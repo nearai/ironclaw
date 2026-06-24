@@ -74,6 +74,25 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
         Ok(definitions)
     }
 
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        // Delegate resolution to the inner port (e.g. the tool-disclosure
+        // forgiving path) rather than the LoopCapabilityPort default, which only
+        // searches THIS filter's already-filtered `tool_definitions` and so
+        // rejects every deferred/disclosed tool before the inner port can resolve
+        // it. Apply the same visible-scope check as `validate`/`register` so a
+        // genuinely non-visible call is still rejected.
+        let capability_ids = self.inner.provider_tool_call_capability_ids(tool_call)?;
+        validate_provider_tool_call_capability_scope(
+            capability_ids.clone(),
+            |capability_id| self.permits(capability_id),
+            "provider tool call is outside the model-visible capability view",
+        )?;
+        Ok(capability_ids)
+    }
+
     fn validate_provider_tool_call(
         &self,
         tool_call: &ProviderToolCall,
@@ -159,6 +178,24 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
             })
         });
         Ok(definitions)
+    }
+
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        // Delegate to the inner port instead of the LoopCapabilityPort default
+        // (which only searches this filter's filtered `tool_definitions`), then
+        // apply the run-profile scope — mirroring `validate`/`register`.
+        let capability_ids = self.inner.provider_tool_call_capability_ids(tool_call)?;
+        if !matches!(self.allow_set.as_ref(), CapabilityAllowSet::All) {
+            validate_provider_tool_call_capability_scope(
+                capability_ids.clone(),
+                |capability_id| self.allow_set.permits(capability_id),
+                "provider tool call is outside the run-profile surface",
+            )?;
+        }
+        Ok(capability_ids)
     }
 
     fn validate_provider_tool_call(
@@ -1383,5 +1420,67 @@ mod tests {
             .expect("surface");
 
         assert_eq!(surface.version.as_str(), "surface-v1");
+    }
+
+    #[test]
+    fn visible_filter_delegates_provider_tool_call_resolution_to_inner() {
+        // Regression: the model gateway pre-check calls
+        // `provider_tool_call_capability_ids` on whatever capability port it holds
+        // — here a CapabilitySurfaceVisibleFilter. If the filter fell back to the
+        // LoopCapabilityPort default (which only searches its OWN already-filtered
+        // `tool_definitions`), every deferred/disclosed tool would be rejected
+        // before the inner forgiving port could resolve it — which is exactly the
+        // "outside the visible capability surface" failure that killed every
+        // deferred extension-tool call. The filter must delegate to inner, then
+        // apply the visible-scope check.
+        let inner = Arc::new(SpyPort::default());
+        // Only the advertised tool is in tool_definitions (the filtered surface)...
+        *inner
+            .tool_definitions
+            .lock()
+            .expect("tool definitions lock") =
+            vec![provider_definition("demo.advertised", "demo__advertised")];
+        // ...but the inner port can still RESOLVE a deferred tool (mimicking the
+        // tool-disclosure forgiving path) that is NOT in tool_definitions.
+        inner
+            .provider_call_capability_ids
+            .lock()
+            .expect("provider call capability ids lock")
+            .insert(
+                "demo__deferred".to_string(),
+                provider_call_capability_ids(&["demo.deferred"]),
+            );
+        // The deferred tool's capability id IS in the model-visible view (it was
+        // disclosed via tool_search), so the call must resolve.
+        let filter = CapabilitySurfaceVisibleFilter::new(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            [
+                capability_id("demo.advertised"),
+                capability_id("demo.deferred"),
+            ],
+        );
+
+        let resolved = filter
+            .provider_tool_call_capability_ids(&provider_call("demo__deferred"))
+            .expect("deferred-but-visible tool resolves through the inner forgiving path");
+        assert_eq!(
+            resolved.provider_capability_id,
+            capability_id("demo.deferred")
+        );
+
+        // A resolvable tool whose capability id is NOT in the visible view is still
+        // rejected by the scope check.
+        inner
+            .provider_call_capability_ids
+            .lock()
+            .expect("provider call capability ids lock")
+            .insert(
+                "demo__hidden".to_string(),
+                provider_call_capability_ids(&["demo.hidden"]),
+            );
+        let error = filter
+            .provider_tool_call_capability_ids(&provider_call("demo__hidden"))
+            .expect_err("non-visible tool is rejected");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
     }
 }
