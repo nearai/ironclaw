@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub update_issue input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": { "pattern": "\\.\\." },
+      "description": "Repository owner or organization."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": { "pattern": "\\.\\." },
+      "description": "Repository name."
+    },
+    "issue_number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Issue number."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536
+    },
+    "body": {
+      "type": ["string", "null"],
+      "maxLength": 65536
+    },
+    "state": {
+      "type": "string",
+      "enum": ["open", "closed"]
+    },
+    "milestone": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    },
+    "labels": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 100 },
+      "maxItems": 100
+    },
+    "assignees": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 100 },
+      "maxItems": 100
+    }
+  },
+  "required": ["owner", "repo", "issue_number"],
+  "anyOf": [
+    { "required": ["title"] },
+    { "required": ["body"] },
+    { "required": ["state"] },
+    { "required": ["milestone"] },
+    { "required": ["labels"] },
+    { "required": ["assignees"] }
+  ]
+}

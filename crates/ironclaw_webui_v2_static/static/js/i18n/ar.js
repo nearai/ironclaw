@@ -518,6 +518,20 @@ registerPack("ar", {
   "skills.removed": "تمت إزالة المهارة \"{name}\"",
   "skills.activatesOn": "يتم تفعيلها عند",
   "skills.imported": "المستوردة",
+  "skills.defaultAutoActivationEnabled": "تفعيل المهارات التلقائي الافتراضي مفعّل",
+  "skills.defaultAutoActivationDisabled": "تفعيل المهارات التلقائي الافتراضي معطّل",
+  "skills.defaultAutoActivationOnDesc":
+    "تتفعّل المهارات تلقائيًا بالكلمات المفتاحية عند تطابق الطلبات. أوقفه لطلب /name صريح.",
+  "skills.defaultAutoActivationOffDesc":
+    "لا تعمل المهارات إلا عند كتابة /name. فعّله للسماح بالتفعيل التلقائي بالكلمات المفتاحية.",
+  "skills.defaultAutoActivationOnButton": "الافتراضي: مفعّل",
+  "skills.defaultAutoActivationOffButton": "الافتراضي: معطّل",
+  "skills.autoActivateOnTitle":
+    "التفعيل التلقائي مفعّل — يعمل عند تطابق الطلبات. انقر لجعله صريحًا فقط عبر /name.",
+  "skills.autoActivateOffTitle":
+    "صريح فقط — يعمل فقط عند كتابة /name. انقر لتفعيل التشغيل التلقائي.",
+  "skills.autoActivateOnLabel": "التفعيل التلقائي: مفعّل",
+  "skills.autoActivateOffLabel": "التفعيل التلقائي: معطّل",
 
   // Settings — users tab
   "users.title": "المستخدمون ({count})",

@@ -190,6 +190,7 @@ export function SkillsTab({ searchQuery = "" }) {
 // default, not learned-only; the per-skill toggle on `SkillCard` is the
 // per-skill counterpart.
 function LearnedAutoActivateCard({ enabled, isSaving, onToggle }) {
+  const t = useT();
   // When auto-activation is off, give the whole card a light-red background as a
   // persistent "default is off" cue. Inline style overrides the Card variant's
   // own background reliably (no Tailwind class-ordering ambiguity).
@@ -199,12 +200,14 @@ function LearnedAutoActivateCard({ enabled, isSaving, onToggle }) {
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="text-sm font-medium text-[var(--v2-text-strong)]">
-            ${`Default skill auto-activation ${enabled ? "enabled" : "disabled"}`}
+            ${enabled
+              ? t("skills.defaultAutoActivationEnabled")
+              : t("skills.defaultAutoActivationDisabled")}
           </div>
           <div className="mt-1 text-xs text-[var(--v2-text-muted)]">
             ${enabled
-              ? "Skills auto-activate by keyword on matching requests. Turn off to require an explicit /name."
-              : "Skills run only when you type /name. Turn on to let them auto-activate by keyword."}
+              ? t("skills.defaultAutoActivationOnDesc")
+              : t("skills.defaultAutoActivationOffDesc")}
           </div>
         </div>
         <div className="shrink-0">
@@ -215,7 +218,9 @@ function LearnedAutoActivateCard({ enabled, isSaving, onToggle }) {
             disabled=${isSaving}
             onClick=${() => onToggle(!enabled)}
           >
-            ${enabled ? "Default: On" : "Default: Off"}
+            ${enabled
+              ? t("skills.defaultAutoActivationOnButton")
+              : t("skills.defaultAutoActivationOffButton")}
           <//>
         </div>
       </div>

@@ -554,6 +554,20 @@ registerPack("en", {
   "skills.updated": "Updated skill \"{name}\"",
   "skills.activatesOn": "Activates on",
   "skills.imported": "imported",
+  "skills.defaultAutoActivationEnabled": "Default skill auto-activation enabled",
+  "skills.defaultAutoActivationDisabled": "Default skill auto-activation disabled",
+  "skills.defaultAutoActivationOnDesc":
+    "Skills auto-activate by keyword on matching requests. Turn off to require an explicit /name.",
+  "skills.defaultAutoActivationOffDesc":
+    "Skills run only when you type /name. Turn on to let them auto-activate by keyword.",
+  "skills.defaultAutoActivationOnButton": "Default: On",
+  "skills.defaultAutoActivationOffButton": "Default: Off",
+  "skills.autoActivateOnTitle":
+    "Auto-activation on — runs on matching requests. Click to make it explicit-only (/name).",
+  "skills.autoActivateOffTitle":
+    "Explicit-only — runs only when you type /name. Click to enable auto-activation.",
+  "skills.autoActivateOnLabel": "Auto-activate: On",
+  "skills.autoActivateOffLabel": "Auto-activate: Off",
 
   // Settings — users tab
   "users.title": "Users ({count})",

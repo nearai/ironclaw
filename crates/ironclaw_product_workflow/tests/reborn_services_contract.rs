@@ -8207,8 +8207,7 @@ async fn operator_diagnostics_aggregates_status_setup_and_config_reasons() {
         .collect::<Vec<_>>();
     assert!(reason_codes.contains(&"operator_doctor_storage_blocked"));
     assert!(reason_codes.contains(&"operator_doctor_status_blocked"));
-    assert!(reason_codes.contains(&"operator_setup_profile_not_wired"));
-    assert!(reason_codes.contains(&"operator_setup_webui_access_not_wired"));
+    assert!(reason_codes.contains(&"operator_doctor_workspace_path_blocked"));
     assert!(reason_codes.contains(&"operator_config_service_not_wired"));
     assert!(!reason_codes.contains(&"operator_doctor_provider_model_ready"));
     let rendered = serde_json::to_string(&response).expect("serialize diagnostics");
