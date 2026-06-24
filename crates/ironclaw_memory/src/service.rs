@@ -320,11 +320,29 @@ impl From<MemoryContextProfileId> for String {
 // Deliberately no `Deref<Target = str>` — auto-deref would let `&id` silently
 // coerce to `&str`, the implicit-conversion pattern this rule prevents.
 
+/// A raw memory-context candidate returned by a [`MemoryService`] provider.
+///
+/// The provider returns the *unsanitized* snippet body plus the resolved
+/// scope/path components the host needs to build the model-visible reference.
+/// The host — not the provider — sanitizes the text, wraps it in the
+/// untrusted-memory envelope, hashes the `memory-snippet:*` reference, and
+/// enforces every model-visible budget. A provider therefore cannot bypass host
+/// prompt safety by pre-sanitizing, pre-wrapping, or forging a reference: the
+/// host is the sole constructor of admitted loop-context snippets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryServiceContextSnippet {
-    pub snippet_ref: String,
-    pub safe_summary: String,
-    pub model_content: String,
+    /// Resolved memory scope/path components. The host hashes
+    /// `[tenant_id, user_id, agent_id?, project_id?, relative_path]` into the
+    /// stable `memory-snippet:*` display reference.
+    pub tenant_id: String,
+    pub user_id: String,
+    pub agent_id: Option<String>,
+    pub project_id: Option<String>,
+    pub relative_path: String,
+    /// Raw, unsanitized snippet body. The host strips control characters,
+    /// truncates, wraps it in the untrusted envelope, and runs the prompt-safety
+    /// denylist before it can enter model context.
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
