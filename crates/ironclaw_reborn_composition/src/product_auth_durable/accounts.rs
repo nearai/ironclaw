@@ -138,6 +138,31 @@ where
         Ok(Some(account))
     }
 
+    async fn refresh_if_unchanged(
+        &self,
+        request: CredentialRefreshRequest,
+        expected_updated_at: Timestamp,
+    ) -> Result<Option<CredentialRefreshReport>, AuthProductError> {
+        let lock = self.lock_for(format!("account:{}", request.account_id));
+        let _guard = lock.lock().await;
+        let Some((account, _version)) = self
+            .read_account(&request.scope, request.account_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if !scope_matches(&request.scope, &account.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if !account_is_authorized_for_requester(&account, request.requester_extension.as_ref()) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if account.updated_at != expected_updated_at {
+            return Ok(None);
+        }
+        self.refresh_account(request).await.map(Some)
+    }
+
     async fn select_unique_configured_account(
         &self,
         request: CredentialAccountSelectionRequest,

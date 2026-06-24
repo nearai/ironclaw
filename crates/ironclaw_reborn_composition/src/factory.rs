@@ -1149,7 +1149,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         services = services.with_runtime_process_port(Arc::new(process_port));
     }
     services = apply_runtime_process_binding(services, runtime_process_binding);
-    services = attach_hosted_mcp_runtime(services)?;
     services = attach_wasm_runtime(services)?;
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let provider_composition = compose_provider_client(
@@ -1238,6 +1237,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             product_auth.runtime_credential_account_refresh_service(),
         ),
     ));
+    services = attach_hosted_mcp_runtime(services)?;
     let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
         filesystem.as_ref(),
         &VirtualPath::new("/system/extensions")?,
@@ -1302,7 +1302,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     nearai_mcp_bootstrap_outcome.log_completion();
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(Arc::clone(&extension_management));
-        local_runtime.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
+        local_runtime.runtime_http_egress = services.runtime_http_egress();
         local_runtime.extension_registry = Arc::clone(&extension_registry);
         let host_runtime_http_egress = services.host_runtime_http_egress_port();
         #[cfg(all(test, feature = "slack-v2-host-beta"))]
@@ -3765,7 +3765,6 @@ where
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier_dyn(production_wiring.turn_run_wake_notifier);
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
-    let services = attach_hosted_mcp_runtime(services)?;
     let provider_composition = compose_provider_client(
         oauth_provider_configs,
         oauth_dcr_provider_configs,
@@ -3849,6 +3848,7 @@ where
             product_auth_services.runtime_credential_account_refresh_service(),
         ),
     ));
+    let services = attach_hosted_mcp_runtime(services)?;
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
         product_auth_services.credential_account_service(),

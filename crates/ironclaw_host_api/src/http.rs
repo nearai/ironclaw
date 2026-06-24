@@ -115,6 +115,8 @@ pub struct RuntimeCredentialInjection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCredentialAccountIdentity {
     pub scope: ResourceScope,
+    #[serde(default)]
+    pub account_surface: RuntimeCredentialAccountSurface,
     pub account_provider: RuntimeCredentialAccountProviderId,
     pub account_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -137,6 +139,7 @@ impl RuntimeCredentialAccountIdentity {
     ) -> Self {
         Self {
             scope,
+            account_surface: RuntimeCredentialAccountSurface::default(),
             account_provider,
             account_id: account_id.into(),
             account_updated_at,
@@ -162,6 +165,7 @@ impl RuntimeCredentialAccountIdentity {
     pub fn marker_on_unauthorized(&self) -> Option<RuntimeCredentialUnauthorized> {
         Some(RuntimeCredentialUnauthorized {
             scope: self.scope.clone(),
+            account_surface: self.account_surface,
             account_provider: self.account_provider.clone(),
             account_id: self.account_id.clone(),
             account_updated_at: self.account_updated_at?,
@@ -170,6 +174,19 @@ impl RuntimeCredentialAccountIdentity {
             unauthorized_policy: self.unauthorized_policy,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeCredentialAccountSurface {
+    Chat,
+    Web,
+    Cli,
+    Tui,
+    #[default]
+    Api,
+    SetupAdmin,
+    Callback,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -353,6 +370,8 @@ pub struct RuntimeHttpSavedBody {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCredentialUnauthorized {
     pub scope: ResourceScope,
+    #[serde(default)]
+    pub account_surface: RuntimeCredentialAccountSurface,
     pub account_provider: RuntimeCredentialAccountProviderId,
     pub account_id: String,
     pub account_updated_at: crate::Timestamp,
@@ -367,6 +386,7 @@ impl RuntimeCredentialUnauthorized {
     pub fn account_key(&self) -> RuntimeCredentialUnauthorizedAccountKey {
         RuntimeCredentialUnauthorizedAccountKey {
             scope: self.scope.clone(),
+            account_surface: self.account_surface,
             account_provider: self.account_provider.clone(),
             account_id: self.account_id.clone(),
             account_updated_at: self.account_updated_at,
@@ -377,6 +397,8 @@ impl RuntimeCredentialUnauthorized {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCredentialUnauthorizedAccountKey {
     pub scope: ResourceScope,
+    #[serde(default)]
+    pub account_surface: RuntimeCredentialAccountSurface,
     pub account_provider: RuntimeCredentialAccountProviderId,
     pub account_id: String,
     pub account_updated_at: crate::Timestamp,

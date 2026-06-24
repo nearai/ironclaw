@@ -599,6 +599,24 @@ impl CredentialAccountService for InMemoryAuthProductServices {
         Ok(Some(account.clone()))
     }
 
+    async fn refresh_if_unchanged(
+        &self,
+        request: CredentialRefreshRequest,
+        expected_updated_at: Timestamp,
+    ) -> Result<Option<CredentialRefreshReport>, AuthProductError> {
+        {
+            let state = self.lock_state();
+            let Some(account) = state.accounts.get(&request.account_id) else {
+                return Ok(None);
+            };
+            validate_refresh_target(account, &request)?;
+            if account.updated_at != expected_updated_at {
+                return Ok(None);
+            }
+        }
+        self.refresh_account(request).await.map(Some)
+    }
+
     async fn select_unique_configured_account(
         &self,
         request: CredentialAccountSelectionRequest,

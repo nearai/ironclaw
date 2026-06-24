@@ -7,7 +7,7 @@ use ironclaw_auth::{
     CredentialAccountStatus, CredentialRefreshRequest,
 };
 use ironclaw_host_api::{
-    CapabilityId, ResourceScope, RuntimeCredentialUnauthorized,
+    CapabilityId, ResourceScope, RuntimeCredentialAccountSurface, RuntimeCredentialUnauthorized,
     RuntimeCredentialUnauthorizedPolicy, RuntimeHttpEgress, RuntimeHttpEgressError,
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
 };
@@ -36,19 +36,30 @@ impl RuntimeCredentialUnauthorizedRecoveryEgress {
         request_scope: &ResourceScope,
         capability_id: &CapabilityId,
         response: &RuntimeHttpEgressResponse,
-    ) {
+    ) -> Result<(), ironclaw_auth::AuthProductError> {
         let Some(unauthorized) = &response.credential_unauthorized else {
-            return;
+            return Ok(());
         };
+        if unauthorized.scope != *request_scope {
+            tracing::debug!(
+                request_scope = ?request_scope,
+                marker_scope = ?unauthorized.scope,
+                "runtime HTTP credential unauthorized marker ignored because request scope did not match"
+            );
+            return Ok(());
+        }
         let Ok(account_uuid) = uuid::Uuid::parse_str(&unauthorized.account_id) else {
-            tracing::warn!(
+            tracing::debug!(
                 account_id = %unauthorized.account_id,
                 "runtime HTTP credential unauthorized marker carried an invalid account id"
             );
-            return;
+            return Ok(());
         };
         let account_id = CredentialAccountId::from_uuid(account_uuid);
-        let scope = AuthProductScope::credential_owner(&unauthorized.scope, AuthSurface::Api);
+        let scope = AuthProductScope::credential_owner(
+            &unauthorized.scope,
+            auth_surface(unauthorized.account_surface),
+        );
         let account_updated_at = unauthorized.account_updated_at;
         match unauthorized.unauthorized_policy {
             RuntimeCredentialUnauthorizedPolicy::RevokeAccount => {
@@ -59,7 +70,7 @@ impl RuntimeCredentialUnauthorizedRecoveryEgress {
                         account_updated_at,
                         unauthorized.requester_extension.clone(),
                     )
-                    .await
+                    .await?
                 {
                     self.record_recovered_auth_required(request_scope, capability_id, unauthorized);
                 }
@@ -67,12 +78,13 @@ impl RuntimeCredentialUnauthorizedRecoveryEgress {
             RuntimeCredentialUnauthorizedPolicy::RefreshAccount => {
                 if self
                     .refresh_if_unchanged(&scope, account_id, account_updated_at, unauthorized)
-                    .await
+                    .await?
                 {
                     self.record_recovered_auth_required(request_scope, capability_id, unauthorized);
                 }
             }
         }
+        Ok(())
     }
 
     fn record_recovered_auth_required(
@@ -94,27 +106,20 @@ impl RuntimeCredentialUnauthorizedRecoveryEgress {
         account_id: CredentialAccountId,
         account_updated_at: ironclaw_host_api::Timestamp,
         requester_extension: Option<ironclaw_host_api::ExtensionId>,
-    ) -> bool {
+    ) -> Result<bool, ironclaw_auth::AuthProductError> {
         let account_id_for_log = account_id.to_string();
         match self
             .credential_accounts
             .revoke_if_unchanged(&scope, account_id, account_updated_at, requester_extension)
-            .await
+            .await?
         {
-            Ok(Some(_)) => true,
-            Ok(None) => {
-                tracing::info!(
+            Some(_) => Ok(true),
+            None => {
+                tracing::debug!(
                     account_id = %account_id_for_log,
                     "runtime HTTP credential unauthorized recovery skipped because account changed or disappeared after staging"
                 );
-                false
-            }
-            Err(error) => {
-                tracing::warn!(
-                    err = %error,
-                    "runtime HTTP credential unauthorized recovery could not conditionally revoke account"
-                );
-                false
+                Ok(false)
             }
         }
     }
@@ -125,47 +130,49 @@ impl RuntimeCredentialUnauthorizedRecoveryEgress {
         account_id: CredentialAccountId,
         account_updated_at: ironclaw_host_api::Timestamp,
         unauthorized: &RuntimeCredentialUnauthorized,
-    ) -> bool {
-        let Ok(request) = refresh_request(scope, account_id, unauthorized) else {
-            tracing::warn!(
-                provider = %unauthorized.account_provider.as_str(),
-                "runtime HTTP credential unauthorized marker carried an invalid provider id"
-            );
-            return false;
+    ) -> Result<bool, ironclaw_auth::AuthProductError> {
+        let request = match refresh_request(scope, account_id, unauthorized) {
+            Ok(request) => request,
+            Err(_) => return Ok(false),
         };
         match self
             .credential_accounts
             .refresh_if_unchanged(request, account_updated_at)
-            .await
+            .await?
         {
-            Ok(Some(report)) => {
+            Some(report) => {
                 if report.account.status != CredentialAccountStatus::Configured {
-                    return true;
+                    return Ok(true);
                 }
                 if !report.refreshed {
-                    tracing::info!(
+                    tracing::debug!(
                         account_id = %unauthorized.account_id,
                         "runtime HTTP credential unauthorized recovery refresh left account unchanged; requiring re-auth"
                     );
-                    return true;
+                    return Ok(true);
                 }
-                false
+                Ok(false)
             }
-            Ok(None) => {
-                tracing::info!(
+            None => {
+                tracing::debug!(
                     account_id = %unauthorized.account_id,
                     "runtime HTTP credential unauthorized recovery skipped refresh because account changed or disappeared after staging"
                 );
-                false
-            }
-            Err(error) => {
-                tracing::warn!(
-                    err = %error,
-                    "runtime HTTP credential unauthorized recovery could not refresh account"
-                );
-                false
+                Ok(false)
             }
         }
+    }
+}
+
+fn auth_surface(surface: RuntimeCredentialAccountSurface) -> AuthSurface {
+    match surface {
+        RuntimeCredentialAccountSurface::Chat => AuthSurface::Chat,
+        RuntimeCredentialAccountSurface::Web => AuthSurface::Web,
+        RuntimeCredentialAccountSurface::Cli => AuthSurface::Cli,
+        RuntimeCredentialAccountSurface::Tui => AuthSurface::Tui,
+        RuntimeCredentialAccountSurface::Api => AuthSurface::Api,
+        RuntimeCredentialAccountSurface::SetupAdmin => AuthSurface::SetupAdmin,
+        RuntimeCredentialAccountSurface::Callback => AuthSurface::Callback,
     }
 }
 
@@ -174,8 +181,15 @@ fn refresh_request(
     account_id: CredentialAccountId,
     unauthorized: &RuntimeCredentialUnauthorized,
 ) -> Result<CredentialRefreshRequest, ironclaw_auth::AuthProductError> {
-    let provider = AuthProviderId::new(unauthorized.account_provider.as_str())
-        .map_err(|_| ironclaw_auth::AuthProductError::MalformedConfig)?;
+    let provider =
+        AuthProviderId::new(unauthorized.account_provider.as_str()).map_err(|error| {
+            tracing::debug!(
+                provider = %unauthorized.account_provider.as_str(),
+                err = %error,
+                "runtime HTTP credential unauthorized marker carried an invalid provider id"
+            );
+            ironclaw_auth::AuthProductError::MalformedConfig
+        })?;
     let mut request = CredentialRefreshRequest::new(scope.clone(), provider, account_id);
     if let Some(requester_extension) = unauthorized.requester_extension.clone() {
         request = request.for_extension(requester_extension);
@@ -192,8 +206,18 @@ impl RuntimeHttpEgress for RuntimeCredentialUnauthorizedRecoveryEgress {
         let request_scope = request.scope.clone();
         let capability_id = request.capability_id.clone();
         let response = self.inner.execute(request).await?;
-        self.recover_unauthorized_credential(&request_scope, &capability_id, &response)
-            .await;
+        if response.status == 401 {
+            self.recover_unauthorized_credential(&request_scope, &capability_id, &response)
+                .await
+                .map_err(|error| RuntimeHttpEgressError::Credential {
+                    reason: error.to_string(),
+                })?;
+        } else if response.credential_unauthorized.is_some() {
+            tracing::debug!(
+                status = response.status,
+                "runtime HTTP credential unauthorized marker ignored because response was not 401"
+            );
+        }
         Ok(response)
     }
 }

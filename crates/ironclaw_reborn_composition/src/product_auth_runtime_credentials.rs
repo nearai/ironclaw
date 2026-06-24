@@ -11,7 +11,8 @@ use ironclaw_auth::{
 use ironclaw_host_api::{
     CredentialStageError, ExtensionId, ResourceScope, RuntimeCredentialAccountIdentity,
     RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAuthRequirement, RuntimeCredentialUnauthorizedPolicy,
+    RuntimeCredentialAccountSurface, RuntimeCredentialAuthRequirement,
+    RuntimeCredentialUnauthorizedPolicy,
 };
 use ironclaw_host_runtime::{
     RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
@@ -523,6 +524,7 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             handle,
             credential_account: Some(RuntimeCredentialAccountIdentity {
                 scope: account.scope.resource,
+                account_surface: runtime_credential_account_surface(account.scope.surface),
                 account_provider: request.provider.clone(),
                 account_id: account.id.to_string(),
                 account_updated_at: Some(account.updated_at),
@@ -531,6 +533,18 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
                 unauthorized_policy,
             }),
         })
+    }
+}
+
+fn runtime_credential_account_surface(surface: AuthSurface) -> RuntimeCredentialAccountSurface {
+    match surface {
+        AuthSurface::Chat => RuntimeCredentialAccountSurface::Chat,
+        AuthSurface::Web => RuntimeCredentialAccountSurface::Web,
+        AuthSurface::Cli => RuntimeCredentialAccountSurface::Cli,
+        AuthSurface::Tui => RuntimeCredentialAccountSurface::Tui,
+        AuthSurface::Api => RuntimeCredentialAccountSurface::Api,
+        AuthSurface::SetupAdmin => RuntimeCredentialAccountSurface::SetupAdmin,
+        AuthSurface::Callback => RuntimeCredentialAccountSurface::Callback,
     }
 }
 

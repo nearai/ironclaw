@@ -1149,6 +1149,7 @@ fn runtime_http_egress_response_round_trips_optional_credential_unauthorized() {
         redaction_applied: true,
         credential_unauthorized: Some(RuntimeCredentialUnauthorized {
             scope: scope.clone(),
+            account_surface: ironclaw_host_api::RuntimeCredentialAccountSurface::Api,
             account_provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
             account_id: "account-123".to_string(),
             account_updated_at: updated_at,

@@ -6,9 +6,8 @@ use ironclaw_capabilities::{
 use ironclaw_host_api::{
     CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountView, Obligation,
     ResourceEstimate, ResourceScope, RuntimeCredentialAccountIdentity, RuntimeCredentialInjection,
-    RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeCredentialUnauthorized,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeKind, SecretHandle, TrustClass,
+    RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TrustClass,
 };
 use ironclaw_secrets::SecretMaterial;
 
@@ -137,32 +136,20 @@ impl HostRuntimeHttpEgressPort {
         let staged_scope = request.request.scope.clone();
         let staged_capability_id = request.request.capability_id.clone();
         let staged_credentials = !request.credentials.is_empty();
-        let staged_unauthorized_identity = match self
+        if let Err(error) = self
             .stage_credentials(&mut request.request, request.credentials)
             .await
         {
-            Ok(identity) => identity,
-            Err(error) => {
-                if staged_credentials {
-                    self.secret_stager.discard_secret_material_for_capability(
-                        &staged_scope,
-                        &staged_capability_id,
-                    );
-                }
-                return Err(error);
+            if staged_credentials {
+                self.secret_stager
+                    .discard_secret_material_for_capability(&staged_scope, &staged_capability_id);
             }
-        };
-        let result = self
-            .runtime_http_egress
-            .execute(request.request)
-            .await
-            .map(|mut response| {
-                super::attach_credential_unauthorized_on_401(
-                    &mut response,
-                    staged_unauthorized_identity,
-                );
-                response
-            });
+            return Err(error);
+        }
+        // The wrapped host HTTP egress pipeline already derives any 401 recovery
+        // marker from the staged credential metadata; this wrapper only stages,
+        // forwards, and cleans up the host-held material.
+        let result = self.runtime_http_egress.execute(request.request).await;
         if staged_credentials {
             self.secret_stager
                 .discard_secret_material_for_capability(&staged_scope, &staged_capability_id);
@@ -174,9 +161,7 @@ impl HostRuntimeHttpEgressPort {
         &self,
         request: &mut RuntimeHttpEgressRequest,
         credentials: Vec<HostRuntimeCredentialMaterial>,
-    ) -> Result<Option<RuntimeCredentialUnauthorized>, RuntimeHttpEgressError> {
-        let mut unauthorized_identity = None::<RuntimeCredentialUnauthorized>;
-        let mut ambiguous_unauthorized_identity = false;
+    ) -> Result<(), RuntimeHttpEgressError> {
         for credential in credentials {
             let credential_account = credential.credential_account.clone();
             self.secret_stager
@@ -185,23 +170,12 @@ impl HostRuntimeHttpEgressPort {
                     &request.capability_id,
                     &credential.handle,
                     credential.material,
-                    credential_account.clone(),
+                    credential_account,
                 )
                 .await
                 .map_err(|_| RuntimeHttpEgressError::Credential {
                     reason: "host credential material could not be staged".to_string(),
                 })?;
-            if let Some(account) = credential_account
-                && let Some(candidate) = account.marker_on_unauthorized()
-            {
-                if let Some(existing) = &unauthorized_identity {
-                    if existing != &candidate {
-                        ambiguous_unauthorized_identity = true;
-                    }
-                } else {
-                    unauthorized_identity = Some(candidate);
-                }
-            }
             request
                 .credential_injections
                 .push(RuntimeCredentialInjection {
@@ -213,11 +187,7 @@ impl HostRuntimeHttpEgressPort {
                     required: credential.required,
                 });
         }
-        Ok(if ambiguous_unauthorized_identity {
-            None
-        } else {
-            unauthorized_identity
-        })
+        Ok(())
     }
 
     async fn authorize_network_egress(
@@ -299,7 +269,8 @@ mod tests {
     use ironclaw_host_api::{
         ExtensionId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme,
         NetworkTargetPattern, RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-        RuntimeCredentialAuthRequirement, RuntimeCredentialUnauthorizedPolicy,
+        RuntimeCredentialAccountSurface, RuntimeCredentialAuthRequirement,
+        RuntimeCredentialUnauthorized, RuntimeCredentialUnauthorizedPolicy,
         RuntimeHttpEgressResponse, UserId,
     };
 
@@ -342,6 +313,13 @@ mod tests {
         }
 
         fn responding(status: u16) -> Self {
+            Self::responding_with_marker(status, None)
+        }
+
+        fn responding_with_marker(
+            status: u16,
+            credential_unauthorized: Option<RuntimeCredentialUnauthorized>,
+        ) -> Self {
             Self {
                 calls: AtomicUsize::new(0),
                 response: Ok(RuntimeHttpEgressResponse {
@@ -352,7 +330,7 @@ mod tests {
                     request_bytes: 0,
                     response_bytes: 0,
                     redaction_applied: false,
-                    credential_unauthorized: None,
+                    credential_unauthorized,
                 }),
             }
         }
@@ -468,14 +446,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_runtime_http_egress_attaches_credential_unauthorized_marker_on_401_only() {
-        let egress = Arc::new(RecordingRuntimeHttpEgress::responding(401));
+    async fn host_runtime_http_egress_preserves_delegate_credential_unauthorized_marker_on_401() {
+        let scope = scope();
+        let account_id = "product-auth-account-123".to_string();
+        let marker = RuntimeCredentialUnauthorized {
+            scope: scope.clone(),
+            account_surface: RuntimeCredentialAccountSurface::Api,
+            account_provider: RuntimeCredentialAccountProviderId::new("github").expect("provider"),
+            account_id: account_id.clone(),
+            account_updated_at: chrono::Utc::now(),
+            requester_extension: None,
+            auth_requirement: auth_requirement("github"),
+            unauthorized_policy: RuntimeCredentialUnauthorizedPolicy::RevokeAccount,
+        };
+        let egress = Arc::new(RecordingRuntimeHttpEgress::responding_with_marker(
+            401,
+            Some(marker.clone()),
+        ));
         let port = host_port(egress, Arc::new(AllowObligations), secret_store());
         let mut request = host_request();
-        let scope = request.request.scope.clone();
-        let account_id = "product-auth-account-123".to_string();
         request.credentials.push(HostRuntimeCredentialMaterial {
-            handle: SecretHandle::new(account_id.clone()).expect("secret handle"),
+            handle: SecretHandle::new(account_id).expect("secret handle"),
             material: SecretMaterial::from("host-held-token"),
             target: RuntimeCredentialTarget::Header {
                 name: "authorization".to_string(),
@@ -484,9 +475,10 @@ mod tests {
             required: true,
             credential_account: Some(RuntimeCredentialAccountIdentity {
                 scope: scope.clone(),
+                account_surface: RuntimeCredentialAccountSurface::Api,
                 account_provider: RuntimeCredentialAccountProviderId::new("github")
                     .expect("provider"),
-                account_id: account_id.clone(),
+                account_id: "product-auth-account-123".to_string(),
                 account_updated_at: Some(chrono::Utc::now()),
                 requester_extension: None,
                 auth_requirement: Some(auth_requirement("github")),
@@ -499,109 +491,7 @@ mod tests {
             .await
             .expect("401 response should still succeed");
 
-        let rejection = response
-            .credential_unauthorized
-            .expect("401 with an injected credential should attach unauthorized marker");
-        assert_eq!(rejection.scope, scope);
-        assert_eq!(rejection.account_id, account_id);
-    }
-
-    #[tokio::test]
-    async fn host_runtime_http_egress_skips_credential_unauthorized_marker_when_ambiguous() {
-        let egress = Arc::new(RecordingRuntimeHttpEgress::responding(401));
-        let port = host_port(egress, Arc::new(AllowObligations), secret_store());
-        let mut request = host_request();
-        let scope = request.request.scope.clone();
-        for account_id in ["product-auth-account-123", "product-auth-account-456"] {
-            request.credentials.push(HostRuntimeCredentialMaterial {
-                handle: SecretHandle::new(account_id).expect("secret handle"),
-                material: SecretMaterial::from("host-held-token"),
-                target: RuntimeCredentialTarget::Header {
-                    name: format!("x-token-{account_id}"),
-                    prefix: None,
-                },
-                required: true,
-                credential_account: Some(RuntimeCredentialAccountIdentity {
-                    scope: scope.clone(),
-                    account_provider: RuntimeCredentialAccountProviderId::new("github")
-                        .expect("provider"),
-                    account_id: account_id.to_string(),
-                    account_updated_at: Some(chrono::Utc::now()),
-                    requester_extension: None,
-                    auth_requirement: Some(auth_requirement("github")),
-                    unauthorized_policy: RuntimeCredentialUnauthorizedPolicy::RevokeAccount,
-                }),
-            });
-        }
-
-        let response = port
-            .execute(request)
-            .await
-            .expect("401 response should still succeed");
-
-        assert!(
-            response.credential_unauthorized.is_none(),
-            "a 401 with multiple credential accounts must not guess which account was rejected"
-        );
-    }
-
-    #[tokio::test]
-    async fn host_runtime_http_egress_skips_credential_unauthorized_marker_when_recovery_metadata_differs()
-     {
-        let egress = Arc::new(RecordingRuntimeHttpEgress::responding(401));
-        let port = host_port(egress, Arc::new(AllowObligations), secret_store());
-        let mut request = host_request();
-        let scope = request.request.scope.clone();
-        let account_id = "product-auth-account-123".to_string();
-        let account_updated_at = chrono::Utc::now();
-        for (header, requester_extension, unauthorized_policy) in [
-            (
-                "x-token-primary",
-                "github",
-                RuntimeCredentialUnauthorizedPolicy::RevokeAccount,
-            ),
-            (
-                "x-token-secondary",
-                "github-alt",
-                RuntimeCredentialUnauthorizedPolicy::RefreshAccount,
-            ),
-        ] {
-            request.credentials.push(HostRuntimeCredentialMaterial {
-                handle: SecretHandle::new(header).expect("secret handle"),
-                material: SecretMaterial::from("host-held-token"),
-                target: RuntimeCredentialTarget::Header {
-                    name: header.to_string(),
-                    prefix: None,
-                },
-                required: true,
-                credential_account: Some(RuntimeCredentialAccountIdentity {
-                    scope: scope.clone(),
-                    account_provider: RuntimeCredentialAccountProviderId::new("github")
-                        .expect("provider"),
-                    account_id: account_id.clone(),
-                    account_updated_at: Some(account_updated_at),
-                    requester_extension: Some(
-                        ExtensionId::new(requester_extension).expect("extension id"),
-                    ),
-                    auth_requirement: Some(RuntimeCredentialAuthRequirement {
-                        requester_extension: ExtensionId::new(requester_extension)
-                            .expect("extension id"),
-                        ..auth_requirement("github")
-                    }),
-                    unauthorized_policy,
-                }),
-            });
-        }
-
-        let response = port
-            .execute(request)
-            .await
-            .expect("401 response should still succeed");
-
-        assert!(
-            response.credential_unauthorized.is_none(),
-            "a 401 with conflicting recovery metadata must not guess which recovery flow to run"
-        );
+        assert_eq!(response.credential_unauthorized, Some(marker));
     }
 
     #[tokio::test]
@@ -619,6 +509,7 @@ mod tests {
             required: true,
             credential_account: Some(RuntimeCredentialAccountIdentity {
                 scope: request.request.scope.clone(),
+                account_surface: RuntimeCredentialAccountSurface::Api,
                 account_provider: RuntimeCredentialAccountProviderId::new("github")
                     .expect("provider"),
                 account_id: "product-auth-account-123".to_string(),
@@ -641,8 +532,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_runtime_http_egress_attaches_refresh_policy_marker_on_401() {
-        let egress = Arc::new(RecordingRuntimeHttpEgress::responding(401));
+    async fn host_runtime_http_egress_preserves_delegate_refresh_policy_marker_on_401() {
+        let marker = RuntimeCredentialUnauthorized {
+            scope: scope(),
+            account_surface: RuntimeCredentialAccountSurface::Api,
+            account_provider: RuntimeCredentialAccountProviderId::new("google").expect("provider"),
+            account_id: "oauth-account-123".to_string(),
+            account_updated_at: chrono::Utc::now(),
+            requester_extension: None,
+            auth_requirement: auth_requirement("google"),
+            unauthorized_policy: RuntimeCredentialUnauthorizedPolicy::RefreshAccount,
+        };
+        let egress = Arc::new(RecordingRuntimeHttpEgress::responding_with_marker(
+            401,
+            Some(marker.clone()),
+        ));
         let port = host_port(egress, Arc::new(AllowObligations), secret_store());
         let mut request = host_request();
         request.credentials.push(HostRuntimeCredentialMaterial {
@@ -655,6 +559,7 @@ mod tests {
             required: true,
             credential_account: Some(RuntimeCredentialAccountIdentity {
                 scope: request.request.scope.clone(),
+                account_surface: RuntimeCredentialAccountSurface::Api,
                 account_provider: RuntimeCredentialAccountProviderId::new("google")
                     .expect("provider"),
                 account_id: "oauth-account-123".to_string(),
@@ -670,13 +575,15 @@ mod tests {
             .await
             .expect("401 response should still succeed");
 
+        let response_marker = response
+            .credential_unauthorized
+            .clone()
+            .expect("delegate should preserve the recovery marker");
         assert_eq!(
-            response
-                .credential_unauthorized
-                .expect("refreshable account should emit a recovery marker")
-                .unauthorized_policy,
+            response_marker.unauthorized_policy,
             RuntimeCredentialUnauthorizedPolicy::RefreshAccount
         );
+        assert_eq!(response.credential_unauthorized, Some(marker));
     }
 
     fn host_port(

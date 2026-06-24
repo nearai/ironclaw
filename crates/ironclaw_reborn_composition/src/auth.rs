@@ -1792,6 +1792,24 @@ mod tests {
             unreachable!("constructor tests do not call credential-account methods")
         }
 
+        async fn revoke_if_unchanged(
+            &self,
+            _scope: &AuthProductScope,
+            _account_id: CredentialAccountId,
+            _expected_updated_at: ironclaw_host_api::Timestamp,
+            _requester_extension: Option<ironclaw_host_api::ExtensionId>,
+        ) -> Result<Option<CredentialAccount>, AuthProductError> {
+            unreachable!("constructor tests do not call credential-account methods")
+        }
+
+        async fn refresh_if_unchanged(
+            &self,
+            _request: CredentialRefreshRequest,
+            _expected_updated_at: ironclaw_host_api::Timestamp,
+        ) -> Result<Option<CredentialRefreshReport>, AuthProductError> {
+            unreachable!("constructor tests do not call credential-account methods")
+        }
+
         async fn select_unique_configured_account(
             &self,
             _request: CredentialAccountSelectionRequest,

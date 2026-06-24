@@ -288,6 +288,8 @@ fn record_unauthorized_identity(
         return;
     };
     let Some(candidate) = account.marker_on_unauthorized() else {
+        // Incomplete account metadata is ambiguous; do not guess a recovery marker.
+        *ambiguous_unauthorized_identity = true;
         return;
     };
     if let Some(existing) = unauthorized_identity {
@@ -520,8 +522,10 @@ const _: fn(&CredentialCacheEntry) = |entry| {
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, TenantId,
-        Timestamp, UserId,
+        ExtensionId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope,
+        RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+        RuntimeCredentialAuthRequirement, RuntimeCredentialUnauthorizedPolicy, RuntimeKind,
+        TenantId, Timestamp, UserId,
     };
     use ironclaw_secrets::SecretMaterial;
     use ironclaw_secrets::{
@@ -653,6 +657,90 @@ mod tests {
                 .expect("required credential should be present");
 
         assert_eq!(material.material.expose_secret(), "sk-test-secret");
+    }
+
+    #[test]
+    fn apply_credential_injections_suppresses_marker_when_any_account_metadata_is_incomplete() {
+        let scope = sample_scope();
+        let capability_id = CapabilityId::new("runtime.http").unwrap();
+        let secret_injections = RuntimeSecretInjectionStore::new();
+        let provider = RuntimeCredentialAccountProviderId::new("github").unwrap();
+        let complete_handle = SecretHandle::new("complete-account").unwrap();
+        let incomplete_handle = SecretHandle::new("incomplete-account").unwrap();
+
+        secret_injections
+            .insert_with_credential_account(
+                &scope,
+                &capability_id,
+                &complete_handle,
+                SecretMaterial::from("complete-secret"),
+                Some(
+                    RuntimeCredentialAccountIdentity::new(
+                        scope.clone(),
+                        provider.clone(),
+                        "product-auth-account-123",
+                        Some(chrono::Utc::now()),
+                        RuntimeCredentialUnauthorizedPolicy::RevokeAccount,
+                    )
+                    .with_requester_extension(Some(ExtensionId::new("test-extension").unwrap()))
+                    .with_auth_requirement(RuntimeCredentialAuthRequirement {
+                        provider: provider.clone(),
+                        setup: RuntimeCredentialAccountSetup::ManualToken,
+                        requester_extension: ExtensionId::new("test-extension").unwrap(),
+                        provider_scopes: Vec::new(),
+                    }),
+                ),
+            )
+            .unwrap();
+        secret_injections
+            .insert_with_credential_account(
+                &scope,
+                &capability_id,
+                &incomplete_handle,
+                SecretMaterial::from("incomplete-secret"),
+                Some(RuntimeCredentialAccountIdentity::new(
+                    scope.clone(),
+                    provider.clone(),
+                    "product-auth-account-456",
+                    Some(chrono::Utc::now()),
+                    RuntimeCredentialUnauthorizedPolicy::RevokeAccount,
+                )),
+            )
+            .unwrap();
+
+        let mut request = sample_request(scope.clone());
+        request.runtime = RuntimeKind::FirstParty;
+        request.credential_injections = vec![
+            RuntimeCredentialInjection {
+                handle: complete_handle,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "x-token-primary".to_string(),
+                    prefix: None,
+                },
+                required: true,
+            },
+            RuntimeCredentialInjection {
+                handle: incomplete_handle,
+                source: RuntimeCredentialSource::StagedObligation { capability_id },
+                target: RuntimeCredentialTarget::Header {
+                    name: "x-token-secondary".to_string(),
+                    prefix: None,
+                },
+                required: true,
+            },
+        ];
+
+        let result = apply_credential_injections(
+            &InMemorySecretStore::new(),
+            Some(&secret_injections),
+            &mut request,
+        )
+        .expect("staged credentials should inject successfully");
+
+        assert!(result.credential_unauthorized.is_none());
     }
 
     fn credential_reason(error: &RuntimeHttpEgressError) -> &str {

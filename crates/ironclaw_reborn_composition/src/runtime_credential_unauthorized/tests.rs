@@ -11,7 +11,7 @@ use ironclaw_host_api::{
     ExtensionId, InvocationId, MountView, NetworkMethod, NetworkPolicy, ResourceEstimate,
     ResourceScope, ResourceUsage, RuntimeCredentialAccountProviderId,
     RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, RuntimeCredentialUnauthorized,
-    RuntimeCredentialUnauthorizedPolicy, RuntimeKind, TrustClass, UserId,
+    RuntimeCredentialUnauthorizedPolicy, RuntimeKind, ThreadId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
@@ -58,6 +58,40 @@ async fn runtime_credential_unauthorized_recovery_revokes_marked_401_account() {
         .expect("lookup")
         .expect("account");
     assert_eq!(stored.status, CredentialAccountStatus::Revoked);
+}
+
+#[tokio::test]
+async fn runtime_credential_unauthorized_recovery_skips_marked_403_response() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let resource_scope = resource_scope();
+    let auth_scope = AuthProductScope::credential_owner(&resource_scope, AuthSurface::Api);
+    let account = seed_account(&accounts, auth_scope.clone()).await;
+    let egress = Arc::new(FixedEgress {
+        status: 403,
+        credential_unauthorized: Some(unauthorized_marker(
+            &resource_scope,
+            "github",
+            &account,
+            RuntimeCredentialUnauthorizedPolicy::RevokeAccount,
+            github_auth_requirement(),
+            None,
+        )),
+    });
+    let reauth_bridge = Arc::new(RuntimeCredentialReauthBridge::default());
+    let wrapper =
+        RuntimeCredentialUnauthorizedRecoveryEgress::new(egress, accounts.clone(), reauth_bridge);
+
+    wrapper
+        .execute(request(resource_scope))
+        .await
+        .expect("403 response should pass through untouched");
+
+    let stored = accounts
+        .get_account(CredentialAccountLookupRequest::new(auth_scope, account.id))
+        .await
+        .expect("lookup")
+        .expect("account");
+    assert_eq!(stored.status, CredentialAccountStatus::Configured);
 }
 
 #[tokio::test]
@@ -145,6 +179,55 @@ async fn runtime_credential_unauthorized_recovery_requires_auth_when_refresh_lea
 }
 
 #[tokio::test]
+async fn runtime_credential_unauthorized_recovery_skips_scope_mismatch() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let request_scope = resource_scope();
+    let marker_scope = resource_scope();
+    let request_auth_scope = AuthProductScope::credential_owner(&request_scope, AuthSurface::Api);
+    let marker_auth_scope = AuthProductScope::credential_owner(&marker_scope, AuthSurface::Api);
+    let request_account = seed_account(&accounts, request_auth_scope.clone()).await;
+    let marker_account = seed_account(&accounts, marker_auth_scope.clone()).await;
+    let egress = Arc::new(FixedEgress {
+        status: 401,
+        credential_unauthorized: Some(unauthorized_marker(
+            &marker_scope,
+            "github",
+            &marker_account,
+            RuntimeCredentialUnauthorizedPolicy::RevokeAccount,
+            github_auth_requirement(),
+            None,
+        )),
+    });
+    let reauth_bridge = Arc::new(RuntimeCredentialReauthBridge::default());
+    let wrapper =
+        RuntimeCredentialUnauthorizedRecoveryEgress::new(egress, accounts.clone(), reauth_bridge);
+
+    wrapper
+        .execute(request(request_scope))
+        .await
+        .expect("scope-mismatched marker should pass through untouched");
+
+    let request_stored = accounts
+        .get_account(CredentialAccountLookupRequest::new(
+            request_auth_scope,
+            request_account.id,
+        ))
+        .await
+        .expect("lookup")
+        .expect("request account");
+    assert_eq!(request_stored.status, CredentialAccountStatus::Configured);
+    let marker_stored = accounts
+        .get_account(CredentialAccountLookupRequest::new(
+            marker_auth_scope,
+            marker_account.id,
+        ))
+        .await
+        .expect("lookup")
+        .expect("marker account");
+    assert_eq!(marker_stored.status, CredentialAccountStatus::Configured);
+}
+
+#[tokio::test]
 async fn runtime_credential_reauth_host_runtime_opens_auth_gate_from_recovered_401() {
     let accounts = Arc::new(InMemoryAuthProductServices::new());
     let resource_scope = resource_scope();
@@ -229,6 +312,62 @@ async fn runtime_credential_reauth_host_runtime_leaves_unmarked_403_completed() 
         .expect("lookup")
         .expect("account");
     assert_eq!(stored.status, CredentialAccountStatus::Configured);
+}
+
+#[tokio::test]
+async fn runtime_credential_reauth_bridge_matches_full_scope() {
+    let bridge = RuntimeCredentialReauthBridge::default();
+    let scope = resource_scope();
+    let mut other_scope = scope.clone();
+    other_scope.thread_id = Some(ThreadId::new("different-thread").unwrap());
+
+    bridge.record_recovered_auth_required(
+        &scope,
+        &capability_id(),
+        vec![github_auth_requirement()],
+    );
+
+    assert!(
+        bridge
+            .take_recovered_auth_required(&other_scope, &capability_id())
+            .is_none(),
+        "scope mismatch should not drain the record",
+    );
+
+    let signal = bridge
+        .take_recovered_auth_required(&scope, &capability_id())
+        .expect("matching full scope should drain the record");
+    assert_eq!(
+        signal.credential_requirements,
+        vec![github_auth_requirement()]
+    );
+}
+
+#[tokio::test]
+async fn runtime_credential_reauth_host_runtime_drains_record_on_inner_error() {
+    let bridge = Arc::new(RuntimeCredentialReauthBridge::default());
+    let scope = resource_scope();
+    bridge.record_recovered_auth_required(
+        &scope,
+        &capability_id(),
+        vec![github_auth_requirement()],
+    );
+    let runtime = RuntimeCredentialReauthHostRuntime::new(
+        Arc::new(AlwaysErrHostRuntime),
+        Arc::clone(&bridge),
+    );
+
+    let err = runtime
+        .invoke_capability(runtime_request(scope.clone()))
+        .await
+        .expect_err("inner error should propagate");
+    assert!(matches!(err, HostRuntimeError::Unavailable { .. }));
+    assert!(
+        bridge
+            .take_recovered_auth_required(&scope, &capability_id())
+            .is_none(),
+        "matching bridge record should be drained on error",
+    );
 }
 
 #[tokio::test]
@@ -461,6 +600,46 @@ async fn runtime_credential_unauthorized_recovery_leaves_unmarked_403_configured
     assert_eq!(stored.status, CredentialAccountStatus::Configured);
 }
 
+#[tokio::test]
+async fn runtime_credential_unauthorized_recovery_propagates_account_service_errors() {
+    let inner = Arc::new(InMemoryAuthProductServices::new());
+    let resource_scope = resource_scope();
+    let auth_scope = AuthProductScope::credential_owner(&resource_scope, AuthSurface::Api);
+    let account = seed_account(&inner, auth_scope.clone()).await;
+    let egress = Arc::new(FixedEgress {
+        status: 401,
+        credential_unauthorized: Some(unauthorized_marker(
+            &resource_scope,
+            "github",
+            &account,
+            RuntimeCredentialUnauthorizedPolicy::RevokeAccount,
+            github_auth_requirement(),
+            None,
+        )),
+    });
+    let accounts = Arc::new(FailingRevokeCredentialAccounts {
+        inner: Arc::clone(&inner),
+    });
+    let reauth_bridge = Arc::new(RuntimeCredentialReauthBridge::default());
+    let wrapper = RuntimeCredentialUnauthorizedRecoveryEgress::new(egress, accounts, reauth_bridge);
+
+    let error = wrapper
+        .execute(request(resource_scope.clone()))
+        .await
+        .expect_err("service error should propagate");
+    assert!(matches!(
+        error,
+        RuntimeHttpEgressError::Credential { ref reason } if reason.contains("backend unavailable")
+    ));
+
+    let stored = inner
+        .get_account(CredentialAccountLookupRequest::new(auth_scope, account.id))
+        .await
+        .expect("lookup")
+        .expect("account");
+    assert_eq!(stored.status, CredentialAccountStatus::Configured);
+}
+
 struct FixedEgress {
     status: u16,
     credential_unauthorized: Option<RuntimeCredentialUnauthorized>,
@@ -486,6 +665,10 @@ impl RuntimeHttpEgress for FixedEgress {
 }
 
 struct NoopRefreshCredentialAccounts {
+    inner: Arc<InMemoryAuthProductServices>,
+}
+
+struct FailingRevokeCredentialAccounts {
     inner: Arc<InMemoryAuthProductServices>,
 }
 
@@ -518,6 +701,16 @@ impl CredentialAccountService for NoopRefreshCredentialAccounts {
         _: CredentialAccountId,
         _: CredentialAccountStatus,
     ) -> Result<ironclaw_auth::CredentialAccount, AuthProductError> {
+        unreachable!("noop-refresh fake only supports refresh_if_unchanged")
+    }
+
+    async fn revoke_if_unchanged(
+        &self,
+        _: &AuthProductScope,
+        _: CredentialAccountId,
+        _: ironclaw_host_api::Timestamp,
+        _: Option<ExtensionId>,
+    ) -> Result<Option<ironclaw_auth::CredentialAccount>, AuthProductError> {
         unreachable!("noop-refresh fake only supports refresh_if_unchanged")
     }
 
@@ -579,9 +772,92 @@ impl CredentialAccountService for NoopRefreshCredentialAccounts {
     }
 }
 
+#[async_trait]
+impl CredentialAccountService for FailingRevokeCredentialAccounts {
+    async fn create_account(
+        &self,
+        request: NewCredentialAccount,
+    ) -> Result<ironclaw_auth::CredentialAccount, AuthProductError> {
+        self.inner.create_account(request).await
+    }
+
+    async fn get_account(
+        &self,
+        request: CredentialAccountLookupRequest,
+    ) -> Result<Option<ironclaw_auth::CredentialAccount>, AuthProductError> {
+        self.inner.get_account(request).await
+    }
+
+    async fn list_accounts(
+        &self,
+        request: ironclaw_auth::CredentialAccountListRequest,
+    ) -> Result<ironclaw_auth::CredentialAccountListPage, AuthProductError> {
+        self.inner.list_accounts(request).await
+    }
+
+    async fn update_status(
+        &self,
+        scope: &AuthProductScope,
+        account_id: CredentialAccountId,
+        status: CredentialAccountStatus,
+    ) -> Result<ironclaw_auth::CredentialAccount, AuthProductError> {
+        self.inner.update_status(scope, account_id, status).await
+    }
+
+    async fn revoke_if_unchanged(
+        &self,
+        _: &AuthProductScope,
+        _: CredentialAccountId,
+        _: ironclaw_host_api::Timestamp,
+        _: Option<ExtensionId>,
+    ) -> Result<Option<ironclaw_auth::CredentialAccount>, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn select_unique_configured_account(
+        &self,
+        request: ironclaw_auth::CredentialAccountSelectionRequest,
+    ) -> Result<CredentialAccountProjection, AuthProductError> {
+        self.inner.select_unique_configured_account(request).await
+    }
+
+    async fn project_credential_recovery(
+        &self,
+        request: ironclaw_auth::CredentialRecoveryRequest,
+    ) -> Result<CredentialRecoveryProjection, AuthProductError> {
+        self.inner.project_credential_recovery(request).await
+    }
+
+    async fn select_configured_account(
+        &self,
+        request: ironclaw_auth::CredentialAccountChoiceRequest,
+    ) -> Result<CredentialAccountProjection, AuthProductError> {
+        self.inner.select_configured_account(request).await
+    }
+
+    async fn refresh_if_unchanged(
+        &self,
+        request: CredentialRefreshRequest,
+        expected_updated_at: ironclaw_host_api::Timestamp,
+    ) -> Result<Option<CredentialRefreshReport>, AuthProductError> {
+        self.inner
+            .refresh_if_unchanged(request, expected_updated_at)
+            .await
+    }
+
+    async fn refresh_account(
+        &self,
+        request: CredentialRefreshRequest,
+    ) -> Result<CredentialRefreshReport, AuthProductError> {
+        self.inner.refresh_account(request).await
+    }
+}
+
 struct EgressCallingHostRuntime {
     egress: Arc<dyn RuntimeHttpEgress>,
 }
+
+struct AlwaysErrHostRuntime;
 
 #[async_trait]
 impl HostRuntime for EgressCallingHostRuntime {
@@ -614,6 +890,48 @@ impl HostRuntime for EgressCallingHostRuntime {
                 usage: ResourceUsage::default(),
             },
         )))
+    }
+
+    async fn resume_capability(
+        &self,
+        _request: RuntimeCapabilityResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        unreachable!("test runtime only invokes")
+    }
+
+    async fn visible_capabilities(
+        &self,
+        _request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
+        unreachable!("test runtime does not expose a surface")
+    }
+
+    async fn cancel_work(
+        &self,
+        _request: CancelRuntimeWorkRequest,
+    ) -> Result<CancelRuntimeWorkOutcome, HostRuntimeError> {
+        unreachable!("test runtime does not track cancellable work")
+    }
+
+    async fn runtime_status(
+        &self,
+        _request: RuntimeStatusRequest,
+    ) -> Result<HostRuntimeStatus, HostRuntimeError> {
+        unreachable!("test runtime does not report status")
+    }
+
+    async fn health(&self) -> Result<HostRuntimeHealth, HostRuntimeError> {
+        unreachable!("test runtime does not report health")
+    }
+}
+
+#[async_trait]
+impl HostRuntime for AlwaysErrHostRuntime {
+    async fn invoke_capability(
+        &self,
+        _request: RuntimeCapabilityRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        Err(HostRuntimeError::unavailable("inner runtime failed"))
     }
 
     async fn resume_capability(
@@ -820,6 +1138,7 @@ fn unauthorized_marker(
 ) -> RuntimeCredentialUnauthorized {
     RuntimeCredentialUnauthorized {
         scope: resource_scope.clone(),
+        account_surface: ironclaw_host_api::RuntimeCredentialAccountSurface::Api,
         account_provider: RuntimeCredentialAccountProviderId::new(provider).expect("provider"),
         account_id: account.id.to_string(),
         account_updated_at: account.updated_at,

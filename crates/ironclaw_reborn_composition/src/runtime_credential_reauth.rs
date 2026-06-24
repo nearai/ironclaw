@@ -2,8 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, ResourceScope, RuntimeCredentialAuthRequirement,
-    sha256_digest_token,
+    CapabilityId, ResourceScope, RuntimeCredentialAuthRequirement, sha256_digest_token,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
@@ -43,7 +42,7 @@ impl RuntimeCredentialReauthBridge {
             return;
         }
         let record = RuntimeCredentialReauthRecord {
-            invocation_id: scope.invocation_id,
+            scope: scope.clone(),
             capability_id: capability_id.clone(),
             credential_requirements,
         };
@@ -64,8 +63,7 @@ impl RuntimeCredentialReauthBridge {
         };
         let mut credential_requirements = Vec::new();
         records.retain(|record| {
-            let matches = record.invocation_id == scope.invocation_id
-                && &record.capability_id == capability_id;
+            let matches = &record.scope == scope && &record.capability_id == capability_id;
             if matches {
                 credential_requirements.extend(record.credential_requirements.clone());
             }
@@ -83,7 +81,7 @@ impl RuntimeCredentialReauthBridge {
 
 #[derive(Debug, Clone)]
 struct RuntimeCredentialReauthRecord {
-    invocation_id: InvocationId,
+    scope: ResourceScope,
     capability_id: CapabilityId,
     credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
 }
@@ -112,6 +110,22 @@ impl RuntimeCredentialReauthHostRuntime {
             .map(auth_required_outcome)
             .unwrap_or(fallback)
     }
+
+    fn finish_reauth_call(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        outcome: Result<RuntimeCapabilityOutcome, HostRuntimeError>,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        match outcome {
+            Ok(outcome) => Ok(self.apply_reauth(scope, capability_id, outcome)),
+            Err(error) => {
+                self.bridge
+                    .take_recovered_auth_required(scope, capability_id);
+                Err(error)
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -122,8 +136,8 @@ impl HostRuntime for RuntimeCredentialReauthHostRuntime {
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         let scope = request.context.resource_scope.clone();
         let capability_id = request.capability_id.clone();
-        let outcome = self.inner.invoke_capability(request).await?;
-        Ok(self.apply_reauth(&scope, &capability_id, outcome))
+        let outcome = self.inner.invoke_capability(request).await;
+        self.finish_reauth_call(&scope, &capability_id, outcome)
     }
 
     async fn spawn_capability(
@@ -132,8 +146,8 @@ impl HostRuntime for RuntimeCredentialReauthHostRuntime {
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         let scope = request.context.resource_scope.clone();
         let capability_id = request.capability_id.clone();
-        let outcome = self.inner.spawn_capability(request).await?;
-        Ok(self.apply_reauth(&scope, &capability_id, outcome))
+        let outcome = self.inner.spawn_capability(request).await;
+        self.finish_reauth_call(&scope, &capability_id, outcome)
     }
 
     async fn resume_capability(
@@ -142,8 +156,8 @@ impl HostRuntime for RuntimeCredentialReauthHostRuntime {
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         let scope = request.context.resource_scope.clone();
         let capability_id = request.capability_id.clone();
-        let outcome = self.inner.resume_capability(request).await?;
-        Ok(self.apply_reauth(&scope, &capability_id, outcome))
+        let outcome = self.inner.resume_capability(request).await;
+        self.finish_reauth_call(&scope, &capability_id, outcome)
     }
 
     async fn auth_resume_capability(
@@ -152,8 +166,8 @@ impl HostRuntime for RuntimeCredentialReauthHostRuntime {
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         let scope = request.context.resource_scope.clone();
         let capability_id = request.capability_id.clone();
-        let outcome = self.inner.auth_resume_capability(request).await?;
-        Ok(self.apply_reauth(&scope, &capability_id, outcome))
+        let outcome = self.inner.auth_resume_capability(request).await;
+        self.finish_reauth_call(&scope, &capability_id, outcome)
     }
 
     async fn resume_spawn_capability(
@@ -162,8 +176,8 @@ impl HostRuntime for RuntimeCredentialReauthHostRuntime {
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         let scope = request.context.resource_scope.clone();
         let capability_id = request.capability_id.clone();
-        let outcome = self.inner.resume_spawn_capability(request).await?;
-        Ok(self.apply_reauth(&scope, &capability_id, outcome))
+        let outcome = self.inner.resume_spawn_capability(request).await;
+        self.finish_reauth_call(&scope, &capability_id, outcome)
     }
 
     async fn visible_capabilities(

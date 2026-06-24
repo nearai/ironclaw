@@ -616,6 +616,69 @@ async fn provider_backed_refresh_if_unchanged_skips_stale_marker() {
 }
 
 #[tokio::test]
+async fn credential_account_revoke_if_unchanged_respects_requester_extension() {
+    let services = Arc::new(InMemoryAuthProductServices::new());
+    let auth = provider_backed_auth(services.clone());
+    let owner = scope("alice");
+    let requester = ExtensionId::new("github-delete-extension").unwrap();
+    let other_requester = ExtensionId::new("github-other-extension").unwrap();
+    let account = auth
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("extension owned"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(requester.clone()),
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-delete-access").unwrap()),
+            refresh_secret: None,
+            scopes: provider_scopes(&["repo"]),
+        })
+        .await
+        .expect("extension-owned account");
+
+    let missing_requester = auth
+        .revoke_if_unchanged(&owner, account.id, account.updated_at, None)
+        .await
+        .expect_err("missing requester cannot revoke extension-owned account");
+    assert_eq!(missing_requester, AuthProductError::CrossScopeDenied);
+
+    let wrong_requester = auth
+        .revoke_if_unchanged(
+            &owner,
+            account.id,
+            account.updated_at,
+            Some(other_requester),
+        )
+        .await
+        .expect_err("wrong requester cannot revoke extension-owned account");
+    assert_eq!(wrong_requester, AuthProductError::CrossScopeDenied);
+
+    let revoked = auth
+        .revoke_if_unchanged(
+            &owner,
+            account.id,
+            account.updated_at,
+            Some(requester.clone()),
+        )
+        .await
+        .expect("matching requester can revoke")
+        .expect("fresh marker should revoke account");
+    assert_eq!(revoked.status, CredentialAccountStatus::Revoked);
+    assert_eq!(revoked.owner_extension, Some(requester.clone()));
+
+    let stored = auth
+        .get_account(
+            CredentialAccountLookupRequest::new(owner, account.id).for_extension(requester),
+        )
+        .await
+        .expect("lookup")
+        .expect("revoked account");
+    assert_eq!(stored.status, CredentialAccountStatus::Revoked);
+}
+
+#[tokio::test]
 async fn credential_refresh_rejects_terminal_statuses_even_with_refresh_secret() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("alice");

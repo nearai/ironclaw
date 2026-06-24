@@ -513,40 +513,13 @@ pub trait CredentialAccountService: Send + Sync {
         account_id: CredentialAccountId,
         expected_updated_at: Timestamp,
         requester_extension: Option<ExtensionId>,
-    ) -> Result<Option<CredentialAccount>, AuthProductError> {
-        let mut lookup = CredentialAccountLookupRequest::new(scope.clone(), account_id);
-        if let Some(requester_extension) = requester_extension {
-            lookup = lookup.for_extension(requester_extension);
-        }
-        let Some(account) = self.get_account(lookup).await? else {
-            return Ok(None);
-        };
-        if account.updated_at != expected_updated_at {
-            return Ok(None);
-        }
-        self.update_status(scope, account_id, CredentialAccountStatus::Revoked)
-            .await
-            .map(Some)
-    }
+    ) -> Result<Option<CredentialAccount>, AuthProductError>;
 
     async fn refresh_if_unchanged(
         &self,
         request: CredentialRefreshRequest,
         expected_updated_at: Timestamp,
-    ) -> Result<Option<CredentialRefreshReport>, AuthProductError> {
-        let mut lookup =
-            CredentialAccountLookupRequest::new(request.scope.clone(), request.account_id);
-        if let Some(requester_extension) = request.requester_extension.clone() {
-            lookup = lookup.for_extension(requester_extension);
-        }
-        let Some(account) = self.get_account(lookup).await? else {
-            return Ok(None);
-        };
-        if account.updated_at != expected_updated_at {
-            return Ok(None);
-        }
-        self.refresh_account(request).await.map(Some)
-    }
+    ) -> Result<Option<CredentialRefreshReport>, AuthProductError>;
 
     async fn select_unique_configured_account(
         &self,
@@ -848,16 +821,23 @@ impl ProviderBackedCredentialAccountService {
         &self,
         lookup_request: &CredentialAccountLookupRequest,
         account: &CredentialAccount,
+        expected_updated_at: Option<Timestamp>,
         requester_extension: Option<&ExtensionId>,
         status: CredentialAccountStatus,
-    ) -> Result<CredentialRefreshReport, AuthProductError> {
+    ) -> Result<Option<CredentialRefreshReport>, AuthProductError> {
         let current = self
             .accounts
             .get_account(lookup_request.clone())
             .await?
             .ok_or(AuthProductError::CredentialMissing)?;
         if current != *account {
-            return self.report_for(&current, requester_extension, false).await;
+            return match expected_updated_at {
+                Some(_) => Ok(None),
+                None => self
+                    .report_for(&current, requester_extension, false)
+                    .await
+                    .map(Some),
+            };
         }
         let updated = self
             .setup
@@ -869,7 +849,9 @@ impl ProviderBackedCredentialAccountService {
                 current.scopes.clone(),
             ))
             .await?;
-        self.report_for(&updated, requester_extension, false).await
+        self.report_for(&updated, requester_extension, false)
+            .await
+            .map(Some)
     }
 
     async fn refresh_account_from_snapshot(
@@ -964,24 +946,25 @@ impl ProviderBackedCredentialAccountService {
                         .await
                         .map(Some)
                 }
-                Err(AuthProductError::InvalidGrant) => self
-                    .report_terminal_refresh_status(
+                Err(AuthProductError::InvalidGrant) => {
+                    self.report_terminal_refresh_status(
                         &lookup_request,
                         &account,
+                        expected_updated_at,
                         request.requester_extension.as_ref(),
                         CredentialAccountStatus::Revoked,
                     )
                     .await
-                    .map(Some),
+                }
                 Err(AuthProductError::RefreshFailed | AuthProductError::TokenExchangeFailed) => {
                     self.report_terminal_refresh_status(
                         &lookup_request,
                         &account,
+                        expected_updated_at,
                         request.requester_extension.as_ref(),
                         CredentialAccountStatus::RefreshFailed,
                     )
                     .await
-                    .map(Some)
                 }
                 Err(error) => Err(error),
             }
