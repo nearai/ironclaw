@@ -41,7 +41,7 @@ mod spinner;
 mod theme;
 mod widgets;
 
-pub use app::{TuiAppConfig, TuiAppHandle, start_tui};
+pub use app::{InterruptHandle, TuiAppConfig, TuiAppHandle, start_tui};
 pub use event::{
     EngineThreadDetailEntry, EngineThreadEntry, EngineThreadMessageEntry, HistoryApprovalRequest,
     HistoryMessage, ThreadEntry, TuiEvent, TuiUiAction, TuiUserMessage,
