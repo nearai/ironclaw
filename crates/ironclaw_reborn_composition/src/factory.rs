@@ -5414,13 +5414,14 @@ mod tests {
     async fn local_dev_nearai_mcp_skips_auto_activation_without_durable_product_auth() {
         let dir = tempfile::tempdir().expect("tempdir");
         let owner = "local-dev-nearai-mcp-no-durable-owner";
-        let services = build_reborn_services(nearai_bootstrap_input(
+        let services = build_reborn_services(nearai_bootstrap_input_with_base(
             owner,
             dir.path().join("local-dev"),
+            "http://private.near.ai",
             "nearai-test-key",
         ))
         .await
-        .expect("local-dev services build");
+        .expect("local-dev services build should ignore invalid NEAR AI MCP endpoint without durable product auth");
         let local_runtime = services.local_runtime.as_ref().expect("local runtime");
         let extension_management = local_runtime
             .extension_management

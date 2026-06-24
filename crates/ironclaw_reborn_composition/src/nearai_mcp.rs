@@ -207,17 +207,17 @@ pub(crate) async fn bootstrap_nearai_mcp(
     let Some(config) = config else {
         return Ok(NearAiMcpBootstrapOutcome::NotConfigured);
     };
-    config
-        .endpoint()
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("NEAR AI MCP auto-enable skipped: invalid NEARAI_BASE_URL: {error}"),
-        })?;
     if !durable_product_auth_storage_enabled() {
         tracing::debug!(
             "NEAR AI MCP credentials are present, but durable product-auth secret storage is not enabled; skipping auto-activation"
         );
         return Ok(NearAiMcpBootstrapOutcome::SkippedUnsupportedStorage);
     }
+    config
+        .endpoint()
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("NEAR AI MCP auto-enable skipped: invalid NEARAI_BASE_URL: {error}"),
+        })?;
 
     let package_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").map_err(|error| {
@@ -388,7 +388,7 @@ impl NearAiMcpBootstrapOutcome {
     }
 }
 
-fn durable_product_auth_storage_enabled() -> bool {
+pub(crate) fn durable_product_auth_storage_enabled() -> bool {
     cfg!(any(feature = "libsql", feature = "postgres"))
 }
 
@@ -510,14 +510,6 @@ mod tests {
             created_at: chrono::DateTime::from_timestamp(updated_at_secs, 0).expect("timestamp"),
             updated_at: chrono::DateTime::from_timestamp(updated_at_secs, 0).expect("timestamp"),
         }
-    }
-
-    #[test]
-    fn durable_product_auth_storage_flag_matches_features() {
-        assert_eq!(
-            durable_product_auth_storage_enabled(),
-            cfg!(any(feature = "libsql", feature = "postgres"))
-        );
     }
 
     #[test]
