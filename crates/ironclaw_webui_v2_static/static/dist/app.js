@@ -5020,7 +5020,7 @@ ${$e}`;if(X.current.gateKey!==He&&(X.current={gateKey:He,credentialRef:null,inFl
             name=${c("channels.slack")||"Slack"}
             description=${c("channels.slackDesc")||"Tenant app channel for DMs and app mentions"}
             enabled=${!1}
-            statusLabel="legacy"
+            statusLabel="setup"
             statusTone="muted"
             detail=${c("channels.slackDetail")||"Tenant Slack app install"}
           >

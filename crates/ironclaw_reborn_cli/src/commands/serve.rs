@@ -383,11 +383,8 @@ impl ServeCommand {
                 None
             };
             #[cfg(feature = "slack-v2-host-beta")]
-            let operator_route_visibility = if sso_startup.is_none() {
-                SlackOperatorRouteVisibility::Visible
-            } else {
-                SlackOperatorRouteVisibility::Hidden
-            };
+            let operator_route_visibility =
+                slack_operator_route_visibility_for_authenticator(env_authenticator.as_ref());
             #[cfg(feature = "slack-v2-host-beta")]
             let bundle: RebornWebuiBundle = build_webui_services_with_slack_host_beta_mounts(
                 &runtime,
@@ -802,6 +799,17 @@ fn resolve_webui_runtime_owner(
     Ok(webui_user_id.to_string())
 }
 
+#[cfg(feature = "slack-v2-host-beta")]
+fn slack_operator_route_visibility_for_authenticator(
+    authenticator: &dyn WebuiAuthenticator,
+) -> SlackOperatorRouteVisibility {
+    if authenticator.mounts_operator_webui_config_routes() {
+        SlackOperatorRouteVisibility::Visible
+    } else {
+        SlackOperatorRouteVisibility::Hidden
+    }
+}
+
 fn print_serve_banner(
     listen_addr: SocketAddr,
     env_token_var: &str,
@@ -903,6 +911,47 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("reborn-cli"), "message: {message}");
         assert!(message.contains("local-user"), "message: {message}");
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_operator_route_visibility_follows_authenticator_route_mount_capability() {
+        struct HiddenAuth;
+
+        #[async_trait::async_trait]
+        impl WebuiAuthenticator for HiddenAuth {
+            async fn authenticate(
+                &self,
+                _token: &str,
+            ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
+                None
+            }
+        }
+
+        struct OperatorRouteAuth;
+
+        #[async_trait::async_trait]
+        impl WebuiAuthenticator for OperatorRouteAuth {
+            async fn authenticate(
+                &self,
+                _token: &str,
+            ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
+                None
+            }
+
+            fn mounts_operator_webui_config_routes(&self) -> bool {
+                true
+            }
+        }
+
+        assert_eq!(
+            slack_operator_route_visibility_for_authenticator(&HiddenAuth),
+            SlackOperatorRouteVisibility::Hidden
+        );
+        assert_eq!(
+            slack_operator_route_visibility_for_authenticator(&OperatorRouteAuth),
+            SlackOperatorRouteVisibility::Visible
+        );
     }
 
     #[tokio::test]
