@@ -69,6 +69,29 @@ function loadI18n() {
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+const LOCALES = ["ar", "de", "en", "es", "fr", "hi", "ja", "ko", "pt-BR", "uk", "zh-CN"];
+
+function loadLocalePack(locale) {
+  let registeredId = null;
+  let registeredPack = null;
+  let source = readFileSync(new URL(`../i18n/${locale}.js`, import.meta.url), "utf8");
+  source = source
+    .split("\n")
+    .filter((line) => !line.startsWith("import "))
+    .join("\n");
+
+  vm.runInNewContext(source, {
+    registerPack: (id, pack) => {
+      registeredId = id;
+      registeredPack = pack;
+    },
+  });
+
+  assert.equal(registeredId, locale);
+  assert.ok(registeredPack, `${locale} pack should register`);
+  return registeredPack;
+}
+
 test("ensurePack: unknown locale resolves null (no loader, not registered)", async () => {
   const { ensurePack } = loadI18n();
   assert.equal(await ensurePack("zz-unknown"), null);
@@ -173,4 +196,43 @@ test("setLang: a stale pack load resolving last does not clobber the newer langu
     ["fr"],
     "only the most recently requested language is committed/persisted",
   );
+});
+
+test("locale packs include skill auto-activation controls", () => {
+  const requiredKeys = [
+    "skills.defaultAutoActivationEnabled",
+    "skills.defaultAutoActivationDisabled",
+    "skills.defaultAutoActivationOnDesc",
+    "skills.defaultAutoActivationOffDesc",
+    "skills.defaultAutoActivationOnButton",
+    "skills.defaultAutoActivationOffButton",
+    "skills.autoActivateOnTitle",
+    "skills.autoActivateOffTitle",
+    "skills.autoActivateOnLabel",
+    "skills.autoActivateOffLabel",
+  ];
+
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of requiredKeys) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+    }
+  }
+});
+
+test("zh-CN localizes Reborn settings copy and compact automation filters", () => {
+  const pack = loadLocalePack("zh-CN");
+
+  assert.equal(pack["settings.traceCommons"], "跟踪共享");
+  assert.equal(pack["traceCommons.title"], "跟踪共享积分");
+  assert.match(pack["traceCommons.emptyState"], /跟踪共享/);
+  assert.equal(pack["skills.defaultAutoActivationOnButton"], "默认：开");
+  assert.equal(pack["skills.defaultAutoActivationOffButton"], "默认：关");
+  assert.equal(pack["skills.autoActivateOnLabel"], "自动激活：开");
+  assert.equal(pack["skills.autoActivateOffLabel"], "自动激活：关");
+  assert.equal(pack["automations.filterLabel"], "自动化状态筛选");
+  assert.equal(pack["automations.filter.all"], "全部");
+  assert.equal(pack["automations.filter.active"], "活跃");
+  assert.equal(pack["automations.filter.paused"], "已暂停");
 });
