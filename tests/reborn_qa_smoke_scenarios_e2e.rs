@@ -305,6 +305,7 @@ async fn qa_trigger_automation_smokes_create_view_and_cleanup() {
 }
 
 #[tokio::test]
+#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by emptying DISABLED_CAPABILITY_IDS"]
 async fn qa_subagent_capability_smoke_uses_child_run() {
     let spawn_subagent = cap(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID);
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
