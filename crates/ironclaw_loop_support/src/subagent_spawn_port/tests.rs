@@ -1556,6 +1556,65 @@ async fn spawn_provider_tool_call_registration_for_activity_uses_requested_activ
 }
 
 #[tokio::test]
+async fn duplicate_spawn_provider_tool_call_registration_reuses_activity_id() {
+    let context = test_run_context("spawn-register-duplicate").await;
+    let inner = Arc::new(SurfacePrimedSpawnAuthPort::default());
+    let port =
+        spawn_test_port_with_inner(context, inner.clone(), Arc::new(RegisteringSpawnInputCodec));
+    let tool_call = spawn_provider_tool_call();
+
+    let first = port
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(tool_call.clone()))
+        .await
+        .expect("first provider tool call registration");
+    let second = port
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(tool_call))
+        .await
+        .expect("duplicate provider tool call registration");
+
+    assert_eq!(second.input_ref, first.input_ref);
+    assert_eq!(second.activity_id, first.activity_id);
+    assert_eq!(*inner.visible_calls.lock().unwrap(), 2);
+    assert_eq!(inner.register_calls.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn duplicate_spawn_provider_tool_call_registration_rejects_changed_activity_id() {
+    let context = test_run_context("spawn-register-changed-activity").await;
+    let inner = Arc::new(SurfacePrimedSpawnAuthPort::default());
+    let port =
+        spawn_test_port_with_inner(context, inner.clone(), Arc::new(RegisteringSpawnInputCodec));
+    let tool_call = spawn_provider_tool_call();
+
+    let first_activity_id = CapabilityActivityId::new();
+    port.register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
+        tool_call.clone(),
+        first_activity_id,
+    ))
+    .await
+    .expect("first provider tool call registration");
+
+    let error = port
+        .register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
+            tool_call,
+            CapabilityActivityId::new(),
+        ))
+        .await
+        .expect_err("changed activity id should be rejected");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(
+        error
+            .safe_summary
+            .contains("provider tool-call activity identity changed"),
+        "unexpected error: {}",
+        error.safe_summary
+    );
+    assert_eq!(*inner.visible_calls.lock().unwrap(), 2);
+    assert_eq!(inner.register_calls.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn spawn_provider_tool_call_registration_rejects_missing_turn_id() {
     let context = test_run_context("spawn-register-missing-turn-id").await;
     let inner = Arc::new(SurfacePrimedSpawnAuthPort::default());

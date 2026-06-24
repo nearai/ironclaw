@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     fmt,
     str::FromStr,
     sync::{
@@ -389,6 +389,7 @@ pub struct SubagentSpawnCapabilityPort {
     deps: Arc<SubagentSpawnDeps>,
     parameters_schema: Arc<serde_json::Value>,
     auth_input_refs: Mutex<HashSet<CapabilityInputRef>>,
+    spawn_activity_ids: Mutex<HashMap<CapabilityInputRef, CapabilityActivityId>>,
     spawned_this_turn: AtomicU32,
 }
 
@@ -501,6 +502,7 @@ impl SubagentSpawnCapabilityPort {
             deps,
             parameters_schema,
             auth_input_refs: Mutex::new(HashSet::new()),
+            spawn_activity_ids: Mutex::new(HashMap::new()),
             spawned_this_turn: AtomicU32::new(0),
         }
     }
@@ -527,6 +529,7 @@ impl SubagentSpawnCapabilityPort {
             deps,
             parameters_schema,
             auth_input_refs: Mutex::new(HashSet::new()),
+            spawn_activity_ids: Mutex::new(HashMap::new()),
             spawned_this_turn: AtomicU32::new(0),
         }
     }
@@ -578,7 +581,7 @@ impl SubagentSpawnCapabilityPort {
     async fn register_spawn_provider_tool_call(
         &self,
         tool_call: ProviderToolCall,
-        activity_id: CapabilityActivityId,
+        activity_id: Option<CapabilityActivityId>,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         let surface = self
             .inner
@@ -596,6 +599,33 @@ impl SubagentSpawnCapabilityPort {
             .spawn_input_codec
             .register_provider_tool_call_input(&self.run_context, &tool_call)
             .await?;
+        let activity_id = {
+            let mut spawn_activity_ids = self.spawn_activity_ids.lock().map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    "subagent spawn activity identity store is unavailable",
+                )
+            })?;
+            match spawn_activity_ids.entry(input_ref.clone()) {
+                Entry::Occupied(entry) => {
+                    let registered_activity_id = *entry.get();
+                    if let Some(activity_id) = activity_id
+                        && registered_activity_id != activity_id
+                    {
+                        return Err(AgentLoopHostError::new(
+                            AgentLoopHostErrorKind::InvalidInvocation,
+                            "provider tool-call activity identity changed",
+                        ));
+                    }
+                    registered_activity_id
+                }
+                Entry::Vacant(entry) => {
+                    let activity_id = activity_id.unwrap_or_default();
+                    entry.insert(activity_id);
+                    activity_id
+                }
+            }
+        };
         self.auth_input_refs
             .lock()
             .map_err(|_| {
@@ -1043,10 +1073,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         } = request;
         if self.is_spawn_provider_tool_name(&tool_call.name) {
             return self
-                .register_spawn_provider_tool_call(
-                    tool_call,
-                    activity_id.unwrap_or_else(CapabilityActivityId::new),
-                )
+                .register_spawn_provider_tool_call(tool_call, activity_id)
                 .await;
         }
         self.inner

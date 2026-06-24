@@ -338,7 +338,7 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
         .invoke_capability_batch(CapabilityBatchInvocation {
             invocations: vec![
                 CapabilityInvocation {
-                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                    activity_id: first.activity_id,
                     surface_version: first.surface_version,
                     capability_id: first.capability_id,
                     input_ref: first.input_ref,
@@ -346,7 +346,7 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
                     auth_resume: None,
                 },
                 CapabilityInvocation {
-                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                    activity_id: second.activity_id,
                     surface_version: second.surface_version,
                     capability_id: second.capability_id,
                     input_ref: second.input_ref,
@@ -675,9 +675,10 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
         .await
         .expect("visible capabilities load");
 
+    let activity_id = ironclaw_turns::CapabilityActivityId::new();
     let auth_blocked = port
         .invoke_capability(CapabilityInvocation {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id,
             surface_version: surface.version.clone(),
             capability_id: capability_id.clone(),
             input_ref: input_ref.clone(),
@@ -701,7 +702,7 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
 
     let auth_resumed = port
         .invoke_capability(CapabilityInvocation {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id,
             surface_version: surface.version,
             capability_id,
             input_ref,
@@ -892,8 +893,7 @@ async fn runtime_capability_port(
 }
 
 async fn visible_runtime_invocation(port: &HostRuntimeLoopCapabilityPort) -> CapabilityInvocation {
-    let surface = port
-        .visible_capabilities(VisibleCapabilityRequest {})
+    port.visible_capabilities(VisibleCapabilityRequest {})
         .await
         .expect("visible capabilities load");
     let candidate = port
@@ -901,8 +901,8 @@ async fn visible_runtime_invocation(port: &HostRuntimeLoopCapabilityPort) -> Cap
         .await
         .expect("provider tool call registers");
     CapabilityInvocation {
-        activity_id: ironclaw_turns::CapabilityActivityId::new(),
-        surface_version: surface.version,
+        activity_id: candidate.activity_id,
+        surface_version: candidate.surface_version,
         capability_id: candidate.capability_id,
         input_ref: candidate.input_ref,
         approval_resume: None,
@@ -967,7 +967,7 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
         .expect("visible capabilities load");
     let resumed = port
         .invoke_capability(CapabilityInvocation {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: first_invocation.activity_id,
             surface_version: surface.version,
             capability_id: capability_id.clone(),
             input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
@@ -1065,7 +1065,7 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
         .expect("visible capabilities load");
     let auth_blocked = port
         .invoke_capability(CapabilityInvocation {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: first_invocation.activity_id,
             surface_version: surface.version.clone(),
             capability_id: capability_id.clone(),
             input_ref: first_invocation.input_ref.clone(),
@@ -1085,7 +1085,7 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
     let original_correlation_id = resume.correlation_id;
     let auth_resumed = port
         .invoke_capability(CapabilityInvocation {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: first_invocation.activity_id,
             surface_version: surface.version,
             capability_id: capability_id.clone(),
             input_ref: first_invocation.input_ref.clone(),
@@ -1174,7 +1174,7 @@ async fn approval_resume_host_error_returns_failed_outcome_and_emits_failure_mil
 
     let first_invocation = visible_runtime_invocation(&port).await;
     let first = port
-        .invoke_capability(first_invocation)
+        .invoke_capability(first_invocation.clone())
         .await
         .expect("first invocation returns approval gate");
     let CapabilityOutcome::ApprovalRequired {
@@ -1191,7 +1191,7 @@ async fn approval_resume_host_error_returns_failed_outcome_and_emits_failure_mil
         .expect("visible capabilities load");
     let resumed = port
         .invoke_capability(CapabilityInvocation {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: first_invocation.activity_id,
             surface_version: surface.version,
             capability_id: capability_id.clone(),
             input_ref: CapabilityInputRef::new("input:approval-resume-host-error")

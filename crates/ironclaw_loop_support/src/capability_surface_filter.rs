@@ -5,6 +5,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::CapabilityId;
+use ironclaw_turns::CapabilityActivityId;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
     CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation,
@@ -33,6 +34,7 @@ pub struct CapabilitySurfaceVisibleFilter {
 struct StagedInvocationKey {
     surface_version: String,
     capability_id: String,
+    activity_id: CapabilityActivityId,
     input_ref: String,
 }
 
@@ -418,6 +420,7 @@ impl StagedInvocationKey {
         Self {
             surface_version: candidate.surface_version.as_str().to_string(),
             capability_id: candidate.capability_id.as_str().to_string(),
+            activity_id: candidate.activity_id,
             input_ref: candidate.input_ref.as_str().to_string(),
         }
     }
@@ -426,6 +429,7 @@ impl StagedInvocationKey {
         Self {
             surface_version: invocation.surface_version.as_str().to_string(),
             capability_id: invocation.capability_id.as_str().to_string(),
+            activity_id: invocation.activity_id,
             input_ref: invocation.input_ref.as_str().to_string(),
         }
     }
@@ -561,11 +565,14 @@ mod tests {
             request: RegisterProviderToolCallRequest,
         ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError>
         {
-            let request = request.tool_call;
+            let RegisterProviderToolCallRequest {
+                tool_call,
+                activity_id,
+            } = request;
             self.provider_calls
                 .lock()
                 .expect("provider call lock")
-                .push(request);
+                .push(tool_call);
             let capability_ids = self
                 .registered_candidate_capability_ids
                 .lock()
@@ -573,7 +580,7 @@ mod tests {
                 .clone()
                 .unwrap_or_else(|| provider_call_capability_ids(&["demo.allowed"]));
             Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                activity_id: activity_id.unwrap_or_default(),
                 surface_version: surface_version(),
                 capability_id: capability_ids.provider_capability_id,
                 input_ref: input_ref("input:provider"),
@@ -1079,7 +1086,7 @@ mod tests {
 
         filter
             .invoke_capability(CapabilityInvocation {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                activity_id: candidate.activity_id,
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
@@ -1090,6 +1097,67 @@ mod tests {
             .expect("staged capability_info invocation should pass");
 
         assert_eq!(inner.invocations.lock().expect("invocation lock").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn capability_info_invocation_rejects_mismatched_activity_id() {
+        let inner = Arc::new(SpyPort::default());
+        *inner
+            .tool_definitions
+            .lock()
+            .expect("tool definitions lock") = vec![
+            provider_definition(capability_info::CAPABILITY_ID, capability_info::TOOL_NAME),
+            provider_definition("demo.allowed", "demo__allowed"),
+        ];
+        inner
+            .provider_call_capability_ids
+            .lock()
+            .expect("provider call capability ids lock")
+            .insert(
+                capability_info::TOOL_NAME.to_string(),
+                provider_call_capability_ids(&[capability_info::CAPABILITY_ID, "demo.allowed"]),
+            );
+        *inner
+            .registered_candidate_capability_ids
+            .lock()
+            .expect("registered candidate capability ids lock") =
+            Some(provider_call_capability_ids(&[
+                capability_info::CAPABILITY_ID,
+                "demo.allowed",
+            ]));
+        let filter = CapabilitySurfaceProfileFilter::new(
+            inner.clone(),
+            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+                "demo.allowed",
+            )])),
+        );
+        let candidate = filter
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                capability_info_call("demo__allowed"),
+            ))
+            .await
+            .expect("allowed capability_info target should stage");
+
+        let outcome = filter
+            .invoke_capability(CapabilityInvocation {
+                activity_id: CapabilityActivityId::new(),
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("mismatched staged capability_info invocation should be denied");
+
+        assert_eq!(denied_reason(&outcome), Some("surface_profile_denied"));
+        assert!(
+            inner
+                .invocations
+                .lock()
+                .expect("invocation lock")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1134,7 +1202,7 @@ mod tests {
         filter
             .invoke_capability_batch(CapabilityBatchInvocation {
                 invocations: vec![CapabilityInvocation {
-                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                    activity_id: candidate.activity_id,
                     surface_version: candidate.surface_version,
                     capability_id: candidate.capability_id,
                     input_ref: candidate.input_ref,
