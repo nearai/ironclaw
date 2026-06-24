@@ -232,3 +232,202 @@ async fn invoke_json_preserves_non_empty_credential_requirements_from_dispatcher
         RuntimeCredentialAccountProviderId::new("mcp_provider").unwrap(),
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test: dispatch_resumed_capability (second call site) also enriches
+//
+// Drives `invoke_json` → BlockedAuth → `auth_resume_json` where the
+// dispatcher returns AuthRequired with empty credential_requirements on the
+// resumed dispatch.  Asserts that the enriched credential_requirements carry
+// the provider declared by the authorizer's InjectCredentialAccountOnce
+// obligation — proving the second call site in `dispatch_resumed_capability`
+// is covered.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn auth_resume_json_enriches_auth_required_credential_requirements_from_obligations() {
+    use ironclaw_run_state::{InMemoryRunStateStore, RunStateStore, RunStatus};
+
+    // A dispatcher that returns AuthRequired with an empty credential_requirements
+    // list on every call (simulating a WASM adapter at both invoke and resume time).
+    struct AlwaysAuthRequiredDispatcher;
+
+    #[async_trait]
+    impl CapabilityDispatcher for AlwaysAuthRequiredDispatcher {
+        async fn dispatch_json(
+            &self,
+            request: CapabilityDispatchRequest,
+        ) -> Result<CapabilityDispatchResult, DispatchError> {
+            Err(DispatchError::AuthRequired {
+                capability: request.capability_id,
+                required_secrets: Vec::new(),
+                credential_requirements: Vec::new(),
+            })
+        }
+    }
+
+    let registry = registry_with_echo_capability();
+    let provider = RuntimeCredentialAccountProviderId::new("github").unwrap();
+    let requester = ExtensionId::new("github").unwrap();
+    let authorizer = CredentialObligationAuthorizer {
+        provider: provider.clone(),
+        setup: RuntimeCredentialAccountSetup::ManualToken,
+        requester_extension: requester,
+    };
+    let dispatcher = AlwaysAuthRequiredDispatcher;
+    let handler = PassthroughObligationHandler;
+    let run_state = InMemoryRunStateStore::new();
+
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+        .with_obligation_handler(&handler)
+        .with_run_state(&run_state);
+
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+
+    // Phase 1: invoke_json → blocked at auth.
+    let invoke_err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context: context.clone(),
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: serde_json::json!({"owner": "acme", "repo": "api", "issue_number": 1, "body": "hi"}),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            invoke_err,
+            CapabilityInvocationError::AuthorizationRequiresAuth { .. }
+        ),
+        "expected AuthorizationRequiresAuth from invoke_json, got {invoke_err:?}"
+    );
+
+    // Manually block the run so auth_resume_json can act on it.
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::BlockedAuth);
+
+    // Phase 2: auth_resume_json → dispatcher returns AuthRequired again →
+    // dispatch_resumed_capability enriches from obligations.
+    let resume_err = host
+        .auth_resume_json(CapabilityAuthResumeRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: serde_json::json!({"owner": "acme", "repo": "api", "issue_number": 1, "body": "hi"}),
+            trust_decision: trust_decision(),
+            approval_request_id: None,
+        })
+        .await
+        .unwrap_err();
+
+    let CapabilityInvocationError::AuthorizationRequiresAuth {
+        credential_requirements,
+        ..
+    } = resume_err
+    else {
+        panic!("expected AuthorizationRequiresAuth from auth_resume_json, got {resume_err:?}");
+    };
+
+    assert_eq!(
+        credential_requirements.len(),
+        1,
+        "resume path must enrich empty credential_requirements from InjectCredentialAccountOnce obligation"
+    );
+    assert_eq!(
+        credential_requirements[0].provider, provider,
+        "enriched requirement on resume path must carry the declared provider id"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: multiple InjectCredentialAccountOnce obligations → only one emitted
+//
+// When the authorizer declares two InjectCredentialAccountOnce obligations
+// (different providers), the enriched list must have length 1, not 2.
+// This locks the `.take(1)` contract: the downstream consumer
+// `auth_prompt_from_credential_requirement` matches exactly one requirement;
+// emitting two would cause it to fall through and leave `provider` as None.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn invoke_json_emits_at_most_one_requirement_when_multiple_obligations_declared() {
+    struct MultiObligationAuthorizer;
+
+    #[async_trait]
+    impl TrustAwareCapabilityDispatchAuthorizer for MultiObligationAuthorizer {
+        async fn authorize_dispatch_with_trust(
+            &self,
+            _context: &ExecutionContext,
+            _descriptor: &CapabilityDescriptor,
+            _estimate: &ResourceEstimate,
+            _trust_decision: &ironclaw_trust::TrustDecision,
+        ) -> Decision {
+            Decision::Allow {
+                obligations: Obligations::new(vec![
+                    Obligation::InjectCredentialAccountOnce {
+                        handle: SecretHandle::new("github_pat").unwrap(),
+                        provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                        setup: RuntimeCredentialAccountSetup::ManualToken,
+                        provider_scopes: Vec::new(),
+                        requester_extension: ExtensionId::new("github").unwrap(),
+                    },
+                    Obligation::InjectCredentialAccountOnce {
+                        handle: SecretHandle::new("gitlab_pat").unwrap(),
+                        provider: RuntimeCredentialAccountProviderId::new("gitlab").unwrap(),
+                        setup: RuntimeCredentialAccountSetup::ManualToken,
+                        provider_scopes: Vec::new(),
+                        requester_extension: ExtensionId::new("gitlab").unwrap(),
+                    },
+                ])
+                .unwrap(),
+            }
+        }
+    }
+
+    let registry = registry_with_echo_capability();
+    let authorizer = MultiObligationAuthorizer;
+    let dispatcher = AuthRequiredDispatcher;
+    let handler = PassthroughObligationHandler;
+    let host =
+        CapabilityHost::new(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: serde_json::json!({}),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    let CapabilityInvocationError::AuthorizationRequiresAuth {
+        credential_requirements,
+        ..
+    } = err
+    else {
+        panic!("expected AuthorizationRequiresAuth, got {err:?}");
+    };
+
+    assert_eq!(
+        credential_requirements.len(),
+        1,
+        "must emit exactly one credential requirement even when two InjectCredentialAccountOnce \
+         obligations are declared — the downstream auth_prompt consumer handles exactly one"
+    );
+    assert_eq!(
+        credential_requirements[0].provider,
+        RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        "must emit the first obligation's provider"
+    );
+}

@@ -4,9 +4,8 @@ use ironclaw_authorization::{
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityDispatchRequest, CapabilityDispatchResult,
-    CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision, DenyReason, DispatchError,
-    ExecutionContext, InvocationFingerprint, InvocationId, Obligation, ProcessId, ResourceEstimate,
-    ResourceScope, RuntimeCredentialAuthRequirement,
+    CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision, DenyReason, ExecutionContext,
+    InvocationFingerprint, InvocationId, Obligation, ProcessId, ResourceEstimate, ResourceScope,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
@@ -529,7 +528,7 @@ where
                     &obligation_outcome,
                 )
                 .await;
-                let error = enrich_auth_required_from_obligations(error, obligations.as_slice());
+                let error = error.enrich_auth_requirements(obligations.as_slice());
                 let invocation_error = CapabilityInvocationError::from(error);
                 apply_run_state_transition_if_configured(
                     self.run_state,
@@ -1916,7 +1915,7 @@ where
                     &obligation_outcome,
                 )
                 .await;
-                let error = enrich_auth_required_from_obligations(error, obligations.as_slice());
+                let error = error.enrich_auth_requirements(obligations.as_slice());
                 let invocation_error = CapabilityInvocationError::from(error);
                 apply_run_state_transition_if_configured(
                     Some(run_state),
@@ -2256,61 +2255,4 @@ fn obligation_invocation_error_kind(error: &CapabilityInvocationError) -> &'stat
         .run_state_transition()
         .map(CapabilityRunStateTransition::error_kind)
         .unwrap_or("Dispatch")
-}
-
-/// Enriches a `DispatchError::AuthRequired` with credential requirements derived
-/// from the capability's declared `InjectCredentialAccountOnce` obligations when
-/// the runtime returned an empty list.
-///
-/// WASM extensions that signal `auth_required` after a 401 on an injected
-/// credential produce an `AuthRequired` with empty `credential_requirements`
-/// because the adapter only receives the error string, not the obligation list.
-/// This function fills that gap so the auth-gate prompt carries the provider
-/// identity the WebUI needs to build a submittable manual-token card.
-///
-/// Only operates when `credential_requirements` is empty; a non-empty list from
-/// the runtime (e.g. MCP passing through its own requirement set) is left
-/// untouched.
-fn enrich_auth_required_from_obligations(
-    error: DispatchError,
-    obligations: &[Obligation],
-) -> DispatchError {
-    let DispatchError::AuthRequired {
-        capability,
-        required_secrets,
-        credential_requirements,
-    } = error
-    else {
-        return error;
-    };
-    if !credential_requirements.is_empty() {
-        return DispatchError::AuthRequired {
-            capability,
-            required_secrets,
-            credential_requirements,
-        };
-    }
-    let enriched: Vec<RuntimeCredentialAuthRequirement> = obligations
-        .iter()
-        .filter_map(|obligation| match obligation {
-            Obligation::InjectCredentialAccountOnce {
-                provider,
-                setup,
-                provider_scopes,
-                requester_extension,
-                ..
-            } => Some(RuntimeCredentialAuthRequirement {
-                provider: provider.clone(),
-                setup: setup.clone(),
-                requester_extension: requester_extension.clone(),
-                provider_scopes: provider_scopes.clone(),
-            }),
-            _ => None,
-        })
-        .collect();
-    DispatchError::AuthRequired {
-        capability,
-        required_secrets,
-        credential_requirements: enriched,
-    }
 }
