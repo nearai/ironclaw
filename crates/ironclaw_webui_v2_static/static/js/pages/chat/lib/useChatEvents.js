@@ -276,13 +276,25 @@ function clearPendingNonAuthGateForRun(setPendingGate, runId, promptRunIdRef) {
   });
 }
 
-function isObsoleteProjectionGate(activeRunRef, pendingGate, batchRunStatusByRunId) {
+function isObsoleteProjectionGate(
+  activeRunRef,
+  pendingGate,
+  batchRunStatusByRunId,
+  latestRunIdRef,
+  stalePromptRunIds,
+) {
+  if (pendingGate?.runId && stalePromptRunIds?.has(pendingGate.runId)) {
+    return true;
+  }
   const batchStatus = pendingGate?.runId
     ? batchRunStatusByRunId?.get(pendingGate.runId)
     : null;
   if (batchStatus) return !GATE_ACTIVE_RUN_STATUSES.has(batchStatus);
   const activeRun = activeRunRef?.current;
-  if (!activeRun?.runId || activeRun.runId !== pendingGate?.runId) return false;
+  if (activeRun?.runId && activeRun.runId !== pendingGate?.runId) return true;
+  const latestRunId = latestRunIdRef?.current || null;
+  if (latestRunId && latestRunId !== pendingGate?.runId) return true;
+  if (!activeRun?.runId) return false;
   if (!activeRun.status) return false;
   return !GATE_ACTIVE_RUN_STATUSES.has(activeRun.status);
 }
@@ -305,10 +317,23 @@ function applyProjectionItems({
   // Snapshot the most recent run id so stale terminal run_status frames can
   // be filtered while a locally resolved gate is resuming a newer run.
   const batchRunStatusByRunId = new Map();
+  const stalePromptRunIds = new Set();
+  const activeRunAtBatchStart = activeRunRef?.current || null;
+  const protectedRunId =
+    activeRunAtBatchStart?.runId || latestRunIdRef?.current || null;
   for (const item of items) {
     const runStatus = item.run_status;
     if (runStatus?.run_id && runStatus.status) {
       batchRunStatusByRunId.set(runStatus.run_id, runStatus.status);
+      if (
+        protectedRunId &&
+        protectedRunId !== runStatus.run_id &&
+        activeRunAtBatchStart?.status &&
+        !TERMINAL_RUN_STATUSES.has(activeRunAtBatchStart.status) &&
+        PROMPT_RUN_STATUSES.has(runStatus.status)
+      ) {
+        stalePromptRunIds.add(runStatus.run_id);
+      }
     }
   }
   let activeRunId = latestRunIdRef?.current ?? null;
@@ -337,6 +362,9 @@ function applyProjectionItems({
         runId && PROMPT_RUN_STATUSES.has(status)
           ? locallyResolvedStateForRun(locallyResolvedGatesRef, runId)
           : null;
+      if (runId && stalePromptRunIds.has(runId)) {
+        continue;
+      }
       if (isStaleLocalRunStatus) {
         continue;
       }
@@ -511,7 +539,13 @@ function applyProjectionItems({
       const runId = pendingGate?.runId || null;
       if (
         runId &&
-        !isObsoleteProjectionGate(activeRunRef, pendingGate, batchRunStatusByRunId) &&
+        !isObsoleteProjectionGate(
+          activeRunRef,
+          pendingGate,
+          batchRunStatusByRunId,
+          latestRunIdRef,
+          stalePromptRunIds,
+        ) &&
         !isLocallyResolvedGate(locallyResolvedGatesRef, runId, pendingGate.gateRef)
       ) {
         ensureGateToolActivity(setMessages, pendingGate, toolActivityStateRef);

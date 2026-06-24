@@ -377,6 +377,12 @@ async fn blocked_prompt_payload(
     if state.status != event.status || state.event_cursor != event.cursor {
         return Ok(None);
     }
+    let blocked_invocation_id = event
+        .blocked_gate
+        .as_ref()
+        .and_then(|gate| gate.activity_id)
+        .or(state.blocked_activity_id)
+        .map(|activity_id| InvocationId::from_uuid(activity_id.as_uuid()));
     let Some(gate_ref) = state.gate_ref.as_ref() else {
         return Ok(None);
     };
@@ -388,6 +394,7 @@ async fn blocked_prompt_payload(
                 &event.scope,
                 event.run_id,
                 &gate_ref_str,
+                blocked_invocation_id,
                 event
                     .sanitized_reason
                     .clone()
@@ -740,6 +747,9 @@ fn gate_projection_item(
         return Ok(None);
     };
     let prompt_context = gate_projection_prompt_context(blocked_prompt)?;
+    let blocked_invocation_id = blocked_gate
+        .activity_id
+        .map(|activity_id| InvocationId::from_uuid(activity_id.as_uuid()));
     let body = prompt_context.body.unwrap_or_else(|| {
         event
             .sanitized_reason
@@ -750,7 +760,7 @@ fn gate_projection_item(
         run_id: event.run_id,
         gate_kind: product_gate_kind(blocked_gate.gate_kind),
         gate_ref: blocked_gate.gate_ref.as_str().to_string(),
-        invocation_id: prompt_context.invocation_id,
+        invocation_id: prompt_context.invocation_id.or(blocked_invocation_id),
         headline: prompt_context
             .headline
             .unwrap_or_else(|| gate_projection_headline(blocked_gate.gate_kind).to_string()),

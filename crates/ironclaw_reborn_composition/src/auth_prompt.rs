@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     AuthProductError, AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl,
 };
-use ironclaw_host_api::{RuntimeCredentialAccountSetup, UserId};
+use ironclaw_host_api::{InvocationId, RuntimeCredentialAccountSetup, UserId};
 use ironclaw_product_adapters::{
     AuthPromptChallengeKind, AuthPromptView, ProductAdapterError, RedactedString,
 };
@@ -93,6 +93,7 @@ pub(crate) async fn auth_prompt_view_for_blocked_auth(
     scope: &TurnScope,
     run_id: TurnRunId,
     gate_ref: &str,
+    invocation_id: Option<InvocationId>,
     body: String,
     credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
     auth_challenges: Option<&dyn AuthChallengeProvider>,
@@ -127,7 +128,7 @@ pub(crate) async fn auth_prompt_view_for_blocked_auth(
     let base_view = AuthPromptView {
         turn_run_id: run_id,
         auth_request_ref: gate_ref.to_string(),
-        invocation_id: None,
+        invocation_id,
         headline: "Authentication required".to_string(),
         body,
         challenge_kind: None,

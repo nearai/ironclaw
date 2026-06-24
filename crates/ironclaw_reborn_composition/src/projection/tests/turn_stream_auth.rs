@@ -32,6 +32,7 @@ async fn webui_event_stream_enriches_auth_prompt_through_projection_stream() {
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: GateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
+                    activity_id: None,
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("GitHub authentication required".to_string()),
@@ -125,6 +126,7 @@ async fn webui_event_stream_uses_credential_requirement_for_manual_token_auth_pr
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: GateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
+                    activity_id: None,
                     credential_requirements: credential_requirements.clone(),
                 }),
                 sanitized_reason: Some("GitHub authentication required".to_string()),
@@ -218,6 +220,7 @@ async fn webui_event_stream_keeps_oauth_requirement_as_oauth_prompt_without_url(
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: GateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
+                    activity_id: None,
                     credential_requirements: credential_requirements.clone(),
                 }),
                 sanitized_reason: Some("Google authentication required".to_string()),
@@ -288,6 +291,7 @@ async fn webui_event_stream_surfaces_auth_challenge_lookup_failure() {
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: GateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
+                    activity_id: None,
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("GitHub authentication required".to_string()),
@@ -394,6 +398,7 @@ async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_g
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: GateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
+                    activity_id: None,
                     credential_requirements: credential_requirements.clone(),
                 }),
                 sanitized_reason: Some("Google authentication required".to_string()),
@@ -565,6 +570,7 @@ async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credenti
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: GateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
+                    activity_id: None,
                     credential_requirements: credential_requirements.clone(),
                 }),
                 sanitized_reason: Some("Notion authentication required".to_string()),

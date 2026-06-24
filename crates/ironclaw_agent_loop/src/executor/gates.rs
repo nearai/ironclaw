@@ -137,6 +137,7 @@ impl ExecutorStage<GateInput> for GateStage {
                 Ok(BatchStep::Exit(LoopExit::Blocked(LoopBlocked {
                     kind: blocked_kind(kind),
                     gate_ref,
+                    blocked_activity_id: Some(call.activity_id),
                     credential_requirements: input.credential_requirements,
                     checkpoint_id: checked.checkpoint_id,
                     state_ref: checked.state_ref,
@@ -233,6 +234,7 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
                 Ok(BatchStep::Exit(LoopExit::Blocked(LoopBlocked {
                     kind: blocked_kind(GateKind::AwaitDependentRun),
                     gate_ref,
+                    blocked_activity_id: Some(call.activity_id),
                     credential_requirements: Vec::new(),
                     checkpoint_id: checked.checkpoint_id,
                     state_ref: checked.state_ref,

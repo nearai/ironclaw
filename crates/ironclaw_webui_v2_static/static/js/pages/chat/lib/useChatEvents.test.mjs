@@ -487,6 +487,60 @@ test("useChatEvents: projection gate visibility is independent of item order", (
   assert.equal(activity?.toolStatus, "running");
 });
 
+test("useChatEvents: delayed old projection does not restore a previous run gate", () => {
+  const currentRunId = "run-current";
+  const oldRunId = "run-old";
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: currentRunId, status: "running" } },
+        ],
+      },
+    },
+  });
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: currentRunId,
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: oldRunId, status: "blocked_approval" } },
+          {
+            gate: {
+              run_id: oldRunId,
+              gate_kind: "approval",
+              gate_ref: "gate:old",
+              invocation_id: "invocation-old",
+              headline: "Old approval",
+              allow_always: false,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.pendingGate, null);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: currentRunId,
+    threadId: "thread-1",
+    status: "running",
+  });
+  assert.equal(
+    harness.messages.some((message) => message.id === "tool-invocation-old"),
+    false,
+  );
+});
+
 test("useChatEvents: gate-only projection rebuilds pending gate from gate identity", () => {
   const runId = "run-gate-only";
   const harness = createUseChatEventsHarness();

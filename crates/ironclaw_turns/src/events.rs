@@ -6,7 +6,9 @@ use thiserror::Error;
 
 use ironclaw_host_api::{RuntimeCredentialAuthRequirement, Timestamp, UserId};
 
-use crate::{GateRef, TurnError, TurnRunId, TurnRunState, TurnScope, TurnStatus};
+use crate::{
+    CapabilityActivityId, GateRef, TurnError, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+};
 
 const MAX_IN_MEMORY_EVENTS: usize = 10_000;
 pub const MAX_TURN_EVENT_PROJECTION_LIMIT: usize = 1_000;
@@ -56,6 +58,8 @@ impl TurnBlockedGateKind {
 pub struct TurnBlockedGateMetadata {
     pub gate_ref: GateRef,
     pub gate_kind: TurnBlockedGateKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_id: Option<CapabilityActivityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
 }
@@ -94,6 +98,7 @@ impl TurnLifecycleEvent {
                     TurnBlockedGateMetadata {
                         gate_ref,
                         gate_kind,
+                        activity_id: state.blocked_activity_id,
                         credential_requirements: state.credential_requirements.clone(),
                     }
                 })
@@ -453,6 +458,7 @@ mod tests {
             blocked_gate: Some(TurnBlockedGateMetadata {
                 gate_ref: GateRef::new("gate:approval-a").expect("gate ref"),
                 gate_kind: TurnBlockedGateKind::Approval,
+                activity_id: None,
                 credential_requirements: vec![RuntimeCredentialAuthRequirement {
                     provider: RuntimeCredentialAccountProviderId::new("github").expect("provider"),
                     setup: Default::default(),
@@ -527,6 +533,7 @@ mod tests {
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: Some(GateRef::new("gate:auth-a").expect("gate ref")),
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
