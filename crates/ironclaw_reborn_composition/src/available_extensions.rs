@@ -47,6 +47,13 @@ const GOOGLE_SHEETS_MANIFEST: &str =
 const GOOGLE_SHEETS_WASM_MODULE: &[u8] = include_bytes!(
     "../../ironclaw_first_party_extensions/assets/google-sheets/wasm/google_sheets_tool.wasm"
 );
+#[cfg(feature = "slack-v2-host-beta")]
+const SLACK_USER_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/slack_user/manifest.toml");
+#[cfg(feature = "slack-v2-host-beta")]
+const SLACK_USER_WASM_MODULE: &[u8] = include_bytes!(
+    "../../ironclaw_first_party_extensions/assets/slack_user/wasm/slack_user_tool.wasm"
+);
 const GOOGLE_SLIDES_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/google-slides/manifest.toml");
 const GOOGLE_SLIDES_WASM_MODULE: &[u8] = include_bytes!(
@@ -327,6 +334,8 @@ impl AvailableExtensionCatalog {
         ];
         #[cfg(feature = "slack-v2-host-beta")]
         packages.push(slack_package()?);
+        #[cfg(feature = "slack-v2-host-beta")]
+        packages.push(slack_user_package()?);
         Ok(Self::from_packages(packages))
     }
 
@@ -507,6 +516,16 @@ fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
+fn slack_user_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package(
+        "slack_user",
+        "Slack (personal)",
+        SLACK_USER_MANIFEST,
+        slack_user_assets(),
+    )
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
 fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package("slack", "Slack", SLACK_MANIFEST, slack_assets())
 }
@@ -525,6 +544,11 @@ pub(crate) fn google_drive_manifest_digest() -> String {
 
 pub(crate) fn google_sheets_manifest_digest() -> String {
     sha256_digest_token(GOOGLE_SHEETS_MANIFEST.as_bytes())
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) fn slack_user_manifest_digest() -> String {
+    sha256_digest_token(SLACK_USER_MANIFEST.as_bytes())
 }
 
 pub(crate) fn google_slides_manifest_digest() -> String {
@@ -1236,6 +1260,23 @@ fn google_sheets_assets() -> Vec<AvailableExtensionAsset> {
             "delete_sheet",
             "rename_sheet",
             "format_cells"
+        ]
+    )
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+fn slack_user_assets() -> Vec<AvailableExtensionAsset> {
+    google_wasm_assets!(
+        "slack_user",
+        SLACK_USER_MANIFEST,
+        "slack_user_tool.wasm",
+        SLACK_USER_WASM_MODULE,
+        [
+            "search_messages",
+            "list_conversations",
+            "get_conversation_history",
+            "get_user_info",
+            "send_message"
         ]
     )
 }
