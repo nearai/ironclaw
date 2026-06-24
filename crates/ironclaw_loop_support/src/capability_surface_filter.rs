@@ -208,14 +208,15 @@ impl LoopCapabilityPort for CapabilitySurfaceDenyFilter {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         validate_provider_tool_call_capability_scope(
-            self.inner.provider_tool_call_capability_ids(&tool_call)?,
+            self.inner
+                .provider_tool_call_capability_ids(&request.tool_call)?,
             |capability_id| self.permits(capability_id),
             "provider tool call targets a disabled capability",
         )?;
-        let candidate = self.inner.register_provider_tool_call(tool_call).await?;
+        let candidate = self.inner.register_provider_tool_call(request).await?;
         validate_provider_tool_call_capability_scope(
             candidate_capability_ids(&candidate),
             |capability_id| self.permits(capability_id),
@@ -1662,7 +1663,9 @@ mod tests {
         );
 
         let error = filter
-            .register_provider_tool_call(provider_call("builtin__spawn_subagent"))
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
+                "builtin__spawn_subagent",
+            )))
             .await
             .expect_err("denied provider call should fail before staging");
 
@@ -1677,7 +1680,9 @@ mod tests {
 
         // Allowed call succeeds and reaches the inner port.
         filter
-            .register_provider_tool_call(provider_call("builtin__echo"))
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
+                "builtin__echo",
+            )))
             .await
             .expect("allowed provider call should succeed");
         assert_eq!(
