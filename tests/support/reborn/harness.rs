@@ -1231,6 +1231,19 @@ impl RebornBinaryE2EHarness {
             if state.status == expected {
                 return Ok(state);
             }
+            // A terminal status (Completed/Failed/Cancelled/RecoveryRequired) is
+            // never left, so once we observe one that is not the target the run
+            // can never reach `expected`. Fail fast instead of polling to the
+            // deadline — otherwise a run that fails early (e.g. a spawn capability
+            // returning a terminal `driver_unavailable`) burns the whole timeout
+            // and buries the real failure category.
+            if state.status.is_terminal() {
+                return Err(format!(
+                    "expected {expected:?} but run reached terminal status {:?}; failure={:?}",
+                    state.status, state.failure
+                )
+                .into());
+            }
             if tokio::time::Instant::now() >= deadline {
                 return Err(format!(
                     "timed out waiting for {expected:?}; last status={:?} failure={:?}",
