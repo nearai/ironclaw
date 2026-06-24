@@ -1,28 +1,31 @@
 # Decomposing `ironclaw_reborn_composition` — Fusion Design
 
-**Status:** Accepted by council (Opus 4.8 + GPT‑5.5 xhigh). Steps 1–6 SHIPPED & green (composition 96.6k→47.6k lines, ~51% reduction; 6 crates extracted). Step 7 (domain relocation) + internal runtime/factory split remain as independent follow-ups.
-**Date:** 2026-06-21
+**Status:** Accepted by council (Opus 4.8 + GPT‑5.5 xhigh). Being delivered as an **incremental series on fresh `main`** (branch `reborn/composition-decomposition`), one isolated crate per PR. Sections 1–12 below are the ratified design and remain current.
+**Date:** 2026-06-21 (status updated 2026-06-22)
 **Owners:** Reborn composition refactor
 
-## Completion status (as built)
+## Completion status (incremental, on fresh `main`)
 
-| Crate / move | Lines | Status |
+A first attempt extracted all six crates at once on a branch taken earlier; during the work `main` advanced ~168 commits / +35k lines on this same crate (now ~132k) and **restructured the extracted modules** (e.g. `product_auth_durable.rs` → a 7-submodule `product_auth_durable/` directory; `product_auth_runtime_credentials/` and `extension_lifecycle/` likewise; new cross-cutting modules `credential_refresh_worker` / `extension_activation_credentials` / `product_auth_refresh_lock` now reach into the auth cluster). Reconciling that merge would have risked silently dropping shipped `main` features, so the big-bang branch was abandoned and the work is being re-applied incrementally on fresh `main`.
+
+| # | Crate / move | Status |
 |---|---|---|
-| Step 1 — mount-seam inversion (`compose_webui_v2_app`) | — | ✅ green |
-| `ironclaw_reborn_http_kit` (6 middleware modules) | 2,626 | ✅ green |
-| `ironclaw_reborn_product_auth` (auth/OAuth; 3 config types inverted out of `input.rs`) | 16,810 | ✅ green |
-| outbound-target vocabulary → `ironclaw_product_workflow` | — | ✅ green |
-| `ironclaw_reborn_slack_host` (concrete-handle `SlackHostRuntimeHandles<F>`; shims+runtime-tests stay in composition `src/slack_host.rs`) | 17,511 | ✅ green |
-| `ironclaw_reborn_llm_admin` (`ResolvedRebornLlm` inverted out of `runtime_input.rs`) | 4,052 | ✅ green |
-| `ironclaw_reborn_extension_host` (**partial** — lifecycle types moved, lifecycle builders + `bundled_skills` + `skill_listing` + `extension_lifecycle_command` kept in composition) | 8,396 | ✅ green |
+| 1 | Step 1 mount-seam inversion + `ironclaw_reborn_http_kit` (6 middleware modules) | ✅ **PR #5137** (green) |
+| 2 | `ironclaw_reborn_product_auth` (auth/OAuth) — re-scope for the `product_auth_durable/` split + integrate the 3 new cross-cutting auth modules | ⏳ next |
+| 3 | `OutboundDeliveryTargetProvider` vocab → `ironclaw_product_workflow` (Slack-cycle prerequisite) | ⏳ |
+| 4 | `ironclaw_reborn_slack_host` (concrete-handle `SlackHostRuntimeHandles<F>`) | ⏳ |
+| 5 | `ironclaw_reborn_llm_admin` (`ResolvedRebornLlm` inverted out of `runtime_input.rs`) | ⏳ |
+| 6 | `ironclaw_reborn_extension_host` (**partial** — see below) | ⏳ |
+
+The per-crate line counts measured on the abandoned branch were roughly: http_kit ~2.6k, product_auth ~16.8k, slack_host ~17.5k, llm_admin ~4.1k, extension_host ~8.4k (those clusters have since grown on `main`; re-scope each before extracting).
 
 **Why extension_host is partial:** `bundled_skills.rs` is tied to composition's `build.rs` OUT_DIR output and carries a behavior-sensitive marker string (`ironclaw_reborn_composition_bundled_skill`); `skill_listing` depends on it; `extension_lifecycle_command` needs `factory::RebornServices`. Moving them would force a build-script migration and a behavior-visible marker change, so they stay in composition (a defensible boundary — bundled skills are a composition build-time asset, the command is composition orchestration).
 
-**Remaining follow-ups (independent, not yet done):**
-- Step 7 domain relocation: trigger creator-pairing hook + fire-time lookup → `ironclaw_triggers`; `builtin_first_party_trust_policy` + `*_allowed_effects` → first-party crates; one-time migrations → quarantined `composition::migrations` module.
-- Internal `runtime.rs` (6.2k) / `factory.rs` (4.5k) decomposition (plans #4471/#4469).
+**Independent follow-ups (after the crate cuts):**
+- Domain relocation: trigger creator-pairing hook + fire-time lookup → `ironclaw_triggers`; `builtin_first_party_trust_policy` + `*_allowed_effects` → first-party crates; one-time migrations → quarantined `composition::migrations` module.
+- Internal `runtime.rs` / `factory.rs` decomposition (plans #4471/#4469).
 
-**Verification per step:** crate tests + `cargo test -p ironclaw_reborn_composition --features "webui-v2-beta,slack-v2-host-beta,openai-compat-beta,root-llm-provider,test-support"` + ingress + `cargo test -p ironclaw_architecture` + clippy, all green. Two pre-existing cross-binary parallel-contention flakes (pass in isolation, fail only under full-suite load, unrelated to this refactor): `budget_e2e::f1_happy_path`, `webui_v2_e2e::nearai_provider_save_persists_key_and_survives_resave`.
+**Verification per crate:** crate tests + `cargo test -p ironclaw_reborn_composition --features "webui-v2-beta,slack-v2-host-beta,openai-compat-beta,root-llm-provider,test-support"` + ingress + `cargo test -p ironclaw_architecture` + clippy, all green. **Pre-existing test-isolation flakes on `main`** (NOT caused by this refactor): several `runtime::` / nearai tests share process-global state (env var for the nearai session token, OS keychain, temp files) and fail *non-deterministically* under full-suite parallel load — they pass deterministically when run serially (`--test-threads=1`). Use serial runs to discriminate a real regression from this flakiness.
 
 ---
 
