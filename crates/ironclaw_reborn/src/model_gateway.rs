@@ -1063,16 +1063,34 @@ async fn tool_response_to_host(
             ));
         }
         for provider_call in &provider_calls {
-            capabilities
-                .validate_provider_tool_call(provider_call)
-                .map_err(map_provider_tool_output_error)?;
+            if let Err(error) = capabilities.validate_provider_tool_call(provider_call) {
+                // Fail loud: this rejection otherwise discards the whole response
+                // (budget released, no dispatch) and the run eventually fails with
+                // no trace of which call or why. Log before mapping/propagating.
+                debug!(
+                    tool_name = provider_call.name.as_str(),
+                    provider_call_id = provider_call.id.as_str(),
+                    error_kind = ?error.kind,
+                    "reborn model gateway rejected provider tool call during validation"
+                );
+                return Err(map_provider_tool_output_error(error));
+            }
         }
         for provider_call in provider_calls {
-            let candidate = capabilities
-                .register_provider_tool_call(provider_call)
-                .await
-                .map_err(map_provider_tool_output_error)?;
-            candidates.push(candidate);
+            let rejected_tool_name = provider_call.name.clone();
+            let rejected_provider_call_id = provider_call.id.clone();
+            match capabilities.register_provider_tool_call(provider_call).await {
+                Ok(candidate) => candidates.push(candidate),
+                Err(error) => {
+                    debug!(
+                        tool_name = rejected_tool_name.as_str(),
+                        provider_call_id = rejected_provider_call_id.as_str(),
+                        error_kind = ?error.kind,
+                        "reborn model gateway rejected provider tool call during registration"
+                    );
+                    return Err(map_provider_tool_output_error(error));
+                }
+            }
         }
         debug!(
             capability_call_count = candidates.len(),
