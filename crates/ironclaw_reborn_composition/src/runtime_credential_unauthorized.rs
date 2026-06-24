@@ -124,10 +124,7 @@ impl RuntimeCredentialUnauthorizedRecoveryEgress {
         account_updated_at: ironclaw_host_api::Timestamp,
         unauthorized: &RuntimeCredentialUnauthorized,
     ) -> Result<bool, ironclaw_auth::AuthProductError> {
-        let request = match refresh_request(scope, account_id, unauthorized) {
-            Ok(request) => request,
-            Err(_) => return Ok(false),
-        };
+        let request = refresh_request(scope, account_id, unauthorized)?;
         match self
             .credential_accounts
             .refresh_if_unchanged(request, account_updated_at)

@@ -1149,7 +1149,7 @@ fn runtime_http_egress_response_round_trips_optional_credential_unauthorized() {
         redaction_applied: true,
         credential_unauthorized: Some(RuntimeCredentialUnauthorized {
             scope: scope.clone(),
-            account_surface: ironclaw_host_api::RuntimeCredentialAccountSurface::Api,
+            account_surface: ironclaw_host_api::RuntimeCredentialAccountSurface::Callback,
             account_provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
             account_id: RuntimeCredentialAccountId::parse("c3d4e5f6-a7b8-9012-cdef-123456789012")
                 .unwrap(),
@@ -1171,6 +1171,10 @@ fn runtime_http_egress_response_round_trips_optional_credential_unauthorized() {
         .credential_unauthorized
         .expect("populated marker should round-trip");
     assert_eq!(rejected.scope, scope);
+    assert_eq!(
+        rejected.account_surface,
+        ironclaw_host_api::RuntimeCredentialAccountSurface::Callback
+    );
     assert_eq!(
         rejected.account_provider,
         RuntimeCredentialAccountProviderId::new("github").unwrap()
