@@ -186,8 +186,10 @@ impl TurnEventBridge {
                 .await
             {
                 Ok(page) => page,
-                Err(TurnEventProjectionError::RebaseRequired { requested, earliest })
-                    if requested.scope == earliest.scope => {
+                Err(TurnEventProjectionError::RebaseRequired {
+                    requested,
+                    earliest,
+                }) if requested.scope == earliest.scope => {
                     // The requested cursor sits below the projection's retention
                     // floor, so the events it asked for are gone. The projection
                     // still tells us the earliest replayable cursor; jump the
