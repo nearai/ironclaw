@@ -29,6 +29,7 @@ const LAUNCHD_LABEL: &str = "com.ironclaw.reborn";
 const SYSTEMD_UNIT: &str = "ironclaw-reborn.service";
 const WEBUI_TOKEN_ENV: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
 const WEBUI_USER_ID_ENV: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
+const SERVICE_COMMAND_OUTPUT_LIMIT_BYTES: usize = 16 * 1024;
 const SERVICE_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,13 +101,10 @@ impl ServiceCommandRunner for SystemCommandRunner {
         loop {
             match child.try_wait().map_err(ServiceCommandError::Status)? {
                 Some(status) => {
-                    let mut stdout = Vec::new();
                     stdout_file
                         .seek(SeekFrom::Start(0))
                         .map_err(ServiceCommandError::Output)?;
-                    stdout_file
-                        .read_to_end(&mut stdout)
-                        .map_err(ServiceCommandError::Output)?;
+                    let stdout = read_command_stdout(&mut stdout_file)?;
                     return Ok(CommandOutput {
                         success: status.success(),
                         stdout,
@@ -125,7 +123,10 @@ impl ServiceCommandRunner for SystemCommandRunner {
 fn terminate_service_command(child: &mut std::process::Child) {
     #[cfg(unix)]
     {
-        let pgid = child.id();
+        let pgid = process_group_id(child).unwrap_or_else(|error| {
+            tracing::debug!(%error, "service manager command process group lookup failed");
+            child.id() as libc::pid_t
+        });
         if let Err(error) = terminate_process_group_with_kill_command(pgid) {
             tracing::debug!(%error, "service manager command process group kill failed");
             let _ = child.kill();
@@ -141,7 +142,15 @@ fn terminate_service_command(child: &mut std::process::Child) {
 }
 
 #[cfg(unix)]
-fn terminate_process_group_with_kill_command(pgid: u32) -> std::io::Result<()> {
+fn process_group_id(child: &std::process::Child) -> std::io::Result<libc::pid_t> {
+    let pid = nix::unistd::Pid::from_raw(child.id() as libc::pid_t);
+    nix::unistd::getpgid(Some(pid))
+        .map(|pgid| pgid.as_raw())
+        .map_err(std::io::Error::other)
+}
+
+#[cfg(unix)]
+fn terminate_process_group_with_kill_command(pgid: libc::pid_t) -> std::io::Result<()> {
     let mut kill = Command::new("/bin/kill")
         .arg("-KILL")
         .arg(format!("-{pgid}"))
@@ -173,15 +182,6 @@ fn terminate_process_group_with_kill_command(pgid: u32) -> std::io::Result<()> {
 }
 
 fn write_service_file(path: &Path, contents: &str) -> std::io::Result<()> {
-    if let Ok(metadata) = std::fs::symlink_metadata(path)
-        && metadata.file_type().is_symlink()
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "local service unit path is a symlink",
-        ));
-    }
-
     #[cfg(unix)]
     {
         let mut file = std::fs::OpenOptions::new()
@@ -201,6 +201,22 @@ fn write_service_file(path: &Path, contents: &str) -> std::io::Result<()> {
     {
         std::fs::write(path, contents)
     }
+}
+
+fn read_command_stdout(
+    stdout_file: &mut (impl Read + Seek),
+) -> Result<Vec<u8>, ServiceCommandError> {
+    let mut stdout = Vec::new();
+    stdout_file
+        .take((SERVICE_COMMAND_OUTPUT_LIMIT_BYTES + 1) as u64)
+        .read_to_end(&mut stdout)
+        .map_err(ServiceCommandError::Output)?;
+    if stdout.len() > SERVICE_COMMAND_OUTPUT_LIMIT_BYTES {
+        return Err(ServiceCommandError::Output(std::io::Error::other(
+            "service manager output exceeded limit",
+        )));
+    }
+    Ok(stdout)
 }
 
 /// Platform-backed local service lifecycle manager.
@@ -1071,6 +1087,23 @@ mod tests {
                 success: true,
                 stdout,
             })
+        }
+    }
+
+    #[test]
+    fn service_manager_stdout_is_bounded() {
+        let mut stdout_file = tempfile::tempfile().expect("tempfile");
+        let oversized = vec![b'x'; SERVICE_COMMAND_OUTPUT_LIMIT_BYTES + 1];
+        std::io::Write::write_all(&mut stdout_file, &oversized).expect("write stdout");
+        std::io::Seek::seek(&mut stdout_file, SeekFrom::Start(0)).expect("rewind");
+
+        let error = read_command_stdout(&mut stdout_file).expect_err("oversized output");
+
+        match error {
+            ServiceCommandError::Output(source) => {
+                assert!(source.to_string().contains("exceeded limit"));
+            }
+            other => panic!("unexpected error: {other:?}"),
         }
     }
 
