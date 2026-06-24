@@ -99,6 +99,9 @@ pub struct DefaultPlannedRuntimeConfig {
     pub heartbeat_interval: std::time::Duration,
     pub poll_interval: std::time::Duration,
     pub worker_count: std::num::NonZeroUsize,
+    /// Capability IDs removed from every model-facing capability surface,
+    /// regardless of the resolved profile allow-set.
+    pub disabled_capability_ids: Vec<String>,
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
 }
@@ -109,10 +112,15 @@ impl Default for DefaultPlannedRuntimeConfig {
             heartbeat_interval: std::time::Duration::from_secs(10),
             poll_interval: std::time::Duration::from_secs(5),
             worker_count: DEFAULT_TURN_RUNNER_WORKER_COUNT,
+            disabled_capability_ids: default_disabled_capability_ids(),
             text_only_driver: TextOnlyModelReplyDriverConfig::default(),
             host: TextOnlyLoopHostConfig::default(),
         }
     }
+}
+
+fn default_disabled_capability_ids() -> Vec<String> {
+    vec![ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string()]
 }
 
 pub trait RuntimeTurnStateStore:
@@ -429,9 +437,9 @@ where
             Arc::clone(&parts.thread_service),
             turn_state_store,
             Arc::clone(&parts.loop_checkpoint_store),
+            await_dependent_run_evidence,
             parts.thread_scope.clone(),
         )
-        .with_await_dependent_run_evidence(await_dependent_run_evidence)
         .with_checkpoint_state_store(Arc::clone(&parts.checkpoint_state_store))
         .with_cancellation_factory(cancellation_factory),
     );
@@ -580,10 +588,13 @@ where
     // or by the host-runtime first-party manifest (the bare authorization stub).
     // This is a deny list — it takes effect regardless of the resolved profile
     // allow-set (which is `All` for top-level runs, making a profile allow-set
-    // narrowing a no-op). Empty `DISABLED_CAPABILITY_IDS` to re-enable.
-    let disabled = DISABLED_CAPABILITY_IDS
+    // narrowing a no-op). Override `disabled_capability_ids` to re-enable in
+    // targeted regression harnesses.
+    let disabled = parts
+        .config
+        .disabled_capability_ids
         .iter()
-        .map(|id| CapabilityId::new(*id))
+        .map(|id| CapabilityId::new(id.clone()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
     let mut capability_factory_builder =
@@ -682,12 +693,6 @@ where
 /// Outermost decorator that strips a caller-supplied deny list from every loop
 /// capability surface (tool definitions, visible descriptors, and invocation),
 /// regardless of the resolved profile allow-set.
-/// Capabilities temporarily removed from the model-facing surface as an
-/// explicit composition decision. Applied via an outermost
-/// [`CapabilitySurfaceDenyFilter`]. Empty this slice to re-enable everything.
-const DISABLED_CAPABILITY_IDS: &[&str] =
-    &[ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID];
-
 struct DisabledCapabilitiesDecorator {
     denied_capability_ids: Vec<CapabilityId>,
 }

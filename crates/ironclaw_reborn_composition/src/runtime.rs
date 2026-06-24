@@ -2661,9 +2661,9 @@ pub async fn build_reborn_runtime(
         Arc::clone(&thread_service),
         Arc::clone(&turn_state_store) as Arc<dyn ironclaw_turns::TurnStateStore>,
         Arc::clone(&loop_checkpoint_store) as Arc<dyn ironclaw_turns::LoopCheckpointStore>,
+        await_dependent_run_evidence,
         thread_scope.clone(),
-    )
-    .with_await_dependent_run_evidence(await_dependent_run_evidence);
+    );
     if let Some(local_runtime) = local_runtime {
         loop_exit_evidence = loop_exit_evidence.with_approval_gate_evidence(Arc::new(
             LocalDevApprovalGateEvidence {

@@ -308,7 +308,8 @@ async fn qa_trigger_automation_smokes_create_view_and_cleanup() {
 async fn qa_subagent_capability_smoke_uses_child_run() {
     let spawn_subagent = cap(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID);
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
-        RebornModelReplayStep::ProviderToolCalls {
+        RebornModelReplayStep::ProviderToolCallsForRequest {
+            request_contains: "split repo testing docs and security docs checks".to_string(),
             calls: vec![call(
                 &spawn_subagent,
                 "qa_spawn_docs_checks",
@@ -319,13 +320,16 @@ async fn qa_subagent_capability_smoke_uses_child_run() {
             )],
             expected_tool_results: Vec::new(),
         },
-        RebornModelReplayStep::Response {
+        RebornModelReplayStep::DelayedResponseForRequest {
+            request_contains: "check repo testing docs and security docs independently".to_string(),
             response: HostManagedModelResponse::assistant_reply(
                 "child found testing docs and security docs",
             ),
+            delay: Duration::from_secs(1),
             expected_tool_results: Vec::new(),
         },
-        RebornModelReplayStep::Response {
+        RebornModelReplayStep::ResponseForRequest {
+            request_contains: "child found testing docs and security docs".to_string(),
             response: HostManagedModelResponse::assistant_reply("qa subagent smoke complete"),
             expected_tool_results: Vec::new(),
         },
@@ -349,7 +353,13 @@ async fn qa_subagent_capability_smoke_uses_child_run() {
     harness
         .wait_for_status_with_config(submitted.run_id, TurnStatus::BlockedDependentRun, qa_wait())
         .await
-        .expect("parent should block on child");
+        .unwrap_or_else(|error| {
+            panic!(
+                "parent should block on child: {error}; model requests={:#?}; remaining_model_responses={}",
+                harness.model_requests(),
+                harness.remaining_model_responses()
+            )
+        });
     let children = harness
         .children_of(&submitted.scope, submitted.run_id)
         .await

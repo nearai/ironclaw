@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_loop_support::RunCancellationFactory;
+use ironclaw_loop_support::{RunCancellationFactory, SpawnSubagentMode};
 use ironclaw_threads::{
     MessageKind, MessageStatus, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
     ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
@@ -165,7 +165,7 @@ where
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
     checkpoint_state_store: Option<Arc<dyn CheckpointStateStore>>,
     approval_gate_evidence: Option<Arc<dyn ApprovalGateEvidenceStore>>,
-    await_dependent_run_evidence: Option<Arc<dyn AwaitDependentRunEvidenceStore>>,
+    await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
     thread_scope: Option<ThreadScope>,
     cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
 }
@@ -200,6 +200,7 @@ where
         thread_service: Arc<S>,
         turn_state_store: Arc<dyn TurnStateStore>,
         loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
+        await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
     ) -> Self {
         Self {
             thread_service,
@@ -207,7 +208,7 @@ where
             loop_checkpoint_store,
             checkpoint_state_store: None,
             approval_gate_evidence: None,
-            await_dependent_run_evidence: None,
+            await_dependent_run_evidence,
             thread_scope: None,
             cancellation_factory: None,
         }
@@ -217,6 +218,7 @@ where
         thread_service: Arc<S>,
         turn_state_store: Arc<dyn TurnStateStore>,
         loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
+        await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
         thread_scope: ThreadScope,
     ) -> Self {
         Self {
@@ -225,7 +227,7 @@ where
             loop_checkpoint_store,
             checkpoint_state_store: None,
             approval_gate_evidence: None,
-            await_dependent_run_evidence: None,
+            await_dependent_run_evidence,
             thread_scope: Some(thread_scope),
             cancellation_factory: None,
         }
@@ -244,14 +246,6 @@ where
         approval_gate_evidence: Arc<dyn ApprovalGateEvidenceStore>,
     ) -> Self {
         self.approval_gate_evidence = Some(approval_gate_evidence);
-        self
-    }
-
-    pub fn with_await_dependent_run_evidence(
-        mut self,
-        await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
-    ) -> Self {
-        self.await_dependent_run_evidence = Some(await_dependent_run_evidence);
         self
     }
 
@@ -517,10 +511,7 @@ where
         &self,
         request: &BlockedEvidenceRequest<'_>,
     ) -> Result<bool, TurnError> {
-        let Some(evidence) = &self.await_dependent_run_evidence else {
-            return Ok(false);
-        };
-        evidence
+        self.await_dependent_run_evidence
             .has_awaited_child_gate(request.scope, request.run_id, &request.blocked.gate_ref)
             .await
     }
@@ -536,9 +527,10 @@ impl AwaitDependentRunEvidenceStore
         run_id: TurnRunId,
         gate_ref: &LoopGateRef,
     ) -> Result<bool, TurnError> {
-        let gate_ref = GateRef::new(gate_ref.as_str()).map_err(|_| TurnError::InvalidRequest {
-            reason: "awaited child gate evidence has invalid gate ref".to_string(),
-        })?;
+        let gate_ref =
+            GateRef::new(gate_ref.as_str()).map_err(|error| TurnError::InvalidRequest {
+                reason: format!("awaited child gate evidence has invalid gate ref: {error}"),
+            })?;
         let state = self
             .state_for_gate(&gate_ref)
             .map_err(|error| TurnError::Unavailable {
@@ -548,6 +540,7 @@ impl AwaitDependentRunEvidenceStore
             state.record.parent_run_context.scope == *scope
                 && state.record.parent_run_context.run_id == run_id
                 && state.record.gate_ref == gate_ref
+                && state.record.mode == SpawnSubagentMode::Blocking
         }))
     }
 }

@@ -421,17 +421,21 @@ impl std::fmt::Display for LoopSafeSummary {
 ///
 /// Unlike [`LoopSafeSummary`], this preserves model-visible prompt formatting
 /// and uses the generic model-content validation budget.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct LoopInlineMessageBody(String);
 
 impl LoopInlineMessageBody {
     pub fn new(value: impl Into<String>) -> Result<Self, String> {
-        validate_loop_inline_message_body(value.into()).map(Self)
+        Self::try_from(value.into())
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
     }
 }
 
@@ -447,13 +451,11 @@ impl std::fmt::Display for LoopInlineMessageBody {
     }
 }
 
-impl<'de> Deserialize<'de> for LoopInlineMessageBody {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
+impl TryFrom<String> for LoopInlineMessageBody {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        validate_loop_inline_message_body(value).map(Self)
     }
 }
 

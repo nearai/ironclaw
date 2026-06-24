@@ -369,6 +369,16 @@ impl RebornTraceReplayModelGateway {
             .iter()
             .position(|step| step.matches_request(&request))
         else {
+            eprintln!(
+                "trace replay has no matching step; request messages: {}; remaining steps: {}",
+                request_message_summary(&request),
+                state
+                    .steps
+                    .iter()
+                    .map(replay_step_summary)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            );
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::Unavailable,
                 format!(
@@ -447,6 +457,25 @@ fn request_message_summary(request: &HostManagedModelRequest) -> String {
         })
         .collect::<Vec<_>>()
         .join(" | ")
+}
+
+fn replay_step_summary(step: &ReplayStep) -> String {
+    let output = match &step.output {
+        ReplayOutput::Response(_) => "response",
+        ReplayOutput::AssertProviderToolsThenResponse { .. } => {
+            "assert_provider_tools_then_response"
+        }
+        ReplayOutput::AssertProviderToolsThenProviderToolCalls { .. } => {
+            "assert_provider_tools_then_provider_tool_calls"
+        }
+        ReplayOutput::DelayedResponse { .. } => "delayed_response",
+        ReplayOutput::ProviderToolCalls(_) => "provider_tool_calls",
+    };
+    format!(
+        "{output}(request_contains={:?}, expected_tool_results={})",
+        step.request_contains,
+        step.expected_tool_results.len()
+    )
 }
 
 async fn provider_tool_calls_response(
