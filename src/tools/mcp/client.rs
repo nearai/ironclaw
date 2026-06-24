@@ -103,17 +103,8 @@ impl McpClient {
     /// Create a new simple MCP client (no authentication).
     ///
     /// Use this for local development servers or servers that don't require auth.
-    pub fn new(server_url: impl Into<String>) -> Self {
+    pub async fn new(server_url: impl Into<String>) -> Result<Self, ToolError> {
         let url: String = server_url.into();
-        // `extract_server_name` is a heuristic URL parser that may emit
-        // values outside the strict allowlist — e.g. the bracketed IPv6
-        // host `[::1]` survives `host_str()` and contains the `:`
-        // forbidden by `McpServerName`'s rules. Apply the same
-        // hyphen→underscore fold as the other constructors (only when
-        // a hyphen is present, to avoid an unnecessary allocation), then
-        // validate through `McpServerName::new`. If validation fails we
-        // fall back to the canonical `"unknown"` value rather than
-        // bypassing the allowlist via `from_trusted`.
         let mut name_str = extract_server_name(&url);
         if name_str.contains('-') {
             name_str = name_str.replace('-', "_");
@@ -128,9 +119,9 @@ impl McpClient {
             McpServerName::new("unknown")
                 .expect("'unknown' is a valid McpServerName (alnum allowlist)") // safety: hardcoded literal satisfies alnum-only validation; infallible
         });
-        let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.as_str()));
+        let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.as_str()).await?);
 
-        Self {
+        Ok(Self {
             transport,
             server_url: url,
             server_name: name,
@@ -146,18 +137,16 @@ impl McpClient {
             initialized: tokio::sync::OnceCell::new(),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::Plain,
-        }
+        })
     }
 
     /// Create a new simple MCP client with a specific name.
     ///
     /// Use this when you have a configured server name but no authentication.
-    pub fn new_with_name(server_name: impl Into<String>, server_url: impl Into<String>) -> Self {
-        // Preserve historical hyphen-to-underscore folding so session
-        // keys match `create_client_from_config`'s canonicalization, then
-        // re-validate through `McpServerName::new`. Caller-provided input
-        // must never reach `from_trusted` — if validation fails we fall
-        // back to the canonical `"unknown"` value.
+    pub async fn new_with_name(
+        server_name: impl Into<String>,
+        server_url: impl Into<String>,
+    ) -> Result<Self, ToolError> {
         let raw: String = server_name.into().replace('-', "_");
         let name = McpServerName::new(&raw).unwrap_or_else(|e| {
             tracing::debug!(
@@ -170,9 +159,9 @@ impl McpClient {
                 .expect("'unknown' is a valid McpServerName (alnum allowlist)") // safety: hardcoded literal satisfies alnum-only validation; infallible
         });
         let url: String = server_url.into();
-        let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.as_str()));
+        let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.as_str()).await?);
 
-        Self {
+        Ok(Self {
             transport,
             server_url: url,
             server_name: name,
@@ -188,7 +177,7 @@ impl McpClient {
             initialized: tokio::sync::OnceCell::new(),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::PlainNamed,
-        }
+        })
     }
 
     /// Create a new simple MCP client from an HTTP server configuration (no authentication).
@@ -212,13 +201,6 @@ impl McpClient {
                     .to_string(),
             ));
         }
-        // Validate the config-supplied name once and thread the canonical
-        // form into both the transport and the client's typed field so the
-        // two can never diverge (e.g. transport falling back to "unknown"
-        // while the client still holds the raw invalid value, which would
-        // desync session-manager lookups against transport writes).
-        // TODO(type-safety PR 4 of 4): switch `McpServerConfig.name` to
-        // `McpServerName` so this shared canonicalization moves upstream.
         let validated_name = McpServerName::new(&config.name).unwrap_or_else(|e| {
             tracing::debug!(
                 candidate = %config.name,
@@ -229,7 +211,7 @@ impl McpClient {
             McpServerName::new("unknown")
                 .expect("'unknown' is a valid McpServerName (alnum allowlist)") // safety: hardcoded literal satisfies alnum-only validation; infallible
         });
-        let transport = Arc::new(HttpMcpTransport::new(
+        let transport = Arc::new(HttpMcpTransport::new_unchecked(
             config.url.clone(),
             validated_name.as_str(),
         ));
@@ -256,20 +238,12 @@ impl McpClient {
     /// Create a new authenticated MCP client.
     ///
     /// Use this for hosted MCP servers that require OAuth authentication.
-    pub fn new_authenticated(
+    pub async fn new_authenticated(
         config: McpServerConfig,
         session_manager: Arc<McpSessionManager>,
         secrets: Arc<dyn SecretsStore + Send + Sync>,
         user_id: impl Into<String>,
-    ) -> Self {
-        // Validate the config-supplied name once and pass the canonical
-        // form into both the transport and the client's typed field. If
-        // the two sides derived the name independently, an invalid config
-        // would leave the transport's `server_name` as "unknown" while
-        // the client's `server_name` held the raw value — session IDs
-        // would then be written under one key and looked up under another.
-        // TODO(type-safety PR 4 of 4): switch `McpServerConfig.name` to
-        // `McpServerName` so this shared canonicalization moves upstream.
+    ) -> Result<Self, ToolError> {
         let validated_name = McpServerName::new(&config.name).unwrap_or_else(|e| {
             tracing::debug!(
                 candidate = %config.name,
@@ -283,12 +257,13 @@ impl McpClient {
         let user_id_str: String = user_id.into();
         let transport = Arc::new(
             HttpMcpTransport::new(config.url.clone(), validated_name.as_str())
+                .await?
                 .with_session_manager(session_manager.clone(), &user_id_str),
         );
 
         let custom_headers = config.headers.clone();
 
-        Self {
+        Ok(Self {
             transport,
             server_url: config.url.clone(),
             server_name: validated_name,
@@ -302,6 +277,70 @@ impl McpClient {
             initialized: tokio::sync::OnceCell::new(),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::Authenticated,
+        })
+    }
+
+    /// Create a new simple MCP client without IP validation.
+    ///
+    /// Only available in tests — allows connecting to localhost servers.
+    #[cfg(test)]
+    pub fn new_unchecked(server_url: impl Into<String>) -> Self {
+        let url: String = server_url.into();
+        let mut name_str = extract_server_name(&url);
+        if name_str.contains('-') {
+            name_str = name_str.replace('-', "_");
+        }
+        let name = McpServerName::new(&name_str).unwrap_or_else(|_| {
+            McpServerName::new("unknown").expect("'unknown' is a valid McpServerName") // safety: hardcoded literal
+        });
+        let transport = Arc::new(HttpMcpTransport::new_unchecked(url.clone(), name.as_str()));
+
+        Self {
+            transport,
+            server_url: url,
+            server_name: name,
+            next_id: AtomicU64::new(1),
+            tools_cache: RwLock::new(None),
+            session_manager: None,
+            secrets: None,
+            user_id: "<unset>".to_string(),
+            server_config: None,
+            custom_headers: HashMap::new(),
+            initialized: tokio::sync::OnceCell::new(),
+            #[cfg(test)]
+            constructor_kind: McpClientConstructor::Plain,
+        }
+    }
+
+    /// Create a new simple MCP client with a specific name, without IP validation.
+    ///
+    /// Only available in tests — allows connecting to localhost servers.
+    #[cfg(test)]
+    pub fn new_with_name_unchecked(
+        server_name: impl Into<String>,
+        server_url: impl Into<String>,
+    ) -> Self {
+        let raw: String = server_name.into().replace('-', "_");
+        let name = McpServerName::new(&raw).unwrap_or_else(|_| {
+            McpServerName::new("unknown").expect("'unknown' is a valid McpServerName") // safety: hardcoded literal
+        });
+        let url: String = server_url.into();
+        let transport = Arc::new(HttpMcpTransport::new_unchecked(url.clone(), name.as_str()));
+
+        Self {
+            transport,
+            server_url: url,
+            server_name: name,
+            next_id: AtomicU64::new(1),
+            tools_cache: RwLock::new(None),
+            session_manager: None,
+            secrets: None,
+            user_id: "<unset>".to_string(),
+            server_config: None,
+            custom_headers: HashMap::new(),
+            initialized: tokio::sync::OnceCell::new(),
+            #[cfg(test)]
+            constructor_kind: McpClientConstructor::PlainNamed,
         }
     }
 
@@ -1011,7 +1050,7 @@ mod tests {
 
     #[test]
     fn test_simple_client_creation() {
-        let client = McpClient::new("http://localhost:8080");
+        let client = McpClient::new_unchecked("http://localhost:8080");
         assert_eq!(client.server_url(), "http://localhost:8080");
         assert!(client.session_manager.is_none());
         assert!(client.secrets.is_none());
@@ -1059,7 +1098,7 @@ mod tests {
 
     #[test]
     fn test_new_defaults() {
-        let client = McpClient::new("http://localhost:9999");
+        let client = McpClient::new_unchecked("http://localhost:9999");
         assert_eq!(client.server_url(), "http://localhost:9999");
         assert_eq!(client.server_name(), "localhost");
         assert!(client.session_manager.is_none());
@@ -1069,7 +1108,7 @@ mod tests {
 
     #[test]
     fn test_new_with_name_uses_custom_name() {
-        let client = McpClient::new_with_name("my-server", "http://localhost:8080");
+        let client = McpClient::new_with_name_unchecked("my-server", "http://localhost:8080");
         assert_eq!(client.server_name(), "my_server");
         assert_eq!(client.server_url(), "http://localhost:8080");
         assert_eq!(client.user_id, "<unset>");
@@ -1087,19 +1126,11 @@ mod tests {
     /// Behavior under the fix: invalid extracted names fall back to the
     /// canonical `"unknown"` and a `tracing::debug!` records the failure.
     /// Either outcome must still be a valid `McpServerName`.
-    #[test]
-    fn new_validates_server_name_for_ipv6_host() {
-        let client = McpClient::new("http://[::1]:8080/");
-        // The extracted name must round-trip through `McpServerName::new`
-        // without error — the contract of the fix is "allowlist or
-        // canonical fallback, never a raw un-checked string".
+    #[tokio::test]
+    async fn new_validates_server_name_for_ipv6_host() {
+        let client = McpClient::new("http://[::1]:8080/").await.unwrap();
         let name = McpServerName::new(client.server_name())
             .expect("server_name must be a valid McpServerName (allowlist or fallback)");
-        // In this environment the extracted host `[::1]` contains the
-        // forbidden `:` and `[`/`]` characters, so the fallback fires.
-        // Document that explicitly — the point of the test is that we
-        // end up with `"unknown"` rather than a silently-accepted bogus
-        // value.
         assert_eq!(
             name.as_str(),
             "unknown",
@@ -1107,15 +1138,11 @@ mod tests {
         );
     }
 
-    /// Regression for review Fix 8: `McpClient::new_with_name` must not
-    /// bypass the allowlist when the caller passes a name that contains
-    /// forbidden characters after the hyphen fold.
-    #[test]
-    fn new_with_name_falls_back_on_invalid_input() {
-        // Slashes are forbidden by the allowlist and are not touched by
-        // the hyphen fold, so the validation must fire and the fallback
-        // engage.
-        let client = McpClient::new_with_name("bad/name", "http://localhost:8080");
+    #[tokio::test]
+    async fn new_with_name_falls_back_on_invalid_input() {
+        let client = McpClient::new_with_name("bad/name", "http://localhost:8080")
+            .await
+            .unwrap();
         let name = McpServerName::new(client.server_name())
             .expect("server_name must be a valid McpServerName (allowlist or fallback)");
         assert_eq!(
@@ -1127,20 +1154,20 @@ mod tests {
 
     #[test]
     fn test_server_name_accessor() {
-        let client = McpClient::new("https://tools.example.org/mcp");
+        let client = McpClient::new_unchecked("https://tools.example.org/mcp");
         assert_eq!(client.server_name(), "tools_example_org");
     }
 
     #[test]
     fn test_server_url_accessor() {
         let url = "https://tools.example.org/mcp?v=2";
-        let client = McpClient::new(url);
+        let client = McpClient::new_unchecked(url);
         assert_eq!(client.server_url(), url);
     }
 
     #[test]
     fn test_clone_preserves_fields() {
-        let client = McpClient::new_with_name("cloned-server", "http://localhost:5555");
+        let client = McpClient::new_with_name_unchecked("cloned-server", "http://localhost:5555");
         client.next_request_id();
         client.next_request_id();
         let cloned = client.clone();
@@ -1152,7 +1179,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clone_resets_tools_cache() {
-        let client = McpClient::new("http://localhost:5555");
+        let client = McpClient::new_unchecked("http://localhost:5555");
         let cloned = client.clone();
         let cache = cloned.tools_cache.read().await;
         assert!(cache.is_none());
@@ -1187,7 +1214,7 @@ mod tests {
 
     #[test]
     fn test_with_session_manager() {
-        let client = McpClient::new("http://localhost:8080");
+        let client = McpClient::new_unchecked("http://localhost:8080");
         assert!(!client.has_session_manager());
 
         let session_manager = Arc::new(McpSessionManager::new());
@@ -1198,7 +1225,7 @@ mod tests {
 
     #[test]
     fn test_next_request_id_monotonically_increasing() {
-        let client = McpClient::new("http://localhost:1234");
+        let client = McpClient::new_unchecked("http://localhost:1234");
         assert_eq!(client.next_request_id(), 1);
         assert_eq!(client.next_request_id(), 2);
         assert_eq!(client.next_request_id(), 3);
@@ -1392,7 +1419,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_transport_supports_http_features_accessor() {
-        let http_transport = HttpMcpTransport::new("http://localhost:8080", "test");
+        let http_transport = HttpMcpTransport::new_unchecked("http://localhost:8080", "test");
         assert!(http_transport.supports_http_features());
         let mock_non_http = MockTransport::new(false, vec![]);
         assert!(!mock_non_http.supports_http_features());
@@ -1630,8 +1657,10 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
 
-        let config = McpServerConfig::new("bad name", "https://api.example.com");
-        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+        let config = McpServerConfig::new("bad name", "https://1.2.3.4");
+        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user")
+            .await
+            .unwrap();
         assert_eq!(
             client.server_name(),
             "unknown",
@@ -1648,8 +1677,10 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
 
-        let config = McpServerConfig::new("good_name123", "https://api.example.com");
-        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+        let config = McpServerConfig::new("good_name123", "https://1.2.3.4");
+        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user")
+            .await
+            .unwrap();
         assert_eq!(client.server_name(), "good_name123");
     }
 
@@ -2101,7 +2132,9 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(EmptyTokenStore);
 
-        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user")
+            .await
+            .unwrap();
 
         let headers = client.build_request_headers().await.unwrap(); // safety: test
         assert!(
@@ -2166,7 +2199,9 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(PaddedTokenStore);
 
-        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user")
+            .await
+            .unwrap();
 
         let headers = client.build_request_headers().await.unwrap(); // safety: test
         assert_eq!(
