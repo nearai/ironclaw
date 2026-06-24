@@ -631,13 +631,19 @@ where
     let mut capability_factory = DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
         .with_decorator(spawn_decorator);
     if parts.config.tool_disclosure.is_bridged() {
-        // Startup build marker: confirms at a glance which binary is running.
-        // Bump the tag when the disclosure resolution logic changes so stale
-        // servers are obvious in the logs. `general-name-matcher` => the build
-        // that resolves bare/dotted/`__`-encoded deferred calls for any provider.
+        // Startup build marker + self-test: confirms which binary is running AND
+        // that the general-name matcher is actually compiled into THIS binary
+        // (guards against stale incremental-compilation codegen units). The
+        // dotted-form match only resolves `true` in the general-name-matcher
+        // build; an older binary would log `false` (or omit the field), making
+        // a stale server unmistakable. Bump the tag when resolution logic changes.
+        let matcher_selftest =
+            crate::tool_disclosure::encode_provider_tool_name("google-calendar.list_events")
+                == "google-calendar__list_events";
         tracing::debug!(
             target: "ironclaw::reborn::runtime",
-            disclosure_build = "general-name-matcher",
+            disclosure_build = "general-name-matcher-v2",
+            matcher_selftest,
             "reborn tool disclosure decorator wired (bridged)"
         );
         capability_factory = capability_factory.with_decorator(Arc::new(
