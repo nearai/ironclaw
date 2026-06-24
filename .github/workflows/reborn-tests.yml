@@ -182,7 +182,7 @@ jobs:
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         package: ${{ fromJSON(needs.package-matrix.outputs.packages) }}
     steps:
