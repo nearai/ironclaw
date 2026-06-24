@@ -49,6 +49,10 @@ AUTH_TOKEN = "reborn-webui-v2-live-qa-token-0123456789abcdef"
 DEFAULT_USER_ID = "reborn-webui-v2-live-qa-user"
 PROVIDER = "reborn-webui-v2"
 MODE = "live"
+HN_KEYWORD_SEARCH_URL = (
+    "https://hn.algolia.com/api/v1/search_by_date"
+    "?query=NEAR%20AI&tags=story&hitsPerPage=1"
+)
 
 CaseFn = Callable[["LiveQaContext"], Awaitable[ProbeResult]]
 
@@ -3491,8 +3495,14 @@ async def _slack_delivery_routine_case(
             f"QA case {case_name}: create a routine named {routine_name}. Every minute, "
             f"{routine_instruction} The routine's final answer and Slack message must "
             f"include the exact marker {delivery_marker}. Create the routine now; do not "
-            f"run it immediately. In your final answer include the exact marker "
-            f"{creation_marker} and include the text routine."
+            "run it immediately. During routine creation, do not perform the routine's "
+            "live check, web/search/HTTP lookup, or Slack send. Before calling trigger_create, "
+            "call builtin__outbound_delivery_targets_list, then call "
+            "builtin__outbound_delivery_target_set with the Slack target id returned by the "
+            "list tool; do not only mention the target in text. Then create the routine "
+            "definition. "
+            f"In your final answer include the exact marker {creation_marker} and include "
+            "the text routine."
         ),
     )
     if not creation.success:
@@ -3809,10 +3819,12 @@ async def case_qa_8b_hn_keyword_live_chat(ctx: LiveQaContext) -> ProbeResult:
         ctx,
         case_name="qa_8b_hn_keyword_live_chat",
         prompt=(
-            "Task 8B: search Hacker News for recent posts mentioning IronClaw "
-            "or NEAR AI. Use live web/search capabilities if available. In the final "
-            f"answer copy this exact marker without changing it: {marker}. "
-            "Also include the text Hacker News."
+            "Task 8B: perform exactly one public HTTP GET to the Hacker News Algolia "
+            f"API URL {HN_KEYWORD_SEARCH_URL}. Treat that response as the live Hacker "
+            "News keyword probe for recent NEAR AI posts. Do not use web_search, "
+            "authenticated connectors, save/download tools, or any other URL. Then "
+            f"immediately final-answer with the exact marker {marker} and include the "
+            "text Hacker News."
         ),
         marker=marker,
         required_text=["Hacker News"],
@@ -3852,10 +3864,10 @@ async def case_qa_8d_hn_keyword_slack_delivery(ctx: LiveQaContext) -> ProbeResul
         routine_prefix="reborn-qa-8d-hn-keyword-slack-delivery",
         marker_prefix="REBORN_QA_8D_HN_KEYWORD",
         routine_instruction=(
-            "perform one quick live Hacker News or public web check for IronClaw "
-            "or NEAR AI mentions, then send a concise Slack message that includes "
-            "Hacker News and either the finding or that no current matching item "
-            "was found"
+            f"perform exactly one public HTTP GET to {HN_KEYWORD_SEARCH_URL} as the "
+            "Hacker News keyword check for recent NEAR AI posts, then send a concise "
+            "Slack message that includes Hacker News and either the first finding or "
+            "that no current matching item was found"
         ),
         required_delivery_text=["Hacker News"],
         delivery_timeout=420.0,
