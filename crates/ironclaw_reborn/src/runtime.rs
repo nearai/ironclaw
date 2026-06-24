@@ -552,7 +552,12 @@ where
             Arc::clone(&parts.thread_service),
         ));
     let subagent_prompt_composer = SubagentPromptComposer::new(Arc::clone(&subagent_prompt_source));
-    let spawn_decorator = Arc::new(SubagentSpawnCapabilityDecorator::new(
+    // TEMP(disable-spawn-subagents): spawn_subagent tool removed from the
+    // model-facing capability surface. Constructed but bound to `_` so all
+    // `parts.*` fields stay used (no unused-field warnings) while the decorator
+    // is NOT installed below — the model never sees/calls spawn_subagent.
+    // Revert: rename back to `spawn_decorator` and re-add `.with_decorator(...)`.
+    let _spawn_decorator = Arc::new(SubagentSpawnCapabilityDecorator::new(
         SubagentSpawnDeps {
             coordinator: Arc::clone(&coordinator) as Arc<dyn ironclaw_turns::TurnCoordinator>,
             child_runs,
@@ -568,10 +573,8 @@ where
         parts.subagent_spawn_limits,
         flavors::builtin_flavor_catalog(),
     )?);
-    let capability_factory: Arc<dyn LoopCapabilityPortFactory> = Arc::new(
-        DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
-            .with_decorator(spawn_decorator),
-    );
+    let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
+        Arc::new(DecoratingLoopCapabilityPortFactory::new(parts.capability_factory));
     let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
         Arc::new(SubagentCapabilitySurfaceResolver::new(
             parts.capability_surface_resolver,
