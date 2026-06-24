@@ -94,7 +94,7 @@ export function GatewayLayout({
 
   return html`
     <div className="flex h-[100dvh] overflow-hidden bg-[var(--v2-canvas)]">
-      ${sidebar.open &&
+      ${sidebar.mobileOpen &&
       html`<button
         type="button"
         aria-label=${t("nav.close")}
@@ -105,10 +105,12 @@ export function GatewayLayout({
       <div
         className=${cn(
           "fixed inset-y-0 left-0 z-50 md:relative md:z-auto",
-          sidebar.open ? "flex" : "hidden md:flex"
+          sidebar.mobileOpen ? "flex" : "hidden",
+          sidebar.desktopOpen ? "md:flex" : "md:hidden"
         )}
       >
         <${Sidebar}
+          id="gateway-sidebar"
           threadsState=${threadsState}
           theme=${theme}
           toggleTheme=${toggleTheme}
