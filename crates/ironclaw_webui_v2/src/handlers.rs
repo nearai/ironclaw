@@ -36,7 +36,8 @@ use ironclaw_product_workflow::{
     RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
     RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
     RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigGetResponse,
     RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
@@ -1437,6 +1438,9 @@ pub async fn get_operator_status(
 }
 
 /// `GET /api/webchat/v2/operator/logs`
+///
+/// Operator-gated version of the logs projection. The non-operator
+/// projection lives at `GET /api/webchat/v2/logs`.
 pub async fn query_operator_logs(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
@@ -1445,6 +1449,30 @@ pub async fn query_operator_logs(
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let response = state.services().query_operator_logs(caller, query).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/logs`
+pub async fn query_logs(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<RebornOperatorLogsQuery>,
+) -> Result<Json<RebornLogQueryResponse>, WebUiV2HttpError> {
+    let request = RebornLogQueryRequest {
+        limit: query.limit,
+        cursor: query.cursor,
+        level: query.level,
+        target: query.target,
+        thread_id: query.thread_id,
+        run_id: query.run_id,
+        turn_id: query.turn_id,
+        tool_call_id: query.tool_call_id,
+        tool_name: query.tool_name,
+        source: query.source,
+        tail: query.tail,
+        follow: query.follow,
+    };
+    let response = state.services().query_logs(caller, request).await?;
     Ok(Json(response))
 }
 

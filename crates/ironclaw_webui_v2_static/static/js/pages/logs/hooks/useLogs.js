@@ -1,6 +1,6 @@
 import { useLocation } from "react-router";
 import { React } from "../../../lib/html.js";
-import { queryOperatorLogs } from "../../../lib/api.js";
+import { queryLogs, queryOperatorLogs } from "../../../lib/api.js";
 import { normalizeOperatorLogsResponse } from "../lib/logs-data.js";
 
 const POLL_INTERVAL_MS = 2000;
@@ -16,23 +16,36 @@ const SCOPE_QUERY_PARAMS = [
   ["source", "source", "logs.scope.source"],
 ];
 
-export function readLogScopeFromLocation(location = globalThis.location) {
+export function readLogScopeFromLocation(location = globalThis.location, defaultThreadId = null) {
   const params = new URLSearchParams(location?.search || "");
-  return SCOPE_QUERY_PARAMS.reduce((scope, [key, param, labelKey]) => {
+  const scope = SCOPE_QUERY_PARAMS.reduce((acc, [key, param, labelKey]) => {
     const value = params.get(param)?.trim();
     if (value) {
-      scope[key] = value;
-      scope.active.push({ key, param, labelKey, value });
+      acc[key] = value;
+      acc.active.push({ key, param, labelKey, value });
     } else {
-      scope[key] = null;
+      acc[key] = null;
     }
-    return scope;
+    return acc;
   }, { active: [] });
+  if (!scope.threadId && defaultThreadId) {
+    scope.threadId = defaultThreadId;
+    scope.active.unshift({
+      key: "threadId",
+      param: "thread_id",
+      labelKey: "logs.scope.thread",
+      value: defaultThreadId,
+    });
+  }
+  return scope;
 }
 
-export function useLogs() {
+export function useLogs({ isAdmin = true, defaultThreadId = null } = {}) {
   const location = useLocation();
-  const scope = React.useMemo(() => readLogScopeFromLocation(location), [location.search]);
+  const scope = React.useMemo(
+    () => readLogScopeFromLocation(location, defaultThreadId),
+    [defaultThreadId, location.search]
+  );
   const [entries, setEntries] = React.useState([]);
   const [levelFilter, setLevelFilter] = React.useState("all");
   const [targetFilter, setTargetFilter] = React.useState("");
@@ -49,7 +62,8 @@ export function useLogs() {
     const requestId = ++requestIdRef.current;
     setIsLoading(true);
     try {
-      const response = await queryOperatorLogs({
+      const queryLogsFn = isAdmin ? queryOperatorLogs : queryLogs;
+      const response = await queryLogsFn({
         limit: LOG_LIMIT,
         level: levelFilter === "all" ? null : levelFilter,
         target: targetFilter.trim() || null,
@@ -80,7 +94,7 @@ export function useLogs() {
         setIsLoading(false);
       }
     }
-  }, [isUnsupported, levelFilter, scope, targetFilter]);
+  }, [isAdmin, isUnsupported, levelFilter, scope, targetFilter]);
 
   React.useEffect(() => {
     loadLogs();

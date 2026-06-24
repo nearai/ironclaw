@@ -57,6 +57,7 @@ browser-reachable.
 | `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | None | `ProductWorkflow` |
 | `webui.v2.send_message` | POST | `/api/webchat/v2/threads/{thread_id}/messages` | None | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (optional `?limit=N&cursor=...`) | None | `ProjectionOnly` |
+| `webui.v2.logs` | GET | `/api/webchat/v2/logs` (optional `?limit=N&cursor=...`) | None | `ProjectionOnly` |
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | SSE | `ProjectionOnly` |
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | WebSocket | `ProjectionOnly` |
 | `webui.v2.cancel_run` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel` | None | `TurnCoordinator` |
@@ -87,12 +88,14 @@ browser-reachable.
 | `webui.v2.operator.logs` | GET | `/api/webchat/v2/operator/logs` | None | `ProjectionOnly` |
 | `webui.v2.operator.service_lifecycle` | POST | `/api/webchat/v2/operator/service` | None | `ProductWorkflow` |
 
-`webui.v2.operator.logs` accepts bounded `limit`, `cursor`, `level`, and `target`
+`webui.v2.logs` accepts bounded `limit`, `cursor`, `level`, and `target`
 query parameters, mutually exclusive boolean `tail` and `follow` flags from
-`RebornOperatorLogsQuery`, plus optional scoped filters for `thread_id`, `run_id`,
-`turn_id`, `tool_call_id`, `tool_name`, and `source`. Responses include the same
-correlation fields when the captured tracing context provides them and expose
-tail/follow capability through `tail_supported` and `follow_supported`.
+`RebornOperatorLogsQuery`, plus optional scoped filters for `thread_id`,
+`run_id`, `turn_id`, `tool_call_id`, `tool_name`, and `source`. Responses
+include the same correlation fields when the captured tracing context provides
+them and expose tail/follow capability through `tail_supported` and
+`follow_supported`. `webui.v2.operator.logs` shares the same shape but stays
+operator-gated.
 
 All routes require `BearerToken` auth with `AuthenticatedCaller`
 scope source. The host's bearer middleware is responsible for
@@ -110,8 +113,8 @@ route handlers also reject mounted operator config requests with `403` when
 the injected `WebUiV2Capabilities` lacks `operator_webui_config`, so host
 composition and handler dispatch share the same fail-closed capability
 boundary. `webui.v2.operator.logs` follows the same operator-capability
-boundary, while non-operator users retain access to the separate gateway logs
-surface in the main Web UI.
+boundary, while non-operator users use `webui.v2.logs` in the v2 surface and
+the separate gateway logs surface in the main Web UI.
 Unwired operator command-plane write, setup, log, and
 service-control methods fail closed with sanitized `503 service_unavailable`
 responses. Config validation plus read-only config, status, and diagnostics

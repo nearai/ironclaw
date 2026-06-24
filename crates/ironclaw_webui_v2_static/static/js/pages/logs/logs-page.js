@@ -1,3 +1,4 @@
+import { useOutletContext } from "react-router";
 import { React, html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
 import { useLogs } from "./hooks/useLogs.js";
@@ -113,6 +114,7 @@ function ScopeChip({ label, value, scopeKey }) {
 
 export function LogsPage() {
   const t = useT();
+  const { isAdmin = true, threadsState } = useOutletContext() || {};
   const {
     entries,
     totalCount,
@@ -130,7 +132,10 @@ export function LogsPage() {
     scope,
     isLoading,
     error,
-  } = useLogs();
+  } = useLogs({
+    isAdmin,
+    defaultThreadId: isAdmin ? null : threadsState?.activeThreadId || null,
+  });
 
   const outputRef = React.useRef(null);
   const followLatestRef = React.useRef(true);

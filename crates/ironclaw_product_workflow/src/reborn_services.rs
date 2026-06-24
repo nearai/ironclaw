@@ -1799,6 +1799,15 @@ pub trait RebornServicesApi: Send + Sync {
         ))
     }
 
+    async fn query_logs(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        let _ = (caller, query);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     async fn query_operator_logs(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3346,6 +3355,15 @@ impl RebornServicesApi for RebornServices {
             service_lifecycle: None,
             diagnostics: Vec::new(),
         })
+    }
+
+    async fn query_logs(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        let request = bounded_log_query(query);
+        self.operator_logs.query_logs(caller, request).await
     }
 
     async fn query_operator_logs(
@@ -5181,6 +5199,26 @@ fn bounded_operator_logs_query(query: RebornOperatorLogsQuery) -> RebornLogQuery
                 .unwrap_or(OPERATOR_LOGS_DEFAULT_LIMIT)
                 .clamp(1, OPERATOR_LOGS_MAX_LIMIT),
         ),
+        cursor: bounded_operator_logs_string(query.cursor, OPERATOR_LOGS_CURSOR_MAX_BYTES),
+        level: query.level,
+        target: bounded_operator_logs_string(query.target, OPERATOR_LOGS_TARGET_MAX_BYTES),
+        thread_id: bounded_operator_logs_context_string(query.thread_id),
+        run_id: bounded_operator_logs_context_string(query.run_id),
+        turn_id: bounded_operator_logs_context_string(query.turn_id),
+        tool_call_id: bounded_operator_logs_context_string(query.tool_call_id),
+        tool_name: bounded_operator_logs_context_string(query.tool_name),
+        source: bounded_operator_logs_context_string(query.source),
+        tail: query.tail,
+        follow: query.follow,
+    }
+}
+
+fn bounded_log_query(query: RebornLogQueryRequest) -> RebornLogQueryRequest {
+    RebornLogQueryRequest {
+        limit: query
+            .limit
+            .map(|limit| limit.clamp(1, OPERATOR_LOGS_MAX_LIMIT))
+            .or(Some(OPERATOR_LOGS_DEFAULT_LIMIT)),
         cursor: bounded_operator_logs_string(query.cursor, OPERATOR_LOGS_CURSOR_MAX_BYTES),
         level: query.level,
         target: bounded_operator_logs_string(query.target, OPERATOR_LOGS_TARGET_MAX_BYTES),

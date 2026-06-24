@@ -50,6 +50,7 @@ use ironclaw_webui_v2::{
     WEBUI_V2_ROUTE_TRACE_CREDITS, WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE,
     WEBUI_V2_ROUTE_UPDATE_PROJECT, WEBUI_V2_ROUTE_UPDATE_PROJECT_MEMBER,
     WEBUI_V2_ROUTE_UPDATE_SKILL, WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER, webui_v2_routes,
+    WEBUI_V2_ROUTE_LOGS,
 };
 
 /// Expected policy surface for one route. Everything host composition
@@ -153,6 +154,23 @@ fn expected_table() -> Vec<Expected> {
             route_id: WEBUI_V2_ROUTE_GET_TIMELINE,
             method: NetworkMethod::Get,
             pattern: "/api/webchat/v2/threads/{thread_id}/timeline",
+            listener_class: ListenerClass::LocalGateway,
+            auth_schemes: &[IngressAuthScheme::BearerToken],
+            scope_source: IngressScopeSource::AuthenticatedCaller,
+            body_limit: BodyLimitPolicy::NoBody,
+            rate_limit_max: 120,
+            rate_limit_window_seconds: 60,
+            rate_limit_scope: RateLimitScope::PerCaller,
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::UserAction,
+            effect_path: AllowedEffectPath::ProjectionOnly,
+        },
+        Expected {
+            route_id: WEBUI_V2_ROUTE_LOGS,
+            method: NetworkMethod::Get,
+            pattern: "/api/webchat/v2/logs",
             listener_class: ListenerClass::LocalGateway,
             auth_schemes: &[IngressAuthScheme::BearerToken],
             scope_source: IngressScopeSource::AuthenticatedCaller,

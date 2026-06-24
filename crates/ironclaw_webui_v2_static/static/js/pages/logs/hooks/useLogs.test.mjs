@@ -22,7 +22,7 @@ function depsChanged(previous, next) {
   return next.some((value, index) => !Object.is(value, previous[index]));
 }
 
-function createHookHarness({ search = "" } = {}) {
+function createHookHarness({ search = "", useLogsArgs = {} } = {}) {
   const calls = [];
   const intervals = [];
   let location = { search };
@@ -84,8 +84,12 @@ function createHookHarness({ search = "" } = {}) {
     normalizeOperatorLogsResponse: (response) => ({
       entries: response?.entries || response?.logs?.entries || [],
     }),
+    queryLogs: async (request) => {
+      calls.push({ endpoint: "logs", ...request });
+      return { entries: [{ id: String(calls.length) }] };
+    },
     queryOperatorLogs: async (request) => {
-      calls.push(request);
+      calls.push({ endpoint: "operator", ...request });
       return { entries: [{ id: String(calls.length) }] };
     },
     setInterval: (fn, ms) => {
@@ -104,7 +108,7 @@ function createHookHarness({ search = "" } = {}) {
     render() {
       hookIndex = 0;
       pendingEffects.length = 0;
-      return context.globalThis.__testExports.useLogs();
+      return context.globalThis.__testExports.useLogs(useLogsArgs);
     },
     async runEffects() {
       const effects = pendingEffects.splice(0);
@@ -126,6 +130,7 @@ test("useLogs reloads scoped logs once when scope changes while paused", async (
   let result = harness.render();
   await harness.runEffects();
   assert.equal(harness.calls.length, 1);
+  assert.equal(harness.calls[0].endpoint, "operator");
   assert.equal(harness.calls[0].threadId, "thread-a");
   assert.equal(harness.intervals.length, 1);
 
@@ -140,6 +145,34 @@ test("useLogs reloads scoped logs once when scope changes while paused", async (
 
   assert.equal(result.paused, true);
   assert.equal(harness.calls.length, 2);
+  assert.equal(harness.calls[1].endpoint, "operator");
   assert.equal(harness.calls[1].threadId, "thread-b");
   assert.equal(harness.intervals.length, 1);
+});
+
+test("useLogs uses the non-operator endpoint when the caller is not admin", async () => {
+  const harness = createHookHarness({
+    search: "?thread_id=thread-a",
+    useLogsArgs: { isAdmin: false },
+  });
+
+  harness.render();
+  await harness.runEffects();
+
+  assert.equal(harness.calls.length, 1);
+  assert.equal(harness.calls[0].endpoint, "logs");
+  assert.equal(harness.calls[0].threadId, "thread-a");
+});
+
+test("useLogs falls back to the caller's active thread when no thread scope is in the URL", async () => {
+  const harness = createHookHarness({
+    useLogsArgs: { isAdmin: false, defaultThreadId: "thread-fallback" },
+  });
+
+  harness.render();
+  await harness.runEffects();
+
+  assert.equal(harness.calls.length, 1);
+  assert.equal(harness.calls[0].endpoint, "logs");
+  assert.equal(harness.calls[0].threadId, "thread-fallback");
 });
