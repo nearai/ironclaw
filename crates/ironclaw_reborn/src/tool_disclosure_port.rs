@@ -155,8 +155,25 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        // PROBE (temporary): unconditional entry log on a target that is known to
+        // surface in the operator's stderr logs, to prove whether this decorator
+        // method is even being called for a deferred tool. If this line does not
+        // appear before a "rejected unresolved unadvertised" gateway log, the
+        // gateway is resolving against a port that is NOT this forgiving decorator.
+        let direct_probe = self.direct_deferred_target(tool_call);
+        debug!(
+            target: "ironclaw::reborn::context_shadow",
+            tool_name = tool_call.name.as_str(),
+            is_bridge = is_bridge_name(&tool_call.name),
+            direct_deferred = match &direct_probe {
+                Ok(Some(_)) => "some",
+                Ok(None) => "none",
+                Err(_) => "err",
+            },
+            "reborn tool disclosure provider_tool_call_capability_ids entry"
+        );
         if !is_bridge_name(&tool_call.name) {
-            if let Some(target) = self.direct_deferred_target(tool_call)? {
+            if let Some(target) = direct_probe? {
                 debug!(
                     tool_name = tool_call.name.as_str(),
                     capability_id = target.definition.capability_id.as_str(),
