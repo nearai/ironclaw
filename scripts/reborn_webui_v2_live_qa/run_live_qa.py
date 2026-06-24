@@ -444,6 +444,22 @@ def _section_env_name(config_text: str, key: str, default: str) -> str:
     return match.group(1) if match else default
 
 
+def _slack_config_value(config_text: str, key: str) -> str | None:
+    in_slack = False
+    for raw_line in config_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_slack = line == "[slack]"
+            continue
+        if not in_slack:
+            continue
+        match = re.match(rf"{re.escape(key)}\s*=\s*\"([^\"]*)\"", line)
+        if match:
+            value = match.group(1).strip()
+            return value or None
+    return None
+
+
 def _disable_slack_in_config(config_path: Path) -> None:
     lines = config_path.read_text(encoding="utf-8").splitlines()
     in_slack = False
@@ -1795,6 +1811,9 @@ def prepare_reborn_home(args: argparse.Namespace, selected_cases: list[str]) -> 
                 "legacy_actor_configured": legacy_actor_configured,
                 "legacy_actor_user_id": legacy_actor_user_id,
                 "auth_user_id": auth_user_id,
+                "config_installation_id": _slack_config_value(config, "installation_id"),
+                "config_team_id": _slack_config_value(config, "team_id"),
+                "config_api_app_id": _slack_config_value(config, "api_app_id"),
                 "auth_test": slack_auth,
                 "secret_source": secret_preflight,
                 "path_secret_env_names": sorted(path_secret_env),
@@ -2819,6 +2838,7 @@ async def case_qa_2a_gmail_connect(ctx: LiveQaContext) -> ProbeResult:
         package_id="gmail",
         display_name="Gmail",
         required_tools=["gmail.list_messages"],
+        ensure_installed=True,
     )
 
 
@@ -2916,6 +2936,7 @@ async def case_qa_4a_gmail_connect(ctx: LiveQaContext) -> ProbeResult:
         package_id="gmail",
         display_name="Gmail",
         required_tools=["gmail.list_messages"],
+        ensure_installed=True,
     )
 
 
@@ -2936,6 +2957,7 @@ async def case_qa_6a_gmail_connect(ctx: LiveQaContext) -> ProbeResult:
         package_id="gmail",
         display_name="Gmail",
         required_tools=["gmail.list_messages"],
+        ensure_installed=True,
     )
 
 
@@ -3313,6 +3335,8 @@ async def _post_signed_slack_dm_event(
     api_app_id = None
     if isinstance(secret_source, dict):
         api_app_id = secret_source.get("api_app_id")
+    if not api_app_id:
+        api_app_id = slack.get("config_api_app_id")
     payload = {
         "token": "live-qa-local-signed-event",
         "team_id": str(team_id or ""),
@@ -3643,6 +3667,7 @@ CASES: dict[str, CaseSpec] = {
     ),
     "qa_4b_github_connect": CaseSpec(
         case_qa_4b_github_connect,
+        default_enabled=False,
     ),
     "qa_4c_github_release_live_chat": CaseSpec(case_qa_4c_github_release_live_chat),
     "qa_4d_github_release_slack_routine": CaseSpec(
@@ -4038,6 +4063,8 @@ def main() -> int:
             forwarded.append("--skip-build")
         if args.require_slack_live:
             forwarded.append("--require-slack-live")
+        if args.all_cases:
+            forwarded.append("--all-cases")
         for case_name in args.case:
             forwarded.extend(["--case", case_name])
         return subprocess.run(forwarded, cwd=ROOT).returncode

@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -101,6 +102,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertTrue(slack["requires_slack"])
             self.assertFalse(slack["env_present"])
             self.assertEqual(slack["auth_test"]["error"], "Slack env unavailable")
+            self.assertEqual(slack["config_installation_id"], "local-dev-installation")
+            self.assertEqual(slack["config_team_id"], "local-dev-team")
+            self.assertEqual(slack["config_api_app_id"], "local-dev-app-id")
 
     def test_generated_slack_home_ignores_empty_ci_vars(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -125,6 +129,41 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertNotIn('installation_id = ""', config)
             self.assertNotIn('team_id = ""', config)
             self.assertNotIn('api_app_id = ""', config)
+
+    def test_default_suite_excludes_github_connect_until_live_oauth_exists(self):
+        self.assertFalse(run_live_qa.CASES["qa_4b_github_connect"].default_enabled)
+        self.assertIn("qa_4b_github_connect", run_live_qa.CASES)
+        default_cases = [
+            name
+            for name, spec in run_live_qa.CASES.items()
+            if spec.default_enabled
+        ]
+        self.assertNotIn("qa_4b_github_connect", default_cases)
+
+    def test_bootstrap_forwards_all_cases_flag(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "out"
+            home = Path(tmpdir) / "home"
+            argv = [
+                "run_live_qa.py",
+                "--output-dir",
+                str(output_dir),
+                "--reborn-home",
+                str(home),
+                "--all-cases",
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(run_live_qa, "bootstrap_python", return_value=Path("/venv/bin/python")),
+                patch.object(run_live_qa, "install_playwright"),
+                patch.object(run_live_qa.subprocess, "run") as subprocess_run,
+            ):
+                subprocess_run.return_value.returncode = 0
+                self.assertEqual(run_live_qa.main(), 0)
+
+            forwarded = subprocess_run.call_args.args[0]
+            self.assertIn("--all-cases", forwarded)
+            self.assertNotIn("--case", forwarded)
 
 
 if __name__ == "__main__":
