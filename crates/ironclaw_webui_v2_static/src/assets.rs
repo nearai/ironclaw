@@ -278,7 +278,7 @@ mod tests {
         assert!(setup_panel.contains("<${SlackChannelPicker} action=${action} />"));
 
         let channels_tab = asset_text("js/pages/extensions/components/channels-tab.js");
-        assert!(channels_tab.contains("showLegacySlackConnectActions"));
+        assert!(channels_tab.contains("showBuiltinSlackConnectActions"));
         assert!(channels_tab.contains("admin_managed_channels"));
         assert!(channels_tab.contains("inbound_proof_code"));
         assert!(channels_tab.contains("SlackAdminManagedSection"));

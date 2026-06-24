@@ -359,6 +359,7 @@ mod tests {
                 user_id: UserId::new("user:alice").unwrap(),
                 agent_id: None,
                 project_id: None,
+                operator_webui_config: false,
             })
             .body(Body::from(body))
             .unwrap()
