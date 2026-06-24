@@ -745,7 +745,12 @@ mod tests {
         assert_eq!(requests[0].path, "/graphql");
         let body: serde_json::Value =
             serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
-        assert!(body["query"].as_str().unwrap().contains("reviewThreads"));
+        let query = body["query"].as_str().unwrap();
+        assert!(query.contains("reviewThreads"));
+        assert!(
+            !query.contains("comments("),
+            "thread listing should not hydrate per-thread comments"
+        );
         assert_eq!(body["variables"]["owner"], "nearai");
         assert_eq!(body["variables"]["first"], 10);
 
@@ -763,6 +768,88 @@ mod tests {
             .unwrap()
             .contains("resolveReviewThread"));
         assert_eq!(body["variables"]["threadId"], "PRRT_kwDOExample");
+    }
+
+    #[test]
+    fn update_pull_request_rejects_oversized_title_body_and_base_before_egress() {
+        for (field, input, expected_error) in [
+            (
+                "title",
+                format!(
+                    r#"{{"owner":"nearai","repo":"ironclaw","pr_number":12,"state":"closed","title":"{}"}}"#,
+                    "a".repeat(65537)
+                ),
+                "Input 'title' exceeds maximum length of 65536 characters",
+            ),
+            (
+                "body",
+                format!(
+                    r#"{{"owner":"nearai","repo":"ironclaw","pr_number":12,"state":"closed","body":"{}"}}"#,
+                    "a".repeat(65537)
+                ),
+                "Input 'body' exceeds maximum length of 65536 characters",
+            ),
+            (
+                "base",
+                format!(
+                    r#"{{"owner":"nearai","repo":"ironclaw","pr_number":12,"state":"closed","base":"{}"}}"#,
+                    "a".repeat(65537)
+                ),
+                "Input 'base' exceeds maximum length of 65536 characters",
+            ),
+        ] {
+            test_support::set_response(Ok(json!({"number": 12}).to_string()));
+
+            assert_eq!(
+                execute_inner(
+                    &input,
+                    Some(r#"{"capability_id":"github.update_pull_request"}"#)
+                )
+                .unwrap_err(),
+                expected_error,
+                "{field} should reject oversized input"
+            );
+            assert!(
+                test_support::requests().is_empty(),
+                "oversized {field} should fail before egress"
+            );
+        }
+    }
+
+    #[test]
+    fn review_threads_reject_oversized_after_and_thread_id_before_egress() {
+        for (capability, input, expected_error) in [
+            (
+                "github.list_pull_request_review_threads",
+                format!(
+                    r#"{{"owner":"nearai","repo":"ironclaw","pr_number":12,"first":10,"after":"{}"}}"#,
+                    "a".repeat(65537)
+                ),
+                "Input 'after' exceeds maximum length of 65536 characters",
+            ),
+            (
+                "github.resolve_review_thread",
+                format!(r#"{{"thread_id":"{}"}}"#, "a".repeat(65537)),
+                "Input 'thread_id' exceeds maximum length of 65536 characters",
+            ),
+            (
+                "github.unresolve_review_thread",
+                format!(r#"{{"thread_id":"{}"}}"#, "a".repeat(65537)),
+                "Input 'thread_id' exceeds maximum length of 65536 characters",
+            ),
+        ] {
+            test_support::set_response(Ok(json!({"data": {}}).to_string()));
+
+            assert_eq!(
+                execute_inner(input.as_str(), Some(&format!(r#"{{"capability_id":"{capability}"}}"#)))
+                    .unwrap_err(),
+                expected_error
+            );
+            assert!(
+                test_support::requests().is_empty(),
+                "oversized validation for {capability} should happen before egress"
+            );
+        }
     }
 
     #[test]

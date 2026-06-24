@@ -9,21 +9,6 @@ query($owner: String!, $repo: String!, $number: Int!, $first: Int!, $after: Stri
         nodes {
           id
           isResolved
-          comments(first: 50) {
-            nodes {
-              id
-              body
-              url
-              createdAt
-              author {
-                login
-              }
-            }
-            pageInfo {
-              hasNextPage
-              endCursor
-            }
-          }
         }
         pageInfo {
           hasNextPage
