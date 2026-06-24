@@ -13,6 +13,8 @@ use ironclaw_reborn_composition::{
 #[cfg(feature = "slack-v2-host-beta")]
 use secrecy::SecretString;
 
+use crate::operator_env::strict_bool_env_var;
+
 #[cfg(feature = "slack-v2-host-beta")]
 const DEFAULT_SLACK_SIGNING_SECRET_ENV_VAR: &str = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET";
 #[cfg(feature = "slack-v2-host-beta")]
@@ -28,19 +30,19 @@ pub(crate) fn resolve_slack_config_for_serve(
     default_user_id: &ironclaw_reborn_composition::host_api::UserId,
     config_path: &Path,
 ) -> anyhow::Result<Option<SlackHostBetaRuntimeConfig>> {
-    let enabled = effective_slack_enabled(section)?;
-    if section.is_none() && !enabled {
-        return Ok(None);
-    }
-    if section.is_some_and(has_legacy_slack_setup) && !enabled {
+    let enablement = resolve_slack_enablement(section)?;
+    if !enablement.enabled {
+        if enablement.env_override == Some(false) || section.is_none() {
+            return Ok(None);
+        }
+        if !section.is_some_and(has_legacy_slack_setup) {
+            return Ok(None);
+        }
         anyhow::bail!(
             "[slack].enabled or {SLACK_ENABLED_ENV_VAR}=true must be set when legacy Slack setup \
              fields are present in {}",
             config_path.display()
         );
-    }
-    if !enabled {
-        return Ok(None);
     }
     let runtime_config = SlackHostBetaRuntimeConfig::new(
         tenant_id.clone(),
@@ -218,7 +220,7 @@ pub(crate) fn resolve_slack_config_for_serve(
 pub(crate) fn reject_enabled_slack_without_feature(
     section: Option<&ironclaw_reborn_config::SlackSection>,
 ) -> anyhow::Result<()> {
-    if effective_slack_enabled(section)? {
+    if resolve_slack_enablement(section)?.enabled {
         anyhow::bail!(
             "Slack enablement ([slack].enabled = true or {SLACK_ENABLED_ENV_VAR}=true) requires \
              an ironclaw-reborn binary built with the `slack-v2-host-beta` Cargo feature"
@@ -227,55 +229,21 @@ pub(crate) fn reject_enabled_slack_without_feature(
     Ok(())
 }
 
-fn effective_slack_enabled(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SlackEnablement {
+    enabled: bool,
+    env_override: Option<bool>,
+}
+
+fn resolve_slack_enablement(
     section: Option<&ironclaw_reborn_config::SlackSection>,
-) -> anyhow::Result<bool> {
-    let mut enabled = section.and_then(|section| section.enabled).unwrap_or(false);
-    if let Some(raw) = strict_env_var(SLACK_ENABLED_ENV_VAR)? {
-        enabled = parse_slack_enabled_env(&raw)?;
-    }
-    Ok(enabled)
-}
-
-fn strict_env_var(name: &str) -> anyhow::Result<Option<String>> {
-    match std::env::var(name) {
-        Ok(value) => {
-            if value.trim().is_empty() {
-                anyhow::bail!(
-                    "{name} is set but empty or whitespace-only; either unset it or provide a valid value"
-                );
-            }
-            Ok(Some(value))
-        }
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
-            "{name} contains non-UTF-8 bytes; either unset it or provide a valid value"
-        ),
-    }
-}
-
-fn parse_slack_enabled_env(raw: &str) -> anyhow::Result<bool> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" => Ok(true),
-        "0" | "false" => Ok(false),
-        _ => {
-            let display = truncate_env_value_for_display(raw);
-            anyhow::bail!(
-                "{SLACK_ENABLED_ENV_VAR} must be one of 1, true, 0, false (got {display:?})"
-            )
-        }
-    }
-}
-
-fn truncate_env_value_for_display(raw: &str) -> String {
-    const MAX_CHARS: usize = 64;
-    let mut iter = raw.chars();
-    let truncated: String = iter.by_ref().take(MAX_CHARS).collect();
-    if iter.next().is_some() {
-        format!("{truncated}...")
-    } else {
-        truncated
-    }
+) -> anyhow::Result<SlackEnablement> {
+    let config_enabled = section.and_then(|section| section.enabled).unwrap_or(false);
+    let env_override = strict_bool_env_var(SLACK_ENABLED_ENV_VAR)?;
+    Ok(SlackEnablement {
+        enabled: env_override.unwrap_or(config_enabled),
+        env_override,
+    })
 }
 
 #[cfg(test)]
@@ -426,7 +394,7 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
-    fn slack_host_beta_runtime_config_env_disable_is_kill_switch() {
+    fn slack_host_beta_runtime_config_env_disable_is_webui_kill_switch() {
         let _lock = env_lock();
         let _enabled = EnvGuard::set(SLACK_ENABLED_ENV_VAR, "0");
         let section = ironclaw_reborn_config::SlackSection {
@@ -443,6 +411,30 @@ mod tests {
             std::path::Path::new("/tmp/reborn-config.toml"),
         )
         .expect("env-disabled Slack should resolve as disabled");
+
+        assert!(resolved.is_none());
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_beta_runtime_config_env_disable_is_legacy_kill_switch() {
+        let _lock = env_lock();
+        let _enabled = EnvGuard::set(SLACK_ENABLED_ENV_VAR, "false");
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(true),
+            installation_id: Some("install-alpha".to_string()),
+            ..Default::default()
+        };
+
+        let resolved = resolve_slack_config_for_serve(
+            Some(&section),
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            std::path::Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect("env-disabled Slack should bypass legacy setup validation");
 
         assert!(resolved.is_none());
     }
@@ -466,6 +458,83 @@ mod tests {
         assert!(
             err.to_string().contains(SLACK_ENABLED_ENV_VAR),
             "error should identify the bad env var: {err}"
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_beta_runtime_config_rejects_blank_enabled_env() {
+        let _lock = env_lock();
+        let _enabled = EnvGuard::set(SLACK_ENABLED_ENV_VAR, "   ");
+
+        let err = resolve_slack_config_for_serve(
+            None,
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            std::path::Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect_err("blank Slack enabled env should fail loud");
+
+        assert!(
+            err.to_string().contains("empty or whitespace-only"),
+            "error should explain blank env value: {err}"
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_beta_runtime_config_truncates_long_invalid_enabled_env() {
+        let _lock = env_lock();
+        let raw = "x".repeat(80);
+        let _enabled = EnvGuard::set(SLACK_ENABLED_ENV_VAR, &raw);
+
+        let err = resolve_slack_config_for_serve(
+            None,
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            std::path::Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect_err("long invalid Slack enabled env should fail loud");
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains('…'),
+            "truncation ellipsis should appear in error: {msg}"
+        );
+        assert!(
+            !msg.contains(&raw),
+            "full untruncated value should not appear in error: {msg}"
+        );
+    }
+
+    #[cfg(all(unix, feature = "slack-v2-host-beta"))]
+    #[test]
+    fn slack_host_beta_runtime_config_rejects_non_utf8_enabled_env() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _lock = env_lock();
+        let _enabled = EnvGuard::set_os(
+            SLACK_ENABLED_ENV_VAR,
+            std::ffi::OsString::from_vec(vec![0xff]),
+        );
+
+        let err = resolve_slack_config_for_serve(
+            None,
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            std::path::Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect_err("non-UTF-8 Slack enabled env should fail loud");
+
+        assert!(
+            err.to_string().contains("non-UTF-8"),
+            "error should explain non-UTF-8 env value: {err}"
         );
     }
 
@@ -598,19 +667,27 @@ mod tests {
 
     struct EnvGuard {
         key: &'static str,
-        prior: Option<String>,
+        prior: Option<std::ffi::OsString>,
     }
 
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
-            let prior = std::env::var(key).ok();
+            let prior = std::env::var_os(key);
+            // SAFETY: tests hold TEST_ENV_LOCK while mutating process env.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, prior }
+        }
+
+        #[cfg(all(unix, feature = "slack-v2-host-beta"))]
+        fn set_os(key: &'static str, value: std::ffi::OsString) -> Self {
+            let prior = std::env::var_os(key);
             // SAFETY: tests hold TEST_ENV_LOCK while mutating process env.
             unsafe { std::env::set_var(key, value) };
             Self { key, prior }
         }
 
         fn remove(key: &'static str) -> Self {
-            let prior = std::env::var(key).ok();
+            let prior = std::env::var_os(key);
             // SAFETY: tests hold TEST_ENV_LOCK while mutating process env.
             unsafe { std::env::remove_var(key) };
             Self { key, prior }
