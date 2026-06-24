@@ -2,6 +2,8 @@ use crate::request::github_request;
 use crate::types::IssueState;
 use crate::validation::*;
 
+const MAX_ASSIGNEES_PER_REQUEST: usize = 10;
+
 // arch-exempt: too_many_args, issue listing keeps GitHub filter args explicit, plan #5171
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn list_issues(
@@ -59,7 +61,18 @@ pub(crate) fn list_issues(
     if let Some(p) = page {
         path.push_str(&format!("&page={}", p));
     }
-    github_request("GET", &path, None)
+    let response = github_request("GET", &path, None)?;
+    filter_pull_requests_from_issues_response(&response)
+}
+
+fn filter_pull_requests_from_issues_response(response: &str) -> Result<String, String> {
+    let issues: Vec<serde_json::Value> =
+        serde_json::from_str(response).map_err(|_| "github_api_invalid_json".to_string())?;
+    let issues = issues
+        .into_iter()
+        .filter(|issue| issue.get("pull_request").is_none())
+        .collect::<Vec<_>>();
+    serde_json::to_string(&issues).map_err(|_| "github_api_invalid_json".to_string())
 }
 
 fn validate_milestone_filter(milestone: &str) -> Result<(), String> {
@@ -214,6 +227,7 @@ pub(crate) fn add_issue_assignees(
     issue_number: u32,
     assignees: Vec<String>,
 ) -> Result<String, String> {
+    validate_assignee_request_limit(&assignees)?;
     issue_name_list_request(
         "POST",
         owner,
@@ -223,6 +237,15 @@ pub(crate) fn add_issue_assignees(
         assignees,
         "assignees",
     )
+}
+
+fn validate_assignee_request_limit(assignees: &[String]) -> Result<(), String> {
+    if assignees.len() > MAX_ASSIGNEES_PER_REQUEST {
+        return Err(format!(
+            "Invalid assignees: at most {MAX_ASSIGNEES_PER_REQUEST} values are allowed"
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn remove_issue_assignees(

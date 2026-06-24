@@ -258,8 +258,8 @@ pub(crate) fn create_pr_review(
         req_body["commit_id"] = serde_json::json!(commit_id);
     }
     if let Some(comments) = comments {
-        req_body["comments"] = serde_json::to_value(comments)
-            .map_err(|e| format!("invalid_comments: {e}"))?;
+        req_body["comments"] =
+            serde_json::to_value(comments).map_err(|e| format!("invalid_comments: {e}"))?;
     }
     github_request("POST", &path, Some(req_body.to_string()))
 }

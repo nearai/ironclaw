@@ -25,7 +25,7 @@
     "assignees": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 100,
+      "maxItems": 10,
       "items": { "type": "string", "minLength": 1, "maxLength": 100 }
     }
   },

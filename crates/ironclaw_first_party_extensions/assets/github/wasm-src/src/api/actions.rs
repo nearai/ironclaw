@@ -93,7 +93,11 @@ pub(crate) fn get_workflow_runs(
         append_query_pair(
             &mut path,
             "exclude_pull_requests",
-            if exclude_pull_requests { "true" } else { "false" },
+            if exclude_pull_requests {
+                "true"
+            } else {
+                "false"
+            },
         );
     }
     if let Some(check_suite_id) = check_suite_id {

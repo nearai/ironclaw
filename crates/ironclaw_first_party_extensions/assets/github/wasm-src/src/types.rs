@@ -9,9 +9,7 @@ where
     Option::<u32>::deserialize(deserializer).map(Some)
 }
 
-fn deserialize_nullable_string<'de, D>(
-    deserializer: D,
-) -> Result<Option<Option<String>>, D::Error>
+fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
 where
     D: Deserializer<'de>,
 {

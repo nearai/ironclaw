@@ -226,6 +226,10 @@ mod tests {
         assert!(find_schema("GitHub list_issues input")["properties"]["labels"].is_object());
         assert!(find_schema("GitHub merge_pull_request input")["properties"]["sha"].is_object());
         assert!(find_schema("GitHub create_issue input")["properties"]["assignees"].is_object());
+        assert_eq!(
+            find_schema("GitHub add_issue_assignees input")["properties"]["assignees"]["maxItems"],
+            10
+        );
         assert!(find_schema("GitHub create_issue input")["properties"]["milestone"].is_object());
         assert!(find_schema("GitHub update_issue input")["properties"]["state"].is_object());
         assert!(find_schema("GitHub update_pull_request input")["properties"]["state"].is_object());
@@ -253,9 +257,11 @@ mod tests {
         assert!(
             find_schema("GitHub search_issues_pull_requests input")["properties"]["sort"]["enum"]
                 .as_array()
-                .is_some_and(|values| values.iter().any(|value| value == "reactions-heart")
-                    && !values.iter().any(|value| value == "author-date")
-                    && !values.iter().any(|value| value == "committer-date"))
+                .is_some_and(
+                    |values| values.iter().any(|value| value == "reactions-heart")
+                        && !values.iter().any(|value| value == "author-date")
+                        && !values.iter().any(|value| value == "committer-date")
+                )
         );
     }
 
@@ -292,6 +298,7 @@ mod tests {
         for code in [
             "Invalid labels: values cannot be empty",
             "Invalid assignees: values cannot be empty",
+            "Invalid assignees: at most 10 values are allowed",
             "Invalid assignees: at most 100 values are allowed",
             "invalid_comments: comments serialization failed",
         ] {
@@ -305,6 +312,13 @@ mod tests {
             {
                 "number": 4806,
                 "title": "issue one"
+            },
+            {
+                "number": 4805,
+                "title": "pull request",
+                "pull_request": {
+                    "url": "https://api.github.com/repos/nearai/ironclaw/pulls/4805"
+                }
             },
             {
                 "number": 4804,
@@ -402,8 +416,11 @@ mod tests {
             test_support::set_response(Ok(json!({"data": {}}).to_string()));
 
             assert_eq!(
-                execute_inner(input, Some(&format!(r#"{{"capability_id":"{capability}"}}"#)))
-                    .unwrap_err(),
+                execute_inner(
+                    input,
+                    Some(&format!(r#"{{"capability_id":"{capability}"}}"#))
+                )
+                .unwrap_err(),
                 expected_error
             );
             assert!(
@@ -579,8 +596,11 @@ mod tests {
         ] {
             test_support::set_response(Ok(json!({}).to_string()));
 
-            execute_inner(input, Some(&format!(r#"{{"capability_id":"{capability}"}}"#)))
-                .expect("issue mutation should dispatch");
+            execute_inner(
+                input,
+                Some(&format!(r#"{{"capability_id":"{capability}"}}"#)),
+            )
+            .expect("issue mutation should dispatch");
 
             let requests = test_support::requests();
             assert_eq!(requests[0].method, expected_method);
@@ -614,6 +634,34 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
         assert_eq!(body, json!({"milestone": null}));
+    }
+
+    #[test]
+    fn add_issue_assignees_rejects_more_than_ten_assignees_before_egress() {
+        let assignees = (0..11)
+            .map(|index| format!("user-{index}"))
+            .collect::<Vec<_>>();
+        let input = json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "issue_number": 42,
+            "assignees": assignees,
+        })
+        .to_string();
+        test_support::set_response(Ok(json!({}).to_string()));
+
+        assert_eq!(
+            execute_inner(
+                &input,
+                Some(r#"{"capability_id":"github.add_issue_assignees"}"#)
+            )
+            .unwrap_err(),
+            "Invalid assignees: at most 10 values are allowed"
+        );
+        assert!(
+            test_support::requests().is_empty(),
+            "too many assignees should fail before egress"
+        );
     }
 
     #[test]
@@ -757,6 +805,18 @@ mod tests {
 
         test_support::set_response(Ok(json!({"data": {}}).to_string()));
         execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","pr_number":12}"#,
+            Some(r#"{"capability_id":"github.list_pull_request_review_threads"}"#),
+        )
+        .expect("list review threads should apply the default page size");
+        let requests = test_support::requests();
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["variables"]["first"], 30);
+        assert_eq!(body["variables"]["after"], serde_json::Value::Null);
+
+        test_support::set_response(Ok(json!({"data": {}}).to_string()));
+        execute_inner(
             r#"{"thread_id":"PRRT_kwDOExample"}"#,
             Some(r#"{"capability_id":"github.resolve_review_thread"}"#),
         )
@@ -842,8 +902,11 @@ mod tests {
             test_support::set_response(Ok(json!({"data": {}}).to_string()));
 
             assert_eq!(
-                execute_inner(input.as_str(), Some(&format!(r#"{{"capability_id":"{capability}"}}"#)))
-                    .unwrap_err(),
+                execute_inner(
+                    input.as_str(),
+                    Some(&format!(r#"{{"capability_id":"{capability}"}}"#))
+                )
+                .unwrap_err(),
                 expected_error
             );
             assert!(
@@ -891,6 +954,30 @@ mod tests {
             "/repos/nearai/ironclaw/actions/runs/123/artifacts?per_page=7&name=coverage&direction=asc&page=3"
         );
 
+        test_support::set_response(Ok(json!({"jobs": []}).to_string()));
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","run_id":123}"#,
+            Some(r#"{"capability_id":"github.get_workflow_run_jobs"}"#),
+        )
+        .expect("workflow jobs should use default pagination");
+        let requests = test_support::requests();
+        assert_eq!(
+            requests[0].path,
+            "/repos/nearai/ironclaw/actions/runs/123/jobs?per_page=30"
+        );
+
+        test_support::set_response(Ok(json!({"artifacts": []}).to_string()));
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","run_id":123}"#,
+            Some(r#"{"capability_id":"github.get_workflow_run_artifacts"}"#),
+        )
+        .expect("workflow artifacts should use default pagination");
+        let requests = test_support::requests();
+        assert_eq!(
+            requests[0].path,
+            "/repos/nearai/ironclaw/actions/runs/123/artifacts?per_page=30"
+        );
+
         test_support::set_response(Ok(json!({"status": 201}).to_string()));
         execute_inner(
             r#"{"owner":"nearai","repo":"ironclaw","run_id":123,"enable_debug_logging":true}"#,
@@ -908,6 +995,17 @@ mod tests {
 
         test_support::set_response(Ok(json!({"status": 201}).to_string()));
         execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","run_id":123}"#,
+            Some(r#"{"capability_id":"github.rerun_failed_workflow_run_jobs"}"#),
+        )
+        .expect("rerun failed jobs should send an empty body when debug logging is omitted");
+        let requests = test_support::requests();
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body, json!({}));
+
+        test_support::set_response(Ok(json!({"status": 201}).to_string()));
+        execute_inner(
             r#"{"owner":"nearai","repo":"ironclaw","job_id":456,"enable_debugger":true}"#,
             Some(r#"{"capability_id":"github.rerun_workflow_job"}"#),
         )
@@ -920,6 +1018,17 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
         assert_eq!(body, json!({"enable_debugger": true}));
+
+        test_support::set_response(Ok(json!({"status": 201}).to_string()));
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","job_id":456}"#,
+            Some(r#"{"capability_id":"github.rerun_workflow_job"}"#),
+        )
+        .expect("rerun workflow job should send an empty body when debug flags are omitted");
+        let requests = test_support::requests();
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body, json!({}));
     }
 
     #[test]
@@ -949,8 +1058,11 @@ mod tests {
             test_support::set_response(Ok(json!({}).to_string()));
 
             assert_eq!(
-                execute_inner(input, Some(&format!(r#"{{"capability_id":"{capability}"}}"#)))
-                    .unwrap_err(),
+                execute_inner(
+                    input,
+                    Some(&format!(r#"{{"capability_id":"{capability}"}}"#))
+                )
+                .unwrap_err(),
                 expected_error
             );
             assert!(
@@ -1002,8 +1114,11 @@ mod tests {
             test_support::set_response(Ok(json!({}).to_string()));
 
             assert_eq!(
-                execute_inner(input, Some(&format!(r#"{{"capability_id":"{capability}"}}"#)))
-                    .unwrap_err(),
+                execute_inner(
+                    input,
+                    Some(&format!(r#"{{"capability_id":"{capability}"}}"#))
+                )
+                .unwrap_err(),
                 expected_error
             );
             assert!(
@@ -1058,11 +1173,8 @@ mod tests {
     fn list_repos_uses_authenticated_endpoint_by_default() {
         test_support::set_response(Ok(json!([]).to_string()));
 
-        execute_inner(
-            r#"{}"#,
-            Some(r#"{"capability_id":"github.list_repos"}"#),
-        )
-        .expect("github.list_repos should list authenticated user repos");
+        execute_inner(r#"{}"#, Some(r#"{"capability_id":"github.list_repos"}"#))
+            .expect("github.list_repos should list authenticated user repos");
 
         let requests = test_support::requests();
         assert_eq!(requests.len(), 1);

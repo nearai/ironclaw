@@ -1,10 +1,11 @@
 use crate::api::*;
+use crate::schema::action_name_from_capability_id;
 use crate::types::{GitHubAction, ToolContext};
 use crate::webhook::handle_webhook;
 
 pub(crate) fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> {
     let action_name = action_from_context(context)?;
-    let action_params = params_with_action(params, action_name)?;
+    let action_params = params_with_action(params, &action_name)?;
     let action: GitHubAction =
         serde_json::from_value(action_params).map_err(|_| "invalid_parameters".to_string())?;
 
@@ -488,13 +489,7 @@ pub(crate) fn execute_inner(params: &str, context: Option<&str>) -> Result<Strin
             job_id,
             enable_debug_logging,
             enable_debugger,
-        } => rerun_workflow_job(
-            &owner,
-            &repo,
-            job_id,
-            enable_debug_logging,
-            enable_debugger,
-        ),
+        } => rerun_workflow_job(&owner, &repo, job_id, enable_debug_logging, enable_debugger),
         GitHubAction::ForkRepo {
             owner,
             repo,
@@ -512,61 +507,12 @@ pub(crate) fn execute_inner(params: &str, context: Option<&str>) -> Result<Strin
     }
 }
 
-pub(crate) fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
+pub(crate) fn action_from_context(context: Option<&str>) -> Result<String, String> {
     let context = context.ok_or_else(|| "missing_invocation_context".to_string())?;
     let context: ToolContext =
         serde_json::from_str(context).map_err(|_| "invalid_invocation_context".to_string())?;
-    match context.capability_id.as_str() {
-        "github.get_repo" => Ok("get_repo"),
-        "github.create_repo" => Ok("create_repo"),
-        "github.list_issues" => Ok("list_issues"),
-        "github.create_issue" => Ok("create_issue"),
-        "github.update_issue" => Ok("update_issue"),
-        "github.add_issue_labels" => Ok("add_issue_labels"),
-        "github.remove_issue_label" => Ok("remove_issue_label"),
-        "github.add_issue_assignees" => Ok("add_issue_assignees"),
-        "github.remove_issue_assignees" => Ok("remove_issue_assignees"),
-        "github.get_issue" => Ok("get_issue"),
-        "github.list_issue_comments" => Ok("list_issue_comments"),
-        "github.create_issue_comment" | "github.comment_issue" => Ok("create_issue_comment"),
-        "github.list_pull_requests" => Ok("list_pull_requests"),
-        "github.create_pull_request" => Ok("create_pull_request"),
-        "github.update_pull_request" => Ok("update_pull_request"),
-        "github.get_pull_request" => Ok("get_pull_request"),
-        "github.get_pull_request_files" => Ok("get_pull_request_files"),
-        "github.create_pr_review" => Ok("create_pr_review"),
-        "github.list_pull_request_comments" => Ok("list_pull_request_comments"),
-        "github.reply_pull_request_comment" => Ok("reply_pull_request_comment"),
-        "github.get_pull_request_reviews" => Ok("get_pull_request_reviews"),
-        "github.list_pull_request_review_threads" => Ok("list_pull_request_review_threads"),
-        "github.resolve_review_thread" => Ok("resolve_review_thread"),
-        "github.unresolve_review_thread" => Ok("unresolve_review_thread"),
-        "github.get_combined_status" => Ok("get_combined_status"),
-        "github.merge_pull_request" => Ok("merge_pull_request"),
-        "github.get_authenticated_user" => Ok("get_authenticated_user"),
-        "github.list_repos" => Ok("list_repos"),
-        "github.search_repositories" => Ok("search_repositories"),
-        "github.search_code" => Ok("search_code"),
-        "github.search_issues" | "github.search_issues_pull_requests" => {
-            Ok("search_issues_pull_requests")
-        }
-        "github.list_branches" => Ok("list_branches"),
-        "github.create_branch" => Ok("create_branch"),
-        "github.get_file_content" => Ok("get_file_content"),
-        "github.create_or_update_file" => Ok("create_or_update_file"),
-        "github.delete_file" => Ok("delete_file"),
-        "github.list_releases" => Ok("list_releases"),
-        "github.create_release" => Ok("create_release"),
-        "github.trigger_workflow" => Ok("trigger_workflow"),
-        "github.get_workflow_runs" => Ok("get_workflow_runs"),
-        "github.get_workflow_run_jobs" => Ok("get_workflow_run_jobs"),
-        "github.get_workflow_run_artifacts" => Ok("get_workflow_run_artifacts"),
-        "github.rerun_failed_workflow_run_jobs" => Ok("rerun_failed_workflow_run_jobs"),
-        "github.rerun_workflow_job" => Ok("rerun_workflow_job"),
-        "github.fork_repo" => Ok("fork_repo"),
-        "github.handle_webhook" => Ok("handle_webhook"),
-        _ => Err("unsupported_github_capability".to_string()),
-    }
+    action_name_from_capability_id(&context.capability_id)
+        .ok_or_else(|| "unsupported_github_capability".to_string())
 }
 
 fn params_with_action(params: &str, action: &str) -> Result<serde_json::Value, String> {
