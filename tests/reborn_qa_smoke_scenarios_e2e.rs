@@ -308,7 +308,8 @@ async fn qa_trigger_automation_smokes_create_view_and_cleanup() {
 async fn qa_subagent_capability_smoke_uses_child_run() {
     let spawn_subagent = cap(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID);
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
-        RebornModelReplayStep::ProviderToolCalls {
+        RebornModelReplayStep::ProviderToolCallsForRequest {
+            request_contains: "split repo testing docs and security docs checks".to_string(),
             calls: vec![call(
                 &spawn_subagent,
                 "qa_spawn_docs_checks",
@@ -319,13 +320,15 @@ async fn qa_subagent_capability_smoke_uses_child_run() {
             )],
             expected_tool_results: Vec::new(),
         },
-        RebornModelReplayStep::Response {
+        RebornModelReplayStep::ResponseForRequest {
+            request_contains: "check repo testing docs and security docs independently".to_string(),
             response: HostManagedModelResponse::assistant_reply(
                 "child found testing docs and security docs",
             ),
             expected_tool_results: Vec::new(),
         },
-        RebornModelReplayStep::Response {
+        RebornModelReplayStep::ResponseForRequest {
+            request_contains: "Subagent completed".to_string(),
             response: HostManagedModelResponse::assistant_reply("qa subagent smoke complete"),
             expected_tool_results: Vec::new(),
         },
