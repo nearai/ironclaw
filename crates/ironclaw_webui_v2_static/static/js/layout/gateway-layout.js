@@ -129,6 +129,7 @@ export function GatewayLayout({
         <${PageHeader}
           threadsState=${threadsState}
           onToggleSidebar=${sidebar.toggle}
+          sidebarOpen=${sidebar.currentOpen}
         />
         <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
           ${statusQuery.error &&

@@ -1,40 +1,12 @@
 import { React } from "../lib/html.js";
 import { useNavigate } from "react-router";
-
-const DESKTOP_SIDEBAR_STORAGE_KEY = "ironclaw:v2-sidebar-open";
-
-export function readDesktopSidebarOpen() {
-  try {
-    return window.localStorage.getItem(DESKTOP_SIDEBAR_STORAGE_KEY) !== "false";
-  } catch (_) {
-    return true;
-  }
-}
-
-function writeDesktopSidebarOpen(open) {
-  try {
-    window.localStorage.setItem(
-      DESKTOP_SIDEBAR_STORAGE_KEY,
-      open ? "true" : "false"
-    );
-  } catch (_) {
-    // Best-effort: storage failures should never block navigation.
-  }
-}
-
-export function isDesktopSidebarViewport() {
-  try {
-    return window.matchMedia("(min-width: 768px)").matches;
-  } catch (_) {
-    return false;
-  }
-}
-
-export function toggleSidebarState(state, isDesktop) {
-  return isDesktop
-    ? { ...state, desktopOpen: !state.desktopOpen }
-    : { ...state, mobileOpen: !state.mobileOpen };
-}
+import {
+  currentSidebarOpen,
+  isDesktopSidebarViewport,
+  readDesktopSidebarOpen,
+  toggleSidebarState,
+  writeDesktopSidebarOpen,
+} from "../lib/sidebar-state.js";
 
 export function useSidebar({ onNewChat } = {}) {
   const navigate = useNavigate();
@@ -42,6 +14,17 @@ export function useSidebar({ onNewChat } = {}) {
     mobileOpen: false,
     desktopOpen: readDesktopSidebarOpen(),
   }));
+  const [isDesktopViewport, setIsDesktopViewport] = React.useState(
+    isDesktopSidebarViewport
+  );
+
+  React.useEffect(() => {
+    const query = window.matchMedia("(min-width: 768px)");
+    const handleChange = () => setIsDesktopViewport(query.matches);
+    handleChange();
+    query.addEventListener?.("change", handleChange);
+    return () => query.removeEventListener?.("change", handleChange);
+  }, []);
 
   React.useEffect(() => {
     writeDesktopSidebarOpen(state.desktopOpen);
@@ -52,10 +35,8 @@ export function useSidebar({ onNewChat } = {}) {
   }, []);
 
   const toggle = React.useCallback(() => {
-    setState((current) =>
-      toggleSidebarState(current, isDesktopSidebarViewport())
-    );
-  }, []);
+    setState((current) => toggleSidebarState(current, isDesktopViewport));
+  }, [isDesktopViewport]);
 
   // "+ New" eagerly creates a thread because v2 requires a
   // pre-existing `thread_id` before `POST /threads/{id}/messages`
@@ -81,6 +62,7 @@ export function useSidebar({ onNewChat } = {}) {
   return {
     mobileOpen: state.mobileOpen,
     desktopOpen: state.desktopOpen,
+    currentOpen: currentSidebarOpen(state, isDesktopViewport),
     close,
     toggle,
     newChat,

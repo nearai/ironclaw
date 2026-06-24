@@ -8,7 +8,7 @@ import { TeeShield } from "./tee-shield.js";
 
 const DOCS_URL = "https://docs.ironclaw.com";
 
-export function PageHeader({ threadsState, onToggleSidebar }) {
+export function PageHeader({ threadsState, onToggleSidebar, sidebarOpen = true }) {
   const t = useT();
   const location = useLocation();
 
@@ -57,10 +57,12 @@ export function PageHeader({ threadsState, onToggleSidebar }) {
       )}
     >
       <button
+        type="button"
         onClick=${onToggleSidebar}
         className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)]"
         aria-label="Toggle sidebar"
         aria-controls="gateway-sidebar"
+        aria-expanded=${sidebarOpen ? "true" : "false"}
         title="Toggle sidebar"
       >
         <${Icon} name="list" className="h-4 w-4" />

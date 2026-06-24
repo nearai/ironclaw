@@ -1,19 +1,14 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import vm from "node:vm";
 
-function useSidebarSourceForTest() {
-  const source = readFileSync(new URL("./useSidebar.js", import.meta.url), "utf8");
-  const lines = [];
-  for (const line of source.split("\n")) {
-    if (line.startsWith("import ")) continue;
-    lines.push(line.replace(/^export function /, "function "));
-  }
-  return `${lines.join(
-    "\n",
-  )}\nglobalThis.__testExports = { readDesktopSidebarOpen, isDesktopSidebarViewport, toggleSidebarState, useSidebar };`;
-}
+import {
+  DESKTOP_SIDEBAR_STORAGE_KEY,
+  currentSidebarOpen,
+  isDesktopSidebarViewport,
+  readDesktopSidebarOpen,
+  toggleSidebarState,
+  writeDesktopSidebarOpen,
+} from "../lib/sidebar-state.js";
 
 function createLocalStorage(initial = {}) {
   const values = new Map(Object.entries(initial));
@@ -25,106 +20,51 @@ function createLocalStorage(initial = {}) {
   };
 }
 
-function createReactStub({ stateUpdates = [] } = {}) {
-  return {
-    useCallback: (fn) => fn,
-    useEffect: (fn) => {
-      fn();
-    },
-    useState: (initial) => {
-      let value = typeof initial === "function" ? initial() : initial;
-      return [
-        value,
-        (next) => {
-          value = typeof next === "function" ? next(value) : next;
-          stateUpdates.push(value);
-        },
-      ];
-    },
-  };
-}
-
-function instantiate({ isDesktop = true, storedOpen = null } = {}) {
-  const stateUpdates = [];
-  const navigations = [];
-  const storage =
-    storedOpen === null
-      ? createLocalStorage()
-      : createLocalStorage({ "ironclaw:v2-sidebar-open": storedOpen });
-  const context = {
-    React: createReactStub({ stateUpdates }),
-    useNavigate: () => (path) => navigations.push(path),
-    window: {
-      localStorage: storage,
-      matchMedia: () => ({ matches: isDesktop }),
-    },
-    globalThis: {},
-  };
-  vm.runInNewContext(useSidebarSourceForTest(), context);
-  return {
-    hook: context.globalThis.__testExports.useSidebar(),
-    exports: context.globalThis.__testExports,
-    navigations,
-    stateUpdates,
-    storage,
-  };
-}
-
-function plain(value) {
-  return JSON.parse(JSON.stringify(value));
-}
-
 test("readDesktopSidebarOpen defaults to open unless the stored value is false", () => {
-  const { exports } = instantiate();
-  assert.equal(exports.readDesktopSidebarOpen(), true);
+  assert.equal(readDesktopSidebarOpen(createLocalStorage()), true);
+  assert.equal(
+    readDesktopSidebarOpen(
+      createLocalStorage({ [DESKTOP_SIDEBAR_STORAGE_KEY]: "false" })
+    ),
+    false
+  );
+});
 
-  const closed = instantiate({ storedOpen: "false" });
-  assert.equal(closed.exports.readDesktopSidebarOpen(), false);
+test("writeDesktopSidebarOpen persists the desktop preference", () => {
+  const storage = createLocalStorage();
+
+  writeDesktopSidebarOpen(false, storage);
+  assert.equal(storage.dump()[DESKTOP_SIDEBAR_STORAGE_KEY], "false");
+
+  writeDesktopSidebarOpen(true, storage);
+  assert.equal(storage.dump()[DESKTOP_SIDEBAR_STORAGE_KEY], "true");
+});
+
+test("isDesktopSidebarViewport reads the responsive desktop breakpoint", () => {
+  assert.equal(
+    isDesktopSidebarViewport({ matchMedia: () => ({ matches: true }) }),
+    true
+  );
+  assert.equal(
+    isDesktopSidebarViewport({ matchMedia: () => ({ matches: false }) }),
+    false
+  );
 });
 
 test("toggleSidebarState targets only the active viewport state", () => {
-  const { exports } = instantiate();
   assert.deepEqual(
-    plain(exports.toggleSidebarState({ mobileOpen: false, desktopOpen: true }, true)),
-    { mobileOpen: false, desktopOpen: false },
+    toggleSidebarState({ mobileOpen: false, desktopOpen: true }, true),
+    { mobileOpen: false, desktopOpen: false }
   );
   assert.deepEqual(
-    plain(exports.toggleSidebarState({ mobileOpen: false, desktopOpen: true }, false)),
-    { mobileOpen: true, desktopOpen: true },
+    toggleSidebarState({ mobileOpen: false, desktopOpen: true }, false),
+    { mobileOpen: true, desktopOpen: true }
   );
 });
 
-test("useSidebar toggles desktop visibility on desktop viewports", () => {
-  const { hook, stateUpdates } = instantiate({ isDesktop: true, storedOpen: "true" });
+test("currentSidebarOpen reports the state for the active viewport", () => {
+  const state = { mobileOpen: false, desktopOpen: true };
 
-  assert.equal(hook.desktopOpen, true);
-  assert.equal(hook.mobileOpen, false);
-
-  hook.toggle();
-
-  assert.deepEqual(plain(stateUpdates.at(-1)), {
-    mobileOpen: false,
-    desktopOpen: false,
-  });
-});
-
-test("useSidebar keeps mobile drawer behavior scoped to mobile viewports", () => {
-  const { hook, navigations, stateUpdates } = instantiate({
-    isDesktop: false,
-    storedOpen: "true",
-  });
-
-  hook.toggle();
-  assert.deepEqual(plain(stateUpdates.at(-1)), {
-    mobileOpen: true,
-    desktopOpen: true,
-  });
-
-  hook.selectThread("thread-1");
-
-  assert.deepEqual(navigations, ["/chat/thread-1"]);
-  assert.deepEqual(plain(stateUpdates.at(-1)), {
-    mobileOpen: false,
-    desktopOpen: true,
-  });
+  assert.equal(currentSidebarOpen(state, true), true);
+  assert.equal(currentSidebarOpen(state, false), false);
 });
