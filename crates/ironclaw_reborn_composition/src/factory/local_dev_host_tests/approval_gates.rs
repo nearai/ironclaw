@@ -17,9 +17,9 @@ use ironclaw_host_api::{
     ResourceEstimate, ResourceScope, RuntimeKind, ThreadId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
-    APPLY_PATCH_CAPABILITY_ID, ECHO_CAPABILITY_ID, RuntimeApprovalGate, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
-    SHELL_CAPABILITY_ID,
+    APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, ECHO_CAPABILITY_ID,
+    RuntimeApprovalGate, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeCapabilityResumeRequest, RuntimeFailureKind, SHELL_CAPABILITY_ID,
 };
 use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
@@ -382,6 +382,78 @@ async fn local_dev_legacy_persistent_echo_grant_does_not_override_global_off() {
 }
 
 #[tokio::test]
+async fn local_dev_settings_page_always_allow_echo_overrides_global_off() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev(
+            "local-dev-echo-settings-allow",
+            dir.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_policy()),
+    )
+    .await
+    .expect("local-dev services build");
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local-dev runtime substrate");
+    let host_runtime = services
+        .host_runtime
+        .as_ref()
+        .expect("local-dev host runtime");
+    let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
+    let context = echo_spawn_execution_context(
+        "local-dev-echo-settings-allow",
+        "thread-echo-settings-allow",
+    );
+
+    local_runtime
+        .persistent_approval_policies
+        .allow(PersistentApprovalPolicyInput {
+            scope: operator_tool_permission_scope_for_test(&context.resource_scope),
+            action: PersistentApprovalAction::Dispatch,
+            capability_id: capability_id.clone(),
+            grantee: Principal::Extension(
+                ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER).expect("builtin provider"),
+            ),
+            approved_by: Principal::User(context.user_id.clone()),
+            constraints: GrantConstraints {
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: None,
+            },
+            source_approval_request_id: None,
+        })
+        .await
+        .expect("settings-page persistent echo policy");
+
+    let outcome = host_runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            capability_id,
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "skip approval for echo"}),
+            trust_decision(echo_spawn_allowed_effects()),
+        ))
+        .await
+        .expect("settings persistent echo invocation succeeds");
+
+    assert!(
+        matches!(outcome, RuntimeCapabilityOutcome::Completed(_)),
+        "settings-page always_allow policy should override global off for builtin.echo, got {outcome:?}"
+    );
+    assert_eq!(
+        pending_approval_count(local_runtime, &context).await,
+        0,
+        "settings-page always_allow builtin.echo must not create a pending approval"
+    );
+}
+
+#[tokio::test]
 async fn local_dev_settings_page_always_allow_policy_skips_next_shell_gate() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_reborn_services(
@@ -413,7 +485,9 @@ async fn local_dev_settings_page_always_allow_policy_skips_next_shell_gate() {
             scope: operator_tool_permission_scope_for_test(&context.resource_scope),
             action: PersistentApprovalAction::Dispatch,
             capability_id: capability_id.clone(),
-            grantee: Principal::Extension(context.extension_id.clone()),
+            grantee: Principal::Extension(
+                ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER).expect("builtin provider"),
+            ),
             approved_by: Principal::User(context.user_id.clone()),
             constraints: GrantConstraints {
                 allowed_effects: shell_allowed_effects(),

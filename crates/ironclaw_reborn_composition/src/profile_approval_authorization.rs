@@ -1,10 +1,7 @@
 use std::{borrow::Cow, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_approvals::{
-    ToolPermissionOverride, permission_mode_allows_persistent_approval,
-    persistent_approval_grant_issuer,
-};
+use ironclaw_approvals::{ToolPermissionOverride, permission_mode_allows_persistent_approval};
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant,
@@ -240,17 +237,20 @@ async fn require_approval_for_profile_policy(
     if has_matching_one_shot_approval_grant(context, descriptor, &gate_effects) {
         return decision;
     }
-    let expected_grantee = Principal::Extension(context.extension_id.clone());
+    let expected_grantee = Principal::Extension(descriptor.provider.clone());
     let durable_auto_approval_eligible =
         permission_mode_allows_persistent_approval(descriptor.default_permission);
-    // 6. A settings-scope per-tool always-allow grant satisfies the gate.
-    //    Legacy prompt-created persistent grants are deliberately not enough
-    //    when the tool row is "Follow global" and the global switch is off.
+    // 6. A settings-scope per-tool always-allow policy satisfies the gate.
+    //    The provider verifies the active settings-page persistent policy
+    //    directly, keyed to the capability provider rather than the caller
+    //    extension, so this does not depend on whether that policy was also
+    //    preloaded into this run's grants. Legacy prompt-created persistent
+    //    grants are deliberately not enough when the tool row is "Follow
+    //    global" and the global switch is off.
     if durable_auto_approval_eligible
         && settings
             .tool_always_allow(&context.resource_scope, &descriptor.id, &expected_grantee)
             .await
-        && has_matching_persistent_approval_grant(context, descriptor, &gate_effects)
     {
         return decision;
     }
@@ -296,47 +296,13 @@ fn approval_gate_effects(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MatchingGrantKind {
-    OneShot,
-    Persistent,
-}
-
 fn has_matching_one_shot_approval_grant(
     context: &ExecutionContext,
     descriptor: &CapabilityDescriptor,
     gate_effects: &[EffectKind],
 ) -> bool {
-    has_matching_approval_grant(
-        context,
-        descriptor,
-        gate_effects,
-        MatchingGrantKind::OneShot,
-    )
-}
-
-fn has_matching_persistent_approval_grant(
-    context: &ExecutionContext,
-    descriptor: &CapabilityDescriptor,
-    gate_effects: &[EffectKind],
-) -> bool {
-    has_matching_approval_grant(
-        context,
-        descriptor,
-        gate_effects,
-        MatchingGrantKind::Persistent,
-    )
-}
-
-fn has_matching_approval_grant(
-    context: &ExecutionContext,
-    descriptor: &CapabilityDescriptor,
-    gate_effects: &[EffectKind],
-    kind: MatchingGrantKind,
-) -> bool {
     let expected_grantee = Principal::Extension(context.extension_id.clone());
     let expected_user_approver = Principal::User(context.user_id.clone());
-    let persistent_approval_issuer = persistent_approval_grant_issuer();
     let now = chrono::Utc::now();
     context.grants.grants.iter().any(|grant| {
         let grant_unexpired = grant_is_unexpired(grant, &now);
@@ -344,15 +310,8 @@ fn has_matching_approval_grant(
             && (grant.issued_by == Principal::HostRuntime
                 || grant.issued_by == expected_user_approver)
             && grant_unexpired;
-        let persistent_approval_grant = grant.constraints.max_invocations.is_none()
-            && grant.issued_by == persistent_approval_issuer
-            && grant_unexpired;
-        let kind_matches = match kind {
-            MatchingGrantKind::OneShot => one_shot_approval_grant,
-            MatchingGrantKind::Persistent => persistent_approval_grant,
-        };
         grant.capability == descriptor.id
-            && kind_matches
+            && one_shot_approval_grant
             && grant.grantee == expected_grantee
             // Match against the spawn-elevated effect set so a one-shot lease
             // that does not cover SpawnProcess cannot satisfy a spawn gate.
@@ -403,6 +362,7 @@ fn approval_request(
 
 #[cfg(test)]
 mod tests {
+    use ironclaw_approvals::persistent_approval_grant_issuer;
     use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
         EffectKind, ExecutionContext, ExtensionId, GrantConstraints, MountView, NetworkPolicy,
@@ -775,7 +735,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_persistent_grant_skips_default_allow_dispatch_gate() {
+    async fn settings_always_allow_skips_default_allow_dispatch_gate_without_loaded_grant() {
         let authorizer = test_authorizer_with_settings(
             ApprovalPolicy::AskDestructive,
             StubSettingsProvider {
@@ -786,15 +746,14 @@ mod tests {
         );
 
         let echo_id = CapabilityId::new("builtin.echo").unwrap();
-        let provider = ExtensionId::new("builtin").unwrap();
         let descriptor =
             test_descriptor_with_id(echo_id.clone(), vec![EffectKind::DispatchCapability]);
         let ctx = test_context(CapabilitySet {
             grants: vec![CapabilityGrant {
                 id: CapabilityGrantId::new(),
                 capability: echo_id,
-                grantee: Principal::Extension(provider),
-                issued_by: persistent_approval_grant_issuer(),
+                grantee: Principal::Extension(ExtensionId::new("builtin").unwrap()),
+                issued_by: Principal::HostRuntime,
                 constraints: GrantConstraints {
                     allowed_effects: vec![EffectKind::DispatchCapability],
                     mounts: MountView::default(),
@@ -817,7 +776,7 @@ mod tests {
 
         assert!(
             matches!(decision, Decision::Allow { .. }),
-            "settings always-allow should skip the default-allow dispatch gate, got {decision:?}"
+            "settings always-allow should skip the default-allow dispatch gate without a preloaded persistent grant, got {decision:?}"
         );
     }
 
@@ -880,7 +839,6 @@ mod tests {
         );
 
         let shell_id = CapabilityId::new("builtin.shell").unwrap();
-        let provider = ExtensionId::new("builtin").unwrap();
         let mut descriptor =
             test_descriptor_with_id(shell_id.clone(), vec![EffectKind::SpawnProcess]);
         descriptor.default_permission = PermissionMode::Deny;
@@ -888,8 +846,8 @@ mod tests {
             grants: vec![CapabilityGrant {
                 id: CapabilityGrantId::new(),
                 capability: shell_id,
-                grantee: Principal::Extension(provider),
-                issued_by: persistent_approval_grant_issuer(),
+                grantee: Principal::Extension(ExtensionId::new("builtin").unwrap()),
+                issued_by: Principal::HostRuntime,
                 constraints: GrantConstraints {
                     allowed_effects: vec![EffectKind::SpawnProcess],
                     mounts: MountView::default(),
