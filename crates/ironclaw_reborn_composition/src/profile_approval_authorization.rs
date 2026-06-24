@@ -241,25 +241,29 @@ async fn require_approval_for_profile_policy(
         return decision;
     }
     let expected_grantee = Principal::Extension(context.extension_id.clone());
+    let durable_auto_approval_eligible =
+        permission_mode_allows_persistent_approval(descriptor.default_permission);
     // 6. A settings-scope per-tool always-allow grant satisfies the gate.
     //    Legacy prompt-created persistent grants are deliberately not enough
     //    when the tool row is "Follow global" and the global switch is off.
-    if settings
-        .tool_always_allow(&context.resource_scope, &descriptor.id, &expected_grantee)
-        .await
+    if durable_auto_approval_eligible
+        && settings
+            .tool_always_allow(&context.resource_scope, &descriptor.id, &expected_grantee)
+            .await
         && has_matching_persistent_approval_grant(context, descriptor, &gate_effects)
     {
         return decision;
     }
     // 7. Global auto-approve bypasses an otherwise-gated eligible tool.
-    if settings.global_auto_approve(&context.resource_scope).await {
+    if durable_auto_approval_eligible && settings.global_auto_approve(&context.resource_scope).await
+    {
         return decision;
     }
     // 8. With the global switch off, eligible tools default to asking even when
     //    the runtime profile would otherwise allow low-risk effects. This makes
     //    the Tools page switch authoritative for #4776; explicit always-allow
     //    grants above remain the per-tool opt-in.
-    if permission_mode_allows_persistent_approval(descriptor.default_permission) {
+    if durable_auto_approval_eligible {
         return require_approval();
     }
     // 9. Policy does not require a gate for this effect set.
@@ -814,6 +818,101 @@ mod tests {
         assert!(
             matches!(decision, Decision::Allow { .. }),
             "settings always-allow should skip the default-allow dispatch gate, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn global_auto_approve_does_not_skip_manifest_ineligible_tool() {
+        let authorizer = test_authorizer_with_settings(
+            ApprovalPolicy::AskDestructive,
+            StubSettingsProvider {
+                tool_override: None,
+                global_auto_approve: true,
+                tool_always_allow: false,
+            },
+        );
+
+        let shell_id = CapabilityId::new("builtin.shell").unwrap();
+        let mut descriptor =
+            test_descriptor_with_id(shell_id.clone(), vec![EffectKind::SpawnProcess]);
+        descriptor.default_permission = PermissionMode::Deny;
+        let ctx = test_context(CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: shell_id,
+                grantee: Principal::Extension(ExtensionId::new("builtin").unwrap()),
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::SpawnProcess],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            }],
+        });
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &ctx,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &test_trust_decision(),
+            )
+            .await;
+
+        assert!(
+            matches!(decision, Decision::RequireApproval { .. }),
+            "global auto-approve must not bypass a tool whose manifest no longer permits durable approval, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_persistent_grant_does_not_skip_manifest_ineligible_tool() {
+        let authorizer = test_authorizer_with_settings(
+            ApprovalPolicy::AskDestructive,
+            StubSettingsProvider {
+                tool_override: None,
+                global_auto_approve: false,
+                tool_always_allow: true,
+            },
+        );
+
+        let shell_id = CapabilityId::new("builtin.shell").unwrap();
+        let provider = ExtensionId::new("builtin").unwrap();
+        let mut descriptor =
+            test_descriptor_with_id(shell_id.clone(), vec![EffectKind::SpawnProcess]);
+        descriptor.default_permission = PermissionMode::Deny;
+        let ctx = test_context(CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: shell_id,
+                grantee: Principal::Extension(provider),
+                issued_by: persistent_approval_grant_issuer(),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::SpawnProcess],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            }],
+        });
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &ctx,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &test_trust_decision(),
+            )
+            .await;
+
+        assert!(
+            matches!(decision, Decision::RequireApproval { .. }),
+            "settings persistent grant must not bypass a tool whose manifest no longer permits durable approval, got {decision:?}"
         );
     }
 

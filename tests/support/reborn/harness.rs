@@ -25,7 +25,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_approvals::{ApprovalResolver, LeaseApproval};
+use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, LeaseApproval};
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
     CredentialOwnership, NewCredentialAccount, ProviderScope,
@@ -1482,6 +1482,7 @@ impl HarnessCapabilityMode {
 struct HostRuntimeCapabilityHarness {
     runtime: Arc<dyn HostRuntime>,
     approval_parts: Option<RebornLocalDevApprovalTestParts>,
+    auto_approve_settings: Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>>,
     pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
     io: Arc<ProductLiveCapabilityIo>,
     root: Arc<tempfile::TempDir>,
@@ -1631,6 +1632,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(Self {
             runtime,
             approval_parts: None,
+            auto_approve_settings: None,
             pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
@@ -1712,6 +1714,9 @@ impl HostRuntimeCapabilityHarness {
         .await?;
         harness.network_policy = wildcard_test_policy();
         harness.additional_provider_trust = bundled_extension_provider_trust()?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
         Ok(harness)
     }
 
@@ -1746,7 +1751,7 @@ impl HostRuntimeCapabilityHarness {
     }
 
     async fn trigger_management_tools() -> HarnessResult<Self> {
-        Self::new_with_options(
+        let harness = Self::new_with_options(
             "reborn-e2e-trigger-management-tools",
             vec![
                 CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
@@ -1766,7 +1771,36 @@ impl HostRuntimeCapabilityHarness {
                 )?),
             ),
         )
-        .await
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
+    }
+
+    async fn enable_global_auto_approve_for_product_and_harness_users(&self) -> HarnessResult<()> {
+        let product_scope = product_scope();
+        self.enable_global_auto_approve(product_scope.clone())
+            .await?;
+        let mut harness_user_scope = product_scope;
+        harness_user_scope.user_id = self.user_id.clone();
+        self.enable_global_auto_approve(harness_user_scope).await?;
+        Ok(())
+    }
+
+    async fn enable_global_auto_approve(&self, scope: ResourceScope) -> HarnessResult<()> {
+        let store = self
+            .auto_approve_settings
+            .as_ref()
+            .ok_or("host runtime harness missing local-dev auto-approve settings")?;
+        store
+            .set(AutoApproveSettingInput {
+                updated_by: Principal::User(scope.user_id.clone()),
+                scope,
+                enabled: true,
+            })
+            .await?;
+        Ok(())
     }
 
     async fn trace_commons_tools() -> HarnessResult<Self> {
@@ -1879,6 +1913,7 @@ impl HostRuntimeCapabilityHarness {
             seed_extension_lifecycle_credentials(&services, &user_id).await?;
         }
         let approval_parts = services.local_dev_approval_test_parts();
+        let auto_approve_settings = services.local_dev_auto_approve_settings_for_test();
         let pending_approval_scopes = Arc::new(Mutex::new(HashMap::new()));
         let runtime = services
             .host_runtime
@@ -1890,6 +1925,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(Self {
             runtime,
             approval_parts,
+            auto_approve_settings,
             pending_approval_scopes,
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
@@ -1973,6 +2009,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(Self {
             runtime,
             approval_parts: None,
+            auto_approve_settings: None,
             pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
@@ -2038,6 +2075,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(Self {
             runtime,
             approval_parts: None,
+            auto_approve_settings: None,
             pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,

@@ -177,7 +177,7 @@ impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
             Ok(policy) => policy.and_then(|policy| policy.active_grant()).is_some(),
             Err(error) => {
                 // silent-ok: fail-safe to "ask" on store read error; logged for observability.
-                tracing::warn!(
+                tracing::debug!(
                     %error,
                     capability = %capability_id,
                     "settings always-allow lookup failed; defaulting to ask"
