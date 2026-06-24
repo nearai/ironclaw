@@ -232,7 +232,16 @@ impl HostOAuthProviderClient {
             &self.capability_id,
             &policy,
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                provider = self.spec.provider_id,
+                token_host = %token_host,
+                auth_error = ?error,
+                "oauth token request egress authorization failed"
+            );
+            error
+        })?;
         let response = self
             .egress
             .execute(RuntimeHttpEgressRequest {
@@ -256,7 +265,15 @@ impl HostOAuthProviderClient {
                 timeout_ms: Some(self.timeout_ms),
             })
             .await
-            .map_err(|_| AuthProductError::BackendUnavailable)?;
+            .map_err(|error| {
+                tracing::warn!(
+                    provider = self.spec.provider_id,
+                    token_host = %token_host,
+                    runtime_error = ?error,
+                    "oauth token request egress failed"
+                );
+                AuthProductError::BackendUnavailable
+            })?;
         if !(200..300).contains(&response.status) {
             if (500..600).contains(&response.status) {
                 return Err(AuthProductError::BackendUnavailable);
@@ -269,6 +286,13 @@ impl HostOAuthProviderClient {
                 let error_code = serde_json::from_slice::<OAuthErrorResponseBody>(&response.body)
                     .ok()
                     .and_then(|body| body.error);
+                tracing::warn!(
+                    provider = self.spec.provider_id,
+                    token_host = %token_host,
+                    status = response.status,
+                    oauth_error_code = error_code.as_deref().unwrap_or("<unparseable>"),
+                    "oauth refresh token endpoint rejected request"
+                );
                 if error_code.as_deref() == Some("invalid_grant") {
                     tracing::debug!(
                         oauth_error_code = "invalid_grant",

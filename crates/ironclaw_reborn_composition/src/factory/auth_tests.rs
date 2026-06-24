@@ -307,6 +307,10 @@ async fn local_dev_google_oauth_backend_builds_with_host_provider_config() {
     .await
     .expect("local-dev services build");
     assert!(services.product_auth.is_some());
+    assert!(
+        services.local_dev_wasm_runtime_credential_provider_captured,
+        "local-dev WASM runtime must capture the product-auth credential provider"
+    );
 }
 
 #[tokio::test]

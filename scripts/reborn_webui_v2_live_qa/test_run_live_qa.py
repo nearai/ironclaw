@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Unit tests for the Reborn WebUI v2 live QA runner helpers.
+
+Run with::
+
+    python3 scripts/reborn_webui_v2_live_qa/test_run_live_qa.py
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import os
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import run_live_qa
+
+
+class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
+    def test_generated_google_seed_creates_refreshable_product_auth_account(self):
+        if importlib.util.find_spec("cryptography") is None:
+            self.skipTest("cryptography is installed in the e2e venv, not system Python")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "reborn-home"
+            env = {
+                "AUTH_LIVE_GOOGLE_ACCESS_TOKEN": "fake-access-token",
+                "AUTH_LIVE_GOOGLE_REFRESH_TOKEN": "fake-refresh-token",
+                "IRONCLAW_REBORN_GOOGLE_CLIENT_ID": "fake-client-id",
+                "REBORN_WEBUI_V2_LIVE_QA_SKIP_GOOGLE_REFRESH_PROBE": "1",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                seed = run_live_qa._seed_generated_google_product_auth_if_configured(
+                    home,
+                    "qa-user",
+                )
+                preflight = run_live_qa._google_product_auth_preflight(
+                    home,
+                    "qa-user",
+                    {"IRONCLAW_REBORN_GOOGLE_CLIENT_ID": "fake-client-id"},
+                )
+
+            self.assertTrue(seed["seeded"])
+            self.assertTrue(preflight["configured_ready"])
+            self.assertTrue(preflight["ready"])
+            self.assertEqual(preflight["configured_account_count"], 1)
+            account = preflight["accounts"][0]
+            self.assertTrue(account["access_secret_expired"])
+            self.assertTrue(account["refresh_secret_present"])
+            self.assertEqual(account["refresh_probe"]["reason"], "disabled_by_env")
+
+            db_path = home / "local-dev" / "reborn-local-dev.db"
+            master_key = (
+                home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+            ).read_text(encoding="utf-8")
+            with sqlite3.connect(db_path) as db:
+                rows = db.execute(
+                    "SELECT contents FROM root_filesystem_entries "
+                    "WHERE path LIKE '%/secrets/google-oauth-refresh-%'"
+                ).fetchall()
+            self.assertEqual(len(rows), 1)
+            stored = json.loads(rows[0][0])
+            self.assertEqual(
+                run_live_qa._decrypt_filesystem_secret(master_key, stored),
+                "fake-refresh-token",
+            )
+
+    def test_prepare_reborn_home_gates_missing_slack_without_raising(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            missing_source = root / "missing-source-home"
+            args = argparse.Namespace(
+                output_dir=root / "out",
+                reborn_home=missing_source,
+                require_slack_live=False,
+            )
+            env = {
+                "LIVE_OPENAI_COMPATIBLE_API_KEY": "fake-live-llm-key",
+                "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV": "LIVE_OPENAI_COMPATIBLE_API_KEY",
+            }
+            for name in (
+                "IRONCLAW_REBORN_SLACK_SIGNING_SECRET",
+                "IRONCLAW_REBORN_SLACK_SIGNING_SECRET_PATH",
+                "IRONCLAW_REBORN_SLACK_BOT_TOKEN",
+                "IRONCLAW_REBORN_SLACK_BOT_TOKEN_PATH",
+            ):
+                env[name] = ""
+
+            with patch.dict(os.environ, env, clear=False):
+                prepared = run_live_qa.prepare_reborn_home(
+                    args,
+                    ["qa_3a_slack_connect"],
+                )
+
+            slack = prepared.preflight["slack"]
+            self.assertTrue(slack["enabled_in_config"])
+            self.assertTrue(slack["requires_slack"])
+            self.assertFalse(slack["env_present"])
+            self.assertEqual(slack["auth_test"]["error"], "Slack env unavailable")
+
+
+if __name__ == "__main__":
+    unittest.main()

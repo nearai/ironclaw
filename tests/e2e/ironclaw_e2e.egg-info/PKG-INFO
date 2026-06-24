@@ -9,6 +9,7 @@ Requires-Dist: pytest-timeout>=2.3
 Requires-Dist: playwright>=1.40
 Requires-Dist: aiohttp>=3.9
 Requires-Dist: httpx>=0.27
+Requires-Dist: cryptography>=42.0
 Provides-Extra: vision
 Requires-Dist: anthropic>=0.40; extra == "vision"
 Provides-Extra: telegram

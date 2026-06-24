@@ -105,6 +105,13 @@ fn compose_provider_client_with_runtime(
         clients.push((provider_id, Arc::new(client) as Arc<dyn AuthProviderClient>));
         dcr_providers.push(provider);
     }
+    tracing::debug!(
+        provider_count = clients.len(),
+        providers = ?clients.iter().map(|(provider, _)| *provider).collect::<Vec<_>>(),
+        dcr_provider_count = dcr_providers.len(),
+        google_gate_provider_count = gate_providers.len(),
+        "product-auth OAuth provider clients composed"
+    );
     let dcr_registry =
         (!dcr_providers.is_empty()).then(|| Arc::new(OAuthDcrProviderRegistry::new(dcr_providers)));
     let gate_registry = (!gate_providers.is_empty())
@@ -175,10 +182,14 @@ impl MultiplexAuthProviderClient {
     }
 
     fn client_for(&self, provider: &str) -> Result<Arc<dyn AuthProviderClient>, AuthProductError> {
-        self.providers
-            .get(provider)
-            .cloned()
-            .ok_or(AuthProductError::BackendUnavailable)
+        self.providers.get(provider).cloned().ok_or_else(|| {
+            tracing::warn!(
+                provider,
+                configured_providers = ?self.providers.keys().collect::<Vec<_>>(),
+                "product-auth OAuth provider client is not configured"
+            );
+            AuthProductError::BackendUnavailable
+        })
     }
 }
 

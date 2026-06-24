@@ -35,11 +35,23 @@ where
         &self,
         request: CredentialAccountLookupRequest,
     ) -> Result<Option<CredentialAccount>, AuthProductError> {
-        let Some((account, _)) = self
+        let account = match self
             .read_account(&request.scope, request.account_id)
             .await?
-        else {
-            return Ok(None);
+        {
+            Some((account, _)) => account,
+            None => {
+                let owner = CredentialAccountOwnerScope::from_scope(&request.scope);
+                let Some(account) = self
+                    .account_records_for_owner(&owner)
+                    .await?
+                    .into_iter()
+                    .find(|account| account.id == request.account_id)
+                else {
+                    return Ok(None);
+                };
+                account
+            }
         };
         if !scope_matches(&request.scope, &account.scope) {
             return Err(AuthProductError::CrossScopeDenied);

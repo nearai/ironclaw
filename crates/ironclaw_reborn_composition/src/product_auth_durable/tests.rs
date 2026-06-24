@@ -2870,10 +2870,9 @@ async fn filesystem_get_account_cross_scope_returns_cross_scope_denied() {
     let result = service2
         .get_account(CredentialAccountLookupRequest::new(cli_scope, account.id))
         .await;
-    // The account doesn't exist in the CLI path (different path on filesystem), so None.
-    assert!(
-        result.unwrap().is_none(),
-        "account written under web scope must not be visible under cli scope"
+    assert_eq!(
+        result.expect_err("account under a different surface must be denied"),
+        AuthProductError::CrossScopeDenied
     );
 }
 
