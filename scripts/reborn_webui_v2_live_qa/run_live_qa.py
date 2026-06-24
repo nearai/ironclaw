@@ -898,6 +898,26 @@ def _github_auth_preflight(
     }
 
 
+def _google_required_env_for_block(
+    preflight: dict[str, object],
+    *,
+    requires_runtime_access: bool,
+) -> list[str]:
+    required = ["IRONCLAW_REBORN_GOOGLE_CLIENT_ID"]
+    if preflight.get("missing_google_client_secret"):
+        required.append("IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET")
+    if requires_runtime_access or preflight.get("refresh_probe_failed"):
+        for name in (
+            "AUTH_LIVE_GOOGLE_ACCESS_TOKEN",
+            "AUTH_LIVE_GOOGLE_REFRESH_TOKEN",
+        ):
+            if name not in required:
+                required.append(name)
+        if "IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET" not in required:
+            required.append("IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET")
+    return required
+
+
 def _first_env_value(
     names: list[str],
     extra_env: dict[str, str] | None = None,
@@ -4131,9 +4151,10 @@ async def run_cases(args: argparse.Namespace) -> int:
                             else "live Google product-auth account is not configured"
                         )
                     ),
-                    "required_env": [
-                        "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
-                    ],
+                    "required_env": _google_required_env_for_block(
+                        google_preflight,
+                        requires_runtime_access=case_spec.requires_google_runtime_access,
+                    ),
                     "legacy_required_env": [
                         "GOOGLE_CLIENT_ID",
                         "GOOGLE_OAUTH_CLIENT_ID",
