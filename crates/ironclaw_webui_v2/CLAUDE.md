@@ -100,16 +100,17 @@ constructing the `WebUiAuthenticatedCaller`, carrying the matched
 token's `WebUiV2Capabilities`, and injecting both as axum
 `Extension`s before the handler runs.
 
-The LLM configuration and operator command-plane routes are operator-wide. Host
-composition mounts them only when the authenticator says the deployment
-has an operator configuration surface, and must still authorize each
-request from the matched token's `operator_webui_config` capability.
-Multi-user session/OIDC authenticators should leave those routes
-unmounted or return non-operator capabilities until an admin role
-boundary exists. The route handlers also reject mounted operator
-requests with `403` when the injected `WebUiV2Capabilities` lacks
-`operator_webui_config`, so host composition and handler dispatch share
-the same fail-closed capability boundary.
+The LLM configuration and operator setup/config/service-control routes are
+operator-wide. Host composition mounts them only when the authenticator says
+the deployment has an operator configuration surface, and must still authorize
+each request from the matched token's `operator_webui_config` capability.
+Multi-user session/OIDC authenticators should leave those routes unmounted or
+return non-operator capabilities until an admin role boundary exists. The
+route handlers also reject mounted operator config requests with `403` when
+the injected `WebUiV2Capabilities` lacks `operator_webui_config`, so host
+composition and handler dispatch share the same fail-closed capability
+boundary. The logs projection remains available without that capability so
+multi-tenant users can inspect permitted logs from the Web UI.
 Unwired operator command-plane write, setup, log, and
 service-control methods fail closed with sanitized `503 service_unavailable`
 responses. Config validation plus read-only config, status, and diagnostics

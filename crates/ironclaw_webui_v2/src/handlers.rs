@@ -1440,10 +1440,8 @@ pub async fn get_operator_status(
 pub async fn query_operator_logs(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Query(query): Query<RebornOperatorLogsQuery>,
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
     let response = state.services().query_operator_logs(caller, query).await?;
     Ok(Json(response))
 }

@@ -279,7 +279,6 @@ pub fn is_webui_v2_operator_webui_config_route_id(route_id: &str) -> bool {
                 | WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG
                 | WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS
                 | WEBUI_V2_ROUTE_OPERATOR_STATUS
-                | WEBUI_V2_ROUTE_OPERATOR_LOGS
                 | WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE
         )
 }
