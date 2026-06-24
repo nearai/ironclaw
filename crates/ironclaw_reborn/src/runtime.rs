@@ -210,7 +210,7 @@ fn default_disabled_capability_ids() -> Vec<CapabilityId> {
     vec![
         // SAFETY: the capability id is a crate-owned static literal.
         CapabilityId::new(ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
-            .expect("static spawn_subagent capability id"),
+            .expect("static spawn_subagent capability id must be valid"),
     ]
 }
 
