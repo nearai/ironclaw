@@ -22,7 +22,8 @@ use ironclaw_github_issue_workflow::{
     GithubPullRequestRef, GithubPullRequestSnapshot, GithubRepositorySelector,
     GithubReviewCommentSnapshot, ListIssueCommentsInput, ListPullRequestChecksInput,
     ListPullRequestReviewCommentsInput, ListPullRequestsInput, PrepareWorkflowWorkspaceOutcome,
-    PrepareWorkflowWorkspaceRequest, RecordWorkflowEventInput, SearchGithubIssuesInput,
+    PrepareWorkflowWorkspaceRequest, PublishWorkflowWorkspaceOutcome, PublishWorkflowWorkspaceRequest,
+    RecordWorkflowEventInput, SearchGithubIssuesInput,
     StageCompletedPayload, StageTurnSubmitter, SubmitStageTurnOutcome, SubmitStageTurnRequest,
     WorkflowActorScope, WorkflowClock, WorkflowConfigAccessRequest, WorkflowEventEnvelope,
     WorkflowEventSourceKind, WorkflowProjectAccess, WorkflowProjectAccessRequest, WorkflowWorkerId,
@@ -771,7 +772,8 @@ mod github_issue_workflow_stage_result_sink_tests {
         GithubIssueWorkspaceSessionId, GithubProviderAccountRef, GithubPullRequestRef,
         GithubPullRequestSnapshot, GithubRepositorySelector, InMemoryGithubIssueWorkflowRepository,
         ListIssueCommentsInput, ListPullRequestsInput, ListWorkflowEventsAfterInput,
-        PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest, StageTurnSubmitter,
+        PrepareWorkflowWorkspaceOutcome, PrepareWorkflowWorkspaceRequest,
+        PublishWorkflowWorkspaceOutcome, PublishWorkflowWorkspaceRequest, StageTurnSubmitter,
         SubmitStageTurnOutcome, SubmitStageTurnRequest, TransitionOutcome, WorkflowClock,
         WorkflowEventSourceKind, WorkflowProjectAccess, WorkflowProjectAccessRequest,
         WorkflowRunTransition, WorkflowWorkerId, WorkflowWorkspaceManager,
@@ -917,6 +919,7 @@ mod github_issue_workflow_stage_result_sink_tests {
             None,
         )
         .await;
+        let run = attach_workspace_session(&repository, run).await;
         let run = create_stage_run(&repository, run, GithubIssueStage::Implementation).await;
         report_stage_result(
             &sink,
@@ -1116,6 +1119,56 @@ mod github_issue_workflow_stage_result_sink_tests {
         {
             TransitionOutcome::Applied { run } => run,
             other => panic!("mode transition should apply: {other:?}"),
+        }
+    }
+
+    async fn attach_workspace_session(
+        repository: &InMemoryGithubIssueWorkflowRepository,
+        run: GithubIssueWorkflowRun,
+    ) -> GithubIssueWorkflowRun {
+        let workspace_session_id =
+            GithubIssueWorkspaceSessionId::from_trusted("workspace-session-smoke".to_string())
+                .unwrap();
+        let session = GithubIssueWorkspaceSession {
+            workspace_session_id: workspace_session_id.clone(),
+            workflow_run_id: run.workflow_run_id.clone(),
+            repository: GithubRepositorySelector {
+                owner: run.issue_ref.owner.clone(),
+                repo: run.issue_ref.repo.clone(),
+            },
+            base_branch: run.issue_ref.default_branch.clone(),
+            base_sha: None,
+            working_branch: "ironclaw/fix-4242".to_string(),
+            current_head_sha: Some("head-sha-4242".to_string()),
+            workspace_ref: WorkflowWorkspaceRef {
+                thread_id: None,
+                workspace_session_id: Some(workspace_session_id),
+                turn_run_id: None,
+            },
+            mount_ref: WorkflowWorkspaceMountRef {
+                mount_id: "workspace-mount-smoke".to_string(),
+                alias: "/workspace".to_string(),
+            },
+            created_at: chrono::Utc::now(),
+        };
+        match repository
+            .advance_event_cursor_and_transition(AdvanceWorkflowRunInput {
+                workflow_run_id: run.workflow_run_id.clone(),
+                worker_id: worker(),
+                expected_workflow_run_version: run.workflow_run_version,
+                expected_event_cursor: run.event_cursor,
+                next_event_cursor: run.event_cursor,
+                transition: WorkflowRunTransition {
+                    workspace_session: Some(session),
+                    ..WorkflowRunTransition::default()
+                },
+                now: chrono::Utc::now(),
+            })
+            .await
+            .expect("attach workspace session")
+        {
+            TransitionOutcome::Applied { run } => run,
+            other => panic!("workspace session transition should apply: {other:?}"),
         }
     }
 
@@ -1371,6 +1424,18 @@ mod github_issue_workflow_stage_result_sink_tests {
                     },
                     created_at: request.requested_at,
                 },
+            })
+        }
+
+        async fn publish_workspace(
+            &self,
+            request: PublishWorkflowWorkspaceRequest,
+        ) -> Result<PublishWorkflowWorkspaceOutcome, GithubIssueWorkflowError> {
+            Ok(PublishWorkflowWorkspaceOutcome {
+                working_branch: "ironclaw/fix-4242".to_string(),
+                base_branch: request.base_branch,
+                head_sha: "head-sha-4242".to_string(),
+                has_changes: true,
             })
         }
     }
@@ -1711,7 +1776,7 @@ fn workflow_capability_grants(
                 grantee: Principal::Extension(grantee.clone()),
                 issued_by: ironclaw_approvals::persistent_approval_grant_issuer(),
                 constraints: GrantConstraints {
-                    allowed_effects: workflow_capability_effects(*capability_id),
+                    allowed_effects: workflow_capability_effects(capability_id),
                     mounts: MountView::default(),
                     network: workflow_github_network_policy(),
                     secrets: Vec::new(),
@@ -1863,6 +1928,7 @@ pub(crate) fn runtime_workflow_workspace_manager(
 ) -> Arc<dyn WorkflowWorkspaceManager> {
     Arc::new(RuntimeWorkflowWorkspaceManager {
         local_dev_storage_root,
+        git_remote: WorkflowGitRemoteConfig::local_dev_default(),
     })
 }
 
@@ -2103,8 +2169,38 @@ const GITHUB_ISSUE_WORKFLOW_WORKSPACES_STORAGE_DIR: &str = "github-issue-workspa
 const GITHUB_ISSUE_WORKFLOW_WORKSPACES_VIRTUAL_ROOT: &str = "/projects/github-issue-workspaces";
 const WORKFLOW_WORKSPACE_GIT_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// How the workflow authenticates git remote operations (clone of private
+/// repos, push of the working branch) and identifies its commits.
+#[derive(Debug, Clone)]
+struct WorkflowGitRemoteConfig {
+    /// `git -c <value>` overrides applied to remote operations — typically a
+    /// credential helper. Values are passed as process args (never inlined into
+    /// a URL) so no token appears in argv or the persisted remote config.
+    config_args: Vec<String>,
+    committer_name: String,
+    committer_email: String,
+}
+
+impl WorkflowGitRemoteConfig {
+    /// Local-dev default: authenticate via the `gh` CLI credential helper
+    /// (clearing any inherited helper first) so clone/push use the operator's
+    /// configured GitHub auth. Production should instead inject an
+    /// account-scoped credential rather than relying on ambient `gh` auth.
+    fn local_dev_default() -> Self {
+        Self {
+            config_args: vec![
+                "credential.helper=".to_string(),
+                "credential.helper=!gh auth git-credential".to_string(),
+            ],
+            committer_name: "IronClaw Bot".to_string(),
+            committer_email: "ironclaw-bot@users.noreply.github.com".to_string(),
+        }
+    }
+}
+
 struct RuntimeWorkflowWorkspaceManager {
     local_dev_storage_root: PathBuf,
+    git_remote: WorkflowGitRemoteConfig,
 }
 
 #[async_trait]
@@ -2130,8 +2226,9 @@ impl WorkflowWorkspaceManager for RuntimeWorkflowWorkspaceManager {
             .map_err(|error| GithubIssueWorkflowError::Repository {
                 reason: format!("failed to create workflow workspace root: {error}"),
             })?;
-        run_workflow_git_command(
+        run_workflow_git_command_with_config(
             None,
+            &self.git_remote.config_args,
             &[
                 "clone",
                 "--no-tags",
@@ -2167,6 +2264,17 @@ impl WorkflowWorkspaceManager for RuntimeWorkflowWorkspaceManager {
             mount_id: workspace_session_id.as_str().to_string(),
             alias: crate::local_dev_mounts::WORKSPACE_ALIAS.to_string(),
         };
+        tracing::debug!(
+            workflow_run_id = %request.workflow_run_id,
+            workspace_session_id = %workspace_session_id,
+            owner = %request.issue.owner,
+            repo = %request.issue.repo,
+            base_branch = %request.base_branch,
+            working_branch = %working_branch,
+            base_sha = %short_sha(&base_sha),
+            mount_alias = %mount_ref.alias,
+            "prepared github issue workflow workspace clone"
+        );
         Ok(PrepareWorkflowWorkspaceOutcome {
             session: GithubIssueWorkspaceSession {
                 workspace_session_id,
@@ -2180,6 +2288,109 @@ impl WorkflowWorkspaceManager for RuntimeWorkflowWorkspaceManager {
                 mount_ref,
                 created_at: request.requested_at,
             },
+        })
+    }
+
+    async fn publish_workspace(
+        &self,
+        request: PublishWorkflowWorkspaceRequest,
+    ) -> Result<PublishWorkflowWorkspaceOutcome, GithubIssueWorkflowError> {
+        let repository =
+            GithubRepositorySelector::new(request.issue.owner.clone(), request.issue.repo.clone())?;
+        let clone_url = workflow_repository_clone_url(&repository)?;
+        let workspace_host_path =
+            workflow_workspace_host_path(&self.local_dev_storage_root, &request.workspace_session_id);
+        if !tokio::fs::try_exists(&workspace_host_path)
+            .await
+            .unwrap_or(false)
+        {
+            return Err(GithubIssueWorkflowError::Repository {
+                reason: "workflow workspace checkout is missing; cannot publish branch".to_string(),
+            });
+        }
+        let working_branch = workflow_working_branch(&request.issue, &request.workflow_run_id);
+        let base_branch = request.base_branch.clone();
+
+        // Stage every change the implementation agent made in the checkout.
+        run_workflow_git_command(Some(&workspace_host_path), &["add", "-A"]).await?;
+        // Commit the staged changes if the working tree is dirty. (The agent may
+        // also have committed itself; in that case there is nothing to stage and
+        // this is a no-op.) `git status --porcelain` is empty iff the tree is
+        // clean after staging.
+        let porcelain =
+            run_workflow_git_command(Some(&workspace_host_path), &["status", "--porcelain"]).await?;
+        if !porcelain.trim().is_empty() {
+            run_workflow_git_command(
+                Some(&workspace_host_path),
+                &[
+                    "-c",
+                    &format!("user.name={}", self.git_remote.committer_name),
+                    "-c",
+                    &format!("user.email={}", self.git_remote.committer_email),
+                    "commit",
+                    "--no-verify",
+                    "-m",
+                    &request.commit_message,
+                ],
+            )
+            .await?;
+        }
+
+        // A draft PR needs at least one commit between base and the working
+        // branch.
+        let commits_ahead = run_workflow_git_command(
+            Some(&workspace_host_path),
+            &["rev-list", "--count", &format!("{base_branch}..HEAD")],
+        )
+        .await
+        .unwrap_or_else(|_| "0".to_string());
+        let has_changes = commits_ahead.trim() != "0";
+        let head_sha =
+            run_workflow_git_command(Some(&workspace_host_path), &["rev-parse", "HEAD"]).await?;
+
+        if !has_changes {
+            tracing::debug!(
+                workflow_run_id = %request.workflow_run_id,
+                working_branch = %working_branch,
+                "workflow workspace has no commits beyond base; skipping push"
+            );
+            return Ok(PublishWorkflowWorkspaceOutcome {
+                working_branch,
+                base_branch,
+                head_sha,
+                has_changes: false,
+            });
+        }
+
+        // Push the working branch to the remote using the configured credential
+        // helper. The refspec pushes the current HEAD to the named branch so the
+        // draft PR can reference it. `--force-with-lease` keeps a re-run safe
+        // without clobbering unrelated remote history.
+        run_workflow_git_command_with_config(
+            Some(&workspace_host_path),
+            &self.git_remote.config_args,
+            &[
+                "push",
+                "--force-with-lease",
+                &clone_url,
+                &format!("HEAD:refs/heads/{working_branch}"),
+            ],
+        )
+        .await?;
+        tracing::debug!(
+            workflow_run_id = %request.workflow_run_id,
+            owner = %request.issue.owner,
+            repo = %request.issue.repo,
+            working_branch = %working_branch,
+            head_sha = %short_sha(&head_sha),
+            "pushed workflow workspace branch to remote"
+        );
+
+        Ok(PublishWorkflowWorkspaceOutcome {
+            working_branch,
+            base_branch,
+            head_sha,
+            has_changes: true,
         })
     }
 }
@@ -2214,7 +2425,12 @@ fn workflow_workspace_mount_view(
             reason: format!("invalid workflow workspace mount alias: {error}"),
         })?,
         workflow_workspace_virtual_root(workspace_session_id)?,
-        MountPermissions::read_write(),
+        // The implementation stage agent edits, deletes, and runs shell/build
+        // commands inside the cloned `/workspace`. It therefore needs full
+        // workspace authority including `execute` (without it the shell handler
+        // rejects a `/workspace` workdir) and `delete` (for apply_patch removals
+        // and file deletions during the fix).
+        MountPermissions::read_write_list_delete_execute(),
     )])
     .map_err(|error| GithubIssueWorkflowError::Policy {
         reason: format!("invalid workflow workspace mount view: {error}"),
@@ -2253,11 +2469,44 @@ async fn run_workflow_git_command(
     current_dir: Option<&Path>,
     args: &[&str],
 ) -> Result<String, GithubIssueWorkflowError> {
+    run_workflow_git_command_with_config(current_dir, &[], args).await
+}
+
+/// Run a workflow git command with optional `-c key=value` config overrides
+/// (e.g. a credential helper for remote operations). Config values are passed
+/// as separate process args after a `-c` flag — never interpolated into a URL —
+/// so credentials do not appear in argv logging or the remote config.
+async fn run_workflow_git_command_with_config(
+    current_dir: Option<&Path>,
+    config_args: &[String],
+    args: &[&str],
+) -> Result<String, GithubIssueWorkflowError> {
     let mut command = Command::new("git");
+    for config in config_args {
+        command.arg("-c").arg(config);
+    }
     command.args(args).stdin(Stdio::null()).kill_on_drop(true);
+    // Git hygiene for workflow-owned checkouts:
+    // - GIT_TERMINAL_PROMPT=0 / GIT_SSH_COMMAND `BatchMode` never block on an
+    //   interactive credential or host-key prompt (the workflow runs headless;
+    //   a prompt would otherwise hang the poller until the timeout).
+    // - GIT_CONFIG_NOSYSTEM=1 ignores the machine-wide /etc gitconfig so a
+    //   system-level alias/insteadof/credential rule can't silently rewrite the
+    //   workflow's commands.
+    // The per-user credential helper IS still available so local-dev can push
+    // using the operator's configured GitHub auth; production should instead
+    // supply an explicit account-scoped credential (see publish step).
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     if let Some(current_dir) = current_dir {
         command.current_dir(current_dir);
     }
+    // The argv is safe to log: callers route credential material through env /
+    // GIT_ASKPASS / a credential helper, never inline in `args` (see the push
+    // step's authenticated-remote handling), so no token reaches this line.
+    tracing::debug!(git_args = ?args, "running workflow git command");
     let output = tokio::time::timeout(WORKFLOW_WORKSPACE_GIT_TIMEOUT, command.output())
         .await
         .map_err(|_| GithubIssueWorkflowError::Repository {
@@ -2304,6 +2553,11 @@ fn workflow_working_branch(
     )
 }
 
+/// Short (first 12 chars) form of a git SHA for non-sensitive audit logging.
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(12).collect()
+}
+
 fn git_branch_component(value: &str) -> String {
     let sanitized = value
         .chars()
@@ -2339,7 +2593,8 @@ impl WorkflowWorkspaceManager for UnconfiguredWorkflowWorkspaceManager {
 mod project_metadata_github_issue_workflow_config_source_tests {
     use super::{
         IronClawGithubIssueWorkflowPollerPorts, ProjectMetadataGithubIssueWorkflowConfigSource,
-        ProjectServiceWorkflowProjectAccess, RuntimeWorkflowWorkspaceManager, git_branch_component,
+        ProjectServiceWorkflowProjectAccess, RuntimeWorkflowWorkspaceManager,
+        WorkflowGitRemoteConfig, git_branch_component,
         test_only_unconfigured_workspace_manager,
         workflow_stage_workspace_mount_view_from_thread_metadata,
     };
@@ -2624,6 +2879,7 @@ mod project_metadata_github_issue_workflow_config_source_tests {
         let root = tempfile::tempdir().expect("tempdir");
         let manager = RuntimeWorkflowWorkspaceManager {
             local_dev_storage_root: root.path().to_path_buf(),
+            git_remote: WorkflowGitRemoteConfig::local_dev_default(),
         };
         let error = manager
             .prepare_workspace(PrepareWorkflowWorkspaceRequest {

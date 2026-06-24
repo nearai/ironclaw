@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tracing::trace;
 
 use crate::{
     GithubIssueProviderActionId, GithubIssueProviderBindingId, GithubIssueRef,
@@ -28,6 +29,13 @@ pub struct GithubIssueProviderBinding {
 }
 
 pub fn issue_binding_ref(issue: &GithubIssueRef) -> GithubProviderBindingRef {
+    trace!(
+        resource_type = "issue",
+        owner = %issue.owner,
+        repo = %issue.repo,
+        issue = issue.number,
+        "building github issue binding ref"
+    );
     GithubProviderBindingRef {
         provider_ref: GithubProviderRef {
             system: "github".to_string(),
@@ -42,6 +50,13 @@ pub fn issue_binding_ref(issue: &GithubIssueRef) -> GithubProviderBindingRef {
 }
 
 pub fn claim_comment_binding_ref(issue: &GithubIssueRef, marker: &str) -> GithubProviderBindingRef {
+    trace!(
+        resource_type = "issue_comment",
+        owner = %issue.owner,
+        repo = %issue.repo,
+        issue = issue.number,
+        "building github claim comment binding ref"
+    );
     GithubProviderBindingRef {
         provider_ref: GithubProviderRef {
             system: "github".to_string(),
@@ -56,6 +71,13 @@ pub fn claim_comment_binding_ref(issue: &GithubIssueRef, marker: &str) -> Github
 }
 
 pub fn primary_pr_binding_ref(pr: &GithubPullRequestRef) -> GithubProviderBindingRef {
+    trace!(
+        resource_type = "pull_request",
+        owner = %pr.owner,
+        repo = %pr.repo,
+        pr = pr.number,
+        "building github primary pull request binding ref"
+    );
     GithubProviderBindingRef {
         provider_ref: GithubProviderRef {
             system: "github".to_string(),

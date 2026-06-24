@@ -542,12 +542,8 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 }
             },
             "required": [
-                "workflow_run_id",
-                "stage_run_id",
-                "turn_run_id",
                 "stage",
                 "schema_version",
-                "completion_nonce",
                 "result"
             ],
             "additionalProperties": false

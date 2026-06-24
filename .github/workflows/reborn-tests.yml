@@ -117,6 +117,7 @@ jobs:
                     | select(
                         (.name | startswith("ironclaw_reborn"))
                         or (.name | startswith("ironclaw_product"))
+                        or (.name | startswith("ironclaw_github_issue_workflow"))
                         or (.name == "ironclaw_architecture")
                         or (.name == "ironclaw_slack_v2_adapter")
                         or (.name == "ironclaw_telegram_v2_adapter")

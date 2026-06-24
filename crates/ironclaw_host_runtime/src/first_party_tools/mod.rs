@@ -73,8 +73,9 @@ pub use trigger_management::{
     TriggerCreateHook,
 };
 pub use workflow_result::{
-    ReportWorkflowStageResultInput, WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID,
-    WorkflowStageResultAck, WorkflowStageResultSink, WorkflowStageResultSinkError,
+    ExecutingStageThread, ReportWorkflowStageResultInput,
+    WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID, WorkflowStageResultAck, WorkflowStageResultSink,
+    WorkflowStageResultSinkError,
 };
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";

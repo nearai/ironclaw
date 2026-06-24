@@ -53,7 +53,17 @@ case "${package}" in
     printf '%s\n' "--features libsql"
     ;;
   ironclaw_reborn_composition)
-    printf '%s\n' "--features test-support,webui-v2-beta,slack-v2-host-beta,libsql"
+    printf '%s\n' "--features test-support,webui-v2-beta,slack-v2-host-beta,libsql,github-issue-workflow-beta"
+    ;;
+  ironclaw_github_issue_workflow)
+    # test-support compiles the shared `testing` scaffolding (used by the
+    # storage crate's hermetic E2E) on the non-cfg(test) build path too.
+    printf '%s\n' "--features test-support"
+    ;;
+  ironclaw_github_issue_workflow_storage)
+    # libsql builds the durable contract + the #![cfg(feature = "libsql")]
+    # hermetic issue->draft-PR E2E (embedded DB; no Postgres/Docker needed).
+    printf '%s\n' "--features libsql"
     ;;
   ironclaw_reborn)
     printf '%s\n' "--features root-llm-provider,libsql-secrets,libsql-restart-tests,webui-user-store"

@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     GithubCommentRef, GithubIssueRef, GithubIssueWorkflowConfig, GithubIssueWorkflowError,
-    GithubIssueWorkflowRunId, GithubIssueWorkspaceSession, GithubProviderAccountRef,
-    GithubPullRequestRef, GithubRepositorySelector, SubmitStageTurnOutcome, SubmitStageTurnRequest,
+    GithubIssueWorkflowRunId, GithubIssueWorkspaceSession, GithubIssueWorkspaceSessionId,
+    GithubProviderAccountRef, GithubPullRequestRef, GithubRepositorySelector,
+    SubmitStageTurnOutcome, SubmitStageTurnRequest,
 };
 
 #[async_trait]
@@ -133,6 +134,25 @@ pub trait WorkflowWorkspaceManager: Send + Sync {
         &self,
         request: PrepareWorkflowWorkspaceRequest,
     ) -> Result<PrepareWorkflowWorkspaceOutcome, GithubIssueWorkflowError>;
+
+    /// Publish the implementation stage's local changes to the provider remote
+    /// so a draft PR can reference them: commit any pending changes in the
+    /// prepared workspace, push the working branch, and report the published
+    /// head SHA. Without this the cloned branch and the agent's edits never
+    /// leave the host and a draft PR would reference a branch that does not
+    /// exist on the remote.
+    ///
+    /// The default fails closed; only a workspace manager backed by a real
+    /// checkout + authenticated remote implements it.
+    async fn publish_workspace(
+        &self,
+        _request: PublishWorkflowWorkspaceRequest,
+    ) -> Result<PublishWorkflowWorkspaceOutcome, GithubIssueWorkflowError> {
+        Err(GithubIssueWorkflowError::PolicyDenied {
+            reason: "GitHub issue workflow workspace publish is not supported by this workspace backend"
+                .to_string(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -398,4 +418,35 @@ pub struct PrepareWorkflowWorkspaceRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrepareWorkflowWorkspaceOutcome {
     pub session: GithubIssueWorkspaceSession,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishWorkflowWorkspaceRequest {
+    pub tenant_id: TenantId,
+    pub creator_user_id: UserId,
+    pub agent_id: Option<AgentId>,
+    pub project_id: Option<ProjectId>,
+    pub workflow_run_id: GithubIssueWorkflowRunId,
+    pub issue: GithubIssueRef,
+    pub workspace_session_id: GithubIssueWorkspaceSessionId,
+    pub base_branch: String,
+    /// Commit message used when the workspace has uncommitted implementation
+    /// changes. Host-authored (never model free-text) so it cannot smuggle
+    /// secrets or shell metacharacters into the git command.
+    pub commit_message: String,
+    pub requested_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishWorkflowWorkspaceOutcome {
+    /// The branch that was pushed to the remote (authoritative head branch for
+    /// the draft PR — derived from the workflow run, never model input).
+    pub working_branch: String,
+    pub base_branch: String,
+    /// Resolved HEAD SHA of the pushed working branch.
+    pub head_sha: String,
+    /// Whether the working branch differs from the base branch (i.e. there is
+    /// at least one commit to open a PR against). A PR cannot be opened when
+    /// this is false.
+    pub has_changes: bool,
 }

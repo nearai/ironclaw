@@ -18,7 +18,7 @@ use super::{
         LoopDriverId, ModelProfileId, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
         RunProfileSourceLayer, RunProfileSourceRef, RunnerPoolId, SchedulingClass,
     },
-    snapshot::{PersonalContextPolicy, ResolvedRunProfile},
+    snapshot::{BudgetApprovalMode, PersonalContextPolicy, ResolvedRunProfile},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +198,7 @@ pub struct RunProfileDefinition {
     checkpoint_policy: CheckpointPolicy,
     resource_budget_policy: ResourceBudgetPolicy,
     personal_context_policy: PersonalContextPolicy,
+    budget_approval_mode: BudgetApprovalMode,
     runtime_constraints: RuntimeProfileConstraints,
     runner_pool_id: Option<RunnerPoolId>,
     scheduling_class: SchedulingClass,
@@ -228,6 +229,15 @@ impl RunProfileDefinition {
         self
     }
 
+    /// Mark this profile as headless: a budget-cap crossing degrades to a
+    /// recoverable error instead of opening an interactive approval gate. Used
+    /// for the GitHub issue workflow stage profiles and any background-job run
+    /// where no human can answer a gate.
+    pub fn with_non_interactive_budget(mut self) -> Self {
+        self.budget_approval_mode = BudgetApprovalMode::NonInteractive;
+        self
+    }
+
     fn resolve(&self, request: &RunProfileResolutionRequest) -> ResolvedRunProfile {
         let mut provenance = provenance_for(self, request);
         let resource_budget_policy = self.resolve_resource_budget_policy(request, &mut provenance);
@@ -244,6 +254,7 @@ impl RunProfileDefinition {
             self,
             &resource_budget_policy,
             effective_personal_context_policy,
+            self.budget_approval_mode,
             &provenance,
         );
         ResolvedRunProfile {
@@ -261,6 +272,7 @@ impl RunProfileDefinition {
             checkpoint_policy: self.checkpoint_policy.clone(),
             resource_budget_policy,
             personal_context_policy: effective_personal_context_policy,
+            budget_approval_mode: self.budget_approval_mode,
             runtime_constraints: self.runtime_constraints.clone(),
             runner_pool_id: self.runner_pool_id.clone(),
             scheduling_class: self.scheduling_class.clone(),
@@ -343,6 +355,7 @@ fn interactive_profile() -> RunProfileDefinition {
             max_capability_invocations: 64,
         },
         personal_context_policy: PersonalContextPolicy::Excluded,
+        budget_approval_mode: BudgetApprovalMode::Interactive,
         runtime_constraints: RuntimeProfileConstraints {
             allow_raw_runtime_backend_selection: false,
             allow_broad_capability_surface: false,
@@ -397,6 +410,7 @@ fn long_running_mission_profile() -> RunProfileDefinition {
             max_capability_invocations: 1024,
         },
         personal_context_policy: PersonalContextPolicy::Excluded,
+        budget_approval_mode: BudgetApprovalMode::Interactive,
         runtime_constraints: RuntimeProfileConstraints {
             allow_raw_runtime_backend_selection: false,
             allow_broad_capability_surface: false,
@@ -449,6 +463,7 @@ fn fingerprint_for(
     definition: &RunProfileDefinition,
     resource_budget_policy: &ResourceBudgetPolicy,
     personal_context_policy: PersonalContextPolicy,
+    budget_approval_mode: BudgetApprovalMode,
     provenance: &RedactedRunProfileProvenance,
 ) -> RunProfileFingerprint {
     let mut hash = 0xcbf29ce484222325_u64;
@@ -485,6 +500,7 @@ fn fingerprint_for(
     update(definition.capability_surface_profile_id.as_str());
     update(definition.context_profile_id.as_str());
     update(personal_context_policy.as_str());
+    update(budget_approval_mode.as_str());
     update_bool(definition.steering_policy.allow_steering, &mut update);
     update_bool(definition.steering_policy.allow_interrupt, &mut update);
     update_bool(
@@ -594,12 +610,14 @@ mod tests {
                 &relaxed,
                 &relaxed.resource_budget_policy,
                 relaxed.personal_context_policy,
+                relaxed.budget_approval_mode,
                 &relaxed_provenance
             ),
             fingerprint_for(
                 &strict,
                 &strict.resource_budget_policy,
                 strict.personal_context_policy,
+                strict.budget_approval_mode,
                 &strict_provenance
             ),
         );

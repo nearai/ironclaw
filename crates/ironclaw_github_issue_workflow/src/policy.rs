@@ -4,6 +4,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use sha2::{Digest, Sha256};
+use tracing::debug;
 
 use crate::{
     AdvanceWorkflowRunInput, CompleteWorkflowStepInput, CompleteWorkflowStepOutcome,
@@ -17,6 +18,7 @@ use crate::{
     GithubPullRequestRef, GithubPullRequestUpdatedPayload, GithubRepositorySelector,
     GithubReviewCommentCreatedPayload, ListWorkflowEventsAfterInput,
     PrepareWorkflowWorkspaceRequest, ProviderActionRunOutcome, ProviderContentSummary,
+    PublishWorkflowWorkspaceOutcome, PublishWorkflowWorkspaceRequest,
     RepositorySnapshot, RunDraftPullRequestProviderActionRequest, StageCompletedPayload,
     StageConstraintSnapshot, StageTurnIdentity, StageTurnSubmitter, SubmitStageTurnOutcome,
     SubmitStageTurnRequest, TransitionOutcome, WorkflowActorScope, WorkflowClock,
@@ -74,6 +76,16 @@ enum PrepareWorkspaceStepOutcome {
     },
 }
 
+enum PublishWorkspaceStepOutcome {
+    Published {
+        outcome: PublishWorkflowWorkspaceOutcome,
+        step: WorkflowStepRun,
+    },
+    NotReady {
+        step: WorkflowStepRun,
+    },
+}
+
 struct PrSynthesisResult {
     title: String,
     body: String,
@@ -124,11 +136,23 @@ where
         &self.ports
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            workflow_run_id = %run.workflow_run_id,
+            issue = run.issue_ref.number,
+            mode = Self::workflow_mode_slug(&run.workflow_state.mode),
+        )
+    )]
     pub async fn tick(
         &self,
         run: GithubIssueWorkflowRun,
     ) -> Result<WorkflowPolicyTickOutcome, GithubIssueWorkflowError> {
         if run_is_terminal(&run.status) {
+            debug!(
+                status = Self::workflow_run_status_slug(&run.status),
+                "skipping tick for terminal workflow run"
+            );
             return Ok(WorkflowPolicyTickOutcome {
                 run,
                 processed_event_count: 0,
@@ -145,6 +169,10 @@ where
             })
             .await?;
         let Some(event) = events.pop() else {
+            debug!(
+                event_cursor = run.event_cursor,
+                "no new workflow event after cursor; tick is a no-op"
+            );
             return Ok(WorkflowPolicyTickOutcome {
                 run,
                 processed_event_count: 0,
@@ -152,6 +180,11 @@ where
             });
         };
 
+        debug!(
+            sequence = event.sequence,
+            event_type = ?event.workflow_event_type,
+            "processing workflow event"
+        );
         match event.workflow_event_type {
             GithubIssueWorkflowEventType::GithubIssueDiscovered
                 if run.workflow_state.mode == GithubIssueWorkflowMode::New =>
@@ -401,7 +434,55 @@ where
             GithubIssueStage::PrSynthesis
                 if run.workflow_state.mode == GithubIssueWorkflowMode::PrSynthesis =>
             {
-                let pr_result = pr_synthesis_result(&payload.result)?;
+                let model_pr_result = pr_synthesis_result(&payload.result)?;
+
+                // Publish the implementation workspace branch to the remote
+                // BEFORE opening the PR. The agent's edits live only in the
+                // local clone until this step pushes them; the draft PR must
+                // reference a branch that actually exists on the remote.
+                let Some(workspace_session_id) = run.workspace_session_id.clone() else {
+                    return Err(GithubIssueWorkflowError::Policy {
+                        reason: "PR synthesis reached without a prepared workspace session"
+                            .to_string(),
+                    });
+                };
+                let (publish_outcome, publish_step) =
+                    match self.publish_workspace_step(&run, workspace_session_id).await? {
+                        PublishWorkspaceStepOutcome::Published { outcome, step } => (outcome, step),
+                        PublishWorkspaceStepOutcome::NotReady { step } => {
+                            return Ok(WorkflowPolicyTickOutcome {
+                                run,
+                                processed_event_count: 0,
+                                steps: vec![step],
+                            });
+                        }
+                    };
+                if !publish_outcome.has_changes {
+                    // No commits between base and the working branch: a draft PR
+                    // cannot be opened. Block the run for human attention rather
+                    // than looping forever on an empty PR creation.
+                    let run = self
+                        .block_run(
+                            run,
+                            "implementation produced no committed changes to open a draft PR"
+                                .to_string(),
+                        )
+                        .await?;
+                    return Ok(WorkflowPolicyTickOutcome {
+                        run,
+                        processed_event_count: 0,
+                        steps: vec![publish_step],
+                    });
+                }
+
+                // The pushed branch/base/SHA are authoritative (host-controlled);
+                // keep only the model's PR title/body.
+                let pr_result = PrSynthesisResult {
+                    head_branch: publish_outcome.working_branch,
+                    base_branch: publish_outcome.base_branch,
+                    head_sha: publish_outcome.head_sha,
+                    ..model_pr_result
+                };
                 let (step, primary_pr) = self
                     .draft_pull_request_step(&run, payload.stage_run_id.clone(), pr_result)
                     .await?;
@@ -409,7 +490,7 @@ where
                     return Ok(WorkflowPolicyTickOutcome {
                         run,
                         processed_event_count: 0,
-                        steps: vec![step],
+                        steps: vec![publish_step, step],
                     });
                 }
                 let Some(primary_pr) = primary_pr else {
@@ -433,7 +514,7 @@ where
                 Ok(WorkflowPolicyTickOutcome {
                     run,
                     processed_event_count: 1,
-                    steps: vec![step],
+                    steps: vec![publish_step, step],
                 })
             }
             GithubIssueStage::CiRepair
@@ -685,6 +766,11 @@ where
             ProviderActionRunOutcome::NeedsReconciliation { .. } => WorkflowStepStatus::Blocked,
             ProviderActionRunOutcome::Failed { .. } => WorkflowStepStatus::Failed,
         };
+        debug!(
+            workflow_run_id = %run.workflow_run_id,
+            outcome = provider_action_outcome_slug(&outcome),
+            "claim issue step completed"
+        );
         let result = serde_json::to_value(&outcome).map_err(policy_serde_error)?;
         if let ProviderActionRunOutcome::Busy { action } = outcome {
             let next_attempt_at = action
@@ -766,6 +852,23 @@ where
             ProviderActionRunOutcome::NeedsReconciliation { .. } => WorkflowStepStatus::Blocked,
             ProviderActionRunOutcome::Failed { .. } => WorkflowStepStatus::Failed,
         };
+        match (&outcome, primary_pr.as_ref()) {
+            (
+                ProviderActionRunOutcome::Succeeded { .. } | ProviderActionRunOutcome::Replayed { .. },
+                Some(pr),
+            ) => debug!(
+                workflow_run_id = %run.workflow_run_id,
+                outcome = provider_action_outcome_slug(&outcome),
+                pr = pr.number,
+                pr_url = %pr.url,
+                "draft pull request step delivered pull request"
+            ),
+            _ => debug!(
+                workflow_run_id = %run.workflow_run_id,
+                outcome = provider_action_outcome_slug(&outcome),
+                "draft pull request step did not produce an open pull request"
+            ),
+        }
         let result = serde_json::to_value(&outcome).map_err(policy_serde_error)?;
         if let ProviderActionRunOutcome::Busy { action } = outcome {
             let next_attempt_at = action
@@ -781,6 +884,7 @@ where
         Ok((step, primary_pr))
     }
 
+    #[tracing::instrument(skip_all, fields(workflow_run_id = %run.workflow_run_id))]
     async fn prepare_workspace_step(
         &self,
         run: &GithubIssueWorkflowRun,
@@ -832,8 +936,18 @@ where
             Ok(outcome) => outcome,
             Err(error) => {
                 if !workspace_prepare_error_is_retryable(&error) {
+                    debug!(
+                        outcome = "blocked",
+                        reason = %error,
+                        "prepare_workspace failed with non-retryable error"
+                    );
                     return Err(error);
                 }
+                debug!(
+                    outcome = "retry",
+                    reason = %error,
+                    "prepare_workspace failed with retryable error; backing off"
+                );
                 let retry = self
                     .retry_step(
                         step,
@@ -846,6 +960,13 @@ where
             }
         };
         let session = outcome.session.clone();
+        debug!(
+            outcome = "prepared",
+            working_branch = %session.working_branch,
+            base_sha = short_sha(session.base_sha.as_deref()),
+            mount_ref = %session.mount_ref.mount_id,
+            "prepared workspace for implementation stage"
+        );
         let result = serde_json::to_value(&outcome).map_err(policy_serde_error)?;
         let completed = self
             .complete_step(step, WorkflowStepStatus::Succeeded, Some(result), None)
@@ -856,6 +977,96 @@ where
         })
     }
 
+    /// Commit + push the implementation workspace's working branch to the
+    /// provider remote so a draft PR can reference real commits. Recorded as an
+    /// idempotent workflow step (replays return the stored push outcome); a
+    /// transient push failure is retried like the prepare step.
+    async fn publish_workspace_step(
+        &self,
+        run: &GithubIssueWorkflowRun,
+        workspace_session_id: GithubIssueWorkspaceSessionId,
+    ) -> Result<PublishWorkspaceStepOutcome, GithubIssueWorkflowError> {
+        let input = json!({
+            "workflow_run_id": run.workflow_run_id,
+            "workspace_session_id": workspace_session_id.as_str(),
+            "policy_version": self.policy_version,
+        });
+        let step = self
+            .create_or_get_step(run, "publish_workspace", &input)
+            .await?;
+        if workflow_step_replays(&step.status) {
+            let Some(result) = step.result.clone() else {
+                return Err(GithubIssueWorkflowError::Policy {
+                    reason: "completed publish_workspace step had no result".to_string(),
+                });
+            };
+            let outcome: PublishWorkflowWorkspaceOutcome =
+                serde_json::from_value(result).map_err(policy_serde_error)?;
+            return Ok(PublishWorkspaceStepOutcome::Published { outcome, step });
+        }
+        let now = self.ports.clock().now();
+        if workflow_step_waits_for_retry(&step, now) {
+            return Ok(PublishWorkspaceStepOutcome::NotReady { step });
+        }
+
+        let outcome = match self
+            .ports
+            .workspace_manager()
+            .publish_workspace(PublishWorkflowWorkspaceRequest {
+                tenant_id: run.tenant_id.clone(),
+                creator_user_id: run.creator_user_id.clone(),
+                agent_id: run.agent_id.clone(),
+                project_id: run.project_id.clone(),
+                workflow_run_id: run.workflow_run_id.clone(),
+                issue: run.issue_ref.clone(),
+                workspace_session_id,
+                base_branch: run.issue_ref.default_branch.clone(),
+                commit_message: workflow_publish_commit_message(run),
+                requested_at: now,
+            })
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if !workspace_prepare_error_is_retryable(&error) {
+                    return Err(error);
+                }
+                let retry = self
+                    .retry_step(
+                        step,
+                        None,
+                        Some(json!({ "reason": error.to_string() })),
+                        now + Duration::seconds(DEFAULT_BUSY_RETRY_SECONDS),
+                    )
+                    .await?;
+                return Ok(PublishWorkspaceStepOutcome::NotReady { step: retry });
+            }
+        };
+        debug!(
+            workflow_run_id = %run.workflow_run_id,
+            working_branch = %outcome.working_branch,
+            base_branch = %outcome.base_branch,
+            head_sha = short_sha(Some(outcome.head_sha.as_str())),
+            has_changes = outcome.has_changes,
+            "published workflow workspace branch to remote"
+        );
+        let result = serde_json::to_value(&outcome).map_err(policy_serde_error)?;
+        let completed = self
+            .complete_step(step, WorkflowStepStatus::Succeeded, Some(result), None)
+            .await?;
+        Ok(PublishWorkspaceStepOutcome::Published {
+            outcome,
+            step: completed,
+        })
+    }
+
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            workflow_run_id = %run.workflow_run_id,
+            stage = stage_slug(&stage),
+        )
+    )]
     async fn start_stage_step(
         &self,
         run: GithubIssueWorkflowRun,
@@ -880,10 +1091,19 @@ where
         let step_name = Self::start_stage_step_name(&stage, trigger_idempotency_key);
         let step = self.create_or_get_step(&run, &step_name, &input).await?;
         if workflow_step_replays(&step.status) {
+            debug!(
+                stage_step_outcome = "replayed",
+                step_status = ?step.status,
+                "start_stage_step short-circuited on prior step result"
+            );
             return Ok((run, step));
         }
         let now = self.ports.clock().now();
         if workflow_step_waits_for_retry(&step, now) {
+            debug!(
+                stage_step_outcome = "busy",
+                "start_stage_step is waiting for retry backoff"
+            );
             return Ok((run, step));
         }
 
@@ -901,6 +1121,11 @@ where
             .await
         {
             let reason = error.to_string();
+            debug!(
+                stage_step_outcome = "blocked",
+                reason = %reason,
+                "start_stage_step blocked by project access denial"
+            );
             let blocked_step = self
                 .complete_step(
                     step,
@@ -922,12 +1147,26 @@ where
             })
             .await?;
         let (stage_run_id, run) = match stage_run {
-            CreateStageRunOutcome::Created { stage_run_id, run }
-            | CreateStageRunOutcome::ActiveStageExists {
+            CreateStageRunOutcome::Created { stage_run_id, run } => {
+                debug!(stage_run_id = %stage_run_id, "created new stage run");
+                (stage_run_id, run)
+            }
+            CreateStageRunOutcome::ActiveStageExists {
                 existing_stage_run_id: stage_run_id,
                 run,
-            } => (stage_run_id, run),
+            } => {
+                debug!(
+                    stage_run_id = %stage_run_id,
+                    "reusing existing active stage run"
+                );
+                (stage_run_id, run)
+            }
             CreateStageRunOutcome::Terminal => {
+                debug!(
+                    stage_step_outcome = "blocked",
+                    reason = "terminal",
+                    "start_stage_step blocked because workflow run is terminal"
+                );
                 let blocked_step = self
                     .complete_step(
                         step,
@@ -944,6 +1183,7 @@ where
             run.workflow_state.latest_provider_snapshot = latest_provider_snapshot;
         }
 
+        let stage_run_id_log = stage_run_id.clone();
         let stage_turn_identity = StageTurnIdentity::new(
             run.workflow_run_id.clone(),
             stage_run_id,
@@ -954,6 +1194,7 @@ where
         let prompt_run = run_with_workspace_session(&run, workspace_session.as_ref());
         let prompt = self.stage_prompt(&prompt_run, &stage, workspace_mount_ref.as_ref())?;
         let idempotency_key = stage_turn_identity.turn_idempotency_key();
+        let idempotency_key_log = idempotency_key.as_str().to_string();
         let outcome = self
             .ports
             .stage_turn_submitter()
@@ -979,6 +1220,29 @@ where
             }
             SubmitStageTurnOutcome::Busy { .. } => WorkflowStepStatus::Retryable,
         };
+        match &outcome {
+            SubmitStageTurnOutcome::Submitted { turn_run_id, .. } => debug!(
+                stage_step_outcome = "submitted",
+                stage_run_id = %stage_run_id_log,
+                turn_run_id = %turn_run_id,
+                idempotency_key = %idempotency_key_log,
+                "submitted stage turn"
+            ),
+            SubmitStageTurnOutcome::Replayed { turn_run_id, .. } => debug!(
+                stage_step_outcome = "replayed",
+                stage_run_id = %stage_run_id_log,
+                turn_run_id = %turn_run_id,
+                idempotency_key = %idempotency_key_log,
+                "replayed existing stage turn"
+            ),
+            SubmitStageTurnOutcome::Busy { reason } => debug!(
+                stage_step_outcome = "busy",
+                stage_run_id = %stage_run_id_log,
+                idempotency_key = %idempotency_key_log,
+                reason = %reason,
+                "stage turn submitter is busy; will retry"
+            ),
+        }
         let result = serde_json::to_value(&outcome).map_err(policy_serde_error)?;
         if let SubmitStageTurnOutcome::Busy { reason } = outcome {
             let completed = self
@@ -1322,6 +1586,18 @@ where
         next_event_cursor: i64,
         transition: WorkflowRunTransition,
     ) -> Result<GithubIssueWorkflowRun, GithubIssueWorkflowError> {
+        if let Some(to_mode) = transition.mode.as_ref() {
+            let from_mode = Self::workflow_mode_slug(&run.workflow_state.mode);
+            let to_slug = Self::workflow_mode_slug(to_mode);
+            if from_mode != to_slug {
+                debug!(
+                    workflow_run_id = %run.workflow_run_id,
+                    from_mode,
+                    to_mode = to_slug,
+                    "workflow mode transition"
+                );
+            }
+        }
         let outcome = self
             .ports
             .repository()
@@ -1451,6 +1727,16 @@ fn decode_prepare_workspace_outcome(
     })
 }
 
+/// Host-authored commit message for the implementation push. Built only from
+/// typed issue identifiers (owner/repo/number), never model free-text, so it
+/// cannot smuggle shell metacharacters or secrets into the git command.
+fn workflow_publish_commit_message(run: &GithubIssueWorkflowRun) -> String {
+    format!(
+        "ironclaw: implement fix for {}/{}#{}",
+        run.issue_ref.owner, run.issue_ref.repo, run.issue_ref.number
+    )
+}
+
 fn workspace_prepare_error_is_retryable(error: &GithubIssueWorkflowError) -> bool {
     matches!(
         error,
@@ -1577,5 +1863,22 @@ where
 fn policy_serde_error(error: serde_json::Error) -> GithubIssueWorkflowError {
     GithubIssueWorkflowError::Policy {
         reason: error.to_string(),
+    }
+}
+
+fn short_sha(sha: Option<&str>) -> String {
+    match sha {
+        Some(sha) => sha.chars().take(12).collect(),
+        None => "<none>".to_string(),
+    }
+}
+
+fn provider_action_outcome_slug(outcome: &ProviderActionRunOutcome) -> &'static str {
+    match outcome {
+        ProviderActionRunOutcome::Succeeded { .. } => "succeeded",
+        ProviderActionRunOutcome::Replayed { .. } => "replayed",
+        ProviderActionRunOutcome::NeedsReconciliation { .. } => "needs_reconciliation",
+        ProviderActionRunOutcome::Failed { .. } => "failed",
+        ProviderActionRunOutcome::Busy { .. } => "busy",
     }
 }

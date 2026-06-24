@@ -18,9 +18,9 @@ use ironclaw_host_api::{
     },
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices,
-    ReportWorkflowStageResultInput, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind, SurfaceKind,
+    CapabilitySurfacePolicy, CapabilitySurfaceVersion, ExecutingStageThread, HostRuntime,
+    HostRuntimeServices, ReportWorkflowStageResultInput, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, SurfaceKind,
     WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID, WorkflowStageResultAck, WorkflowStageResultSink,
     WorkflowStageResultSinkError, builtin_first_party_handlers,
     builtin_first_party_handlers_with_workflow_stage_result_sink, builtin_first_party_package,
@@ -61,17 +61,14 @@ async fn workflow_result_manifest_is_host_bundled_and_schema_resolves() {
             candidate.descriptor.id.as_str() == WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID
         })
         .expect("workflow result capability is visible");
+    // Only the fields the model has an authoritative source for are required.
+    // workflow_run_id/stage_run_id/turn_run_id/completion_nonce are derived by
+    // the host from the executing thread (see workflow_result.rs), so they are
+    // optional in `properties` but not `required` — the model can't fail
+    // validation by omitting a value it was never given.
     assert_eq!(
         capability.descriptor.parameters_schema["required"],
-        json!([
-            "workflow_run_id",
-            "stage_run_id",
-            "turn_run_id",
-            "stage",
-            "schema_version",
-            "completion_nonce",
-            "result"
-        ])
+        json!(["stage", "schema_version", "result"])
     );
     assert_eq!(
         capability.descriptor.parameters_schema["additionalProperties"],
@@ -104,13 +101,77 @@ async fn workflow_result_handler_forwards_to_sink() {
     );
     let calls = sink.calls();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].workflow_run_id, "workflow-run-1");
-    assert_eq!(calls[0].stage_run_id, "stage-run-1");
-    assert_eq!(calls[0].turn_run_id, "turn-run-1");
+    assert_eq!(calls[0].workflow_run_id.as_deref(), Some("workflow-run-1"));
+    assert_eq!(calls[0].stage_run_id.as_deref(), Some("stage-run-1"));
+    assert_eq!(calls[0].turn_run_id.as_deref(), Some("turn-run-1"));
     assert_eq!(calls[0].stage, "analysis");
     assert_eq!(calls[0].schema_version, "workflow.stage_result.v1");
-    assert_eq!(calls[0].completion_nonce, "nonce-1");
+    assert_eq!(calls[0].completion_nonce.as_deref(), Some("nonce-1"));
     assert_eq!(calls[0].result, json!({"summary": "fixed", "ok": true}));
+}
+
+#[tokio::test]
+async fn workflow_result_handler_accepts_minimal_input_without_identity_fields() {
+    // The model only knows {stage, schema_version, result} (the run/stage/turn
+    // ids and nonce are not injected into any stage prompt). Supplying only those
+    // must be accepted and forwarded — the host derives identity from the
+    // executing thread — with the omitted fields deserializing to None.
+    let sink = Arc::new(RecordingWorkflowSink::default());
+    let runtime = runtime_with_workflow_sink(Arc::clone(&sink));
+
+    let output = invoke_with_context(
+        &runtime,
+        WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID,
+        json!({
+            "stage": "analysis",
+            "schema_version": "workflow.stage_result.v1",
+            "result": {"summary": "fixed", "ok": true}
+        }),
+        execution_context([WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID]),
+    )
+    .await
+    .expect("minimal input (no identity fields) must be accepted");
+
+    assert_eq!(output["accepted"], json!(true));
+    let calls = sink.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].workflow_run_id, None);
+    assert_eq!(calls[0].stage_run_id, None);
+    assert_eq!(calls[0].turn_run_id, None);
+    assert_eq!(calls[0].completion_nonce, None);
+    assert_eq!(calls[0].stage, "analysis");
+}
+
+#[tokio::test]
+async fn report_stage_result_handler_forwards_trusted_executing_thread() {
+    // Test-through-the-caller guard: the handler must forward the trusted
+    // host-stamped executing thread scope to the sink, not drop it. The sink
+    // derives authoritative stage identity from this thread, so losing it
+    // would silently disable binding enforcement.
+    let sink = Arc::new(RecordingWorkflowSink::default());
+    let runtime = runtime_with_workflow_sink(Arc::clone(&sink));
+
+    let thread_id =
+        ironclaw_host_api::ThreadId::new("github-issue-workflow:wf-1:stage:stage-1").unwrap();
+    let mut context = execution_context([WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID]);
+    context.thread_id = Some(thread_id.clone());
+    context.resource_scope.thread_id = Some(thread_id.clone());
+    context
+        .validate()
+        .expect("execution context with a thread id is valid");
+
+    invoke_with_context(
+        &runtime,
+        WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID,
+        valid_input(),
+        context,
+    )
+    .await
+    .unwrap();
+
+    let threads = sink.threads();
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0].scope.thread_id, Some(thread_id));
 }
 
 #[tokio::test]
@@ -255,11 +316,16 @@ fn workflow_sink_handlers_registers_result_capability() {
 #[derive(Default)]
 struct RecordingWorkflowSink {
     calls: Mutex<Vec<ReportWorkflowStageResultInput>>,
+    threads: Mutex<Vec<ExecutingStageThread>>,
 }
 
 impl RecordingWorkflowSink {
     fn calls(&self) -> Vec<ReportWorkflowStageResultInput> {
         self.calls.lock().unwrap().clone()
+    }
+
+    fn threads(&self) -> Vec<ExecutingStageThread> {
+        self.threads.lock().unwrap().clone()
     }
 }
 
@@ -267,13 +333,15 @@ impl RecordingWorkflowSink {
 impl WorkflowStageResultSink for RecordingWorkflowSink {
     async fn report_stage_result(
         &self,
+        executing_thread: ExecutingStageThread,
         input: ReportWorkflowStageResultInput,
     ) -> Result<WorkflowStageResultAck, WorkflowStageResultSinkError> {
+        self.threads.lock().unwrap().push(executing_thread);
         self.calls.lock().unwrap().push(input.clone());
         Ok(WorkflowStageResultAck {
             accepted: true,
             duplicate: false,
-            stage_run_id: input.stage_run_id,
+            stage_run_id: input.stage_run_id.unwrap_or_default(),
         })
     }
 }
@@ -291,6 +359,7 @@ struct EchoingReasonWorkflowSink {
 impl WorkflowStageResultSink for EchoingReasonWorkflowSink {
     async fn report_stage_result(
         &self,
+        _executing_thread: ExecutingStageThread,
         input: ReportWorkflowStageResultInput,
     ) -> Result<WorkflowStageResultAck, WorkflowStageResultSinkError> {
         let echoed_result = input

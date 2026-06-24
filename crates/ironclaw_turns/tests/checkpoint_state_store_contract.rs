@@ -799,6 +799,7 @@ fn turn_persistence_snapshot_legacy_run_defaults_resume_disposition_to_none() {
             max_capability_invocations: 32,
         },
         personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
+        budget_approval_mode: Default::default(),
         runtime_constraints: RuntimeProfileConstraints {
             allow_raw_runtime_backend_selection: false,
             allow_broad_capability_surface: false,
@@ -939,6 +940,7 @@ fn turn_persistence_snapshot_legacy_run_preserves_denied_resume_disposition() {
             max_capability_invocations: 32,
         },
         personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
+        budget_approval_mode: Default::default(),
         runtime_constraints: RuntimeProfileConstraints {
             allow_raw_runtime_backend_selection: false,
             allow_broad_capability_surface: false,

@@ -125,7 +125,7 @@ pub use skill_context::{
     SkillRunSnapshot, SkillTrustLevel, SkillVisibility, is_skill_snippet_model_message_ref,
     skill_snippet_model_message_ref,
 };
-pub use snapshot::{PersonalContextPolicy, ResolvedRunProfile};
+pub use snapshot::{BudgetApprovalMode, PersonalContextPolicy, ResolvedRunProfile};
 pub use snippet_ref::memory_snippet_display_ref;
 pub use system_inference::{
     SystemInferenceError, SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,

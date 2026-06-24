@@ -493,10 +493,10 @@ tenant/user fields.
 | `POST` | `/api/reborn/product-auth/manual-token/submit` | One-shot manual-token setup + secret-submit (legacy WebUI shape, compatibility). |
 | `POST` | `/api/reborn/product-auth/manual-token/setup` | Mint a manual-token interaction challenge; returns `interaction_id` + `invocation_id`. |
 | `POST` | `/api/reborn/product-auth/manual-token/secret-submit` | Submit the raw token for an existing `interaction_id`; model transcript, tool arguments, logs, and durable events only ever see the redacted `credential_submitted` / `auth_failed` projection. |
-| `POST` | `/api/reborn/product-auth/accounts/list` | List redacted credential account projections for a provider. |
-| `POST` | `/api/reborn/product-auth/accounts/select` | Select a single configured account by id; returns its redacted projection. |
-| `POST` | `/api/reborn/product-auth/accounts/recovery` | Project the stable recovery state for a provider (configured / setup_required / reauthorize_required / account_selection_required). |
-| `POST` | `/api/reborn/product-auth/accounts/refresh` | Refresh / reauthorize an account; returns `CredentialRefreshReport` + projected recovery state. |
+| `POST` | `/api/webchat/v2/extensions/{package_id}/accounts/list` | List redacted credential account projections for a provider, scoped to the requester extension. |
+| `POST` | `/api/webchat/v2/extensions/{package_id}/accounts/select` | Select a single configured account by id, scoped to the requester extension; returns its redacted projection. |
+| `POST` | `/api/webchat/v2/extensions/{package_id}/accounts/recovery` | Project the stable recovery state for a provider (configured / setup_required / reauthorize_required / account_selection_required), scoped to the requester extension. |
+| `POST` | `/api/webchat/v2/extensions/{package_id}/accounts/refresh` | Refresh / reauthorize an account, scoped to the requester extension; returns `CredentialRefreshReport` + projected recovery state. |
 | `POST` | `/api/reborn/product-auth/lifecycle/cleanup` | Apply ownership-aware deactivate/uninstall cleanup for an extension; returns a redacted `SecretCleanupReport`. |
 
 Rules:
@@ -508,6 +508,16 @@ Rules:
 - Manual-token setup and secret-submit are linked by `interaction_id` plus an
   `invocation_id` round-tripped through the browser, matching the OAuth
   start/callback pattern.
+- The four account routes (`list`/`select`/`recovery`/`refresh`) are
+  extension-scoped: the requester extension is carried as a trusted
+  `{package_id}` URL path segment and derived server-side via
+  `ExtensionId::new(package_id)` (mirroring
+  `/api/webchat/v2/extensions/{package_id}/setup/oauth/start`). It is never read
+  from the request body — a stray `requester_extension` body key is ignored. An
+  invalid/empty `{package_id}` is rejected with `invalid_request` before any
+  backend call. The frontend must call these with the extension as the path
+  segment (see the established `extensions-api.js`
+  `/api/webchat/v2/extensions/${packageId}/...` pattern), not as a body field.
 - Google OAuth setup is configured in the Reborn host process from env-only
   values: `IRONCLAW_REBORN_GOOGLE_CLIENT_ID`,
   `IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI`, optional

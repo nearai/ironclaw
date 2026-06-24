@@ -3,7 +3,7 @@ use ironclaw_filesystem::FilesystemError;
 use std::time::Duration;
 
 use ironclaw_host_api::{
-    EffectKind, PermissionMode, ResourceCeiling, ResourceEstimate, ResourceProfile,
+    EffectKind, MountView, PermissionMode, ResourceCeiling, ResourceEstimate, ResourceProfile,
     RuntimeDispatchErrorKind, SandboxQuota, ScopedPath, VirtualPath,
 };
 use serde_json::{Value, json};
@@ -66,7 +66,7 @@ pub(super) async fn dispatch(
     request: &FirstPartyCapabilityRequest,
 ) -> Result<(Value, Duration), FirstPartyCapabilityError> {
     let parsed = shell_core::parse_shell_request(&request.input).map_err(shell_error)?;
-    reject_unbacked_scoped_workdir(request, parsed.workdir.as_deref())?;
+    reject_unbacked_scoped_workdir(request.mounts.as_ref(), parsed.workdir.as_deref())?;
     if parsed
         .timeout_secs
         .is_some_and(|timeout_secs| timeout_secs > MAX_SHELL_TIMEOUT_SECS)
@@ -209,17 +209,13 @@ fn render_shell_output(
 }
 
 fn reject_unbacked_scoped_workdir(
-    request: &FirstPartyCapabilityRequest,
+    mounts: Option<&MountView>,
     workdir: Option<&str>,
 ) -> Result<(), FirstPartyCapabilityError> {
     let Some(workdir) = workdir else {
         return Ok(());
     };
-    let Some(mounts) = request
-        .mounts
-        .as_ref()
-        .filter(|mounts| !mounts.mounts.is_empty())
-    else {
+    let Some(mounts) = mounts.filter(|mounts| !mounts.mounts.is_empty()) else {
         return Ok(());
     };
     let scoped_path = ScopedPath::new(workdir.to_string())
@@ -233,12 +229,14 @@ fn reject_unbacked_scoped_workdir(
         ));
     }
 
-    // Shell execution still uses the local process fallback. Until the resolved
-    // process backend can receive virtual cwd + scoped mounts, fail closed rather
-    // than translating scoped paths to ambient host paths in this handler.
-    Err(FirstPartyCapabilityError::new(
-        RuntimeDispatchErrorKind::Client,
-    ))
+    // The scoped workdir resolves to a mount grant that permits execution. The
+    // resolved process backend (LocalHostProcessPort) receives the same
+    // `MountView` on the CommandExecutionRequest and translates the scoped
+    // `/workspace` workdir to the backing host path via its workdir aliases, so
+    // the command runs inside the mounted workspace rather than the ambient host
+    // cwd. (Previously this handler failed closed because the backend could not
+    // yet translate scoped paths; that is no longer true.)
+    Ok(())
 }
 
 fn shell_error(error: shell_core::ShellExecutionError) -> FirstPartyCapabilityError {
@@ -326,5 +324,47 @@ mod tests {
             max_saved_stream_size: 16,
             expires_at_unix_secs: 1,
         }
+    }
+
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions};
+
+    fn workspace_mounts(permissions: MountPermissions) -> MountView {
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("alias"),
+            VirtualPath::new("/projects/github-issue-workspaces/session-1").expect("virtual path"),
+            permissions,
+        )])
+        .expect("mount view")
+    }
+
+    #[test]
+    fn scoped_workdir_backed_by_execute_grant_is_allowed() {
+        // The implementation-stage workspace mount carries execute, so a shell
+        // call scoped to /workspace must be accepted (the process backend then
+        // translates it to the host clone path).
+        let mounts = workspace_mounts(MountPermissions::read_write_list_delete_execute());
+        assert!(reject_unbacked_scoped_workdir(Some(&mounts), Some("/workspace")).is_ok());
+        assert!(reject_unbacked_scoped_workdir(Some(&mounts), Some("/workspace/crates")).is_ok());
+    }
+
+    #[test]
+    fn scoped_workdir_without_execute_grant_is_rejected() {
+        // A read/write-but-not-execute mount must NOT permit shell execution.
+        let mounts = workspace_mounts(MountPermissions::read_write());
+        assert!(reject_unbacked_scoped_workdir(Some(&mounts), Some("/workspace")).is_err());
+    }
+
+    #[test]
+    fn scoped_workdir_outside_any_grant_is_rejected() {
+        let mounts = workspace_mounts(MountPermissions::read_write_list_delete_execute());
+        assert!(reject_unbacked_scoped_workdir(Some(&mounts), Some("/etc")).is_err());
+    }
+
+    #[test]
+    fn unscoped_workdir_and_missing_workdir_are_allowed() {
+        // No mounts at all (plain local-dev) and no workdir are both fine.
+        assert!(reject_unbacked_scoped_workdir(None, Some("/some/host/path")).is_ok());
+        let mounts = workspace_mounts(MountPermissions::read_write_list_delete_execute());
+        assert!(reject_unbacked_scoped_workdir(Some(&mounts), None).is_ok());
     }
 }

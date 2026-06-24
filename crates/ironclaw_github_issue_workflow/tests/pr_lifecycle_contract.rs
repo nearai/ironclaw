@@ -240,6 +240,61 @@ mod pr_lifecycle_contract {
         }
     }
 
+    /// Attach a prepared workspace session to a run, as the Implementation
+    /// transition does in a real run. Required before PrSynthesis so the
+    /// publish-workspace step has a session to push.
+    async fn attach_workspace_session(
+        repository: &InMemoryGithubIssueWorkflowRepository,
+        run: GithubIssueWorkflowRun,
+    ) -> GithubIssueWorkflowRun {
+        let workspace_session_id =
+            GithubIssueWorkspaceSessionId::from_trusted("workspace-session-pr".to_string())
+                .unwrap();
+        let session = GithubIssueWorkspaceSession {
+            workspace_session_id: workspace_session_id.clone(),
+            workflow_run_id: run.workflow_run_id.clone(),
+            repository: GithubRepositorySelector {
+                owner: run.issue_ref.owner.clone(),
+                repo: run.issue_ref.repo.clone(),
+            },
+            base_branch: run.issue_ref.default_branch.clone(),
+            base_sha: None,
+            working_branch: "ironclaw/fix-42".to_string(),
+            current_head_sha: Some("head-sha-42".to_string()),
+            workspace_ref: WorkflowWorkspaceRef {
+                thread_id: None,
+                workspace_session_id: Some(workspace_session_id),
+                turn_run_id: None,
+            },
+            mount_ref: WorkflowWorkspaceMountRef {
+                mount_id: "workspace-mount-pr".to_string(),
+                alias: "/workspace".to_string(),
+            },
+            created_at: fixed_time(20),
+        };
+        let outcome = repository
+            .advance_event_cursor_and_transition(
+                ironclaw_github_issue_workflow::AdvanceWorkflowRunInput {
+                    workflow_run_id: run.workflow_run_id.clone(),
+                    worker_id: worker(),
+                    expected_workflow_run_version: run.workflow_run_version,
+                    expected_event_cursor: run.event_cursor,
+                    next_event_cursor: run.event_cursor,
+                    transition: WorkflowRunTransition {
+                        workspace_session: Some(session),
+                        ..WorkflowRunTransition::default()
+                    },
+                    now: fixed_time(21),
+                },
+            )
+            .await
+            .unwrap();
+        match outcome {
+            ironclaw_github_issue_workflow::TransitionOutcome::Applied { run } => run,
+            other => panic!("workspace session transition should apply: {other:?}"),
+        }
+    }
+
     async fn record_stage_completed(
         repository: &InMemoryGithubIssueWorkflowRepository,
         run: &GithubIssueWorkflowRun,
@@ -593,6 +648,21 @@ mod pr_lifecycle_contract {
                 },
             })
         }
+
+        async fn publish_workspace(
+            &self,
+            request: ironclaw_github_issue_workflow::PublishWorkflowWorkspaceRequest,
+        ) -> Result<
+            ironclaw_github_issue_workflow::PublishWorkflowWorkspaceOutcome,
+            GithubIssueWorkflowError,
+        > {
+            Ok(ironclaw_github_issue_workflow::PublishWorkflowWorkspaceOutcome {
+                working_branch: "ironclaw/fix-42".to_string(),
+                base_branch: request.base_branch,
+                head_sha: "head-sha-42".to_string(),
+                has_changes: true,
+            })
+        }
     }
 
     #[derive(Debug, Default)]
@@ -731,6 +801,7 @@ mod pr_lifecycle_contract {
             None,
         )
         .await;
+        let run = attach_workspace_session(&policy.ports().repository, run).await;
         record_stage_completed(
             &policy.ports().repository,
             &run,

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tracing::debug;
 
 use crate::{
     ClaimProviderActionInput, ClaimProviderActionOutcome, CompleteProviderActionInput,
@@ -161,6 +162,16 @@ where
         Self { repository, port }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            op = "claim_comment",
+            workflow_run_id = %request.run.workflow_run_id,
+            owner = %request.run.issue_ref.owner,
+            repo = %request.run.issue_ref.repo,
+            issue = request.run.issue_ref.number,
+        )
+    )]
     pub async fn run_claim_comment(
         &self,
         request: RunClaimCommentProviderActionRequest,
@@ -195,18 +206,32 @@ where
 
         match claimed {
             ClaimProviderActionOutcome::Claimed { action } => {
+                debug!(claim = "claimed", "executing claim-comment provider action");
                 self.run_claimed_claim_comment(request, action, marker)
                     .await
             }
             ClaimProviderActionOutcome::AlreadyCompleted { action } => {
+                debug!(claim = "already_completed", "claim-comment action replayed");
                 Ok(ProviderActionRunOutcome::Replayed { action })
             }
             ClaimProviderActionOutcome::Busy { action } => {
+                debug!(claim = "busy", "claim-comment action lease is busy");
                 Ok(ProviderActionRunOutcome::Busy { action })
             }
         }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            op = "draft_pull_request",
+            workflow_run_id = %request.run.workflow_run_id,
+            owner = %request.run.issue_ref.owner,
+            repo = %request.run.issue_ref.repo,
+            issue = request.run.issue_ref.number,
+            account_id = %request.provider_account_ref.account_id,
+        )
+    )]
     pub async fn run_draft_pull_request(
         &self,
         request: RunDraftPullRequestProviderActionRequest,
@@ -242,13 +267,19 @@ where
 
         match claimed {
             ClaimProviderActionOutcome::Claimed { action } => {
+                debug!(claim = "claimed", "executing draft-pull-request provider action");
                 self.run_claimed_draft_pull_request(request, action, marker)
                     .await
             }
             ClaimProviderActionOutcome::AlreadyCompleted { action } => {
+                debug!(
+                    claim = "already_completed",
+                    "draft-pull-request action replayed"
+                );
                 Ok(ProviderActionRunOutcome::Replayed { action })
             }
             ClaimProviderActionOutcome::Busy { action } => {
+                debug!(claim = "busy", "draft-pull-request action lease is busy");
                 Ok(ProviderActionRunOutcome::Busy { action })
             }
         }
@@ -269,7 +300,14 @@ where
             .await
         {
             Ok(actor) => actor,
-            Err(_) => {
+            Err(error) => {
+                debug!(
+                    %error,
+                    op = "get_authenticated_workflow_actor",
+                    workflow_run_id = %request.run.workflow_run_id,
+                    failure_kind = "provider_read_failed",
+                    "provider action failed before sanitizing failure"
+                );
                 let action = self
                     .complete_sanitized_failure(
                         &action,
@@ -290,7 +328,14 @@ where
             .await
         {
             Ok(comments) => comments,
-            Err(_) => {
+            Err(error) => {
+                debug!(
+                    %error,
+                    op = "list_issue_comments",
+                    workflow_run_id = %request.run.workflow_run_id,
+                    failure_kind = "provider_read_failed",
+                    "provider action failed before sanitizing failure"
+                );
                 let action = self
                     .complete_sanitized_failure(
                         &action,
@@ -308,6 +353,11 @@ where
             .filter(|comment| comment.body.contains(&marker))
             .collect();
         if matching_comments.len() > 1 {
+            debug!(
+                matching = matching_comments.len(),
+                failure_kind = "ambiguous_claim_comment",
+                "multiple claim-comment markers found; needs reconciliation"
+            );
             let action = self
                 .complete_needs_reconciliation(
                     &action,
@@ -341,6 +391,10 @@ where
                     .await;
             }
 
+            debug!(
+                failure_kind = "claim_comment_marker_author_mismatch",
+                "claim-comment marker authored by another actor; needs reconciliation"
+            );
             let action = self
                 .complete_needs_reconciliation(
                     &action,
@@ -362,7 +416,14 @@ where
             .await
         {
             Ok(comment) => comment,
-            Err(_) => {
+            Err(error) => {
+                debug!(
+                    %error,
+                    op = "create_issue_comment",
+                    workflow_run_id = %request.run.workflow_run_id,
+                    failure_kind = "provider_write_failed",
+                    "provider action failed before sanitizing failure"
+                );
                 let action = self
                     .complete_sanitized_failure(
                         &action,
@@ -408,7 +469,14 @@ where
             .await
         {
             Ok(pull_requests) => pull_requests,
-            Err(_) => {
+            Err(error) => {
+                debug!(
+                    %error,
+                    op = "list_pull_requests",
+                    workflow_run_id = %request.run.workflow_run_id,
+                    failure_kind = "provider_read_failed",
+                    "provider action failed before sanitizing failure"
+                );
                 let action = self
                     .complete_sanitized_failure(
                         &action,
@@ -429,6 +497,11 @@ where
             })
             .collect();
         if matching_pull_requests.len() > 1 {
+            debug!(
+                matching = matching_pull_requests.len(),
+                failure_kind = "ambiguous_draft_pull_request",
+                "multiple draft pull requests match marker; needs reconciliation"
+            );
             let action = self
                 .complete_needs_reconciliation(
                     &action,
@@ -469,7 +542,14 @@ where
             .await
         {
             Ok(pull_request) => pull_request,
-            Err(_) => {
+            Err(error) => {
+                debug!(
+                    %error,
+                    op = "create_draft_pull_request",
+                    workflow_run_id = %request.run.workflow_run_id,
+                    failure_kind = "provider_write_failed",
+                    "provider action failed before sanitizing failure"
+                );
                 let action = self
                     .complete_sanitized_failure(
                         &action,

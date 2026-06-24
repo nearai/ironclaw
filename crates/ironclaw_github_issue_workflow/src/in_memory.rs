@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use tokio::sync::Mutex;
+use tracing::debug;
 
 use crate::{
     AcceptStageResultInput, AcceptStageResultOutcome, AdvanceWorkflowRunInput,
@@ -412,6 +413,11 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
         run.workflow_run_version += 1;
         run.updated_at = input.now;
 
+        debug!(
+            workflow_run_id = %input.workflow_run_id,
+            outcome = "blocked",
+            "in-memory repository blocked workflow run"
+        );
         Ok(BlockWorkflowRunOutcome::Blocked { run: run.clone() })
     }
 
@@ -531,9 +537,20 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
         })?;
 
         if is_terminal(&run.status) {
+            debug!(
+                workflow_run_id = %workflow_run_id,
+                outcome = "terminal",
+                "create_stage_run rejected on terminal run"
+            );
             return Ok(CreateStageRunOutcome::Terminal);
         }
         if let Some(active_stage_run_id) = run.active_stage_run_id.clone() {
+            debug!(
+                workflow_run_id = %workflow_run_id,
+                stage_run_id = %active_stage_run_id,
+                outcome = "active_stage_exists",
+                "create_stage_run found existing active stage"
+            );
             return Ok(CreateStageRunOutcome::ActiveStageExists {
                 existing_stage_run_id: active_stage_run_id,
                 run: run.clone(),
@@ -546,6 +563,14 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
         run.updated_at = now;
         let updated_run = run.clone();
 
+        // Split-brain gap: the run row now points at the stage run, but the
+        // stage_runs table has not been written yet. A crash here would orphan
+        // the active_stage_run_id pointer.
+        debug!(
+            workflow_run_id = %workflow_run_id,
+            stage_run_id = %stage_run_id,
+            "create_stage_run pointer written; persisting stage run row"
+        );
         state.stage_runs_by_id.insert(
             stage_run_id.clone(),
             InMemoryStageRun {
@@ -555,6 +580,11 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
             },
         );
 
+        debug!(
+            stage_run_id = %stage_run_id,
+            outcome = "created",
+            "create_stage_run created new stage run"
+        );
         Ok(CreateStageRunOutcome::Created {
             stage_run_id,
             run: updated_run,
@@ -577,9 +607,20 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
             })?;
 
         if is_terminal(&run.status) {
+            debug!(
+                workflow_run_id = %input.workflow_run_id,
+                outcome = "terminal",
+                "accept_stage_result rejected on terminal run"
+            );
             return Ok(AcceptStageResultOutcome::Terminal);
         }
         if run.active_stage_run_id.as_ref() != Some(&input.stage_run_id) {
+            debug!(
+                workflow_run_id = %input.workflow_run_id,
+                stage_run_id = %input.stage_run_id,
+                outcome = "not_active_stage",
+                "accept_stage_result stage run is not the active stage"
+            );
             return Ok(AcceptStageResultOutcome::NotActiveStage { run: run.clone() });
         }
         let stage_is_active_for_run = state
@@ -588,6 +629,12 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
             .map(|stage_run| stage_run.workflow_run_id == input.workflow_run_id && stage_run.active)
             .unwrap_or(false);
         if !stage_is_active_for_run {
+            debug!(
+                workflow_run_id = %input.workflow_run_id,
+                stage_run_id = %input.stage_run_id,
+                outcome = "not_active_stage",
+                "accept_stage_result stage run row is not active"
+            );
             return Ok(AcceptStageResultOutcome::NotActiveStage { run: run.clone() });
         }
 
@@ -606,6 +653,13 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
         run.updated_at = input.now;
         let updated_run = run.clone();
 
+        // Split-brain gap: the run row already cleared its active stage pointer,
+        // but the stage run row is still marked active until the write below.
+        debug!(
+            workflow_run_id = %input.workflow_run_id,
+            stage_run_id = %input.stage_run_id,
+            "accept_stage_result cleared active pointer; persisting stage run result"
+        );
         let stage_run = state
             .stage_runs_by_id
             .get_mut(&input.stage_run_id)
@@ -613,6 +667,12 @@ impl GithubIssueWorkflowRepository for InMemoryGithubIssueWorkflowRepository {
         stage_run.result = Some(input.result);
         stage_run.active = false;
 
+        debug!(
+            workflow_run_id = %input.workflow_run_id,
+            stage_run_id = %input.stage_run_id,
+            outcome = "accepted",
+            "accept_stage_result accepted stage result"
+        );
         Ok(AcceptStageResultOutcome::Accepted { run: updated_run })
     }
 

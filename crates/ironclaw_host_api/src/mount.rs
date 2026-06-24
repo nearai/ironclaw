@@ -66,6 +66,23 @@ impl MountPermissions {
         }
     }
 
+    /// Full workspace authority: read + write + list + delete + execute.
+    ///
+    /// Use for an isolated agent workspace mount (e.g. the GitHub issue
+    /// workflow's cloned `/workspace` checkout) where the stage agent must be
+    /// able to edit and delete files AND run shell/build/test commands scoped
+    /// to that mount. `execute` is required for the shell handler to accept a
+    /// scoped `workdir` under this mount; without it shell calls fail closed.
+    pub fn read_write_list_delete_execute() -> Self {
+        Self {
+            read: true,
+            write: true,
+            delete: true,
+            list: true,
+            execute: true,
+        }
+    }
+
     pub fn is_subset_of(&self, parent: &Self) -> bool {
         (!self.read || parent.read)
             && (!self.write || parent.write)

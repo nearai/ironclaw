@@ -4,6 +4,7 @@ use chrono::{DateTime, Duration, Utc};
 use ironclaw_host_api::{ProjectId, TenantId, UserId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
+use tracing::debug;
 
 use crate::{
     BlockWorkflowRunInput, ClaimRunnableWorkflowRunsInput, CreateOrGetWorkflowRunInput,
@@ -88,12 +89,17 @@ where
         &self.ports
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(worker_id = %self.ports.worker_id(), policy_key = %self.workflow_policy_key)
+    )]
     pub async fn tick_once(
         &self,
     ) -> Result<GithubIssueWorkflowPollerTickOutcome, GithubIssueWorkflowError> {
         let mut outcome = GithubIssueWorkflowPollerTickOutcome::default();
         if !self.config.enabled {
             outcome.disabled = true;
+            debug!("github issue workflow poller is disabled; skipping tick");
             return Ok(outcome);
         }
 
@@ -103,6 +109,7 @@ where
             .list_enabled_workflow_configs()
             .await?;
         outcome.configs_loaded = configs.len();
+        debug!(configs_loaded = outcome.configs_loaded, "poller tick started");
 
         let mut repos_remaining = self.config.max_repos_per_tick;
         let mut claim_tenants = Vec::new();
@@ -157,6 +164,18 @@ where
 
         self.tick_runnable_runs(&claim_tenants, &mut outcome)
             .await?;
+        debug!(
+            repositories_scanned = outcome.repositories_scanned,
+            issues_seen = outcome.issues_seen,
+            events_recorded = outcome.events_recorded,
+            events_deduped = outcome.events_deduped,
+            runnable_runs_claimed = outcome.runnable_runs_claimed,
+            policy_ticks = outcome.policy_ticks,
+            leases_released = outcome.leases_released,
+            blocked_configs = outcome.blocked_configs.len(),
+            blocked_runs = outcome.blocked_runs.len(),
+            "poller tick completed"
+        );
         Ok(outcome)
     }
 
@@ -176,6 +195,14 @@ where
             .await
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            owner = %repository.owner,
+            repo = %repository.repo,
+            account_id = %workflow_config.provider_account_ref.account_id,
+        )
+    )]
     async fn discover_repository(
         &self,
         workflow_config: &GithubIssueWorkflowConfig,
@@ -195,6 +222,7 @@ where
             })
             .await?;
         outcome.repositories_scanned += 1;
+        debug!(hits = hits.len(), "discovered open bug issue candidates");
 
         for hit in hits
             .into_iter()
@@ -216,6 +244,12 @@ where
                 .candidate_selector
                 .allows_author_login(snapshot.author_login.as_deref())
             {
+                debug!(
+                    issue = hit.number,
+                    author_login = snapshot.author_login.as_deref().unwrap_or("<none>"),
+                    outcome = "skipped",
+                    "author allowlist denied issue candidate"
+                );
                 continue;
             }
             let issue_ref = snapshot.issue_ref();
@@ -244,6 +278,12 @@ where
 
             let (run, event_type) = match run_outcome {
                 CreateOrGetWorkflowRunOutcome::Created { run } => {
+                    debug!(
+                        issue = hit.number,
+                        workflow_run_id = %run.workflow_run_id,
+                        outcome = "discovered",
+                        "created workflow run for newly discovered issue"
+                    );
                     (run, GithubIssueWorkflowEventType::GithubIssueDiscovered)
                 }
                 CreateOrGetWorkflowRunOutcome::Existing { run } => {
@@ -257,8 +297,20 @@ where
                         .await?
                     {
                         outcome.events_deduped += 1;
+                        debug!(
+                            issue = hit.number,
+                            workflow_run_id = %run.workflow_run_id,
+                            outcome = "deduped",
+                            "issue change already recorded; skipping"
+                        );
                         continue;
                     }
+                    debug!(
+                        issue = hit.number,
+                        workflow_run_id = %run.workflow_run_id,
+                        outcome = "changed",
+                        "issue changed since last observation"
+                    );
                     (run, GithubIssueWorkflowEventType::GithubIssueChanged)
                 }
             };
@@ -696,6 +748,14 @@ where
                 .await?;
             remaining = remaining.saturating_sub(claimed.len());
             outcome.runnable_runs_claimed += claimed.len();
+            if !claimed.is_empty() {
+                debug!(
+                    tenant = %tenant_id,
+                    worker_id = %self.ports.worker_id(),
+                    claimed = claimed.len(),
+                    "claimed runnable workflow runs"
+                );
+            }
 
             for run in claimed {
                 self.tick_claimed_run(run, outcome).await?;
@@ -704,11 +764,24 @@ where
         Ok(())
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            workflow_run_id = %run.workflow_run_id,
+            issue = run.issue_ref.number,
+            worker_id = %self.ports.worker_id(),
+        )
+    )]
     async fn tick_claimed_run(
         &self,
         run: crate::GithubIssueWorkflowRun,
         outcome: &mut GithubIssueWorkflowPollerTickOutcome,
     ) -> Result<(), GithubIssueWorkflowError> {
+        debug!(
+            event_cursor = run.event_cursor,
+            active_stage = run.active_stage_run_id.is_some(),
+            "ticking claimed workflow run"
+        );
         let policy = GithubIssueWorkflowPolicy::new(
             self.policy_ports(),
             self.workflow_policy_version.clone(),
@@ -716,6 +789,12 @@ where
         match policy.tick(run.clone()).await {
             Ok(policy_outcome) => {
                 outcome.policy_ticks += 1;
+                if policy_outcome.processed_event_count == 0 {
+                    debug!(
+                        active_stage = policy_outcome.run.active_stage_run_id.is_some(),
+                        "claimed run produced no new event (stuck-run no-op)"
+                    );
+                }
                 let release = self
                     .ports
                     .repository()
@@ -733,6 +812,11 @@ where
             Err(error) => {
                 let reason = error.to_string();
                 let kind = run_block_kind(&error);
+                debug!(
+                    kind = ?kind,
+                    reason = %reason,
+                    "blocking workflow run after policy tick failure"
+                );
                 self.ports
                     .repository()
                     .block_workflow_run(BlockWorkflowRunInput {

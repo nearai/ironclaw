@@ -32,6 +32,12 @@ pub struct ResolvedRunProfile {
     pub resource_budget_policy: ResourceBudgetPolicy,
     #[serde(default)]
     pub personal_context_policy: PersonalContextPolicy,
+    /// Whether this run can satisfy an interactive budget-approval gate. Headless
+    /// runs (the GitHub issue workflow stages, background jobs) are
+    /// `NonInteractive`: a budget-cap crossing must degrade to a recoverable
+    /// error rather than open an approval gate no human will ever answer.
+    #[serde(default)]
+    pub budget_approval_mode: BudgetApprovalMode,
     pub runtime_constraints: RuntimeProfileConstraints,
     pub runner_pool_id: Option<RunnerPoolId>,
     pub scheduling_class: SchedulingClass,
@@ -54,6 +60,33 @@ impl PersonalContextPolicy {
             Self::Excluded => "excluded",
             Self::Allowed => "allowed",
         }
+    }
+}
+
+/// Whether a run can satisfy an interactive budget-approval gate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetApprovalMode {
+    /// A human can resolve a budget-approval gate (CLI/REPL/web). Default — keeps
+    /// existing and legacy profiles fail-safe (still gated).
+    #[default]
+    Interactive,
+    /// No human is available to approve (headless workflow / background run). A
+    /// budget-cap crossing degrades to a recoverable `BudgetExceeded` error
+    /// instead of opening an approval gate that would strand the run.
+    NonInteractive,
+}
+
+impl BudgetApprovalMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Interactive => "interactive",
+            Self::NonInteractive => "non_interactive",
+        }
+    }
+
+    pub fn is_non_interactive(self) -> bool {
+        matches!(self, Self::NonInteractive)
     }
 }
 
@@ -106,6 +139,7 @@ impl ResolvedRunProfile {
                 max_capability_invocations: 64,
             },
             personal_context_policy: PersonalContextPolicy::Excluded,
+            budget_approval_mode: BudgetApprovalMode::Interactive,
             runtime_constraints: RuntimeProfileConstraints {
                 allow_raw_runtime_backend_selection: false,
                 allow_broad_capability_surface: false,

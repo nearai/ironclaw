@@ -55,6 +55,15 @@ const SAFE_ENV_VARS: &[&str] = &[
     "RUSTUP_HOME",
     "NODE_PATH",
     "NPM_CONFIG_PREFIX",
+    // Package-locator roots so a Scrubbed-env shell can still discover
+    // user/global test tooling (pytest/pip user-site, gem, virtualenv) without
+    // inheriting the real HOME. These are path roots, not secret-bearing.
+    "PYTHONUSERBASE",
+    "PYTHONPATH",
+    "PIP_CONFIG_FILE",
+    "GEM_HOME",
+    "GEM_PATH",
+    "VIRTUAL_ENV",
     "EDITOR",
     "VISUAL",
     "SystemRoot",
@@ -182,6 +191,10 @@ pub struct LocalHostProcessPort {
     env_mode: LocalHostProcessEnvMode,
     workdir_aliases: Vec<LocalHostWorkdirAlias>,
     virtual_root_aliases: Vec<LocalHostVirtualRootAlias>,
+    /// Optional "tool home" used ONLY to make installed user/global test runners
+    /// discoverable in Scrubbed mode (by deriving `PYTHONUSERBASE`). The real
+    /// `HOME` is never forwarded, so dotfiles/SSH/cloud creds stay unexposed.
+    tool_home: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +232,7 @@ impl LocalHostProcessPort {
             env_mode: LocalHostProcessEnvMode::Scrubbed,
             workdir_aliases: Vec::new(),
             virtual_root_aliases: Vec::new(),
+            tool_home: None,
         }
     }
 
@@ -227,7 +241,19 @@ impl LocalHostProcessPort {
             env_mode: LocalHostProcessEnvMode::Inherited,
             workdir_aliases: Vec::new(),
             virtual_root_aliases: Vec::new(),
+            tool_home: None,
         }
+    }
+
+    /// Set a "tool home" used ONLY to make installed user/global test runners
+    /// (e.g. Python user-site `pytest`) discoverable in Scrubbed mode, by
+    /// deriving `PYTHONUSERBASE` from it. `HOME` stays pinned to the command
+    /// workdir — the real home is NEVER forwarded, so dotfiles, SSH keys, and
+    /// cloud credentials remain unexposed to the agent-driven shell. Local-dev
+    /// host execution only; production uses the per-project sandbox.
+    pub fn with_tool_home(mut self, tool_home: impl Into<PathBuf>) -> Self {
+        self.tool_home = Some(tool_home.into());
+        self
     }
 
     pub fn with_workdir_alias(
@@ -306,8 +332,19 @@ impl RuntimeProcessPort for LocalHostProcessPort {
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         let aliases = self.effective_workdir_aliases(request.mounts.as_ref());
+        // When the caller scopes execution with a `MountView` (e.g. a GitHub
+        // issue workflow stage running inside its cloned `/workspace`) but omits
+        // an explicit `workdir`, default the working directory to the primary
+        // writable mount root rather than the ambient host cwd. Falling back to
+        // `std::env::current_dir()` here would run the command in the host repo
+        // and let edits land outside the scoped workspace. Unscoped local-dev
+        // execution (no mounts) keeps the host-cwd default.
+        let effective_workdir = request
+            .workdir
+            .clone()
+            .or_else(|| default_writable_mount_workdir(request.mounts.as_ref()));
         let cwd =
-            resolve_local_host_workdir(request.workdir.as_deref(), &aliases).map_err(|e| {
+            resolve_local_host_workdir(effective_workdir.as_deref(), &aliases).map_err(|e| {
                 RuntimeProcessError::ExecutionFailed(format!(
                     "cannot determine working directory: {e}"
                 ))
@@ -331,6 +368,7 @@ impl RuntimeProcessPort for LocalHostProcessPort {
             timeout,
             &request.extra_env,
             self.env_mode,
+            self.tool_home.as_deref(),
         )
         .await?;
         // The command was rewritten alias->host before execution, so any host
@@ -350,6 +388,19 @@ impl RuntimeProcessPort for LocalHostProcessPort {
     }
 }
 
+/// The alias of the primary writable mount grant, used as the default working
+/// directory for a scoped command that omits an explicit `workdir`. Picks the
+/// first grant that permits both read and write (the canonical agent workspace
+/// shape), preferring it over the ambient host cwd so scoped execution stays
+/// inside the mount.
+fn default_writable_mount_workdir(mounts: Option<&MountView>) -> Option<String> {
+    mounts?
+        .mounts
+        .iter()
+        .find(|grant| grant.permissions.read && grant.permissions.write)
+        .map(|grant| grant.alias.as_str().to_string())
+}
+
 fn virtual_path_tail(root: &str, target: &str) -> Option<PathBuf> {
     if target == root {
         return Some(PathBuf::new());
@@ -366,6 +417,18 @@ fn push_workdir_alias_override(
     aliases.push(alias);
 }
 
+/// The Python user-site BASE directory under a home dir. Python appends the
+/// interpreter version and `site-packages`/`bin` to this, so we point it at the
+/// PARENT (macOS: `<home>/Library/Python`; other unix: `<home>/.local`). Used to
+/// let a Scrubbed-env shell resolve a user-site `pytest` without forwarding HOME.
+fn python_user_base(home: &Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library").join("Python")
+    } else {
+        home.join(".local")
+    }
+}
+
 async fn execute_local_command(
     scope: &ResourceScope,
     cmd: &str,
@@ -373,6 +436,7 @@ async fn execute_local_command(
     timeout: Duration,
     extra_env: &HashMap<String, String>,
     env_mode: LocalHostProcessEnvMode,
+    tool_home: Option<&Path>,
 ) -> Result<(CapturedCommandOutput, i32), RuntimeProcessError> {
     let mut command = if cfg!(target_os = "windows") {
         let mut c = Command::new("cmd");
@@ -397,6 +461,17 @@ async fn execute_local_command(
             }
             // Keep shell "~" expansion available without exposing the host user's home.
             command.env("HOME", workdir);
+            // Make installed user/global test tooling (e.g. Python user-site
+            // `pytest`) discoverable WITHOUT forwarding the real $HOME — that
+            // would re-expose ~/.ssh, ~/.aws, ~/.netrc and every dotfile, defeating
+            // the whole point of scrubbing. We only derive PYTHONUSERBASE from the
+            // tool home, and only when the caller did not already provide one via
+            // SAFE_ENV_VARS (an explicit export wins). HOME stays at workdir.
+            if let Some(tool_home) = tool_home
+                && std::env::var_os("PYTHONUSERBASE").is_none()
+            {
+                command.env("PYTHONUSERBASE", python_user_base(tool_home));
+            }
         }
         LocalHostProcessEnvMode::Inherited => {}
     }
@@ -654,6 +729,7 @@ mod tests {
             Duration::from_secs(5),
             &HashMap::new(),
             LocalHostProcessEnvMode::Scrubbed,
+            None,
         )
         .await
         .expect("command succeeds");
@@ -682,6 +758,7 @@ mod tests {
             Duration::from_secs(5),
             &HashMap::new(),
             LocalHostProcessEnvMode::Scrubbed,
+            None,
         )
         .await
         .expect("command succeeds");
@@ -689,6 +766,56 @@ mod tests {
         assert_eq!(exit_code, 0);
         assert_eq!(output.preview, workdir.path().display().to_string());
         assert_eq!(output.saved_output, None);
+    }
+
+    #[test]
+    fn python_user_base_is_platform_specific() {
+        let home = Path::new("/home/agent");
+        let base = python_user_base(home);
+        if cfg!(target_os = "macos") {
+            assert_eq!(base, Path::new("/home/agent/Library/Python"));
+        } else {
+            assert_eq!(base, Path::new("/home/agent/.local"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_local_command_scrubbed_derives_python_user_base_without_leaking_home() {
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let tool_home = tempfile::tempdir().expect("tool home tempdir");
+
+        let (output, exit_code) = execute_local_command(
+            &ResourceScope::system(),
+            "printf '%s\\n%s' \"$HOME\" \"$PYTHONUSERBASE\"",
+            &workdir.path().to_path_buf(),
+            Duration::from_secs(5),
+            &HashMap::new(),
+            LocalHostProcessEnvMode::Scrubbed,
+            Some(tool_home.path()),
+        )
+        .await
+        .expect("command succeeds");
+
+        assert_eq!(exit_code, 0);
+        let mut lines = output.preview.lines();
+        let home = lines.next().unwrap_or_default();
+        let user_base = lines.next().unwrap_or_default();
+
+        // SECURITY INVARIANT: even with a tool home, HOME stays at the workspace —
+        // the real/tool home is never exposed, so dotfiles/SSH/cloud creds stay hidden.
+        assert_eq!(home, workdir.path().display().to_string());
+
+        // The tool home yields a non-empty PYTHONUSERBASE so user-site tooling
+        // (pytest) resolves. It is either the derived tool-home base (when the
+        // ambient env supplied none) or a legitimately-forwarded ambient value.
+        let derived = python_user_base(tool_home.path()).display().to_string();
+        let ambient = std::env::var("PYTHONUSERBASE").unwrap_or_default();
+        assert!(!user_base.is_empty(), "tool home must set PYTHONUSERBASE");
+        assert!(
+            user_base == derived || (!ambient.is_empty() && user_base == ambient),
+            "PYTHONUSERBASE should be the derived tool-home base or a forwarded ambient one: got {user_base}"
+        );
     }
 
     #[cfg(unix)]
@@ -707,6 +834,7 @@ mod tests {
                 "inherited".to_string(),
             )]),
             LocalHostProcessEnvMode::Inherited,
+            None,
         )
         .await
         .expect("command succeeds");
@@ -862,11 +990,65 @@ mod tests {
         assert!(!default_workspace.join("canary").exists());
     }
 
+    #[tokio::test]
+    async fn local_host_process_port_defaults_missing_workdir_to_writable_mount() {
+        // A scoped command that omits `workdir` must default its cwd to the
+        // writable mount root (the cloned workflow `/workspace`), NOT the
+        // ambient host cwd. This is the safety fix: previously a `None` workdir
+        // fell back to `std::env::current_dir()` and ran in the host repo.
+        let root_dir = tempfile::tempdir().expect("root tempdir");
+        let root = root_dir.path().canonicalize().expect("canonical root");
+        let default_workspace = root.join("workspace");
+        let workflow_workspace = root.join("github-issue-workspaces/session-1");
+        std::fs::create_dir_all(&default_workspace).expect("default workspace dir");
+        std::fs::create_dir_all(&workflow_workspace).expect("workflow workspace dir");
+        let port = LocalHostProcessPort::new_inherited_env()
+            .with_workdir_alias("/workspace", default_workspace)
+            .with_virtual_root_alias("/projects", root.clone())
+            .with_virtual_root_alias("/projects/workspace", root.join("workspace"));
+
+        let output = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: Some(workflow_workspace_mounts()),
+                // Relative command (no absolute /workspace path), so the result
+                // depends entirely on the resolved working directory.
+                command: "printf '%s' \"$PWD\"".to_string(),
+                workdir: None,
+                timeout_secs: Some(5),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .expect("command succeeds");
+
+        assert_eq!(output.exit_code, 0);
+        // The cwd is the workflow workspace mount root, rewritten back to its
+        // alias in the model-facing output.
+        assert_eq!(output.output, "/workspace");
+    }
+
+    #[test]
+    fn default_writable_mount_workdir_picks_writable_grant() {
+        assert_eq!(
+            default_writable_mount_workdir(Some(&workflow_workspace_mounts())),
+            Some("/workspace".to_string())
+        );
+        assert_eq!(default_writable_mount_workdir(None), None);
+        // A read-only mount is not a default workdir target.
+        let read_only = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/skills").expect("mount alias"),
+            VirtualPath::new("/projects/skills").expect("virtual path"),
+            MountPermissions::read_only(),
+        )])
+        .expect("mount view");
+        assert_eq!(default_writable_mount_workdir(Some(&read_only)), None);
+    }
+
     fn workflow_workspace_mounts() -> MountView {
         MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").expect("mount alias"),
             VirtualPath::new("/projects/github-issue-workspaces/session-1").expect("virtual path"),
-            MountPermissions::read_write(),
+            MountPermissions::read_write_list_delete_execute(),
         )])
         .expect("mount view")
     }
@@ -883,6 +1065,7 @@ mod tests {
             Duration::from_secs(5),
             &HashMap::new(),
             LocalHostProcessEnvMode::Scrubbed,
+            None,
         )
         .await
         .expect("command succeeds");

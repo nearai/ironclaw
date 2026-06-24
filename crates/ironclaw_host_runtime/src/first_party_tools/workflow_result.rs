@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, EffectKind, HostApiError, PermissionMode,
-    ResourceUsage, RuntimeDispatchErrorKind,
+    ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,13 +23,38 @@ pub const WORKFLOW_REPORT_STAGE_RESULT_CAPABILITY_ID: &str = "builtin.workflow_r
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReportWorkflowStageResultInput {
-    pub workflow_run_id: String,
-    pub stage_run_id: String,
-    pub turn_run_id: String,
+    /// Optional and **never trusted**: the host derives the authoritative
+    /// workflow run id from the executing thread. The model has no authoritative
+    /// source for it, so the input schema does not require it; when present it is
+    /// cross-checked against the thread-derived id as defense in depth.
+    pub workflow_run_id: Option<String>,
+    /// Optional and **never trusted** (see [`Self::workflow_run_id`]);
+    /// cross-checked against the thread-derived id when present.
+    pub stage_run_id: Option<String>,
+    /// Optional and **never trusted**; its FORMAT is validated when present, but
+    /// it is not a binding axis (the host binds via the executing thread).
+    pub turn_run_id: Option<String>,
     pub stage: String,
     pub schema_version: String,
-    pub completion_nonce: String,
+    /// Accepted for wire back-compat only, optional, and **never trusted**. The
+    /// model has no authoritative source for this value (it is not injected into
+    /// any stage prompt); the host derives the authoritative stage identity from
+    /// the trusted executing thread (see [`ExecutingStageThread`]). Do not
+    /// re-introduce a check against it.
+    pub completion_nonce: Option<String>,
     pub result: Value,
+}
+
+/// The trusted, host-stamped scope of the thread that is executing the turn
+/// reporting this stage result.
+///
+/// The composition sink uses [`ResourceScope::thread_id`] plus the thread's
+/// host-written metadata to derive the authoritative stage identity, so a
+/// turn can only complete the stage it is actually executing — model-supplied
+/// identity fields are cross-checked against this, never trusted on their own.
+#[derive(Debug, Clone)]
+pub struct ExecutingStageThread {
+    pub scope: ResourceScope,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,6 +84,7 @@ pub enum WorkflowStageResultSinkError {
 pub trait WorkflowStageResultSink: Send + Sync {
     async fn report_stage_result(
         &self,
+        executing_thread: ExecutingStageThread,
         input: ReportWorkflowStageResultInput,
     ) -> Result<WorkflowStageResultAck, WorkflowStageResultSinkError>;
 }
@@ -108,11 +134,17 @@ impl FirstPartyCapabilityHandler for WorkflowResultToolHandler {
         }
         bounded_input_size(request.capability_id.as_str(), &request.input)?;
         let started = Instant::now();
+        // Capture the trusted host-stamped scope BEFORE moving `request.input`
+        // out of the request; the sink derives authoritative stage identity
+        // from this, never from the model-supplied input fields.
+        let executing_thread = ExecutingStageThread {
+            scope: request.scope.clone(),
+        };
         let input: ReportWorkflowStageResultInput =
             serde_json::from_value(request.input).map_err(|_| input_error())?;
         let ack = self
             .sink
-            .report_stage_result(input)
+            .report_stage_result(executing_thread, input)
             .await
             .map_err(workflow_sink_error)?;
         let output = serde_json::to_value(ack)

@@ -357,7 +357,34 @@ impl GovernorBackedAccountant {
                 Ok(())
             }
             Err(ResourceError::RequiresApproval { needed, .. }) => {
-                // Side-effect: persist a pending gate when a store is
+                // A headless run (GitHub issue workflow stage, background job) has
+                // no human to answer an approval gate. Opening one would strand
+                // the run, and `BudgetApprovalRequired` maps to a TERMINAL
+                // `HostUnavailable` (model_error_class -> None), silently killing
+                // the turn. For non-interactive runs, degrade to a recoverable
+                // `BudgetExceeded` (model_error_class -> ContextOverflow) so the
+                // loop's recovery path runs and the run fails cleanly/visibly
+                // instead — and do NOT open an orphan gate no one will resolve.
+                if context
+                    .resolved_run_profile
+                    .budget_approval_mode
+                    .is_non_interactive()
+                {
+                    tracing::debug!(
+                        run_id = ?context.run_id,
+                        dimension = %needed.dimension,
+                        "budget cap reached on non-interactive run; degrading to recoverable error (no approval gate opened)"
+                    );
+                    return Err(LoopModelGatewayError::new(
+                        AgentLoopHostErrorKind::BudgetExceeded,
+                        format!(
+                            "budget cap reached for {} (non-interactive run, no approval available)",
+                            needed.dimension
+                        ),
+                    )
+                    .map_err(internal_summary_error)?);
+                }
+                // Interactive run: persist a pending gate when a store is
                 // wired. The error returned to the run is unchanged so
                 // existing callers still fail closed; the gate is what
                 // lets a user-facing handler (or test) resolve the
@@ -668,12 +695,12 @@ mod tests {
         AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnActor, TurnId, TurnRunId,
         TurnScope,
         run_profile::{
-            CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
-            ConcurrencyClass, ContextProfileId, LoopDriverId, LoopModelRequest, LoopModelResponse,
-            LoopRunContext, ModelCallOutcome, ModelProfileId, PersonalContextPolicy,
-            RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
-            ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
-            SchedulingClass, SteeringPolicy,
+            BudgetApprovalMode, CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
+            CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId, LoopModelRequest,
+            LoopModelResponse, LoopRunContext, ModelCallOutcome, ModelProfileId,
+            PersonalContextPolicy, RedactedRunProfileProvenance, ResolvedRunProfile,
+            ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+            RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
         },
     };
     use rust_decimal::Decimal;
@@ -725,6 +752,7 @@ mod tests {
                 max_capability_invocations: 64,
             },
             personal_context_policy: PersonalContextPolicy::Excluded,
+            budget_approval_mode: BudgetApprovalMode::Interactive,
             runtime_constraints: RuntimeProfileConstraints {
                 allow_raw_runtime_backend_selection: false,
                 allow_broad_capability_surface: false,
@@ -862,6 +890,79 @@ mod tests {
             err.kind,
             AgentLoopHostErrorKind::BudgetExceeded | AgentLoopHostErrorKind::BudgetApprovalRequired
         ));
+    }
+
+    // Seed a $10 rolling-24h cap with pause_at 0.90 so a $9.50 estimate (95%)
+    // lands in the approval band (RequiresApproval), not the hard-cap band.
+    fn seed_pause_band_limit(governor: &Arc<dyn ResourceGovernor>, context: &LoopRunContext) {
+        let account = ResourceAccount::user(
+            context.scope.tenant_id.clone(),
+            UserId::new("acct-user").unwrap(),
+        );
+        governor
+            .set_limit(
+                account,
+                ResourceLimits {
+                    max_usd: Some(dec!(10.00)),
+                    period: BudgetPeriod::Rolling24h,
+                    thresholds: BudgetThresholds {
+                        warn_at: 0.75,
+                        pause_at: 0.90,
+                    },
+                    ..ResourceLimits::default()
+                },
+            )
+            .unwrap();
+    }
+
+    // 95 output tokens * $0.10 = $9.50 estimate (no input contribution), factor
+    // 1.0 -> 95% of the $10 cap -> crosses pause_at but not the hard cap ->
+    // the governor returns RequiresApproval.
+    fn pause_band_cost() -> ModelCost {
+        ModelCost {
+            input_per_token: dec!(0.0),
+            output_per_token: dec!(0.10),
+            max_output_tokens: 95,
+        }
+    }
+
+    #[tokio::test]
+    async fn interactive_run_returns_approval_required_in_pause_band() {
+        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
+        let context = run_context(); // Interactive by default.
+        seed_pause_band_limit(&governor, &context);
+        let accountant =
+            GovernorBackedAccountant::new(governor, Arc::new(CostStub(pause_band_cost())))
+                .with_overestimate_factor(dec!(1.0));
+        let err = accountant
+            .pre_model_call(&context, &sample_request())
+            .await
+            .unwrap_err();
+        // Proves the params land in the approval band: an interactive run opens a
+        // gate and surfaces the (terminal) BudgetApprovalRequired today.
+        assert_eq!(err.kind, AgentLoopHostErrorKind::BudgetApprovalRequired);
+    }
+
+    #[tokio::test]
+    async fn non_interactive_run_degrades_pause_band_to_budget_exceeded() {
+        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
+        let mut context = run_context();
+        // Headless run (workflow stage / background job): no human can approve.
+        context.resolved_run_profile.budget_approval_mode = BudgetApprovalMode::NonInteractive;
+        seed_pause_band_limit(&governor, &context);
+        let accountant =
+            GovernorBackedAccountant::new(governor, Arc::new(CostStub(pause_band_cost())))
+                .with_overestimate_factor(dec!(1.0));
+        let err = accountant
+            .pre_model_call(&context, &sample_request())
+            .await
+            .unwrap_err();
+        // The SAME governor outcome (RequiresApproval) that opens a gate on an
+        // interactive run instead degrades to a recoverable BudgetExceeded, so the
+        // run fails cleanly via the recovery path instead of dying terminally on
+        // an approval gate no one can answer.
+        assert_eq!(err.kind, AgentLoopHostErrorKind::BudgetExceeded);
+        assert_ne!(err.kind, AgentLoopHostErrorKind::BudgetApprovalRequired);
     }
 
     #[tokio::test]
