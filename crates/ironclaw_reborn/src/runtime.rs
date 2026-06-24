@@ -642,7 +642,7 @@ where
                 == "google-calendar__list_events";
         tracing::debug!(
             target: "ironclaw::reborn::runtime",
-            disclosure_build = "general-name-matcher-v3",
+            disclosure_build = "surface-tracking-delegates-v4",
             matcher_selftest,
             // Echoes a const from ironclaw_loop_support: if this reads
             // "delegate-to-inner", the surface-filter resolution fix is actually
