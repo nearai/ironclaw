@@ -101,7 +101,7 @@ pub struct DefaultPlannedRuntimeConfig {
     pub worker_count: std::num::NonZeroUsize,
     /// Capability IDs removed from every model-facing capability surface,
     /// regardless of the resolved profile allow-set.
-    pub disabled_capability_ids: Vec<String>,
+    pub disabled_capability_ids: Vec<CapabilityId>,
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
 }
@@ -119,8 +119,11 @@ impl Default for DefaultPlannedRuntimeConfig {
     }
 }
 
-fn default_disabled_capability_ids() -> Vec<String> {
-    vec![ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string()]
+fn default_disabled_capability_ids() -> Vec<CapabilityId> {
+    vec![
+        CapabilityId::new(ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+            .expect("static spawn_subagent capability id must be valid"), // safety: crate-owned static dotted id.
+    ]
 }
 
 pub trait RuntimeTurnStateStore:
@@ -590,13 +593,7 @@ where
     // allow-set (which is `All` for top-level runs, making a profile allow-set
     // narrowing a no-op). Override `disabled_capability_ids` to re-enable in
     // targeted regression harnesses.
-    let disabled = parts
-        .config
-        .disabled_capability_ids
-        .iter()
-        .map(|id| CapabilityId::new(id.clone()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
+    let disabled = parts.config.disabled_capability_ids.clone();
     let mut capability_factory_builder =
         DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
             .with_decorator(spawn_decorator);

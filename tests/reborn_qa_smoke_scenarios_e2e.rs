@@ -354,9 +354,11 @@ async fn qa_subagent_capability_smoke_uses_child_run() {
         .wait_for_status_with_config(submitted.run_id, TurnStatus::BlockedDependentRun, qa_wait())
         .await
         .unwrap_or_else(|error| {
+            let model_requests = harness.model_requests();
             panic!(
-                "parent should block on child: {error}; model requests={:#?}; remaining_model_responses={}",
-                harness.model_requests(),
+                "parent should block on child: {error}; model_request_count={}; model_request_shapes={}; remaining_model_responses={}",
+                model_requests.len(),
+                model_request_shape_summary(&model_requests),
                 harness.remaining_model_responses()
             )
         });
@@ -982,6 +984,32 @@ fn qa_wait() -> WaitConfig {
         timeout: Duration::from_secs(60),
         poll_interval: Duration::from_millis(20),
     }
+}
+
+fn model_request_shape_summary(
+    requests: &[ironclaw_loop_support::HostManagedModelRequest],
+) -> String {
+    if requests.is_empty() {
+        return "none".to_string();
+    }
+    requests
+        .iter()
+        .enumerate()
+        .map(|(index, request)| {
+            let roles = request
+                .messages
+                .iter()
+                .map(|message| format!("{:?}", message.role))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "#{index}:messages={},roles=[{}]",
+                request.messages.len(),
+                roles
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn call(
