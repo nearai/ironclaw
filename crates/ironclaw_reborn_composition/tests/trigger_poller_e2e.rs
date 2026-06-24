@@ -57,6 +57,14 @@ impl RecordingGateway {
             .flat_map(|req| req.messages.iter().map(|m| m.content.clone()))
             .collect()
     }
+
+    async fn request_count_containing(&self, needle: &str) -> usize {
+        let snapshot = self.requests.lock().await;
+        snapshot
+            .iter()
+            .filter(|req| req.messages.iter().any(|m| m.content.contains(needle)))
+            .count()
+    }
 }
 
 #[async_trait]
@@ -108,6 +116,30 @@ where
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     last.expect("at least one read should have succeeded in wait_for_settled")
+}
+
+async fn recent_due_slot_after_with_future_next(
+    schedule: &TriggerSchedule,
+    after: Option<chrono::DateTime<Utc>>,
+) -> chrono::DateTime<Utc> {
+    let stop = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < stop {
+        let now = Utc::now();
+        let slot = now - chrono::Duration::milliseconds(500);
+        if after.map(|previous| slot <= previous).unwrap_or(false) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            continue;
+        }
+        let next = schedule
+            .next_slot_after(slot)
+            .expect("valid recurring schedule")
+            .expect("recurring schedule should have a next slot");
+        if next > now {
+            return slot;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("could not choose a due slot whose next recurring slot is still in the future");
 }
 
 /// Shared runtime builder. Every test passes the `TriggerPollerSettings` it
@@ -505,6 +537,130 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
     assert!(
         settled.last_run_at.is_some(),
         "builtin-created trigger should record last_run_at after poller fire"
+    );
+}
+
+#[tokio::test]
+async fn builtin_created_recurring_trigger_fires_again_after_first_run_settles() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let recording_gateway = Arc::new(RecordingGateway {
+        requests: Arc::new(TokioMutex::new(Vec::new())),
+    });
+
+    let runtime = build_runtime_with(
+        &root,
+        Arc::clone(&recording_gateway),
+        TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
+            TriggerPollerWorkerConfig {
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            },
+        ),
+    )
+    .await;
+
+    let created = invoke_trigger_create(
+        &runtime,
+        json!({
+            "name": "trigger-e2e-created-by-tool-fires-twice",
+            "prompt": TRIGGER_PROMPT,
+            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
+        }),
+    )
+    .await;
+
+    let repo = runtime
+        .trigger_repository()
+        .expect("local-dev runtime exposes trigger repository");
+    let tenant_id = TenantId::new(TENANT).expect("tenant id");
+    let trigger_id = TriggerId::parse(
+        created["trigger"]["trigger_id"]
+            .as_str()
+            .expect("created trigger id"),
+    )
+    .expect("valid trigger id");
+
+    let mut record = repo
+        .get_trigger(tenant_id.clone(), trigger_id)
+        .await
+        .expect("get created trigger")
+        .expect("created trigger persisted");
+    let first_due_slot = recent_due_slot_after_with_future_next(&record.schedule, None).await;
+    record.next_run_at = first_due_slot;
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("make first recurring slot due");
+
+    let first = wait_for_settled(
+        &repo,
+        &tenant_id,
+        trigger_id,
+        Duration::from_secs(15),
+        |r| {
+            r.last_fired_slot.is_some()
+                && r.last_run_at.is_some()
+                && r.last_status == Some(TriggerRunStatus::Ok)
+                && r.active_fire_slot.is_none()
+                && r.active_run_ref.is_none()
+                && r.next_run_at > first_due_slot
+        },
+    )
+    .await;
+    assert!(
+        recording_gateway
+            .request_count_containing(TRIGGER_PROMPT)
+            .await
+            >= 1,
+        "first recurring trigger fire should submit a model request"
+    );
+
+    let first_fired_slot = first.last_fired_slot.expect("first fire slot");
+    let mut second_record = first.clone();
+    let second_due_slot =
+        recent_due_slot_after_with_future_next(&second_record.schedule, Some(first_fired_slot))
+            .await;
+    second_record.next_run_at = second_due_slot;
+    second_record.active_fire_slot = None;
+    second_record.active_run_ref = None;
+    repo.upsert_trigger(second_record)
+        .await
+        .expect("make second recurring slot due");
+
+    let second = wait_for_settled(
+        &repo,
+        &tenant_id,
+        trigger_id,
+        Duration::from_secs(15),
+        |r| {
+            r.last_fired_slot
+                .map(|slot| slot > first_fired_slot)
+                .unwrap_or(false)
+                && r.last_status == Some(TriggerRunStatus::Ok)
+                && r.active_fire_slot.is_none()
+                && r.active_run_ref.is_none()
+                && r.next_run_at > second_due_slot
+        },
+    )
+    .await;
+
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    let request_count = recording_gateway
+        .request_count_containing(TRIGGER_PROMPT)
+        .await;
+    assert!(
+        request_count >= 2,
+        "recurring trigger should submit once per due slot — requests containing prompt: {request_count}"
+    );
+    assert_eq!(
+        second.state,
+        TriggerState::Scheduled,
+        "recurring trigger must remain Scheduled after the second fire — record: {second:?}"
+    );
+    assert_eq!(
+        second.last_status,
+        Some(TriggerRunStatus::Ok),
+        "second fire should settle successfully — record: {second:?}"
     );
 }
 
