@@ -472,12 +472,15 @@ registerPack("ar", {
   "channels.slackAccessError": "فشل تحديث قناة Slack.",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "السماح دائمًا بالأدوات المؤهلة",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "ينطبق فقط على الأدوات المضبوطة على \"اتباع الإعداد العام\". إعدادات كل أداة تتجاوز هذا المفتاح؛ وبوابات الموافقة ذات الحد الصارم ستظل تطلب الموافقة.",
   "tools.permissions": "أذونات الأدوات",
   "tools.alwaysAllow": "السماح دائمًا",
   "tools.askEachTime": "السؤال كل مرة",
   "tools.disabled": "معطّل",
   "tools.default": "افتراضي",
-  "tools.followDefault": "Follow global",
+  "tools.followDefault": "اتباع الإعداد العام",
   "tools.sourceDefault": "default permission",
   "tools.sourceGlobal": "global setting",
   "tools.sourceOverride": "per-tool override",

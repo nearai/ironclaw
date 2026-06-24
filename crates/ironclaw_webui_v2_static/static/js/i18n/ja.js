@@ -472,12 +472,15 @@ registerPack("ja", {
   "channels.slackAccessError": "Slack チャネルの更新に失敗しました。",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "対象ツールを常に許可",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "「グローバルに従う」に設定されたツールにのみ適用されます。ツールごとの設定がこの切り替えより優先され、ハードフロアの承認ゲートでは引き続き承認が必要です。",
   "tools.permissions": "ツール権限",
   "tools.alwaysAllow": "常に許可",
   "tools.askEachTime": "毎回確認",
   "tools.disabled": "無効",
   "tools.default": "デフォルト",
-  "tools.followDefault": "Follow global",
+  "tools.followDefault": "グローバルに従う",
   "tools.sourceDefault": "default permission",
   "tools.sourceGlobal": "global setting",
   "tools.sourceOverride": "per-tool override",

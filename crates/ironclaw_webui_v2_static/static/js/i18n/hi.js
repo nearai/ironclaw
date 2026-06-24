@@ -472,12 +472,15 @@ registerPack("hi", {
   "channels.slackAccessError": "Slack चैनल अद्यतन विफल रहा।",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "योग्य टूल हमेशा अनुमति दें",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "यह केवल “वैश्विक का पालन करें” पर सेट टूल पर लागू होता है। प्रति-टूल सेटिंग इस स्विच को ओवरराइड करती है; हार्ड-फ्लोर अनुमोदन गेट फिर भी पूछेंगे।",
   "tools.permissions": "टूल अनुमतियाँ",
   "tools.alwaysAllow": "हमेशा अनुमति दें",
   "tools.askEachTime": "हर बार पूछें",
   "tools.disabled": "अक्षम",
   "tools.default": "डिफ़ॉल्ट",
-  "tools.followDefault": "Follow global",
+  "tools.followDefault": "वैश्विक का पालन करें",
   "tools.sourceDefault": "default permission",
   "tools.sourceGlobal": "global setting",
   "tools.sourceOverride": "per-tool override",

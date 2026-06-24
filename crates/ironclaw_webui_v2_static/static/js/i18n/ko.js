@@ -472,12 +472,15 @@ registerPack("ko", {
   "channels.slackAccessError": "Slack 채널 업데이트에 실패했습니다.",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "대상 도구 항상 허용",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "“전역 설정 따르기”로 설정된 도구에만 적용됩니다. 도구별 설정이 이 스위치를 덮어쓰며, 하드 플로어 승인 게이트는 계속 승인을 요청합니다.",
   "tools.permissions": "도구 권한",
   "tools.alwaysAllow": "항상 허용",
   "tools.askEachTime": "매번 확인",
   "tools.disabled": "비활성화",
   "tools.default": "기본값",
-  "tools.followDefault": "Follow global",
+  "tools.followDefault": "전역 설정 따르기",
   "tools.sourceDefault": "default permission",
   "tools.sourceGlobal": "global setting",
   "tools.sourceOverride": "per-tool override",

@@ -472,12 +472,15 @@ registerPack("uk", {
   "channels.slackAccessError": "Помилка оновлення каналу Slack.",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "Завжди дозволяти придатні інструменти",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "Застосовується лише до інструментів із режимом «Дотримуватися глобальних». Налаштування окремого інструмента перекривають цей перемикач; жорсткі межі схвалення все одно вимагатимуть підтвердження.",
   "tools.permissions": "Дозволи інструментів",
   "tools.alwaysAllow": "Завжди дозволяти",
   "tools.askEachTime": "Питати щоразу",
   "tools.disabled": "Вимкнено",
   "tools.default": "за замовчуванням",
-  "tools.followDefault": "Follow global",
+  "tools.followDefault": "Дотримуватися глобальних",
   "tools.sourceDefault": "default permission",
   "tools.sourceGlobal": "global setting",
   "tools.sourceOverride": "per-tool override",

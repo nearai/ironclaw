@@ -472,12 +472,15 @@ registerPack("pt-BR", {
   "channels.slackAccessError": "Falha na atualização do canal Slack.",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "Sempre permitir ferramentas qualificadas",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "Aplica-se apenas a ferramentas definidas como “Seguir global”. Configurações por ferramenta substituem este controle; aprovações de piso rígido ainda serão solicitadas.",
   "tools.permissions": "Permissões de ferramentas",
   "tools.alwaysAllow": "Permitir sempre",
   "tools.askEachTime": "Perguntar sempre",
   "tools.disabled": "Desativado",
   "tools.default": "padrão",
-  "tools.followDefault": "Follow global",
+  "tools.followDefault": "Seguir global",
   "tools.sourceDefault": "default permission",
   "tools.sourceGlobal": "global setting",
   "tools.sourceOverride": "per-tool override",

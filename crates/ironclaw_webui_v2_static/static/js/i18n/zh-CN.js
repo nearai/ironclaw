@@ -370,7 +370,7 @@ registerPack("zh-CN", {
   "settings.field.autoApproveToolsDesc": "跳过所有工具调用的审批",
   "settings.field.autoApproveEligibleTools": "始终允许符合条件的工具",
   "settings.field.autoApproveEligibleToolsDesc":
-    "自动运行符合条件的工具。单个工具的“每次询问”覆盖项和硬性审批下限仍会要求审批。",
+    "仅影响设置为“跟随全局”的工具。单工具设置会覆盖此开关；硬性审批工具仍需审批。",
   "settings.field.timezone": "时区",
   "settings.field.timezoneDesc": "计划任务的 IANA 时区",
   "settings.field.sessionIdleTimeout": "会话空闲超时",

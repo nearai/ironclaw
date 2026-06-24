@@ -472,12 +472,15 @@ registerPack("de", {
   "channels.slackAccessError": "Slack-Kanalaktualisierung fehlgeschlagen.",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "Geeignete Tools immer erlauben",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "Gilt nur für Tools, die auf „Global folgen“ gesetzt sind. Einstellungen pro Tool überschreiben diesen Schalter; harte Genehmigungsgrenzen fragen weiterhin nach.",
   "tools.permissions": "Tool‑Berechtigungen",
   "tools.alwaysAllow": "Immer erlauben",
   "tools.askEachTime": "Jedes Mal fragen",
   "tools.disabled": "Deaktiviert",
   "tools.default": "Standard",
-  "tools.followDefault": "Follow global",
+  "tools.followDefault": "Global folgen",
   "tools.sourceDefault": "default permission",
   "tools.sourceGlobal": "global setting",
   "tools.sourceOverride": "per-tool override",
