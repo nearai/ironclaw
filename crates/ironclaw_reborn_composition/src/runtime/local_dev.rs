@@ -38,9 +38,12 @@ use ironclaw_turns::{
     },
 };
 
-use crate::local_dev_authorization::local_dev_effects_require_approval;
+use crate::local_dev_authorization::{
+    StoreApprovalSettingsProvider, local_dev_effects_require_approval,
+};
 use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
 use crate::local_dev_mounts::scoped_skill_management_mount_view;
+use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::{
     RebornServices,
     projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
@@ -99,6 +102,16 @@ pub(super) fn capability_wiring(
         local_runtime.system_extensions_lifecycle_mounts.clone();
     let approval_requests: Arc<dyn ApprovalRequestStore> = local_runtime.approval_requests.clone();
     let capability_leases: Arc<dyn CapabilityLeaseStore> = local_runtime.capability_leases.clone();
+    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+        local_runtime.tool_permission_overrides.clone();
+    let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+        local_runtime.auto_approve_settings.clone();
+    let approval_settings: Arc<dyn ApprovalSettingsProvider> =
+        Arc::new(StoreApprovalSettingsProvider::new(
+            tool_permission_overrides,
+            auto_approve_settings,
+            local_runtime.persistent_approval_policies.clone(),
+        ));
     let outbound_delivery_target_set_requires_approval = local_dev_effects_require_approval(
         local_runtime.runtime_policy.as_ref(),
         policy.as_ref(),
@@ -139,6 +152,7 @@ pub(super) fn capability_wiring(
             trajectory_observer,
             outbound_preferences_facade,
             outbound_delivery_target_set_requires_approval,
+            approval_settings,
             approval_requests,
             capability_leases,
         });
@@ -172,6 +186,7 @@ struct LocalDevLoopCapabilityPortFactory {
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     outbound_delivery_target_set_requires_approval: bool,
+    approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
 }
@@ -209,6 +224,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             outbound_preferences_facade: self.outbound_preferences_facade.clone(),
             outbound_delivery_target_set_requires_approval: self
                 .outbound_delivery_target_set_requires_approval,
+            approval_settings: Arc::clone(&self.approval_settings),
             approval_requests: Arc::clone(&self.approval_requests),
             capability_leases: Arc::clone(&self.capability_leases),
         })
