@@ -136,6 +136,8 @@ struct InstallInput {
     expected_version: Option<String>,
     #[serde(default)]
     expected_artifact_digest: Option<String>,
+    #[serde(default)]
+    private_manifest_url: Option<String>,
 }
 
 #[async_trait]
@@ -180,6 +182,7 @@ impl FirstPartyCapabilityHandler for IronHubCapabilityHandler {
                         acknowledge_unverified: false,
                         expected_version: input.expected_version,
                         expected_artifact_digest: input.expected_artifact_digest,
+                        private_manifest_url: input.private_manifest_url,
                     },
                 }
             }

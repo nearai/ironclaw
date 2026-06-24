@@ -222,7 +222,7 @@ impl IronHubService {
     }
 
     async fn search(&self, query: &str) -> Result<LifecycleProductResponse, IronHubCommandError> {
-        let manifest = self.fetch_manifest_cached().await?;
+        let manifest = self.fetch_manifest_cached(&self.manifest_url).await?;
         let query = query.trim().to_ascii_lowercase();
         let tools = manifest
             .tools
@@ -251,7 +251,7 @@ impl IronHubService {
         &self,
         kind: Option<IronHubEntryKind>,
     ) -> Result<LifecycleProductResponse, IronHubCommandError> {
-        let manifest = self.fetch_manifest_cached().await?;
+        let manifest = self.fetch_manifest_cached(&self.manifest_url).await?;
         match kind {
             Some(IronHubEntryKind::Skill) => {
                 let skills = manifest
@@ -315,7 +315,7 @@ impl IronHubService {
         hint: Option<IronHubEntryKind>,
     ) -> Result<LifecycleProductResponse, IronHubCommandError> {
         validate_hub_name(name)?;
-        let manifest = self.fetch_manifest_cached().await?;
+        let manifest = self.fetch_manifest_cached(&self.manifest_url).await?;
         let kind = classify(&manifest, name, hint)?;
         let response = match kind {
             IronHubEntryKind::Tool => {
@@ -356,7 +356,10 @@ impl IronHubService {
         options: IronHubInstallOptions,
     ) -> Result<LifecycleProductResponse, IronHubCommandError> {
         validate_hub_name(name)?;
-        let manifest = self.fetch_manifest_cached().await?;
+        let manifest = match options.private_manifest_url.as_deref() {
+            Some(private_url) => Arc::new(self.download_and_verify_manifest(private_url).await?),
+            None => self.fetch_manifest_cached(&self.manifest_url).await?,
+        };
         let (kind, provenance, artifact_digest) =
             classify_gate_and_digest(&manifest, name, options.kind, &options)?;
         let lock_key = format!("{}:{name}", kind.as_str());
@@ -436,27 +439,32 @@ impl IronHubService {
         }
     }
 
-    async fn fetch_manifest_cached(&self) -> Result<Arc<IronHubManifest>, IronHubCommandError> {
+    async fn fetch_manifest_cached(
+        &self,
+        url: &str,
+    ) -> Result<Arc<IronHubManifest>, IronHubCommandError> {
         let now = Instant::now();
-        if let Some(hit) = manifest_cache_get(&self.manifest_url, now) {
+        if let Some(hit) = manifest_cache_get(url, now) {
             return Ok(hit);
         }
-        let fetch_lock = manifest_fetch_lock(&self.manifest_url);
+        let fetch_lock = manifest_fetch_lock(url);
         let _fetch_guard = fetch_lock.lock().await;
         let now = Instant::now();
-        if let Some(hit) = manifest_cache_get(&self.manifest_url, now) {
+        if let Some(hit) = manifest_cache_get(url, now) {
             return Ok(hit);
         }
-        let manifest = Arc::new(self.fetch_manifest().await?);
-        manifest_cache_put(&self.manifest_url, Arc::clone(&manifest), now);
+        let manifest = Arc::new(self.download_and_verify_manifest(url).await?);
+        enforce_manifest_monotonic(url, &manifest)?;
+        manifest_cache_put(url, Arc::clone(&manifest), now);
         Ok(manifest)
     }
 
-    async fn fetch_manifest(&self) -> Result<IronHubManifest, IronHubCommandError> {
-        validate_artifact_url("hub-manifest", "manifest_url", &self.manifest_url)?;
-        let envelope = self
-            .download_url(&self.manifest_url, MAX_SIGNED_MANIFEST_BYTES)
-            .await?;
+    async fn download_and_verify_manifest(
+        &self,
+        url: &str,
+    ) -> Result<IronHubManifest, IronHubCommandError> {
+        validate_artifact_url("hub-manifest", "manifest_url", url)?;
+        let envelope = self.download_url(url, MAX_SIGNED_MANIFEST_BYTES).await?;
         #[cfg(not(test))]
         let verified_manifest = verify_signed_manifest(&envelope);
         #[cfg(test)]
@@ -474,7 +482,6 @@ impl IronHubService {
             serde_json::from_slice(&bytes).map_err(|error| IronHubCommandError::Catalog {
                 reason: format!("manifest parse failed: {error}"),
             })?;
-        enforce_manifest_monotonic(&self.manifest_url, &manifest)?;
         Ok(manifest)
     }
 

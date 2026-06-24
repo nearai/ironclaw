@@ -340,6 +340,48 @@ async fn install_skill_and_tool_materialize_into_reborn_management() {
 }
 
 #[tokio::test]
+async fn install_resolves_skill_from_private_manifest_url() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("local-dev");
+    let public_manifest_url = "https://hub.ironclaw.com/tests/private/public-manifest.json";
+    let private_manifest_url =
+        "https://hub.ironclaw.com/tests/private/org-manifest.json?token=test-capability-token";
+    let skill_url = "https://hub.ironclaw.com/tests/private/SKILL.md";
+    let skill_bytes = b"# private skill\n";
+    let private_manifest = signed_manifest(skill_manifest_json(
+        "private-skill",
+        "2026-01-04T00:00:00Z",
+        skill_url,
+        &sha256_hex(skill_bytes),
+        IronHubProvenance::Official,
+    ));
+    let egress = Arc::new(RecordingIronHubEgress::new([
+        (
+            public_manifest_url,
+            signed_manifest(empty_manifest_json("2026-01-04T00:00:00Z")),
+        ),
+        (private_manifest_url, private_manifest),
+        (skill_url, skill_bytes.to_vec()),
+    ]));
+    let service = ironhub_service(root.clone(), egress, public_manifest_url).await;
+
+    let installed = service
+        .execute(super::model::IronHubCommand::Install {
+            name: "private-skill".to_string(),
+            options: IronHubInstallOptions {
+                kind: Some(IronHubEntryKind::Skill),
+                private_manifest_url: Some(private_manifest_url.to_string()),
+                ..IronHubInstallOptions::default()
+            },
+        })
+        .await
+        .expect("install resolves the skill from the private manifest");
+
+    assert_eq!(installed.phase, LifecyclePhase::Installed);
+    assert!(root.join("skills/private-skill/SKILL.md").exists());
+}
+
+#[tokio::test]
 async fn fetch_manifest_uses_runtime_egress_host_policy() {
     let dir = tempfile::tempdir().expect("tempdir");
     let manifest_url = "https://hub.ironclaw.com/tests/policy/manifest.json";

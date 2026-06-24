@@ -145,6 +145,7 @@ pub struct IronHubInstallOptions {
     pub acknowledge_unverified: bool,
     pub expected_version: Option<String>,
     pub expected_artifact_digest: Option<String>,
+    pub private_manifest_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
