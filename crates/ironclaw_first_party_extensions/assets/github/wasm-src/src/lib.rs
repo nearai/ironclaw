@@ -1001,6 +1001,20 @@ mod tests {
     }
 
     #[test]
+    fn update_pull_request_rejects_missing_mutation_fields_before_egress() {
+        let error = execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","pr_number":12}"#,
+            Some(r#"{"capability_id":"github.update_pull_request"}"#),
+        )
+        .expect_err("update pull request should require at least one mutable field");
+        assert_eq!(error, "invalid_parameters");
+        assert!(
+            test_support::requests().is_empty(),
+            "missing mutation fields should fail before egress"
+        );
+    }
+
+    #[test]
     fn review_threads_reject_oversized_after_and_thread_id_before_egress() {
         for (capability, input, expected_error) in [
             (
