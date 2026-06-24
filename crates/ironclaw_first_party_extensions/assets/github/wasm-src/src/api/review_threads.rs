@@ -93,7 +93,29 @@ fn graphql_request(query: &str, variables: serde_json::Value) -> Result<String, 
         "query": query,
         "variables": variables,
     });
-    github_request("POST", "/graphql", Some(req_body.to_string()))
+    let response = github_request("POST", "/graphql", Some(req_body.to_string()))?;
+    parse_graphql_response(&response)
+}
+
+fn parse_graphql_response(response: &str) -> Result<String, String> {
+    let response_json: serde_json::Value = serde_json::from_str(response)
+        .map_err(|err| format!("github_api_invalid_json: graphql response parse failed: {err}"))?;
+
+    if let Some(errors) = response_json
+        .get("errors")
+        .and_then(|errors| errors.as_array())
+    {
+        if !errors.is_empty() {
+            return Err(format!(
+                "github_graphql_errors: {}",
+                serde_json::to_string(errors).unwrap_or_else(|err| format!(
+                    r#"[{{"message":"failed to serialize graphql errors: {err}"}}]"#
+                ))
+            ));
+        }
+    }
+
+    Ok(response.to_string())
 }
 
 fn validate_node_id(value: &str) -> Result<(), String> {
@@ -101,4 +123,62 @@ fn validate_node_id(value: &str) -> Result<(), String> {
         return Err("invalid_thread_id".to_string());
     }
     validate_input_length(value, "thread_id")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::list_pull_request_review_threads;
+    use crate::request::test_support;
+
+    #[test]
+    fn list_pull_request_review_threads_returns_successful_graphql_body() {
+        test_support::set_response(Ok(serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [],
+                            "pageInfo": {
+                                "hasNextPage": false,
+                                "endCursor": null
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .to_string()));
+
+        let response = list_pull_request_review_threads("nearai", "ironclaw", 17, Some(30), None)
+            .expect("graphQL response should succeed");
+
+        assert!(response.contains("\"reviewThreads\""));
+        let requests = test_support::requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/graphql");
+    }
+
+    #[test]
+    fn list_pull_request_review_threads_surfaces_graphql_errors() {
+        test_support::set_response(Ok(serde_json::json!({
+            "data": {
+                "repository": null
+            },
+            "errors": [
+                {
+                    "message": "review threads failed",
+                    "path": ["repository", "pullRequest", "reviewThreads"]
+                }
+            ]
+        })
+        .to_string()));
+
+        let error = list_pull_request_review_threads("nearai", "ironclaw", 17, Some(30), None)
+            .expect_err("graphQL errors should fail the tool");
+
+        assert!(error.starts_with("github_graphql_errors: "));
+        assert!(error.contains("review threads failed"));
+        assert!(error.contains("reviewThreads"));
+    }
 }

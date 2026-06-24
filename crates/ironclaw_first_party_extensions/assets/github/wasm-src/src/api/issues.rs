@@ -3,6 +3,8 @@ use crate::types::IssueState;
 use crate::validation::*;
 
 const MAX_ASSIGNEES_PER_REQUEST: usize = 10;
+const MAX_LIST_ISSUES_LOGICAL_PAGE: u32 = 10;
+const MAX_LIST_ISSUES_RAW_PAGES: u32 = 10;
 
 // arch-exempt: too_many_args, issue listing keeps GitHub filter args explicit, plan #5171
 #[allow(clippy::too_many_arguments)]
@@ -25,6 +27,7 @@ pub(crate) fn list_issues(
         _ => return Err("invalid_state".to_string()),
     }
     validate_page(page)?;
+    validate_list_issues_page(page)?;
     validate_limit(limit)?;
     validate_name_list(labels.as_deref(), "labels")?;
     if let Some(assignee) = assignee {
@@ -97,6 +100,9 @@ fn list_issue_only_page(request: ListIssuesPageRequest<'_>) -> Result<String, St
         if is_last_raw_page {
             return serialize_issues_response(&output);
         }
+        if raw_page >= MAX_LIST_ISSUES_RAW_PAGES {
+            return Err("github_issue_page_scan_limit".to_string());
+        }
         raw_page = raw_page
             .checked_add(1)
             .ok_or_else(|| "invalid_page".to_string())?;
@@ -132,6 +138,13 @@ fn serialize_issues_response(issues: &[serde_json::Value]) -> Result<String, Str
     serde_json::to_string(issues).map_err(|err| {
         format!("github_api_invalid_json: issues response serialization failed: {err}")
     })
+}
+
+fn validate_list_issues_page(page: Option<u32>) -> Result<(), String> {
+    if page.is_some_and(|page| page > MAX_LIST_ISSUES_LOGICAL_PAGE) {
+        return Err("invalid_page".to_string());
+    }
+    Ok(())
 }
 
 fn validate_milestone_filter(milestone: &str) -> Result<(), String> {

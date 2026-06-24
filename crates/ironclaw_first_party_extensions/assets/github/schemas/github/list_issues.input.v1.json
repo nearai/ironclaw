@@ -36,8 +36,9 @@
     "page": {
       "type": "integer",
       "minimum": 1,
+      "maximum": 10,
       "default": 1,
-      "description": "1-based results page."
+      "description": "1-based issue-only results page. Capped to bound upstream requests while normalizing GitHub's mixed issues and pull requests feed."
     },
     "limit": {
       "type": "integer",

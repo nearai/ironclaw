@@ -223,6 +223,10 @@ mod tests {
             find_schema("GitHub get_pull_request_files input")["properties"]["page"]["maximum"]
                 .is_null()
         );
+        assert_eq!(
+            find_schema("GitHub list_issues input")["properties"]["page"]["maximum"],
+            10
+        );
         assert!(find_schema("GitHub list_issues input")["properties"]["labels"].is_object());
         assert!(find_schema("GitHub merge_pull_request input")["properties"]["sha"].is_object());
         assert!(find_schema("GitHub create_issue input")["properties"]["assignees"].is_object());
@@ -405,6 +409,61 @@ mod tests {
         assert_eq!(
             requests[0].path,
             "/repos/nearai/ironclaw/issues?state=all&per_page=1&page=1"
+        );
+    }
+
+    #[test]
+    fn list_issues_bounds_logical_page_and_raw_page_scan() {
+        test_support::set_response(Ok(json!([]).to_string()));
+
+        assert_eq!(
+            execute_inner(
+                r#"{"owner":"nearai","repo":"ironclaw","page":11}"#,
+                Some(r#"{"capability_id":"github.list_issues"}"#),
+            )
+            .unwrap_err(),
+            "invalid_page"
+        );
+        assert!(
+            test_support::requests().is_empty(),
+            "oversized logical issue page should fail before egress"
+        );
+
+        let pr_only_page = || {
+            Ok(json!([{
+                "number": 4805,
+                "title": "pull request",
+                "pull_request": {
+                    "url": "https://api.github.com/repos/nearai/ironclaw/pulls/4805"
+                }
+            }])
+            .to_string())
+        };
+        test_support::set_responses([
+            pr_only_page(),
+            pr_only_page(),
+            pr_only_page(),
+            pr_only_page(),
+            pr_only_page(),
+            pr_only_page(),
+            pr_only_page(),
+            pr_only_page(),
+            pr_only_page(),
+            pr_only_page(),
+        ]);
+
+        assert_eq!(
+            execute_inner(
+                r#"{"owner":"nearai","repo":"ironclaw","limit":1}"#,
+                Some(r#"{"capability_id":"github.list_issues"}"#),
+            )
+            .unwrap_err(),
+            "github_issue_page_scan_limit"
+        );
+        assert_eq!(
+            test_support::requests().len(),
+            10,
+            "scan limit should bound upstream page requests"
         );
     }
 
@@ -725,6 +784,38 @@ mod tests {
             test_support::requests().is_empty(),
             "oversized body should fail before egress"
         );
+    }
+
+    #[test]
+    fn update_issue_rejects_missing_mutation_fields_before_egress() {
+        let error = execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","issue_number":42}"#,
+            Some(r#"{"capability_id":"github.update_issue"}"#),
+        )
+        .expect_err("update issue should require at least one mutable field");
+        assert_eq!(error, "invalid_parameters");
+        assert!(
+            test_support::requests().is_empty(),
+            "missing mutation fields should fail before egress"
+        );
+    }
+
+    #[test]
+    fn update_issue_preserves_empty_labels_and_assignees_arrays() {
+        test_support::set_response(Ok(json!({}).to_string()));
+
+        execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","issue_number":42,"labels":[],"assignees":[]}"#,
+            Some(r#"{"capability_id":"github.update_issue"}"#),
+        )
+        .expect("update issue should accept empty labels and assignees arrays");
+
+        let requests = test_support::requests();
+        assert_eq!(requests[0].method, "PATCH");
+        assert_eq!(requests[0].path, "/repos/nearai/ironclaw/issues/42");
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body, json!({"labels": [], "assignees": []}));
     }
 
     #[test]
