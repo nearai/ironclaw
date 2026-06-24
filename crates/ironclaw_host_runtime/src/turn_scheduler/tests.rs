@@ -265,6 +265,7 @@ async fn claimed_test_run(thread_id: &str) -> ClaimedTurnRun {
         received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: None,
+        blocked_activity_id: None,
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(1),

@@ -32,7 +32,7 @@ use ironclaw_turns::{
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use crate::AuthChallengeProvider;
-use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
+use crate::auth_prompt::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
 use crate::failure_summary::{
     pinned_failure_summary_for_category, reborn_failure_summary_for_category,
 };
@@ -389,19 +389,19 @@ async fn blocked_prompt_payload(
     let gate_ref_str = gate_ref.as_str().to_string();
     match event.status {
         TurnStatus::BlockedAuth => {
-            let view = auth_prompt_view_for_blocked_auth(
-                event.owner_user_id.as_ref().unwrap_or(caller_user_id),
-                &event.scope,
-                event.run_id,
-                &gate_ref_str,
-                blocked_invocation_id,
-                event
+            let view = auth_prompt_view_for_blocked_auth(BlockedAuthPromptRequest {
+                fallback_owner_user_id: event.owner_user_id.as_ref().unwrap_or(caller_user_id),
+                scope: &event.scope,
+                run_id: event.run_id,
+                gate_ref: &gate_ref_str,
+                invocation_id: blocked_invocation_id,
+                body: event
                     .sanitized_reason
                     .clone()
                     .unwrap_or_else(|| "Authenticate to continue this run.".to_string()),
-                &state.credential_requirements,
+                credential_requirements: &state.credential_requirements,
                 auth_challenges,
-            )
+            })
             .await?;
             Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
         }
