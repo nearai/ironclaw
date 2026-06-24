@@ -66,6 +66,25 @@ async fn webui_event_stream_enriches_auth_prompt_through_projection_stream() {
                 && prompt.provider.as_deref() == Some("github")
                 && prompt.authorization_url.as_deref() == Some("https://github.com/login/oauth/authorize")
     )));
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        ProductOutboundPayload::ProjectionUpdate { state }
+            if state.items.iter().any(|item| matches!(
+                item,
+                ProductProjectionItem::Gate {
+                    run_id,
+                    gate_kind,
+                    gate_ref: projected_gate_ref,
+                    auth_context: Some(context),
+                    ..
+                } if *run_id == turn_run
+                    && *gate_kind == ProductGateKind::Auth
+                    && projected_gate_ref == gate_ref
+                    && context.challenge_kind == AuthPromptChallengeKind::OAuthUrl
+                    && context.provider.as_deref() == Some("github")
+                    && context.authorization_url.as_deref() == Some("https://github.com/login/oauth/authorize")
+            ))
+    )));
 }
 
 #[tokio::test]
@@ -137,6 +156,25 @@ async fn webui_event_stream_uses_credential_requirement_for_manual_token_auth_pr
                 && prompt.challenge_kind == Some(AuthPromptChallengeKind::ManualToken)
                 && prompt.provider.as_deref() == Some("github")
                 && prompt.account_label.as_deref() == Some("github")
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        ProductOutboundPayload::ProjectionUpdate { state }
+            if state.items.iter().any(|item| matches!(
+                item,
+                ProductProjectionItem::Gate {
+                    run_id,
+                    gate_kind,
+                    gate_ref: projected_gate_ref,
+                    auth_context: Some(context),
+                    ..
+                } if *run_id == turn_run
+                    && *gate_kind == ProductGateKind::Auth
+                    && projected_gate_ref == gate_ref
+                    && context.challenge_kind == AuthPromptChallengeKind::ManualToken
+                    && context.provider.as_deref() == Some("github")
+                    && context.account_label.as_deref() == Some("github")
+            ))
     )));
 }
 

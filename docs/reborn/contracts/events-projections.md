@@ -122,8 +122,11 @@ Reducer rules:
   replay paths can render refusal as a neutral declined state instead of a
   generic failure.
 - product-facing gate projection rows must carry the run identity and gate kind
-  needed to resolve the gate. Clients must not infer gate run identity from the
-  latest active run or from tool name/order heuristics.
+  needed to resolve the gate. When the gate is tied to a parked capability
+  activity or product-safe prompt metadata, the row also carries the stable
+  invocation id and the same approval/auth context used by the immediate prompt
+  payload. Clients must not infer gate run identity from the latest active run
+  or from tool name/order heuristics.
   Product adapters may additionally emit rich `GatePrompt`/`AuthPrompt`
   payloads for immediate UI affordances such as OAuth URLs or approval context,
   but those prompt payloads are enrichments; replay/rebase reconstruction must

@@ -984,6 +984,102 @@ pub struct AuthPromptView {
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuthPromptContextView {
+    pub challenge_kind: AuthPromptChallengeKind,
+    /// Short provider id (e.g. `"google"`, `"github"`, `"notion"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Human-readable account label (e.g. `"work@example.com"`, `"GitHub PAT"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
+    /// Opaque IDP authorization URL. Only present for `OAuthUrl` challenges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_url: Option<String>,
+    /// Challenge expiry. Present when the auth flow has a bounded TTL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl AuthPromptContextView {
+    pub fn new(
+        challenge_kind: AuthPromptChallengeKind,
+        provider: Option<String>,
+        account_label: Option<String>,
+        authorization_url: Option<String>,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<Self, ProductAdapterError> {
+        let view = Self {
+            challenge_kind,
+            provider,
+            account_label,
+            authorization_url,
+            expires_at,
+        };
+        view.validate()?;
+        Ok(view)
+    }
+
+    pub fn from_auth_prompt(prompt: &AuthPromptView) -> Option<Self> {
+        Self::new(
+            prompt.challenge_kind?,
+            prompt.provider.clone(),
+            prompt.account_label.clone(),
+            prompt.authorization_url.clone(),
+            prompt.expires_at,
+        )
+        .ok()
+    }
+
+    fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_optional_display_text(
+            "auth_prompt_provider",
+            self.provider.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "auth_prompt_account_label",
+            self.account_label.as_deref(),
+            PROJECTION_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "auth_prompt_authorization_url",
+            self.authorization_url.as_deref(),
+            PROJECTION_TEXT_MAX_BYTES,
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for AuthPromptContextView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            challenge_kind: AuthPromptChallengeKind,
+            #[serde(default)]
+            provider: Option<String>,
+            #[serde(default)]
+            account_label: Option<String>,
+            #[serde(default)]
+            authorization_url: Option<String>,
+            #[serde(default)]
+            expires_at: Option<DateTime<Utc>>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        AuthPromptContextView::new(
+            wire.challenge_kind,
+            wire.provider,
+            wire.account_label,
+            wire.authorization_url,
+            wire.expires_at,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductGateKind {
@@ -1035,8 +1131,14 @@ pub enum ProductProjectionItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         invocation_id: Option<InvocationId>,
         headline: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
         #[serde(default)]
         allow_always: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval_context: Option<ApprovalPromptContextView>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_context: Option<AuthPromptContextView>,
     },
     SkillActivation {
         id: String,
@@ -1083,7 +1185,12 @@ impl ProductProjectionItem {
                 Ok(())
             }
             Self::Gate {
-                gate_ref, headline, ..
+                gate_ref,
+                headline,
+                body,
+                approval_context,
+                auth_context,
+                ..
             } => {
                 validate_bounded_text(
                     "projection_gate_ref",
@@ -1094,7 +1201,17 @@ impl ProductProjectionItem {
                     "projection_gate_headline",
                     headline,
                     PROJECTION_TEXT_MAX_BYTES,
-                )
+                )?;
+                if let Some(body) = body {
+                    validate_bounded_text("projection_gate_body", body, PROJECTION_TEXT_MAX_BYTES)?;
+                }
+                if let Some(context) = approval_context {
+                    context.validate()?;
+                }
+                if let Some(context) = auth_context {
+                    context.validate()?;
+                }
+                Ok(())
             }
             Self::SkillActivation {
                 id,
@@ -1176,7 +1293,13 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 invocation_id: Option<InvocationId>,
                 headline: String,
                 #[serde(default)]
+                body: Option<String>,
+                #[serde(default)]
                 allow_always: bool,
+                #[serde(default)]
+                approval_context: Option<ApprovalPromptContextView>,
+                #[serde(default)]
+                auth_context: Option<AuthPromptContextView>,
             },
             SkillActivation {
                 id: String,
@@ -1224,14 +1347,20 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 gate_ref,
                 invocation_id,
                 headline,
+                body,
                 allow_always,
+                approval_context,
+                auth_context,
             } => ProductProjectionItem::Gate {
                 run_id,
                 gate_kind,
                 gate_ref,
                 invocation_id,
                 headline,
+                body,
                 allow_always,
+                approval_context,
+                auth_context,
             },
             Wire::SkillActivation {
                 id,
@@ -1566,7 +1695,10 @@ mod tests {
                 gate_ref: "gate:approval-test".to_string(),
                 invocation_id: Some(invocation_id),
                 headline: "Approval required".to_string(),
+                body: Some("capability requires approval".to_string()),
                 allow_always: true,
+                approval_context: None,
+                auth_context: None,
             }],
         )
         .expect("valid gate projection");
@@ -1580,9 +1712,59 @@ mod tests {
             invocation_id.to_string()
         );
         assert_eq!(value["items"][0]["gate"]["headline"], "Approval required");
+        assert_eq!(
+            value["items"][0]["gate"]["body"],
+            "capability requires approval"
+        );
         assert_eq!(value["items"][0]["gate"]["allow_always"], true);
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize gate projection");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_round_trips_auth_gate_context() {
+        let run_id = TurnRunId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::Gate {
+                run_id,
+                gate_kind: ProductGateKind::Auth,
+                gate_ref: "gate:auth-test".to_string(),
+                invocation_id: None,
+                headline: "Authentication required".to_string(),
+                body: Some("Authenticate to continue this run.".to_string()),
+                allow_always: false,
+                approval_context: None,
+                auth_context: Some(
+                    AuthPromptContextView::new(
+                        AuthPromptChallengeKind::OAuthUrl,
+                        Some("github".to_string()),
+                        None,
+                        Some("https://github.com/login/oauth/authorize".to_string()),
+                        None,
+                    )
+                    .expect("valid auth context"),
+                ),
+            }],
+        )
+        .expect("valid auth gate projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+
+        assert_eq!(
+            value["items"][0]["gate"]["auth_context"]["challenge_kind"],
+            "oauth_url"
+        );
+        assert_eq!(
+            value["items"][0]["gate"]["auth_context"]["provider"],
+            "github"
+        );
+        assert_eq!(
+            value["items"][0]["gate"]["auth_context"]["authorization_url"],
+            "https://github.com/login/oauth/authorize"
+        );
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize auth gate projection");
         assert_eq!(decoded, state);
     }
 

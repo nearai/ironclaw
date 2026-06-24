@@ -1,5 +1,5 @@
 import { React } from "../../../lib/html.js";
-import { gateFromEvent } from "./gates.js";
+import { gateFromEvent, gateFromProjectionGate } from "./gates.js";
 import {
   toolCardFromActivity,
   toolCardFromPreview,
@@ -276,35 +276,6 @@ function clearPendingNonAuthGateForRun(setPendingGate, runId, promptRunIdRef) {
   });
 }
 
-function pendingGateFromProjectionGate(gate) {
-  if (!gate?.run_id || !gate.gate_ref) return null;
-  const gateKind = gate.gate_kind || "generic";
-  const base = {
-    gateKind,
-    runId: gate.run_id,
-    gateRef: gate.gate_ref,
-    invocationId: gate.invocation_id || null,
-    headline: gate.headline,
-    body: "",
-    allowAlways: gate.allow_always === true,
-  };
-  if (gateKind === "auth") {
-    return {
-      ...base,
-      kind: "auth_required",
-      challengeKind: "other",
-      provider: null,
-      accountLabel: "",
-      authorizationUrl: null,
-      expiresAt: null,
-    };
-  }
-  return {
-    ...base,
-    kind: "gate",
-  };
-}
-
 function isObsoleteProjectionGate(activeRunRef, pendingGate) {
   const activeRun = activeRunRef?.current;
   if (!activeRun?.runId || activeRun.runId !== pendingGate?.runId) return false;
@@ -525,7 +496,7 @@ function applyProjectionItems({
     }
 
     if (item.gate) {
-      const pendingGate = pendingGateFromProjectionGate(item.gate);
+      const pendingGate = gateFromProjectionGate(item.gate);
       const runId = pendingGate?.runId || null;
       if (
         runId &&
