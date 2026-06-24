@@ -61,11 +61,27 @@ pub fn apply_profile(settings: &mut Settings) -> Result<(), ConfigError> {
         Some(n) if !n.is_empty() => n,
         _ => return Ok(()),
     };
+    apply_named_profile(settings, &name)
+}
 
-    let profile_settings = load_profile(&name)?;
+/// Apply a deployment profile by explicit name, bypassing `IRONCLAW_PROFILE`
+/// env resolution. Use this when the caller has already decided which profile
+/// to apply (e.g. setup wizard after the user selects one interactively) —
+/// otherwise an ambient `IRONCLAW_PROFILE` in the real environment would
+/// silently override the chosen profile via `set_runtime_env`, which
+/// `optional_env` treats as a fallback rather than an override.
+pub fn apply_named_profile(settings: &mut Settings, name: &str) -> Result<(), ConfigError> {
+    if name.is_empty() {
+        return Ok(());
+    }
+    // Normalize up-front so the trace log matches the name `load_profile`
+    // actually resolves against (which lowercases internally). Keeps the
+    // single-source-of-truth invariant per the project's case-insensitive
+    // comparison convention.
+    let normalized = name.to_ascii_lowercase();
+    let profile_settings = load_profile(&normalized)?;
     settings.merge_from(&profile_settings);
-
-    tracing::debug!("Applied deployment profile: {name}");
+    tracing::debug!("Applied deployment profile: {normalized}");
     Ok(())
 }
 
