@@ -661,7 +661,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
                 .lock()
                 .expect("lock"))
             .or(activity_id)
-            .unwrap_or_else(ironclaw_turns::CapabilityActivityId::new),
+            .unwrap_or_default(),
             surface_version: self.visible_surface_version.clone(),
             capability_id: capability_id(),
             input_ref,

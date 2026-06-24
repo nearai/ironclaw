@@ -4834,7 +4834,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
-                activity_id: activity_id,
+                activity_id,
                 surface_version: surface.version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
