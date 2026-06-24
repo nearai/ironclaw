@@ -642,8 +642,12 @@ where
                 == "google-calendar__list_events";
         tracing::debug!(
             target: "ironclaw::reborn::runtime",
-            disclosure_build = "general-name-matcher-v2",
+            disclosure_build = "general-name-matcher-v3",
             matcher_selftest,
+            // Echoes a const from ironclaw_loop_support: if this reads
+            // "delegate-to-inner", the surface-filter resolution fix is actually
+            // linked in (not a stale incremental build of that crate).
+            filter_build = ironclaw_loop_support::CAPABILITY_FILTER_RESOLUTION_BUILD,
             "reborn tool disclosure decorator wired (bridged)"
         );
         capability_factory = capability_factory.with_decorator(Arc::new(

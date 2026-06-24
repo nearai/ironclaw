@@ -5,6 +5,14 @@
 //! not own provider clients, tool dispatchers, secrets, or runtime handles.
 #![warn(unreachable_pub)]
 
+/// Build tag for the capability-surface-filter provider-tool-call resolution path.
+/// Bumped when that resolution logic changes so a startup marker can prove THIS
+/// crate (not just a stale incremental codegen unit) is actually linked in.
+/// `delegate-to-inner` => the filters delegate `provider_tool_call_capability_ids`
+/// to the inner port (reaching the tool-disclosure forgiving path) instead of the
+/// LoopCapabilityPort default.
+pub const CAPABILITY_FILTER_RESOLUTION_BUILD: &str = "delegate-to-inner";
+
 use std::{
     collections::{HashMap, HashSet},
     sync::{
