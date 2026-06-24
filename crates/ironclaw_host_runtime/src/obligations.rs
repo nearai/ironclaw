@@ -123,16 +123,6 @@ impl RuntimeSecretInjectionStore {
         capability_id: &CapabilityId,
         handle: &SecretHandle,
         material: SecretMaterial,
-    ) -> Result<(), RuntimeSecretInjectionStoreError> {
-        self.insert_with_credential_account(scope, capability_id, handle, material, None)
-    }
-
-    pub(crate) fn insert_with_credential_account(
-        &self,
-        scope: &ResourceScope,
-        capability_id: &CapabilityId,
-        handle: &SecretHandle,
-        material: SecretMaterial,
         credential_account: Option<RuntimeCredentialAccountIdentity>,
     ) -> Result<(), RuntimeSecretInjectionStoreError> {
         let now = Instant::now();
@@ -155,24 +145,6 @@ impl RuntimeSecretInjectionStore {
         scope: &ResourceScope,
         capability_id: &CapabilityId,
         handle: &SecretHandle,
-    ) -> Result<Option<SecretMaterial>, RuntimeSecretInjectionStoreError> {
-        let now = Instant::now();
-        let mut secrets = self.lock()?;
-        prune_expired_entries(&mut secrets, now);
-        Ok(secrets
-            .remove(&RuntimeSecretInjectionKey::new(
-                scope,
-                capability_id,
-                handle,
-            ))
-            .map(|entry| entry.material))
-    }
-
-    pub(crate) fn take_with_metadata(
-        &self,
-        scope: &ResourceScope,
-        capability_id: &CapabilityId,
-        handle: &SecretHandle,
     ) -> Result<Option<RuntimeStagedSecretMaterial>, RuntimeSecretInjectionStoreError> {
         let now = Instant::now();
         let mut secrets = self.lock()?;
@@ -189,7 +161,7 @@ impl RuntimeSecretInjectionStore {
             }))
     }
 
-    pub(crate) fn clone_material_with_metadata(
+    pub(crate) fn clone_material(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -1330,6 +1302,7 @@ impl BuiltinObligationHandler {
                     request.capability_id,
                     &handle,
                     secret,
+                    None,
                 )
                 .map_err(|_| secret_obligation_failed())?;
         }
@@ -1901,7 +1874,7 @@ async fn stage_credential_material(
             crate::services::stage_secret_error(e)
         })?;
     secret_injections
-        .insert_with_credential_account(
+        .insert(
             target_scope,
             capability_id,
             target,
@@ -2340,6 +2313,7 @@ mod tests {
                 &capability_id,
                 &handle,
                 SecretMaterial::from("runtime-secret"),
+                None,
             )
             .unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2378,6 +2352,7 @@ mod tests {
                 &capability_id,
                 &handle,
                 SecretMaterial::from("runtime-secret"),
+                None,
             )
             .unwrap();
 

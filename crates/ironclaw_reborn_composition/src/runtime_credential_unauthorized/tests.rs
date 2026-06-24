@@ -9,7 +9,7 @@ use ironclaw_auth::{
 use ironclaw_host_api::{
     CapabilityId, CapabilitySet, CorrelationId, CredentialStageError, ExecutionContext,
     ExtensionId, InvocationId, MountView, NetworkMethod, NetworkPolicy, ResourceEstimate,
-    ResourceScope, ResourceUsage, RuntimeCredentialAccountProviderId,
+    ResourceScope, ResourceUsage, RuntimeCredentialAccountId, RuntimeCredentialAccountProviderId,
     RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, RuntimeCredentialUnauthorized,
     RuntimeCredentialUnauthorizedPolicy, RuntimeKind, ThreadId, TrustClass, UserId,
 };
@@ -1140,7 +1140,7 @@ fn unauthorized_marker(
         scope: resource_scope.clone(),
         account_surface: ironclaw_host_api::RuntimeCredentialAccountSurface::Api,
         account_provider: RuntimeCredentialAccountProviderId::new(provider).expect("provider"),
-        account_id: account.id.to_string(),
+        account_id: RuntimeCredentialAccountId::from_uuid(account.id.as_uuid()),
         account_updated_at: account.updated_at,
         requester_extension,
         auth_requirement,

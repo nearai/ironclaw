@@ -240,7 +240,7 @@ impl ProductAuthProviderRuntimePorts {
             .await
             .map_err(stage_secret_error)?;
         self.secret_injection_store
-            .insert(target_scope, capability_id, handle, secret)
+            .insert(target_scope, capability_id, handle, secret, None)
             .map_err(|_| ProductAuthCredentialStageError::Backend)
     }
 }

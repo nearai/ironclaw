@@ -39,27 +39,10 @@ impl RuntimeSecretMaterialStager {
         capability_id: &CapabilityId,
         handle: &SecretHandle,
         material: SecretMaterial,
-    ) -> Result<(), RuntimeSecretStageError> {
-        self.stage_secret_material_once_with_account(
-            target_scope,
-            capability_id,
-            handle,
-            material,
-            None,
-        )
-        .await
-    }
-
-    pub async fn stage_secret_material_once_with_account(
-        &self,
-        target_scope: &ResourceScope,
-        capability_id: &CapabilityId,
-        handle: &SecretHandle,
-        material: SecretMaterial,
         credential_account: Option<RuntimeCredentialAccountIdentity>,
     ) -> Result<(), RuntimeSecretStageError> {
         self.secret_injection_store
-            .insert_with_credential_account(
+            .insert(
                 target_scope,
                 capability_id,
                 handle,
@@ -165,7 +148,7 @@ impl HostRuntimeHttpEgressPort {
         for credential in credentials {
             let credential_account = credential.credential_account.clone();
             self.secret_stager
-                .stage_secret_material_once_with_account(
+                .stage_secret_material_once(
                     &request.scope,
                     &request.capability_id,
                     &credential.handle,
@@ -268,10 +251,10 @@ mod tests {
     };
     use ironclaw_host_api::{
         ExtensionId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme,
-        NetworkTargetPattern, RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-        RuntimeCredentialAccountSurface, RuntimeCredentialAuthRequirement,
-        RuntimeCredentialUnauthorized, RuntimeCredentialUnauthorizedPolicy,
-        RuntimeHttpEgressResponse, UserId,
+        NetworkTargetPattern, RuntimeCredentialAccountId, RuntimeCredentialAccountProviderId,
+        RuntimeCredentialAccountSetup, RuntimeCredentialAccountSurface,
+        RuntimeCredentialAuthRequirement, RuntimeCredentialUnauthorized,
+        RuntimeCredentialUnauthorizedPolicy, RuntimeHttpEgressResponse, UserId,
     };
 
     use super::*;
@@ -448,12 +431,13 @@ mod tests {
     #[tokio::test]
     async fn host_runtime_http_egress_preserves_delegate_credential_unauthorized_marker_on_401() {
         let scope = scope();
-        let account_id = "product-auth-account-123".to_string();
+        let account_id =
+            RuntimeCredentialAccountId::parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap();
         let marker = RuntimeCredentialUnauthorized {
             scope: scope.clone(),
             account_surface: RuntimeCredentialAccountSurface::Api,
             account_provider: RuntimeCredentialAccountProviderId::new("github").expect("provider"),
-            account_id: account_id.clone(),
+            account_id,
             account_updated_at: chrono::Utc::now(),
             requester_extension: None,
             auth_requirement: auth_requirement("github"),
@@ -466,7 +450,7 @@ mod tests {
         let port = host_port(egress, Arc::new(AllowObligations), secret_store());
         let mut request = host_request();
         request.credentials.push(HostRuntimeCredentialMaterial {
-            handle: SecretHandle::new(account_id).expect("secret handle"),
+            handle: SecretHandle::new("product-auth-account-123").expect("secret handle"),
             material: SecretMaterial::from("host-held-token"),
             target: RuntimeCredentialTarget::Header {
                 name: "authorization".to_string(),
@@ -478,7 +462,7 @@ mod tests {
                 account_surface: RuntimeCredentialAccountSurface::Api,
                 account_provider: RuntimeCredentialAccountProviderId::new("github")
                     .expect("provider"),
-                account_id: "product-auth-account-123".to_string(),
+                account_id,
                 account_updated_at: Some(chrono::Utc::now()),
                 requester_extension: None,
                 auth_requirement: Some(auth_requirement("github")),
@@ -512,7 +496,10 @@ mod tests {
                 account_surface: RuntimeCredentialAccountSurface::Api,
                 account_provider: RuntimeCredentialAccountProviderId::new("github")
                     .expect("provider"),
-                account_id: "product-auth-account-123".to_string(),
+                account_id: RuntimeCredentialAccountId::parse(
+                    "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                )
+                .unwrap(),
                 account_updated_at: Some(chrono::Utc::now()),
                 requester_extension: None,
                 auth_requirement: Some(auth_requirement("github")),
@@ -537,7 +524,8 @@ mod tests {
             scope: scope(),
             account_surface: RuntimeCredentialAccountSurface::Api,
             account_provider: RuntimeCredentialAccountProviderId::new("google").expect("provider"),
-            account_id: "oauth-account-123".to_string(),
+            account_id: RuntimeCredentialAccountId::parse("b2c3d4e5-f6a7-8901-bcde-f12345678901")
+                .unwrap(),
             account_updated_at: chrono::Utc::now(),
             requester_extension: None,
             auth_requirement: auth_requirement("google"),
@@ -562,7 +550,10 @@ mod tests {
                 account_surface: RuntimeCredentialAccountSurface::Api,
                 account_provider: RuntimeCredentialAccountProviderId::new("google")
                     .expect("provider"),
-                account_id: "oauth-account-123".to_string(),
+                account_id: RuntimeCredentialAccountId::parse(
+                    "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+                )
+                .unwrap(),
                 account_updated_at: Some(chrono::Utc::now()),
                 requester_extension: None,
                 auth_requirement: Some(auth_requirement("google")),

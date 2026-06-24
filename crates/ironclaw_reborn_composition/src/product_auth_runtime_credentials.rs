@@ -9,10 +9,10 @@ use ironclaw_auth::{
     select_latest_duplicate_user_reusable_account,
 };
 use ironclaw_host_api::{
-    CredentialStageError, ExtensionId, ResourceScope, RuntimeCredentialAccountIdentity,
-    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAccountSurface, RuntimeCredentialAuthRequirement,
-    RuntimeCredentialUnauthorizedPolicy,
+    CredentialStageError, ExtensionId, ResourceScope, RuntimeCredentialAccountId,
+    RuntimeCredentialAccountIdentity, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialAccountSetup, RuntimeCredentialAccountSurface,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialUnauthorizedPolicy,
 };
 use ironclaw_host_runtime::{
     RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
@@ -526,7 +526,7 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
                 scope: account.scope.resource,
                 account_surface: runtime_credential_account_surface(account.scope.surface),
                 account_provider: request.provider.clone(),
-                account_id: account.id.to_string(),
+                account_id: RuntimeCredentialAccountId::from_uuid(account.id.as_uuid()),
                 account_updated_at: Some(account.updated_at),
                 requester_extension: recovery_requester_extension,
                 auth_requirement: Some(auth_requirement),

@@ -12,8 +12,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
     CapabilityId, ExtensionId, HostApiError, MountGrant, NetworkMethod, NetworkPolicy,
-    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
-    RuntimeKind, ScopedPath, SecretHandle,
+    ResourceScope, RuntimeCredentialAccountId, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialAuthRequirement, RuntimeKind, ScopedPath, SecretHandle,
 };
 
 /// Runtime HTTP request accepted by the host-owned egress service.
@@ -118,7 +118,7 @@ pub struct RuntimeCredentialAccountIdentity {
     #[serde(default)]
     pub account_surface: RuntimeCredentialAccountSurface,
     pub account_provider: RuntimeCredentialAccountProviderId,
-    pub account_id: String,
+    pub account_id: RuntimeCredentialAccountId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_updated_at: Option<crate::Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -133,7 +133,7 @@ impl RuntimeCredentialAccountIdentity {
     pub fn new(
         scope: ResourceScope,
         account_provider: RuntimeCredentialAccountProviderId,
-        account_id: impl Into<String>,
+        account_id: RuntimeCredentialAccountId,
         account_updated_at: Option<crate::Timestamp>,
         unauthorized_policy: RuntimeCredentialUnauthorizedPolicy,
     ) -> Self {
@@ -141,7 +141,7 @@ impl RuntimeCredentialAccountIdentity {
             scope,
             account_surface: RuntimeCredentialAccountSurface::default(),
             account_provider,
-            account_id: account_id.into(),
+            account_id,
             account_updated_at,
             requester_extension: None,
             auth_requirement: None,
@@ -167,7 +167,7 @@ impl RuntimeCredentialAccountIdentity {
             scope: self.scope.clone(),
             account_surface: self.account_surface,
             account_provider: self.account_provider.clone(),
-            account_id: self.account_id.clone(),
+            account_id: self.account_id,
             account_updated_at: self.account_updated_at?,
             requester_extension: self.requester_extension.clone(),
             auth_requirement: self.auth_requirement.clone()?,
@@ -373,7 +373,7 @@ pub struct RuntimeCredentialUnauthorized {
     #[serde(default)]
     pub account_surface: RuntimeCredentialAccountSurface,
     pub account_provider: RuntimeCredentialAccountProviderId,
-    pub account_id: String,
+    pub account_id: RuntimeCredentialAccountId,
     pub account_updated_at: crate::Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requester_extension: Option<ExtensionId>,
@@ -388,7 +388,7 @@ impl RuntimeCredentialUnauthorized {
             scope: self.scope.clone(),
             account_surface: self.account_surface,
             account_provider: self.account_provider.clone(),
-            account_id: self.account_id.clone(),
+            account_id: self.account_id,
             account_updated_at: self.account_updated_at,
         }
     }
@@ -400,7 +400,7 @@ pub struct RuntimeCredentialUnauthorizedAccountKey {
     #[serde(default)]
     pub account_surface: RuntimeCredentialAccountSurface,
     pub account_provider: RuntimeCredentialAccountProviderId,
-    pub account_id: String,
+    pub account_id: RuntimeCredentialAccountId,
     pub account_updated_at: crate::Timestamp,
 }
 

@@ -48,14 +48,7 @@ impl RuntimeCredentialUnauthorizedRecoveryEgress {
             );
             return Ok(());
         }
-        let Ok(account_uuid) = uuid::Uuid::parse_str(&unauthorized.account_id) else {
-            tracing::debug!(
-                account_id = %unauthorized.account_id,
-                "runtime HTTP credential unauthorized marker carried an invalid account id"
-            );
-            return Ok(());
-        };
-        let account_id = CredentialAccountId::from_uuid(account_uuid);
+        let account_id = CredentialAccountId::from_uuid(unauthorized.account_id.as_uuid());
         let scope = AuthProductScope::credential_owner(
             &unauthorized.scope,
             auth_surface(unauthorized.account_surface),
@@ -110,7 +103,7 @@ impl RuntimeCredentialUnauthorizedRecoveryEgress {
         let account_id_for_log = account_id.to_string();
         match self
             .credential_accounts
-            .revoke_if_unchanged(&scope, account_id, account_updated_at, requester_extension)
+            .revoke_if_unchanged(scope, account_id, account_updated_at, requester_extension)
             .await?
         {
             Some(_) => Ok(true),

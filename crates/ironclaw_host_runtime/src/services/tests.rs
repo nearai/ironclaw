@@ -196,6 +196,7 @@ async fn runtime_secret_material_stager_stages_secret_material_into_target_scope
             &capability_id,
             &handle,
             SecretMaterial::from("config-secret-material"),
+            None,
         )
         .await
         .expect("runtime stager should stage provided secret material");
@@ -205,7 +206,7 @@ async fn runtime_secret_material_stager_stages_secret_material_into_target_scope
         .take(&scope, &capability_id, &handle)
         .expect("staged secret should be readable for target scope")
         .expect("provided material should be staged");
-    assert_eq!(staged.expose_secret(), "config-secret-material");
+    assert_eq!(staged.material.expose_secret(), "config-secret-material");
 }
 
 #[tokio::test]
@@ -364,6 +365,7 @@ async fn host_http_egress_helper_injects_staged_credentials_from_handoff_store()
             &capability_id,
             &handle,
             SecretMaterial::from("staged-secret"),
+            None,
         )
         .expect("staged credential should be seeded");
     let egress = configured_egress(&services);
@@ -409,6 +411,7 @@ async fn host_http_egress_helper_consumes_staged_credentials_after_first_egress(
             &capability_id,
             &handle,
             SecretMaterial::from("staged-secret"),
+            None,
         )
         .expect("staged credential should be seeded");
     let egress = configured_egress(&services);
@@ -465,6 +468,7 @@ async fn host_http_egress_treats_expired_staged_secret_as_missing() {
             &capability_id,
             &handle,
             SecretMaterial::from("staged-secret"),
+            None,
         )
         .expect("staged credential should be seeded");
     std::thread::sleep(Duration::from_millis(20));

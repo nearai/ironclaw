@@ -206,7 +206,7 @@ fn restore_staged_secrets(
         else {
             continue;
         };
-        if let Err(error) = secret_injections.insert_with_credential_account(
+        if let Err(error) = secret_injections.insert(
             &request.scope,
             &capability_id,
             &handle,
@@ -262,13 +262,9 @@ fn staged_secret_for_injection(
         return missing_runtime_credential(injection.required);
     };
     let material = if runtime_reuses_staged_credentials(request.runtime) {
-        secret_injections.clone_material_with_metadata(
-            &request.scope,
-            capability_id,
-            &injection.handle,
-        )
+        secret_injections.clone_material(&request.scope, capability_id, &injection.handle)
     } else {
-        secret_injections.take_with_metadata(&request.scope, capability_id, &injection.handle)
+        secret_injections.take(&request.scope, capability_id, &injection.handle)
     };
     match material {
         Ok(Some(material)) => Ok(Some(material)),
@@ -523,9 +519,9 @@ mod tests {
     use super::*;
     use ironclaw_host_api::{
         ExtensionId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope,
-        RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-        RuntimeCredentialAuthRequirement, RuntimeCredentialUnauthorizedPolicy, RuntimeKind,
-        TenantId, Timestamp, UserId,
+        RuntimeCredentialAccountId, RuntimeCredentialAccountProviderId,
+        RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
+        RuntimeCredentialUnauthorizedPolicy, RuntimeKind, TenantId, Timestamp, UserId,
     };
     use ironclaw_secrets::SecretMaterial;
     use ironclaw_secrets::{
@@ -669,7 +665,7 @@ mod tests {
         let incomplete_handle = SecretHandle::new("incomplete-account").unwrap();
 
         secret_injections
-            .insert_with_credential_account(
+            .insert(
                 &scope,
                 &capability_id,
                 &complete_handle,
@@ -678,7 +674,8 @@ mod tests {
                     RuntimeCredentialAccountIdentity::new(
                         scope.clone(),
                         provider.clone(),
-                        "product-auth-account-123",
+                        RuntimeCredentialAccountId::parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+                            .unwrap(),
                         Some(chrono::Utc::now()),
                         RuntimeCredentialUnauthorizedPolicy::RevokeAccount,
                     )
@@ -693,7 +690,7 @@ mod tests {
             )
             .unwrap();
         secret_injections
-            .insert_with_credential_account(
+            .insert(
                 &scope,
                 &capability_id,
                 &incomplete_handle,
@@ -701,7 +698,8 @@ mod tests {
                 Some(RuntimeCredentialAccountIdentity::new(
                     scope.clone(),
                     provider.clone(),
-                    "product-auth-account-456",
+                    RuntimeCredentialAccountId::parse("b2c3d4e5-f6a7-8901-bcde-f12345678901")
+                        .unwrap(),
                     Some(chrono::Utc::now()),
                     RuntimeCredentialUnauthorizedPolicy::RevokeAccount,
                 )),

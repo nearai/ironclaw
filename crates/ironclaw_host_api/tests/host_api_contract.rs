@@ -1151,7 +1151,8 @@ fn runtime_http_egress_response_round_trips_optional_credential_unauthorized() {
             scope: scope.clone(),
             account_surface: ironclaw_host_api::RuntimeCredentialAccountSurface::Api,
             account_provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
-            account_id: "account-123".to_string(),
+            account_id: RuntimeCredentialAccountId::parse("c3d4e5f6-a7b8-9012-cdef-123456789012")
+                .unwrap(),
             account_updated_at: updated_at,
             requester_extension: Some(ExtensionId::new("github").unwrap()),
             auth_requirement: RuntimeCredentialAuthRequirement {
@@ -1174,7 +1175,10 @@ fn runtime_http_egress_response_round_trips_optional_credential_unauthorized() {
         rejected.account_provider,
         RuntimeCredentialAccountProviderId::new("github").unwrap()
     );
-    assert_eq!(rejected.account_id, "account-123");
+    assert_eq!(
+        rejected.account_id,
+        RuntimeCredentialAccountId::parse("c3d4e5f6-a7b8-9012-cdef-123456789012").unwrap()
+    );
     assert_eq!(rejected.account_updated_at, updated_at);
     assert_eq!(
         rejected.auth_requirement.provider,

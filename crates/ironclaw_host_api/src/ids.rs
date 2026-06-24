@@ -278,3 +278,4 @@ uuid_id!(ResourceReservationId);
 uuid_id!(ApprovalRequestId);
 uuid_id!(AuditEventId);
 uuid_id!(CorrelationId);
+uuid_id!(RuntimeCredentialAccountId);
