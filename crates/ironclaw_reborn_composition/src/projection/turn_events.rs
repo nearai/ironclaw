@@ -186,12 +186,28 @@ impl TurnEventBridge {
                 .await
             {
                 Ok(page) => page,
-                Err(TurnEventProjectionError::RebaseRequired { earliest, .. })
-                    if after_cursor.is_none() =>
-                {
+                Err(TurnEventProjectionError::RebaseRequired {
+                    requested,
+                    earliest,
+                }) if requested.scope == earliest.scope => {
+                    // The requested cursor sits below the projection's retention
+                    // floor, so the events it asked for are gone. The projection
+                    // still tells us the earliest replayable cursor; jump the
+                    // client forward to it instead of surfacing a retryable error.
+                    //
+                    // This applies on reconnect too (a non-`None` cursor), not
+                    // just first connect. Otherwise the browser auto-reconnects
+                    // via `Last-Event-ID` with the same stale cursor, gets the
+                    // same rebase rejection, and loops forever — appearing as a
+                    // permanently "disconnected" stream. Skipping the
+                    // unavoidably-pruned events keeps the stream alive and
+                    // self-corrects: the next drain requests `after = earliest`,
+                    // which is at/above the floor and drains normally. Any
+                    // payloads already collected this drain are returned first so
+                    // we never drop events we did read.
                     return Ok(TurnEventDrain {
                         next_cursor: Some(*earliest),
-                        payloads: Vec::new(),
+                        payloads,
                     });
                 }
                 Err(error) => return Err(map_turn_event_projection_error(error)),
