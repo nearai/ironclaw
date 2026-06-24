@@ -198,6 +198,140 @@ const LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MAX_DEPTH: usize = 64;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 const LOCAL_DEV_SECRETS_MASTER_KEY_PATH: &str = ".reborn-local-dev-secrets-master-key";
 
+/// Local-dev persistence file for the three self-learning master switches.
+const LOCAL_DEV_SKILL_LEARNING_SWITCHES_PATH: &str = ".reborn-skill-learning-switches.json";
+
+/// Persisted values of the three self-learning master switches, so an operator's
+/// Settings toggle survives a restart instead of fail-open resetting to ON.
+/// First boot (no file) and a missing key default to `true` (all ON). An
+/// EXISTING file that is unreadable or corrupt instead fails CLOSED (see
+/// [`SkillLearningSwitches::fail_closed`]) so a disabled egress is never silently
+/// re-enabled; only an explicit operator change persists a value.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SkillLearningSwitches {
+    #[serde(default = "skill_learning_switch_default")]
+    pub(crate) learning_enabled: bool,
+    #[serde(default = "skill_learning_switch_default")]
+    pub(crate) require_review: bool,
+    #[serde(default = "skill_learning_switch_default")]
+    pub(crate) auto_activate_learned: bool,
+}
+
+fn skill_learning_switch_default() -> bool {
+    true
+}
+
+impl Default for SkillLearningSwitches {
+    fn default() -> Self {
+        Self {
+            learning_enabled: true,
+            require_review: true,
+            auto_activate_learned: true,
+        }
+    }
+}
+
+impl SkillLearningSwitches {
+    /// Fail-closed values for when an EXISTING switch file can't be read or
+    /// parsed (distinct from first boot, which uses [`Default`] = all ON):
+    /// self-learning OFF + hold-for-review ON + no learned auto-activation, so a
+    /// corrupt/unreadable file never silently re-enables transcript distillation
+    /// (and its provider egress) that the operator had turned off.
+    fn fail_closed() -> Self {
+        Self {
+            learning_enabled: false,
+            require_review: true,
+            auto_activate_learned: false,
+        }
+    }
+}
+
+/// Persists the three self-learning master switches to a small JSON file under
+/// the local-dev storage root (single-operator, process-global by design — the
+/// same scope as the in-memory flags). Mirrors the local-dev secrets-master-key
+/// pattern (`std::fs` over the storage root) rather than the CAS-scoped store,
+/// because these are three booleans with no per-user scope.
+pub(crate) struct SkillLearningSwitchStore {
+    path: PathBuf,
+    write_lock: std::sync::Mutex<()>,
+}
+
+impl SkillLearningSwitchStore {
+    pub(crate) fn new(storage_root: &Path) -> Self {
+        Self {
+            path: storage_root.join(LOCAL_DEV_SKILL_LEARNING_SWITCHES_PATH),
+            write_lock: std::sync::Mutex::new(()),
+        }
+    }
+
+    /// Read the persisted switches. First boot (no file) → all-ON defaults; a
+    /// corrupt or unreadable EXISTING file → fail CLOSED (never silently
+    /// re-enable a disabled egress). debug! respects the REPL/TUI invariant.
+    pub(crate) fn load(&self) -> SkillLearningSwitches {
+        match std::fs::read_to_string(&self.path) {
+            Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|error| {
+                // A corrupt EXISTING file fails CLOSED (not all-ON), so a
+                // previously-disabled distillation/egress is not silently
+                // re-enabled; the operator re-toggles to recover.
+                tracing::debug!(%error, path = %self.path.display(), "skill-learning switch store: corrupt file, failing closed");
+                SkillLearningSwitches::fail_closed()
+            }),
+            // First boot: no file yet — use defaults (all ON) silently.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                SkillLearningSwitches::default()
+            }
+            // A real IO failure (permission denied, EIO) on an existing file
+            // fails CLOSED and leaves a trail so an operator can see why a toggle
+            // keeps reverting.
+            Err(error) => {
+                tracing::debug!(%error, path = %self.path.display(), "skill-learning switch store: read failed on existing file, failing closed");
+                SkillLearningSwitches::fail_closed()
+            }
+        }
+    }
+
+    pub(crate) fn persist_learning_enabled(&self, value: bool) -> Result<(), String> {
+        self.update(|switches| switches.learning_enabled = value)
+    }
+
+    pub(crate) fn persist_require_review(&self, value: bool) -> Result<(), String> {
+        self.update(|switches| switches.require_review = value)
+    }
+
+    pub(crate) fn persist_auto_activate_learned(&self, value: bool) -> Result<(), String> {
+        self.update(|switches| switches.auto_activate_learned = value)
+    }
+
+    /// Read → mutate the one field → write, under a lock so concurrent toggles
+    /// don't clobber each other's other fields.
+    fn update(&self, mutate: impl FnOnce(&mut SkillLearningSwitches)) -> Result<(), String> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| "skill-learning switch store lock poisoned".to_string())?;
+        // Read the CURRENT switches directly (NOT via load(), which substitutes
+        // fallback values for the availability read). A corrupt/unreadable
+        // EXISTING file must abort the write rather than overwrite the operator's
+        // other switches with fallbacks; only first boot (NotFound) starts fresh.
+        let mut switches = match std::fs::read_to_string(&self.path) {
+            Ok(raw) => serde_json::from_str(&raw).map_err(|error| {
+                format!(
+                    "skill-learning switch store: refusing to overwrite a corrupt file: {error}"
+                )
+            })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                SkillLearningSwitches::default()
+            }
+            Err(error) => {
+                return Err(format!("skill-learning switch store: read failed: {error}"));
+            }
+        };
+        mutate(&mut switches);
+        let serialized = serde_json::to_vec_pretty(&switches).map_err(|error| error.to_string())?;
+        std::fs::write(&self.path, serialized).map_err(|error| error.to_string())
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
 struct TestNetworkHttpEgress(Arc<dyn ironclaw_network::NetworkHttpEgress>);
@@ -514,6 +648,28 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// Settings write flips it and the next turn's selection honors the new
     /// value without a restart.
     pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
+    /// "Hold new skills for review" master switch, shared by reference between
+    /// the skill-learning sink (reads it when a new skill is distilled) and the
+    /// WebUI skills facade (toggles it). When `true`, a freshly learned skill is
+    /// saved but not auto-activated, pending the user's approval. Defaults to
+    /// `true`: a machine-distilled skill (whose source transcript can include
+    /// attacker-influenced web/tool/user text) is held for explicit approval
+    /// rather than criteria-activating in a later run unreviewed.
+    pub(crate) skill_require_review: Arc<AtomicBool>,
+    /// "Self-learning" master switch, shared by reference between the
+    /// skill-learning sink (reads it at turn end, before distilling) and the
+    /// WebUI skills facade (toggles it). When `false`, the sink does not extract
+    /// or save any new skill from a completed run. Defaults to `true`, so when a
+    /// learning model is configured the sink runs as before until a Settings
+    /// write turns it off. Only meaningful when the sink is wired (a learning
+    /// model is configured); the facade reports it unavailable otherwise.
+    pub(crate) skill_learning_enabled: Arc<AtomicBool>,
+    /// Durable backing for the three switches above, so an operator's toggle
+    /// survives a restart instead of fail-open resetting to ON. `Some` only on
+    /// the filesystem-backed local-dev graph; `None` on the in-memory graph
+    /// (where there is nothing to persist to). The setters write through it
+    /// before flipping the in-memory flag (store-then-atomic).
+    pub(crate) skill_learning_switch_store: Option<Arc<SkillLearningSwitchStore>>,
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
     #[cfg(feature = "slack-v2-host-beta")]
@@ -1716,6 +1872,12 @@ fn build_local_dev_store_graph(
     let skill_management =
         build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
     let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
+    // Load the persisted self-learning switches so an operator's prior toggle
+    // survives this restart instead of fail-open resetting to ON; each defaults
+    // to ON when absent. The setters write back through the same store.
+    let skill_learning_switch_store =
+        Arc::new(SkillLearningSwitchStore::new(&local_dev_storage_root));
+    let persisted_switches = skill_learning_switch_store.load();
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         extension_lifecycle_surface_context,
         approval_requests: Arc::clone(&approval_requests),
@@ -1729,7 +1891,12 @@ fn build_local_dev_store_graph(
             Arc::clone(&project_repository),
         )),
         outbound_preferences: outbound_stores.outbound_preferences,
-        skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
+        skill_auto_activate_learned: Arc::new(AtomicBool::new(
+            persisted_switches.auto_activate_learned,
+        )),
+        skill_require_review: Arc::new(AtomicBool::new(persisted_switches.require_review)),
+        skill_learning_enabled: Arc::new(AtomicBool::new(persisted_switches.learning_enabled)),
+        skill_learning_switch_store: Some(Arc::clone(&skill_learning_switch_store)),
         #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound_stores.outbound_state,
         #[cfg(feature = "slack-v2-host-beta")]
@@ -1873,6 +2040,11 @@ fn build_local_dev_store_graph(
         )),
         outbound_preferences: outbound_stores.outbound_preferences,
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
+        skill_require_review: Arc::new(AtomicBool::new(true)),
+        skill_learning_enabled: Arc::new(AtomicBool::new(true)),
+        // In-memory graph: nothing to persist to, so the switches stay process-
+        // local (default ON, reset on restart, as before).
+        skill_learning_switch_store: None,
         #[cfg(feature = "slack-v2-host-beta")]
         outbound_state: outbound_stores.outbound_state,
         #[cfg(feature = "slack-v2-host-beta")]
@@ -4168,6 +4340,9 @@ mod tests {
             project_service: Arc::clone(&base_runtime.project_service),
             outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
             skill_auto_activate_learned: Arc::clone(&base_runtime.skill_auto_activate_learned),
+            skill_require_review: Arc::clone(&base_runtime.skill_require_review),
+            skill_learning_enabled: Arc::clone(&base_runtime.skill_learning_enabled),
+            skill_learning_switch_store: base_runtime.skill_learning_switch_store.clone(),
             #[cfg(feature = "slack-v2-host-beta")]
             outbound_state: Arc::clone(&base_runtime.outbound_state),
             #[cfg(feature = "slack-v2-host-beta")]

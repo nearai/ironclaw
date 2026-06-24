@@ -14,9 +14,10 @@ use ironclaw_product_workflow::{
     LifecycleSkillSource, LifecycleSkillSummary, ProductWorkflowError,
 };
 use ironclaw_skills::{
-    SkillInstallRequest, SkillInstallSource, SkillManagementContext, SkillManagementError,
-    SkillManagementErrorKind, SkillRemoveRequest, SkillSearchRequest, SkillUpdateRequest,
-    install_skill, list_skills, read_skill_content, remove_skill, search_skills, update_skill,
+    LearnedSkillProvenance, SkillInstallRequest, SkillInstallSource, SkillManagementContext,
+    SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest, SkillSearchRequest,
+    SkillUpdateRequest, install_skill, list_skills, read_learned_provenance, read_skill_content,
+    remove_skill, search_skills, skill_is_bundle, update_skill, write_learned_provenance,
 };
 
 use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
@@ -140,6 +141,47 @@ impl RebornLocalSkillManagementPort {
     ) -> Result<ironclaw_skills::SkillRemoveResult, RebornLocalSkillManagementError> {
         let context = self.skill_context_for_scope(scope)?;
         Ok(remove_skill(&context, SkillRemoveRequest { name }).await?)
+    }
+
+    /// Read the learning-sink provenance sidecar for a skill, if any. `None`
+    /// means it is not a machine-learned skill (human-built, installed, or never
+    /// learned) — which the gate treats as "not auto-evolvable".
+    pub(crate) async fn read_provenance_for_scope(
+        &self,
+        scope: ResourceScope,
+        name: &str,
+    ) -> Result<Option<LearnedSkillProvenance>, RebornLocalSkillManagementError> {
+        let context = self.skill_context_for_scope(scope)?;
+        Ok(read_learned_provenance(&context, name).await?)
+    }
+
+    /// Write the machine-baseline provenance sidecar (the body + manifest hash the
+    /// overwrite gate compares against). Intended for the machine learning path
+    /// (`PortSkillWriter`) and the approve path, which both legitimately
+    /// (re-)record the baseline. This is `pub(crate)` with no typed caller guard,
+    /// so it is an intent contract, not an enforced one: a plain human EDIT must
+    /// never route here, or it would refresh the baseline and hide itself from
+    /// the gate.
+    pub(crate) async fn write_provenance_for_scope(
+        &self,
+        scope: ResourceScope,
+        name: &str,
+        provenance: &LearnedSkillProvenance,
+    ) -> Result<(), RebornLocalSkillManagementError> {
+        let context = self.skill_context_for_scope(scope)?;
+        write_learned_provenance(&context, name, provenance).await?;
+        Ok(())
+    }
+
+    /// True iff the skill is a multi-file bundle (sibling files beyond `SKILL.md`
+    /// + dotfiles) — the gate must not auto-overwrite its `SKILL.md`.
+    pub(crate) async fn is_bundle_for_scope(
+        &self,
+        scope: ResourceScope,
+        name: &str,
+    ) -> Result<bool, RebornLocalSkillManagementError> {
+        let context = self.skill_context_for_scope(scope)?;
+        Ok(skill_is_bundle(&context, name).await?)
     }
 }
 
@@ -913,6 +955,76 @@ mod tests {
             missing_remove,
             ProductWorkflowError::InvalidBindingRequest { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn learned_provenance_port_methods_round_trip_and_detect_bundles() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(&storage_root).expect("storage root");
+
+        let mut filesystem = LocalFilesystem::new();
+        filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.clone()),
+            )
+            .expect("mount storage root");
+        let port = RebornLocalSkillManagementPort::new(
+            UserId::new("prov-owner").expect("valid user"),
+            Arc::new(filesystem),
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new("/skills").expect("valid alias"),
+                VirtualPath::new("/projects/skills").expect("valid path"),
+                MountPermissions::read_write_list_delete(),
+            )])
+            .expect("valid mount view"),
+        );
+        let scope = port.owner_scope().expect("owner scope");
+
+        let content = "---\nname: learned-one\ndescription: a learned skill\nactivation:\n  keywords: [deploy]\n---\nDo the deploy.\n";
+        port.install_for_scope(scope.clone(), None, content)
+            .await
+            .expect("install");
+
+        // No provenance until the sink writes one; a lone SKILL.md is not a bundle.
+        assert!(
+            port.read_provenance_for_scope(scope.clone(), "learned-one")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !port
+                .is_bundle_for_scope(scope.clone(), "learned-one")
+                .await
+                .unwrap()
+        );
+
+        // Write the baseline through the machine-only port, read it back.
+        let provenance = LearnedSkillProvenance::for_machine_content(content).expect("baseline");
+        port.write_provenance_for_scope(scope.clone(), "learned-one", &provenance)
+            .await
+            .unwrap();
+        let read_back = port
+            .read_provenance_for_scope(scope.clone(), "learned-one")
+            .await
+            .unwrap()
+            .expect("provenance present after write");
+        assert_eq!(read_back, provenance);
+        assert!(read_back.matches_live_content(content));
+
+        // A human drops a sibling file in → now a bundle.
+        std::fs::write(
+            storage_root.join("skills/learned-one/helper.py"),
+            b"print('hi')",
+        )
+        .expect("write sibling file");
+        assert!(
+            port.is_bundle_for_scope(scope.clone(), "learned-one")
+                .await
+                .unwrap()
+        );
     }
 
     fn lifecycle_fixture() -> (

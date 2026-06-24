@@ -10,7 +10,7 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{HostPath, VirtualPath};
 use ironclaw_loop_support::SkillFilePath;
-use ironclaw_skills::{ManagedSkillSource, SkillSummary};
+use ironclaw_skills::{ManagedSkillSource, SkillOrigin, SkillSummary};
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
@@ -103,6 +103,7 @@ pub(crate) fn bundled_reborn_skill_summaries() -> Result<Vec<SkillSummary>, Rebo
             tags: skill.tags,
             requires_skills: skill.requires_skills,
             auto_activate: true,
+            origin: SkillOrigin::System,
         })
         .collect())
 }

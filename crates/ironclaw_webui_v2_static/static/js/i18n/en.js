@@ -511,6 +511,56 @@ registerPack("en", {
   "skills.source.installed": "installed",
   "skills.source.system": "system",
   "skills.source.workspace": "workspace",
+  // Skill self-learning controls + per-skill auto-activation
+  "skills.pendingReview": "Pending review",
+  "skills.autoActivate.on": "Auto-activate: On",
+  "skills.autoActivate.onPaused": "Auto-activate: On (paused)",
+  "skills.autoActivate.off": "Auto-activate: Off",
+  "skills.autoActivate.titlePaused":
+    "Learned-skill auto-activation is off — learned skills don't auto-fire until you turn it back on at the top of this page. This setting is saved for later.",
+  "skills.autoActivate.titleOn":
+    "Auto-activation on — runs on matching requests. Click to make it explicit-only (/name).",
+  "skills.autoActivate.titleOff":
+    "Explicit-only — runs only when you type /name. Click to enable auto-activation.",
+  "skills.learning.selfLearning.title": "Self-learning",
+  "skills.learning.selfLearning.summaryOn":
+    "On — after a task that did real work (several tool steps), IronClaw makes one extra call to your provider to try distilling it into a reusable skill. Quick or trivial tasks are skipped, and a skill is saved only when it's genuinely reusable.",
+  "skills.learning.selfLearning.summaryOff":
+    "Off — finished tasks are never sent for distillation, and no new skills are created.",
+  "skills.learning.selfLearning.labelOn": "On",
+  "skills.learning.selfLearning.labelOff": "Off",
+  "skills.learning.review.title": "When it learns a new skill",
+  "skills.learning.review.summaryOn":
+    "Held for your review below before it's used.",
+  "skills.learning.review.summaryOff":
+    "Used right away — turn on to review new skills first.",
+  "skills.learning.review.labelOn": "Hold for review",
+  "skills.learning.review.labelOff": "Use right away",
+  "skills.learning.review.pendingTitle": "Pending review ({count})",
+  "skills.learning.review.pendingDescription":
+    "Skills IronClaw learned or wants to update, waiting for you to approve or discard.",
+  "skills.learning.review.newBadge": "New skill",
+  "skills.learning.review.proposedBadge": "Proposed update",
+  "skills.learning.review.newDescription":
+    "Learned from a task and held for review — it won't auto-activate until you approve it.",
+  "skills.learning.review.evolutionDescription":
+    "The assistant wants to update this skill, but you've edited it — review the change before it replaces your version.",
+  "skills.learning.review.preview": "Preview",
+  "skills.learning.review.hide": "Hide",
+  "skills.learning.review.approve": "Approve",
+  "skills.learning.review.applyUpdate": "Apply update",
+  "skills.learning.review.discard": "Discard",
+  "skills.learning.review.yourVersion": "Your current version",
+  "skills.learning.review.proposedVersion": "Proposed update",
+  "skills.learning.review.skillContent": "Skill content",
+  "skills.learning.activation.title":
+    "When a learned skill matches your request",
+  "skills.learning.activation.summaryOn":
+    "Skills IronClaw learned run automatically when they match.",
+  "skills.learning.activation.summaryOff":
+    "Learned skills run only when you type /name. Your hand-written skills are unaffected.",
+  "skills.learning.activation.labelOn": "Use automatically",
+  "skills.learning.activation.labelOff": "Only on command",
   "skills.noInstalled": "No skills installed",
   "skills.noInstalledDesc":
     "Skills extend the agent with domain-specific instructions. Add a SKILL.md bundle or place SKILL.md files in your workspace.",
@@ -542,6 +592,8 @@ registerPack("en", {
   "skills.cancel": "Cancel",
   "skills.confirmRemove": "Remove skill \"{name}\"?",
   "skills.confirmDelete": "Delete skill \"{name}\"?",
+  "skills.confirmDiscardPending":
+    "Discard the pending skill \"{name}\"? A held new skill is deleted; a proposed update is dropped and your version is kept.",
   "skills.removeFailed": "Remove failed.",
   "skills.removed": "Removed skill \"{name}\"",
   "skills.contentLoadFailed": "Failed to load SKILL.md content.",

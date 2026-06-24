@@ -14,7 +14,7 @@
 //! Uses async I/O throughout to avoid blocking the tokio runtime.
 
 use std::collections::HashSet;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -1143,6 +1143,7 @@ fn read_file_bytes_limited<R: io::Read>(
     path: &str,
     name: &str,
 ) -> Result<Vec<u8>, SkillRegistryError> {
+    use std::io::Read;
     let mut bytes = Vec::new();
     reader
         .take(MAX_PROMPT_FILE_SIZE + 1)
@@ -1457,7 +1458,10 @@ async fn build_loaded_skill(
 
 /// Compute SHA-256 hash of content in the format "sha256:hex...".
 pub fn compute_hash(content: &str) -> String {
-    compute_hash_bytes(content.as_bytes())
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    let result = hasher.finalize();
+    format!("sha256:{:x}", result)
 }
 
 /// Helper to check gating for a `GatingRequirements`. Useful for callers that
@@ -1901,15 +1905,21 @@ mod tests {
         let skill_dir = dir.path().join("editable-skill");
         fs::create_dir(&skill_dir).unwrap();
         let skill_path = skill_dir.join("SKILL.md");
-        let original = "---\nname: editable-skill\n---\n\nBefore prompt.\n";
-        let swapped = "---\nname: editable-skill\n---\n\nChange prompt.\n";
-        assert_eq!(original.len(), swapped.len());
-        fs::write(&skill_path, original).unwrap();
+        fs::write(
+            &skill_path,
+            "---\nname: editable-skill\n---\n\nBefore prompt.\n",
+        )
+        .unwrap();
 
         let checked = checked_skill_md_path(&skill_dir, "editable-skill")
             .await
             .unwrap();
-        fs::write(&skill_path, swapped).unwrap();
+        fs::remove_file(&skill_path).unwrap();
+        fs::write(
+            &skill_path,
+            "---\nname: editable-skill\n---\n\nSwapped prompt.\n",
+        )
+        .unwrap();
 
         let err = write_checked_skill_md(
             checked,
@@ -1922,7 +1932,7 @@ mod tests {
         assert!(
             fs::read_to_string(skill_path)
                 .unwrap()
-                .contains("Change prompt")
+                .contains("Swapped prompt")
         );
     }
 

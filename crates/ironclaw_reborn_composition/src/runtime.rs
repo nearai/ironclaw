@@ -474,6 +474,10 @@ pub struct RebornRuntime {
     #[cfg(feature = "root-llm-provider")]
     skill_learning_extraction_tasks:
         Option<Arc<crate::skill_learning::SkillLearningExtractionTasks>>,
+    /// Whether the skill-learning turn-end sink was composed (a learning provider
+    /// AND a local runtime were both present). The WebUI skills facade reads this
+    /// to gate the self-learning / hold-for-review switches.
+    skill_learning_sink_wired: bool,
     /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
     /// `set_trigger_post_submit_hook` fills this after `build_reborn_runtime` returns.
     /// `None` when the trigger poller is not enabled.
@@ -1164,6 +1168,14 @@ impl RebornRuntime {
 
     pub(crate) fn webui_turn_coordinator(&self) -> Arc<dyn TurnCoordinator> {
         self.turn_coordinator.clone()
+    }
+
+    /// Whether the skill-learning sink/writer were wired (a learning provider is
+    /// available and a local runtime is composed). The WebUI skills facade gates
+    /// the `learning_enabled` and `require_review` switch availability on this so
+    /// a toggle does not write a flag nothing reads.
+    pub(crate) fn webui_skill_learning_sink_wired(&self) -> bool {
+        self.skill_learning_sink_wired
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -2542,9 +2554,9 @@ pub async fn build_reborn_runtime(
     //    the cold-boot path, an LLM session manager), which made
     //    timeout-sensitive tests flaky. When no override is set, build normally.
     // Build the (optional) skill-learning provider from the resolved LLM config
-    // BEFORE the gateway consumes `llm`. Distillation/refinement runs against a
-    // stronger model (IRONCLAW_SKILL_LEARNING_MODEL), reusing the run's NEAR AI
-    // credentials with only the model overridden.
+    // BEFORE the gateway consumes `llm`. Distillation/refinement runs against the
+    // run's CURRENT model on whatever backend is configured (any backend); there
+    // is no separate learning model.
     #[cfg(feature = "root-llm-provider")]
     let skill_learning_provider = match llm.as_ref() {
         Some(resolved) => build_skill_learning_provider(&resolved.config).await,
@@ -2856,9 +2868,11 @@ pub async fn build_reborn_runtime(
             Arc::clone(&trace_capture_scopes),
         ));
     // Skill learning shares the turn-end seam with trace capture (composed
-    // additively, so the trace-capture path is unchanged). It is active only
-    // when a learning model is configured (a stronger model than the run's, via
-    // IRONCLAW_SKILL_LEARNING_MODEL); otherwise only trace capture runs.
+    // additively, so the trace-capture path is unchanged). It is active whenever
+    // an LLM provider is available (any backend) AND a local runtime substrate is
+    // composed (the skill-management / refiner / notifier ports come from
+    // `local_runtime`) — both conditions are checked at the wiring site below.
+    // It uses the run's current model; otherwise only trace capture runs.
     #[cfg_attr(not(feature = "root-llm-provider"), allow(unused_mut))]
     let mut turn_event_sinks: Vec<Arc<dyn ironclaw_turns::TurnEventSink>> =
         vec![trace_capture_sink];
@@ -2866,15 +2880,19 @@ pub async fn build_reborn_runtime(
     let mut skill_learning_extraction_tasks: Option<
         Arc<crate::skill_learning::SkillLearningExtractionTasks>,
     > = None;
+    // True once the learning sink is actually composed (a learning provider AND a
+    // local runtime are both present). The WebUI skills facade reads this to gate
+    // the self-learning / hold-for-review switches: it only exposes them when a
+    // sink exists to honor them, instead of accepting a write to a flag nothing
+    // reads.
     #[cfg(feature = "root-llm-provider")]
-    if let (Some((learning_provider, learning_model)), Some(local_runtime)) =
-        (skill_learning_provider, local_runtime)
+    let mut skill_learning_sink_wired = false;
+    #[cfg(feature = "root-llm-provider")]
+    if let (Some(learning_provider), Some(local_runtime)) = (skill_learning_provider, local_runtime)
     {
-        let inference: Arc<dyn ironclaw_skill_learning::SkillInferencePort> =
-            Arc::new(crate::skill_learning::SkillLearningInferenceAdapter::new(
-                learning_provider,
-                learning_model,
-            ));
+        let inference: Arc<dyn ironclaw_skill_learning::SkillInferencePort> = Arc::new(
+            crate::skill_learning::SkillLearningInferenceAdapter::new(learning_provider),
+        );
         // Reuse the runtime's already-built scoped skill-management port so the
         // learned skill lands exactly where the WebUI lists it and the next run
         // loads it. The writer evolves an existing learned skill in place when a
@@ -2883,10 +2901,15 @@ pub async fn build_reborn_runtime(
         let skill_refiner: Arc<dyn crate::skill_learning::SkillRefiner> = Arc::new(
             crate::skill_learning::LlmSkillRefiner::new(Arc::clone(&inference)),
         );
+        // Hold-for-review master switch, shared with the WebUI skills facade so a
+        // Settings toggle takes effect on the next learned skill. Default ON
+        // (fail-safe): a freshly learned skill is staged inactive + pending until
+        // a human approves it.
         let skill_writer: Arc<dyn crate::skill_learning::SkillWriter> =
             Arc::new(crate::skill_learning::PortSkillWriter::new(
                 Arc::clone(&local_runtime.skill_management),
                 skill_refiner,
+                Arc::clone(&local_runtime.skill_require_review),
             ));
         // Live "learned a skill" bubble on the run's thread stream (reuses the
         // SkillActivation projection -> existing chat bubble).
@@ -2902,9 +2925,15 @@ pub async fn build_reborn_runtime(
                 skill_writer,
                 skill_learned_notifier,
                 extraction_tasks,
+                // Self-learning master switch, shared with the WebUI skills
+                // facade so a Settings toggle takes effect the next turn.
+                Arc::clone(&local_runtime.skill_learning_enabled),
             ),
         ));
+        skill_learning_sink_wired = true;
     }
+    #[cfg(not(feature = "root-llm-provider"))]
+    let skill_learning_sink_wired = false;
     let turn_event_sink: Arc<dyn ironclaw_turns::TurnEventSink> = Arc::new(
         crate::skill_learning::CompositeTurnEventSink::new(turn_event_sinks),
     );
@@ -3273,6 +3302,7 @@ pub async fn build_reborn_runtime(
         trace_flush_worker,
         #[cfg(feature = "root-llm-provider")]
         skill_learning_extraction_tasks,
+        skill_learning_sink_wired,
         #[cfg(feature = "slack-v2-host-beta")]
         post_submit_hook_slot: runtime_post_submit_hook_slot,
         #[cfg(any(test, feature = "test-support"))]
@@ -3606,39 +3636,36 @@ async fn build_production_model_gateway(
     }
 }
 
-/// Build a dedicated provider for the skill-learning model, when configured.
+/// Build a provider for skill distillation/refinement from the run's resolved
+/// LLM config.
 ///
-/// Skill distillation/refinement runs against a STRONGER model than the run's.
-/// The model id comes from `IRONCLAW_SKILL_LEARNING_MODEL`; it reuses the run's
-/// NEAR AI credentials/base URL with only the model overridden (NEAR AI is
-/// multi-model and honours a per-request model override). Returns `None` when
-/// unconfigured, when the backend is not NEAR AI, or when provider construction
-/// fails — in all of which cases skill learning stays disabled.
+/// Distillation runs against the run's CURRENT model on whatever backend the
+/// user configured (anthropic / openai / openai_compatible / nearai / bedrock /
+/// …) — via the same backend-agnostic chain (`build_static_provider_chain`) that
+/// `build_llm_gateway` uses for runs. This mirrors Hermes, where the same model
+/// the agent uses also writes its skills. The older Reborn behavior (a separate,
+/// stronger learning model, NEAR-AI-only) shut self-learning off entirely for
+/// Anthropic/OpenAI users, so it was removed — there is no separate learning
+/// model and no model knob.
+///
+/// Returns `None` only when provider construction fails — in which case skill
+/// learning stays disabled and the WebUI switches report unavailable.
 #[cfg(feature = "root-llm-provider")]
 async fn build_skill_learning_provider(
     config: &ironclaw_llm::LlmConfig,
-) -> Option<(Arc<dyn ironclaw_llm::LlmProvider>, String)> {
-    let model = std::env::var("IRONCLAW_SKILL_LEARNING_MODEL")
-        .ok()
-        .filter(|model| !model.trim().is_empty())?;
-    if !matches!(config.backend.as_str(), "nearai" | "near_ai" | "near") {
-        tracing::debug!(
-            backend = %config.backend,
-            "skill-learning: learning model is only wired for the nearai backend; skill learning disabled"
-        );
-        return None;
-    }
-    let mut nearai = config.nearai.clone();
-    nearai.model = model.clone();
+) -> Option<Arc<dyn ironclaw_llm::LlmProvider>> {
+    // A sibling provider chain pinned to the run's config: distillation keeps the
+    // model it was composed with rather than following a mid-process hot-swap of
+    // the run's model (the run gateway is swappable; this learning provider is not).
     let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
-    match ironclaw_llm::create_llm_provider_with_config(
-        &nearai,
-        session,
-        config.request_timeout_secs,
-    ) {
-        Ok(provider) => Some((provider, model)),
+    match ironclaw_llm::build_static_provider_chain(config, session).await {
+        Ok(provider) => Some(provider),
         Err(error) => {
-            tracing::debug!(%error, "skill-learning: could not build the learning provider; skill learning disabled");
+            tracing::debug!(
+                %error,
+                backend = %config.backend,
+                "skill-learning: could not build the learning provider; skill learning disabled"
+            );
             None
         }
     }
@@ -5421,6 +5448,62 @@ mod tests {
             response_cache_ttl_secs: 3600,
             response_cache_max_entries: 1000,
         }
+    }
+
+    // A non-NEAR-AI (Ollama) LLM config pointing at a dead endpoint: provider
+    // construction is lazy, so the chain BUILDS (proving skill learning wires for
+    // the backend) even though a real call would fail. Mirrors
+    // `dead_endpoint_nearai_config`.
+    #[cfg(feature = "root-llm-provider")]
+    fn dead_endpoint_ollama_config(session_path: std::path::PathBuf) -> ironclaw_llm::LlmConfig {
+        let mut config = dead_endpoint_nearai_config(session_path);
+        config.backend = "ollama".to_string();
+        config.provider = Some(ironclaw_llm::RegistryProviderConfig {
+            protocol: ironclaw_llm::ProviderProtocol::Ollama,
+            provider_id: "ollama".to_string(),
+            api_key: None,
+            base_url: "http://127.0.0.1:1".to_string(),
+            model: "llama3".to_string(),
+            extra_headers: Vec::new(),
+            oauth_token: None,
+            is_codex_chatgpt: false,
+            refresh_token: None,
+            auth_path: None,
+            cache_retention: ironclaw_llm::CacheRetention::None,
+            unsupported_params: Vec::new(),
+        });
+        config
+    }
+
+    // Regression for the Hermes-aligned change: distillation must wire on ANY
+    // backend using the run's current model. The old code required
+    // `IRONCLAW_SKILL_LEARNING_MODEL` AND rejected every backend except NEAR AI,
+    // which disabled self-learning for OpenAI/Anthropic/Ollama users entirely.
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn build_skill_learning_provider_wires_on_any_backend() {
+        let dir = tempfile::tempdir().expect("session tempdir");
+
+        // NEAR AI (the old code's only allowed backend) still wires — with no
+        // separate learning model and no env var to set.
+        let nearai = super::build_skill_learning_provider(&dead_endpoint_nearai_config(
+            dir.path().join("nearai-session.json"),
+        ))
+        .await;
+        assert!(
+            nearai.is_some(),
+            "nearai learning provider must wire (distillation uses the run's model)"
+        );
+
+        // A non-NEAR-AI backend (previously => None because of the nearai-only gate).
+        let ollama = super::build_skill_learning_provider(&dead_endpoint_ollama_config(
+            dir.path().join("ollama-session.json"),
+        ))
+        .await;
+        assert!(
+            ollama.is_some(),
+            "skill learning must wire for a non-nearai backend (the nearai-only gate is gone)"
+        );
     }
 
     /// Regression guard for Firat's review: the provider factory (caller

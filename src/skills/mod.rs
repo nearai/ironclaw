@@ -337,6 +337,7 @@ mod tests {
         let skill = ironclaw_skills::LoadedSkill {
             manifest: SkillManifest {
                 name: "test-api".to_string(),
+                origin: SkillOrigin::User,
                 version: "1.0.0".to_string(),
                 auto_activate: true,
                 description: "Test".to_string(),
@@ -377,6 +378,7 @@ mod tests {
         let skill = ironclaw_skills::LoadedSkill {
             manifest: SkillManifest {
                 name: "gmail".to_string(),
+                origin: SkillOrigin::User,
                 version: "1.0.0".to_string(),
                 auto_activate: true,
                 description: "Test".to_string(),
@@ -435,6 +437,7 @@ mod tests {
         let skill = ironclaw_skills::LoadedSkill {
             manifest: SkillManifest {
                 name: "bad-skill".to_string(),
+                origin: SkillOrigin::User,
                 version: "1.0.0".to_string(),
                 auto_activate: true,
                 description: "Test".to_string(),

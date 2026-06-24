@@ -167,6 +167,60 @@ pub struct SkillManifest {
     /// Gating requirements (binaries, env vars, config files, companion skills).
     #[serde(default)]
     pub requires: GatingRequirements,
+    /// Who authored this skill. Declared in the SKILL.md frontmatter so it
+    /// travels with the skill across scopes, exports, and tenant sharing —
+    /// unlike host-private bookkeeping. The global "auto-activate learned
+    /// skills" master switch governs only skills whose origin is `Learned`;
+    /// hand-written (`User`) and bundled (`System`) skills are unaffected.
+    /// Defaults to `User` so existing skills (no `origin:` key) are treated as
+    /// hand-written. See [`SkillOrigin`] for the security caveat.
+    #[serde(default)]
+    pub origin: SkillOrigin,
+}
+
+/// Provenance of a skill — who authored it.
+///
+/// This is a **declarative / UX signal**, not a security boundary. It lets the
+/// selector scope the global auto-activate-learned switch to machine-learned
+/// skills, and lets the UI badge a skill's origin. Because it lives in the
+/// SKILL.md frontmatter it travels with the skill (export, tenant share),
+/// rather than in a host-private sidecar that does not.
+///
+/// The machine-overwrite gate must NOT trust this field as its only authority:
+/// a learned skill could in principle declare `origin: user` to dodge the
+/// switch, so overwrite protection still authenticates against the
+/// host-private content hash. Mislabelling here only changes auto-activation
+/// (a UX/cost decision), never whether the machine may clobber a human edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillOrigin {
+    /// Hand-authored by a human. The default for any skill without an explicit
+    /// `origin:` marker, so existing and user-written skills are unaffected by
+    /// the learned-skills master switch.
+    #[default]
+    User,
+    /// Distilled and installed by the host-side skill-learning sink.
+    Learned,
+    /// Shipped with the system or a bundled extension.
+    System,
+}
+
+impl SkillOrigin {
+    /// Stable wire identifier, matching the snake_case serde representation so
+    /// `set_skill_origin` round-trips through [`parse_skill_md`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SkillOrigin::User => "user",
+            SkillOrigin::Learned => "learned",
+            SkillOrigin::System => "system",
+        }
+    }
+
+    /// True iff this skill was machine-learned, i.e. governed by the global
+    /// auto-activate-learned master switch.
+    pub fn is_learned(self) -> bool {
+        matches!(self, SkillOrigin::Learned)
+    }
 }
 
 fn default_version() -> String {
@@ -530,6 +584,7 @@ requires:
                 activation: ActivationCriteria::default(),
                 credentials: vec![],
                 requires: GatingRequirements::default(),
+                origin: SkillOrigin::default(),
             },
             prompt_content: "test prompt".to_string(),
             trust: SkillTrust::Trusted,

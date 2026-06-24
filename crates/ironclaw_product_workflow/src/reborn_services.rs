@@ -125,9 +125,10 @@ pub use types::{
     RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornResumeGateResponse, RebornServiceLifecycleAction,
-    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornPendingSkill,
+    RebornPendingSkillKind, RebornPendingSkillsResponse, RebornResolveGateResponse,
+    RebornResumeGateResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState,
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
@@ -359,15 +360,75 @@ pub trait SkillsProductFacade: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
-    /// Toggle the global default criteria-based skill auto-activation master
-    /// switch. Disabling leaves skills invokable via an explicit `/name`
-    /// mention but turns off keyword/criteria auto-activation for all skills.
+    /// Toggle the global "auto-activate learned skills" master switch. Disabling
+    /// excludes only machine-LEARNED skills (`SkillOrigin::Learned`) from
+    /// keyword/criteria selection, leaving hand-written and bundled skills
+    /// auto-activating; learned skills then activate only via an explicit
+    /// `/name` mention. (The wire field is still named `auto_activate_learned`.)
     async fn set_auto_activate_learned(
         &self,
         caller: WebUiAuthenticatedCaller,
         enabled: bool,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         let _ = (caller, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Toggle the global "hold new skills for review" master switch. When on, a
+    /// freshly learned skill is saved but held pending the user's approval
+    /// instead of going live. Defaults to unavailable.
+    async fn set_require_review(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Toggle the global "self-learning" master switch. When off, the assistant
+    /// does not extract or save new skills from completed runs at all. Defaults
+    /// to unavailable (e.g. no learning model configured).
+    async fn set_learning_enabled(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// List the caller's learned skills awaiting review: skills held under "hold
+    /// for review" plus proposed evolutions of skills the user has edited.
+    /// Defaults to unavailable.
+    async fn list_pending_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornPendingSkillsResponse, RebornServicesError> {
+        let _ = caller;
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Approve a pending skill: activate a held new skill, or apply a proposed
+    /// evolution to the live skill. The going-live content is re-validated.
+    /// Defaults to unavailable.
+    async fn approve_pending_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Discard a pending skill: delete a held new skill, or drop a proposed
+    /// evolution while keeping the user's live version. Defaults to unavailable.
+    async fn discard_pending_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name);
         Err(RebornServicesError::service_unavailable(false))
     }
 }
@@ -1625,16 +1686,73 @@ pub trait RebornServicesApi: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
-    /// Toggle the global default criteria-based skill auto-activation master
-    /// switch (see [`SkillsProductFacade::set_auto_activate_learned`]).
-    /// Defaults to unavailable so impls that do not surface skill management
-    /// inherit a fail-closed response.
+    /// Toggle the global "auto-activate learned skills" master switch — gates
+    /// keyword/criteria activation for machine-learned skills only
+    /// (`SkillOrigin::Learned`); hand-written and bundled skills are unaffected
+    /// (see [`SkillsProductFacade::set_auto_activate_learned`]). Defaults to
+    /// unavailable so impls that do not surface skill management inherit a
+    /// fail-closed response.
     async fn set_auto_activate_learned(
         &self,
         caller: WebUiAuthenticatedCaller,
         enabled: bool,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         let _ = (caller, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Toggle the global "hold new skills for review" master switch (see
+    /// [`SkillsProductFacade::set_require_review`]). Defaults to unavailable so
+    /// impls that do not surface skill management inherit a fail-closed response.
+    async fn set_require_review(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Toggle the global "self-learning" master switch (see
+    /// [`SkillsProductFacade::set_learning_enabled`]). Defaults to unavailable.
+    async fn set_learning_enabled(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// List learned skills awaiting the user's review (see
+    /// [`SkillsProductFacade::list_pending_skills`]). Defaults to unavailable.
+    async fn list_pending_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornPendingSkillsResponse, RebornServicesError> {
+        let _ = caller;
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Approve a pending skill (see
+    /// [`SkillsProductFacade::approve_pending_skill`]). Defaults to unavailable.
+    async fn approve_pending_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Discard a pending skill (see
+    /// [`SkillsProductFacade::discard_pending_skill`]). Defaults to unavailable.
+    async fn discard_pending_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name);
         Err(RebornServicesError::service_unavailable(false))
     }
 
@@ -3305,6 +3423,47 @@ impl RebornServicesApi for RebornServices {
         self.skills_facade
             .set_auto_activate_learned(caller, enabled)
             .await
+    }
+
+    async fn set_require_review(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade.set_require_review(caller, enabled).await
+    }
+
+    async fn set_learning_enabled(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade
+            .set_learning_enabled(caller, enabled)
+            .await
+    }
+
+    async fn list_pending_skills(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornPendingSkillsResponse, RebornServicesError> {
+        self.skills_facade.list_pending_skills(caller).await
+    }
+
+    async fn approve_pending_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade.approve_pending_skill(caller, name).await
+    }
+
+    async fn discard_pending_skill(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade.discard_pending_skill(caller, name).await
     }
 
     async fn remove_skill(

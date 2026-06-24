@@ -54,6 +54,7 @@ fn make_skill(
     ironclaw_skills::LoadedSkill {
         manifest: SkillManifest {
             name: name.to_string(),
+            origin: SkillOrigin::User,
             version: "1.0.0".to_string(),
             auto_activate: true,
             description: format!("{} skill", name),

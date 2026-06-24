@@ -41,20 +41,20 @@ use ironclaw_product_workflow::{
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
     RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
-    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
-    RebornProjectMemberInfo, RebornProjectResponse, RebornRemoveMemberRequest,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAttachmentCapabilities,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    RebornOutboundPreferencesResponse, RebornPendingSkillsResponse, RebornProjectFsListRequest,
+    RebornProjectFsListResponse, RebornProjectFsReadRequest, RebornProjectFsStatRequest,
+    RebornProjectFsStatResponse, RebornProjectMemberInfo, RebornProjectResponse,
+    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1180,6 +1180,67 @@ pub async fn set_auto_activate_learned(
     Ok(Json(response))
 }
 
+/// `POST /api/webchat/v2/skills/require-review`
+pub async fn set_require_review(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<SetSkillAutoActivateBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_require_review(caller, body.enabled)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/skills/learning-enabled`
+pub async fn set_learning_enabled(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<SetSkillAutoActivateBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_learning_enabled(caller, body.enabled)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/skills/pending`
+pub async fn list_pending_skills(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornPendingSkillsResponse>, WebUiV2HttpError> {
+    let response = state.services().list_pending_skills(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/skills/pending/approve`
+pub async fn approve_pending_skill(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<PendingSkillActionBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .approve_pending_skill(caller, body.name)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/skills/pending/discard`
+pub async fn discard_pending_skill(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<PendingSkillActionBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .discard_pending_skill(caller, body.name)
+        .await?;
+    Ok(Json(response))
+}
+
 /// `GET /api/webchat/v2/extensions/registry`
 pub async fn list_extension_registry(
     State(state): State<WebUiV2State>,
@@ -1648,6 +1709,11 @@ pub struct UpdateSkillBody {
 #[derive(Debug, Deserialize)]
 pub struct SetSkillAutoActivateBody {
     pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PendingSkillActionBody {
+    pub name: String,
 }
 
 fn extension_package_ref_for_request(

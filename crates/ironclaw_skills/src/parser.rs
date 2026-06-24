@@ -3,7 +3,7 @@
 //! Parses files with YAML frontmatter delimited by `---` lines, followed by a
 //! markdown prompt body.
 
-use crate::types::SkillManifest;
+use crate::types::{SkillManifest, SkillOrigin};
 use crate::validation::{validate_skill_name, validate_skill_version};
 
 /// Error type for SKILL.md parsing failures.
@@ -54,30 +54,32 @@ pub fn parse_skill_md(content: &str) -> Result<ParsedSkill, SkillParseError> {
     parse_skill_md_impl(content, true)
 }
 
-/// Return `content` with the top-level `auto_activate:` frontmatter flag set to
-/// `auto_activate`, replacing the line when present and inserting it just before
-/// the closing `---` when absent. The prompt body and other frontmatter fields
-/// are preserved semantically, while line endings are normalized to LF and a
-/// trailing newline is ensured as the document is reconstructed. The result
-/// re-parses through [`parse_skill_md`] with the same `name`, so it is safe to
-/// feed to the skill-update path.
-pub fn set_skill_auto_activate(content: &str, auto_activate: bool) -> String {
-    let new_line = format!("auto_activate: {auto_activate}");
+/// Return `content` with the top-level frontmatter scalar `key: value` set,
+/// replacing the line when present and inserting it just before the closing
+/// `---` when absent. Only a *top-level* (column-0) key inside the frontmatter
+/// block is touched — a nested key (e.g. `keywords:` under `activation:`) is
+/// never matched, and neither is the prompt body. Everything else is left
+/// byte-for-byte unchanged, so editing one field does not reformat the
+/// document. The result re-parses through [`parse_skill_md`] with the same
+/// `name`, so it is safe to feed to the skill-update path.
+fn set_frontmatter_scalar(content: &str, key: &str, value: &str) -> String {
+    let new_line = format!("{key}: {value}");
+    let key_prefix = format!("{key}:");
     let mut out = String::with_capacity(content.len() + new_line.len() + 2);
     let mut seen_open = false;
     let mut in_frontmatter = false;
-    let mut wrote_flag = false;
+    let mut wrote = false;
     for line in content.lines() {
         if line.trim() == "---" {
             if !seen_open {
                 seen_open = true;
                 in_frontmatter = true;
             } else if in_frontmatter {
-                // Closing the frontmatter — make sure the flag landed first.
-                if !wrote_flag {
+                // Closing the frontmatter — make sure the key landed first.
+                if !wrote {
                     out.push_str(&new_line);
                     out.push('\n');
-                    wrote_flag = true;
+                    wrote = true;
                 }
                 in_frontmatter = false;
             }
@@ -85,16 +87,40 @@ pub fn set_skill_auto_activate(content: &str, auto_activate: bool) -> String {
             out.push('\n');
             continue;
         }
-        if in_frontmatter && !wrote_flag && line.starts_with("auto_activate:") {
-            out.push_str(&new_line);
-            out.push('\n');
-            wrote_flag = true;
+        if in_frontmatter && line.starts_with(&key_prefix) {
+            // Replace the first top-level occurrence and DROP any later
+            // duplicates of the same key, so the stamped value is authoritative
+            // rather than left to YAML's duplicate-key resolution (a
+            // model-authored SKILL.md could otherwise smuggle a second
+            // `origin:`/`auto_activate:` line past the review/overwrite gate).
+            // `starts_with(key_prefix)` only matches column-0 (top-level) keys;
+            // indented nested keys are untouched.
+            if !wrote {
+                out.push_str(&new_line);
+                out.push('\n');
+                wrote = true;
+            }
             continue;
         }
         out.push_str(line);
         out.push('\n');
     }
     out
+}
+
+/// Return `content` with the top-level `auto_activate:` frontmatter flag set to
+/// `auto_activate`. See [`set_frontmatter_scalar`] for the formatting contract.
+pub fn set_skill_auto_activate(content: &str, auto_activate: bool) -> String {
+    set_frontmatter_scalar(content, "auto_activate", &auto_activate.to_string())
+}
+
+/// Return `content` with the top-level `origin:` frontmatter marker set to
+/// `origin`. The skill-learning writer stamps distilled skills `learned` so the
+/// global auto-activate-learned switch and the UI can tell machine-authored
+/// skills apart, and re-applies it across evolution. Round-trips through
+/// [`parse_skill_md`] into [`SkillManifest::origin`].
+pub fn set_skill_origin(content: &str, origin: SkillOrigin) -> String {
+    set_frontmatter_scalar(content, "origin", origin.as_str())
 }
 
 pub(crate) fn starts_with_frontmatter_delimiter(content: &str) -> bool {
@@ -508,5 +534,79 @@ metadata:
             1,
             "flag replaced, not duplicated"
         );
+    }
+
+    #[test]
+    fn origin_defaults_to_user_when_absent() {
+        let parsed = parse_skill_md(TOGGLE_SKILL).expect("parses");
+        assert_eq!(parsed.manifest.origin, SkillOrigin::User);
+        assert!(!parsed.manifest.origin.is_learned());
+    }
+
+    #[test]
+    fn set_skill_origin_inserts_then_replaces_the_marker() {
+        // Stamped when absent; document still parses, name + body preserved.
+        let learned = set_skill_origin(TOGGLE_SKILL, SkillOrigin::Learned);
+        let parsed = parse_skill_md(&learned).expect("re-parses after stamping learned");
+        assert_eq!(parsed.manifest.origin, SkillOrigin::Learned);
+        assert!(parsed.manifest.origin.is_learned());
+        assert_eq!(parsed.manifest.name, "my-skill");
+        assert!(parsed.prompt_content.contains("Body."));
+        assert_eq!(
+            learned.matches("origin:").count(),
+            1,
+            "exactly one origin line"
+        );
+        // Replaced (not duplicated) when already present, and round-trips by
+        // the snake_case wire value.
+        let user = set_skill_origin(&learned, SkillOrigin::User);
+        let reparsed = parse_skill_md(&user).expect("re-parses after restamping user");
+        assert_eq!(reparsed.manifest.origin, SkillOrigin::User);
+        assert!(user.contains("origin: user"));
+        assert_eq!(
+            user.matches("origin:").count(),
+            1,
+            "marker replaced, not duplicated"
+        );
+    }
+
+    #[test]
+    fn set_frontmatter_scalar_drops_duplicate_top_level_keys() {
+        // A model-authored SKILL.md could smuggle a second top-level
+        // `origin:`/`auto_activate:` line; the setter must replace the first and
+        // DROP later duplicates so the stamped value is authoritative, not left
+        // to YAML duplicate-key resolution.
+        let dup = "---\nname: my-skill\nversion: 1\norigin: user\ndescription: x\norigin: user\nauto_activate: true\nauto_activate: true\n---\n\nBody.\n";
+        let stamped_origin = set_skill_origin(dup, SkillOrigin::Learned);
+        assert_eq!(
+            stamped_origin.matches("origin:").count(),
+            1,
+            "duplicate origin lines collapsed to one"
+        );
+        // De-dup the other key too, then parse: serde_yml rejects duplicate keys,
+        // so a surviving duplicate would have made the stamped doc unparseable —
+        // dropping duplicates is what keeps the stamped value authoritative.
+        let stamped_both = set_skill_auto_activate(&stamped_origin, false);
+        assert_eq!(
+            stamped_both.matches("auto_activate:").count(),
+            1,
+            "duplicate auto_activate lines collapsed to one"
+        );
+        let parsed = parse_skill_md(&stamped_both).expect("re-parses after de-duping both keys");
+        assert_eq!(parsed.manifest.origin, SkillOrigin::Learned);
+        assert!(!parsed.manifest.auto_activate);
+    }
+
+    #[test]
+    fn origin_and_auto_activate_setters_are_independent() {
+        // Stamping origin must not disturb a previously-set auto_activate flag,
+        // and vice versa — the two top-level scalars coexist.
+        let off = set_skill_auto_activate(TOGGLE_SKILL, false);
+        let stamped = set_skill_origin(&off, SkillOrigin::Learned);
+        let parsed = parse_skill_md(&stamped).expect("re-parses with both scalars");
+        assert!(!parsed.manifest.auto_activate);
+        assert_eq!(parsed.manifest.origin, SkillOrigin::Learned);
+        assert_eq!(stamped.matches("auto_activate:").count(), 1);
+        assert_eq!(stamped.matches("origin:").count(), 1);
     }
 }

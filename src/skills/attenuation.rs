@@ -122,7 +122,9 @@ pub fn attenuate_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_skills::{ActivationCriteria, GatingRequirements, SkillManifest, SkillSource};
+    use ironclaw_skills::{
+        ActivationCriteria, GatingRequirements, SkillManifest, SkillOrigin, SkillSource,
+    };
     use std::path::PathBuf;
 
     fn make_tool(name: &str) -> ToolDefinition {
@@ -137,6 +139,7 @@ mod tests {
         LoadedSkill {
             manifest: SkillManifest {
                 name: name.to_string(),
+                origin: SkillOrigin::User,
                 version: "1.0.0".to_string(),
                 auto_activate: true,
                 description: String::new(),

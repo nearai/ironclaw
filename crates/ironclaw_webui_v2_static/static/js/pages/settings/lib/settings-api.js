@@ -124,13 +124,57 @@ export function setSkillAutoActivate(name, enabled) {
     body: JSON.stringify({ enabled }),
   });
 }
-// Global "auto-activate learned skills" master switch. When disabled, learned
-// skills activate only via an explicit /name mention.
+// Global "auto-activate learned skills" master switch (the "use" stage). When
+// disabled, only machine-LEARNED skills are gated out of keyword/criteria
+// auto-activation (they then activate only via an explicit /name mention);
+// hand-written skills are unaffected and keep auto-activating.
 export function setAutoActivateLearned(enabled) {
   return apiFetch(`/api/webchat/v2/skills/auto-activate-learned`, {
     method: "POST",
     headers: { "X-Confirm-Action": "true" },
     body: JSON.stringify({ enabled }),
+  });
+}
+// Self-learning master switch (the "extract" stage). When disabled, the
+// assistant stops distilling and saving new skills from completed tasks at all.
+export function setLearningEnabled(enabled) {
+  return apiFetch(`/api/webchat/v2/skills/learning-enabled`, {
+    method: "POST",
+    headers: { "X-Confirm-Action": "true" },
+    body: JSON.stringify({ enabled }),
+  });
+}
+// "Hold new skills for review" master switch (the "review" stage). When enabled,
+// a freshly learned skill is saved but held pending approval instead of going
+// live.
+export function setRequireReview(enabled) {
+  return apiFetch(`/api/webchat/v2/skills/require-review`, {
+    method: "POST",
+    headers: { "X-Confirm-Action": "true" },
+    body: JSON.stringify({ enabled }),
+  });
+}
+// Learned skills awaiting the user's review: skills held under "hold for review"
+// plus proposed evolutions of skills the user has since edited.
+export function fetchPendingSkills() {
+  return apiFetch("/api/webchat/v2/skills/pending");
+}
+// Approve a pending skill: activate a held new skill, or apply a proposed
+// evolution to the live skill.
+export function approvePendingSkill(name) {
+  return apiFetch("/api/webchat/v2/skills/pending/approve", {
+    method: "POST",
+    headers: { "X-Confirm-Action": "true" },
+    body: JSON.stringify({ name }),
+  });
+}
+// Discard a pending skill: delete a held new skill, or drop a proposed evolution
+// while keeping the user's live version.
+export function discardPendingSkill(name) {
+  return apiFetch("/api/webchat/v2/skills/pending/discard", {
+    method: "POST",
+    headers: { "X-Confirm-Action": "true" },
+    body: JSON.stringify({ name }),
   });
 }
 // Trace Commons credits — read-only, scoped server-side to the

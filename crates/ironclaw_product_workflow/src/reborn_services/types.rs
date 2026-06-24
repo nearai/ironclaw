@@ -1021,11 +1021,26 @@ pub struct RebornExtensionListResponse {
 pub struct RebornSkillListResponse {
     pub skills: Vec<RebornSkillInfo>,
     pub count: usize,
-    /// Global default criteria-based skill auto-activation master switch. When
-    /// `false`, skills activate only via an explicit `/name` mention. Defaults
-    /// to `true` for back-compat with producers that predate the flag.
+    /// Global "auto-activate learned skills" master switch. When `false`, only
+    /// machine-LEARNED skills (`SkillManifest::origin == Learned`) are excluded
+    /// from keyword/criteria selection and activate via an explicit `/name`
+    /// mention; hand-written (`User`) and bundled (`System`) skills are
+    /// unaffected and keep auto-activating. Defaults to `true` for back-compat
+    /// with producers that predate the flag.
     #[serde(default = "default_true")]
     pub auto_activate_learned: bool,
+    /// "Hold new skills for review" master switch. When `true`, a freshly
+    /// learned skill is saved but held pending the user's approval instead of
+    /// going live. Defaults to `true`: a machine-distilled skill is held for
+    /// explicit approval rather than auto-activating in a later run unreviewed.
+    #[serde(default = "default_true")]
+    pub require_review: bool,
+    /// "Self-learning" master switch. When `false`, the assistant does not
+    /// extract or save new skills from completed runs at all. Defaults to `true`
+    /// for back-compat with producers that predate the flag; reported `false`
+    /// when no learning model is configured (nothing is being learned).
+    #[serde(default = "default_true")]
+    pub learning_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1082,10 +1097,61 @@ pub struct RebornSkillInfo {
     /// only runs when explicitly invoked with `/name`. Defaults to `true`.
     #[serde(default = "default_true")]
     pub auto_activate: bool,
+    /// Whether this skill was machine-learned (`SkillManifest::origin == Learned`).
+    /// The global auto-activate-learned switch governs only these, so the UI
+    /// shows the "paused" affordance and badge for learned skills only.
+    /// Defaults to `false` so hand-written/system skills are unaffected.
+    #[serde(default)]
+    pub is_learned: bool,
+    /// Whether this skill is a freshly-learned skill still held for review (it
+    /// also appears in the pending-review queue). The UI badges it here so a
+    /// held skill in the main list isn't mistaken for a live one. Defaults to
+    /// `false`.
+    #[serde(default)]
+    pub pending_review: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// Why a learned skill is awaiting the user's review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornPendingSkillKind {
+    /// A freshly-learned skill saved under "hold for review" — installed but not
+    /// yet activated, awaiting the user's approval before it can auto-fire.
+    NewSkill,
+    /// The assistant re-learned a skill a human has since edited and proposes an
+    /// updated version; the live skill stays unchanged until the user approves.
+    Evolution,
+}
+
+/// One learned skill awaiting the user's review: either a held new skill or a
+/// proposed evolution of a skill the user has edited. The browser renders
+/// `current_content` for a new skill, or a diff of `current_content` vs
+/// `proposed_content` for an evolution, then approves or discards it by `name`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornPendingSkill {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub kind: RebornPendingSkillKind,
+    /// The current on-disk `SKILL.md`. For `NewSkill` this is the held skill
+    /// itself; for `Evolution` this is the user's live version.
+    pub current_content: String,
+    /// The assistant's proposed `SKILL.md`. Present only for `Evolution` (the
+    /// stashed update); `None` for `NewSkill`, whose held content already lives
+    /// in `current_content`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_content: Option<String>,
+}
+
+/// The set of learned skills awaiting the user's review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornPendingSkillsResponse {
+    pub pending: Vec<RebornPendingSkill>,
+    pub count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

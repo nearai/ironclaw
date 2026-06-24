@@ -5,6 +5,7 @@ import { useT } from "../../../lib/i18n.js";
 import { useSkills } from "../hooks/useSkills.js";
 import { matchesSearch } from "../lib/settings-search.js";
 import { SkillCard } from "./skill-card.js";
+import { PendingSkillCard } from "./pending-skill-card.js";
 import { SkillInstallPanel } from "./skill-install-panel.js";
 import { SettingsSearchEmpty } from "./settings-search-empty.js";
 
@@ -14,20 +15,51 @@ export function SkillsTab({ searchQuery = "" }) {
     skills,
     query,
     autoActivateLearned,
+    learningEnabled,
+    requireReview,
+    pendingSkills,
     fetchSkillContent,
     installSkill,
     removeSkill,
     updateSkill,
     setSkillAutoActivate,
     setAutoActivateLearned,
+    setLearningEnabled,
+    setRequireReview,
+    approvePendingSkill,
+    discardPendingSkill,
     isInstalling,
     isRemoving,
     isUpdating,
     isSettingAutoActivate,
     isSettingAutoActivateLearned,
+    isSettingLearningEnabled,
+    isSettingRequireReview,
+    isApprovingPending,
+    isDiscardingPending,
   } = useSkills();
   const [actionError, setActionError] = React.useState("");
   const [actionResult, setActionResult] = React.useState("");
+
+  // Shared shape for the toggle handlers: clear banners, run the mutation,
+  // surface the facade's message (or its error) back to the user.
+  const runToggle = React.useCallback(
+    async (mutation, value) => {
+      setActionError("");
+      setActionResult("");
+      try {
+        const response = await mutation(value);
+        if (!response?.success) {
+          setActionError(response?.message || t("skills.updateFailed"));
+          return;
+        }
+        setActionResult(response.message);
+      } catch (err) {
+        setActionError(err.message || t("skills.updateFailed"));
+      }
+    },
+    [t]
+  );
 
   const handleRemove = React.useCallback(async (name) => {
     if (!window.confirm(t("skills.confirmDelete", { name }))) return;
@@ -83,11 +115,24 @@ export function SkillsTab({ searchQuery = "" }) {
     }
   }, [setSkillAutoActivate, t]);
 
-  const handleSetAutoActivateLearned = React.useCallback(async (enabled) => {
+  const handleSetLearningEnabled = React.useCallback(
+    (enabled) => runToggle(setLearningEnabled, enabled),
+    [runToggle, setLearningEnabled]
+  );
+  const handleSetRequireReview = React.useCallback(
+    (enabled) => runToggle(setRequireReview, enabled),
+    [runToggle, setRequireReview]
+  );
+  const handleSetAutoActivateLearned = React.useCallback(
+    (enabled) => runToggle(setAutoActivateLearned, enabled),
+    [runToggle, setAutoActivateLearned]
+  );
+
+  const handleApprovePending = React.useCallback(async (name) => {
     setActionError("");
     setActionResult("");
     try {
-      const response = await setAutoActivateLearned(enabled);
+      const response = await approvePendingSkill(name);
       if (!response?.success) {
         setActionError(response?.message || t("skills.updateFailed"));
         return;
@@ -96,7 +141,25 @@ export function SkillsTab({ searchQuery = "" }) {
     } catch (err) {
       setActionError(err.message || t("skills.updateFailed"));
     }
-  }, [setAutoActivateLearned, t]);
+  }, [approvePendingSkill, t]);
+
+  const handleDiscardPending = React.useCallback(async (name) => {
+    if (!window.confirm(t("skills.confirmDiscardPending", { name }))) {
+      return;
+    }
+    setActionError("");
+    setActionResult("");
+    try {
+      const response = await discardPendingSkill(name);
+      if (!response?.success) {
+        setActionError(response?.message || t("skills.updateFailed"));
+        return;
+      }
+      setActionResult(response.message);
+    } catch (err) {
+      setActionError(err.message || t("skills.updateFailed"));
+    }
+  }, [discardPendingSkill, t]);
 
   let body;
   if (query.isLoading) {
@@ -155,6 +218,7 @@ export function SkillsTab({ searchQuery = "" }) {
                 key=${group.id}
                 title=${t(group.labelKey)}
                 skills=${group.skills}
+                globalAutoActivate=${autoActivateLearned}
                 onEdit=${fetchSkillContent}
                 onRemove=${handleRemove}
                 onUpdate=${handleUpdate}
@@ -172,10 +236,23 @@ export function SkillsTab({ searchQuery = "" }) {
 
   return html`
     <div className="space-y-4">
-      <${LearnedAutoActivateCard}
-        enabled=${autoActivateLearned}
-        isSaving=${isSettingAutoActivateLearned}
-        onToggle=${handleSetAutoActivateLearned}
+      <${SkillLearningControls}
+        learningEnabled=${learningEnabled}
+        requireReview=${requireReview}
+        autoActivateLearned=${autoActivateLearned}
+        isSettingLearningEnabled=${isSettingLearningEnabled}
+        isSettingRequireReview=${isSettingRequireReview}
+        isSettingAutoActivateLearned=${isSettingAutoActivateLearned}
+        onSetLearningEnabled=${handleSetLearningEnabled}
+        onSetRequireReview=${handleSetRequireReview}
+        onSetAutoActivateLearned=${handleSetAutoActivateLearned}
+      />
+      <${PendingReviewSection}
+        pending=${pendingSkills}
+        onApprove=${handleApprovePending}
+        onDiscard=${handleDiscardPending}
+        isApproving=${isApprovingPending}
+        isDiscarding=${isDiscardingPending}
       />
       <${SkillInstallPanel} onInstall=${installSkill} isInstalling=${isInstalling} />
       <${SkillActionResult} error=${actionError} result=${actionResult} />
@@ -184,28 +261,81 @@ export function SkillsTab({ searchQuery = "" }) {
   `;
 }
 
-// Global master switch for keyword/criteria skill activation. When off, EVERY
-// skill (learned, user-authored, and bundled) stays invokable via an explicit
-// /name mention but no longer auto-activates by keyword. This is a true global
-// default, not learned-only; the per-skill toggle on `SkillCard` is the
-// per-skill counterpart.
-function LearnedAutoActivateCard({ enabled, isSaving, onToggle }) {
-  // When auto-activation is off, give the whole card a light-red background as a
-  // persistent "default is off" cue. Inline style overrides the Card variant's
-  // own background reliably (no Tailwind class-ordering ambiguity).
-  const cardStyle = enabled ? undefined : { background: "var(--v2-danger-soft)" };
+// The three stages of skill self-evolution, shown in pipeline order so the
+// controls read as one flow: learn (extract) -> review -> use (activate).
+function SkillLearningControls({
+  learningEnabled,
+  requireReview,
+  autoActivateLearned,
+  isSettingLearningEnabled,
+  isSettingRequireReview,
+  isSettingAutoActivateLearned,
+  onSetLearningEnabled,
+  onSetRequireReview,
+  onSetAutoActivateLearned,
+}) {
+  const t = useT();
+  return html`
+    <div className="space-y-3">
+      <${SkillSwitchCard}
+        title=${t("skills.learning.selfLearning.title")}
+        summary=${learningEnabled
+          ? t("skills.learning.selfLearning.summaryOn")
+          : t("skills.learning.selfLearning.summaryOff")}
+        labelOn=${t("skills.learning.selfLearning.labelOn")}
+        labelOff=${t("skills.learning.selfLearning.labelOff")}
+        enabled=${learningEnabled}
+        isSaving=${isSettingLearningEnabled}
+        onToggle=${onSetLearningEnabled}
+      />
+      <${SkillSwitchCard}
+        title=${t("skills.learning.review.title")}
+        summary=${requireReview
+          ? t("skills.learning.review.summaryOn")
+          : t("skills.learning.review.summaryOff")}
+        labelOn=${t("skills.learning.review.labelOn")}
+        labelOff=${t("skills.learning.review.labelOff")}
+        enabled=${requireReview}
+        isSaving=${isSettingRequireReview}
+        onToggle=${onSetRequireReview}
+      />
+      <${SkillSwitchCard}
+        title=${t("skills.learning.activation.title")}
+        summary=${autoActivateLearned
+          ? t("skills.learning.activation.summaryOn")
+          : t("skills.learning.activation.summaryOff")}
+        labelOn=${t("skills.learning.activation.labelOn")}
+        labelOff=${t("skills.learning.activation.labelOff")}
+        enabled=${autoActivateLearned}
+        isSaving=${isSettingAutoActivateLearned}
+        onToggle=${onSetAutoActivateLearned}
+        dangerWhenOff=${true}
+      />
+    </div>
+  `;
+}
+
+// A single binary skill control. The button shows the CURRENT choice and
+// clicking it flips to the other. `dangerWhenOff` paints the card with a soft
+// red background while off, a persistent cue for a restrictive default (used by
+// the "use" switch, where off means nothing auto-activates).
+function SkillSwitchCard({
+  title,
+  summary,
+  labelOn,
+  labelOff,
+  enabled,
+  isSaving,
+  onToggle,
+  dangerWhenOff = false,
+}) {
+  const cardStyle = dangerWhenOff && !enabled ? { background: "var(--v2-danger-soft)" } : undefined;
   return html`
     <${Card} padding="md" style=${cardStyle}>
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <div className="text-sm font-medium text-[var(--v2-text-strong)]">
-            ${`Default skill auto-activation ${enabled ? "enabled" : "disabled"}`}
-          </div>
-          <div className="mt-1 text-xs text-[var(--v2-text-muted)]">
-            ${enabled
-              ? "Skills auto-activate by keyword on matching requests. Turn off to require an explicit /name."
-              : "Skills run only when you type /name. Turn on to let them auto-activate by keyword."}
-          </div>
+          <div className="text-sm font-medium text-[var(--v2-text-strong)]">${title}</div>
+          <div className="mt-1 text-xs text-[var(--v2-text-muted)]">${summary}</div>
         </div>
         <div className="shrink-0">
           <${Button}
@@ -215,7 +345,7 @@ function LearnedAutoActivateCard({ enabled, isSaving, onToggle }) {
             disabled=${isSaving}
             onClick=${() => onToggle(!enabled)}
           >
-            ${enabled ? "Default: On" : "Default: Off"}
+            ${enabled ? labelOn : labelOff}
           <//>
         </div>
       </div>
@@ -223,9 +353,37 @@ function LearnedAutoActivateCard({ enabled, isSaving, onToggle }) {
   `;
 }
 
+function PendingReviewSection({ pending, onApprove, onDiscard, isApproving, isDiscarding }) {
+  const t = useT();
+  if (!pending || pending.length === 0) return null;
+  return html`
+    <${Card} padding="md">
+      <h3 className="mb-1 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
+        ${t("skills.learning.review.pendingTitle", { count: pending.length })}
+      </h3>
+      <p className="mb-3 text-xs text-[var(--v2-text-muted)]">
+        ${t("skills.learning.review.pendingDescription")}
+      </p>
+      ${pending.map(
+        (skill) => html`
+          <${PendingSkillCard}
+            key=${`${skill.kind}:${skill.name}`}
+            skill=${skill}
+            onApprove=${onApprove}
+            onDiscard=${onDiscard}
+            isApproving=${isApproving}
+            isDiscarding=${isDiscarding}
+          />
+        `
+      )}
+    <//>
+  `;
+}
+
 function SkillGroup({
   title,
   skills,
+  globalAutoActivate,
   onEdit,
   onRemove,
   onUpdate,
@@ -245,6 +403,7 @@ function SkillGroup({
           <${SkillCard}
             key=${`${skill.source_kind || "skill"}:${skill.name || skill.id}`}
             skill=${skill}
+            globalAutoActivate=${globalAutoActivate}
             onEdit=${onEdit}
             onRemove=${onRemove}
             onUpdate=${onUpdate}
@@ -283,12 +442,24 @@ function groupSkills(skills) {
 
 function SkillActionResult({ error, result }) {
   if (!error && !result) return null;
+  // Theme-token colors (not raw Tailwind palette) so the text stays legible in
+  // both the light and dark v2 themes. Errors use the danger token; plain
+  // confirmations use the positive token on a subtle surface — kept neutral
+  // rather than alarming red, since the persistent "reduced-safety" signal
+  // lives on the auto-activation card (its red `dangerWhenOff` background).
+  const style = error
+    ? {
+        background: "var(--v2-danger-soft)",
+        color: "var(--v2-danger-text)",
+        border: "1px solid var(--v2-danger-soft)",
+      }
+    : {
+        background: "var(--v2-surface-soft)",
+        color: "var(--v2-positive-text)",
+        border: "1px solid var(--v2-card-border)",
+      };
   return html`
-    <div
-      className=${error
-        ? "rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-        : "rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200"}
-    >
+    <div className="rounded-xl px-4 py-3 text-sm" style=${style}>
       ${error || result}
     </div>
   `;

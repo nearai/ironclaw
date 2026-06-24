@@ -14,6 +14,12 @@ export function SkillCard({
   isRemoving,
   isUpdating,
   isSettingAutoActivate,
+  // The global "auto-activate learned skills" master switch. When off, only
+  // machine-LEARNED skills stop auto-firing by keyword (hand-written skills are
+  // unaffected); a learned skill's per-skill toggle is then shown disabled
+  // (greyed) — its saved value is preserved, just overridden until the switch is
+  // back on. See `pausedByGlobal` below.
+  globalAutoActivate = true,
 }) {
   const t = useT();
   const name = skill.name || skill.id;
@@ -23,6 +29,11 @@ export function SkillCard({
   const canDelete = Boolean(skill.can_delete);
   // Defaults true: a skill without the field auto-activates.
   const autoActivate = skill.auto_activate !== false;
+  // Decision B: the global learned-auto-activation switch governs ONLY
+  // machine-learned skills. A learned skill is "paused" (kept, but not
+  // auto-firing) when that switch is off; hand-written skills never pause.
+  const isLearned = Boolean(skill.is_learned);
+  const pausedByGlobal = isLearned && !globalAutoActivate;
   const [isEditing, setIsEditing] = React.useState(false);
   const [draft, setDraft] = React.useState("");
   const [editError, setEditError] = React.useState("");
@@ -70,6 +81,12 @@ export function SkillCard({
               label=${t(`skills.source.${sourceKind}`)}
               size="sm"
             />
+            ${skill.pending_review &&
+            html`<${Badge}
+              tone="warning"
+              label=${t("skills.pendingReview")}
+              size="sm"
+            />`}
             ${skill.version &&
             html`<span className="font-mono text-[11px] text-[var(--v2-text-faint)]">v${skill.version}</span>`}
           </div>
@@ -138,14 +155,20 @@ export function SkillCard({
               type="button"
               variant=${autoActivate ? "secondary" : "ghost"}
               size="sm"
-              disabled=${isSettingAutoActivate}
-              title=${autoActivate
-                ? "Auto-activation on — runs on matching requests. Click to make it explicit-only (/name)."
-                : "Explicit-only — runs only when you type /name. Click to enable auto-activation."}
+              disabled=${isSettingAutoActivate || pausedByGlobal}
+              title=${pausedByGlobal
+                ? t("skills.autoActivate.titlePaused")
+                : autoActivate
+                  ? t("skills.autoActivate.titleOn")
+                  : t("skills.autoActivate.titleOff")}
               onClick=${() => onSetAutoActivate(name, !autoActivate)}
             >
               <${Icon} name=${autoActivate ? "check" : "close"} className="h-4 w-4" />
-              ${autoActivate ? "Auto-activate: On" : "Auto-activate: Off"}
+              ${autoActivate
+                ? pausedByGlobal
+                  ? t("skills.autoActivate.onPaused")
+                  : t("skills.autoActivate.on")
+                : t("skills.autoActivate.off")}
             <//>
           `}
           ${canDelete && !isEditing &&

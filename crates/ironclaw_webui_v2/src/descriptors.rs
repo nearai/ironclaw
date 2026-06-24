@@ -50,6 +50,11 @@ pub const WEBUI_V2_ROUTE_UPDATE_SKILL: &str = "webui.v2.update_skill";
 pub const WEBUI_V2_ROUTE_REMOVE_SKILL: &str = "webui.v2.remove_skill";
 pub const WEBUI_V2_ROUTE_SET_SKILL_AUTO_ACTIVATE: &str = "webui.v2.set_skill_auto_activate";
 pub const WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED: &str = "webui.v2.set_auto_activate_learned";
+pub const WEBUI_V2_ROUTE_SET_REQUIRE_REVIEW: &str = "webui.v2.set_require_review";
+pub const WEBUI_V2_ROUTE_SET_LEARNING_ENABLED: &str = "webui.v2.set_learning_enabled";
+pub const WEBUI_V2_ROUTE_LIST_PENDING_SKILLS: &str = "webui.v2.list_pending_skills";
+pub const WEBUI_V2_ROUTE_APPROVE_PENDING_SKILL: &str = "webui.v2.approve_pending_skill";
+pub const WEBUI_V2_ROUTE_DISCARD_PENDING_SKILL: &str = "webui.v2.discard_pending_skill";
 pub const WEBUI_V2_ROUTE_GET_LLM_CONFIG: &str = "webui.v2.get_llm_config";
 pub const WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER: &str = "webui.v2.upsert_llm_provider";
 pub const WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER: &str = "webui.v2.delete_llm_provider";
@@ -129,6 +134,11 @@ pub const WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE: &str =
     "/api/webchat/v2/skills/{name}/auto-activate";
 pub const WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED: &str =
     "/api/webchat/v2/skills/auto-activate-learned";
+pub const WEBUI_V2_PATTERN_SET_REQUIRE_REVIEW: &str = "/api/webchat/v2/skills/require-review";
+pub const WEBUI_V2_PATTERN_SET_LEARNING_ENABLED: &str = "/api/webchat/v2/skills/learning-enabled";
+pub const WEBUI_V2_PATTERN_LIST_PENDING_SKILLS: &str = "/api/webchat/v2/skills/pending";
+pub const WEBUI_V2_PATTERN_APPROVE_PENDING_SKILL: &str = "/api/webchat/v2/skills/pending/approve";
+pub const WEBUI_V2_PATTERN_DISCARD_PENDING_SKILL: &str = "/api/webchat/v2/skills/pending/discard";
 pub const WEBUI_V2_PATTERN_GET_LLM_CONFIG: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER: &str =
@@ -208,6 +218,11 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         remove_skill_descriptor(),
         set_skill_auto_activate_descriptor(),
         set_auto_activate_learned_descriptor(),
+        set_require_review_descriptor(),
+        set_learning_enabled_descriptor(),
+        list_pending_skills_descriptor(),
+        approve_pending_skill_descriptor(),
+        discard_pending_skill_descriptor(),
         get_llm_config_descriptor(),
         upsert_llm_provider_descriptor(),
         delete_llm_provider_descriptor(),
@@ -1013,6 +1028,76 @@ fn set_auto_activate_learned_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED,
         NetworkMethod::Post,
         WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn set_require_review_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_REQUIRE_REVIEW,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SET_REQUIRE_REVIEW,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn set_learning_enabled_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_LEARNING_ENABLED,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SET_LEARNING_ENABLED,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn list_pending_skills_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_PENDING_SKILLS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_LIST_PENDING_SKILLS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn approve_pending_skill_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_APPROVE_PENDING_SKILL,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_APPROVE_PENDING_SKILL,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn discard_pending_skill_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_DISCARD_PENDING_SKILL,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_DISCARD_PENDING_SKILL,
         mutation_policy(
             body_limit_kib(4),
             mutation_rate_limit(),

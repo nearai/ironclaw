@@ -65,6 +65,7 @@ pub(crate) use learning::{
 #[cfg(feature = "root-llm-provider")]
 mod learning {
     use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, LazyLock, Mutex};
 
     use async_trait::async_trait;
@@ -76,7 +77,8 @@ mod learning {
         distill_skill, refine_skill,
     };
     use ironclaw_skills::{
-        ManagedSkillSource, SkillManagementErrorKind, SkillSummary, parse_skill_md,
+        LearnedSkillProvenance, ManagedSkillSource, SkillManagementErrorKind, SkillOrigin,
+        SkillSummary, parse_skill_md, set_skill_auto_activate, set_skill_origin,
     };
     use ironclaw_threads::{
         AppendAssistantDraftRequest, ContextWindow, LoadContextWindowRequest, MessageContent,
@@ -91,11 +93,13 @@ mod learning {
     use crate::projection::LiveProjectionPublisher;
 
     /// Cheap pre-filter: skip the (paid) distillation LLM call on runs that
-    /// obviously can't yield a reusable skill (pure chat, a single lookup). The
-    /// *real* quality gate is the learning model's own `SKIP` judgement, so this
-    /// is kept lenient — an efficient agent may complete a skill-worthy,
-    /// multi-step task in only two tool calls (e.g. `shell` mkdir + batch write).
-    const MIN_TOOL_ACTIONS: usize = 2;
+    /// obviously can't yield a reusable skill (pure chat, a one/two-shot lookup).
+    /// Modeled on Hermes's "5+ tool calls" trigger and tuned down one notch: a
+    /// genuinely multi-step task still clears 4, while one/two-shot lookups no
+    /// longer each pay for a ~16K-token distillation call. The *real* quality gate
+    /// is still the learning model's own `SKIP` judgement; this is the cheapest
+    /// lever for cutting distillation spend.
+    const MIN_TOOL_ACTIONS: usize = 4;
     const MIN_TRANSCRIPT_MESSAGES: usize = 3;
     /// Recent-transcript bound for the eligibility read.
     const TRANSCRIPT_READ_LIMIT: usize = 64;
@@ -104,10 +108,6 @@ mod learning {
     /// may be a reasoning model that spends tokens on reasoning before emitting
     /// the `SKILL.md`, so a tight cap would truncate the document.
     const SKILL_LEARNING_MAX_TOKENS: u32 = 16384;
-
-    /// User-facing note shown on the learned-skill bubble.
-    const LEARNED_SKILL_FEEDBACK: &str =
-        "Learned this skill from the task you just completed — review it under Settings -> Skills.";
 
     /// Jaccard-similarity floor (over the combined name/keyword/tag token sets)
     /// above which a freshly distilled skill is treated as a near-duplicate of
@@ -130,20 +130,53 @@ mod learning {
     /// mirroring the WebUI facade's `validate_skill_content_safety`.
     static SKILL_LEARNING_SAFETY: LazyLock<Sanitizer> = LazyLock::new(Sanitizer::new);
 
+    /// Stamp the `origin: learned` frontmatter marker into `content`. Every skill
+    /// this writer installs or evolves is machine-learned by definition; the marker
+    /// travels with the skill (export, tenant share) and lets the selector scope
+    /// the global auto-activate-learned switch to learned skills and the UI badge a
+    /// skill's origin. Applied at each live-write point — not once on entry —
+    /// because the refiner model rewrites the document and may drop the line.
+    fn mark_learned(content: &str) -> String {
+        set_skill_origin(content, SkillOrigin::Learned)
+    }
+
+    /// Outcome of a learning-sink skill write, so the sink can notify the user
+    /// truthfully: only `Installed`/`Evolved` actually changed an active skill.
+    #[derive(Debug)]
+    pub(crate) enum SkillWriteOutcome {
+        /// A brand-new learned skill was installed and will auto-apply.
+        Installed(String),
+        /// "Hold for review" is on: a brand-new learned skill was saved but NOT
+        /// auto-activated, marked pending the user's approval.
+        Pending(String),
+        /// An existing machine-owned skill was evolved in place. `active` carries the
+        /// skill's preserved auto-activation state so the sink can word the user
+        /// notice honestly (a skill the user turned off must not be announced as
+        /// "active").
+        Evolved { name: String, active: bool },
+        /// The target is human-owned/edited; the distillation was stashed as a
+        /// proposal for review and the live skill was NOT changed.
+        Proposed(String),
+        /// Nothing was written — a bundle, a human-built skill, or the model
+        /// judged the existing skill already sufficient.
+        Skipped,
+    }
+
     /// Scoped skill write seam. Composition implements it over the real
     /// `RebornLocalSkillManagementPort`; tests use a stub. Keeps the sink
     /// testable without a filesystem.
     #[async_trait]
     pub(crate) trait SkillWriter: Send + Sync {
-        /// Install the skill for `scope`, falling back to an in-place update
-        /// when a skill of that name already exists (re-learning). Returns the
-        /// stored skill name.
+        /// Install a new learned skill, evolve an existing machine-owned one, or
+        /// — when the target is human-owned/edited — stash a proposal instead of
+        /// overwriting. The returned [`SkillWriteOutcome`] tells the caller
+        /// whether a skill actually changed, so it notifies the user honestly.
         async fn install_or_update(
             &self,
             scope: ResourceScope,
             name: &str,
             content: &str,
-        ) -> Result<String, String>;
+        ) -> Result<SkillWriteOutcome, String>;
     }
 
     /// What to do with an existing learned skill when a near-duplicate candidate
@@ -156,9 +189,10 @@ mod learning {
         /// candidate, OR refinement failed and the accumulated skill must not be
         /// discarded for a single-run candidate (see [`SkillRefiner::merge`]).
         KeepExisting,
-        /// There is no meaningful existing content to preserve; write the
-        /// candidate under the existing name. A refiner error or a rejected
-        /// refinement keeps the existing skill instead of overwriting it.
+        /// The existing skill's stored content could not be read, so there is no
+        /// accumulated document to preserve; write the candidate under the
+        /// existing name. Reserved for that genuinely-no-content case — a refiner
+        /// error or a rejected refinement keeps the existing skill instead.
         Overwrite,
     }
 
@@ -212,9 +246,10 @@ mod learning {
                 }
                 Ok(RefineOutcome::KeepExisting) => MergeAction::KeepExisting,
                 Err(error) => {
-                    // A transient model hiccup or unparseable response is exactly
-                    // when the single-run candidate is least trustworthy, so
-                    // preserve the evolved skill instead of regressing it.
+                    // A transient model hiccup or an unparseable response is
+                    // exactly when the single-run candidate is least trustworthy,
+                    // so preserve the evolved skill instead of regressing it to a
+                    // fresh distillation.
                     tracing::debug!(
                         %error,
                         skill = %target_name,
@@ -228,16 +263,27 @@ mod learning {
 
     /// [`SkillWriter`] over the runtime's scoped skill-management port.
     pub(crate) struct PortSkillWriter {
-        port: Arc<RebornLocalSkillManagementPort>,
+        pub(super) port: Arc<RebornLocalSkillManagementPort>,
         refiner: Arc<dyn SkillRefiner>,
+        /// "Hold new skills for review" master switch. When `true`, a freshly
+        /// learned skill is installed but NOT auto-activated and marked pending
+        /// (awaiting the user's approval) instead of going live immediately.
+        /// Only affects brand-new skills — evolutions of already-approved
+        /// machine-owned skills still apply, so the flywheel keeps turning.
+        require_review: Arc<AtomicBool>,
     }
 
     impl PortSkillWriter {
         pub(crate) fn new(
             port: Arc<RebornLocalSkillManagementPort>,
             refiner: Arc<dyn SkillRefiner>,
+            require_review: Arc<AtomicBool>,
         ) -> Self {
-            Self { port, refiner }
+            Self {
+                port,
+                refiner,
+                require_review,
+            }
         }
     }
 
@@ -248,7 +294,7 @@ mod learning {
             scope: ResourceScope,
             name: &str,
             content: &str,
-        ) -> Result<String, String> {
+        ) -> Result<SkillWriteOutcome, String> {
             // Self-improvement loop: when this task has been learned before
             // (the same skill name, or a renamed sibling covering the same
             // ground), evolve the existing skill in place instead of overwriting
@@ -258,6 +304,24 @@ mod learning {
             // document's frontmatter `name` to equal the target, so the merged
             // content is retargeted.
             if let Some(existing_name) = self.find_merge_target(&scope, name, content).await {
+                // Gate (Path A): only auto-overwrite a skill the machine itself
+                // learned, that no human has edited since, and that is a single
+                // file. Otherwise the human owns it — stash the candidate as a
+                // proposal and leave the live SKILL.md untouched.
+                if !self.is_auto_overwritable(&scope, &existing_name).await {
+                    let proposed = self.stash_proposal(&scope, &existing_name, content).await;
+                    tracing::debug!(
+                        distilled_name = %name,
+                        target = %existing_name,
+                        proposed,
+                        "skill-learning: merge target is human-owned or a bundle; not overwritten"
+                    );
+                    return Ok(if proposed {
+                        SkillWriteOutcome::Proposed(existing_name)
+                    } else {
+                        SkillWriteOutcome::Skipped
+                    });
+                }
                 let existing = self
                     .port
                     .read_content_for_scope(scope.clone(), &existing_name)
@@ -286,7 +350,7 @@ mod learning {
                             kept = %existing_name,
                             "skill-learning: existing learned skill already subsumes candidate"
                         );
-                        return Ok(existing_name);
+                        return Ok(SkillWriteOutcome::Skipped);
                     }
                     MergeAction::Overwrite => {
                         tracing::debug!(
@@ -297,33 +361,47 @@ mod learning {
                         rewrite_skill_name(content, &existing_name)
                     }
                 };
-                return self
-                    .port
-                    .update_for_scope(scope, &existing_name, &merged)
-                    .await
-                    .map(|_| existing_name)
-                    .map_err(|error| error.to_string());
+                return self.apply_evolution(&scope, &existing_name, &merged).await;
             }
+            // Brand-new skill (no merge target). Under "hold for review", stage
+            // it (saved, not auto-activated, marked pending) instead of going
+            // live. Evolutions of already-approved skills above are unaffected.
+            if self.require_review.load(Ordering::Relaxed) {
+                return self.install_pending(&scope, name, content).await;
+            }
+            let stamped = mark_learned(content);
             match self
                 .port
-                .install_for_scope(scope.clone(), Some(name), content)
+                .install_for_scope(scope.clone(), Some(name), &stamped)
                 .await
             {
-                Ok(result) => Ok(result.name),
+                Ok(result) => {
+                    // New learned skill — record the machine baseline (over the
+                    // stamped content actually written) so a later run can tell
+                    // whether a human has since edited it.
+                    self.record_baseline(&scope, &result.name, &stamped, false)
+                        .await;
+                    Ok(SkillWriteOutcome::Installed(result.name))
+                }
                 // install is create-only; only a name CONFLICT means a same-named
-                // skill exists (we are re-learning it), so update it in place.
+                // skill exists that find_merge_target did not match (e.g. a parse/
+                // listing hiccup). Gate (Path B): overwrite only a machine-owned,
+                // untouched, single-file skill; otherwise stash a proposal.
                 Err(RebornLocalSkillManagementError::Skill(error))
                     if error.kind() == SkillManagementErrorKind::Conflict =>
                 {
-                    self.port
-                        .update_for_scope(scope, name, content)
-                        .await
-                        .map(|_| name.to_string())
-                        .map_err(|error| error.to_string())
+                    if self.is_auto_overwritable(&scope, name).await {
+                        self.apply_evolution(&scope, name, content).await
+                    } else if self.stash_proposal(&scope, name, content).await {
+                        Ok(SkillWriteOutcome::Proposed(name.to_string()))
+                    } else {
+                        Ok(SkillWriteOutcome::Skipped)
+                    }
                 }
-                // Any other failure class (filesystem, validation, resource) is
-                // NOT a conflict, so overwriting a live skill on it would be data
-                // loss — fail loud instead of clobbering it.
+                // Any other failure class (filesystem-denied, validation,
+                // resource) is NOT a name conflict, so falling through to an
+                // overwrite would clobber a live skill on a transient error.
+                // Fail loud instead.
                 Err(error) => {
                     tracing::debug!(
                         skill_name = %name,
@@ -368,6 +446,219 @@ mod learning {
                 return None;
             }
             select_duplicate_skill(name, &new_tokens, &existing)
+        }
+
+        /// True iff `name` is a skill the learning sink wrote (a provenance sidecar
+        /// exists — the sink is its only writer), that no human has edited since
+        /// (live content still matches the recorded baseline), and that is not a
+        /// multi-file bundle. Any uncertainty — missing provenance, read error,
+        /// unparseable live content — resolves to `false` (fail safe toward "the
+        /// human owns it, do not overwrite"). The single gate both
+        /// `install_or_update` write paths consult. The security authority is the
+        /// host-private content hash (`matches_live_content`), never the skill's
+        /// own frontmatter `origin`, so a forged origin cannot invite an overwrite.
+        async fn is_auto_overwritable(&self, scope: &ResourceScope, name: &str) -> bool {
+            let Ok(Some(provenance)) = self
+                .port
+                .read_provenance_for_scope(scope.clone(), name)
+                .await
+            else {
+                return false;
+            };
+            if self
+                .port
+                .is_bundle_for_scope(scope.clone(), name)
+                .await
+                .unwrap_or(true)
+            {
+                return false;
+            }
+            let Ok(live) = self.port.read_content_for_scope(scope.clone(), name).await else {
+                return false;
+            };
+            provenance.matches_live_content(&live.content)
+        }
+
+        /// Record the machine baseline (origin + body hash + activation snapshot)
+        /// for a skill the learning sink just wrote, replacing any stale proposal.
+        /// `pending_review` carries the hold state forward — a held skill that is
+        /// re-learned must stay held. Best-effort: a sidecar failure must not fail
+        /// the already-successful skill write; on failure the prior sidecar (still
+        /// pending if it was) remains, which fails safe.
+        async fn record_baseline(
+            &self,
+            scope: &ResourceScope,
+            name: &str,
+            written: &str,
+            pending_review: bool,
+        ) {
+            match LearnedSkillProvenance::for_machine_content(written) {
+                Ok(mut provenance) => {
+                    provenance.pending_review = pending_review;
+                    if let Err(error) = self
+                        .port
+                        .write_provenance_for_scope(scope.clone(), name, &provenance)
+                        .await
+                    {
+                        tracing::debug!(skill = %name, %error, "skill-learning: failed to record provenance baseline");
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(skill = %name, ?error, "skill-learning: could not compute provenance baseline");
+                }
+            }
+        }
+
+        /// Apply evolved `content` to an existing auto-overwritable (machine-owned,
+        /// untouched, single-file) skill. If that skill is currently held for
+        /// review, the evolution must NOT un-hold or activate it: stage it
+        /// inactive, keep it pending, and return `Pending` so the sink stays
+        /// silent. Otherwise evolve it live and return `Evolved`. Both
+        /// `install_or_update` overwrite paths funnel through here, so the
+        /// held-skill guard cannot be bypassed by one path while the other forgets
+        /// it.
+        async fn apply_evolution(
+            &self,
+            scope: &ResourceScope,
+            name: &str,
+            content: &str,
+        ) -> Result<SkillWriteOutcome, String> {
+            // Re-validate the overwrite authority HERE, right before the write.
+            // `is_auto_overwritable` was checked in `install_or_update` BEFORE the
+            // refiner's (slow) LLM merge, so a human could have edited the skill
+            // during that window (TOCTOU). Read provenance + live content once and
+            // require the live skill still match the machine baseline; a missing
+            // sidecar or a mismatch means a human now owns it — stash the
+            // candidate as a proposal instead of clobbering the edit. Read
+            // failures propagate (fail closed, no overwrite).
+            let provenance = self
+                .port
+                .read_provenance_for_scope(scope.clone(), name)
+                .await
+                .map_err(|error| error.to_string())?;
+            let live = self
+                .port
+                .read_content_for_scope(scope.clone(), name)
+                .await
+                .map_err(|error| error.to_string())?;
+            let Some(provenance) =
+                provenance.filter(|prov| prov.matches_live_content(&live.content))
+            else {
+                let proposed = self.stash_proposal(scope, name, content).await;
+                tracing::debug!(
+                    skill = %name,
+                    proposed,
+                    "skill-learning: live skill diverged during refine; not overwriting"
+                );
+                return Ok(if proposed {
+                    SkillWriteOutcome::Proposed(name.to_string())
+                } else {
+                    SkillWriteOutcome::Skipped
+                });
+            };
+            if provenance.pending_review {
+                // Re-learning a held skill before the user has reviewed it must
+                // keep the hold: stage inactive, stay pending, emit no
+                // "auto-applies" notice. (Holds even if `require_review` was since
+                // switched off — an already-held skill is still unreviewed.)
+                let staged = mark_learned(&set_skill_auto_activate(content, false));
+                self.port
+                    .update_for_scope(scope.clone(), name, &staged)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                self.record_baseline(scope, name, &staged, true).await;
+                Ok(SkillWriteOutcome::Pending(name.to_string()))
+            } else {
+                // Preserve the live skill's activation across evolution: an
+                // evolution improves CONTENT, it must NOT silently flip a skill the
+                // user turned off back on. A parse failure on the (baseline-
+                // matching) live content defaults to OFF rather than activating.
+                let keep_active = parse_skill_md(&live.content)
+                    .map(|parsed| parsed.manifest.auto_activate)
+                    .unwrap_or(false);
+                let evolved = mark_learned(&set_skill_auto_activate(content, keep_active));
+                self.port
+                    .update_for_scope(scope.clone(), name, &evolved)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                self.record_baseline(scope, name, &evolved, false).await;
+                Ok(SkillWriteOutcome::Evolved {
+                    name: name.to_string(),
+                    active: keep_active,
+                })
+            }
+        }
+
+        /// Stash a distilled candidate as a pending proposal for human review,
+        /// WITHOUT touching the live `SKILL.md`. Returns `true` iff a proposal was
+        /// actually stashed. Only meaningful for a machine-learned, single-file
+        /// skill a human has edited; for bundles and purely human-built skills it
+        /// is a no-op and returns `false` (we neither overwrite nor pester).
+        /// Best-effort.
+        async fn stash_proposal(&self, scope: &ResourceScope, name: &str, candidate: &str) -> bool {
+            let Some(mut provenance) = self
+                .port
+                .read_provenance_for_scope(scope.clone(), name)
+                .await
+                .ok()
+                .flatten()
+            else {
+                return false;
+            };
+            if self
+                .port
+                .is_bundle_for_scope(scope.clone(), name)
+                .await
+                .unwrap_or(true)
+            {
+                return false;
+            }
+            provenance.proposed_content = Some(candidate.to_string());
+            match self
+                .port
+                .write_provenance_for_scope(scope.clone(), name, &provenance)
+                .await
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::debug!(skill = %name, %error, "skill-learning: failed to stash proposal");
+                    false
+                }
+            }
+        }
+
+        /// Install a freshly-learned skill under "hold for review": saved, but
+        /// auto-activation turned off and a `pending_review` provenance marker
+        /// set, so it does not go live until the user approves it. An install
+        /// conflict (the rare best-effort `None` from `find_merge_target` with
+        /// the name nonetheless taken) is returned as an error rather than
+        /// overwriting a possibly human-owned skill.
+        async fn install_pending(
+            &self,
+            scope: &ResourceScope,
+            name: &str,
+            content: &str,
+        ) -> Result<SkillWriteOutcome, String> {
+            // A pending skill must not auto-fire before it has been reviewed.
+            let staged = mark_learned(&set_skill_auto_activate(content, false));
+            let result = self
+                .port
+                .install_for_scope(scope.clone(), Some(name), &staged)
+                .await
+                .map_err(|error| error.to_string())?;
+            // The pending_review marker IS part of the pending install: without
+            // it, review/list/approve can't find the held skill, so the UI would
+            // announce a pending skill the approval API can't see. Make the
+            // sidecar write mandatory — propagate its failure rather than leave a
+            // saved-but-unmarked skill.
+            let mut provenance =
+                LearnedSkillProvenance::for_machine_content(&staged).map_err(|e| e.to_string())?;
+            provenance.pending_review = true;
+            self.port
+                .write_provenance_for_scope(scope.clone(), &result.name, &provenance)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(SkillWriteOutcome::Pending(result.name))
         }
     }
 
@@ -521,6 +812,10 @@ mod learning {
         skill_writer: Arc<dyn SkillWriter>,
         notifier: Arc<dyn SkillLearnedNotifier>,
         extraction_tasks: Arc<SkillLearningExtractionTasks>,
+        /// "Self-learning" master switch (shared with the WebUI skills facade).
+        /// When `false`, `publish` returns early before reading the transcript or
+        /// spawning an extraction job, so a completed run distills nothing.
+        learning_enabled: Arc<AtomicBool>,
     }
 
     impl SkillLearningTurnEventSink {
@@ -530,6 +825,7 @@ mod learning {
             skill_writer: Arc<dyn SkillWriter>,
             notifier: Arc<dyn SkillLearnedNotifier>,
             extraction_tasks: Arc<SkillLearningExtractionTasks>,
+            learning_enabled: Arc<AtomicBool>,
         ) -> Self {
             Self {
                 thread_service,
@@ -537,6 +833,7 @@ mod learning {
                 skill_writer,
                 notifier,
                 extraction_tasks,
+                learning_enabled,
             }
         }
     }
@@ -600,6 +897,12 @@ mod learning {
             // Only successful completions are extraction candidates. Failed or
             // blocked runs are the self-improvement loop's concern.
             if !matches!(event.kind, TurnEventKind::Completed) {
+                return Ok(());
+            }
+            // "Self-learning" master switch: when off, distill nothing — return
+            // before reading the transcript or spawning an extraction job, so a
+            // Settings toggle takes effect on the very next completed run.
+            if !self.learning_enabled.load(Ordering::Relaxed) {
                 return Ok(());
             }
             // System/sentinel-scoped turns have no owner to attribute a skill to.
@@ -738,34 +1041,82 @@ mod learning {
             let transcript = format_transcript(&window);
             match distill_skill(&transcript, self.inference.as_ref()).await {
                 Ok(DistillOutcome::Skill(skill)) => {
-                    if let Some(installed_name) = persist_learned_skill(
+                    let outcome = persist_learned_skill(
                         self.skill_writer.as_ref(),
                         &self.write_tenant,
                         &self.write_owner,
                         &skill,
                         self.run_id,
                     )
-                    .await
-                    {
-                        // Durable feedback first: a thread message survives a
-                        // page reload and renders from `get_timeline`, so the
-                        // user sees the learned-skill notice even when no live
-                        // stream was connected at publish time. The live bubble
-                        // below is the ephemeral, best-effort fast path.
+                    .await;
+                    // Word the user notice honestly per outcome: a fresh install
+                    // is active; an evolution preserves the skill's on/off (so a
+                    // skill the user turned off is NOT announced as active); a held
+                    // skill (require_review default on) is "saved but off, pending
+                    // review". Proposed/Skipped left the live skill untouched, so
+                    // they stay silent. The durable note and the live bubble carry
+                    // the same wording so they agree.
+                    let user_note: Option<(String, String)> = match outcome {
+                        Some(SkillWriteOutcome::Installed(name)) => {
+                            let note = format!(
+                                "🎓 I learned a new skill from this task: **{name}**. \
+                                 It's active — I'll use it on similar requests when auto-activation is on; manage it under Settings → Skills."
+                            );
+                            Some((name, note))
+                        }
+                        Some(SkillWriteOutcome::Evolved { name, active: true }) => {
+                            let note = format!(
+                                "🎓 I improved the **{name}** skill from this task. \
+                                 It's active — I'll use it on similar requests when auto-activation is on; manage it under Settings → Skills."
+                            );
+                            Some((name, note))
+                        }
+                        Some(SkillWriteOutcome::Evolved {
+                            name,
+                            active: false,
+                        }) => {
+                            let note = format!(
+                                "🎓 I improved the **{name}** skill from this task. \
+                                 It stays off (you turned it off) — turn it on under Settings → Skills."
+                            );
+                            Some((name, note))
+                        }
+                        Some(SkillWriteOutcome::Pending(name)) => {
+                            let note = format!(
+                                "🎓 I learned a new skill from this task: **{name}**. \
+                                 It's saved but off, pending your review — turn it on under Settings → Skills."
+                            );
+                            Some((name, note))
+                        }
+                        Some(SkillWriteOutcome::Proposed(name)) => {
+                            tracing::debug!(
+                                run_id = ?self.run_id,
+                                skill = %name,
+                                "skill-learning: stashed a proposed update to a human-edited skill"
+                            );
+                            None
+                        }
+                        Some(SkillWriteOutcome::Skipped) | None => None,
+                    };
+                    if let Some((name, note)) = user_note {
+                        // Durable feedback first: a thread message survives a page
+                        // reload and renders from `get_timeline`. The live bubble
+                        // (notify) is the ephemeral best-effort fast path; both
+                        // carry the same wording.
                         announce_learned_skill(
                             self.thread_service.as_ref(),
                             &self.scope,
                             &self.thread_id,
                             self.run_id,
-                            &installed_name,
+                            &note,
                         )
                         .await;
                         self.notifier.notify(
                             &self.write_owner,
                             &self.event_scope,
                             self.run_id,
-                            &installed_name,
-                            LEARNED_SKILL_FEEDBACK,
+                            &name,
+                            &note,
                         );
                     }
                 }
@@ -794,12 +1145,9 @@ mod learning {
         scope: &ThreadScope,
         thread_id: &ThreadId,
         run_id: TurnRunId,
-        skill_name: &str,
+        note: &str,
     ) {
-        let note = format!(
-            "🎓 I learned a new skill from this task: **{skill_name}**. \
-             I'll apply it automatically on similar requests — manage it under Settings → Skills."
-        );
+        let note = note.to_string();
         let draft = match thread_service
             .append_assistant_draft(AppendAssistantDraftRequest {
                 scope: scope.clone(),
@@ -833,7 +1181,9 @@ mod learning {
     }
 
     /// Safety-scan a distilled skill and, if it passes, install it for the
-    /// run's (tenant, owner) scope. Returns the stored skill name on success.
+    /// run's (tenant, owner) scope. Returns the [`SkillWriteOutcome`] on success
+    /// so the caller can word the user notice honestly per state (installed /
+    /// pending / evolved-active-or-off / proposed / skipped).
     /// Best-effort: every failure exit is `debug!`-only.
     async fn persist_learned_skill(
         writer: &dyn SkillWriter,
@@ -841,7 +1191,7 @@ mod learning {
         owner: &UserId,
         skill: &DistilledSkill,
         run_id: TurnRunId,
-    ) -> Option<String> {
+    ) -> Option<SkillWriteOutcome> {
         // The distilled content becomes trusted prompt text loaded into the
         // next run, so injection-scan it first (High/Critical rejects).
         if let Err(rejection) =
@@ -872,13 +1222,13 @@ mod learning {
             .install_or_update(scope, &skill.name, &skill.skill_md)
             .await
         {
-            Ok(name) => {
+            Ok(outcome) => {
                 tracing::debug!(
                     run_id = ?run_id,
-                    skill = %name,
-                    "skill-learning: installed learned skill (live)"
+                    skill = %skill.name,
+                    "skill-learning: learned-skill write completed"
                 );
-                Some(name)
+                Some(outcome)
             }
             Err(error) => {
                 tracing::debug!(
@@ -920,18 +1270,18 @@ mod learning {
         out
     }
 
-    /// Adapts a concrete strong-model [`LlmProvider`] to the logic crate's
-    /// [`SkillInferencePort`]. The learning model is passed as a per-request
-    /// override (NEAR AI honours it), so distillation runs against a stronger
-    /// model than the run's without touching the run's model gateway.
+    /// Adapts the run's [`LlmProvider`] to the logic crate's
+    /// [`SkillInferencePort`], so distillation runs against the user's CURRENT
+    /// model on whatever backend they configured — the same model the run used.
+    /// There is no separate learning model and no per-request model override:
+    /// matching Hermes, the model that does the work also writes the skill.
     pub(crate) struct SkillLearningInferenceAdapter {
         provider: Arc<dyn LlmProvider>,
-        model: String,
     }
 
     impl SkillLearningInferenceAdapter {
-        pub(crate) fn new(provider: Arc<dyn LlmProvider>, model: String) -> Self {
-            Self { provider, model }
+        pub(crate) fn new(provider: Arc<dyn LlmProvider>) -> Self {
+            Self { provider }
         }
     }
 
@@ -940,9 +1290,10 @@ mod learning {
         async fn infer(&self, system: &str, user: &str) -> Result<String, SkillInferenceError> {
             let request =
                 CompletionRequest::new(vec![ChatMessage::system(system), ChatMessage::user(user)])
-                    .with_model(self.model.clone())
                     // No temperature override: reasoning models (e.g. gpt-5.x)
                     // reject any non-default temperature with HTTP 400.
+                    // No model override either: distillation uses the provider's
+                    // configured model — the run's current model.
                     .with_max_tokens(SKILL_LEARNING_MAX_TOKENS);
             let response = self
                 .provider
@@ -986,8 +1337,8 @@ mod learning {
                 _scope: ResourceScope,
                 _name: &str,
                 _content: &str,
-            ) -> Result<String, String> {
-                Ok("stub".to_string())
+            ) -> Result<SkillWriteOutcome, String> {
+                Ok(SkillWriteOutcome::Installed("stub".to_string()))
             }
         }
 
@@ -1039,6 +1390,7 @@ mod learning {
                 Arc::new(StubWriter),
                 Arc::new(StubNotifier),
                 Arc::new(SkillLearningExtractionTasks::new()),
+                Arc::new(AtomicBool::new(true)),
             );
             // A failed run is the self-improvement loop's concern, not extraction.
             sink.publish(event(TurnEventKind::Failed, Some("alice")))
@@ -1048,6 +1400,138 @@ mod learning {
             sink.publish(event(TurnEventKind::Completed, None))
                 .await
                 .expect("ownerless completion is a no-op");
+        }
+
+        // Self-learning master switch: with it OFF, even an eligible completed run
+        // must not be distilled — the sink returns before spawning extraction.
+        #[tokio::test]
+        async fn self_learning_off_skips_extraction_for_an_eligible_run() {
+            let service: Arc<dyn SessionThreadService> =
+                Arc::new(InMemorySessionThreadService::default());
+            let scope = ThreadScope {
+                tenant_id: TenantId::new("learn-off-tenant").expect("tenant"),
+                agent_id: AgentId::new("learn-off-agent").expect("agent"),
+                project_id: None,
+                owner_user_id: Some(UserId::new("learn-off-user").expect("user")),
+                mission_id: None,
+            };
+            let thread_id = ThreadId::new("learn-off-thread").expect("thread");
+            let run_id = TurnRunId::new();
+            service
+                .ensure_thread(EnsureThreadRequest {
+                    scope: scope.clone(),
+                    thread_id: Some(thread_id.clone()),
+                    created_by_actor_id: "learn-off-user".to_string(),
+                    title: None,
+                    metadata_json: None,
+                })
+                .await
+                .expect("ensure thread");
+            // Seed an ELIGIBLE run: >= MIN_TOOL_ACTIONS tool results for the run
+            // plus enough transcript messages.
+            for result_ref in ["r1", "r2", "r3", "r4"] {
+                service
+                    .append_tool_result_reference(AppendToolResultReferenceRequest {
+                        scope: scope.clone(),
+                        thread_id: thread_id.clone(),
+                        turn_run_id: run_id.to_string(),
+                        result_ref: format!("result:{result_ref}"),
+                        safe_summary: ToolResultSafeSummary::new("tool ran").expect("summary"),
+                        provider_call: None,
+                        model_observation: None,
+                    })
+                    .await
+                    .expect("seed tool result");
+            }
+            let filler = service
+                .append_assistant_draft(AppendAssistantDraftRequest {
+                    scope: scope.clone(),
+                    thread_id: thread_id.clone(),
+                    turn_run_id: run_id.to_string(),
+                    content: MessageContent::text("done"),
+                })
+                .await
+                .expect("seed filler");
+            service
+                .finalize_assistant_message(
+                    &scope,
+                    &thread_id,
+                    filler.message_id,
+                    MessageContent::text("done"),
+                )
+                .await
+                .expect("finalize filler");
+
+            // Control: the run IS eligible — driving extraction directly reaches
+            // inference (proves the gate below is what stops it, not ineligibility).
+            let control_calls = Arc::new(AtomicUsize::new(0));
+            ExtractionJob {
+                thread_service: Arc::clone(&service),
+                inference: Arc::new(RecordingInference {
+                    calls: Arc::clone(&control_calls),
+                }),
+                skill_writer: Arc::new(StubWriter),
+                notifier: Arc::new(StubNotifier),
+                scope: scope.clone(),
+                thread_id: thread_id.clone(),
+                run_id,
+                write_tenant: scope.tenant_id.clone(),
+                write_owner: scope.owner_user_id.clone().expect("owner"),
+                event_scope: TurnScope::new_with_owner(
+                    scope.tenant_id.clone(),
+                    Some(scope.agent_id.clone()),
+                    None,
+                    thread_id.clone(),
+                    scope.owner_user_id.clone(),
+                ),
+            }
+            .run()
+            .await;
+            assert!(
+                control_calls.load(Ordering::Relaxed) >= 1,
+                "the seeded run is eligible — extraction reaches inference"
+            );
+
+            // Gate: with self-learning OFF, publishing the SAME run does not even
+            // spawn extraction, so inference is never called.
+            let gated_calls = Arc::new(AtomicUsize::new(0));
+            let sink = SkillLearningTurnEventSink::new(
+                Arc::clone(&service),
+                Arc::new(RecordingInference {
+                    calls: Arc::clone(&gated_calls),
+                }),
+                Arc::new(StubWriter),
+                Arc::new(StubNotifier),
+                Arc::new(SkillLearningExtractionTasks::new()),
+                Arc::new(AtomicBool::new(false)),
+            );
+            sink.publish(TurnLifecycleEvent {
+                cursor: EventCursor::default(),
+                scope: TurnScope::new_with_owner(
+                    scope.tenant_id.clone(),
+                    Some(scope.agent_id.clone()),
+                    None,
+                    thread_id.clone(),
+                    scope.owner_user_id.clone(),
+                ),
+                occurred_at: None,
+                owner_user_id: scope.owner_user_id.clone(),
+                run_id,
+                status: TurnStatus::Completed,
+                kind: TurnEventKind::Completed,
+                blocked_gate: None,
+                sanitized_reason: None,
+            })
+            .await
+            .expect("publish is a no-op when self-learning is off");
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                gated_calls.load(Ordering::Relaxed),
+                0,
+                "self-learning off must skip extraction entirely — no distillation"
+            );
         }
 
         // Durable feedback regression: a learned skill must leave a persisted
@@ -1105,14 +1589,13 @@ mod learning {
                 .await
                 .expect("finalize seeded reply");
 
-            announce_learned_skill(
-                service.as_ref(),
-                &scope,
-                &thread_id,
-                run_id,
-                "file-character-count-roundtrip",
-            )
-            .await;
+            // The caller now words the note per write-outcome and passes it in;
+            // announce just persists it. Use a representative install note.
+            let note = "🎓 I learned a new skill from this task: \
+                 **file-character-count-roundtrip**. It's active — I'll use it on \
+                 similar requests when auto-activation is on; manage it under \
+                 Settings → Skills.";
+            announce_learned_skill(service.as_ref(), &scope, &thread_id, run_id, note).await;
 
             let history = service
                 .list_thread_history(ThreadHistoryRequest { scope, thread_id })
@@ -1289,9 +1772,12 @@ mod learning {
                 "a trivial follow-up turn must not re-distill the previous run's stale tool work"
             );
 
-            // Control: a run that DID its own tool work stays eligible.
+            // Control: a run that DID its own tool work stays eligible. Seed
+            // MIN_TOOL_ACTIONS (4) results so the current run clears the floor.
             seed_tool_result(service.as_ref(), &scope, &thread_id, &current_run, "r3").await;
             seed_tool_result(service.as_ref(), &scope, &thread_id, &current_run, "r4").await;
+            seed_tool_result(service.as_ref(), &scope, &thread_id, &current_run, "r5").await;
+            seed_tool_result(service.as_ref(), &scope, &thread_id, &current_run, "r6").await;
             let substantive_calls = Arc::new(AtomicUsize::new(0));
             job(
                 Arc::clone(&service),
@@ -1325,6 +1811,7 @@ mod learning {
                 tags: tags.iter().map(|t| t.to_string()).collect(),
                 requires_skills: Vec::new(),
                 auto_activate: true,
+                origin: SkillOrigin::Learned,
             }
         }
 

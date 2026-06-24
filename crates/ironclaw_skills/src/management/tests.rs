@@ -1033,6 +1033,129 @@ fn skill_mounts() -> MountView {
     .unwrap()
 }
 
+#[tokio::test]
+async fn learned_provenance_sidecar_round_trips_and_is_absent_by_default() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem.clone(), user_skill_mounts());
+
+    let content = skill_md("prov-skill", "a learned skill", "DO THE THING");
+    install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: &content,
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Absent until the learning sink writes one.
+    assert!(
+        read_learned_provenance(&context, "prov-skill")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let provenance = crate::LearnedSkillProvenance::for_machine_content(&content).unwrap();
+    write_learned_provenance(&context, "prov-skill", &provenance)
+        .await
+        .unwrap();
+
+    let read_back = read_learned_provenance(&context, "prov-skill")
+        .await
+        .unwrap()
+        .expect("sidecar present after write");
+    assert_eq!(read_back, provenance);
+    assert!(read_back.matches_live_content(&content));
+
+    // The dotfile sidecar must NOT surface as a skill.
+    let listed = list_skills(&context).await.unwrap();
+    assert_eq!(listed.iter().filter(|s| s.name == "prov-skill").count(), 1);
+}
+
+#[tokio::test]
+async fn skill_is_bundle_distinguishes_single_file_from_multi_file() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem.clone(), user_skill_mounts());
+
+    let content = skill_md("solo", "single file skill", "PROMPT");
+    install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: &content,
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // A lone SKILL.md → not a bundle.
+    assert!(!skill_is_bundle(&context, "solo").await.unwrap());
+
+    // A `.ironclaw-*` dotfile sidecar must NOT make it look like a bundle.
+    let prov = crate::LearnedSkillProvenance::for_machine_content(&content).unwrap();
+    write_learned_provenance(&context, "solo", &prov)
+        .await
+        .unwrap();
+    assert!(!skill_is_bundle(&context, "solo").await.unwrap());
+
+    // A real sibling file → bundle.
+    write_file(
+        filesystem.as_ref(),
+        "/projects/skills/solo/helper.py",
+        "print('hi')".to_string(),
+    )
+    .await;
+    assert!(skill_is_bundle(&context, "solo").await.unwrap());
+}
+
+#[tokio::test]
+async fn skill_is_bundle_is_false_for_missing_skill() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem.clone(), user_skill_mounts());
+    assert!(!skill_is_bundle(&context, "does-not-exist").await.unwrap());
+}
+
+#[tokio::test]
+async fn read_learned_provenance_is_none_on_malformed_sidecar() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem.clone(), user_skill_mounts());
+    let content = skill_md("corrupt", "x", "PROMPT");
+    install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: &content,
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+        },
+    )
+    .await
+    .unwrap();
+    write_file(
+        filesystem.as_ref(),
+        "/projects/skills/corrupt/.ironclaw-learned.json",
+        "{ not valid json".to_string(),
+    )
+    .await;
+    // Fail safe: a malformed sidecar reads as None → treated as not-learned →
+    // not auto-evolvable.
+    assert!(
+        read_learned_provenance(&context, "corrupt")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 fn user_skill_mounts() -> MountView {
     MountView::new(vec![MountGrant::new(
         MountAlias::new("/skills").unwrap(),

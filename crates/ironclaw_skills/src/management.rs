@@ -6,8 +6,8 @@ use std::{
 use crate::parser::starts_with_frontmatter_delimiter;
 use crate::validation::normalize_skill_identifier;
 use crate::{
-    MAX_PROMPT_FILE_SIZE, ParsedSkill, SkillParseError, normalize_line_endings, parse_skill_md,
-    validate_skill_name,
+    MAX_PROMPT_FILE_SIZE, ParsedSkill, SkillOrigin, SkillParseError, normalize_line_endings,
+    parse_skill_md, validate_skill_name,
 };
 use async_trait::async_trait;
 use ironclaw_filesystem::{
@@ -158,6 +158,10 @@ pub struct SkillSummary {
     /// Whether the skill participates in automatic activation (mirrors
     /// `SkillManifest::auto_activate`). `false` means explicit-mention only.
     pub auto_activate: bool,
+    /// Who authored the skill (mirrors `SkillManifest::origin`). Lets callers
+    /// tell machine-learned skills apart — e.g. to scope the global
+    /// auto-activate-learned switch or badge a skill's origin in the UI.
+    pub origin: SkillOrigin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +190,8 @@ pub fn skill_summary_json(skill: &SkillSummary) -> serde_json::Value {
         "keywords": skill.keywords,
         "tags": skill.tags,
         "requires_skills": skill.requires_skills,
+        "auto_activate": skill.auto_activate,
+        "origin": skill.origin.as_str(),
     })
 }
 
@@ -608,6 +614,93 @@ pub async fn update_skill(
     })
 }
 
+/// Write the machine-learned provenance sidecar (`.ironclaw-learned.json`) next
+/// to a skill's `SKILL.md`. Called ONLY by the self-evolution learning sink (via
+/// the composition `PortSkillWriter`), never by the human-edit facade — so a
+/// human content edit never refreshes the baseline and therefore naturally
+/// diverges from it. See `docs/plans/2026-06-19-skill-edit-preservation.md`.
+pub async fn write_learned_provenance(
+    context: &SkillManagementContext,
+    skill_name: &str,
+    provenance: &crate::LearnedSkillProvenance,
+) -> Result<(), SkillManagementError> {
+    let path = skill_scoped_path(
+        USER_SKILLS_ROOT,
+        skill_name,
+        crate::LEARNED_PROVENANCE_FILE_NAME,
+    )?;
+    let bytes = provenance.to_pretty_json().map_err(|error| {
+        SkillManagementError::with_reason(SkillManagementErrorKind::Resource, error.to_string())
+    })?;
+    context
+        .filesystem
+        .write_file(&context.scope, &path, &bytes)
+        .await
+        .map_err(filesystem_error)?;
+    Ok(())
+}
+
+/// Read the machine-learned provenance sidecar for a skill, if present. `None`
+/// means the skill was not authored by the learning sink (a human-built,
+/// registry-installed, or never-learned skill) — which the gate treats as "not
+/// auto-evolvable". A malformed sidecar also reads as `None` (fail safe).
+pub async fn read_learned_provenance(
+    context: &SkillManagementContext,
+    skill_name: &str,
+) -> Result<Option<crate::LearnedSkillProvenance>, SkillManagementError> {
+    let path = skill_scoped_path(
+        USER_SKILLS_ROOT,
+        skill_name,
+        crate::LEARNED_PROVENANCE_FILE_NAME,
+    )?;
+    if stat_optional(context, &path).await?.is_none() {
+        return Ok(None);
+    }
+    let Some(bytes) = context
+        .filesystem
+        .read_bytes_bounded(&context.scope, &path, crate::MAX_LEARNED_PROVENANCE_BYTES)
+        .await
+        .map_err(filesystem_error)?
+    else {
+        return Ok(None);
+    };
+    Ok(crate::LearnedSkillProvenance::from_sidecar_bytes(&bytes))
+}
+
+/// Bounded probe count for the bundle check — far above any realistic skill
+/// directory (`SKILL.md` + a few dotfile sidecars + a handful of bundle files).
+const MAX_BUNDLE_PROBE_ENTRIES: usize = 64;
+
+/// True iff the skill directory holds anything beyond `SKILL.md` and `.`-prefixed
+/// dotfile sidecars — i.e. it is a multi-file bundle (a human-built
+/// `references/`/`scripts/`/`assets/` skill, or files a human added to a learned
+/// one). The self-evolution gate must not auto-overwrite a bundle's `SKILL.md`,
+/// since the distillation cannot see the sibling files it may reference. A
+/// missing directory reads as `false`.
+pub async fn skill_is_bundle(
+    context: &SkillManagementContext,
+    skill_name: &str,
+) -> Result<bool, SkillManagementError> {
+    let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, skill_name)?;
+    let entries = match context
+        .filesystem
+        .list_dir_bounded(&context.scope, &skill_dir, MAX_BUNDLE_PROBE_ENTRIES)
+        .await
+    {
+        Ok(entries) => entries,
+        Err(FilesystemError::NotFound { .. }) => return Ok(false),
+        Err(error) => return Err(filesystem_error(error)),
+    };
+    // Fail closed: a directory at the bounded-probe cap was truncated, so a
+    // bundle sibling could exist beyond the probe window. Treat a capped probe
+    // as a bundle so self-evolution never overwrites a `SKILL.md` whose sibling
+    // files it could not see.
+    let has_bundle_sibling = entries
+        .iter()
+        .any(|entry| entry.name != SKILL_FILE_NAME && !entry.name.starts_with('.'));
+    Ok(has_bundle_sibling || entries.len() >= MAX_BUNDLE_PROBE_ENTRIES)
+}
+
 fn skill_mutation_lock(skill_name: &str) -> SkillMutationLock {
     let mut guard = SKILL_MUTATION_LOCKS
         .lock()
@@ -790,6 +883,7 @@ async fn read_skill_summary(
         tags: parsed.manifest.activation.tags,
         requires_skills: parsed.manifest.requires.skills,
         auto_activate: parsed.manifest.auto_activate,
+        origin: parsed.manifest.origin,
     }))
 }
 
