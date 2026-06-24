@@ -16,24 +16,26 @@ use serde::Serialize;
 use crate::descriptors::{
     WEBUI_V2_PATTERN_ACTIVATE_EXTENSION, WEBUI_V2_PATTERN_BROWSE_FS_DIR,
     WEBUI_V2_PATTERN_CANCEL_RUN, WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN,
-    WEBUI_V2_PATTERN_CREATE_THREAD, WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER,
-    WEBUI_V2_PATTERN_DELETE_THREAD, WEBUI_V2_PATTERN_GET_ATTACHMENT,
-    WEBUI_V2_PATTERN_GET_LLM_CONFIG, WEBUI_V2_PATTERN_GET_SESSION, WEBUI_V2_PATTERN_GET_TIMELINE,
-    WEBUI_V2_PATTERN_INSTALL_EXTENSION, WEBUI_V2_PATTERN_INSTALL_SKILL,
-    WEBUI_V2_PATTERN_LIST_AUTOMATIONS, WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS,
-    WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY, WEBUI_V2_PATTERN_LIST_EXTENSIONS,
-    WEBUI_V2_PATTERN_LIST_FS_MOUNTS, WEBUI_V2_PATTERN_LIST_LLM_MODELS,
-    WEBUI_V2_PATTERN_LIST_PROJECT_FILES, WEBUI_V2_PATTERN_LIST_PROJECTS,
-    WEBUI_V2_PATTERN_LIST_SKILLS, WEBUI_V2_PATTERN_OPERATOR_CONFIG,
+    WEBUI_V2_PATTERN_CREATE_THREAD, WEBUI_V2_PATTERN_DELETE_AUTOMATION,
+    WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER, WEBUI_V2_PATTERN_DELETE_THREAD,
+    WEBUI_V2_PATTERN_GET_ATTACHMENT, WEBUI_V2_PATTERN_GET_LLM_CONFIG, WEBUI_V2_PATTERN_GET_SESSION,
+    WEBUI_V2_PATTERN_GET_TIMELINE, WEBUI_V2_PATTERN_INSTALL_EXTENSION,
+    WEBUI_V2_PATTERN_INSTALL_SKILL, WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
+    WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS, WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,
+    WEBUI_V2_PATTERN_LIST_EXTENSIONS, WEBUI_V2_PATTERN_LIST_FS_MOUNTS,
+    WEBUI_V2_PATTERN_LIST_LLM_MODELS, WEBUI_V2_PATTERN_LIST_PROJECT_FILES,
+    WEBUI_V2_PATTERN_LIST_PROJECTS, WEBUI_V2_PATTERN_LIST_SKILLS, WEBUI_V2_PATTERN_OPERATOR_CONFIG,
     WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY, WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE,
     WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS, WEBUI_V2_PATTERN_OPERATOR_LOGS,
     WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE, WEBUI_V2_PATTERN_OPERATOR_SETUP,
     WEBUI_V2_PATTERN_OPERATOR_STATUS, WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS,
-    WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES, WEBUI_V2_PATTERN_PROJECT_DETAIL,
-    WEBUI_V2_PATTERN_PROJECT_MEMBER_DETAIL, WEBUI_V2_PATTERN_PROJECT_MEMBERS,
-    WEBUI_V2_PATTERN_READ_FS_FILE, WEBUI_V2_PATTERN_READ_PROJECT_FILE,
-    WEBUI_V2_PATTERN_REMOVE_EXTENSION, WEBUI_V2_PATTERN_RESOLVE_GATE,
+    WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES, WEBUI_V2_PATTERN_PAUSE_AUTOMATION,
+    WEBUI_V2_PATTERN_PROJECT_DETAIL, WEBUI_V2_PATTERN_PROJECT_MEMBER_DETAIL,
+    WEBUI_V2_PATTERN_PROJECT_MEMBERS, WEBUI_V2_PATTERN_READ_FS_FILE,
+    WEBUI_V2_PATTERN_READ_PROJECT_FILE, WEBUI_V2_PATTERN_REMOVE_EXTENSION,
+    WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_RESUME_AUTOMATION,
     WEBUI_V2_PATTERN_SEARCH_SKILLS, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
+    WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED, WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE,
     WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_SKILL_DETAIL,
     WEBUI_V2_PATTERN_START_CODEX_LOGIN, WEBUI_V2_PATTERN_START_NEARAI_LOGIN,
     WEBUI_V2_PATTERN_STAT_FS_PATH, WEBUI_V2_PATTERN_STAT_PROJECT_FILE,
@@ -83,6 +85,7 @@ impl WebUiV2RouteOptions {
 pub struct WebUiV2State {
     services: Arc<dyn RebornServicesApi>,
     sse_capacity: Arc<SseCapacity>,
+    reborn_projects_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -98,7 +101,22 @@ impl WebUiV2State {
         Self {
             services,
             sse_capacity: Arc::new(SseCapacity::new(max_concurrent_streams_per_caller)),
+            reborn_projects_enabled: false,
         }
+    }
+
+    /// Deployment gate for the Reborn Projects WebUI surface (the sidebar
+    /// entry and the `/projects` route). Off by default while the surface
+    /// is still being finished; host composition reads the
+    /// `IRONCLAW_REBORN_PROJECTS` env flag and feeds it here, and the
+    /// browser learns it from `GET /session`'s `features.reborn_projects`.
+    pub fn with_reborn_projects_enabled(mut self, enabled: bool) -> Self {
+        self.reborn_projects_enabled = enabled;
+        self
+    }
+
+    pub fn reborn_projects_enabled(&self) -> bool {
+        self.reborn_projects_enabled
     }
 
     pub fn services(&self) -> &Arc<dyn RebornServicesApi> {
@@ -192,6 +210,18 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
             get(handlers::list_automations),
         )
+        .route(
+            WEBUI_V2_PATTERN_PAUSE_AUTOMATION,
+            post(handlers::pause_automation),
+        )
+        .route(
+            WEBUI_V2_PATTERN_RESUME_AUTOMATION,
+            post(handlers::resume_automation),
+        )
+        .route(
+            WEBUI_V2_PATTERN_DELETE_AUTOMATION,
+            delete(handlers::delete_automation),
+        )
         .route(WEBUI_V2_PATTERN_TRACE_CREDITS, get(handlers::trace_credits))
         .route(
             WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE,
@@ -227,6 +257,14 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             get(handlers::get_skill_content)
                 .put(handlers::update_skill)
                 .delete(handlers::remove_skill),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE,
+            post(handlers::set_skill_auto_activate),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED,
+            post(handlers::set_auto_activate_learned),
         )
         .route(
             WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,

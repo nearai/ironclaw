@@ -9,6 +9,12 @@ export const defaultRoute = "/chat";
 export const primaryRoutes = [
   { id: "chat", path: "/chat", labelKey: "nav.chat" },
   { id: "workspace", path: "/workspace", labelKey: "nav.workspace" },
+  // Surfaced in the conversations panel (under Search, above Recent) by
+  // SidebarThreads rather than the primary nav list, so `hidden: true` keeps the
+  // /projects route registered (direct URL + breadcrumb/title resolution) while
+  // suppressing the now-duplicate top-nav entry. Its lib/projects-api.js calls
+  // the real v2 `/api/webchat/v2/projects` endpoints (list/create/read/update/
+  // delete + membership ACL); per-project missions/threads remain stubbed.
   { id: "projects", path: "/projects", labelKey: "nav.projects", hidden: true },
   { id: "jobs", path: "/jobs", labelKey: "nav.jobs", hidden: true },
   { id: "routines", path: "/routines", labelKey: "nav.routines", hidden: true },

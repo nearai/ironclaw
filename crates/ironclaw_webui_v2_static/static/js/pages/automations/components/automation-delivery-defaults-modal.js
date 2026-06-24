@@ -12,7 +12,7 @@ export function AutomationDeliveryDefaultsModal({ deliveryState, open, onClose }
     <${Modal}
       open=${open}
       onClose=${onClose}
-      size="lg"
+      size="md"
       title=${t("automations.delivery.title")}
     >
       <${ModalBody}>

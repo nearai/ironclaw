@@ -4,22 +4,34 @@ import { EmptyPanel, Panel } from "../../../design-system/primitives.js";
 import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { cn } from "../../../utils/cn.js";
-import { AUTOMATION_FILTERS, filterAutomations } from "../lib/automations-presenters.js";
+import {
+  AUTOMATION_FILTERS,
+  AUTOMATION_SORTS,
+  filterAutomations,
+  sortAutomations,
+} from "../lib/automations-presenters.js";
 import { AutomationDeliveryDefaultsModal } from "./automation-delivery-defaults-modal.js";
 import { AutomationDetailModal } from "./automation-detail-modal.js";
 import { AutomationRow } from "./automation-row.js";
 import { AutomationsEmptyState } from "./automations-empty-state.js";
+import { AutomationsSummaryStrip } from "./automations-summary-strip.js";
 
 export function AutomationsList({
   automations,
+  summary,
+  nextRunAt,
   filter,
   onFilterChange,
-  onRefresh,
-  isRefreshing,
   deliveryState,
+  isMutating,
+  onPauseAutomation,
+  onResumeAutomation,
+  onDeleteAutomation,
 }) {
   const t = useT();
-  const filtered = filterAutomations(automations, filter);
+  // Default sort mirrors the natural ordering (active first, soonest next run).
+  const [sort, setSort] = React.useState("next");
+  const filtered = sortAutomations(filterAutomations(automations, filter), sort);
   const hasAutomations = automations.length > 0;
 
   // The detail modal is opened by automation id (not index) so it survives
@@ -32,22 +44,17 @@ export function AutomationsList({
   return html`
     <div className="space-y-5">
       <div className="mt-4 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">
-            ${t("automations.eyebrow")}
-          </div>
-          <div className="mt-2 flex items-center gap-3">
-            <h2 className="text-[1.75rem] font-semibold tracking-tight text-iron-100">
-              ${t("automations.title")}
-            </h2>
-            <span
-              className="h-6 w-px shrink-0 bg-[var(--v2-panel-border)]"
-              aria-hidden="true"
-            ></span>
-            <p className="text-sm leading-6 text-iron-300">
-              ${t("automations.description")}
-            </p>
-          </div>
+        <div className="flex items-center gap-3">
+          <h2 className="text-[1.75rem] font-semibold tracking-tight text-iron-100">
+            ${t("automations.title")}
+          </h2>
+          <span
+            className="h-6 w-px shrink-0 bg-[var(--v2-panel-border)]"
+            aria-hidden="true"
+          ></span>
+          <p className="text-sm leading-6 text-iron-300">
+            ${t("automations.description")}
+          </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -73,6 +80,23 @@ export function AutomationsList({
               </button>
             `)}
           </div>
+          <label className="inline-flex items-center gap-1.5">
+            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-iron-400">
+              ${t("automations.sort.label")}
+            </span>
+            <select
+              value=${sort}
+              onChange=${(event) => setSort(event.target.value)}
+              aria-label=${t("automations.sort.label")}
+              className="h-9 rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-2.5 text-xs font-semibold text-[var(--v2-text-strong)] hover:bg-[var(--v2-surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--v2-accent)]"
+            >
+              ${AUTOMATION_SORTS.map(
+                (item) => html`<option key=${item.value} value=${item.value}>
+                  ${t(item.labelKey)}
+                </option>`
+              )}
+            </select>
+          </label>
           ${deliveryState &&
           html`
             <${Button}
@@ -80,25 +104,14 @@ export function AutomationsList({
               size="sm"
               onClick=${() => setDeliveryOpen(true)}
             >
-              <${Icon} name="settings" className="mr-1.5 h-4 w-4" />
+              <${Icon} name="send" className="mr-1.5 h-4 w-4" />
               ${t("automations.delivery.setDefaults")}
             <//>
           `}
-          <${Button}
-            variant="secondary"
-            size="icon-sm"
-            aria-label=${t("automations.refresh")}
-            title=${isRefreshing ? t("automations.refreshing") : t("automations.refresh")}
-            disabled=${isRefreshing}
-            onClick=${onRefresh}
-          >
-            <${Icon}
-              name="retry"
-              className=${cn("h-4 w-4", isRefreshing && "v2-spin")}
-            />
-          <//>
         </div>
       </div>
+
+      <${AutomationsSummaryStrip} summary=${summary} nextRunAt=${nextRunAt} />
 
       ${!filtered.length
         ? hasAutomations
@@ -129,6 +142,10 @@ export function AutomationsList({
         automation=${openAutomation}
         open=${Boolean(openAutomation)}
         onClose=${() => setOpenId(null)}
+        isMutating=${isMutating}
+        onPauseAutomation=${onPauseAutomation}
+        onResumeAutomation=${onResumeAutomation}
+        onDeleteAutomation=${onDeleteAutomation}
       />
 
       ${deliveryState &&

@@ -1,3 +1,9 @@
+// Source types the presenter understands. Rows with other source types are
+// silently excluded from the list (the original intent of the "schedule"-only
+// guard) — adding a new backend source type requires a one-line addition here.
+// Add new source types here as the backend gains them
+const SUPPORTED_SOURCE_TYPES = ["schedule", "once"];
+
 // Display tone + i18n label key for each status. The label text itself is
 // resolved through `t` at render time so non-English locales don't see English
 // status pills (RUNNING / ERROR / etc.).
@@ -44,14 +50,62 @@ export const AUTOMATION_FILTERS = [
     predicate: (automation) => automation.has_failed_runs,
   },
   { value: "paused", labelKey: "automations.filter.paused", predicate: isBrowserPaused },
+  { value: "completed", labelKey: "automations.filter.completed", predicate: isBrowserCompleted },
 ];
+
+// Sort options surfaced by the list's sort control. `next` is the default and
+// mirrors the natural ordering produced by `compareAutomations` (active first,
+// then soonest next run). Labels reuse the existing table column keys.
+export const AUTOMATION_SORTS = [
+  { value: "next", labelKey: "automations.table.nextRun" },
+  { value: "last", labelKey: "automations.table.lastRun" },
+  { value: "name", labelKey: "automations.table.name" },
+  { value: "status", labelKey: "automations.table.status" },
+];
+
+// Stable rank for the "status" sort: live runs first, then ones needing review,
+// then everything else.
+function statusRank(automation) {
+  if (automation?.has_running_run) return 0;
+  if (automation?.has_failed_runs) return 1;
+  if (isBrowserActive(automation)) return 2;
+  return 3;
+}
+
+// Return a re-sorted copy of `automations` for the given sort key. Defaults to
+// the natural next-run ordering so the control's default visibly matches what
+// the list already does.
+export function sortAutomations(automations, sort) {
+  const list = [...automations];
+  if (sort === "last") {
+    return list.sort(
+      (a, b) =>
+        (b.last_run_timestamp ?? Number.NEGATIVE_INFINITY) -
+        (a.last_run_timestamp ?? Number.NEGATIVE_INFINITY),
+    );
+  }
+  if (sort === "name") {
+    return list.sort((a, b) =>
+      String(a.display_name).localeCompare(String(b.display_name)),
+    );
+  }
+  if (sort === "status") {
+    return list.sort(
+      (a, b) =>
+        statusRank(a) - statusRank(b) ||
+        (nextRunTimestamp(a) ?? Number.MAX_SAFE_INTEGER) -
+          (nextRunTimestamp(b) ?? Number.MAX_SAFE_INTEGER),
+    );
+  }
+  return list.sort(compareAutomations);
+}
 
 export function normalizeAutomations(response, t, locale) {
   const automations = Array.isArray(response?.automations)
     ? response.automations
     : [];
   return automations
-    .filter((automation) => automation?.source?.type === "schedule")
+    .filter((automation) => SUPPORTED_SOURCE_TYPES.includes(automation?.source?.type))
     .map((automation) => normalizeAutomation(automation, t, locale))
     .sort(compareAutomations);
 }
@@ -81,16 +135,20 @@ export function automationIcon(automation) {
 }
 
 export function automationSummary(automations) {
-  const active = automations.filter((automation) => isBrowserActive(automation)).length;
+  // Exclude completed (soft-completed one-shots) from summary cards so that
+  // fetching with include_completed=true does not inflate the counts shown on
+  // all other tabs.
+  const visible = automations.filter((a) => a.state !== "completed");
+  const active = visible.filter((automation) => isBrowserActive(automation)).length;
   // Count automations (not individual runs) so each card matches the
   // same-named filter tab, which filters automations via has_running_run /
   // has_failed_runs.
-  const running = automations.filter((automation) => automation.has_running_run).length;
-  const failures = automations.filter((automation) => automation.has_failed_runs).length;
+  const running = visible.filter((automation) => automation.has_running_run).length;
+  const failures = visible.filter((automation) => automation.has_failed_runs).length;
   // Only automations that will actually fire contribute to "soonest next run".
   // Paused triggers keep their stored next_run_at slot, but they won't run, so
   // surfacing their time here would imply a run that never happens.
-  const next = automations
+  const next = visible
     .filter(
       (automation) =>
         isBrowserActive(automation) && nextRunTimestamp(automation) != null,
@@ -101,7 +159,7 @@ export function automationSummary(automations) {
         (b.next_run_timestamp ?? Number.MAX_SAFE_INTEGER),
     )[0];
   return {
-    scheduled: automations.length,
+    scheduled: visible.length,
     active,
     running,
     failures,
@@ -216,16 +274,22 @@ export function scheduleLabel(cron, timezone, t, locale) {
 
 // `fallback` is already-translated text the caller resolves via `t`; `locale`
 // localizes the date itself so non-English users don't see English months.
-export function formatAutomationDate(value, fallback = "Unknown", locale) {
+// When `timezone` is a non-empty string it is forwarded to `Intl` so the wall
+// clock reflects that timezone. The catch fallback deliberately omits timeZone
+// (browser-local) — never substitute UTC.
+export function formatAutomationDate(value, fallback = "Unknown", locale, timezone) {
   if (!value) return fallback;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return fallback;
+  const tzOptions =
+    timezone && typeof timezone === "string" ? { timeZone: timezone } : {};
   try {
     return date.toLocaleString(locale || [], {
       month: "short",
       day: "numeric",
       hour: "2-digit",
       minute: "2-digit",
+      ...tzOptions,
     });
   } catch (_) {
     return date.toLocaleString([], {
@@ -242,6 +306,9 @@ export function formatAutomationDate(value, fallback = "Unknown", locale) {
 // missing/unparseable input so callers can omit the relative line entirely.
 export function formatRelativeTime(value, locale) {
   if (!value) return null;
+  // Older browsers / ICU-less Node test envs lack Intl.RelativeTimeFormat;
+  // bail before constructing it so the catch can't re-throw and crash.
+  if (typeof Intl === "undefined" || !Intl.RelativeTimeFormat) return null;
   const ts = typeof value === "number" ? value : Date.parse(value);
   if (Number.isNaN(ts)) return null;
   const diffMs = ts - Date.now();
@@ -278,6 +345,22 @@ export function stateTone(state) {
   return STATE_PRESENTATION[state]?.tone || "muted";
 }
 
+export function primaryStatusLabel(automation, t) {
+  if (isBrowserActive(automation) && automation?.has_running_run) {
+    return tr(t)("automations.status.running");
+  }
+  if (isBrowserActive(automation) && automation?.has_failed_runs) {
+    return tr(t)("automations.status.needsReview");
+  }
+  return stateLabel(automation?.state, t);
+}
+
+export function primaryStatusTone(automation) {
+  if (isBrowserActive(automation) && automation?.has_running_run) return "info";
+  if (isBrowserActive(automation) && automation?.has_failed_runs) return "danger";
+  return stateTone(automation?.state);
+}
+
 export function lastStatusLabel(status, t) {
   const key = LAST_STATUS_PRESENTATION[status]?.labelKey || "automations.lastStatus.none";
   return tr(t)(key);
@@ -298,6 +381,30 @@ export function runStatusTone(status) {
   return RUN_STATUS_PRESENTATION[normalizeRunStatus(status)]?.tone || "muted";
 }
 
+// Format a one-shot trigger as "Once on <datetime> (<tz>)".
+// Returns the custom-schedule fallback key when `at` is missing or unparseable.
+function onceScheduleLabel(at, timezone, t, locale) {
+  if (!at) return tr(t)("automations.schedule.custom");
+  const datetime = formatAutomationDate(at, null, locale, timezone);
+  if (!datetime) return tr(t)("automations.schedule.custom");
+  const tzSuffix = timezone && typeof timezone === "string" ? ` (${timezone})` : "";
+  return tr(t)("automations.schedule.onceAt", { datetime }) + tzSuffix;
+}
+
+// Dispatcher for the discriminated source union. A future source kind is a
+// one-line addition in SUPPORTED_SOURCE_TYPES + a branch here.
+function automationScheduleLabel(source, t, locale) {
+  if (source?.type === "once") {
+    return onceScheduleLabel(source.at, source.timezone, t, locale);
+  }
+  if (source?.type === "schedule") {
+    // Preserve the pre-existing "UTC" default for schedule sources so that a
+    // recurring trigger with no stored timezone still appends "(UTC)".
+    return scheduleLabel(source.cron, source.timezone || "UTC", t, locale);
+  }
+  return tr(t)("automations.schedule.custom");
+}
+
 function normalizeAutomation(automation, t, locale) {
   const tx = tr(t);
   const recentRuns = normalizeRuns(automation.recent_runs, t, locale);
@@ -308,20 +415,23 @@ function normalizeAutomation(automation, t, locale) {
     null;
   const lastStatus = lastCompletedRun?.status || automation.last_status;
   const lastRunAt = lastCompletedRun?.completed_at || automation.last_run_at || null;
+  const normalized = {
+    ...automation,
+    recent_runs: recentRuns,
+    has_running_run: recentRuns.some((run) => run.status === "running"),
+    has_failed_runs: recentRuns.some((run) => run.status === "error"),
+  };
 
   return {
-    ...automation,
+    ...normalized,
     display_name: automation.name || tx("automations.untitled"),
     icon: automationIcon(automation),
     schedule_timezone: automation.source?.timezone || "UTC",
-    schedule_label: scheduleLabel(
-      automation.source?.cron,
-      automation.source?.timezone || "UTC",
-      t,
-      locale,
-    ),
+    schedule_label: automationScheduleLabel(automation.source, t, locale),
     state_label: stateLabel(automation.state, t),
     state_tone: stateTone(automation.state),
+    primary_status_label: primaryStatusLabel(normalized, t),
+    primary_status_tone: primaryStatusTone(normalized),
     next_run_timestamp: parseTimestamp(automation.next_run_at),
     next_run_label: formatAutomationDate(
       automation.next_run_at,
@@ -330,6 +440,7 @@ function normalizeAutomation(automation, t, locale) {
     ),
     last_run_label: formatAutomationDate(lastRunAt, tx("automations.date.noRuns"), locale),
     last_run_relative: formatRelativeTime(lastRunAt, locale),
+    last_run_timestamp: parseTimestamp(lastRunAt),
     last_status_label: lastStatusLabel(lastStatus, t),
     last_status_tone: lastStatusTone(lastStatus),
     created_label: formatAutomationDate(
@@ -337,11 +448,8 @@ function normalizeAutomation(automation, t, locale) {
       tx("automations.date.unknown"),
       locale,
     ),
-    recent_runs: recentRuns,
     latest_run: latestRun,
     current_run: currentRun,
-    has_running_run: recentRuns.some((run) => run.status === "running"),
-    has_failed_runs: recentRuns.some((run) => run.status === "error"),
     success_rate_label: successRateLabel(recentRuns, t),
   };
 }
@@ -485,6 +593,10 @@ function isBrowserActive(automation) {
 
 function isBrowserPaused(automation) {
   return ["paused", "disabled", "inactive"].includes(automation?.state);
+}
+
+function isBrowserCompleted(automation) {
+  return automation?.state === "completed";
 }
 
 function nextRunTimestamp(automation) {

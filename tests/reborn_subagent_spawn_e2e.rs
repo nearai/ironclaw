@@ -222,7 +222,7 @@ async fn blocking_spawn_waits_while_child_is_blocked_on_approval_then_resumes() 
     ]);
     let mut harness = tokio::time::timeout(
         WaitConfig::default().timeout,
-        RebornBinaryE2EHarness::with_harness_blocked_evidence_unscoped_worker(
+        RebornBinaryE2EHarness::with_harness_blocked_evidence(
             "room-subagent-child-approval",
             model_gateway,
             RecordingTestCapabilityPort::approval_then_allowed_tool_with_spawn_subagent(),
@@ -403,7 +403,7 @@ async fn spawn_harness(
 ) -> RebornBinaryE2EHarness {
     tokio::time::timeout(
         WaitConfig::default().timeout,
-        RebornBinaryE2EHarness::with_harness_blocked_evidence_unscoped_worker(
+        RebornBinaryE2EHarness::with_harness_blocked_evidence(
             conversation_id,
             model_gateway,
             RecordingTestCapabilityPort::echo_with_spawn_subagent(),

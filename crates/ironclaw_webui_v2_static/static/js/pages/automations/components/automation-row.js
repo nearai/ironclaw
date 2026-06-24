@@ -12,16 +12,8 @@ import { RunDots } from "./automation-recent-runs.js";
 export function AutomationRow({ automation, onOpen }) {
   const t = useT();
 
-  const statusTone = automation.has_running_run
-    ? "info"
-    : automation.has_failed_runs
-      ? "danger"
-      : automation.state_tone;
-  const statusLabel = automation.has_running_run
-    ? t("automations.status.running")
-    : automation.has_failed_runs
-      ? t("automations.status.needsReview")
-      : automation.state_label;
+  const statusTone = automation.primary_status_tone;
+  const statusLabel = automation.primary_status_label;
 
   return html`
     <button
@@ -45,7 +37,7 @@ export function AutomationRow({ automation, onOpen }) {
       </span>
 
       <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-semibold text-iron-100">
+        <div className="truncate text-base font-semibold text-iron-100">
           ${automation.display_name}
         </div>
         <div className="mt-1 truncate text-sm text-iron-300">

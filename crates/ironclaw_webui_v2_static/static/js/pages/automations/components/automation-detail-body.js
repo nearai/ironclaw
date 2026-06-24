@@ -63,17 +63,15 @@ export function AutomationDetailBody({ automation, onOpenRun, onOpenLogs }) {
       </div>
 
       <div>
-        <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <h4 className="text-sm font-semibold text-iron-100">
-            ${t("automations.detail.recentRuns")}
-          </h4>
-          <${RunHistorySummary} runs=${automation.recent_runs} />
-        </div>
+        <h4 className="mb-3 text-base font-semibold text-iron-100">
+          ${t("automations.detail.recentRuns")}
+        </h4>
+        <${RunHistorySummary} runs=${automation.recent_runs} className="mb-4" />
 
-        ${automation.recent_runs.length
+        ${(automation.recent_runs || []).length
           ? html`
               <div>
-                ${automation.recent_runs.map(
+                ${(automation.recent_runs || []).map(
                   (run) => html`
                     <${RecentRunRow}
                       key=${recentRunKey(run)}

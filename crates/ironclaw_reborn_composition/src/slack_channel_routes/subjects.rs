@@ -61,9 +61,10 @@ async fn list_handler(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<SlackRoutableTeamSubjectListResponse>, SlackRouteError> {
     ensure_authorized_operator(&config, &caller)?;
+    let context = config.route_context().await?;
     Ok(Json(SlackRoutableTeamSubjectListResponse {
-        team_id: config.team_id.clone(),
-        subjects: config.routable_team_subjects.clone(),
+        team_id: context.team_id,
+        subjects: context.routable_team_subjects,
     }))
 }
 

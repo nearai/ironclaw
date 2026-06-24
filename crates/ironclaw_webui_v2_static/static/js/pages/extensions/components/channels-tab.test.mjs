@@ -16,7 +16,7 @@ function channelsTabSourceForTest() {
 function slackConnectActionSectionsForTest(slackConnectAction, slackConnectActions) {
   const context = {
     globalThis: {},
-    SlackChannelPicker() {},
+    SlackAdminManagedSection() {},
     SlackPairingSection() {},
     html(strings, ...values) {
       return { strings: Array.from(strings), values };
@@ -28,7 +28,7 @@ function slackConnectActionSectionsForTest(slackConnectAction, slackConnectActio
       slackConnectAction,
       slackConnectActions,
     }),
-    SlackChannelPicker: context.SlackChannelPicker,
+    SlackAdminManagedSection: context.SlackAdminManagedSection,
     SlackPairingSection: context.SlackPairingSection,
   };
 }
@@ -177,13 +177,13 @@ test("SlackConnectActionSections renders every supported Slack action", () => {
   const admin = { channel: "slack", strategy: "admin_managed_channels", action: {} };
 
   const adminView = slackConnectActionSectionsForTest(admin);
-  assert.equal(adminView.rendered.values[0][0].values[0], adminView.SlackChannelPicker);
+  assert.equal(adminView.rendered.values[0][0].values[0], adminView.SlackAdminManagedSection);
 
   const personalView = slackConnectActionSectionsForTest(personal);
   assert.equal(personalView.rendered.values[0][0].values[0], personalView.SlackPairingSection);
 
   const combinedView = slackConnectActionSectionsForTest(null, [admin, personal]);
-  assert.equal(combinedView.rendered.values[0][0].values[0], combinedView.SlackChannelPicker);
+  assert.equal(combinedView.rendered.values[0][0].values[0], combinedView.SlackAdminManagedSection);
   assert.equal(combinedView.rendered.values[0][1].values[0], combinedView.SlackPairingSection);
 
   const unhandledView = slackConnectActionSectionsForTest({

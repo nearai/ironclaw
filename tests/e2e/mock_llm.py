@@ -100,6 +100,7 @@ CANNED_RESPONSES = [
      "I found the information you requested."),
 ]
 DEFAULT_RESPONSE = "I understand your request."
+EMULATE_GITHUB_BEARER = "ghp_emulate_github_token"
 
 TOOL_FAILURE_TRIGGER = re.compile(r"issue 1780 tool failure", re.IGNORECASE)
 TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
@@ -121,6 +122,10 @@ GMAIL_ROUNDTRIP_TRIGGER = re.compile(
 )
 GCAL_LIFECYCLE_TRIGGER = re.compile(
     r"create a google calendar event titled",
+    re.IGNORECASE,
+)
+GDRIVE_UPLOAD_LIFECYCLE_TRIGGER = re.compile(
+    r"upload a google drive file titled",
     re.IGNORECASE,
 )
 NOTION_SEARCH_LIFECYCLE_TRIGGER = re.compile(
@@ -1458,6 +1463,11 @@ def _find_tool_result(messages: list[dict]) -> dict | None:
     return results[0] if results else None
 
 
+def _find_named_tool_results(messages: list[dict], name: str) -> list[dict]:
+    """Collect fresh tool results for one tool name."""
+    return [result for result in _find_tool_results(messages) if result.get("name") == name]
+
+
 def _tool_results_include_denial(tool_results: list[dict]) -> bool:
     return any(DENIAL_PATTERN.search(tr.get("content", "")) for tr in tool_results)
 
@@ -1595,6 +1605,56 @@ def _extract_calendar_event_id(content: str) -> str | None:
     return None
 
 
+def _extract_drive_file_id(content: str) -> str | None:
+    """Extract the file id from a Google Drive upload/get tool result."""
+    def from_value(value: object) -> str | None:
+        if isinstance(value, dict):
+            for key in ("id", "file_id"):
+                candidate = value.get(key)
+                if isinstance(candidate, str):
+                    return candidate
+            for key in ("file", "output", "result"):
+                candidate = from_value(value.get(key))
+                if candidate:
+                    return candidate
+            for candidate_value in value.values():
+                candidate = from_value(candidate_value)
+                if candidate:
+                    return candidate
+        if isinstance(value, list):
+            for item in value:
+                candidate = from_value(item)
+                if candidate:
+                    return candidate
+        if isinstance(value, str):
+            try:
+                return from_value(json.loads(value))
+            except (json.JSONDecodeError, ValueError, TypeError):
+                return None
+        return None
+
+    try:
+        parsed = json.loads(content)
+        extracted = from_value(parsed)
+        if extracted:
+            return extracted
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+    m = re.search(r'"(?:id|file_id)"\s*:\s*"([^"]+)"', content)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _extract_drive_file_id_from_results(tool_results: list[dict]) -> str | None:
+    """Extract a Drive file id from any prior lifecycle tool result."""
+    for result in tool_results:
+        file_id = _extract_drive_file_id(result.get("content", ""))
+        if file_id:
+            return file_id
+    return None
+
+
 def _tomorrow_10am_utc() -> str:
     """Return an RFC3339 timestamp for tomorrow at 10:00 UTC."""
     from datetime import datetime, timedelta, timezone
@@ -1693,7 +1753,7 @@ def match_special_response(messages: list[dict], has_tools: bool) -> dict | None
     if m and has_tools:
         owner = m.group("owner")
         repo = m.group("repo")
-        tool_results = _find_tool_results(messages)
+        tool_results = _find_named_tool_results(messages, "github")
         n = len(tool_results)
         if n == 0:
             return {
@@ -1750,7 +1810,7 @@ def match_special_response(messages: list[dict], has_tools: bool) -> dict | None
     m = GMAIL_ROUNDTRIP_TRIGGER.search(last_user)
     if m and has_tools:
         email = m.group("email")
-        tool_results = _find_tool_results(messages)
+        tool_results = _find_named_tool_results(messages, "gmail")
         n = len(tool_results)
         if n == 0:
             subject = _extract_canary_subject(last_user)
@@ -1798,7 +1858,7 @@ def match_special_response(messages: list[dict], has_tools: bool) -> dict | None
 
     # ── Lifecycle canary: Google Calendar create → list → delete ─────────
     if GCAL_LIFECYCLE_TRIGGER.search(last_user) and has_tools:
-        tool_results = _find_tool_results(messages)
+        tool_results = _find_named_tool_results(messages, "google_calendar")
         n = len(tool_results)
         if n == 0:
             title = _extract_canary_title(last_user)
@@ -1845,6 +1905,39 @@ def match_special_response(messages: list[dict], has_tools: bool) -> dict | None
         return {
             "type": "text",
             "text": "google_calendar lifecycle complete. Event created, verified, and deleted.",
+        }
+
+    # ── Lifecycle canary: Google Drive upload → download ────────────────
+    if GDRIVE_UPLOAD_LIFECYCLE_TRIGGER.search(last_user) and has_tools:
+        tool_results = _find_named_tool_results(messages, "google_drive")
+        n = len(tool_results)
+        title = _extract_canary_title(last_user)
+        if n == 0:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "google_drive",
+                    "arguments": {
+                        "action": "upload_file",
+                        "name": title,
+                        "content": f"Canary Google Drive content for {title}",
+                        "mime_type": "text/plain",
+                    },
+                },
+            }
+        if n == 1:
+            file_id = _extract_drive_file_id_from_results(tool_results)
+            if file_id:
+                return {
+                    "type": "tool_call",
+                    "tool_call": {
+                        "tool_name": "google_drive",
+                        "arguments": {"action": "download_file", "file_id": file_id},
+                    },
+                }
+        return {
+            "type": "text",
+            "text": "google_drive lifecycle complete. File uploaded and downloaded.",
         }
 
     # ── Lifecycle canary: Notion search → search again ────────────────────
@@ -1946,6 +2039,7 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
         GITHUB_ISSUE_LIFECYCLE_TRIGGER,
         GMAIL_ROUNDTRIP_TRIGGER,
         GCAL_LIFECYCLE_TRIGGER,
+        GDRIVE_UPLOAD_LIFECYCLE_TRIGGER,
         NOTION_SEARCH_LIFECYCLE_TRIGGER,
     ):
         if special and _conversation_has_user_trigger(messages, lifecycle_trigger):
@@ -2268,6 +2362,12 @@ def _is_google_token_url(url: str) -> bool:
     return "googleapis.com" in lowered or "accounts.google.com" in lowered
 
 
+def _is_github_token_url(url: str) -> bool:
+    if not url:
+        return False
+    return "github.com/login/oauth/access_token" in url.lower()
+
+
 async def oauth_exchange(request: web.Request) -> web.Response:
     """Mock OAuth token exchange proxy for E2E tests.
 
@@ -2309,6 +2409,13 @@ async def oauth_exchange(request: web.Request) -> web.Response:
         if live_refresh:
             resp["refresh_token"] = live_refresh
         return web.json_response(resp)
+
+    if _is_github_token_url(data.get("token_url", "")):
+        return web.json_response({
+            access_token_field: EMULATE_GITHUB_BEARER,
+            "refresh_token": "mock-github-refresh-token",
+            "expires_in": 3600,
+        })
 
     return web.json_response({
         access_token_field: f"mock-token-{code}",

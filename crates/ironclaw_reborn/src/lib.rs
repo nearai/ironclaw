@@ -34,6 +34,7 @@ pub mod runtime;
 pub mod subagent;
 pub mod text_loop_driver;
 pub mod thread_scope;
+pub mod turn_run_executor;
 pub mod turn_runner;
 
 #[cfg(feature = "root-llm-provider")]

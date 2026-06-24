@@ -4002,6 +4002,7 @@ dependencies = [
  "ironclaw_extensions",
  "ironclaw_extractors",
  "ironclaw_filesystem",
+ "ironclaw_first_party_extensions",
  "ironclaw_gateway",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
@@ -4015,6 +4016,7 @@ dependencies = [
  "ironclaw_product_workflow",
  "ironclaw_reborn",
  "ironclaw_reborn_composition",
+ "ironclaw_reborn_config",
  "ironclaw_reborn_traces",
  "ironclaw_resources",
  "ironclaw_run_state",
@@ -4609,8 +4611,10 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "tracing-test",
  "url",
  "uuid",
  "wat",
@@ -5067,6 +5071,7 @@ dependencies = [
  "ironclaw_runtime_policy",
  "ironclaw_safety",
  "ironclaw_secrets",
+ "ironclaw_skill_learning",
  "ironclaw_skills",
  "ironclaw_slack_v2_adapter",
  "ironclaw_threads",
@@ -5376,6 +5381,16 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "ironclaw_skill_learning"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_skills",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

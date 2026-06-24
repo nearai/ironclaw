@@ -137,7 +137,7 @@ export function DeliveryDefaultsContent({ deliveryState }) {
         key="cmd"
         className="rounded px-1.5 py-0.5 font-mono text-[0.6875rem] bg-[var(--v2-surface-muted)] text-[var(--v2-accent-text)]"
       >
-        approve &lt;code&gt;
+        ${"approve <code>"}
       </code>`,
     },
   );
@@ -178,7 +178,7 @@ export function DeliveryDefaultsContent({ deliveryState }) {
         >
 
           <!-- Available external targets -->
-          ${deliveryState.finalReplyTargets.map((option) => {
+          ${(deliveryState.finalReplyTargets || []).map((option) => {
             const tid = option?.target?.target_id ?? "";
             const label =
               option?.target?.display_name || option?.target?.target_id || "";
@@ -206,6 +206,11 @@ export function DeliveryDefaultsContent({ deliveryState }) {
                   onChange=${() => setDraftTargetId(tid)}
                   className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--v2-accent)]"
                 />
+                <span
+                  className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] text-[var(--v2-text-muted)]"
+                >
+                  <${Icon} name="chat" className="h-4 w-4" />
+                </span>
                 <div className="flex-1 min-w-0">
                   <div className="text-sm font-semibold text-[var(--v2-text-strong)] leading-snug">
                     ${label}
@@ -272,6 +277,11 @@ export function DeliveryDefaultsContent({ deliveryState }) {
               onChange=${() => setDraftTargetId("")}
               className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--v2-accent)]"
             />
+            <span
+              className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] text-[var(--v2-text-muted)]"
+            >
+              <${Icon} name="file" className="h-4 w-4" />
+            </span>
             <div className="flex-1 min-w-0">
               <div className="text-sm font-semibold text-[var(--v2-text-strong)] leading-snug">
                 ${t("automations.delivery.webOption")}
@@ -290,30 +300,34 @@ export function DeliveryDefaultsContent({ deliveryState }) {
         </div>
       </div>
 
-      <!-- ── Save row ─────────────────────────────────────────────── -->
-      <div className="flex flex-wrap items-center gap-3">
-        <${Button}
-          variant="primary"
-          size="sm"
-          className="text-white"
-          disabled=${!canSave}
-          onClick=${handleSave}
-        >
-          ${t("automations.delivery.save")}
-        <//>
-        <${Button}
-          variant="secondary"
-          size="sm"
-          disabled=${!canClear}
-          onClick=${handleClear}
-        >
-          ${t("automations.delivery.clear")}
-        <//>
+      <!-- ── Save / Clear — full-width, centered ──────────────────── -->
+      <div className="flex flex-col gap-2">
+        <div className="flex gap-3">
+          <${Button}
+            variant="primary"
+            size="sm"
+            fullWidth
+            className="text-white"
+            disabled=${!canSave}
+            onClick=${handleSave}
+          >
+            ${t("automations.delivery.save")}
+          <//>
+          <${Button}
+            variant="secondary"
+            size="sm"
+            fullWidth
+            disabled=${!canClear}
+            onClick=${handleClear}
+          >
+            ${t("automations.delivery.clear")}
+          <//>
+        </div>
         ${showSaved &&
         html`
           <span
             role="status"
-            className="flex items-center gap-1.5 text-xs font-semibold text-[var(--v2-positive-text)]"
+            className="flex items-center justify-center gap-1.5 text-xs font-semibold text-[var(--v2-positive-text)]"
           >
             <${Icon} name="check" className="h-3 w-3" />
             ${t("automations.delivery.saved")}
@@ -324,7 +338,7 @@ export function DeliveryDefaultsContent({ deliveryState }) {
         html`
           <span
             role="alert"
-            className="flex items-center gap-1.5 text-xs font-semibold text-red-300"
+            className="flex items-center justify-center gap-1.5 text-xs font-semibold text-red-300"
           >
             <${Icon} name="close" className="h-3 w-3" />
             ${t("automations.delivery.saveFailed")}
@@ -332,11 +346,11 @@ export function DeliveryDefaultsContent({ deliveryState }) {
         `}
       </div>
 
-      <!-- ── Footnote (only when an external Slack-style target exists) ── -->
+      <!-- ── Footnote — centered, beneath Save/Clear (Slack targets only) ── -->
       ${hasExternalTargets &&
       html`
         <div
-          className="rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-xs leading-relaxed text-[var(--v2-text-faint)]"
+          className="rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-center text-xs leading-relaxed text-[var(--v2-text-faint)]"
         >
           ${footnoteSegments}
         </div>

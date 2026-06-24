@@ -55,11 +55,14 @@ const VARIANTS = {
   secondary:
     "border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-strong)] " +
     "hover:bg-[var(--v2-surface-muted)] " +
-    "hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]",
+    "hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))] " +
+    // Icons read as muted by default and lighten to match the label on hover.
+    "[&_svg]:text-[var(--v2-text-muted)] hover:[&_svg]:text-[var(--v2-text-strong)] [&_svg]:transition-colors",
 
   ghost:
     "border border-transparent bg-transparent text-[var(--v2-text-muted)] " +
-    "hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]",
+    "hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)] " +
+    "[&_svg]:text-[var(--v2-text-muted)] hover:[&_svg]:text-[var(--v2-text-strong)] [&_svg]:transition-colors",
 
   danger:
     "border border-[rgba(217,101,116,0.6)] bg-transparent text-[#ff6480] " +
@@ -118,7 +121,7 @@ export function Button({
       className=${cn(BASE, sizeClass, fullClass, variantClass, className)}
       ...${rest}
     >
-      ${children}
+      <span className="flex items-center justify-center">${children}</span>
     <//>
   `;
 }

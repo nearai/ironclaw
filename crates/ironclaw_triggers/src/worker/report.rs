@@ -44,6 +44,11 @@ pub enum TriggerPollerFireOutcome {
     PermanentFailed {
         reason: TriggerPollerFailureReason,
     },
+    /// A `Once` trigger hit a permanent pre-submission failure and was
+    /// completed so it cannot re-fire the same terminal schedule slot forever.
+    OncePermanentFailed {
+        reason: TriggerPollerFailureReason,
+    },
     ClearedTerminalActive {
         run_id: TurnRunId,
     },

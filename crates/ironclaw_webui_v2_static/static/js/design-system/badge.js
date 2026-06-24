@@ -51,7 +51,7 @@ export function Badge({ tone = "muted", label, dot = true, size = "md", classNam
         // other space-free scripts wrap between any two characters, so a
         // translated tone label like "信号" would otherwise stack vertically
         // inside the fixed-height pill.
-        "inline-flex shrink-0 items-center whitespace-nowrap border font-mono uppercase",
+        "inline-flex shrink-0 items-center whitespace-nowrap border font-mono uppercase leading-none",
         sizeClasses[size] ?? sizeClasses.md,
         toneClasses[tone] ?? toneClasses.muted,
         className
@@ -64,7 +64,7 @@ export function Badge({ tone = "muted", label, dot = true, size = "md", classNam
             isLive && "animate-[v2-breathe_2s_ease-in-out_infinite]"
           )}
         />`}
-      ${label}
+      <span className="inline-block leading-none [transform:translateY(0.5px)]">${label}</span>
     </span>
   `;
 }

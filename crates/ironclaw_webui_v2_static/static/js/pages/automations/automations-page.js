@@ -3,7 +3,6 @@ import { React, html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
 import { AutomationDetailPage } from "./components/automation-detail-page.js";
 import { AutomationsList } from "./components/automations-list.js";
-import { AutomationsSummaryStrip } from "./components/automations-summary-strip.js";
 import { useAutomations } from "./hooks/useAutomations.js";
 import { useOutboundDeliveryDefaults } from "./hooks/useOutboundDeliveryDefaults.js";
 
@@ -11,22 +10,13 @@ export function AutomationsPage() {
   const t = useT();
   const { automationId } = useParams();
   const [filter, setFilter] = React.useState("all");
-  const automationsState = useAutomations();
+  const includeCompleted = filter === "completed";
+  const automationsState = useAutomations(includeCompleted);
   const deliveryState = useOutboundDeliveryDefaults();
 
-  // A local refetch can resolve almost instantly, leaving the spinner to flash
-  // imperceptibly. Hold a minimum spin window so a manual refresh always reads
-  // as a deliberate action.
-  const [minSpin, setMinSpin] = React.useState(false);
-  const minSpinTimer = React.useRef(null);
-  React.useEffect(() => () => clearTimeout(minSpinTimer.current), []);
-  const handleRefresh = React.useCallback(() => {
-    setMinSpin(true);
-    clearTimeout(minSpinTimer.current);
-    minSpinTimer.current = setTimeout(() => setMinSpin(false), 1000);
-    automationsState.refetch();
-  }, [automationsState.refetch]);
-  const isRefreshing = automationsState.isRefreshing || minSpin;
+  // Data stays fresh on its own: a base poll plus a smart timer that pulls
+  // near-due and in-progress automations forward (see useAutomations), so there
+  // is no manual refresh control to reason about.
   const showErrorOnly =
     automationsState.error &&
     !automationsState.isLoading &&
@@ -43,6 +33,10 @@ export function AutomationsPage() {
       automation=${automation}
       isLoading=${automationsState.isLoading}
       error=${automationsState.error}
+      isMutating=${automationsState.isMutating}
+      onPauseAutomation=${automationsState.pauseAutomation}
+      onResumeAutomation=${automationsState.resumeAutomation}
+      onDeleteAutomation=${automationsState.deleteAutomation}
     />`;
   }
 
@@ -56,6 +50,14 @@ export function AutomationsPage() {
               className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
             >
               ${t("automations.error.loadFailed")}
+            </div>
+          `}
+          ${automationsState.actionError &&
+          html`
+            <div
+              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+            >
+              ${automationsState.actionError.message}
             </div>
           `}
 
@@ -77,13 +79,6 @@ export function AutomationsPage() {
                     </div>
                   </div>
                 `}
-                <${AutomationsSummaryStrip}
-                  summary=${automationsState.summary}
-                  nextRunAt=${automationsState.nextRunAt}
-                  activeFilter=${filter}
-                  onSelectFilter=${setFilter}
-                />
-
                 ${automationsState.isLoading
                   ? html`
                       <div className="space-y-4">
@@ -99,11 +94,15 @@ export function AutomationsPage() {
                   : html`
                       <${AutomationsList}
                         automations=${automationsState.automations}
+                        summary=${automationsState.summary}
+                        nextRunAt=${automationsState.nextRunAt}
                         filter=${filter}
                         onFilterChange=${setFilter}
-                        onRefresh=${handleRefresh}
-                        isRefreshing=${isRefreshing}
                         deliveryState=${deliveryState}
+                        isMutating=${automationsState.isMutating}
+                        onPauseAutomation=${automationsState.pauseAutomation}
+                        onResumeAutomation=${automationsState.resumeAutomation}
+                        onDeleteAutomation=${automationsState.deleteAutomation}
                       />
                     `}
               `}

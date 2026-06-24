@@ -1,10 +1,10 @@
-import { Badge, Panel } from "../../../design-system/primitives.js";
+import { Badge } from "../../../design-system/primitives.js";
 import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { cn } from "../../../utils/cn.js";
 
 // Re-render once a second so the next-run countdown ticks. A single shared
-// timer for the whole strip (not one per card) keeps it cheap.
+// timer for the whole strip (not one per cell) keeps it cheap.
 function useNow(intervalMs = 1000) {
   const [now, setNow] = React.useState(() => Date.now());
   React.useEffect(() => {
@@ -30,65 +30,14 @@ function formatCountdown(ms) {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
-function SummaryCard({ card, activeFilter, onSelectFilter }) {
-  const t = useT();
-  const interactive = Boolean(card.filter && onSelectFilter);
-  const isActive = interactive && activeFilter === card.filter;
-
-  const inner = html`
-    <div className="flex h-full flex-col">
-      <div className="flex items-center justify-between gap-2">
-        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-iron-400">
-          ${card.label}
-        </span>
-        <${Badge} tone=${card.tone} label=${card.badgeLabel} size="sm" />
-      </div>
-      <div
-        className=${cn(
-          "mt-2.5 truncate font-medium tracking-[-0.03em] tabular-nums text-iron-100",
-          card.valueClassName || "text-[1.6rem]"
-        )}
-      >
-        ${card.value}
-      </div>
-      <div
-        className="mt-auto truncate pt-1 text-[13px] leading-[1.2] text-iron-300"
-        title=${card.detail}
-      >
-        ${card.detail}
-      </div>
-    </div>
-  `;
-
-  const baseClass =
-    "flex h-full flex-col rounded-[14px] border border-white/8 bg-white/[0.03] px-3.5 py-3 text-left";
-
-  if (!interactive) {
-    return html`<div className=${baseClass}>${inner}</div>`;
-  }
-  return html`
-    <button
-      type="button"
-      aria-pressed=${isActive}
-      title=${t("automations.summary.filterAction", { label: card.label })}
-      onClick=${() => onSelectFilter(card.filter)}
-      className=${cn(
-        baseClass,
-        "transition-colors hover:border-white/20 hover:bg-white/[0.05]",
-        "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--v2-accent)]",
-        isActive && "border-[var(--v2-accent)]/60 bg-[var(--v2-accent-soft)]/30"
-      )}
-    >
-      ${inner}
-    </button>
-  `;
-}
-
-export function AutomationsSummaryStrip({ summary, nextRunAt, activeFilter, onSelectFilter }) {
+// A static, read-only stats strip. Deliberately styled as a single recessed
+// (inset) bar with hairline-separated cells so it reads as ambient context —
+// distinct from the interactive filter pills that actually drive the list.
+export function AutomationsSummaryStrip({ summary, nextRunAt }) {
   const t = useT();
   const now = useNow();
 
-  // Next-run card: a live countdown as the headline with the absolute time as
+  // Next-run cell: a live countdown as the headline with the absolute time as
   // the sub-line. Falls back to "None" when nothing is scheduled to fire.
   const hasNextRun = typeof nextRunAt === "number" && Number.isFinite(nextRunAt);
   const countdown = hasNextRun ? formatCountdown(nextRunAt - now) : null;
@@ -101,7 +50,8 @@ export function AutomationsSummaryStrip({ summary, nextRunAt, activeFilter, onSe
     ? summary?.nextRun || t("automations.summary.nextRunDetail")
     : t("automations.summary.nextRunDetail");
 
-  const cards = [
+  const failures = summary?.failures ?? 0;
+  const cells = [
     {
       key: "scheduled",
       label: t("automations.summary.scheduled"),
@@ -109,7 +59,6 @@ export function AutomationsSummaryStrip({ summary, nextRunAt, activeFilter, onSe
       tone: "muted",
       badgeLabel: t("automations.badge.muted"),
       detail: t("automations.summary.scheduledDetail"),
-      filter: "all",
     },
     {
       key: "active",
@@ -118,7 +67,6 @@ export function AutomationsSummaryStrip({ summary, nextRunAt, activeFilter, onSe
       tone: "signal",
       badgeLabel: t("automations.badge.signal"),
       detail: t("automations.summary.activeDetail"),
-      filter: "active",
     },
     {
       key: "running",
@@ -127,19 +75,17 @@ export function AutomationsSummaryStrip({ summary, nextRunAt, activeFilter, onSe
       tone: "info",
       badgeLabel: t("automations.badge.info"),
       detail: t("automations.summary.runningDetail"),
-      filter: "running",
     },
     {
       key: "failures",
       label: t("automations.summary.failures"),
-      value: summary?.failures ?? 0,
-      tone: (summary?.failures ?? 0) > 0 ? "danger" : "success",
+      value: failures,
+      tone: failures > 0 ? "danger" : "success",
       badgeLabel:
-        (summary?.failures ?? 0) > 0
+        failures > 0
           ? t("automations.badge.danger")
           : t("automations.badge.success"),
       detail: t("automations.summary.failuresDetail"),
-      filter: (summary?.failures ?? 0) > 0 ? "failures" : null,
     },
     {
       key: "nextRun",
@@ -152,17 +98,34 @@ export function AutomationsSummaryStrip({ summary, nextRunAt, activeFilter, onSe
   ];
 
   return html`
-    <${Panel} className="p-3 sm:p-3.5">
-      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 xl:grid-cols-5">
-        ${cards.map(
-          (card) => html`<${SummaryCard}
-            key=${card.key}
-            card=${card}
-            activeFilter=${activeFilter}
-            onSelectFilter=${onSelectFilter}
-          />`
+    <div
+      className="overflow-hidden rounded-[14px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)]"
+    >
+      <div
+        className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 lg:divide-x lg:divide-[var(--v2-panel-border)]"
+      >
+        ${cells.map(
+          (cell) => html`
+            <div key=${cell.key} className="flex min-w-0 flex-col px-4 py-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate font-mono text-[10px] uppercase tracking-[0.14em] text-iron-400">
+                  ${cell.label}
+                </span>
+                <${Badge} tone=${cell.tone} label=${cell.badgeLabel} size="sm" />
+              </div>
+              <div className="mt-1.5 truncate text-2xl font-medium tracking-[-0.03em] tabular-nums text-iron-100">
+                ${cell.value}
+              </div>
+              <div
+                className="mt-0.5 truncate text-xs leading-[1.3] text-iron-400"
+                title=${cell.detail}
+              >
+                ${cell.detail}
+              </div>
+            </div>
+          `
         )}
       </div>
-    <//>
+    </div>
   `;
 }

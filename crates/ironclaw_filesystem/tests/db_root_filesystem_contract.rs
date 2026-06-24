@@ -1163,6 +1163,29 @@ async fn libsql_append_and_tail_assigns_monotonic_seqno() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_tail_bounded_limits_records_before_materialization() {
+    let filesystem = libsql_root().await;
+    let log = VirtualPath::new("/events/bounded").unwrap();
+
+    let s1 = filesystem.append(&log, b"a".to_vec()).await.unwrap();
+    let s2 = filesystem.append(&log, b"b".to_vec()).await.unwrap();
+    let s3 = filesystem.append(&log, b"c".to_vec()).await.unwrap();
+
+    let none = filesystem.tail_bounded(&log, SeqNo::ZERO, 0).await.unwrap();
+    let first_two = filesystem.tail_bounded(&log, SeqNo::ZERO, 2).await.unwrap();
+    let after_first = filesystem.tail_bounded(&log, s1, 1).await.unwrap();
+
+    assert!(none.is_empty());
+    assert_eq!(first_two.len(), 2);
+    assert_eq!(first_two[0].seq, s1);
+    assert_eq!(first_two[1].seq, s2);
+    assert_eq!(after_first.len(), 1);
+    assert_eq!(after_first[0].seq, s2);
+    assert_eq!(filesystem.tail_bounded(&log, s3, 1).await.unwrap().len(), 0);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_head_seq_returns_none_for_empty_path() {
     let filesystem = libsql_root().await;
     let log = VirtualPath::new("/events/empty-head").unwrap();
@@ -1268,7 +1291,7 @@ mod postgres_tests {
     use ironclaw_filesystem::{
         Capability, CasExpectation, Entry, FilesystemError, FilesystemOperation, Filter, IndexKey,
         IndexKind, IndexName, IndexSpec, IndexValue, Page, PostgresRootFilesystem, RecordKind,
-        SeqNo,
+        SeqNo, TxnCapability,
     };
     use ironclaw_host_api::VirtualPath;
 
@@ -1394,6 +1417,48 @@ mod postgres_tests {
         let got = fs.get(&path).await.unwrap().unwrap();
         assert_eq!(got.version, v2);
         assert_eq!(got.entry.body, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn postgres_transaction_rollback_discards_prior_put_after_later_cas_conflict() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        assert_eq!(fs.capabilities().txn(), TxnCapability::MultiKey);
+
+        let prefix_path = VirtualPath::new(&prefix).unwrap();
+        let pending = vpath(&prefix, "txn_pending");
+        let existing = vpath(&prefix, "txn_existing");
+        fs.put(
+            &existing,
+            Entry::bytes(b"already committed".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+        let mut txn = fs.begin(&prefix_path).await.unwrap();
+        txn.put(
+            &pending,
+            Entry::bytes(b"must roll back".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+        let err = txn
+            .put(
+                &existing,
+                Entry::bytes(b"conflicting rewrite".to_vec()),
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
+        txn.rollback().await;
+
+        assert!(fs.get(&pending).await.unwrap().is_none());
+        let got = fs.get(&existing).await.unwrap().unwrap();
+        assert_eq!(got.entry.body, b"already committed");
     }
 
     #[tokio::test]
@@ -1882,6 +1947,30 @@ mod postgres_tests {
 
         // tail-from-last returns nothing.
         assert!(fs.tail(&log, s3).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn postgres_tail_bounded_limits_records_before_materialization() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let log = VirtualPath::new(format!("{prefix}/events_bounded")).unwrap();
+
+        let s1 = fs.append(&log, b"a".to_vec()).await.unwrap();
+        let s2 = fs.append(&log, b"b".to_vec()).await.unwrap();
+        let s3 = fs.append(&log, b"c".to_vec()).await.unwrap();
+
+        let none = fs.tail_bounded(&log, SeqNo::ZERO, 0).await.unwrap();
+        let first_two = fs.tail_bounded(&log, SeqNo::ZERO, 2).await.unwrap();
+        let after_first = fs.tail_bounded(&log, s1, 1).await.unwrap();
+
+        assert!(none.is_empty());
+        assert_eq!(first_two.len(), 2);
+        assert_eq!(first_two[0].seq, s1);
+        assert_eq!(first_two[1].seq, s2);
+        assert_eq!(after_first.len(), 1);
+        assert_eq!(after_first[0].seq, s2);
+        assert_eq!(fs.tail_bounded(&log, s3, 1).await.unwrap().len(), 0);
     }
 
     #[tokio::test]

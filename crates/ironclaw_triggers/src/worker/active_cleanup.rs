@@ -116,18 +116,33 @@ impl TriggerPollerWorker {
             };
             // Map the run state to "should this active fire be cleared, and if
             // so with what status". A blocked run is parked on a human-
-            // interaction gate an unattended fire cannot satisfy, so it clears
-            // as failed; a terminal run clears with whatever status it reached.
-            // Exhaustive (no wildcard) so a new variant forces a compile error.
+            // interaction gate an unattended fire cannot satisfy. For recurring
+            // (Cron) triggers this clears as failed so the schedule can advance
+            // to its next slot. For Once triggers the gate is still answerable
+            // and must NOT be cleared here — leaving it pending lets the one-shot
+            // remain active until the gate is resolved, after which the run
+            // reaches Terminal and the existing Terminal path clears it and marks
+            // it Completed (via schedule.next_slot_after returning None).
+            // Clearing a fire-once blocked run would hide it as Completed even
+            // though it never fired successfully; and setting it back to Scheduled
+            // would refire-loop since the one-shot slot is already in the past.
+            // Terminal runs clear with whatever status they reached. Exhaustive
+            // (no wildcard) so a new variant forces a compile error.
             let clear: Option<(TriggerPollerFireOutcome, TriggerRunHistoryStatus)> = match state {
                 TriggerActiveRunState::Terminal { status } => Some((
                     TriggerPollerFireOutcome::ClearedTerminalActive { run_id },
                     status,
                 )),
-                TriggerActiveRunState::Blocked => Some((
-                    TriggerPollerFireOutcome::ClearedBlockedActive { run_id },
-                    TriggerRunHistoryStatus::Error,
-                )),
+                TriggerActiveRunState::Blocked => {
+                    if record.schedule.is_recurring() {
+                        Some((
+                            TriggerPollerFireOutcome::ClearedBlockedActive { run_id },
+                            TriggerRunHistoryStatus::Error,
+                        ))
+                    } else {
+                        None
+                    }
+                }
                 // Missing remains conservative until recovery can prove the
                 // active run lookup is not merely stale or temporarily empty.
                 TriggerActiveRunState::Missing | TriggerActiveRunState::Nonterminal => None,

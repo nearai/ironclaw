@@ -11,7 +11,15 @@ import { AutomationDetailBody } from "./automation-detail-body.js";
 // of the detail modal (or by deep link to `/automations/:automationId`). Unlike
 // the modal, this is a routed page: it survives reloads and exposes a direct
 // jump into the scoped logs for the most recent run.
-export function AutomationDetailPage({ automation, isLoading, error }) {
+export function AutomationDetailPage({
+  automation,
+  isLoading,
+  error,
+  isMutating = false,
+  onPauseAutomation,
+  onResumeAutomation,
+  onDeleteAutomation,
+}) {
   const t = useT();
   const navigate = useNavigate();
   const goBack = () => navigate("/automations");
@@ -57,14 +65,26 @@ export function AutomationDetailPage({ automation, isLoading, error }) {
     `;
   }
 
-  const statusTone = automation.has_running_run ? "info" : automation.state_tone;
-  const statusLabel = automation.has_running_run
-    ? t("automations.status.running")
-    : automation.state_label;
+  const canResume = automation.state === "paused";
+  const canPause = automation.state === "active" || automation.state === "scheduled";
+  const actionTitle = `${
+    canResume ? t("missions.action.resume") : t("missions.action.pause")
+  }: ${automation.display_name}`;
+  const handleAction = () => {
+    if (canResume) onResumeAutomation?.(automation.automation_id);
+    else if (canPause) onPauseAutomation?.(automation.automation_id);
+  };
+  const deleteTitle = `${t("common.delete")}: ${automation.display_name}`;
+  const handleDelete = () => {
+    if (window.confirm(deleteTitle)) {
+      onDeleteAutomation?.(automation.automation_id);
+      goBack();
+    }
+  };
 
   // Jump straight to the scoped logs for the most recent run that has a thread
   // or run id; falls back to the unscoped logs page when nothing is attached.
-  const latestScoped = automation.recent_runs.find(
+  const latestScoped = (automation.recent_runs || []).find(
     (run) => run.thread_id || run.run_id
   );
   const logsPath = buildScopedLogsPath({
@@ -94,8 +114,11 @@ export function AutomationDetailPage({ automation, isLoading, error }) {
                 </div>
               </div>
             </div>
-            <div className="flex items-center gap-3">
-              <${StatusPill} tone=${statusTone} label=${statusLabel} />
+            <div className="flex flex-wrap items-center gap-2">
+              <${StatusPill}
+                tone=${automation.primary_status_tone}
+                label=${automation.primary_status_label}
+              />
               <${Button}
                 variant="secondary"
                 size="sm"
@@ -103,6 +126,31 @@ export function AutomationDetailPage({ automation, isLoading, error }) {
               >
                 <${Icon} name="file" className="mr-1.5 h-4 w-4" />
                 ${t("automations.detail.viewLogs")}
+              <//>
+              ${(canPause || canResume) &&
+              html`
+                <${Button}
+                  type="button"
+                  variant=${canResume ? "primary" : "secondary"}
+                  size="sm"
+                  className=${canResume ? "text-white" : ""}
+                  disabled=${isMutating}
+                  onClick=${handleAction}
+                >
+                  <${Icon} name=${canResume ? "play" : "pause"} className="mr-1.5 h-4 w-4" />
+                  ${canResume ? t("missions.action.resume") : t("missions.action.pause")}
+                <//>
+              `}
+              <${Button}
+                type="button"
+                variant="danger"
+                size="icon-sm"
+                aria-label=${deleteTitle}
+                title=${deleteTitle}
+                disabled=${isMutating}
+                onClick=${handleDelete}
+              >
+                <${Icon} name="trash" className="h-4 w-4" />
               <//>
             </div>
           </div>

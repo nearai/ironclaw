@@ -33,6 +33,8 @@ mod budget;
 mod budget_events;
 mod bundled_skills;
 mod communication_context;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+mod credential_refresh_worker;
 mod default_system_prompt;
 mod error;
 mod extension_activation_credentials;
@@ -81,6 +83,8 @@ mod outbound_delivery_capability_surface;
 mod outbound_preferences;
 mod product_auth_durable;
 mod product_auth_providers;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+mod product_auth_refresh_lock;
 mod product_auth_runtime_credentials;
 #[cfg(feature = "webui-v2-beta")]
 mod product_auth_serve;
@@ -106,6 +110,7 @@ mod readiness;
 mod runtime;
 mod runtime_input;
 mod runtime_profile_approval_policy;
+mod skill_learning;
 mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_actor_identity;
@@ -137,6 +142,8 @@ mod slack_personal_binding_pairing_serve;
 mod slack_personal_binding_serve;
 #[cfg(feature = "slack-v2-host-beta")]
 pub mod slack_serve;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_setup;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 mod trace_capture;
@@ -192,6 +199,7 @@ pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
+pub use ironclaw_reborn::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use ironclaw_runtime_policy::{
     ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
@@ -212,9 +220,9 @@ pub use llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
 #[cfg(feature = "root-llm-provider")]
 pub use llm_key_store::{LlmKeyStore, LlmKeyStoreError};
 pub use local_runtime_profile::{
-    RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions, local_dev_runtime_policy,
-    local_dev_yolo_runtime_policy, local_runtime_build_input,
-    local_runtime_build_input_with_options,
+    RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions,
+    hosted_single_tenant_runtime_policy, local_dev_runtime_policy, local_dev_yolo_runtime_policy,
+    local_runtime_build_input, local_runtime_build_input_with_options,
 };
 pub use nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
@@ -254,9 +262,10 @@ pub use runtime::{
     RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
 };
 pub use runtime_input::{
-    DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings,
-    RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck, TriggerFireAccessChecker,
-    TriggerFireAccessDecision, TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
+    CredentialRefreshSettings, DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
+    DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
+    TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
+    TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
 };
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
@@ -292,9 +301,10 @@ pub use slack_egress::{
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_host_beta::{
     SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
-    SlackHostBetaConfigInput, SlackHostBetaMounts, build_slack_events_route_mount,
+    SlackHostBetaConfigInput, SlackHostBetaLegacySetup, SlackHostBetaMounts,
+    SlackHostBetaRuntimeConfig, build_slack_events_route_mount,
     build_slack_events_route_mount_with_actor_user_resolver, build_slack_host_beta_mounts,
-    build_triggered_run_delivery_hook,
+    build_slack_host_beta_runtime_mounts, build_triggered_run_delivery_hook,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding::{
@@ -785,6 +795,11 @@ pub(crate) fn slack_host_state_mount_view(
             MountPermissions::read_write_list_delete(),
         ),
         MountGrant::new(
+            MountAlias::new("/tenant-shared/slack-setup")?,
+            VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-setup"))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
             MountAlias::new("/engine/product_workflow/idempotency")?,
             VirtualPath::new(format!(
                 "/tenants/{tenant_id}/shared/slack-product-workflow/idempotency"
@@ -1039,6 +1054,11 @@ mod mount_view_tests {
                 "slack-channel-routes/install/team/route.json",
             ),
             (
+                "/tenant-shared/slack-setup",
+                "/tenant-shared/slack-setup/installation.json",
+                "slack-setup/installation.json",
+            ),
+            (
                 "/engine/product_workflow/idempotency",
                 "/engine/product_workflow/idempotency/actions/action.json",
                 "slack-product-workflow/idempotency/actions/action.json",
@@ -1242,6 +1262,7 @@ mod two_tenant_isolation_tests {
                 scope_a.clone(),
                 handle.clone(),
                 SecretMaterial::from("alice-secret".to_string()),
+                None,
             )
             .await
             .unwrap();
@@ -1250,6 +1271,7 @@ mod two_tenant_isolation_tests {
                 scope_b.clone(),
                 handle.clone(),
                 SecretMaterial::from("bob-secret".to_string()),
+                None,
             )
             .await
             .unwrap();

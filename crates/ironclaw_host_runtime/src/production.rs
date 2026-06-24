@@ -1982,7 +1982,15 @@ fn failure_from(
 ) -> RuntimeCapabilityFailure {
     let kind = failure_kind_from(&error);
     let message = sanitized_failure_message(&error);
-    RuntimeCapabilityFailure::new(capability_id, kind, message)
+    let detail = match error {
+        CapabilityInvocationError::Dispatch { detail, .. } => detail,
+        _ => None,
+    };
+    let mut failure = RuntimeCapabilityFailure::new(capability_id, kind, message);
+    if let Some(detail) = detail {
+        failure = failure.with_detail(detail);
+    }
+    failure
 }
 
 /// Returns a stable, redacted summary message for a capability invocation
@@ -2169,6 +2177,7 @@ mod tests {
         CapabilityInvocationError::Dispatch {
             kind,
             safe_summary: None,
+            detail: None,
         }
     }
 
@@ -2459,6 +2468,7 @@ output_schema_ref = "schemas/test.output.json"
                 "apply_patch failed for path workspace main.rs: old_string matched 0 times"
                     .to_string(),
             ),
+            detail: None,
         };
 
         assert_eq!(
@@ -2472,11 +2482,41 @@ output_schema_ref = "schemas/test.output.json"
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
             safe_summary: Some("read_file failed for path workspace api_key.txt".to_string()),
+            detail: None,
         };
 
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
         assert_eq!(message, "dispatch failed: OperationFailed");
         assert!(!message.contains("api_key"));
+    }
+
+    #[test]
+    fn failure_from_preserves_dispatch_detail() {
+        let issue = ironclaw_host_api::DispatchInputIssue::new(
+            "schedule.kind",
+            ironclaw_host_api::DispatchInputIssueCode::MissingRequired,
+        )
+        .expected("cron or once");
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            safe_summary: Some("trigger_create input failed validation".to_string()),
+            detail: Some(ironclaw_host_api::DispatchFailureDetail::InvalidInput {
+                issues: vec![issue.clone()],
+            }),
+        };
+
+        let failure = failure_from(
+            error,
+            CapabilityId::new("builtin.trigger_create").expect("valid capability id"),
+        );
+
+        assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+        assert_eq!(
+            failure.detail,
+            Some(ironclaw_host_api::DispatchFailureDetail::InvalidInput {
+                issues: vec![issue]
+            })
+        );
     }
 
     #[test]

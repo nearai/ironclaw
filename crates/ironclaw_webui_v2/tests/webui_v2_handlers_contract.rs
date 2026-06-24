@@ -31,16 +31,16 @@ use ironclaw_product_workflow::{
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, ProjectFsEntry,
     ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RebornAddMemberRequest,
     RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
-    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
-    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
+    RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
+    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
@@ -226,7 +226,11 @@ struct StubServices {
     cancel_run_calls: Mutex<Vec<WebUiCancelRunRequest>>,
     resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
+    pause_automation_calls: Mutex<Vec<String>>,
+    resume_automation_calls: Mutex<Vec<String>>,
+    delete_automation_calls: Mutex<Vec<String>>,
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
+    next_delete_automation_error: Mutex<Option<RebornServicesError>>,
     get_outbound_preferences_calls: Mutex<usize>,
     set_outbound_preferences_calls: Mutex<Vec<RebornSetOutboundPreferencesRequest>>,
     next_set_outbound_preferences_error: Mutex<Option<RebornServicesError>>,
@@ -265,6 +269,9 @@ struct StubServices {
     /// Queued response for the next `submit_turn` call. When `Some`, the value
     /// is taken and returned instead of the default `Submitted` response.
     next_submit_response: Mutex<Option<RebornSubmitTurnResponse>>,
+    /// Records the `enabled` value each `set_auto_activate_learned` call passes,
+    /// so the handler test can assert the request body reaches the facade.
+    set_auto_activate_learned_calls: Mutex<Vec<bool>>,
     // Project routes — recorded requests so path-param-override behavior can be
     // asserted (the path id must win over any body value).
     update_project_calls: Mutex<Vec<RebornUpdateProjectRequest>>,
@@ -287,6 +294,10 @@ impl StubServices {
 
     fn fail_list_automations(&self, error: RebornServicesError) {
         *self.next_list_automations_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_delete_automation(&self, error: RebornServicesError) {
+        *self.next_delete_automation_error.lock().expect("lock") = Some(error);
     }
 
     fn fail_set_outbound_preferences(&self, error: RebornServicesError) {
@@ -705,6 +716,67 @@ impl RebornServicesApi for StubServices {
         })
     }
 
+    async fn pause_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.pause_automation_calls
+            .lock()
+            .expect("lock")
+            .push(automation_id);
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "automation-paused",
+                "Daily status",
+                "0 9 * * *",
+            )),
+        })
+    }
+
+    async fn resume_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.resume_automation_calls
+            .lock()
+            .expect("lock")
+            .push(automation_id);
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: Some(automation_info(
+                "automation-resumed",
+                "Daily status",
+                "0 9 * * *",
+            )),
+        })
+    }
+
+    async fn delete_automation(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.delete_automation_calls
+            .lock()
+            .expect("lock")
+            .push(automation_id);
+        if let Some(error) = self
+            .next_delete_automation_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(error);
+        }
+        Ok(RebornAutomationMutationResponse {
+            updated: true,
+            automation: None,
+        })
+    }
+
     async fn list_extensions(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -762,6 +834,24 @@ impl RebornServicesApi for StubServices {
         _name: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
+    }
+
+    async fn set_auto_activate_learned(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.set_auto_activate_learned_calls
+            .lock()
+            .expect("lock")
+            .push(enabled);
+        Ok(RebornSkillActionResponse {
+            success: true,
+            message: format!(
+                "Default skill auto-activation {}",
+                if enabled { "enabled" } else { "disabled" }
+            ),
+        })
     }
 
     async fn list_connectable_channels(
@@ -1425,6 +1515,40 @@ async fn send_message_rejected_busy_wire_shape() {
     );
 }
 
+// Test-through-the-caller: the handler must forward the request body's
+// `enabled` flag to `RebornServicesApi::set_auto_activate_learned`, not a
+// hardcoded value. Posting `false` and asserting the facade recorded `false`
+// catches the arg-loss class (e.g. a handler that always passes `true`).
+#[tokio::test]
+async fn set_auto_activate_learned_forwards_enabled_flag_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/auto-activate-learned")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":false}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["success"], true);
+    assert_eq!(
+        *services
+            .set_auto_activate_learned_calls
+            .lock()
+            .expect("lock"),
+        vec![false],
+        "handler must forward body.enabled=false to the facade verbatim"
+    );
+}
+
 // Replay-path variant: run metadata is None — wire must omit active_run_id, status,
 // event_cursor so the client receives no fabricated run reference it cannot query.
 #[tokio::test]
@@ -1868,6 +1992,66 @@ async fn list_automations_omits_limits_and_forwards_none() {
 }
 
 #[tokio::test]
+async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let pause_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha/pause")
+                .body(Body::empty())
+                .expect("pause request"),
+        )
+        .await
+        .expect("pause oneshot");
+    assert_eq!(pause_response.status(), StatusCode::OK);
+    let pause_body = read_json(pause_response).await;
+    assert_eq!(pause_body["updated"], true);
+    assert_eq!(
+        pause_body["automation"]["automation_id"],
+        "automation-paused"
+    );
+
+    let resume_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha/resume")
+                .body(Body::empty())
+                .expect("resume request"),
+        )
+        .await
+        .expect("resume oneshot");
+    assert_eq!(resume_response.status(), StatusCode::OK);
+    let resume_body = read_json(resume_response).await;
+    assert_eq!(resume_body["updated"], true);
+    assert_eq!(
+        resume_body["automation"]["automation_id"],
+        "automation-resumed"
+    );
+
+    assert_eq!(
+        services
+            .pause_automation_calls
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["automation-alpha".to_string()]
+    );
+    assert_eq!(
+        services
+            .resume_automation_calls
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["automation-alpha".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
     // The facade's default `trace_credits` body reads contributor-local
     // Trace Commons state scoped by the authenticated caller's user id.
@@ -1918,6 +2102,99 @@ async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
             .expect("note")
             .contains("authoritative ledger is server-side")
     );
+}
+
+#[tokio::test]
+async fn delete_automation_dispatches_path_id_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/automations/automation-alpha")
+                .body(Body::empty())
+                .expect("delete request"),
+        )
+        .await
+        .expect("delete oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["updated"], true);
+    assert!(body.get("automation").is_none() || body["automation"].is_null());
+    assert_eq!(
+        services
+            .delete_automation_calls
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["automation-alpha".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn delete_automation_error_maps_to_http_status() {
+    for (error, expected_status, expected_code, expected_kind, expected_retryable) in [
+        (
+            RebornServicesError {
+                code: RebornServicesErrorCode::Forbidden,
+                kind: RebornServicesErrorKind::ParticipantDenied,
+                status_code: 403,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            },
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "participant_denied",
+            false,
+        ),
+        (
+            RebornServicesError {
+                code: RebornServicesErrorCode::Unavailable,
+                kind: RebornServicesErrorKind::ServiceUnavailable,
+                status_code: 503,
+                retryable: true,
+                field: None,
+                validation_code: None,
+            },
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "service_unavailable",
+            true,
+        ),
+    ] {
+        let services = Arc::new(StubServices::default());
+        services.fail_delete_automation(error);
+        let router = router_with(services.clone());
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/webchat/v2/automations/automation-alpha")
+                    .body(Body::empty())
+                    .expect("delete request"),
+            )
+            .await
+            .expect("delete oneshot");
+
+        assert_eq!(response.status(), expected_status);
+        let body = read_json(response).await;
+        assert_eq!(body["error"], expected_code);
+        assert_eq!(body["kind"], expected_kind);
+        assert_eq!(body["retryable"], expected_retryable);
+        assert_eq!(
+            services
+                .delete_automation_calls
+                .lock()
+                .expect("lock")
+                .clone(),
+            vec!["automation-alpha".to_string()]
+        );
+    }
 }
 
 #[tokio::test]
@@ -2003,6 +2280,105 @@ async fn list_automations_error_maps_to_http_status() {
     assert_eq!(body["error"], "forbidden");
     assert_eq!(body["kind"], "participant_denied");
     assert_eq!(body["retryable"], false);
+}
+
+#[tokio::test]
+async fn list_automations_include_completed_true_forwarded_to_facade() {
+    // ?include_completed=true must be parsed and forwarded as `true` in the
+    // WebUiListAutomationsRequest so the facade can widen its exclusion slice.
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations?include_completed=true")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services
+        .list_automations_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].include_completed,
+        "include_completed=true must be forwarded to the facade"
+    );
+}
+
+#[tokio::test]
+async fn list_automations_include_completed_absent_defaults_to_false() {
+    // No ?include_completed query param → `include_completed` must default to
+    // false so existing callers that do not set the flag are unaffected.
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services
+        .list_automations_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        !calls[0].include_completed,
+        "absent include_completed must default to false (active-only)"
+    );
+}
+
+// Regression: malformed `?include_completed=garbage` must be rejected at the
+// Query extractor level (400 Bad Request) before the handler or facade run.
+// The field is a plain `bool`; `serde_urlencoded` does not silently default
+// unparseable values — it returns a deserialization error, which axum maps to
+// 400. There is no silent fallback to `false`.
+#[tokio::test]
+async fn list_automations_malformed_include_completed_rejected_with_400() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations?include_completed=notabool")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "malformed include_completed must be rejected at query deserialization with 400, \
+         not silently defaulted to false"
+    );
+    assert!(
+        services
+            .list_automations_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "malformed include_completed must be rejected before reaching the facade"
+    );
 }
 
 #[tokio::test]
@@ -2298,6 +2674,43 @@ async fn get_session_returns_false_operator_capability_when_capabilities_default
     assert_eq!(body["capabilities"]["operator_webui_config"], false);
 }
 
+// The browser hides the Projects surface (sidebar entry + `/projects` route)
+// unless the deployment opts in. The gate is delivered through the session
+// response's `features.reborn_projects` field, fed from
+// `WebUiV2State::with_reborn_projects_enabled` at composition. Drive the real
+// router (not just the state accessor) so a handler that forgot to surface the
+// flag is caught — see `.claude/rules/testing.md` "Test Through the Caller".
+#[tokio::test]
+async fn get_session_reports_reborn_projects_feature_from_state_flag() {
+    for enabled in [false, true] {
+        let services = Arc::new(StubServices::default());
+        let router = webui_v2_router(
+            WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_reborn_projects_enabled(enabled),
+        )
+        .layer(axum::Extension(caller()))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/webchat/v2/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body["features"]["reborn_projects"], enabled,
+            "features.reborn_projects must mirror the state flag (enabled={enabled})"
+        );
+    }
+}
+
 #[tokio::test]
 async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
     let services = Arc::new(StubServices::default());
@@ -2397,7 +2810,7 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/api/webchat/v2/operator/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack")
+                .uri("/api/webchat/v2/operator/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack&follow=true")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -2467,6 +2880,8 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
     );
     assert_eq!(operator_log_calls[0].tool_name.as_deref(), Some("shell"));
     assert_eq!(operator_log_calls[0].source.as_deref(), Some("slack"));
+    assert!(operator_log_calls[0].follow);
+    assert!(!operator_log_calls[0].tail);
     drop(operator_log_calls);
     assert_eq!(
         services
@@ -4585,8 +5000,8 @@ fn sample_project_info(project_id: &str) -> RebornProjectInfo {
         metadata: serde_json::json!({}),
         state: RebornProjectState::Active,
         role: RebornProjectRole::Owner,
-        created_at: "2026-06-17T00:00:00Z".to_string(),
-        updated_at: "2026-06-17T00:00:00Z".to_string(),
+        created_at: "2026-06-17T00:00:00Z".parse().expect("created at"),
+        updated_at: "2026-06-17T00:00:00Z".parse().expect("updated at"),
     }
 }
 
@@ -4596,8 +5011,8 @@ fn sample_member_info(user_id: &str) -> RebornProjectMemberInfo {
         role: RebornProjectRole::Editor,
         status: RebornProjectMemberStatus::Active,
         granted_by: "user-alpha".to_string(),
-        created_at: "2026-06-17T00:00:00Z".to_string(),
-        updated_at: "2026-06-17T00:00:00Z".to_string(),
+        created_at: "2026-06-17T00:00:00Z".parse().expect("created at"),
+        updated_at: "2026-06-17T00:00:00Z".parse().expect("updated at"),
     }
 }
 

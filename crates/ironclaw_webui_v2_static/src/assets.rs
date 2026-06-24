@@ -273,11 +273,15 @@ mod tests {
         assert!(picker.contains("listSlackAllowedChannels"));
         assert!(picker.contains("saveSlackAllowedChannels(channels)"));
 
+        let setup_panel = asset_text("js/components/slack-setup-panel.js");
+        assert!(setup_panel.contains("SlackChannelPicker"));
+        assert!(setup_panel.contains("<${SlackChannelPicker} action=${action} />"));
+
         let channels_tab = asset_text("js/pages/extensions/components/channels-tab.js");
         assert!(channels_tab.contains("showLegacySlackConnectActions"));
         assert!(channels_tab.contains("admin_managed_channels"));
         assert!(channels_tab.contains("inbound_proof_code"));
-        assert!(channels_tab.contains("SlackChannelPicker"));
+        assert!(channels_tab.contains("SlackAdminManagedSection"));
         assert!(channels_tab.contains("SlackPairingSection"));
         assert!(channels_tab.contains("findSlackConnectActions"));
         assert!(channels_tab.contains("slackConnectActions"));
@@ -301,28 +305,87 @@ mod tests {
 
         let api = asset_text("js/lib/api.js");
         assert!(api.contains("listAutomations"));
+        assert!(api.contains("pauseAutomation"));
+        assert!(api.contains("resumeAutomation"));
+        assert!(api.contains("deleteAutomation"));
         assert!(api.contains("/automations"));
+        assert!(api.contains("/pause"));
+        assert!(api.contains("/resume"));
+        assert!(api.contains(r#"method: "DELETE""#));
         assert!(api.contains("getOutboundPreferences"));
         assert!(api.contains("setOutboundPreferences"));
         assert!(api.contains("/outbound/preferences"));
         assert!(api.contains("/outbound/targets"));
 
         let page = asset_text("js/pages/automations/automations-page.js");
-        assert!(page.contains("AutomationsSummaryStrip"));
         assert!(page.contains("useOutboundDeliveryDefaults"));
         // Delivery defaults moved off the page into a modal opened from the list
         // header; the page now threads the hook state down as `deliveryState`.
         assert!(page.contains("deliveryState"));
         assert!(page.contains("AutomationsList"));
 
-        // The list owns the delivery entrypoint + modal.
+        // The list owns the summary strip (rendered under the header), plus the
+        // delivery entrypoint + modal.
         let list = asset_text("js/pages/automations/components/automations-list.js");
+        assert!(list.contains("AutomationsSummaryStrip"));
         assert!(list.contains("AutomationDeliveryDefaultsModal"));
 
-        // The modal renders the shared delivery form content.
+        // The delivery modal renders the shared delivery form content.
         let defaults_modal =
             asset_text("js/pages/automations/components/automation-delivery-defaults-modal.js");
         assert!(defaults_modal.contains("DeliveryDefaultsContent"));
+
+        // Smart-refetch wiring lives in the hook.
+        let automations_hook = asset_text("js/pages/automations/hooks/useAutomations.js");
+        assert!(automations_hook.contains("AUTOMATIONS_BASE_REFETCH_MS"));
+        assert!(automations_hook.contains("nextAutomationsRefetchDelay"));
+        assert!(automations_hook.contains("query.refetch()"));
+
+        // List rows render the unified status pill from the presenter fields.
+        let row = asset_text("js/pages/automations/components/automation-row.js");
+        assert!(row.contains("primary_status_label"));
+        assert!(row.contains("primary_status_tone"));
+
+        // The redesign surfaces pause/resume/delete from the per-automation
+        // detail modal (the legacy side panel was replaced by the modal +
+        // full-page detail view).
+        let detail_modal =
+            asset_text("js/pages/automations/components/automation-detail-modal.js");
+        assert!(detail_modal.contains("onPauseAutomation"));
+        assert!(detail_modal.contains("onResumeAutomation"));
+        assert!(detail_modal.contains("onDeleteAutomation"));
+        assert!(detail_modal.contains("automation.state === \"active\""));
+        assert!(detail_modal.contains("automation.state === \"scheduled\""));
+        assert!(detail_modal.contains("primary_status_label"));
+        assert!(detail_modal.contains("primary_status_tone"));
+        assert!(detail_modal.contains("window.confirm"));
+
+        let app_bundle = asset_text("dist/app.js");
+        let app_bundle_contains_encoded_automation_route = |suffix: &str| {
+            app_bundle
+                .split("/automations/${encodeURIComponent(")
+                .any(|tail| tail.contains(&format!(")}}/{suffix}")))
+        };
+        assert!(
+            app_bundle_contains_encoded_automation_route("pause"),
+            "served WebUI bundle must include the automation pause endpoint; run frontend build after editing static/js/**"
+        );
+        assert!(
+            app_bundle_contains_encoded_automation_route("resume"),
+            "served WebUI bundle must include the automation resume endpoint; run frontend build after editing static/js/**"
+        );
+        let app_bundle_contains_encoded_automation_delete = app_bundle
+            .split("/automations/${encodeURIComponent(")
+            .any(|tail| {
+                let near = tail.chars().take(220).collect::<String>();
+                near.contains("method:\"DELETE\"")
+                    && !near.contains("/pause")
+                    && !near.contains("/resume")
+            });
+        assert!(
+            app_bundle_contains_encoded_automation_delete,
+            "served WebUI bundle must include the automation delete endpoint; run frontend build after editing static/js/**"
+        );
 
         let defaults_panel =
             asset_text("js/pages/automations/components/automation-delivery-defaults-panel.js");

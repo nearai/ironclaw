@@ -131,6 +131,8 @@ registerPack("en", {
   "approval.approveAndAlways": "Approve & always allow",
   "approval.alwaysAllowToolLabel": "Always allow {tool} without asking",
   "approval.thisTool": "this tool",
+  "approval.viewFullCommand": "View full command",
+  "approval.showCommandPreview": "Show preview",
   // Chat — tool activity
   "tool.tabDetails": "Details",
   "tool.tabParameters": "Parameters",
@@ -688,6 +690,7 @@ registerPack("en", {
   "automations.filter.running": "Running",
   "automations.filter.failures": "Failures",
   "automations.filter.paused": "Paused",
+  "automations.filter.completed": "Completed",
   "automations.refresh": "Refresh automations",
   "automations.error.loadFailed": "Unable to load automations",
   "automations.schedulerOff.title": "Scheduling is turned off",
@@ -702,6 +705,7 @@ registerPack("en", {
   "automations.schedule.weekdayAt": "{weekday} at {time}",
   "automations.schedule.monthlyAt": "Day {day} of each month at {time}",
   "automations.schedule.dateAt": "{date} at {time}",
+  "automations.schedule.onceAt": "Once on {datetime}",
   "automations.badge.muted": "Muted",
   "automations.badge.signal": "Signal",
   "automations.badge.info": "Info",
@@ -740,7 +744,7 @@ registerPack("en", {
   "automations.delivery.changeTarget": "Change target",
   "automations.delivery.availableTargets": "Available targets",
   "automations.delivery.none": "None",
-  "automations.delivery.webOption": "Web app only (no external delivery)",
+  "automations.delivery.webOption": "Web app only",
   "automations.delivery.webOptionDesc":
     "Results are stored in the run history. No DM or notification is sent.",
   "automations.delivery.unpairedNotice": "Slack DM — not available",
@@ -830,6 +834,9 @@ registerPack("en", {
   "automations.detail.run": "run",
   "automations.detail.noThread": "No thread attached",
   "automations.row.lastRun": "Last run",
+  "automations.sort.label": "Sort",
+  "automations.detail.idLabel": "ID",
+  "automations.detail.copyId": "Copy ID",
 
   // Routines page
   "routines.explorer": "Tasks",
@@ -869,14 +876,14 @@ registerPack("en", {
   "projects.startProject": "Start a project",
   "projects.searchPlaceholder": "Search projects",
   "projects.creationDraft":
-    "Create a new project for me. I want to set up an autonomous workspace for: ",
+    "Create a new project for me. I want to set up a project for: ",
   "projects.chatAutoFail":
     "Unable to prepare chat automatically. Opening chat anyway.",
-  "projects.openWorkspace": "Open workspace",
-  "projects.openGeneralWorkspace": "Open general workspace",
+  "projects.openWorkspace": "Open project",
+  "projects.openGeneralWorkspace": "Open project",
   "projects.noDescription":
-    "No project description yet. The workspace is still being shaped by active missions and thread history.",
-  "projects.general.label": "General workspace",
+    "No project description yet. The project is still being shaped by recent activity and thread history.",
+  "projects.general.label": "General project",
   "projects.general.title": "Default project control room",
   "projects.general.desc":
     "Shared context, ad hoc work, and the catch-all runtime path for threads that are not yet promoted into a named project.",

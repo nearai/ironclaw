@@ -137,15 +137,19 @@ mod tests {
     ) -> HostVisibleCapabilityRequest {
         let policy = crate::local_dev_capability_policy::local_dev_capability_policy()
             .expect("policy parses");
+        let empty_mounts = MountView::default();
 
         local_dev_visible_capability_request(
             run_context,
             fallback_user_id,
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            &policy,
-            &LocalDevExtensionSurface::default(),
+            LocalDevVisibleCapabilityInputs {
+                workspace_mounts: &empty_mounts,
+                skill_mounts: &empty_mounts,
+                memory_mounts: &empty_mounts,
+                system_extensions_lifecycle_mounts: &empty_mounts,
+                policy: &policy,
+                extension_surface: &LocalDevExtensionSurface::default(),
+            },
         )
         .expect("visible request")
     }
@@ -817,6 +821,9 @@ mod tests {
         let memory_mounts =
             crate::local_dev_mounts::memory_mount_view(MountPermissions::read_write_list_delete())
                 .expect("memory mounts build");
+        let system_extensions_lifecycle_mounts =
+            crate::local_dev_mounts::system_extensions_lifecycle_mount_view()
+                .expect("system extensions lifecycle mounts build");
         assert!(workspace_mounts.mounts.iter().all(|mount| {
             mount.alias.as_str() != "/skills" && mount.alias.as_str() != "/system/skills"
         }));
@@ -840,6 +847,7 @@ mod tests {
             &workspace_mounts,
             &skill_mounts,
             &memory_mounts,
+            &system_extensions_lifecycle_mounts,
         );
         let grant_for = |capability_id: &str| {
             grants
@@ -913,7 +921,10 @@ mod tests {
             extension_search_grant.constraints.allowed_effects,
             vec![EffectKind::DispatchCapability, EffectKind::ReadFilesystem]
         );
-        assert!(extension_search_grant.constraints.mounts.mounts.is_empty());
+        assert_eq!(
+            extension_search_grant.constraints.mounts,
+            system_extensions_lifecycle_mounts
+        );
         assert_eq!(
             extension_search_grant.constraints.network,
             NetworkPolicy::default()
@@ -925,7 +936,7 @@ mod tests {
         ] {
             let grant = grant_for(capability_id);
             assert_eq!(grant.constraints.allowed_effects, local_dev_allowed_effects);
-            assert!(grant.constraints.mounts.mounts.is_empty());
+            assert_eq!(grant.constraints.mounts, system_extensions_lifecycle_mounts);
             assert_eq!(grant.constraints.network, NetworkPolicy::default());
         }
         let extension_activate_grant = grant_for(EXTENSION_ACTIVATE_CAPABILITY_ID);
@@ -938,12 +949,9 @@ mod tests {
                 EffectKind::Network
             ]
         );
-        assert!(
-            extension_activate_grant
-                .constraints
-                .mounts
-                .mounts
-                .is_empty()
+        assert_eq!(
+            extension_activate_grant.constraints.mounts,
+            system_extensions_lifecycle_mounts
         );
         assert_eq!(
             extension_activate_grant
@@ -1070,6 +1078,9 @@ mod tests {
             policy,
             workspace_mounts: local_runtime.workspace_mounts.clone(),
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -1078,6 +1089,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
@@ -1216,6 +1228,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_dev_project_create_tool_persists_project_visible_to_owner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-project-create-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let runtime = services.host_runtime.clone().expect("host runtime");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+        let factory = LocalDevLoopCapabilityPortFactory {
+            runtime,
+            fallback_user_id: UserId::new("project-create-fallback-user").expect("user id"),
+            policy: Arc::clone(&local_runtime.capability_policy),
+            workspace_mounts: local_runtime.workspace_mounts.clone(),
+            memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
+            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            input_resolver,
+            result_writer,
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            skill_activation_source: None,
+            project_service: Arc::clone(&local_runtime.project_service),
+            trajectory_observer: None,
+            outbound_preferences_facade: None,
+            outbound_delivery_target_set_requires_approval: false,
+            approval_requests: local_runtime.approval_requests.clone(),
+            capability_leases: local_runtime.capability_leases.clone(),
+        };
+
+        let tenant_id = TenantId::new("tenant-project-create").expect("tenant id");
+        let owner_user_id = UserId::new("project-create-owner").expect("user id");
+        let run_context = run_context_with_scope(TurnScope::new_with_owner(
+            tenant_id.clone(),
+            Some(AgentId::new("agent-project-create").expect("agent id")),
+            Some(ProjectId::new("project-project-create").expect("project id")),
+            ThreadId::new("thread-project-create").expect("thread id"),
+            Some(owner_user_id.clone()),
+        ))
+        .await;
+
+        let port = factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+        assert!(
+            surface
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.capability_id.as_str()
+                    == PROJECT_CREATE_CAPABILITY_ID),
+            "project_create should be an exposed synthetic capability"
+        );
+
+        // The name deliberately contains payload/path delimiters (`/ < >`), which
+        // are valid in a project name but forbidden in a tool-result safe summary.
+        // A summary that interpolated the raw name would fail validation in
+        // `append_capability_result_ref` and terminate the whole run; this locks
+        // that regression — the capability must still complete.
+        let candidate = port
+            .register_provider_tool_call(provider_tool_call_with_name(
+                "builtin__project_create",
+                serde_json::json!({
+                    "name": "Build /api <svc>",
+                    "description": "Ship the project feature"
+                }),
+            ))
+            .await
+            .expect("project_create call stages");
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("project_create invokes");
+        let message = match outcome {
+            CapabilityOutcome::Completed(message) => message,
+            outcome => panic!("project_create should complete, got {outcome:?}"),
+        };
+        // The executor passes this safe summary to `append_capability_result_ref`,
+        // which validates it through `LoopSafeSummary`/`ToolResultSafeSummary`
+        // before writing the result ref; an unsafe summary there is mapped to a
+        // terminal `HostUnavailable` that kills the whole run. Re-run that exact
+        // validation here so a summary that interpolated the delimiter-bearing
+        // project name (the regression) fails this test.
+        ironclaw_turns::run_profile::LoopSafeSummary::new(message.safe_summary.clone())
+            .expect("capability safe summary must pass result-ref validation");
+        let result_ref = message.result_ref;
+        let output = capability_io
+            .result_output(result_ref.as_str())
+            .expect("result read succeeds")
+            .expect("result output exists");
+        assert_eq!(output["name"], "Build /api <svc>");
+        assert!(
+            output["project_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty()),
+            "tool output should carry the new project id"
+        );
+
+        // The capability writes a real control-plane entity, not a workspace
+        // file: the owner can now see the project through the same
+        // access-controlled `ProjectService` facade the WebUI lists from.
+        let listed = local_runtime
+            .project_service
+            .list_projects(
+                ironclaw_product_workflow::ProjectCaller {
+                    tenant_id: tenant_id.clone(),
+                    user_id: owner_user_id.clone(),
+                },
+                ironclaw_product_workflow::RebornListProjectsRequest { limit: None },
+            )
+            .await
+            .expect("list projects for owner");
+        assert!(
+            listed
+                .projects
+                .iter()
+                .any(|project| project.name == "Build /api <svc>"),
+            "agent-created project must be visible to its owner"
+        );
+    }
+
+    #[tokio::test]
     async fn local_dev_outbound_delivery_capabilities_use_provider_backed_facade() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
@@ -1274,6 +1426,9 @@ mod tests {
             policy,
             workspace_mounts: local_runtime.workspace_mounts.clone(),
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -1282,6 +1437,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: Some(outbound_preferences_facade),
             outbound_delivery_target_set_requires_approval: true,
+            project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
@@ -1474,6 +1630,7 @@ mod tests {
                 &local_runtime.workspace_mounts,
                 &local_runtime.skill_mounts,
                 &local_runtime.memory_mounts,
+                &local_runtime.system_extensions_lifecycle_mounts,
             )
             .expect("outbound delivery approval lease terms");
         ApprovalResolver::new(
@@ -1734,6 +1891,9 @@ mod tests {
             policy,
             workspace_mounts: local_runtime.workspace_mounts.clone(),
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -1742,6 +1902,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
@@ -1831,6 +1992,9 @@ mod tests {
             policy,
             workspace_mounts,
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -1839,6 +2003,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
@@ -2058,6 +2223,9 @@ mod tests {
             policy,
             workspace_mounts,
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -2066,6 +2234,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
@@ -2155,6 +2324,9 @@ mod tests {
             policy,
             workspace_mounts,
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -2163,6 +2335,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
@@ -2451,6 +2624,83 @@ mod tests {
         assert!(
             tool_definition_ids.contains(&"github.search_issues"),
             "refreshed provider tools should include github after activation"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_capability_port_extension_search_reads_system_catalog() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-extension-search-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let run_context = run_context("extension-search-loop-port").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            thread_scope,
+            UserId::new("local-dev-extension-search-user").expect("user id"),
+            Arc::new(
+                crate::local_dev_capability_policy::local_dev_capability_policy()
+                    .expect("policy parses"),
+            ),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
+            None,
+            None,
+        )
+        .expect("local-dev capability wiring");
+        let port = wiring
+            .capability_factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+        let tool_definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id.as_str() == EXTENSION_SEARCH_CAPABILITY_ID)
+            .expect("extension_search tool definition");
+
+        let candidate = port
+            .register_provider_tool_call(provider_tool_call_with_name(
+                tool_definition.name,
+                serde_json::json!({"query": "gmail"}),
+            ))
+            .await
+            .expect("extension_search provider tool call stages");
+        assert_eq!(
+            candidate.capability_id.as_str(),
+            EXTENSION_SEARCH_CAPABILITY_ID
+        );
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("extension_search invocation");
+
+        assert!(
+            matches!(outcome, CapabilityOutcome::Completed(_)),
+            "extension_search should be authorized to read the system extension catalog, got {outcome:?}"
         );
     }
 

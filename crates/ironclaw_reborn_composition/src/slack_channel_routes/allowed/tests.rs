@@ -2,8 +2,10 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::{AgentId, SecretHandle, TenantId, UserId};
 use ironclaw_product_adapters::AdapterInstallationId;
+use ironclaw_secrets::InMemorySecretStore;
+use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 use super::*;
@@ -11,6 +13,9 @@ use crate::slack_channel_routes::{
     DEFAULT_LIST_LIMIT, InMemorySlackChannelRouteStore, SlackChannelRouteError,
     SlackChannelRouteKey, SlackChannelRouteListPage, SlackChannelRouteStore,
     slack_channel_route_admin_route_mount,
+};
+use crate::slack_setup::{
+    SlackInstallationSetup, SlackInstallationSetupStore, SlackSetupError, SlackSetupService,
 };
 
 const TENANT: &str = "tenant:slack-routes";
@@ -366,6 +371,52 @@ async fn allowed_channel_admin_preserves_existing_unmanaged_subject_for_same_cha
 }
 
 #[tokio::test]
+async fn dynamic_allowed_channel_admin_rejects_stale_existing_subject_after_setup_change() {
+    let store = Arc::new(InMemorySlackChannelRouteStore::new());
+    let setup_store = Arc::new(MemorySetupStore::new(setup_record(
+        "user:slack-operator",
+        Some("user:current-shared-agent"),
+    )));
+    let mount =
+        slack_channel_route_admin_route_mount(dynamic_route_config(store.clone(), setup_store));
+    let tenant_id = TenantId::new(TENANT).expect("tenant");
+    let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
+    let stale_key = SlackChannelRouteKey::new(
+        tenant_id.clone(),
+        installation_id.clone(),
+        TEAM.to_string(),
+        "C0RAW".to_string(),
+    )
+    .expect("raw key");
+    store
+        .upsert_route(
+            stale_key.clone(),
+            UserId::new("user:old-shared-agent").expect("stale subject"),
+        )
+        .await
+        .expect("seed stale route");
+
+    let response = mount
+        .protected
+        .oneshot(request(
+            "PUT",
+            r#"{"channels":[{"channel_id":"C0RAW","subject_user_id":"user:old-shared-agent"}]}"#,
+            TENANT,
+        ))
+        .await
+        .expect("save responds");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        store
+            .resolve_subject_user_id(&stale_key)
+            .await
+            .expect("resolve stale route"),
+        Some(UserId::new("user:old-shared-agent").expect("stale subject"))
+    );
+}
+
+#[tokio::test]
 async fn allowed_channel_admin_generates_only_missing_explicit_subjects() {
     let store = Arc::new(InMemorySlackChannelRouteStore::new());
     let mount = slack_channel_route_admin_route_mount(route_config(store.clone()));
@@ -662,6 +713,66 @@ fn route_config_for(
         store,
     )
     .with_allowed_subject_user_ids([UserId::new("user:eng-team-agent").expect("subject user")])
+}
+
+fn dynamic_route_config(
+    route_store: Arc<dyn SlackChannelRouteStore>,
+    setup_store: Arc<dyn SlackInstallationSetupStore>,
+) -> SlackChannelRouteAdminRouteConfig {
+    let setup_service = Arc::new(SlackSetupService::new(
+        TenantId::new(TENANT).expect("tenant"),
+        AgentId::new("agent:slack-routes").expect("agent"),
+        None,
+        UserId::new("user:admin").expect("operator user"),
+        setup_store,
+        Arc::new(InMemorySecretStore::new()),
+    ));
+    SlackChannelRouteAdminRouteConfig::dynamic(route_store, setup_service)
+}
+
+fn setup_record(user_id: &str, shared_subject_user_id: Option<&str>) -> SlackInstallationSetup {
+    SlackInstallationSetup {
+        installation_id: INSTALLATION.to_string(),
+        team_id: TEAM.to_string(),
+        api_app_id: "A0ROUTES".to_string(),
+        user_id: user_id.to_string(),
+        shared_subject_user_id: shared_subject_user_id.map(str::to_string),
+        bot_token_handle: SecretHandle::new("slack_bot_token_test").expect("bot token handle"),
+        signing_secret_handle: SecretHandle::new("slack_signing_secret_test")
+            .expect("signing secret handle"),
+        revision: 1,
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+#[derive(Debug)]
+struct MemorySetupStore {
+    setup: RwLock<Option<SlackInstallationSetup>>,
+}
+
+impl MemorySetupStore {
+    fn new(setup: SlackInstallationSetup) -> Self {
+        Self {
+            setup: RwLock::new(Some(setup)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SlackInstallationSetupStore for MemorySetupStore {
+    async fn get_slack_installation_setup(
+        &self,
+    ) -> Result<Option<SlackInstallationSetup>, SlackSetupError> {
+        Ok(self.setup.read().await.clone())
+    }
+
+    async fn put_slack_installation_setup(
+        &self,
+        setup: &SlackInstallationSetup,
+    ) -> Result<(), SlackSetupError> {
+        *self.setup.write().await = Some(setup.clone());
+        Ok(())
+    }
 }
 
 async fn save_single_channel_subject(
