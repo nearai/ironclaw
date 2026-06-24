@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub rerun_workflow_job input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": { "pattern": "\\.\\." }
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": { "pattern": "\\.\\." }
+    },
+    "job_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "enable_debug_logging": {
+      "type": "boolean"
+    },
+    "enable_debugger": {
+      "type": "boolean"
+    }
+  },
+  "required": ["owner", "repo", "job_id"]
+}

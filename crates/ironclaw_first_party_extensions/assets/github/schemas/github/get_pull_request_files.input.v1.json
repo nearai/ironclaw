@@ -28,6 +28,19 @@
       "type": "integer",
       "minimum": 1,
       "description": "Pull request number."
+    },
+    "page": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "1-based results page."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 30,
+      "description": "Maximum number of changed files to return."
     }
   },
   "required": [

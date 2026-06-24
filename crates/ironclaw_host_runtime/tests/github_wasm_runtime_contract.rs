@@ -1095,7 +1095,7 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
     }));
     let list_my_repos = execute_bundled_github_wasm(
         "github.list_repos",
-        json!({"username": "me", "limit": 2}),
+        json!({"limit": 2}),
         Arc::clone(&list_my_repos_http),
     );
     assert_eq!(list_my_repos.error, None);

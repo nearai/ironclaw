@@ -511,6 +511,20 @@ registerPack("es", {
   "skills.removed": "Habilidad eliminada \"{name}\"",
   "skills.activatesOn": "Se activa en",
   "skills.imported": "importado",
+  "skills.defaultAutoActivationEnabled": "Autoactivación predeterminada de habilidades activada",
+  "skills.defaultAutoActivationDisabled": "Autoactivación predeterminada de habilidades desactivada",
+  "skills.defaultAutoActivationOnDesc":
+    "Las habilidades se autoactivan por palabra clave en solicitudes coincidentes. Desactívalo para exigir un /name explícito.",
+  "skills.defaultAutoActivationOffDesc":
+    "Las habilidades solo se ejecutan cuando escribes /name. Actívalo para permitir la autoactivación por palabra clave.",
+  "skills.defaultAutoActivationOnButton": "Predeterminado: Sí",
+  "skills.defaultAutoActivationOffButton": "Predeterminado: No",
+  "skills.autoActivateOnTitle":
+    "Autoactivación activada: se ejecuta en solicitudes coincidentes. Haz clic para exigir /name.",
+  "skills.autoActivateOffTitle":
+    "Solo explícito: se ejecuta solo cuando escribes /name. Haz clic para activar la autoactivación.",
+  "skills.autoActivateOnLabel": "Autoactivar: Sí",
+  "skills.autoActivateOffLabel": "Autoactivar: No",
 
   // Settings — users tab
   "users.title": "Usuarios ({count})",

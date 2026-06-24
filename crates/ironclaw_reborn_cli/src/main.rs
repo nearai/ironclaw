@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod context;
 mod file_write;
+mod operator_env;
 mod runtime;
 
 fn main() -> anyhow::Result<()> {

@@ -511,6 +511,20 @@ registerPack("ja", {
   "skills.removed": "スキル「{name}」を削除",
   "skills.activatesOn": "にアクティブ化します",
   "skills.imported": "輸入された",
+  "skills.defaultAutoActivationEnabled": "デフォルトのスキル自動有効化はオンです",
+  "skills.defaultAutoActivationDisabled": "デフォルトのスキル自動有効化はオフです",
+  "skills.defaultAutoActivationOnDesc":
+    "一致するリクエストではキーワードでスキルが自動有効化されます。明示的な /name を必須にするにはオフにします。",
+  "skills.defaultAutoActivationOffDesc":
+    "スキルは /name を入力したときだけ実行されます。キーワードで自動有効化するにはオンにします。",
+  "skills.defaultAutoActivationOnButton": "デフォルト: オン",
+  "skills.defaultAutoActivationOffButton": "デフォルト: オフ",
+  "skills.autoActivateOnTitle":
+    "自動有効化オン — 一致するリクエストで実行されます。クリックすると /name のみになります。",
+  "skills.autoActivateOffTitle":
+    "明示実行のみ — /name を入力したときだけ実行されます。クリックすると自動有効化します。",
+  "skills.autoActivateOnLabel": "自動有効化: オン",
+  "skills.autoActivateOffLabel": "自動有効化: オフ",
 
   // Settings — users tab
   "users.title": "ユーザー ({count})",

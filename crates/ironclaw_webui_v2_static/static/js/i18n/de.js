@@ -511,6 +511,20 @@ registerPack("de", {
   "skills.removed": "Skill „{name}“ entfernt",
   "skills.activatesOn": "Aktiviert am",
   "skills.imported": "importiert",
+  "skills.defaultAutoActivationEnabled": "Standardmäßige automatische Skill-Aktivierung aktiviert",
+  "skills.defaultAutoActivationDisabled": "Standardmäßige automatische Skill-Aktivierung deaktiviert",
+  "skills.defaultAutoActivationOnDesc":
+    "Skills werden bei passenden Anfragen per Schlüsselwort automatisch aktiviert. Deaktivieren, um ein explizites /name zu verlangen.",
+  "skills.defaultAutoActivationOffDesc":
+    "Skills laufen nur, wenn du /name eingibst. Aktivieren, um automatische Aktivierung per Schlüsselwort zu erlauben.",
+  "skills.defaultAutoActivationOnButton": "Standard: Ein",
+  "skills.defaultAutoActivationOffButton": "Standard: Aus",
+  "skills.autoActivateOnTitle":
+    "Automatische Aktivierung ein — läuft bei passenden Anfragen. Klicken, um nur explizites /name zu erlauben.",
+  "skills.autoActivateOffTitle":
+    "Nur explizit — läuft nur, wenn du /name eingibst. Klicken, um automatische Aktivierung zu aktivieren.",
+  "skills.autoActivateOnLabel": "Auto-Aktivierung: Ein",
+  "skills.autoActivateOffLabel": "Auto-Aktivierung: Aus",
 
   // Settings — users tab
   "users.title": "Benutzer ({count})",
