@@ -21,7 +21,7 @@ fn operator_route_predicate_matches_operator_config_routes_only() {
     assert!(is_webui_v2_operator_webui_config_route_id(
         WEBUI_V2_ROUTE_OPERATOR_SET_CONFIG_KEY
     ));
-    assert!(!is_webui_v2_operator_webui_config_route_id(
+    assert!(is_webui_v2_operator_webui_config_route_id(
         WEBUI_V2_ROUTE_OPERATOR_LOGS
     ));
     assert!(!is_webui_v2_operator_webui_config_route_id(

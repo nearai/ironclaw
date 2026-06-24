@@ -76,13 +76,9 @@ use tokio::sync::Notify;
 use tower::ServiceExt;
 
 fn caller() -> WebUiAuthenticatedCaller {
-    caller_with_tenant("tenant-alpha", "user-alpha")
-}
-
-fn caller_with_tenant(tenant: &str, user: &str) -> WebUiAuthenticatedCaller {
     WebUiAuthenticatedCaller::new(
-        TenantId::new(tenant).expect("tenant"),
-        UserId::new(user).expect("user"),
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("user-alpha").expect("user"),
         Some(AgentId::new("agent-alpha").expect("agent")),
         Some(ProjectId::new("project-alpha").expect("project")),
     )
@@ -257,7 +253,6 @@ struct StubServices {
     get_operator_diagnostics_calls: Mutex<usize>,
     get_operator_status_calls: Mutex<usize>,
     query_operator_logs_calls: Mutex<Vec<OperatorLogsCall>>,
-    query_operator_logs_forbidden_tenant: Mutex<Option<TenantId>>,
     run_operator_service_lifecycle_calls: Mutex<Vec<RebornOperatorServiceLifecycleAction>>,
     list_extensions_calls: Mutex<usize>,
     list_extension_registry_calls: Mutex<usize>,
@@ -1005,25 +1000,9 @@ impl RebornServicesApi for StubServices {
 
     async fn query_operator_logs(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        _caller: WebUiAuthenticatedCaller,
         query: RebornOperatorLogsQuery,
     ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        if self
-            .query_operator_logs_forbidden_tenant
-            .lock()
-            .expect("lock")
-            .as_ref()
-            .is_some_and(|tenant| tenant == &caller.tenant_id)
-        {
-            return Err(RebornServicesError {
-                code: RebornServicesErrorCode::Forbidden,
-                kind: RebornServicesErrorKind::ParticipantDenied,
-                status_code: 403,
-                retryable: false,
-                field: None,
-                validation_code: None,
-            });
-        }
         self.query_operator_logs_calls
             .lock()
             .expect("lock")
@@ -2842,7 +2821,7 @@ async fn operator_config_routes_require_operator_capability() {
 }
 
 #[tokio::test]
-async fn operator_logs_are_available_without_operator_capability() {
+async fn operator_logs_require_operator_capability() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
 
@@ -2851,49 +2830,6 @@ async fn operator_logs_are_available_without_operator_capability() {
             Request::builder()
                 .method(Method::GET)
                 .uri("/api/webchat/v2/operator/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack&follow=true")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let operator_log_calls = services.query_operator_logs_calls.lock().expect("lock");
-    assert_eq!(operator_log_calls.len(), 1);
-    assert_eq!(operator_log_calls[0].limit, Some(25));
-    assert_eq!(operator_log_calls[0].cursor.as_deref(), Some("after-1"));
-    assert_eq!(operator_log_calls[0].thread_id.as_deref(), Some("thread-a"));
-    assert_eq!(operator_log_calls[0].run_id.as_deref(), Some("run-a"));
-    assert_eq!(operator_log_calls[0].turn_id.as_deref(), Some("turn-a"));
-    assert_eq!(
-        operator_log_calls[0].tool_call_id.as_deref(),
-        Some("tool-a")
-    );
-    assert_eq!(operator_log_calls[0].tool_name.as_deref(), Some("shell"));
-    assert_eq!(operator_log_calls[0].source.as_deref(), Some("slack"));
-    assert!(operator_log_calls[0].follow);
-    assert!(!operator_log_calls[0].tail);
-}
-
-#[tokio::test]
-async fn operator_logs_are_denied_for_cross_tenant_callers() {
-    let services = Arc::new(StubServices::default());
-    services
-        .query_operator_logs_forbidden_tenant
-        .lock()
-        .expect("lock")
-        .replace(TenantId::new("tenant-beta").expect("tenant"));
-    let router = router_with_caller(
-        services.clone(),
-        WebUiV2Capabilities::default(),
-        caller_with_tenant("tenant-beta", "user-beta"),
-    );
-
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/operator/logs?thread_id=thread-a&run_id=run-a")
                 .body(Body::empty())
                 .expect("request"),
         )

@@ -109,8 +109,9 @@ return non-operator capabilities until an admin role boundary exists. The
 route handlers also reject mounted operator config requests with `403` when
 the injected `WebUiV2Capabilities` lacks `operator_webui_config`, so host
 composition and handler dispatch share the same fail-closed capability
-boundary. The logs projection remains available without that capability so
-multi-tenant users can inspect permitted logs from the Web UI.
+boundary. `webui.v2.operator.logs` follows the same operator-capability
+boundary, while non-operator users retain access to the separate gateway logs
+surface in the main Web UI.
 Unwired operator command-plane write, setup, log, and
 service-control methods fail closed with sanitized `503 service_unavailable`
 responses. Config validation plus read-only config, status, and diagnostics
