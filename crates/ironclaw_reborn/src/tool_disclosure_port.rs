@@ -228,8 +228,20 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         if !is_bridge_name(&tool_call.name) {
             if let Some(target) = self.direct_deferred_target(&tool_call)? {
+                // Preserve the model's emitted wire name in the replay when it is
+                // already valid (the common `__`-encoded case) so the replayed
+                // assistant tool call mirrors what the model generated. Only when
+                // the model called the deferred tool by a non-wire-safe form —
+                // most often the dotted catalog capability_id like
+                // `google-calendar.list_events` — fall back to the resolved
+                // definition's canonical name; recording a dotted name fails
+                // `validate_provider_tool_name` and borks the run on transcript
+                // write.
+                let replay_tool_name =
+                    replay_provider_tool_name(&tool_call.name, &target.definition.name);
                 debug!(
                     tool_name = tool_call.name.as_str(),
+                    replay_tool_name = replay_tool_name.as_str(),
                     capability_id = target.definition.capability_id.as_str(),
                     "reborn tool disclosure registering direct deferred provider tool call"
                 );
@@ -237,7 +249,7 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
                     .inner
                     .register_provider_tool_call(target.target_call)
                     .await?;
-                candidate.provider_replay = Some(provider_replay_for(&tool_call));
+                candidate.provider_replay = Some(provider_replay_for(&tool_call, replay_tool_name));
                 self.record_promotable_input(
                     candidate.input_ref.as_str(),
                     candidate.capability_id.clone(),
@@ -249,11 +261,15 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
         if tool_call.name == TOOL_CALL_NAME
             && let Some(target) = self.allowed_tool_call_target(&tool_call)?
         {
+            // The model invoked the `tool_call` bridge itself (a valid wire
+            // name); the replay reflects that actual call, not the target.
+            let bridge_provider_tool_name = tool_call.name.clone();
             let mut candidate = self
                 .inner
                 .register_provider_tool_call(target.target_call)
                 .await?;
-            candidate.provider_replay = Some(provider_replay_for(&tool_call));
+            candidate.provider_replay =
+                Some(provider_replay_for(&tool_call, bridge_provider_tool_name));
             self.record_promotable_input(
                 candidate.input_ref.as_str(),
                 candidate.capability_id.clone(),
@@ -458,7 +474,7 @@ impl ToolDisclosureCapabilityPort {
             capability_id: definition.capability_id,
             input_ref,
             effective_capability_ids: Vec::new(),
-            provider_replay: Some(provider_replay_for(&tool_call)),
+            provider_replay: Some(provider_replay_for(&tool_call, tool_call.name.clone())),
         })
     }
 
@@ -758,13 +774,45 @@ impl CatalogLookupByCapability for CapabilityCatalog {
     }
 }
 
-fn provider_replay_for(tool_call: &ProviderToolCall) -> ProviderToolCallReplay {
+/// Choose the wire name to record in a forgiving direct-deferred replay.
+///
+/// Preserve the model's emitted name when it is already a valid provider tool
+/// name (the common `__`-encoded case) so the replayed assistant tool call
+/// faithfully mirrors what the model generated. Only when the model called the
+/// deferred tool by a non-wire-safe form — most often the dotted catalog
+/// `capability_id` such as `google-calendar.list_events` — fall back to the
+/// resolved definition's canonical name, which is always wire-safe. Recording a
+/// dotted name fails `validate_provider_tool_name` and borks the run on the
+/// assistant transcript / provider-error result-ref write.
+fn replay_provider_tool_name(called_name: &str, definition_name: &str) -> String {
+    if ironclaw_safety::validate_provider_tool_name(called_name).is_ok() {
+        called_name.to_string()
+    } else {
+        definition_name.to_string()
+    }
+}
+
+/// Build the provider-call replay metadata recorded with a capability candidate.
+///
+/// `provider_tool_name` is the wire name the replay (and any provider-error
+/// result reference) serializes into the transcript. It MUST be a canonical
+/// provider tool name (`[A-Za-z0-9_-]`) because `validate_provider_tool_name`
+/// rejects anything else and a failed transcript write borks the whole run. On
+/// the forgiving direct-deferred path the model may have called a deferred tool
+/// by its dotted catalog `capability_id` (e.g. `google-calendar.list_events`);
+/// callers there must pass the resolved definition's `name` (the `__`-encoded
+/// wire name), NOT the raw `tool_call.name`. Bridge/normal paths pass the
+/// already-valid `tool_call.name`.
+fn provider_replay_for(
+    tool_call: &ProviderToolCall,
+    provider_tool_name: String,
+) -> ProviderToolCallReplay {
     ProviderToolCallReplay {
         provider_id: tool_call.provider_id.clone(),
         provider_model_id: tool_call.provider_model_id.clone(),
         provider_turn_id: tool_call.turn_id.clone().unwrap_or_default(),
         provider_call_id: tool_call.id.clone(),
-        provider_tool_name: tool_call.name.clone(),
+        provider_tool_name,
         arguments: tool_call.arguments.clone(),
         response_reasoning: tool_call.response_reasoning.clone(),
         reasoning: tool_call.reasoning.clone(),
@@ -867,7 +915,7 @@ mod tests {
                 capability_id: definition.capability_id,
                 input_ref: input_ref(format!("input:{}", tool_call.name)),
                 effective_capability_ids: Vec::new(),
-                provider_replay: Some(provider_replay_for(&tool_call)),
+                provider_replay: Some(provider_replay_for(&tool_call, tool_call.name.clone())),
             })
         }
 
@@ -1251,6 +1299,74 @@ mod tests {
                 .any(|definition| definition.name == "hidden_tool"),
             "successful direct deferred call should promote the target on the next turn"
         );
+    }
+
+    #[tokio::test]
+    async fn direct_deferred_dotted_capability_id_records_canonical_wire_name_in_replay() {
+        // Regression: a weak model frequently calls a deferred provider tool by
+        // its dotted catalog capability_id (e.g. `google-calendar.list_events`,
+        // which `tool_search`/`tool_describe` surface) instead of the canonical
+        // `__`-encoded wire name. The forgiving direct-deferred path resolves
+        // that, but the recorded provider replay (consumed by the assistant
+        // transcript and any provider-error result ref) MUST carry the canonical
+        // wire name — recording the dotted name fails `validate_provider_tool_name`
+        // and borks the whole run on transcript write.
+        let definitions = vec![
+            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition(
+                "google-calendar.list_events",
+                "google-calendar__list_events",
+                "List Google Calendar events",
+            ),
+            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
+            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
+            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
+            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
+        ];
+        let inner = Arc::new(SpyPort {
+            definitions,
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let promoted_by_scope = Arc::new(Mutex::new(HashMap::new()));
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::clone(&promoted_by_scope),
+        );
+
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface");
+        let advertised = port.tool_definitions().expect("tool definitions");
+        assert!(
+            !advertised
+                .iter()
+                .any(|definition| definition.name == "google-calendar__list_events"),
+            "deferred Google Calendar tool starts hidden"
+        );
+
+        // The model calls the tool by its DOTTED capability_id, not the wire name.
+        let dotted_call = provider_call("google-calendar.list_events", json!({"path": "demo"}));
+        port.provider_tool_call_capability_ids(&dotted_call)
+            .expect("dotted capability id resolves through forgiving path");
+        port.validate_provider_tool_call(&dotted_call)
+            .expect("dotted capability id validates through forgiving path");
+        let candidate = port
+            .register_provider_tool_call(dotted_call)
+            .await
+            .expect("dotted capability id registers as target");
+
+        let replay = candidate.provider_replay.as_ref().expect("provider replay");
+        assert_eq!(
+            replay.provider_tool_name, "google-calendar__list_events",
+            "replay records the canonical wire name, not the dotted capability_id"
+        );
+        // The recorded name must serialize into the transcript without error.
+        ironclaw_safety::validate_provider_tool_name(&replay.provider_tool_name)
+            .expect("recorded provider tool name is wire-safe");
     }
 
     #[tokio::test]
