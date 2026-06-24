@@ -511,6 +511,20 @@ registerPack("hi", {
   "skills.removed": "हटाया गया कौशल \"{name}\"",
   "skills.activatesOn": "सक्रिय होता है",
   "skills.imported": "आयातित",
+  "skills.defaultAutoActivationEnabled": "डिफ़ॉल्ट स्किल ऑटो-एक्टिवेशन चालू है",
+  "skills.defaultAutoActivationDisabled": "डिफ़ॉल्ट स्किल ऑटो-एक्टिवेशन बंद है",
+  "skills.defaultAutoActivationOnDesc":
+    "मिलते-जुलते अनुरोधों पर स्किल कीवर्ड से अपने-आप सक्रिय होती हैं। स्पष्ट /name आवश्यक करने के लिए बंद करें।",
+  "skills.defaultAutoActivationOffDesc":
+    "स्किल केवल तब चलती हैं जब आप /name लिखते हैं। कीवर्ड से ऑटो-एक्टिवेशन के लिए चालू करें।",
+  "skills.defaultAutoActivationOnButton": "डिफ़ॉल्ट: चालू",
+  "skills.defaultAutoActivationOffButton": "डिफ़ॉल्ट: बंद",
+  "skills.autoActivateOnTitle":
+    "ऑटो-एक्टिवेशन चालू — मिलते-जुलते अनुरोधों पर चलेगी। केवल /name करने के लिए क्लिक करें।",
+  "skills.autoActivateOffTitle":
+    "केवल स्पष्ट — सिर्फ़ /name लिखने पर चलेगी। ऑटो-एक्टिवेशन चालू करने के लिए क्लिक करें।",
+  "skills.autoActivateOnLabel": "ऑटो-एक्टिवेट: चालू",
+  "skills.autoActivateOffLabel": "ऑटो-एक्टिवेट: बंद",
 
   // Settings — users tab
   "users.title": "उपयोगकर्ता ({count})",
