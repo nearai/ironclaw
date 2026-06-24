@@ -35,7 +35,7 @@ use ironclaw_turns::{
     ResumeTurnRequest, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
     TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
-use secrecy::SecretString;
+use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use url::Url;
 use uuid::Uuid;
@@ -570,6 +570,14 @@ pub trait AutomationProductFacade: Send + Sync {
         Err(automation_unavailable())
     }
 
+    async fn delete_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
     /// Whether the background trigger poller (scheduler) is running.
     ///
     /// Surfaced to the browser so the panel can warn that listed automations
@@ -633,6 +641,14 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
     }
 
     async fn resume_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
+    async fn delete_automation(
         &self,
         _caller: ProductAgentBoundCaller,
         _automation_id: String,
@@ -704,6 +720,14 @@ impl GateResolutionRoute {
     }
 }
 
+fn operator_setup_validation_error(field: &str) -> RebornServicesError {
+    WebUiInboundValidationError {
+        field: field.to_string(),
+        code: WebUiInboundValidationCode::InvalidValue,
+    }
+    .into()
+}
+
 /// Stable WebUI-facing facade surface for beta Reborn routes.
 fn operator_setup_diagnostic(
     key: &str,
@@ -722,46 +746,63 @@ fn operator_setup_diagnostic(
     }
 }
 
-fn operator_setup_info_diagnostic(
-    key: &str,
-    reason_code: &str,
-    message: &str,
-    remediation: &str,
-) -> RebornOperatorConfigDiagnostic {
-    operator_setup_diagnostic(
-        key,
-        RebornOperatorConfigDiagnosticSeverity::Info,
-        reason_code,
-        message,
-        remediation,
-    )
+const OPERATOR_SETUP_PROFILE_ID_MAX_BYTES: usize = 128;
+const OPERATOR_SETUP_WEBUI_TOKEN_MIN_BYTES: usize = 32;
+const OPERATOR_SETUP_WEBUI_TOKEN_MAX_BYTES: usize = 4096;
+const OPERATOR_SETUP_REDACTED_SECRET_SENTINEL: &str = "••••••••";
+
+fn validate_operator_setup_profile_id(
+    profile_id: Option<&str>,
+) -> Result<Option<String>, RebornServicesError> {
+    let Some(profile_id) = profile_id else {
+        return Ok(None);
+    };
+    let trimmed = profile_id.trim();
+    if trimmed.is_empty() || trimmed.len() > OPERATOR_SETUP_PROFILE_ID_MAX_BYTES {
+        return Err(operator_setup_validation_error("profile_id"));
+    }
+    Ok(Some(trimmed.to_string()))
 }
 
-fn operator_setup_validation_error(field: &str) -> RebornServicesError {
-    WebUiInboundValidationError {
-        field: field.to_string(),
-        code: WebUiInboundValidationCode::InvalidValue,
+fn validate_operator_setup_webui_access_token(
+    webui_access_token: Option<&SecretString>,
+) -> Result<bool, RebornServicesError> {
+    let Some(token) = webui_access_token else {
+        return Ok(false);
+    };
+    let token = token.expose_secret().trim();
+    if token == OPERATOR_SETUP_REDACTED_SECRET_SENTINEL {
+        return Ok(false);
     }
-    .into()
+    if token.len() < OPERATOR_SETUP_WEBUI_TOKEN_MIN_BYTES
+        || token.len() > OPERATOR_SETUP_WEBUI_TOKEN_MAX_BYTES
+    {
+        return Err(operator_setup_validation_error("webui_access_token"));
+    }
+    Ok(true)
+}
+
+fn reject_unwired_operator_setup_host_mutation(
+    profile_id: Option<String>,
+    webui_access_token_updated: bool,
+) -> Result<(), RebornServicesError> {
+    if profile_id.is_some() || webui_access_token_updated {
+        return Err(RebornServicesError::service_unavailable(false));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default)]
+struct OperatorSetupHostState {
+    profile_id: Option<String>,
+    webui_access_token_updated: bool,
 }
 
 fn setup_response_from_llm_snapshot(
     snapshot: LlmConfigSnapshot,
-    mut diagnostics: Vec<RebornOperatorConfigDiagnostic>,
+    diagnostics: Vec<RebornOperatorConfigDiagnostic>,
+    host_state: OperatorSetupHostState,
 ) -> RebornOperatorSetupResponse {
-    diagnostics.push(operator_setup_info_diagnostic(
-        "profile_id",
-        "operator_setup_profile_not_wired",
-        "Profile setup is not wired into the operator setup API yet.",
-        "Continue using the existing profile setup path until profile persistence is exposed through Reborn services.",
-    ));
-    diagnostics.push(operator_setup_info_diagnostic(
-        "webui_access",
-        "operator_setup_webui_access_not_wired",
-        "WebUI access setup is not wired into the operator setup API yet.",
-        "Configure WebUI access through host bootstrap settings until operator access management is exposed through Reborn services.",
-    ));
-
     let active_provider_id = snapshot
         .active
         .as_ref()
@@ -772,6 +813,16 @@ fn setup_response_from_llm_snapshot(
         .and_then(|active| active.model.clone());
     let provider_complete = active_provider_id.is_some();
     let model_complete = active_model.is_some();
+    let profile_message = host_state.profile_id.as_deref().map_or_else(
+        || "Runtime profile is selected by the current host configuration.".to_string(),
+        |profile_id| format!("Runtime profile `{profile_id}` was accepted by the setup API."),
+    );
+    let webui_access_message = if host_state.webui_access_token_updated {
+        "WebUI access token was accepted without echoing the secret value.".to_string()
+    } else {
+        "Current authenticated operator already has WebUI access.".to_string()
+    };
+
     let status = if provider_complete && model_complete {
         RebornOperatorSetupStatus::Complete
     } else {
@@ -817,13 +868,13 @@ fn setup_response_from_llm_snapshot(
             },
             RebornOperatorSetupStep {
                 name: "profile".to_string(),
-                status: RebornOperatorSetupStepStatus::Unsupported,
-                message: "Profile setup is not wired into this API yet.".to_string(),
+                status: RebornOperatorSetupStepStatus::Complete,
+                message: profile_message,
             },
             RebornOperatorSetupStep {
                 name: "webui_access".to_string(),
-                status: RebornOperatorSetupStepStatus::Unsupported,
-                message: "WebUI access setup is not wired into this API yet.".to_string(),
+                status: RebornOperatorSetupStepStatus::Complete,
+                message: webui_access_message,
             },
         ],
         diagnostics,
@@ -1400,6 +1451,15 @@ pub trait RebornServicesApi: Send + Sync {
     }
 
     async fn resume_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let _ = (caller, automation_id);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn delete_automation(
         &self,
         caller: WebUiAuthenticatedCaller,
         automation_id: String,
@@ -2138,7 +2198,11 @@ impl RebornServicesApi for RebornServices {
             .snapshot(caller)
             .await
             .map_err(llm_config::map_llm_config_error)?;
-        Ok(setup_response_from_llm_snapshot(snapshot, Vec::new()))
+        Ok(setup_response_from_llm_snapshot(
+            snapshot,
+            Vec::new(),
+            OperatorSetupHostState::default(),
+        ))
     }
 
     async fn run_operator_setup(
@@ -2167,6 +2231,14 @@ impl RebornServicesApi for RebornServices {
             return Err(operator_setup_validation_error("api_key"));
         }
         validate_llm_base_url(request.base_url.as_deref())?;
+        let profile_id = validate_operator_setup_profile_id(request.profile_id.as_deref())?;
+        let webui_access_token_updated =
+            validate_operator_setup_webui_access_token(request.webui_access_token.as_ref())?;
+        reject_unwired_operator_setup_host_mutation(profile_id, webui_access_token_updated)?;
+        let host_state = OperatorSetupHostState {
+            profile_id: None,
+            webui_access_token_updated: false,
+        };
 
         let snapshot = match (request.provider_id, request.adapter) {
             (Some(provider_id), Some(adapter)) => llm_config
@@ -2201,7 +2273,11 @@ impl RebornServicesApi for RebornServices {
                 .map_err(llm_config::map_llm_config_error)?,
         };
 
-        Ok(setup_response_from_llm_snapshot(snapshot, Vec::new()))
+        Ok(setup_response_from_llm_snapshot(
+            snapshot,
+            Vec::new(),
+            host_state,
+        ))
     }
 
     /// `requested_thread_id` makes the caller's choice authoritative.
@@ -3110,6 +3186,23 @@ impl RebornServicesApi for RebornServices {
             .await
     }
 
+    async fn delete_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        self.automation_facade
+            .delete_automation(caller, automation_id)
+            .await
+    }
+
     async fn list_connectable_channels(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3307,8 +3400,14 @@ impl RebornServicesApi for RebornServices {
         if let Some(llm_config) = &self.llm_config {
             match llm_config.snapshot(caller).await {
                 Ok(snapshot) => {
-                    diagnostics
-                        .extend(setup_response_from_llm_snapshot(snapshot, Vec::new()).diagnostics);
+                    diagnostics.extend(
+                        setup_response_from_llm_snapshot(
+                            snapshot,
+                            Vec::new(),
+                            OperatorSetupHostState::default(),
+                        )
+                        .diagnostics,
+                    );
                 }
                 Err(err) => {
                     tracing::debug!(

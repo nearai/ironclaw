@@ -248,6 +248,15 @@ export function resumeAutomation({ automationId } = {}) {
   });
 }
 
+export function deleteAutomation({ automationId } = {}) {
+  if (!automationId) {
+    return Promise.reject(new Error("automationId is required"));
+  }
+  return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}`, {
+    method: "DELETE",
+  });
+}
+
 // --- Projects (first-class entity + membership ACL) ---
 
 const PROJECTS_BASE = `${V2_BASE}/projects`;

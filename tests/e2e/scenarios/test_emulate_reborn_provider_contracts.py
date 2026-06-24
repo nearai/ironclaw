@@ -10,83 +10,13 @@ import json
 
 import httpx
 
-from helpers import (
-    EMULATE_GITHUB_BEARER,
-    EMULATE_GOOGLE_BEARER,
-    EMULATE_SLACK_BEARER,
+from emulate_provider import (
+    github_json,
+    gmail_header,
+    google_headers,
+    raw_mime,
+    slack_post,
 )
-
-
-def _google_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {EMULATE_GOOGLE_BEARER}"}
-
-
-def _slack_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {EMULATE_SLACK_BEARER}"}
-
-
-def _github_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {EMULATE_GITHUB_BEARER}"}
-
-
-def _gmail_header(message: dict, name: str) -> str | None:
-    for header in message.get("payload", {}).get("headers", []):
-        if header.get("name", "").lower() == name.lower():
-            return header.get("value")
-    return None
-
-
-def _raw_mime(*, to: str, subject: str, body: str) -> str:
-    message = (
-        f"To: {to}\r\n"
-        f"Subject: {subject}\r\n"
-        "Content-Type: text/plain; charset=utf-8\r\n"
-        "\r\n"
-        f"{body}"
-    )
-    return base64.urlsafe_b64encode(message.encode("utf-8")).decode("ascii").rstrip("=")
-
-
-async def _slack_post(
-    client: httpx.AsyncClient,
-    base_url: str,
-    method: str,
-    payload: dict | None = None,
-) -> dict:
-    response = await client.post(
-        f"{base_url}/api/{method}",
-        headers=_slack_headers(),
-        json=payload or {},
-    )
-    response.raise_for_status()
-    body = response.json()
-    assert body.get("ok") is True, f"Slack {method} failed: {body}"
-    return body
-
-
-async def _github_json(
-    client: httpx.AsyncClient,
-    base_url: str,
-    method: str,
-    path: str,
-    *,
-    payload: dict | None = None,
-    params: dict | None = None,
-    expected_status: int = 200,
-) -> dict | list:
-    response = await client.request(
-        method,
-        f"{base_url}{path}",
-        headers=_github_headers(),
-        json=payload,
-        params=params,
-    )
-    assert response.status_code == expected_status, (
-        f"GitHub {method} {path} returned {response.status_code}: {response.text}"
-    )
-    if not response.content:
-        return {}
-    return response.json()
 
 
 async def test_emulate_google_covers_reborn_gsuite_read_inputs(emulate_google_server):
@@ -94,7 +24,7 @@ async def test_emulate_google_covers_reborn_gsuite_read_inputs(emulate_google_se
     async with httpx.AsyncClient(timeout=10) as client:
         messages_response = await client.get(
             f"{base_url}/gmail/v1/users/me/messages",
-            headers=_google_headers(),
+            headers=google_headers(),
             params={"q": "is:unread"},
         )
         messages_response.raise_for_status()
@@ -103,16 +33,16 @@ async def test_emulate_google_covers_reborn_gsuite_read_inputs(emulate_google_se
 
         message_response = await client.get(
             f"{base_url}/gmail/v1/users/me/messages/msg_emulate_unread",
-            headers=_google_headers(),
+            headers=google_headers(),
             params={"format": "full"},
         )
         message_response.raise_for_status()
         message = message_response.json()
-        assert _gmail_header(message, "Subject") == "Emulate seeded unread"
+        assert gmail_header(message, "Subject") == "Emulate seeded unread"
 
         crm_response = await client.get(
             f"{base_url}/gmail/v1/users/me/messages",
-            headers=_google_headers(),
+            headers=google_headers(),
             params={"q": "from:near.ai"},
         )
         crm_response.raise_for_status()
@@ -121,7 +51,7 @@ async def test_emulate_google_covers_reborn_gsuite_read_inputs(emulate_google_se
 
         calendars_response = await client.get(
             f"{base_url}/calendar/v3/users/me/calendarList",
-            headers=_google_headers(),
+            headers=google_headers(),
         )
         calendars_response.raise_for_status()
         calendars = calendars_response.json()["items"]
@@ -132,7 +62,7 @@ async def test_emulate_google_covers_reborn_gsuite_read_inputs(emulate_google_se
 
         events_response = await client.get(
             f"{base_url}/calendar/v3/calendars/primary/events",
-            headers=_google_headers(),
+            headers=google_headers(),
         )
         events_response.raise_for_status()
         events = events_response.json()["items"]
@@ -148,7 +78,7 @@ async def test_emulate_google_covers_reborn_gsuite_read_inputs(emulate_google_se
 
         files_response = await client.get(
             f"{base_url}/drive/v3/files",
-            headers=_google_headers(),
+            headers=google_headers(),
             params={"q": "'root' in parents and trashed=false", "orderBy": "name"},
         )
         files_response.raise_for_status()
@@ -172,7 +102,7 @@ async def test_emulate_google_covers_reborn_gsuite_read_inputs(emulate_google_se
 
         strategy_response = await client.get(
             f"{base_url}/drive/v3/files/drv_near_ai_strategy",
-            headers=_google_headers(),
+            headers=google_headers(),
             params={"alt": "media"},
         )
         strategy_response.raise_for_status()
@@ -185,9 +115,9 @@ async def test_emulate_google_covers_reborn_gsuite_write_outputs(emulate_google_
         subject = "Reborn meeting prep summary"
         sent_response = await client.post(
             f"{base_url}/gmail/v1/users/me/messages/send",
-            headers=_google_headers(),
+            headers=google_headers(),
             json={
-                "raw": _raw_mime(
+                "raw": raw_mime(
                     to="e2e.google@example.com",
                     subject=subject,
                     body="PepsiCo meeting prep from Calendar, Drive, and latest news.",
@@ -200,17 +130,17 @@ async def test_emulate_google_covers_reborn_gsuite_write_outputs(emulate_google_
 
         sent_readback_response = await client.get(
             f"{base_url}/gmail/v1/users/me/messages/{sent_message['id']}",
-            headers=_google_headers(),
+            headers=google_headers(),
             params={"format": "full"},
         )
         sent_readback_response.raise_for_status()
         sent_readback = sent_readback_response.json()
-        assert _gmail_header(sent_readback, "Subject") == subject
-        assert _gmail_header(sent_readback, "To") == "e2e.google@example.com"
+        assert gmail_header(sent_readback, "Subject") == subject
+        assert gmail_header(sent_readback, "To") == "e2e.google@example.com"
 
         created_event_response = await client.post(
             f"{base_url}/calendar/v3/calendars/primary/events",
-            headers=_google_headers(),
+            headers=google_headers(),
             json={
                 "summary": "Reborn created prep follow-up",
                 "description": "Created by the Reborn Emulate provider contract.",
@@ -225,7 +155,7 @@ async def test_emulate_google_covers_reborn_gsuite_write_outputs(emulate_google_
 
         listed_events_response = await client.get(
             f"{base_url}/calendar/v3/calendars/primary/events",
-            headers=_google_headers(),
+            headers=google_headers(),
             params={"q": "Reborn created prep follow-up"},
         )
         listed_events_response.raise_for_status()
@@ -236,7 +166,7 @@ async def test_emulate_google_covers_reborn_gsuite_write_outputs(emulate_google_
 
         delete_event_response = await client.delete(
             f"{base_url}/calendar/v3/calendars/primary/events/{created_event['id']}",
-            headers=_google_headers(),
+            headers=google_headers(),
         )
         assert delete_event_response.status_code == 204
 
@@ -261,7 +191,7 @@ async def test_emulate_google_covers_reborn_gsuite_write_outputs(emulate_google_
         drive_create_response = await client.post(
             f"{base_url}/upload/drive/v3/files",
             headers={
-                **_google_headers(),
+                **google_headers(),
                 "Content-Type": f"multipart/related; boundary={boundary}",
             },
             content=multipart_body,
@@ -273,7 +203,7 @@ async def test_emulate_google_covers_reborn_gsuite_write_outputs(emulate_google_
 
         drive_media_response = await client.get(
             f"{base_url}/drive/v3/files/{drive_file['id']}",
-            headers=_google_headers(),
+            headers=google_headers(),
             params={"alt": "media"},
         )
         drive_media_response.raise_for_status()
@@ -283,11 +213,11 @@ async def test_emulate_google_covers_reborn_gsuite_write_outputs(emulate_google_
 async def test_emulate_slack_covers_reborn_delivery_surfaces(emulate_slack_server):
     base_url = emulate_slack_server["url"]
     async with httpx.AsyncClient(timeout=10) as client:
-        auth = await _slack_post(client, base_url, "auth.test")
+        auth = await slack_post(client, base_url, "auth.test")
         assert auth["team"] == "Reborn E2E Workspace"
         assert auth["user"] == "reborn-user"
 
-        channels = await _slack_post(
+        channels = await slack_post(
             client,
             base_url,
             "conversations.list",
@@ -298,7 +228,7 @@ async def test_emulate_slack_covers_reborn_delivery_surfaces(emulate_slack_serve
         )
 
         text = "Reborn Emulate Slack delivery contract"
-        posted = await _slack_post(
+        posted = await slack_post(
             client,
             base_url,
             "chat.postMessage",
@@ -307,7 +237,7 @@ async def test_emulate_slack_covers_reborn_delivery_surfaces(emulate_slack_serve
         assert posted["message"]["text"] == text
 
         thread_reply_text = "Threaded Reborn follow-up"
-        thread_reply = await _slack_post(
+        thread_reply = await slack_post(
             client,
             base_url,
             "chat.postMessage",
@@ -319,7 +249,7 @@ async def test_emulate_slack_covers_reborn_delivery_surfaces(emulate_slack_serve
         )
         assert thread_reply["message"]["thread_ts"] == posted["ts"]
 
-        history = await _slack_post(
+        history = await slack_post(
             client,
             base_url,
             "conversations.history",
@@ -327,7 +257,7 @@ async def test_emulate_slack_covers_reborn_delivery_surfaces(emulate_slack_serve
         )
         assert any(message["text"] == text for message in history["messages"])
 
-        replies = await _slack_post(
+        replies = await slack_post(
             client,
             base_url,
             "conversations.replies",
@@ -337,11 +267,11 @@ async def test_emulate_slack_covers_reborn_delivery_surfaces(emulate_slack_serve
             message["text"] == thread_reply_text for message in replies["messages"]
         )
 
-        users = await _slack_post(client, base_url, "users.list")
+        users = await slack_post(client, base_url, "users.list")
         reviewer = next(
             member for member in users["members"] if member["name"] == "qa-reviewer"
         )
-        dm = await _slack_post(
+        dm = await slack_post(
             client,
             base_url,
             "conversations.open",
@@ -349,7 +279,7 @@ async def test_emulate_slack_covers_reborn_delivery_surfaces(emulate_slack_serve
         )
         dm_channel = dm["channel"]["id"]
         dm_text = "Reborn Emulate Slack DM delivery contract"
-        dm_posted = await _slack_post(
+        dm_posted = await slack_post(
             client,
             base_url,
             "chat.postMessage",
@@ -357,7 +287,7 @@ async def test_emulate_slack_covers_reborn_delivery_surfaces(emulate_slack_serve
         )
         assert dm_posted["message"]["text"] == dm_text
 
-        dm_history = await _slack_post(
+        dm_history = await slack_post(
             client,
             base_url,
             "conversations.history",
@@ -365,13 +295,13 @@ async def test_emulate_slack_covers_reborn_delivery_surfaces(emulate_slack_serve
         )
         assert any(message["text"] == dm_text for message in dm_history["messages"])
 
-        await _slack_post(
+        await slack_post(
             client,
             base_url,
             "reactions.add",
             {"channel": channel["id"], "timestamp": posted["ts"], "name": "eyes"},
         )
-        reaction = await _slack_post(
+        reaction = await slack_post(
             client,
             base_url,
             "reactions.get",
@@ -382,7 +312,7 @@ async def test_emulate_slack_covers_reborn_delivery_surfaces(emulate_slack_serve
             for item in reaction["message"]["reactions"]
         )
 
-        reviewer_info = await _slack_post(
+        reviewer_info = await slack_post(
             client,
             base_url,
             "users.info",
@@ -394,10 +324,10 @@ async def test_emulate_slack_covers_reborn_delivery_surfaces(emulate_slack_serve
 async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server):
     base_url = emulate_github_server["url"]
     async with httpx.AsyncClient(timeout=10) as client:
-        user = await _github_json(client, base_url, "GET", "/user")
+        user = await github_json(client, base_url, "GET", "/user")
         assert user["login"] == "reborn-dev"
 
-        created_repo = await _github_json(
+        created_repo = await github_json(
             client,
             base_url,
             "POST",
@@ -412,13 +342,13 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert created_repo["full_name"] == "reborn-dev/reborn-provider-contract"
 
-        user_repos = await _github_json(client, base_url, "GET", "/user/repos")
+        user_repos = await github_json(client, base_url, "GET", "/user/repos")
         assert any(
             item["full_name"] == "reborn-dev/reborn-provider-contract"
             for item in user_repos
         )
 
-        repo = await _github_json(
+        repo = await github_json(
             client,
             base_url,
             "GET",
@@ -428,7 +358,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         assert repo["language"] == "Rust"
         assert "reborn" in repo["topics"]
 
-        fork = await _github_json(
+        fork = await github_json(
             client,
             base_url,
             "POST",
@@ -438,7 +368,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert fork["full_name"] == "reborn-dev/ironclaw-reborn-fork"
 
-        forks = await _github_json(
+        forks = await github_json(
             client,
             base_url,
             "GET",
@@ -446,7 +376,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert any(item["full_name"] == fork["full_name"] for item in forks)
 
-        release = await _github_json(
+        release = await github_json(
             client,
             base_url,
             "POST",
@@ -461,7 +391,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         assert release["tag_name"] == "reborn-emulate-v1"
         assert release["draft"] is False
 
-        latest_release = await _github_json(
+        latest_release = await github_json(
             client,
             base_url,
             "GET",
@@ -469,7 +399,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert latest_release["tag_name"] == "reborn-emulate-v1"
 
-        releases = await _github_json(
+        releases = await github_json(
             client,
             base_url,
             "GET",
@@ -478,7 +408,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         assert any(item["tag_name"] == "reborn-emulate-v1" for item in releases)
 
         issue_title = "Emulate Reborn provider contract issue"
-        issue = await _github_json(
+        issue = await github_json(
             client,
             base_url,
             "POST",
@@ -492,7 +422,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         assert issue["title"] == issue_title
         assert issue["state"] == "open"
 
-        issue_readback = await _github_json(
+        issue_readback = await github_json(
             client,
             base_url,
             "GET",
@@ -500,7 +430,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert issue_readback["title"] == issue_title
 
-        issue_comment = await _github_json(
+        issue_comment = await github_json(
             client,
             base_url,
             "POST",
@@ -510,7 +440,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert issue_comment["body"] == "Issue comment from the provider contract."
 
-        issue_comments = await _github_json(
+        issue_comments = await github_json(
             client,
             base_url,
             "GET",
@@ -518,7 +448,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert any(item["id"] == issue_comment["id"] for item in issue_comments)
 
-        issues = await _github_json(
+        issues = await github_json(
             client,
             base_url,
             "GET",
@@ -527,7 +457,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert any(item["title"] == issue_title for item in issues)
 
-        issue_search = await _github_json(
+        issue_search = await github_json(
             client,
             base_url,
             "GET",
@@ -536,21 +466,21 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert any(item["number"] == issue["number"] for item in issue_search["items"])
 
-        main_ref = await _github_json(
+        main_ref = await github_json(
             client,
             base_url,
             "GET",
             "/repos/nearai/ironclaw/git/ref/heads/main",
         )
         main_sha = main_ref["object"]["sha"]
-        main_commit = await _github_json(
+        main_commit = await github_json(
             client,
             base_url,
             "GET",
             f"/repos/nearai/ironclaw/git/commits/{main_sha}",
         )
         content = "Reborn provider contract git object payload."
-        blob = await _github_json(
+        blob = await github_json(
             client,
             base_url,
             "POST",
@@ -558,7 +488,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
             payload={"content": content, "encoding": "utf-8"},
             expected_status=201,
         )
-        blob_readback = await _github_json(
+        blob_readback = await github_json(
             client,
             base_url,
             "GET",
@@ -566,7 +496,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert base64.b64decode(blob_readback["content"]).decode("utf-8") == content
 
-        tree = await _github_json(
+        tree = await github_json(
             client,
             base_url,
             "POST",
@@ -584,7 +514,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
             },
             expected_status=201,
         )
-        tree_readback = await _github_json(
+        tree_readback = await github_json(
             client,
             base_url,
             "GET",
@@ -597,7 +527,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
             for item in tree_readback["tree"]
         )
 
-        commit = await _github_json(
+        commit = await github_json(
             client,
             base_url,
             "POST",
@@ -610,7 +540,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
             expected_status=201,
         )
         branch_name = "reborn-emulate-provider-contract"
-        branch_ref = await _github_json(
+        branch_ref = await github_json(
             client,
             base_url,
             "POST",
@@ -620,7 +550,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert branch_ref["ref"] == f"refs/heads/{branch_name}"
 
-        branches = await _github_json(
+        branches = await github_json(
             client,
             base_url,
             "GET",
@@ -628,7 +558,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert any(item["name"] == branch_name for item in branches)
 
-        matching_refs = await _github_json(
+        matching_refs = await github_json(
             client,
             base_url,
             "GET",
@@ -637,7 +567,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         assert any(item["ref"] == f"refs/heads/{branch_name}" for item in matching_refs)
 
         pr_title = "Emulate Reborn provider contract PR"
-        pr = await _github_json(
+        pr = await github_json(
             client,
             base_url,
             "POST",
@@ -654,7 +584,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         assert pr["title"] == pr_title
         assert pr["state"] == "open"
 
-        pull_requests = await _github_json(
+        pull_requests = await github_json(
             client,
             base_url,
             "GET",
@@ -663,7 +593,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert any(item["number"] == pr["number"] for item in pull_requests)
 
-        pr_readback = await _github_json(
+        pr_readback = await github_json(
             client,
             base_url,
             "GET",
@@ -671,7 +601,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert pr_readback["head"]["ref"] == branch_name
 
-        pr_files = await _github_json(
+        pr_files = await github_json(
             client,
             base_url,
             "GET",
@@ -679,7 +609,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert isinstance(pr_files, list)
 
-        review = await _github_json(
+        review = await github_json(
             client,
             base_url,
             "POST",
@@ -699,7 +629,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert review["state"] == "COMMENTED"
 
-        reviews = await _github_json(
+        reviews = await github_json(
             client,
             base_url,
             "GET",
@@ -707,7 +637,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert any(item["id"] == review["id"] for item in reviews)
 
-        review_comments = await _github_json(
+        review_comments = await github_json(
             client,
             base_url,
             "GET",
@@ -718,7 +648,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
             for item in review_comments
         )
 
-        pr_comment = await _github_json(
+        pr_comment = await github_json(
             client,
             base_url,
             "POST",
@@ -731,7 +661,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert pr_comment["in_reply_to_id"] == review_comments[0]["id"]
 
-        pr_comments = await _github_json(
+        pr_comments = await github_json(
             client,
             base_url,
             "GET",
@@ -739,7 +669,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert any(item["id"] == pr_comment["id"] for item in pr_comments)
 
-        merge = await _github_json(
+        merge = await github_json(
             client,
             base_url,
             "PUT",
@@ -751,7 +681,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert merge["merged"] is True
 
-        repo_search = await _github_json(
+        repo_search = await github_json(
             client,
             base_url,
             "GET",
@@ -760,7 +690,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert any(item["full_name"] == "nearai/ironclaw" for item in repo_search["items"])
 
-        code_search = await _github_json(
+        code_search = await github_json(
             client,
             base_url,
             "GET",
@@ -773,7 +703,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
             for item in code_search["items"]
         )
 
-        workflow_runs = await _github_json(
+        workflow_runs = await github_json(
             client,
             base_url,
             "GET",
@@ -781,7 +711,7 @@ async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server)
         )
         assert workflow_runs["total_count"] == 0
 
-        workflows = await _github_json(
+        workflows = await github_json(
             client,
             base_url,
             "GET",

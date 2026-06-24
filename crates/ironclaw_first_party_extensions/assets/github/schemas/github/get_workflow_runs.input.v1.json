@@ -29,10 +29,68 @@
       "maxLength": 255,
       "description": "Optional workflow file name or numeric id."
     },
+    "actor": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "Optional actor login filter."
+    },
+    "branch": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "Optional branch filter."
+    },
+    "event": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "Optional workflow event filter."
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "action_required",
+        "cancelled",
+        "failure",
+        "neutral",
+        "skipped",
+        "stale",
+        "success",
+        "timed_out",
+        "in_progress",
+        "queued",
+        "requested",
+        "waiting",
+        "pending"
+      ],
+      "description": "Optional workflow run status filter."
+    },
+    "created": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "Optional created date search filter."
+    },
+    "exclude_pull_requests": {
+      "type": "boolean",
+      "description": "Whether to exclude pull request workflow runs."
+    },
+    "check_suite_id": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional check suite id filter."
+    },
+    "head_sha": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "Optional head SHA filter."
+    },
     "page": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 100,
       "default": 1
     },
     "limit": {

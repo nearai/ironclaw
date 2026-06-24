@@ -408,7 +408,14 @@ pub struct RebornServices {
     /// Shared scoped secret store. Exposed so runtime-level features (e.g.
     /// operator LLM-key storage) can reuse the same instance product-auth uses
     /// rather than standing up a second authority.
-    #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
+    #[cfg_attr(
+        not(any(
+            feature = "root-llm-provider",
+            feature = "slack-v2-host-beta",
+            feature = "test-support"
+        )),
+        allow(dead_code)
+    )]
     pub(crate) secret_store: Arc<dyn SecretStore>,
     /// Readiness of the background credential keepalive worker (B1). Carries the
     /// worker's dependencies together so "both deps present or neither" is a type
@@ -445,7 +452,14 @@ pub(crate) enum CredentialRefreshWorkerReady {
 
 impl RebornServices {
     /// The shared scoped secret store backing this composition.
-    #[cfg(feature = "root-llm-provider")]
+    #[cfg_attr(
+        not(any(
+            feature = "root-llm-provider",
+            feature = "slack-v2-host-beta",
+            feature = "test-support"
+        )),
+        allow(dead_code)
+    )]
     pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {
         Arc::clone(&self.secret_store)
     }
@@ -714,7 +728,6 @@ impl RebornServices {
             production_runtime: None,
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             production_scheduler_wake: None,
-            #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
@@ -1313,7 +1326,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         production_runtime: None,
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_scheduler_wake: None,
-        #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
         secret_store,
         // Local-dev is single-user; no cross-owner enumeration or leader lock needed.
         #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -3046,7 +3058,7 @@ fn notion_mcp_allowed_effects() -> Vec<EffectKind> {
     ]
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
 fn nearai_allowed_effects() -> Vec<EffectKind> {
     vec![
         EffectKind::DispatchCapability,
@@ -3816,7 +3828,6 @@ where
         production_runtime: Some(production_runtime),
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_scheduler_wake: Some(scheduler_wake_wiring),
-        #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
         secret_store,
         // `Ready` only when this path built a durable candidate source (i.e. no
         // caller-supplied product_auth_ports override); `Absent` otherwise. The
@@ -3981,9 +3992,12 @@ mod tests {
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
         ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
         MountPermissions, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal,
-        ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId,
-        RuntimeCredentialRequirementSource, RuntimeKind, ScopedPath, SecretHandle, TenantId,
+        ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath, SecretHandle, TenantId,
         TrustClass, UserId, VirtualPath,
+    };
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    use ironclaw_host_api::{
+        RuntimeCredentialAccountProviderId, RuntimeCredentialRequirementSource,
     };
     use ironclaw_host_runtime::{
         MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
@@ -5318,6 +5332,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[tokio::test]
     async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5394,6 +5409,64 @@ mod tests {
         assert!(nearai_account.access_secret.is_some());
     }
 
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    #[tokio::test]
+    async fn local_dev_nearai_mcp_skips_auto_activation_without_durable_product_auth() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let owner = "local-dev-nearai-mcp-no-durable-owner";
+        let services = build_reborn_services(nearai_bootstrap_input_with_base(
+            owner,
+            dir.path().join("local-dev"),
+            "http://private.near.ai",
+            "nearai-test-key",
+        ))
+        .await
+        .expect("local-dev services build should ignore invalid NEAR AI MCP endpoint without durable product auth");
+        let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let nearai_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
+
+        let projection = extension_management
+            .project(nearai_ref)
+            .await
+            .expect("NEAR AI MCP projected");
+        assert_eq!(projection.phase, LifecyclePhase::Discovered);
+
+        let capabilities = extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities");
+        assert!(
+            capabilities
+                .iter()
+                .all(|capability| capability.id.as_str() != "nearai.web_search")
+        );
+
+        let auth_scope = AuthProductScope::new(
+            local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
+                .expect("NEAR AI MCP owner scope"),
+            AuthSurface::Api,
+        );
+        let accounts = services
+            .product_auth
+            .as_ref()
+            .expect("product auth")
+            .credential_account_record_source()
+            .accounts_for_owner(&auth_scope)
+            .await
+            .expect("credential accounts load");
+        assert!(
+            accounts
+                .iter()
+                .all(|account| account.provider.as_str() != "nearai")
+        );
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[tokio::test]
     async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5470,6 +5543,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[tokio::test]
     async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential() {
         let dir = tempfile::tempdir().expect("tempdir");

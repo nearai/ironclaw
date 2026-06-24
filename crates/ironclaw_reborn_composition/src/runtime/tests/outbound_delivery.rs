@@ -27,7 +27,7 @@ use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInp
 
 use super::build_reborn_runtime;
 
-const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Default)]
 struct OutboundDeliveryTriggerGateway {

@@ -61,7 +61,6 @@
     "page": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 100,
       "default": 1,
       "description": "1-based results page."
     },
@@ -74,7 +73,19 @@
     },
     "sort": {
       "type": "string",
-      "enum": ["comments", "created", "updated"],
+      "enum": [
+        "comments",
+        "created",
+        "updated",
+        "reactions",
+        "reactions-+1",
+        "reactions--1",
+        "reactions-smile",
+        "reactions-thinking_face",
+        "reactions-heart",
+        "reactions-tada",
+        "interactions"
+      ],
       "description": "Optional GitHub issue search sort field."
     },
     "order": {
