@@ -22,7 +22,8 @@ use crate::extension_credential_requirements::{
     product_auth_credential_source,
 };
 use crate::nearai_mcp::{
-    NearAiMcpBootstrapConfig, NearAiMcpEndpoint, nearai_mcp_endpoint_from_env,
+    NearAiMcpBootstrapConfig, NearAiMcpEndpoint, durable_product_auth_storage_enabled,
+    nearai_mcp_endpoint_from_base, nearai_mcp_endpoint_from_env,
 };
 
 const GITHUB_MANIFEST: &str =
@@ -550,9 +551,13 @@ pub(crate) fn slack_manifest_digest() -> String {
 pub(crate) fn nearai_mcp_manifest_toml_for_config(
     config: Option<&NearAiMcpBootstrapConfig>,
 ) -> Result<String, ProductWorkflowError> {
-    let endpoint = match config {
-        Some(config) => config.endpoint().map_err(map_binding_error)?,
-        None => nearai_mcp_endpoint_from_env().map_err(map_binding_error)?,
+    let endpoint = if durable_product_auth_storage_enabled() {
+        match config {
+            Some(config) => config.endpoint().map_err(map_binding_error)?,
+            None => nearai_mcp_endpoint_from_env().map_err(map_binding_error)?,
+        }
+    } else {
+        nearai_mcp_endpoint_from_base(None).map_err(map_binding_error)?
     };
     nearai_mcp_manifest_toml_for_endpoint(&endpoint)
 }
@@ -1622,8 +1627,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::nearai_mcp::nearai_mcp_endpoint_from_base;
-
     #[test]
     fn visible_capability_ids_include_write_effects() {
         let extension = test_extension_package();
@@ -2255,6 +2258,24 @@ handle = "web_token"
         assert_eq!(
             manifest["capabilities"][0]["runtime_credentials"][0]["audience"]["port"].as_integer(),
             Some(8443)
+        );
+    }
+
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    #[test]
+    fn nearai_manifest_renderer_ignores_config_endpoint_without_durable_product_auth() {
+        let config = NearAiMcpBootstrapConfig::new(
+            "http://invalid-nearai.example.test",
+            secrecy::SecretString::from("nearai-test-key"),
+        )
+        .unwrap();
+
+        let manifest_toml = nearai_mcp_manifest_toml_for_config(Some(&config)).unwrap();
+        let manifest: Value = toml::from_str(&manifest_toml).unwrap();
+
+        assert_eq!(
+            manifest["runtime"]["url"].as_str(),
+            Some("https://cloud-api.near.ai/mcp")
         );
     }
 

@@ -513,6 +513,20 @@ registerPack("uk", {
   "skills.removed": "Видалено навик \"{name}\"",
   "skills.activatesOn": "Активується вкл",
   "skills.imported": "імпортовано",
+  "skills.defaultAutoActivationEnabled": "Автоактивацію навичок за замовчуванням увімкнено",
+  "skills.defaultAutoActivationDisabled": "Автоактивацію навичок за замовчуванням вимкнено",
+  "skills.defaultAutoActivationOnDesc":
+    "Навички автоматично активуються за ключовими словами для відповідних запитів. Вимкніть, щоб вимагати явне /name.",
+  "skills.defaultAutoActivationOffDesc":
+    "Навички запускаються лише коли ви вводите /name. Увімкніть, щоб дозволити автоактивацію за ключовими словами.",
+  "skills.defaultAutoActivationOnButton": "За замовчуванням: увімкнено",
+  "skills.defaultAutoActivationOffButton": "За замовчуванням: вимкнено",
+  "skills.autoActivateOnTitle":
+    "Автоактивацію увімкнено — запускається для відповідних запитів. Натисніть, щоб вимагати /name.",
+  "skills.autoActivateOffTitle":
+    "Лише явно — запускається тільки коли ви вводите /name. Натисніть, щоб увімкнути автоактивацію.",
+  "skills.autoActivateOnLabel": "Автоактивація: увімкнено",
+  "skills.autoActivateOffLabel": "Автоактивація: вимкнено",
 
   // Settings — users tab
   "users.title": "Користувачі ({count})",

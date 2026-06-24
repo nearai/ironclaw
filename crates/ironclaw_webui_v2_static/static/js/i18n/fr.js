@@ -513,6 +513,20 @@ registerPack("fr", {
   "skills.removed": "Compétence supprimée \"{name}\"",
   "skills.activatesOn": "Active sur",
   "skills.imported": "importé",
+  "skills.defaultAutoActivationEnabled": "Activation automatique par défaut des compétences activée",
+  "skills.defaultAutoActivationDisabled": "Activation automatique par défaut des compétences désactivée",
+  "skills.defaultAutoActivationOnDesc":
+    "Les compétences s’activent automatiquement par mot-clé sur les requêtes correspondantes. Désactivez pour exiger un /name explicite.",
+  "skills.defaultAutoActivationOffDesc":
+    "Les compétences ne s’exécutent que lorsque vous tapez /name. Activez pour autoriser l’activation automatique par mot-clé.",
+  "skills.defaultAutoActivationOnButton": "Par défaut : activé",
+  "skills.defaultAutoActivationOffButton": "Par défaut : désactivé",
+  "skills.autoActivateOnTitle":
+    "Activation automatique activée — s’exécute sur les requêtes correspondantes. Cliquez pour exiger /name.",
+  "skills.autoActivateOffTitle":
+    "Explicite uniquement — s’exécute seulement lorsque vous tapez /name. Cliquez pour activer l’activation automatique.",
+  "skills.autoActivateOnLabel": "Auto-activation : activée",
+  "skills.autoActivateOffLabel": "Auto-activation : désactivée",
 
   // Settings — users tab
   "users.title": "Utilisateurs ({count})",

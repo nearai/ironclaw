@@ -513,6 +513,20 @@ registerPack("ko", {
   "skills.removed": "제거된 스킬 \"{name}\"",
   "skills.activatesOn": "활성화",
   "skills.imported": "가져온",
+  "skills.defaultAutoActivationEnabled": "기본 스킬 자동 활성화 켜짐",
+  "skills.defaultAutoActivationDisabled": "기본 스킬 자동 활성화 꺼짐",
+  "skills.defaultAutoActivationOnDesc":
+    "일치하는 요청에서 키워드로 스킬이 자동 활성화됩니다. 명시적인 /name을 요구하려면 끄세요.",
+  "skills.defaultAutoActivationOffDesc":
+    "스킬은 /name을 입력할 때만 실행됩니다. 키워드 자동 활성화를 허용하려면 켜세요.",
+  "skills.defaultAutoActivationOnButton": "기본값: 켜짐",
+  "skills.defaultAutoActivationOffButton": "기본값: 꺼짐",
+  "skills.autoActivateOnTitle":
+    "자동 활성화 켜짐 — 일치하는 요청에서 실행됩니다. 클릭하면 /name 명시 실행만 허용합니다.",
+  "skills.autoActivateOffTitle":
+    "명시 실행만 — /name을 입력할 때만 실행됩니다. 클릭하면 자동 활성화를 켭니다.",
+  "skills.autoActivateOnLabel": "자동 활성화: 켜짐",
+  "skills.autoActivateOffLabel": "자동 활성화: 꺼짐",
 
   // Settings — users tab
   "users.title": "사용자 ({count})",

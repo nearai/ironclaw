@@ -6,7 +6,8 @@ not the legacy v1 Slack WASM channel.
 Slack support has two gates:
 
 1. The binary must be built with the `slack-v2-host-beta` Cargo feature.
-2. Runtime config must set `[slack].enabled = true`.
+2. Runtime config must set `[slack].enabled = true`, or the deployment env
+   must set `IRONCLAW_REBORN_SLACK_ENABLED=true`.
 
 Slack bot token and signing secret are configured in WebUI Slack setup and
 stored in the Reborn secret store. Do not put OAuth client secrets or LLM keys
@@ -89,6 +90,7 @@ IRONCLAW_REBORN_HOME=/data/ironclaw-reborn
 IRONCLAW_REBORN_PROFILE=local-dev
 IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
 IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli
+IRONCLAW_REBORN_SLACK_ENABLED=true
 OPENAI_API_KEY=sk-...
 ```
 
@@ -104,8 +106,13 @@ Minimal Slack config:
 enabled = true
 ```
 
-`enabled` is the only Slack boot setting. It mounts
-`POST /webhooks/slack/events` and exposes Slack channel setup in WebUI.
+`enabled` is the only Slack boot setting. You can also set
+`IRONCLAW_REBORN_SLACK_ENABLED=true` instead of editing config. The env var
+overrides only the route enablement gate: `true`/`1` mounts Slack, while
+`false`/`0` acts as a deployment kill switch.
+
+Slack enablement mounts `POST /webhooks/slack/events` and exposes Slack channel
+setup in WebUI.
 Slack installation ids, team/app ids, the bot token, the signing secret,
 and channel mappings are configured after startup from WebUI channel setup.
 
@@ -247,7 +254,7 @@ Verification checklist:
 
 ## Troubleshooting
 
-### [slack].enabled = true requires ... slack-v2-host-beta
+### Slack enablement requires ... slack-v2-host-beta
 
 Rebuild or rerun ironclaw-reborn with --features slack-v2-host-beta.
 
