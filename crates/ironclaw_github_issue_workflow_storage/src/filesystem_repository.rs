@@ -19,7 +19,8 @@ use ironclaw_github_issue_workflow::{
     CompleteProviderActionOutcome, CompleteWorkflowStepInput, CompleteWorkflowStepOutcome,
     CreateOrGetProviderActionInput, CreateOrGetWorkflowRunInput, CreateOrGetWorkflowRunOutcome,
     CreateOrGetWorkflowStepInput, CreateOrGetWorkflowStepOutcome, CreateStageRunInput,
-    CreateStageRunOutcome, FindLatestWorkflowEventForProviderInput, GithubIssueProviderActionId,
+    CreateStageRunOutcome, FailStageRunInput, FailStageRunOutcome,
+    FindLatestWorkflowEventForProviderInput, GetStageRunInput, GithubIssueProviderActionId,
     GithubIssueProviderActionRecord, GithubIssueProviderBinding, GithubIssueProviderBindingId,
     GithubIssueStage, GithubIssueStageRunId, GithubIssueWorkflowError, GithubIssueWorkflowEvent,
     GithubIssueWorkflowEventId, GithubIssueWorkflowMode, GithubIssueWorkflowRepository,
@@ -27,9 +28,9 @@ use ironclaw_github_issue_workflow::{
     GithubIssueWorkflowRunStatus, GithubIssueWorkflowState, LeaseReleaseOutcome,
     LeaseRenewalOutcome, ListActiveWorkflowRunsForRepositoryInput, ListWorkflowEventsAfterInput,
     ProviderActionStatus, RecordWorkflowEventInput, RecordWorkflowEventOutcome,
-    ReleaseWorkflowRunLeaseInput, RenewWorkflowRunLeaseInput, TransitionOutcome,
+    ReleaseWorkflowRunLeaseInput, RenewWorkflowRunLeaseInput, StageRunSnapshot, TransitionOutcome,
     UpsertProviderBindingInput, WorkflowIdempotencyKey, WorkflowStepRun, WorkflowStepRunId,
-    WorkflowStepStatus,
+    WorkflowStepStatus, apply_workflow_run_transition,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{AgentId, InvocationId, ProjectId, TenantId, UserId};
@@ -512,26 +513,11 @@ where
             }
 
             run.event_cursor = input.next_event_cursor;
-            if let Some(status) = input.transition.status.clone() {
-                run.status = status;
-            }
-            if let Some(mode) = input.transition.mode.clone() {
-                run.workflow_state.mode = mode;
-            }
-            if input.transition.clear_active_block {
-                run.workflow_state.active_block = None;
-            }
-            if let Some(active_block) = input.transition.active_block.clone() {
-                run.workflow_state.active_block = Some(active_block);
-            }
-            if let Some(workspace_session) = input.transition.workspace_session.clone() {
-                run.workspace_session_id = Some(workspace_session.workspace_session_id);
-                run.workflow_state.current_workspace_ref = Some(workspace_session.workspace_ref);
-                run.workflow_state.current_workspace_mount_ref = Some(workspace_session.mount_ref);
-            }
-            if let Some(primary_pr) = input.transition.primary_pr.clone() {
-                run.workflow_state.primary_pr = Some(primary_pr);
-            }
+            // Single shared projection: route through the domain crate's
+            // `apply_workflow_run_transition` so the durable backend cannot
+            // silently drop a transition field the in-memory backend applies
+            // (this divergence shipped once for `latest_provider_snapshot`).
+            apply_workflow_run_transition(&mut run, &input.transition);
 
             run.workflow_run_version += 1;
             run.updated_at = input.now;
@@ -567,34 +553,42 @@ where
                 });
             }
 
+            // Stage-row-FIRST: persist the stage row before pointing the run at
+            // it. A crash after this put but before the run write leaves an
+            // active, *unreferenced* stage row (harmless and GC-able); the next
+            // tick re-creates a fresh stage. The reverse order (pointer first)
+            // would leave a pointer to a missing stage row, which
+            // `accept_stage_result` reads as `NotActiveStage` forever — a
+            // permanent stuck run. The id is minted inside the loop so a
+            // run-CAS conflict re-mints a new id (the orphan row is harmless).
             let stage_run_id = GithubIssueStageRunId::new();
+            let stage = StoredStageRun {
+                stage_run_id: stage_run_id.clone(),
+                workflow_run_id: input.workflow_run_id.clone(),
+                stage: input.stage.clone(),
+                result: None,
+                active: true,
+                failed: false,
+                created_at: input.now,
+                updated_at: input.now,
+                last_heartbeat_at: Some(input.now),
+            };
+            let path = stage_path(&self.root, &stage.workflow_run_id, &stage_run_id)?;
+            self.filesystem
+                .put(
+                    &self.scope,
+                    &path,
+                    entry_for_stage(&stage)?,
+                    CasExpectation::Absent,
+                )
+                .await
+                .map_err(|error| filesystem_error("create stage run", error))?;
+
             run.active_stage_run_id = Some(stage_run_id.clone());
             run.workflow_run_version += 1;
             run.updated_at = input.now;
-
             match self.put_run_versioned(&run, version).await {
-                Ok(()) => {
-                    let stage = StoredStageRun {
-                        stage_run_id: stage_run_id.clone(),
-                        workflow_run_id: input.workflow_run_id,
-                        stage: input.stage,
-                        result: None,
-                        active: true,
-                        created_at: input.now,
-                        updated_at: input.now,
-                    };
-                    let path = stage_path(&self.root, &stage.workflow_run_id, &stage_run_id)?;
-                    self.filesystem
-                        .put(
-                            &self.scope,
-                            &path,
-                            entry_for_stage(&stage)?,
-                            CasExpectation::Absent,
-                        )
-                        .await
-                        .map_err(|error| filesystem_error("create stage run", error))?;
-                    return Ok(CreateStageRunOutcome::Created { stage_run_id, run });
-                }
+                Ok(()) => return Ok(CreateStageRunOutcome::Created { stage_run_id, run }),
                 Err(FilesystemError::VersionMismatch { .. }) => continue,
                 Err(error) => return Err(filesystem_error("create stage run", error)),
             }
@@ -631,6 +625,12 @@ where
                 return Ok(AcceptStageResultOutcome::NotActiveStage { run });
             }
 
+            // Run-pointer-FIRST is the recoverable order for accept: a crash
+            // after clearing the pointer but before flipping the stage row
+            // leaves an unreferenced still-active stage row (an orphan) while
+            // the run is free to advance. The reverse order would leave a
+            // pointer to an inactive stage = a stuck run the reconciler must not
+            // auto-recover, so the pointer write stays first here.
             run.active_stage_run_id = None;
             run.workflow_run_version += 1;
             run.updated_at = input.now;
@@ -639,6 +639,7 @@ where
                     stage.result = Some(input.result);
                     stage.active = false;
                     stage.updated_at = input.now;
+                    stage.last_heartbeat_at = Some(input.now);
                     self.filesystem
                         .put(
                             &self.scope,
@@ -652,6 +653,83 @@ where
                 }
                 Err(FilesystemError::VersionMismatch { .. }) => continue,
                 Err(error) => return Err(filesystem_error("accept stage result", error)),
+            }
+        }
+    }
+
+    async fn get_stage_run(
+        &self,
+        input: GetStageRunInput,
+    ) -> Result<Option<StageRunSnapshot>, GithubIssueWorkflowError> {
+        let path = stage_path(&self.root, &input.workflow_run_id, &input.stage_run_id)?;
+        let Some((stage, _version)) = load_record::<F, StoredStageRun>(
+            &self.filesystem,
+            &self.scope,
+            &path,
+            "load stage run",
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        if stage.workflow_run_id != input.workflow_run_id {
+            return Ok(None);
+        }
+        let created_at = stage.created_at;
+        Ok(Some(StageRunSnapshot {
+            stage_run_id: stage.stage_run_id,
+            workflow_run_id: stage.workflow_run_id,
+            stage: stage.stage,
+            active: stage.active,
+            failed: stage.failed,
+            created_at,
+            last_heartbeat_at: stage.last_heartbeat_at.unwrap_or(created_at),
+        }))
+    }
+
+    async fn fail_stage_run(
+        &self,
+        input: FailStageRunInput,
+    ) -> Result<FailStageRunOutcome, GithubIssueWorkflowError> {
+        let path = stage_path(&self.root, &input.workflow_run_id, &input.stage_run_id)?;
+        loop {
+            let Some((mut stage, stage_version)) = load_record::<F, StoredStageRun>(
+                &self.filesystem,
+                &self.scope,
+                &path,
+                "load stage run",
+            )
+            .await?
+            else {
+                return Ok(FailStageRunOutcome::NotFound);
+            };
+            if stage.workflow_run_id != input.workflow_run_id {
+                return Ok(FailStageRunOutcome::NotFound);
+            }
+            if !stage.active {
+                return Ok(FailStageRunOutcome::AlreadyInactive);
+            }
+            stage.active = false;
+            stage.failed = true;
+            stage.updated_at = input.now;
+            stage.last_heartbeat_at = Some(input.now);
+            match self
+                .filesystem
+                .put(
+                    &self.scope,
+                    &path,
+                    entry_for_stage(&stage)?,
+                    CasExpectation::Version(stage_version),
+                )
+                .await
+            {
+                Ok(_) => {
+                    return Ok(FailStageRunOutcome::Failed {
+                        stage_run_id: input.stage_run_id,
+                    });
+                }
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(filesystem_error("fail stage run", error)),
             }
         }
     }
@@ -1565,6 +1643,20 @@ where
         self.inner.accept_stage_result(input).await
     }
 
+    async fn get_stage_run(
+        &self,
+        input: GetStageRunInput,
+    ) -> Result<Option<StageRunSnapshot>, GithubIssueWorkflowError> {
+        self.inner.get_stage_run(input).await
+    }
+
+    async fn fail_stage_run(
+        &self,
+        input: FailStageRunInput,
+    ) -> Result<FailStageRunOutcome, GithubIssueWorkflowError> {
+        self.inner.fail_stage_run(input).await
+    }
+
     async fn create_or_get_workflow_step(
         &self,
         input: CreateOrGetWorkflowStepInput,
@@ -1719,6 +1811,20 @@ impl GithubIssueWorkflowRepository for RebornLibSqlGithubIssueWorkflowRepository
         self.inner.accept_stage_result(input).await
     }
 
+    async fn get_stage_run(
+        &self,
+        input: GetStageRunInput,
+    ) -> Result<Option<StageRunSnapshot>, GithubIssueWorkflowError> {
+        self.inner.get_stage_run(input).await
+    }
+
+    async fn fail_stage_run(
+        &self,
+        input: FailStageRunInput,
+    ) -> Result<FailStageRunOutcome, GithubIssueWorkflowError> {
+        self.inner.fail_stage_run(input).await
+    }
+
     async fn create_or_get_workflow_step(
         &self,
         input: CreateOrGetWorkflowStepInput,
@@ -1871,6 +1977,20 @@ impl GithubIssueWorkflowRepository for RebornPostgresGithubIssueWorkflowReposito
         input: AcceptStageResultInput,
     ) -> Result<AcceptStageResultOutcome, GithubIssueWorkflowError> {
         self.inner.accept_stage_result(input).await
+    }
+
+    async fn get_stage_run(
+        &self,
+        input: GetStageRunInput,
+    ) -> Result<Option<StageRunSnapshot>, GithubIssueWorkflowError> {
+        self.inner.get_stage_run(input).await
+    }
+
+    async fn fail_stage_run(
+        &self,
+        input: FailStageRunInput,
+    ) -> Result<FailStageRunOutcome, GithubIssueWorkflowError> {
+        self.inner.fail_stage_run(input).await
     }
 
     async fn create_or_get_workflow_step(
@@ -2277,8 +2397,16 @@ struct StoredStageRun {
     stage: GithubIssueStage,
     result: Option<JsonValue>,
     active: bool,
+    // `#[serde(default)]` so legacy rows (written before the stuck-stage
+    // reconciler) deserialize. `failed` defaults to false; `last_heartbeat_at`
+    // is backfilled from `created_at` on read so a legacy row never looks
+    // infinitely stale and triggers a spurious recovery escalation.
+    #[serde(default)]
+    failed: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    #[serde(default)]
+    last_heartbeat_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

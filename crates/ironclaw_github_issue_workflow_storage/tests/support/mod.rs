@@ -209,9 +209,25 @@ pub fn binding_input(
     }
 }
 
+/// libSQL's native layer is unsafe under concurrent connection open/use within
+/// a single process: running these contract tests in parallel threads
+/// intermittently crashes the process (SIGSEGV/SIGABRT) or surfaces a
+/// "bad parameter or other API misuse" error from libSQL. Production uses a
+/// single connection per process, so this is purely a test-harness concern.
+/// `cases()` acquires this lock and every `RepositoryCase` it returns holds a
+/// clone for the test's full duration, so RepositoryCase-based tests run one at
+/// a time within a binary (each is sub-millisecond, so the cost is negligible).
+/// Each test calls `cases()` exactly once, so this cannot deadlock.
+fn case_serial_lock() -> Arc<tokio::sync::Mutex<()>> {
+    static LOCK: std::sync::OnceLock<Arc<tokio::sync::Mutex<()>>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 pub struct RepositoryCase {
     pub name: String,
     backend: RepositoryBackend,
+    _serial_guard: Arc<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 enum RepositoryBackend {
@@ -230,11 +246,13 @@ enum RepositoryBackend {
 impl RepositoryCase {
     pub async fn cases(test_name: &str) -> Vec<Self> {
         let suffix = unique_suffix(test_name);
+        let serial_guard = Arc::new(case_serial_lock().lock_owned().await);
         let mut cases = vec![Self {
             name: format!("in-memory-{suffix}"),
             backend: RepositoryBackend::InMemory(Arc::new(
                 InMemoryGithubIssueWorkflowRepository::default(),
             )),
+            _serial_guard: serial_guard.clone(),
         }];
 
         #[cfg(feature = "libsql")]
@@ -247,6 +265,7 @@ impl RepositoryCase {
                     path: db_path.display().to_string(),
                     _temp_dir: dir,
                 },
+                _serial_guard: serial_guard.clone(),
             });
         }
 
@@ -255,6 +274,7 @@ impl RepositoryCase {
             cases.push(Self {
                 name: format!("postgres-{suffix}"),
                 backend: RepositoryBackend::Postgres { filesystem },
+                _serial_guard: serial_guard.clone(),
             });
         }
 

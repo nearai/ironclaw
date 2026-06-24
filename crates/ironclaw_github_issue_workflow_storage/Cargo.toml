@@ -29,6 +29,7 @@ tracing = "0.1"
 [dev-dependencies]
 deadpool-postgres = "0.14"
 ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["libsql", "postgres"] }
+ironclaw_github_issue_workflow = { path = "../ironclaw_github_issue_workflow", features = ["test-support"] }
 libsql = { version = "0.6", default-features = false, features = ["core", "replication", "remote", "tls"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
