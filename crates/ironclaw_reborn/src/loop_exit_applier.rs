@@ -167,7 +167,7 @@ where
     checkpoint_state_store: Option<Arc<dyn CheckpointStateStore>>,
     approval_gate_evidence: Option<Arc<dyn ApprovalGateEvidenceStore>>,
     resource_gate_evidence: Option<Arc<dyn ResourceGateEvidenceStore>>,
-    await_dependent_run_evidence: Option<Arc<dyn AwaitDependentRunEvidenceStore>>,
+    await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
     thread_scope: Option<ThreadScope>,
     cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
 }
@@ -211,6 +211,7 @@ where
         thread_service: Arc<S>,
         turn_state_store: Arc<dyn TurnStateStore>,
         loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
+        await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
     ) -> Self {
         Self {
             thread_service,
@@ -219,7 +220,7 @@ where
             checkpoint_state_store: None,
             approval_gate_evidence: None,
             resource_gate_evidence: None,
-            await_dependent_run_evidence: None,
+            await_dependent_run_evidence,
             thread_scope: None,
             cancellation_factory: None,
         }
@@ -229,6 +230,7 @@ where
         thread_service: Arc<S>,
         turn_state_store: Arc<dyn TurnStateStore>,
         loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
+        await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
         thread_scope: ThreadScope,
     ) -> Self {
         Self {
@@ -238,7 +240,7 @@ where
             checkpoint_state_store: None,
             approval_gate_evidence: None,
             resource_gate_evidence: None,
-            await_dependent_run_evidence: None,
+            await_dependent_run_evidence,
             thread_scope: Some(thread_scope),
             cancellation_factory: None,
         }
@@ -265,14 +267,6 @@ where
         resource_gate_evidence: Arc<dyn ResourceGateEvidenceStore>,
     ) -> Self {
         self.resource_gate_evidence = Some(resource_gate_evidence);
-        self
-    }
-
-    pub fn with_await_dependent_run_evidence(
-        mut self,
-        await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
-    ) -> Self {
-        self.await_dependent_run_evidence = Some(await_dependent_run_evidence);
         self
     }
 
@@ -564,10 +558,7 @@ where
         &self,
         request: &BlockedEvidenceRequest<'_>,
     ) -> Result<bool, TurnError> {
-        let Some(evidence) = &self.await_dependent_run_evidence else {
-            return Ok(false);
-        };
-        evidence
+        self.await_dependent_run_evidence
             .has_awaited_child_gate(request.scope, request.run_id, &request.blocked.gate_ref)
             .await
     }

@@ -478,7 +478,7 @@ pub struct LoopInlineMessageBody(String);
 
 impl LoopInlineMessageBody {
     pub fn new(value: impl Into<String>) -> Result<Self, String> {
-        validate_loop_inline_message_body(value.into()).map(Self)
+        Self::try_from(value.into())
     }
 
     pub fn as_str(&self) -> &str {
@@ -506,7 +506,7 @@ impl TryFrom<String> for LoopInlineMessageBody {
     type Error = String;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
+        validate_loop_inline_message_body(value).map(Self)
     }
 }
 

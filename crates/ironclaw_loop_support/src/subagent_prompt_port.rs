@@ -49,9 +49,9 @@ pub struct SubagentPromptLimits {
 
 impl Default for SubagentPromptLimits {
     fn default() -> Self {
-        // Keep the raw DoS guard internal. The default allows 2x the sanitized
-        // budget so whitespace-heavy handoffs can collapse before the visible
-        // prompt budget is enforced without permitting unbounded raw input.
+        // Keep the raw DoS guard internal. The default allows 2x the visible
+        // prompt budget so sanitization can run before the final budget check
+        // without permitting unbounded raw input.
         Self {
             max_goal_bytes: DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
             max_raw_goal_bytes: DEFAULT_SUBAGENT_GOAL_RAW_MAX_BYTES,
@@ -209,7 +209,7 @@ fn materialize_inline_message(
 fn materialize_sanitized_inline_message(
     role: LoopInlineMessageRole,
     label: &'static str,
-    safe_body: impl Into<String>,
+    safe_body: String,
 ) -> Result<LoopInlineMessage, AgentLoopHostError> {
     let safe_body = LoopInlineMessageBody::new(safe_body).map_err(|reason| {
         AgentLoopHostError::new(
