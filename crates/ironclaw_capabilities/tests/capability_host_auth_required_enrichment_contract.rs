@@ -346,17 +346,18 @@ async fn auth_resume_json_enriches_auth_required_credential_requirements_from_ob
 }
 
 // ---------------------------------------------------------------------------
-// Test: multiple InjectCredentialAccountOnce obligations → only one emitted
+// Test: multiple InjectCredentialAccountOnce obligations → NOT enriched
 //
 // When the authorizer declares two InjectCredentialAccountOnce obligations
-// (different providers), the enriched list must have length 1, not 2.
-// This locks the `.take(1)` contract: the downstream consumer
-// `auth_prompt_from_credential_requirement` matches exactly one requirement;
-// emitting two would cause it to fall through and leave `provider` as None.
+// (different providers), the gate is left unmodified — credential_requirements
+// stays EMPTY — because the failed credential cannot be attributed to one
+// provider without guessing.  Emitting the wrong provider would point the
+// WebUI manual-token card at the wrong credential and make the gate
+// unresolvable.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn invoke_json_emits_at_most_one_requirement_when_multiple_obligations_declared() {
+async fn invoke_json_does_not_enrich_when_multiple_credential_obligations_declared() {
     struct MultiObligationAuthorizer;
 
     #[async_trait]
@@ -419,15 +420,10 @@ async fn invoke_json_emits_at_most_one_requirement_when_multiple_obligations_dec
         panic!("expected AuthorizationRequiresAuth, got {err:?}");
     };
 
-    assert_eq!(
-        credential_requirements.len(),
-        1,
-        "must emit exactly one credential requirement even when two InjectCredentialAccountOnce \
-         obligations are declared — the downstream auth_prompt consumer handles exactly one"
-    );
-    assert_eq!(
-        credential_requirements[0].provider,
-        RuntimeCredentialAccountProviderId::new("github").unwrap(),
-        "must emit the first obligation's provider"
+    assert!(
+        credential_requirements.is_empty(),
+        "must NOT enrich when two InjectCredentialAccountOnce obligations are declared — \
+         failed credential cannot be attributed to one provider; gate is left unmodified \
+         rather than mis-pointed at the wrong provider"
     );
 }

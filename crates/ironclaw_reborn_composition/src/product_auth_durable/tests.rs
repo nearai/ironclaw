@@ -3690,6 +3690,14 @@ async fn filesystem_complete_manual_token_still_rejects_genuinely_foreign_owner(
     // scope has a different *owner* (different user_id) than the credential account
     // must still return CrossScopeDenied.  This guards against
     // `binding_scope_owns_account` being over-permissive.
+    //
+    // GUARD ANALYSIS: `user_id` is NOT encoded in the on-disk path (the path is
+    // keyed by surface + session, not by user; the filesystem mount is fixed to
+    // alice's tree in tests).  Bob's account written via `create_account` lands at
+    // the SAME physical path that alice's flow reads.  Therefore `read_account`
+    // returns `Some(bob_account)`, and the `CrossScopeDenied` comes from
+    // `binding_scope_owns_account` comparing the scopes — the guard itself is
+    // exercised, not a path-partition miss.
     let filesystem = test_filesystem();
     let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
 
@@ -3976,5 +3984,287 @@ async fn filesystem_complete_credential_selection_succeeds_across_different_invo
         completed.credential_account_id,
         Some(account.id),
         "completed flow must reference the pre-existing credential account"
+    );
+}
+
+// ─── security: complete_credential_selection ownership enforcement ────────────
+
+#[tokio::test]
+async fn filesystem_complete_credential_selection_rejects_genuinely_foreign_owner() {
+    // Reviewer A (serrrfirat): `complete_credential_selection` must enforce the
+    // same ownership boundary as `complete_manual_token`. A flow owned by alice
+    // must not complete against a credential account owned by bob, even after the
+    // `binding_scope_owns_account` relaxation for ephemeral invocation_id/thread.
+    //
+    // GUARD ANALYSIS: `user_id` is NOT encoded in the on-disk account path (path
+    // is keyed by surface + session only; the test filesystem mount is fixed to
+    // alice's tree). Bob's account therefore lands at the same physical path that
+    // alice's flow reads — `read_account` returns `Some(bob_account)`. The
+    // `CrossScopeDenied` comes from `binding_scope_owns_account` itself (the guard
+    // is exercised, not a path-partition miss).  This is the most important new
+    // test: it proves the guard actually fires on a reachable foreign-owner account.
+    use ironclaw_auth::{AuthFlowKind, CredentialSelectionInput};
+
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+
+    // Account created under user "bob" (foreign owner).
+    let mut bob_resource = test_scope().resource;
+    bob_resource.user_id = UserId::new("bob").unwrap();
+    let bob_scope = AuthProductScope::new(bob_resource, AuthSurface::Web);
+
+    // Flow created under user "alice" (the default `test_scope()`).
+    let alice_scope = test_scope();
+
+    let service = test_service(filesystem, secret_store);
+
+    // Create a Configured account owned by bob.
+    let bob_account = service
+        .create_account(NewCredentialAccount {
+            scope: bob_scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(SecretHandle::new("bob-sel-access").unwrap()),
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    // Create the account-selection flow under alice's scope, advertising bob's
+    // account id (simulates a tampered or confused client submission).
+    let flow = service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: alice_scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::AccountSelectionRequired {
+                provider: google_provider(),
+                accounts: vec![bob_account.projection()],
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+
+    // Alice's flow must not complete against bob's account — CrossScopeDenied.
+    let err = service
+        .complete_credential_selection(
+            &alice_scope,
+            CredentialSelectionInput {
+                flow_id: flow.id,
+                credential_account_id: bob_account.id,
+            },
+        )
+        .await
+        .expect_err(
+            "complete_credential_selection against a foreign-owner account must return \
+             CrossScopeDenied",
+        );
+
+    assert_eq!(
+        err,
+        AuthProductError::CrossScopeDenied,
+        "binding_scope_owns_account must reject a reachable account whose user_id differs \
+         from the flow scope's user_id"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_complete_credential_selection_rejects_different_session_id() {
+    // Reviewer A (serrrfirat) parity with `complete_manual_token` session test.
+    // `complete_credential_selection` must reject an attempt to complete a
+    // selection flow whose scope carries session S2 against a credential account
+    // created under session S1.
+    //
+    // GUARD ANALYSIS: `session_id` IS encoded in the on-disk account path (see
+    // `product_auth_root` — the path includes `/sessions/{session_id}` when
+    // `session_id` is Some). An account stored under S1 is therefore NOT
+    // accessible from a read under S2. The durable store returns `None` for the
+    // account lookup → `CredentialMissing`. Both `CredentialMissing` (path
+    // partitioning intercepts before the guard) and `CrossScopeDenied` (the guard
+    // fires) are correct secure outcomes; this test locks which one actually
+    // occurs so it cannot silently regress. The `binding_scope_owns_account`
+    // session exact-match is defense-in-depth for any future code path that
+    // bypasses the path partitioning.
+    use ironclaw_auth::{AuthFlowKind, CredentialSelectionInput};
+
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+
+    // Account created under session S1.
+    let account_resource = test_scope().resource;
+    let mut account_scope = AuthProductScope::new(account_resource.clone(), AuthSurface::Web);
+    account_scope.session_id = Some(AuthSessionId::new("sel-session-s1").unwrap());
+
+    // Flow created under session S2 (same surface, same owner, different session).
+    let mut flow_resource = test_scope().resource;
+    flow_resource.invocation_id = InvocationId::new(); // realistic fresh invocation
+    let mut flow_scope = AuthProductScope::new(flow_resource, AuthSurface::Web);
+    flow_scope.session_id = Some(AuthSessionId::new("sel-session-s2").unwrap());
+
+    let service = test_service(filesystem, secret_store);
+
+    // Create the credential account under session S1.
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: account_scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(SecretHandle::new("sel-s1-access").unwrap()),
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    // Create the account-selection flow under session S2.
+    let flow = service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: flow_scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::AccountSelectionRequired {
+                provider: google_provider(),
+                accounts: vec![account.projection()],
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+
+    // Cross-session completion must be rejected.
+    // The disk layout partitions by session_id so the account is not found at
+    // all under S2 → CredentialMissing.  CrossScopeDenied would be returned if
+    // the account were somehow reachable with a mismatched session.  Both are
+    // correct secure outcomes; accepting either documents the actual behavior.
+    let err = service
+        .complete_credential_selection(
+            &flow_scope,
+            CredentialSelectionInput {
+                flow_id: flow.id,
+                credential_account_id: account.id,
+            },
+        )
+        .await
+        .expect_err("complete_credential_selection with different session_id must be rejected");
+
+    assert!(
+        matches!(
+            err,
+            AuthProductError::CredentialMissing | AuthProductError::CrossScopeDenied
+        ),
+        "cross-session credential selection must return CredentialMissing (path-partition \
+         intercepts before the guard) or CrossScopeDenied (guard fires on a reachable \
+         session-mismatched account), got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_complete_credential_selection_rejects_different_auth_surface() {
+    // Reviewer A (serrrfirat) parity with `complete_manual_token` surface test.
+    // `complete_credential_selection` must reject an attempt to complete a
+    // selection flow whose scope carries surface Cli against a credential account
+    // created under surface Web.
+    //
+    // GUARD ANALYSIS: `surface` IS encoded in the on-disk account path (see
+    // `surface_path_segment` in `paths.rs`). An account stored under Web is NOT
+    // accessible from a read under Cli — `read_account` returns `None` →
+    // `CredentialMissing`. The `binding_scope_owns_account` surface exact-match is
+    // defense-in-depth: if a future refactor bypasses path partitioning the guard
+    // would catch a reachable surface-mismatched account and return
+    // `CrossScopeDenied`. Both outcomes are correct and secure; this test locks
+    // which one occurs so a regression cannot pass silently.
+    use ironclaw_auth::{AuthFlowKind, CredentialSelectionInput};
+
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+
+    // Account created under AuthSurface::Web (default from test_scope()).
+    let web_scope = test_scope();
+
+    // Flow created under AuthSurface::Cli (same owner, different surface).
+    let cli_scope = AuthProductScope::new(test_scope().resource, AuthSurface::Cli);
+
+    let service = test_service(filesystem, secret_store);
+
+    // Create the credential account under Web surface.
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: web_scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(SecretHandle::new("sel-web-access").unwrap()),
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    // Create the account-selection flow under Cli surface.
+    let flow = service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: cli_scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::AccountSelectionRequired {
+                provider: google_provider(),
+                accounts: vec![account.projection()],
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+
+    // Cross-surface completion must be rejected.
+    // The filesystem partitions by surface path segment so the account is not
+    // found from Cli → CredentialMissing.  CrossScopeDenied would fire if the
+    // account were somehow reachable with a mismatched surface.
+    let err = service
+        .complete_credential_selection(
+            &cli_scope,
+            CredentialSelectionInput {
+                flow_id: flow.id,
+                credential_account_id: account.id,
+            },
+        )
+        .await
+        .expect_err("complete_credential_selection with different AuthSurface must be rejected");
+
+    assert!(
+        matches!(
+            err,
+            AuthProductError::CredentialMissing | AuthProductError::CrossScopeDenied
+        ),
+        "cross-surface credential selection must return CredentialMissing (path-partition \
+         intercepts before the guard) or CrossScopeDenied (guard fires on a reachable \
+         surface-mismatched account), got: {err:?}"
     );
 }

@@ -11,9 +11,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    CapabilityId, ExtensionId, MountView, Obligation, ResourceEstimate, ResourceReceipt,
-    ResourceReservation, ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement,
-    RuntimeKind, SecretHandle,
+    CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt, ResourceReservation,
+    ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
 };
 
 /// Request for one already-authorized declared capability dispatch.
@@ -403,51 +402,6 @@ impl DispatchError {
         }
     }
 
-    /// Enriches an `AuthRequired` error's empty `credential_requirements` list from
-    /// the capability's declared obligations.
-    ///
-    /// When a WASM adapter (or any runtime that only receives the error string) returns
-    /// `AuthRequired` with an empty `credential_requirements`, this method fills it
-    /// with the first matching `InjectCredentialAccountOnce` obligation.
-    ///
-    /// Only the **first** obligation is emitted (`.take(1)`) because the downstream
-    /// consumer — `auth_prompt_from_credential_requirement` in
-    /// `ironclaw_reborn_composition` — matches exactly one requirement via
-    /// `let [requirement] = credential_requirements else { return view; }`. Emitting
-    /// more than one would cause the match to fall through and leave `provider` as
-    /// `None`, making the gate unsubmittable.
-    ///
-    /// If `self` is not `AuthRequired`, or if `credential_requirements` is already
-    /// non-empty (e.g. passed through from an MCP runtime), `self` is returned
-    /// unchanged without any allocation.
-    pub fn enrich_auth_requirements(self, obligations: &[Obligation]) -> Self {
-        match &self {
-            Self::AuthRequired {
-                credential_requirements,
-                ..
-            } if credential_requirements.is_empty() => {}
-            _ => return self,
-        }
-        let Self::AuthRequired {
-            capability,
-            required_secrets,
-            ..
-        } = self
-        else {
-            unreachable!("matched AuthRequired with empty requirements above")
-        };
-        let enriched = obligations
-            .iter()
-            .filter_map(Obligation::credential_auth_requirement)
-            .take(1)
-            .collect();
-        Self::AuthRequired {
-            capability,
-            required_secrets,
-            credential_requirements: enriched,
-        }
-    }
-
     /// Stable event-token string for the error, suitable for telemetry and structured logging.
     ///
     /// This is the single canonical source for dispatch error event tokens; crates should
@@ -481,10 +435,6 @@ pub trait CapabilityDispatcher: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        ExtensionId, Obligation, RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-        SecretHandle,
-    };
 
     #[test]
     fn dispatch_input_issue_builder_methods_round_trip_optional_fields() {
@@ -500,130 +450,6 @@ mod tests {
         assert_eq!(
             issue.schema_path.as_deref(),
             Some("/properties/schedule/oneOf/0/properties/kind")
-        );
-    }
-
-    fn auth_required_empty(cap: &str) -> DispatchError {
-        DispatchError::AuthRequired {
-            capability: CapabilityId::new(cap).unwrap(),
-            required_secrets: Vec::new(),
-            credential_requirements: Vec::new(),
-        }
-    }
-
-    fn auth_required_with_provider(cap: &str, provider: &str) -> DispatchError {
-        DispatchError::AuthRequired {
-            capability: CapabilityId::new(cap).unwrap(),
-            required_secrets: Vec::new(),
-            credential_requirements: vec![RuntimeCredentialAuthRequirement {
-                provider: RuntimeCredentialAccountProviderId::new(provider).unwrap(),
-                setup: RuntimeCredentialAccountSetup::ManualToken,
-                requester_extension: ExtensionId::new(provider).unwrap(),
-                provider_scopes: Vec::new(),
-            }],
-        }
-    }
-
-    fn inject_credential_obligation(provider: &str) -> Obligation {
-        Obligation::InjectCredentialAccountOnce {
-            handle: SecretHandle::new(format!("{provider}_pat")).unwrap(),
-            provider: RuntimeCredentialAccountProviderId::new(provider).unwrap(),
-            setup: RuntimeCredentialAccountSetup::ManualToken,
-            provider_scopes: Vec::new(),
-            requester_extension: ExtensionId::new(provider).unwrap(),
-        }
-    }
-
-    // enrich_auth_requirements: empty → enriched with first obligation
-    #[test]
-    fn enrich_auth_requirements_fills_empty_from_obligation() {
-        let error = auth_required_empty("echo.say");
-        let obligations = [inject_credential_obligation("github")];
-
-        let enriched = error.enrich_auth_requirements(&obligations);
-
-        let DispatchError::AuthRequired {
-            credential_requirements,
-            ..
-        } = enriched
-        else {
-            panic!("expected AuthRequired");
-        };
-        assert_eq!(credential_requirements.len(), 1);
-        assert_eq!(
-            credential_requirements[0].provider,
-            RuntimeCredentialAccountProviderId::new("github").unwrap()
-        );
-    }
-
-    // enrich_auth_requirements: already-populated → returned unchanged
-    #[test]
-    fn enrich_auth_requirements_leaves_non_empty_unchanged() {
-        let error = auth_required_with_provider("echo.say", "mcp_provider");
-        let obligations = [inject_credential_obligation("github")];
-
-        let unchanged = error.enrich_auth_requirements(&obligations);
-
-        let DispatchError::AuthRequired {
-            credential_requirements,
-            ..
-        } = unchanged
-        else {
-            panic!("expected AuthRequired");
-        };
-        // Must retain the original mcp_provider, not be replaced by github.
-        assert_eq!(credential_requirements.len(), 1);
-        assert_eq!(
-            credential_requirements[0].provider,
-            RuntimeCredentialAccountProviderId::new("mcp_provider").unwrap()
-        );
-    }
-
-    // enrich_auth_requirements: two obligations → only the first is emitted (.take(1))
-    #[test]
-    fn enrich_auth_requirements_take_one_when_multiple_obligations_declared() {
-        let error = auth_required_empty("echo.say");
-        let obligations = [
-            inject_credential_obligation("github"),
-            inject_credential_obligation("gitlab"),
-        ];
-
-        let enriched = error.enrich_auth_requirements(&obligations);
-
-        let DispatchError::AuthRequired {
-            credential_requirements,
-            ..
-        } = enriched
-        else {
-            panic!("expected AuthRequired");
-        };
-        // Downstream consumer (auth_prompt_from_credential_requirement) handles exactly one
-        // requirement; emitting more would cause it to fall through and leave provider as None.
-        assert_eq!(
-            credential_requirements.len(),
-            1,
-            "must emit exactly one requirement even with two InjectCredentialAccountOnce obligations"
-        );
-        assert_eq!(
-            credential_requirements[0].provider,
-            RuntimeCredentialAccountProviderId::new("github").unwrap(),
-            "must emit the first obligation's provider"
-        );
-    }
-
-    // enrich_auth_requirements: non-AuthRequired variants are returned unchanged
-    #[test]
-    fn enrich_auth_requirements_is_noop_for_non_auth_required_variants() {
-        let error = DispatchError::UnknownCapability {
-            capability: CapabilityId::new("echo.say").unwrap(),
-        };
-        let obligations = [inject_credential_obligation("github")];
-
-        let unchanged = error.enrich_auth_requirements(&obligations);
-
-        assert!(
-            matches!(unchanged, DispatchError::UnknownCapability { .. }),
-            "non-AuthRequired variants must be returned unchanged"
         );
     }
 }
