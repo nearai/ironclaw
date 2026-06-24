@@ -3058,7 +3058,7 @@ fn notion_mcp_allowed_effects() -> Vec<EffectKind> {
     ]
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
 fn nearai_allowed_effects() -> Vec<EffectKind> {
     vec![
         EffectKind::DispatchCapability,
@@ -3992,9 +3992,12 @@ mod tests {
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
         ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
         MountPermissions, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal,
-        ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId,
-        RuntimeCredentialRequirementSource, RuntimeKind, ScopedPath, SecretHandle, TenantId,
+        ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath, SecretHandle, TenantId,
         TrustClass, UserId, VirtualPath,
+    };
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    use ironclaw_host_api::{
+        RuntimeCredentialAccountProviderId, RuntimeCredentialRequirementSource,
     };
     use ironclaw_host_runtime::{
         MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
@@ -5329,6 +5332,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[tokio::test]
     async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5405,6 +5409,64 @@ mod tests {
         assert!(nearai_account.access_secret.is_some());
     }
 
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    #[tokio::test]
+    async fn local_dev_nearai_mcp_skips_auto_activation_without_durable_product_auth() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let owner = "local-dev-nearai-mcp-no-durable-owner";
+        let services = build_reborn_services(nearai_bootstrap_input_with_base(
+            owner,
+            dir.path().join("local-dev"),
+            "http://private.near.ai",
+            "nearai-test-key",
+        ))
+        .await
+        .expect("local-dev services build should ignore invalid NEAR AI MCP endpoint without durable product auth");
+        let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let nearai_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
+
+        let projection = extension_management
+            .project(nearai_ref)
+            .await
+            .expect("NEAR AI MCP projected");
+        assert_eq!(projection.phase, LifecyclePhase::Discovered);
+
+        let capabilities = extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities");
+        assert!(
+            capabilities
+                .iter()
+                .all(|capability| capability.id.as_str() != "nearai.web_search")
+        );
+
+        let auth_scope = AuthProductScope::new(
+            local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
+                .expect("NEAR AI MCP owner scope"),
+            AuthSurface::Api,
+        );
+        let accounts = services
+            .product_auth
+            .as_ref()
+            .expect("product auth")
+            .credential_account_record_source()
+            .accounts_for_owner(&auth_scope)
+            .await
+            .expect("credential accounts load");
+        assert!(
+            accounts
+                .iter()
+                .all(|account| account.provider.as_str() != "nearai")
+        );
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[tokio::test]
     async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5481,6 +5543,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[tokio::test]
     async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -36,14 +36,39 @@
     "page": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 100,
-      "default": 1
+      "maximum": 10,
+      "default": 1,
+      "description": "1-based issue-only results page. Capped to bound upstream requests while normalizing GitHub's mixed issues and pull requests feed."
     },
     "limit": {
       "type": "integer",
       "minimum": 1,
       "maximum": 100,
-      "default": 30
+      "default": 30,
+      "description": "Maximum number of issues to return."
+    },
+    "labels": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      },
+      "description": "Optional labels that all returned issues must have."
+    },
+    "assignee": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "Optional assignee login, or GitHub special values such as none or *."
+    },
+    "milestone": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^(\\d+|none|\\*)$",
+      "description": "Optional milestone number, or GitHub special values none or *."
     }
   },
   "required": [

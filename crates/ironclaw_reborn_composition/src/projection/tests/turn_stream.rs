@@ -766,6 +766,91 @@ async fn webui_event_stream_tolerates_initial_turn_event_rebase() {
 }
 
 #[tokio::test]
+async fn webui_event_stream_recovers_from_turn_event_rebase_on_reconnect() {
+    // Regression for the SSE "disconnected" loop: a reconnecting stream carries
+    // a non-`None` resume cursor whose turn component has fallen below the
+    // projection's retention floor. The drain must jump forward to the earliest
+    // replayable cursor instead of surfacing a retryable rebase error. Before
+    // the fix, recovery only happened when the resume cursor was `None` (first
+    // connect); on reconnect the drain returned 503 ReplayUnavailable, the
+    // browser auto-reconnected via `Last-Event-ID` with the same stale cursor,
+    // and the stream looped forever — appearing as a permanently disconnected
+    // session that could no longer send messages.
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-thread").unwrap();
+    let runtime_run = InvocationId::new();
+    let turn_run = TurnRunId::new();
+    let retention_floor = TurnEventCursor(7);
+    let stale_turn_cursor = TurnEventCursor(3);
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::model_started(
+            resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, runtime_run),
+            CapabilityId::new("loop.model").unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let actor = TurnActor::new(user_id.clone());
+    let event_log_dyn: Arc<dyn DurableEventLog> = event_log;
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(RebaseTurnEventSource {
+            cursor: retention_floor,
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: turn_run_state(&scope, &user_id, turn_run, retention_floor),
+        }),
+    );
+
+    let stale_cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
+        runtime: Some(EventProjectionCursor::origin_for_scope(
+            runtime_projection_scope(&actor, &scope),
+        )),
+        live: None,
+        runtime_item: None,
+        turn: Some(TurnEventProjectionCursor::for_scope(
+            scope.clone(),
+            stale_turn_cursor,
+        )),
+        runtime_payloads_delivered: 0,
+    })
+    .unwrap();
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope: scope.clone(),
+            after_cursor: Some(stale_cursor),
+        })
+        .await
+        .expect("reconnect rebase must recover, not surface a retryable error");
+
+    // The stream stays alive: the runtime event is still delivered ...
+    assert!(contains_run_status(&events, runtime_run, "running"));
+    // ... and the turn cursor is advanced to the earliest replayable cursor, so
+    // the next reconnect resumes at/above the floor and the loop terminates.
+    let parsed =
+        parse_webui_projection_cursor(events.last().unwrap().projection_cursor().as_str()).unwrap();
+    assert_eq!(
+        parsed.turn,
+        Some(TurnEventProjectionCursor::for_scope(scope, retention_floor))
+    );
+}
+
+#[tokio::test]
 async fn webui_event_stream_rejects_foreign_composite_turn_cursor() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();

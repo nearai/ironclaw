@@ -72,6 +72,12 @@ pub struct WebUiAuthenticatedCaller {
     pub agent_id: Option<AgentId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<ProjectId>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub operator_webui_config: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl WebUiAuthenticatedCaller {
@@ -86,7 +92,13 @@ impl WebUiAuthenticatedCaller {
             user_id,
             agent_id,
             project_id,
+            operator_webui_config: false,
         }
+    }
+
+    pub fn with_operator_webui_config(mut self, operator_webui_config: bool) -> Self {
+        self.operator_webui_config = operator_webui_config;
+        self
     }
 
     pub fn actor(&self) -> TurnActor {

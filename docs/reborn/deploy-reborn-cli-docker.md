@@ -166,8 +166,18 @@ IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI=https://<railway-domain>/api/reborn/pr
 ## Slack
 
 Slack routes are compiled into the image, but they are disabled by the default
-config. To enable them, edit `$IRONCLAW_REBORN_HOME/config.toml` or mount a
-config file with:
+config. On Railway, prefer the env toggle so the seeded config can stay
+unchanged:
+
+```bash
+IRONCLAW_REBORN_SLACK_ENABLED=true
+```
+
+The env var overrides only the Slack route enablement gate. `true`/`1` enables
+Slack, while `false`/`0` forces Slack off for the deployment.
+
+You can also enable Slack by editing `$IRONCLAW_REBORN_HOME/config.toml` or
+mounting a config file with:
 
 ```toml
 [slack]
