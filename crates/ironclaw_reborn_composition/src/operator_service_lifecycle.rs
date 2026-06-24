@@ -600,7 +600,7 @@ impl RebornLocalServiceLifecycle {
                 }
             }
             ServicePlatform::Macos => {
-                let output = self.runner.run("launchctl", &["list"]);
+                let output = self.runner.run("launchctl", &["list", LAUNCHD_LABEL]);
                 match output {
                     Ok(output) => match launchd_status(output.stdout_text().as_ref()) {
                         LaunchdStatus::Running => Self::status_response(
@@ -1009,6 +1009,7 @@ mod tests {
     struct RecordingRunner {
         calls: Mutex<Vec<(String, Vec<String>)>>,
         status_stdout: Mutex<String>,
+        scoped_status_stdout: Mutex<Option<String>>,
         fail_command: Mutex<Option<(String, Vec<String>)>>,
         timeout_command: Mutex<Option<(String, Vec<String>)>>,
     }
@@ -1018,6 +1019,7 @@ mod tests {
             Self {
                 calls: Mutex::default(),
                 status_stdout: Mutex::new(status_stdout.to_string()),
+                scoped_status_stdout: Mutex::new(None),
                 fail_command: Mutex::new(None),
                 timeout_command: Mutex::new(None),
             }
@@ -1039,6 +1041,10 @@ mod tests {
 
         fn calls(&self) -> Vec<(String, Vec<String>)> {
             self.calls.lock().expect("lock").clone()
+        }
+
+        fn set_scoped_status_stdout(&self, stdout: &str) {
+            *self.scoped_status_stdout.lock().expect("lock") = Some(stdout.to_string());
         }
     }
 
@@ -1077,9 +1083,21 @@ mod tests {
             }
             let reports_status = (program == "systemctl"
                 && args.ends_with(&["is-active", SYSTEMD_UNIT]))
-                || (program == "launchctl" && args == ["list"]);
+                || (program == "launchctl" && args == ["list"])
+                || (program == "launchctl" && args == ["list", LAUNCHD_LABEL]);
             let stdout = if reports_status {
-                self.status_stdout.lock().expect("lock").as_bytes().to_vec()
+                if program == "launchctl" && args == ["list", LAUNCHD_LABEL] {
+                    self.scoped_status_stdout
+                        .lock()
+                        .expect("lock")
+                        .as_ref()
+                        .map_or_else(
+                            || self.status_stdout.lock().expect("lock").as_bytes().to_vec(),
+                            |stdout| stdout.as_bytes().to_vec(),
+                        )
+                } else {
+                    self.status_stdout.lock().expect("lock").as_bytes().to_vec()
+                }
             } else {
                 Vec::new()
             };
@@ -1722,7 +1740,7 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
     async fn macos_status_timeout_returns_timeout_failed_state() {
         let temp = TempDir::new().expect("tempdir");
         let runner = Arc::new(RecordingRunner::new(""));
-        runner.timeout_command("launchctl", &["list"]);
+        runner.timeout_command("launchctl", &["list", LAUNCHD_LABEL]);
         let service = macos_service(&temp, runner);
 
         let response = service
@@ -1737,6 +1755,36 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
 
         assert_eq!(response.state, RebornServiceLifecycleState::Failed);
         assert_eq!(response.message, "local service manager command timed out");
+    }
+
+    #[tokio::test]
+    async fn macos_status_uses_label_scoped_query_when_listing_is_large() {
+        let temp = TempDir::new().expect("tempdir");
+        let runner = Arc::new(RecordingRunner::new(&format!(
+            "{:0>16384}\n123\t0\t{LAUNCHD_LABEL}\n",
+            ""
+        )));
+        runner.set_scoped_status_stdout(&format!("123\t0\t{LAUNCHD_LABEL}\n"));
+        let service = macos_service(&temp, runner.clone());
+
+        let response = service
+            .control_service(
+                test_caller(),
+                RebornServiceLifecycleRequest {
+                    action: RebornServiceLifecycleAction::Status,
+                },
+            )
+            .await
+            .expect("status response");
+
+        assert_eq!(response.state, RebornServiceLifecycleState::Running);
+        assert_eq!(
+            runner.calls(),
+            vec![(
+                "launchctl".to_string(),
+                vec!["list".to_string(), LAUNCHD_LABEL.to_string()]
+            )]
+        );
     }
 
     #[tokio::test]
