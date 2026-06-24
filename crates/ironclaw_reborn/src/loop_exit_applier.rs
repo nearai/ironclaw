@@ -181,7 +181,10 @@ pub trait ApprovalGateEvidenceStore: Send + Sync {
 
 #[async_trait]
 pub trait AwaitDependentRunEvidenceStore: Send + Sync {
-    async fn pending_awaited_child_gate(
+    /// Return true when the gate ref identifies an awaited child recorded for
+    /// this parent run. Terminal/delivery state is not part of blocked-exit
+    /// evidence; the checkpoint gate binding verifies the blocking point.
+    async fn has_awaited_child_gate(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
@@ -358,7 +361,7 @@ where
                 }
             }
             LoopBlockedKind::AwaitDependentRun => {
-                if !self.verify_pending_awaited_child_gate(&request).await? {
+                if !self.verify_awaited_child_gate(&request).await? {
                     return Ok(false);
                 }
             }
@@ -510,7 +513,7 @@ where
             .await
     }
 
-    async fn verify_pending_awaited_child_gate(
+    async fn verify_awaited_child_gate(
         &self,
         request: &BlockedEvidenceRequest<'_>,
     ) -> Result<bool, TurnError> {
@@ -518,7 +521,7 @@ where
             return Ok(false);
         };
         evidence
-            .pending_awaited_child_gate(request.scope, request.run_id, &request.blocked.gate_ref)
+            .has_awaited_child_gate(request.scope, request.run_id, &request.blocked.gate_ref)
             .await
     }
 }
@@ -527,7 +530,7 @@ where
 impl AwaitDependentRunEvidenceStore
     for crate::subagent::gate_resolution::BoundedSubagentGateResolutionStore
 {
-    async fn pending_awaited_child_gate(
+    async fn has_awaited_child_gate(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,

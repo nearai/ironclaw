@@ -1006,7 +1006,7 @@ async fn thread_checkpoint_evidence_does_not_read_checkpoint_for_blocked_claims(
 }
 
 #[tokio::test]
-async fn thread_checkpoint_evidence_rejects_await_dependent_run_without_pending_child_gate() {
+async fn thread_checkpoint_evidence_rejects_await_dependent_run_without_awaited_child_gate() {
     let evidence = text_checkpoint_evidence(Arc::new(PanicLoopCheckpointStore));
     let claimed = claimed_run();
     let exit = blocked_exit(LoopBlockedKind::AwaitDependentRun);
@@ -1074,7 +1074,7 @@ async fn thread_checkpoint_evidence_verifies_pending_approval_blocked_checkpoint
 }
 
 #[tokio::test]
-async fn thread_checkpoint_evidence_verifies_pending_awaited_child_blocked_checkpoint() {
+async fn thread_checkpoint_evidence_verifies_awaited_child_blocked_checkpoint() {
     let claimed = claimed_run();
     let checkpoint_id = TurnCheckpointId::new();
     let state_ref =
@@ -1152,7 +1152,7 @@ async fn thread_checkpoint_evidence_verifies_pending_awaited_child_blocked_check
             blocked,
         })
         .await
-        .expect("await-child blocked evidence should verify through pending child gate");
+        .expect("await-child blocked evidence should verify through awaited child gate");
     assert!(verified);
 
     let transition = Arc::new(RecordingTransitionPort::new());
