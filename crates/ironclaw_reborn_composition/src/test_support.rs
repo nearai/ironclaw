@@ -51,6 +51,14 @@ use crate::runtime::{AssistantReply, ConversationId};
 
 /// Build the GitHub issue workflow stage-turn submitter for composition tests.
 ///
+/// Real `RuntimeWorkflowWorkspaceManager` pointed at an arbitrary
+/// `clone_base_url` (e.g. a `file://` bare repo) so integration tests can drive
+/// the production clone/publish/verify path hermetically. The production
+/// constructor hardcodes the GitHub clone URL + gh credential helper, which is
+/// unusable without a network/credentials.
+#[cfg(feature = "github-issue-workflow-beta")]
+pub use crate::github_issue_workflow::runtime_workflow_workspace_manager_for_test;
+
 /// Production wiring constructs this adapter inside the composition graph once
 /// the workflow runtime is enabled; this helper only lets integration tests
 /// drive the same crate-private adapter over fake thread/turn services.
@@ -235,7 +243,6 @@ where
 /// helper lets integration tests drive the same adapter over a fake dispatch seam.
 #[cfg(feature = "github-issue-workflow-beta")]
 pub fn github_issue_workflow_provider_port_for_test<D>(
-    configured_provider_account_ref: ironclaw_github_issue_workflow::GithubProviderAccountRef,
     dispatcher: Arc<D>,
 ) -> Arc<dyn ironclaw_github_issue_workflow::GithubIssueWorkflowPort>
 where
@@ -243,11 +250,27 @@ where
 {
     let dispatcher =
         Arc::new(GithubIssueWorkflowCapabilityDispatcherTestAdapter { inner: dispatcher });
-    Arc::new(
-        crate::github_issue_workflow::IronClawGithubIssueWorkflowPort::new(
-            configured_provider_account_ref,
-            dispatcher,
-        ),
+    Arc::new(crate::github_issue_workflow::IronClawGithubIssueWorkflowPort::new(dispatcher))
+}
+
+/// Build the PRODUCTION GitHub issue workflow project-access checker for
+/// composition tests.
+///
+/// Production wiring constructs this inside the composition graph from the
+/// trusted [`ProjectService`](ironclaw_product_workflow::ProjectService) and the
+/// composition-bound provider account (`configured_provider_account_ref`); this
+/// helper lets integration tests drive the same crate-private impl so they
+/// exercise its real authorization semantics (repo-allowability against the
+/// project's declared repositories + credential-fit against the bound account)
+/// rather than a fake.
+#[cfg(feature = "github-issue-workflow-beta")]
+pub fn project_service_workflow_project_access_for_test(
+    project_service: Arc<dyn ironclaw_product_workflow::ProjectService>,
+    configured_provider_account_ref: ironclaw_github_issue_workflow::GithubProviderAccountRef,
+) -> Arc<dyn ironclaw_github_issue_workflow::WorkflowProjectAccess> {
+    crate::github_issue_workflow::project_service_github_issue_workflow_project_access(
+        project_service,
+        configured_provider_account_ref,
     )
 }
 

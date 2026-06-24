@@ -206,11 +206,18 @@ mod github_issue_workflow_stage_turn {
             "github_issue_workflow"
         );
 
-        let source = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/github_issue_workflow.rs"
-        ))
-        .expect("read composition source");
+        // The composition was decomposed from a single file into a module
+        // directory; read every module file so this guard stays robust to the
+        // split (the submitter lives in mod.rs, but grep the whole tree).
+        let module_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/github_issue_workflow");
+        let mut source = String::new();
+        for entry in std::fs::read_dir(module_dir).expect("read composition module dir") {
+            let path = entry.expect("module dir entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                source.push_str(&std::fs::read_to_string(&path).expect("read composition source"));
+                source.push('\n');
+            }
+        }
         for forbidden in [
             "TrustedInboundTurnRequest",
             "TrustedTriggerSubmitRequest",
@@ -547,6 +554,7 @@ mod github_issue_workflow_stage_turn {
                 virtual_root: "/workspace".to_string(),
                 changed_files: Vec::new(),
             }),
+            verification: None,
             constraints: StageConstraintSnapshot {
                 stage: GithubIssueStage::Triage,
                 stage_goal: "Classify the GitHub issue and choose the next stage.".to_string(),

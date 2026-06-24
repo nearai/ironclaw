@@ -27,10 +27,7 @@ mod github_issue_workflow_provider {
                 "updated_at": "2026-06-22T10:30:00Z"
             }
         ]))));
-        let port = github_issue_workflow_provider_port_for_test(
-            provider_account("configured-account"),
-            dispatcher.clone(),
-        );
+        let port = github_issue_workflow_provider_port_for_test(dispatcher.clone());
         let query = "repo:nearai/ironclaw is:issue state:open label:bug".to_string();
 
         let hits = port
@@ -72,10 +69,7 @@ mod github_issue_workflow_provider {
             "updated_at": "2026-06-22T10:30:00Z",
             "repository": { "default_branch": "main" }
         }))));
-        let port = github_issue_workflow_provider_port_for_test(
-            provider_account("configured-account"),
-            dispatcher.clone(),
-        );
+        let port = github_issue_workflow_provider_port_for_test(dispatcher.clone());
 
         let issue = port
             .get_issue(GetGithubIssueInput {
@@ -114,13 +108,11 @@ mod github_issue_workflow_provider {
             "id": 44,
             "html_url": "https://github.com/nearai/ironclaw/issues/42#issuecomment-44"
         }))));
-        let port = github_issue_workflow_provider_port_for_test(
-            provider_account("configured-account"),
-            dispatcher.clone(),
-        );
+        let port = github_issue_workflow_provider_port_for_test(dispatcher.clone());
 
         let comment = port
             .create_issue_comment(CreateIssueCommentInput {
+                provider_account_ref: provider_account("input-account"),
                 issue: issue_ref(),
                 body: marker_body.clone(),
             })
@@ -136,6 +128,10 @@ mod github_issue_workflow_provider {
         let requests = dispatcher.requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].capability_id, "github.comment_issue");
+        assert_eq!(
+            requests[0].provider_account_ref,
+            provider_account("input-account")
+        );
         assert_eq!(
             requests[0].input,
             json!({
@@ -157,10 +153,7 @@ mod github_issue_workflow_provider {
                 "sha": "abc123"
             }
         }))));
-        let port = github_issue_workflow_provider_port_for_test(
-            provider_account("configured-account"),
-            dispatcher.clone(),
-        );
+        let port = github_issue_workflow_provider_port_for_test(dispatcher.clone());
 
         let pr = port
             .create_draft_pull_request(CreateDraftPullRequestInput {
@@ -219,10 +212,7 @@ mod github_issue_workflow_provider {
                 }
             }
         ]))));
-        let port = github_issue_workflow_provider_port_for_test(
-            provider_account("configured-account"),
-            dispatcher.clone(),
-        );
+        let port = github_issue_workflow_provider_port_for_test(dispatcher.clone());
 
         let pulls = port
             .list_pull_requests(ListPullRequestsInput {
@@ -275,10 +265,7 @@ mod github_issue_workflow_provider {
                 "sha": "def456"
             }
         }))));
-        let port = github_issue_workflow_provider_port_for_test(
-            provider_account("configured-account"),
-            dispatcher.clone(),
-        );
+        let port = github_issue_workflow_provider_port_for_test(dispatcher.clone());
 
         let pull = port
             .get_pull_request(GetPullRequestInput {
@@ -322,10 +309,7 @@ mod github_issue_workflow_provider {
                 }
             ]
         }))));
-        let port = github_issue_workflow_provider_port_for_test(
-            provider_account("configured-account"),
-            dispatcher.clone(),
-        );
+        let port = github_issue_workflow_provider_port_for_test(dispatcher.clone());
 
         let checks = port
             .list_pull_request_checks(ListPullRequestChecksInput {
@@ -370,10 +354,7 @@ mod github_issue_workflow_provider {
                 "updated_at": "2026-06-22T12:21:00Z"
             }
         ]))));
-        let port = github_issue_workflow_provider_port_for_test(
-            provider_account("configured-account"),
-            dispatcher.clone(),
-        );
+        let port = github_issue_workflow_provider_port_for_test(dispatcher.clone());
 
         let comments = port
             .list_pull_request_review_comments(ListPullRequestReviewCommentsInput {
@@ -420,10 +401,7 @@ mod github_issue_workflow_provider {
                 message: "raw provider body: {\"token\":\"ghp_secret\"}".to_string(),
             },
         )));
-        let port = github_issue_workflow_provider_port_for_test(
-            provider_account("configured-account"),
-            dispatcher,
-        );
+        let port = github_issue_workflow_provider_port_for_test(dispatcher);
 
         let error = port
             .search_open_bug_issues(SearchGithubIssuesInput {
@@ -447,17 +425,16 @@ mod github_issue_workflow_provider {
     }
 
     #[tokio::test]
-    async fn provider_adapter_uses_configured_account_ref() {
+    async fn provider_adapter_uses_per_input_account_ref() {
         let dispatcher = Arc::new(RecordingDispatcher::with_response(Ok(json!({
             "login": "serrrfirat",
             "node_id": "MDQ6VXNlcjE="
         }))));
-        let configured = provider_account("configured-account");
-        let port =
-            github_issue_workflow_provider_port_for_test(configured.clone(), dispatcher.clone());
+        let port = github_issue_workflow_provider_port_for_test(dispatcher.clone());
 
         let actor = port
             .get_authenticated_workflow_actor(GetAuthenticatedWorkflowActorInput {
+                provider_account_ref: provider_account("input-account"),
                 owner: "nearai".to_string(),
                 repo: "ironclaw".to_string(),
             })
@@ -469,7 +446,11 @@ mod github_issue_workflow_provider {
         let requests = dispatcher.requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].capability_id, "github.get_authenticated_user");
-        assert_eq!(requests[0].provider_account_ref, configured);
+        // The per-op input account reaches the dispatcher — not a global default.
+        assert_eq!(
+            requests[0].provider_account_ref,
+            provider_account("input-account")
+        );
         assert_eq!(requests[0].input, json!({}));
     }
 

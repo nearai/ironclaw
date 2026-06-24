@@ -158,6 +158,8 @@ pub(super) fn capability_wiring(
 #[derive(Clone)]
 struct LocalDevLoopCapabilityPortFactory {
     runtime: Arc<dyn HostRuntime>,
+    // Read only by the `github-issue-workflow-beta` stage-mount resolver.
+    #[cfg_attr(not(feature = "github-issue-workflow-beta"), allow(dead_code))]
     thread_service: Arc<dyn SessionThreadService>,
     fallback_user_id: UserId,
     policy: Arc<LocalDevCapabilityPolicy>,
@@ -217,6 +219,8 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
 }
 
 impl LocalDevLoopCapabilityPortFactory {
+    // `run_context` selects the stage workspace only under the workflow feature.
+    #[cfg_attr(not(feature = "github-issue-workflow-beta"), allow(unused_variables))]
     async fn workspace_mounts_for_run(
         &self,
         run_context: &LoopRunContext,
@@ -261,6 +265,14 @@ impl LocalDevLoopCapabilityPortFactory {
                 "GitHub issue workflow stage thread is missing workspace metadata",
             )
         })?;
+        // A stage thread legitimately carries no workspace mount until the
+        // workspace is prepared (the `prepare_workspace` step runs on the
+        // Planning -> Implementation transition). Triage and Planning therefore
+        // run with `workspace_mount_ref: null` in their thread metadata, and the
+        // parser returns `Ok(None)` for that case. Returning `Ok(None)` here lets
+        // `workspace_mounts_for_run` fall back to the default workspace mounts for
+        // those pre-workspace stages instead of failing host creation (which would
+        // terminate the very first stage turn before the model ever runs).
         let mounts =
             crate::github_issue_workflow::workflow_stage_workspace_mount_view_from_thread_metadata(
                 metadata_json,
@@ -270,14 +282,8 @@ impl LocalDevLoopCapabilityPortFactory {
                     AgentLoopHostErrorKind::Invalid,
                     format!("invalid GitHub issue workflow stage workspace metadata: {error}"),
                 )
-            })?
-            .ok_or_else(|| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Invalid,
-                    "GitHub issue workflow stage thread metadata has no workspace mount",
-                )
             })?;
-        Ok(Some(mounts))
+        Ok(mounts)
     }
 }
 
@@ -893,11 +899,15 @@ fn append_sanitized_capped(value: &str, output: &mut String) -> bool {
         if output.len() >= LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES {
             return true;
         }
-        let character = if character.is_control()
-            || matches!(
-                character,
-                '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
-            ) {
+        // Preserve real content verbatim: brackets, backticks, slashes, braces,
+        // and newlines/indentation are load-bearing in the code, paths, and JSON
+        // the model must read. The previous delimiter->space strip corrupted that
+        // content (e.g. `median([3, 1, 2])` became `median( 3, 1, 2 )`, misleading
+        // the model about a function's contract). Tool results are demarcated as
+        // untrusted by their `ToolResult` message role, so prompt-injection defense
+        // does not require mutilating the bytes. Only neutralize non-whitespace
+        // control characters.
+        let character = if character.is_control() && !matches!(character, '\n' | '\t' | '\r') {
             ' '
         } else {
             character

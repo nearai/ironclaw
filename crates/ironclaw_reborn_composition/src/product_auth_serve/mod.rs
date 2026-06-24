@@ -77,10 +77,17 @@ pub(crate) const MANUAL_TOKEN_SUBMIT_PATH: &str = "/api/reborn/product-auth/manu
 pub(crate) const MANUAL_TOKEN_SETUP_PATH: &str = "/api/reborn/product-auth/manual-token/setup";
 pub(crate) const MANUAL_TOKEN_SECRET_SUBMIT_PATH: &str =
     "/api/reborn/product-auth/manual-token/secret-submit";
-pub(crate) const ACCOUNTS_LIST_PATH: &str = "/api/reborn/product-auth/accounts/list";
-pub(crate) const ACCOUNTS_SELECT_PATH: &str = "/api/reborn/product-auth/accounts/select";
-pub(crate) const ACCOUNTS_RECOVERY_PATH: &str = "/api/reborn/product-auth/accounts/recovery";
-pub(crate) const ACCOUNTS_REFRESH_PATH: &str = "/api/reborn/product-auth/accounts/refresh";
+// Account list/select/recovery/refresh are extension-scoped: the requester
+// extension is carried as a trusted `{package_id}` URL path segment (mirroring
+// `EXTENSION_OAUTH_START_PATH`) and derived server-side, never from the browser
+// body. See FIX #15 / docs/reborn/contracts/auth-product.md.
+pub(crate) const ACCOUNTS_LIST_PATH: &str = "/api/webchat/v2/extensions/{package_id}/accounts/list";
+pub(crate) const ACCOUNTS_SELECT_PATH: &str =
+    "/api/webchat/v2/extensions/{package_id}/accounts/select";
+pub(crate) const ACCOUNTS_RECOVERY_PATH: &str =
+    "/api/webchat/v2/extensions/{package_id}/accounts/recovery";
+pub(crate) const ACCOUNTS_REFRESH_PATH: &str =
+    "/api/webchat/v2/extensions/{package_id}/accounts/refresh";
 pub(crate) const LIFECYCLE_CLEANUP_PATH: &str = "/api/reborn/product-auth/lifecycle/cleanup";
 
 const OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.start";
@@ -91,10 +98,10 @@ const EXTENSION_OAUTH_START_ROUTE_ID: &str = "webui_v2.extensions.oauth.start";
 const MANUAL_TOKEN_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.submit";
 const MANUAL_TOKEN_SETUP_ROUTE_ID: &str = "product_auth.manual_token.setup";
 const MANUAL_TOKEN_SECRET_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.secret_submit";
-const ACCOUNTS_LIST_ROUTE_ID: &str = "product_auth.accounts.list";
-const ACCOUNTS_SELECT_ROUTE_ID: &str = "product_auth.accounts.select";
-const ACCOUNTS_RECOVERY_ROUTE_ID: &str = "product_auth.accounts.recovery";
-const ACCOUNTS_REFRESH_ROUTE_ID: &str = "product_auth.accounts.refresh";
+const ACCOUNTS_LIST_ROUTE_ID: &str = "webui_v2.extensions.accounts.list";
+const ACCOUNTS_SELECT_ROUTE_ID: &str = "webui_v2.extensions.accounts.select";
+const ACCOUNTS_RECOVERY_ROUTE_ID: &str = "webui_v2.extensions.accounts.recovery";
+const ACCOUNTS_REFRESH_ROUTE_ID: &str = "webui_v2.extensions.accounts.refresh";
 const LIFECYCLE_CLEANUP_ROUTE_ID: &str = "product_auth.lifecycle.cleanup";
 const OAUTH_PKCE_VERIFIER_CACHE_CAPACITY: NonZeroUsize = match NonZeroUsize::new(1024) {
     Some(value) => value,
@@ -608,10 +615,13 @@ pub(super) struct ManualTokenSecretSubmitRequest {
     scope: ScopeFields,
 }
 
+// The requester extension is no longer a body field — it is derived
+// server-side from the trusted `{package_id}` URL path segment. A stray
+// `requester_extension` key in the JSON body is ignored by serde and cannot
+// influence account scoping. See FIX #15.
 #[derive(Deserialize)]
 pub(super) struct AccountsListRequest {
     provider: String,
-    requester_extension: Option<String>,
     cursor: Option<String>,
     limit: Option<usize>,
     #[serde(flatten)]
@@ -622,7 +632,6 @@ pub(super) struct AccountsListRequest {
 pub(super) struct AccountsSelectRequest {
     provider: String,
     account_id: String,
-    requester_extension: Option<String>,
     #[serde(flatten)]
     scope: ScopeFields,
 }
@@ -630,7 +639,6 @@ pub(super) struct AccountsSelectRequest {
 #[derive(Deserialize)]
 pub(super) struct AccountsRecoveryRequest {
     provider: String,
-    requester_extension: Option<String>,
     #[serde(flatten)]
     scope: ScopeFields,
 }
@@ -639,7 +647,6 @@ pub(super) struct AccountsRecoveryRequest {
 pub(super) struct AccountsRefreshRequest {
     provider: String,
     account_id: String,
-    requester_extension: Option<String>,
     #[serde(flatten)]
     scope: ScopeFields,
 }
@@ -1309,12 +1316,6 @@ pub(super) fn parse_credential_account_id(
 
 pub(super) fn parse_extension_id(value: &str) -> Result<ExtensionId, ProductAuthRouteFailure> {
     ExtensionId::new(value.to_string()).map_err(|_| ProductAuthRouteFailure::invalid_request())
-}
-
-pub(super) fn parse_optional_extension(
-    value: Option<&str>,
-) -> Result<Option<ExtensionId>, ProductAuthRouteFailure> {
-    value.map(parse_extension_id).transpose()
 }
 
 /// Await a product-auth backend call under the shared backend timeout and

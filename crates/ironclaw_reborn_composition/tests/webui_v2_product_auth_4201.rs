@@ -422,13 +422,22 @@ async fn post_unauthenticated(
         .expect("oneshot")
 }
 
+// Account routes are extension-scoped: the requester extension travels as a
+// trusted `{package_id}` URL path segment (FIX #15), never as a body field.
+// Tests substitute a concrete package id.
+const PACKAGE: &str = "github";
+const ACCOUNTS_LIST_PATH: &str = "/api/webchat/v2/extensions/github/accounts/list";
+const ACCOUNTS_SELECT_PATH: &str = "/api/webchat/v2/extensions/github/accounts/select";
+const ACCOUNTS_RECOVERY_PATH: &str = "/api/webchat/v2/extensions/github/accounts/recovery";
+const ACCOUNTS_REFRESH_PATH: &str = "/api/webchat/v2/extensions/github/accounts/refresh";
+
 const PATHS: &[&str] = &[
     "/api/reborn/product-auth/manual-token/setup",
     "/api/reborn/product-auth/manual-token/secret-submit",
-    "/api/reborn/product-auth/accounts/list",
-    "/api/reborn/product-auth/accounts/select",
-    "/api/reborn/product-auth/accounts/recovery",
-    "/api/reborn/product-auth/accounts/refresh",
+    ACCOUNTS_LIST_PATH,
+    ACCOUNTS_SELECT_PATH,
+    ACCOUNTS_RECOVERY_PATH,
+    ACCOUNTS_REFRESH_PATH,
     "/api/reborn/product-auth/lifecycle/cleanup",
 ];
 
@@ -569,7 +578,7 @@ async fn accounts_list_returns_only_seeded_provider_accounts() {
 
     let response = post_authenticated(
         &fixture.app,
-        "/api/reborn/product-auth/accounts/list",
+        ACCOUNTS_LIST_PATH,
         json!({
             "provider": "github",
             "invocation_id": invocation_id.to_string()
@@ -598,7 +607,7 @@ async fn accounts_list_invalid_limit_is_sanitized() {
     let invocation_id = InvocationId::new();
     let response = post_authenticated(
         &fixture.app,
-        "/api/reborn/product-auth/accounts/list",
+        ACCOUNTS_LIST_PATH,
         json!({ "provider": "github", "limit": 0, "invocation_id": invocation_id.to_string() }),
     )
     .await;
@@ -616,7 +625,7 @@ async fn accounts_select_returns_redacted_projection() {
 
     let response = post_authenticated(
         &fixture.app,
-        "/api/reborn/product-auth/accounts/select",
+        ACCOUNTS_SELECT_PATH,
         json!({
             "provider": "github",
             "account_id": account_id.to_string(),
@@ -648,7 +657,7 @@ async fn accounts_select_rejects_account_from_different_invocation_scope() {
 
     let response = post_authenticated(
         &fixture.app,
-        "/api/reborn/product-auth/accounts/select",
+        ACCOUNTS_SELECT_PATH,
         json!({
             "provider": "github",
             "account_id": account_id.to_string(),
@@ -674,7 +683,7 @@ async fn accounts_select_rejects_wrong_provider_as_missing() {
 
     let response = post_authenticated(
         &fixture.app,
-        "/api/reborn/product-auth/accounts/select",
+        ACCOUNTS_SELECT_PATH,
         json!({
             "provider": "slack",
             "account_id": account_id.to_string(),
@@ -706,7 +715,7 @@ async fn accounts_select_rejects_unconfigured_account() {
 
     let response = post_authenticated(
         &fixture.app,
-        "/api/reborn/product-auth/accounts/select",
+        ACCOUNTS_SELECT_PATH,
         json!({
             "provider": "github",
             "account_id": account_id.to_string(),
@@ -726,7 +735,7 @@ async fn accounts_recovery_projects_setup_required_when_no_account_exists() {
 
     let response = post_authenticated(
         &fixture.app,
-        "/api/reborn/product-auth/accounts/recovery",
+        ACCOUNTS_RECOVERY_PATH,
         json!({ "provider": "github", "invocation_id": invocation_id.to_string() }),
     )
     .await;
@@ -793,7 +802,7 @@ async fn accounts_refresh_returns_report_for_seeded_account() {
 
     let response = post_authenticated(
         &fixture.app,
-        "/api/reborn/product-auth/accounts/refresh",
+        ACCOUNTS_REFRESH_PATH,
         json!({
             "provider": "github",
             "account_id": account_id.to_string(),
@@ -828,12 +837,7 @@ async fn accounts_refresh_enforces_tighter_per_caller_rate_limit() {
     });
 
     for i in 1..=5 {
-        let response = post_authenticated(
-            &fixture.app,
-            "/api/reborn/product-auth/accounts/refresh",
-            body.clone(),
-        )
-        .await;
+        let response = post_authenticated(&fixture.app, ACCOUNTS_REFRESH_PATH, body.clone()).await;
         assert_eq!(
             response.status(),
             StatusCode::OK,
@@ -841,12 +845,7 @@ async fn accounts_refresh_enforces_tighter_per_caller_rate_limit() {
         );
     }
 
-    let response = post_authenticated(
-        &fixture.app,
-        "/api/reborn/product-auth/accounts/refresh",
-        body,
-    )
-    .await;
+    let response = post_authenticated(&fixture.app, ACCOUNTS_REFRESH_PATH, body).await;
     assert_eq!(
         response.status(),
         StatusCode::TOO_MANY_REQUESTS,
@@ -889,7 +888,7 @@ async fn accounts_list_requires_invocation_id() {
 
     let response = post_authenticated(
         &fixture.app,
-        "/api/reborn/product-auth/accounts/list",
+        ACCOUNTS_LIST_PATH,
         json!({ "provider": "github" /* invocation_id absent */ }),
     )
     .await;
@@ -913,11 +912,11 @@ async fn new_routes_reject_malformed_invocation_id() {
             }),
         ),
         (
-            "/api/reborn/product-auth/accounts/list",
+            ACCOUNTS_LIST_PATH,
             json!({ "provider": "github", "invocation_id": "not-a-uuid" }),
         ),
         (
-            "/api/reborn/product-auth/accounts/select",
+            ACCOUNTS_SELECT_PATH,
             json!({
                 "provider": "github",
                 "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -925,11 +924,11 @@ async fn new_routes_reject_malformed_invocation_id() {
             }),
         ),
         (
-            "/api/reborn/product-auth/accounts/recovery",
+            ACCOUNTS_RECOVERY_PATH,
             json!({ "provider": "github", "invocation_id": "not-a-uuid" }),
         ),
         (
-            "/api/reborn/product-auth/accounts/refresh",
+            ACCOUNTS_REFRESH_PATH,
             json!({
                 "provider": "github",
                 "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -966,7 +965,7 @@ async fn accounts_select_rejects_malformed_account_id() {
 
     let response = post_authenticated(
         &fixture.app,
-        "/api/reborn/product-auth/accounts/select",
+        ACCOUNTS_SELECT_PATH,
         json!({
             "provider": "github",
             "account_id": "not-a-uuid",
@@ -1020,7 +1019,7 @@ async fn new_product_auth_routes_enforce_per_caller_rate_limit() {
     for i in 1..=20 {
         let response = post_authenticated(
             &fixture.app,
-            "/api/reborn/product-auth/accounts/list",
+            ACCOUNTS_LIST_PATH,
             json!({
                 "provider": "github",
                 "invocation_id": invocation_ids.next().expect("id").to_string()
@@ -1036,7 +1035,7 @@ async fn new_product_auth_routes_enforce_per_caller_rate_limit() {
 
     let response = post_authenticated(
         &fixture.app,
-        "/api/reborn/product-auth/accounts/list",
+        ACCOUNTS_LIST_PATH,
         json!({
             "provider": "github",
             "invocation_id": invocation_ids.next().expect("id").to_string()
@@ -1063,7 +1062,7 @@ async fn accounts_refresh_returns_error_for_unknown_account_id() {
 
     let response = post_authenticated(
         &fixture.app,
-        "/api/reborn/product-auth/accounts/refresh",
+        ACCOUNTS_REFRESH_PATH,
         json!({
             "provider": "github",
             "account_id": unknown_id.to_string(),
@@ -1093,7 +1092,7 @@ async fn accounts_recovery_projects_configured_for_existing_account() {
 
     let response = post_authenticated(
         &fixture.app,
-        "/api/reborn/product-auth/accounts/recovery",
+        ACCOUNTS_RECOVERY_PATH,
         json!({
             "provider": "github",
             "invocation_id": invocation_id.to_string()
@@ -1142,7 +1141,7 @@ async fn accounts_refresh_rejects_malformed_account_id() {
 
     let response = post_authenticated(
         &fixture.app,
-        "/api/reborn/product-auth/accounts/refresh",
+        ACCOUNTS_REFRESH_PATH,
         json!({
             "provider": "github",
             "account_id": "not-a-uuid",
@@ -1164,15 +1163,12 @@ async fn follow_up_routes_require_invocation_id() {
 
     let cases: &[(&str, Value)] = &[
         (
-            "/api/reborn/product-auth/accounts/select",
+            ACCOUNTS_SELECT_PATH,
             json!({ "provider": "github", "account_id": account_id.to_string() }),
         ),
+        (ACCOUNTS_RECOVERY_PATH, json!({ "provider": "github" })),
         (
-            "/api/reborn/product-auth/accounts/recovery",
-            json!({ "provider": "github" }),
-        ),
-        (
-            "/api/reborn/product-auth/accounts/refresh",
+            ACCOUNTS_REFRESH_PATH,
             json!({ "provider": "github", "account_id": account_id.to_string() }),
         ),
     ];
@@ -1813,7 +1809,7 @@ async fn accounts_select_requires_invocation_id() {
 
     let response = post_authenticated(
         &fixture.app,
-        "/api/reborn/product-auth/accounts/select",
+        ACCOUNTS_SELECT_PATH,
         json!({
             "provider": "github",
             "account_id": account_id.to_string()
@@ -1837,7 +1833,7 @@ async fn accounts_recovery_requires_invocation_id() {
 
     let response = post_authenticated(
         &fixture.app,
-        "/api/reborn/product-auth/accounts/recovery",
+        ACCOUNTS_RECOVERY_PATH,
         json!({ "provider": "github" /* invocation_id absent */ }),
     )
     .await;
@@ -1848,4 +1844,128 @@ async fn accounts_recovery_requires_invocation_id() {
     );
     let body = read_body_string(response).await;
     assert!(body.contains("\"code\":\"invalid_request\""));
+}
+
+// ── FIX #15: account routes derive the requester extension from the trusted
+// `{package_id}` URL path segment, not the browser body. ─────────────────────
+
+#[tokio::test]
+async fn accounts_list_scopes_to_extension_from_path_segment() {
+    // The requester extension is taken from the `{package_id}` segment of the
+    // URL (here `github`), never a body field. A UserReusable seeded account is
+    // returned because it is authorized for any requester; the test proves the
+    // route reaches the backend with the path-derived extension scoping rather
+    // than rejecting or returning an empty page.
+    let fixture = build_fixture();
+    let invocation_id = InvocationId::new();
+    let github_id =
+        seed_configured_account(&fixture.shared, invocation_id, "github", "work github").await;
+
+    let response = post_authenticated(
+        &fixture.app,
+        ACCOUNTS_LIST_PATH,
+        json!({
+            "provider": "github",
+            "invocation_id": invocation_id.to_string()
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    let json: Value = serde_json::from_str(&body).expect("list json");
+    let accounts = json["accounts"].as_array().expect("accounts array");
+    assert_eq!(accounts.len(), 1, "path-scoped list must reach the backend");
+    assert_eq!(
+        accounts[0]["id"].as_str(),
+        Some(github_id.to_string().as_str())
+    );
+}
+
+#[tokio::test]
+async fn accounts_routes_reject_invalid_package_id_segment() {
+    // An invalid `{package_id}` segment must yield 400 invalid_request before
+    // any backend call, mirroring how extension_oauth_start rejects a malformed
+    // ExtensionId. `BadPackage` routes as a single non-empty URL segment but
+    // fails ExtensionId validation (must start lowercase).
+    let fixture = build_fixture();
+    let invocation_id = InvocationId::new();
+    let cases: &[(&str, Value)] = &[
+        (
+            "/api/webchat/v2/extensions/BadPackage/accounts/list",
+            json!({ "provider": "github", "invocation_id": invocation_id.to_string() }),
+        ),
+        (
+            "/api/webchat/v2/extensions/BadPackage/accounts/select",
+            json!({
+                "provider": "github",
+                "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "invocation_id": invocation_id.to_string()
+            }),
+        ),
+        (
+            "/api/webchat/v2/extensions/BadPackage/accounts/recovery",
+            json!({ "provider": "github", "invocation_id": invocation_id.to_string() }),
+        ),
+        (
+            "/api/webchat/v2/extensions/BadPackage/accounts/refresh",
+            json!({
+                "provider": "github",
+                "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "invocation_id": invocation_id.to_string()
+            }),
+        ),
+    ];
+    for (path, body) in cases {
+        let response = post_authenticated(&fixture.app, path, body.clone()).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{path} must reject an invalid package_id segment"
+        );
+        let body_str = read_body_string(response).await;
+        assert!(
+            body_str.contains("\"code\":\"invalid_request\""),
+            "{path}: expected invalid_request, got: {body_str}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn accounts_select_ignores_body_requester_extension() {
+    // A stray `requester_extension` key in the JSON body must be ignored: the
+    // path segment governs scoping. A select that succeeds against the
+    // path-derived `github` extension proves the body field cannot influence
+    // (or hijack) binding.
+    let fixture = build_fixture();
+    let invocation_id = InvocationId::new();
+    let account_id =
+        seed_configured_account(&fixture.shared, invocation_id, "github", "work github").await;
+
+    let response = post_authenticated(
+        &fixture.app,
+        ACCOUNTS_SELECT_PATH,
+        json!({
+            "provider": "github",
+            "account_id": account_id.to_string(),
+            // Stray field a malicious browser might send to claim another
+            // extension identity — must be deserialized away and ignored.
+            "requester_extension": "attacker-extension",
+            "invocation_id": invocation_id.to_string()
+        }),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "select must succeed under the path-derived extension, ignoring the body field"
+    );
+    let body = read_body_string(response).await;
+    let json: Value = serde_json::from_str(&body).expect("select json");
+    assert_eq!(
+        json["id"].as_str(),
+        Some(account_id.to_string().as_str()),
+        "the path segment, not the body, scopes the selection"
+    );
+    // Sanity: the package segment we relied on is the trusted `github` id.
+    assert_eq!(PACKAGE, "github");
 }

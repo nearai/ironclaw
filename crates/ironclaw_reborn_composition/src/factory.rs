@@ -290,6 +290,24 @@ fn local_dev_process_port_for_policy(
     .with_workdir_alias("/workspace", workspace_root)
     .with_virtual_root_alias("/projects", local_dev_storage_root)
     .with_virtual_root_alias("/projects/workspace", workspace_root);
+    // Scrubbed mode pins HOME to the workspace (hiding the operator's real home),
+    // but installed user-site test tooling (e.g. `pip install --user pytest`)
+    // resolves under the real home. Give the scrubbed shell a tool home so the
+    // process port can derive PYTHONUSERBASE at the real user-site WITHOUT ever
+    // forwarding HOME itself (dotfiles/SSH/cloud creds stay hidden). Inherited-env
+    // mode already has the real HOME, so this only applies to the scrubbed path.
+    if runtime_policy.secret_mode != SecretMode::InheritedEnv {
+        let tool_home = host_home_root
+            .map(|root| root.canonical_root.clone())
+            .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from));
+        match tool_home {
+            Some(tool_home) => process_port = process_port.with_tool_home(tool_home),
+            None => tracing::debug!(
+                "no host home resolvable for the scrubbed tool home; user-site test \
+                 tooling may be undiscoverable to the model's shell"
+            ),
+        }
+    }
     if let Some(host_home_root) = host_home_root {
         process_port =
             process_port.with_workdir_alias("/host", host_home_root.canonical_root.clone());

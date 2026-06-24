@@ -67,7 +67,14 @@ impl Default for RebornRuntimeIdentity {
 }
 
 pub const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
-pub const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// Fallback timeout for the turn-runner wake loop.
+///
+/// The runner is wake-driven: a `Notify` signal fires the claim-and-run cycle
+/// as soon as a run is submitted/resumed, so real claim latency is bounded by
+/// the wake path, not this timeout. This fallback only guards against missed
+/// wakes, so it can be coarse — keeping it short produced a busy-spin of
+/// "no runs available to claim" logs (~5/sec) without improving latency.
+pub const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Fire-time access request for a persisted trigger.
 ///
@@ -305,6 +312,10 @@ pub struct GithubIssueWorkflowSettings {
     pub max_issues_per_repo_per_tick: usize,
     pub max_runnable_runs_per_tick: usize,
     pub lease_duration: Duration,
+    /// How long an active stage may sit without progress before the stuck-stage
+    /// reconciler escalates the run to `RecoveryRequired`. Must exceed the
+    /// longest legitimate stage turn.
+    pub stage_stale_after: Duration,
     pub(crate) allow_in_memory_for_tests: bool,
 }
 
@@ -323,6 +334,7 @@ impl GithubIssueWorkflowSettings {
             max_issues_per_repo_per_tick: 10,
             max_runnable_runs_per_tick: 10,
             lease_duration: Duration::from_secs(300),
+            stage_stale_after: Duration::from_secs(1800),
             allow_in_memory_for_tests: false,
         }
     }
@@ -743,5 +755,33 @@ impl RebornRuntimeInput {
     ) -> Self {
         self.model_cost_table_override = Some(cost_table);
         self
+    }
+}
+
+#[cfg(test)]
+mod runtime_input_tests {
+    use super::*;
+
+    #[test]
+    fn turn_runner_fallback_poll_interval_is_coarse() {
+        // The runner is wake-driven; the fallback timeout only guards missed
+        // wakes, so it must stay coarse. A sub-second value re-introduces the
+        // "no runs available to claim" busy-spin. Pin it at >= 1s so a future
+        // edit cannot silently regress to the old 200ms flood.
+        assert!(
+            DEFAULT_TURN_RUNNER_POLL_INTERVAL >= Duration::from_secs(1),
+            "turn-runner fallback poll interval must stay coarse to avoid log flood"
+        );
+        assert_eq!(DEFAULT_TURN_RUNNER_POLL_INTERVAL, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn turn_runner_settings_default_uses_coarse_poll_interval() {
+        let settings = TurnRunnerSettings::default();
+        assert_eq!(settings.poll_interval, DEFAULT_TURN_RUNNER_POLL_INTERVAL);
+        assert_eq!(
+            settings.heartbeat_interval,
+            DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL
+        );
     }
 }

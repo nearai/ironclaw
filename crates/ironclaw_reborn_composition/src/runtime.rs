@@ -41,9 +41,12 @@ use ironclaw_first_party_extension_ports::{
 };
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
-    AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, GrantConstraints,
-    InvocationId, MountView, ResourceScope, TenantId, ThreadId, UserId,
+    AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId,
+    ResourceScope, TenantId, ThreadId, UserId,
 };
+// Used only by the `github-issue-workflow-beta`-gated stage approval-policy builder below.
+#[cfg(feature = "github-issue-workflow-beta")]
+use ironclaw_host_api::{GrantConstraints, MountView};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     EmptyUserProfileSource, FilesystemSkillBundleSource, HostIdentityContextSource,
@@ -119,9 +122,11 @@ use crate::github_issue_workflow::{
     GithubIssueWorkflowStageApprovalPolicyInput,
     ensure_github_issue_workflow_stage_approval_policies, spawn_github_issue_workflow,
 };
-use crate::local_dev_capability_policy::{
-    LocalDevApprovalPolicyAction, LocalDevCapabilityPolicy, local_dev_capability_policy,
-};
+use crate::local_dev_capability_policy::local_dev_capability_policy;
+// The policy/action types are referenced only by the
+// `github-issue-workflow-beta`-gated stage approval-policy builder below.
+#[cfg(feature = "github-issue-workflow-beta")]
+use crate::local_dev_capability_policy::{LocalDevApprovalPolicyAction, LocalDevCapabilityPolicy};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound_preferences::{
@@ -3261,6 +3266,7 @@ pub async fn build_reborn_runtime(
                 })?;
                 crate::github_issue_workflow::project_service_github_issue_workflow_project_access(
                     project_service,
+                    configured_provider_account_ref.clone(),
                 )
             }
         };
@@ -3356,7 +3362,6 @@ pub async fn build_reborn_runtime(
                 repository,
                 stage_result_sink_slot,
                 host_runtime,
-                configured_provider_account_ref,
                 config_source,
                 project_access,
                 workspace_manager,
