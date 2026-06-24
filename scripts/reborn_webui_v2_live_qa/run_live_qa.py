@@ -3055,6 +3055,7 @@ async def case_qa_4b_github_connect(ctx: LiveQaContext) -> ProbeResult:
         package_id="github",
         display_name="GitHub",
         required_tools=["github.get_authenticated_user"],
+        ensure_installed=True,
     )
 
 
