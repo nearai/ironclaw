@@ -631,6 +631,15 @@ where
     let mut capability_factory = DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
         .with_decorator(spawn_decorator);
     if parts.config.tool_disclosure.is_bridged() {
+        // Startup build marker: confirms at a glance which binary is running.
+        // Bump the tag when the disclosure resolution logic changes so stale
+        // servers are obvious in the logs. `general-name-matcher` => the build
+        // that resolves bare/dotted/`__`-encoded deferred calls for any provider.
+        tracing::debug!(
+            target: "ironclaw::reborn::runtime",
+            disclosure_build = "general-name-matcher",
+            "reborn tool disclosure decorator wired (bridged)"
+        );
         capability_factory = capability_factory.with_decorator(Arc::new(
             ToolDisclosureCapabilityDecorator::new(Arc::clone(&parts.capability_result_writer)),
         ));
