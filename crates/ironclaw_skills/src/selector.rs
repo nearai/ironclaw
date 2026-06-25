@@ -1136,6 +1136,39 @@ mod tests {
     }
 
     #[test]
+    fn test_chain_loaded_companion_keeps_its_own_trust_not_the_parent() {
+        // Security boundary: chain-loading must not extend the parent's trust to
+        // a companion. A Trusted skill that requires an Installed (e.g.
+        // marketplace) companion must still expose that companion as Installed —
+        // trust is resolved per skill, never inherited through requires.skills.
+        let parent =
+            make_skill_with_requires("trusted-parent", &["setup"], &["installed-companion"]);
+        assert_eq!(parent.trust, SkillTrust::Trusted);
+        let mut companion = make_skill("installed-companion", &["wont-match-on-its-own"], &[], &[]);
+        companion.trust = SkillTrust::Installed;
+
+        let skills = vec![parent, companion];
+        let outcome = prefilter_skills(
+            "setup",
+            &skills,
+            10,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+        );
+
+        let chain_loaded = outcome
+            .selected
+            .iter()
+            .find(|s| s.name() == "installed-companion")
+            .expect("installed companion must be chain-loaded by the trusted parent");
+        assert_eq!(
+            chain_loaded.trust,
+            SkillTrust::Installed,
+            "chain-loaded companion must keep its own Installed trust, not inherit the parent's"
+        );
+    }
+
+    #[test]
     fn test_chain_load_pulls_in_required_companions() {
         // Parent is scored normally; companions bypass scoring.
         // The companion has NO matching keywords — it would score 0

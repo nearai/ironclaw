@@ -1200,6 +1200,53 @@ async fn instruction_bundle_rejects_untrusted_skill_security_vocabulary() {
 }
 
 #[tokio::test]
+async fn instruction_bundle_does_not_extend_trust_to_an_untrusted_chain_loaded_companion() {
+    // #5169 security boundary: each skill snippet is evaluated on its OWN
+    // trust_level. A `trusted` skill present in the same bundle (e.g. a parent
+    // that chain-loaded a companion via requires.skills) must NOT extend the
+    // content-check exemption to an `installed` companion snippet — the
+    // companion's credential-shaped body is still rejected.
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                compaction_message_index: Vec::new(),
+                instruction_snippets: vec![
+                    LoopContextSnippet {
+                        snippet_ref: "skill:code-review".to_string(),
+                        model_content: "Use Authorization: Bearer ghp_trustedparent123".to_string(),
+                        safe_summary: "code-review skill".to_string(),
+                        metadata: Some(LoopContextSnippetMetadata {
+                            source_name: "code-review".to_string(),
+                            trust_level: "trusted".to_string(),
+                        }),
+                    },
+                    LoopContextSnippet {
+                        snippet_ref: "skill:github".to_string(),
+                        model_content: "Use Authorization: Bearer ghp_companionvalue456"
+                            .to_string(),
+                        safe_summary: "github companion skill".to_string(),
+                        metadata: Some(LoopContextSnippetMetadata {
+                            source_name: "github".to_string(),
+                            trust_level: "installed".to_string(),
+                        }),
+                    },
+                ],
+                memory_snippets: Vec::new(),
+            },
+            visible_surface: None,
+            safety_context: None,
+            inline_messages: Vec::new(),
+            runtime_context: None,
+        })
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+}
+
+#[tokio::test]
 async fn instruction_bundle_rejects_untrusted_skill_host_path_and_secret_value() {
     // #5169 boundary: the content-check exemption is trust-scoped. An *installed*
     // (untrusted) skill body carrying a host path or a credential-shaped value is
