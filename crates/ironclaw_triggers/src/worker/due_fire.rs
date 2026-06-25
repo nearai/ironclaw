@@ -63,7 +63,7 @@ impl TriggerPollerWorker {
         Ok(outcome)
     }
 
-    async fn process_claimed_fire(
+    pub(super) async fn process_claimed_fire(
         &self,
         record: TriggerRecord,
         fire_slot: Timestamp,

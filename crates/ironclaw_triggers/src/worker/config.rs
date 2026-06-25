@@ -9,6 +9,7 @@ pub struct TriggerPollerWorkerConfig {
     pub poll_interval: Duration,
     pub fires_per_tick: usize,
     pub max_concurrent_fires_per_trigger: usize,
+    pub claim_only_recovery_grace: Duration,
 }
 
 impl Default for TriggerPollerWorkerConfig {
@@ -17,6 +18,7 @@ impl Default for TriggerPollerWorkerConfig {
             poll_interval: Duration::from_secs(30),
             fires_per_tick: 32,
             max_concurrent_fires_per_trigger: 1,
+            claim_only_recovery_grace: Duration::from_secs(120),
         }
     }
 }
@@ -36,6 +38,11 @@ impl TriggerPollerWorkerConfig {
         if self.max_concurrent_fires_per_trigger != 1 {
             return Err(TriggerError::InvalidPollerConfig {
                 reason: "V1 supports exactly one concurrent fire per trigger".to_string(),
+            });
+        }
+        if self.claim_only_recovery_grace.is_zero() {
+            return Err(TriggerError::InvalidPollerConfig {
+                reason: "claim_only_recovery_grace must be non-zero".to_string(),
             });
         }
         Ok(())

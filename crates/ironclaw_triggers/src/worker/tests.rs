@@ -101,6 +101,15 @@ fn worker_config_rejects_noop_or_unsupported_settings() {
         config.validate(),
         Err(TriggerError::InvalidPollerConfig { .. })
     ));
+
+    let config = TriggerPollerWorkerConfig {
+        claim_only_recovery_grace: Duration::ZERO,
+        ..TriggerPollerWorkerConfig::default()
+    };
+    assert!(matches!(
+        config.validate(),
+        Err(TriggerError::InvalidPollerConfig { .. })
+    ));
 }
 
 #[test]
@@ -1403,14 +1412,21 @@ async fn tick_keeps_missing_active_run_blocked() {
 }
 
 #[tokio::test]
-async fn tick_keeps_claim_only_active_fire_blocked() {
+async fn tick_keeps_fresh_claim_only_active_fire_blocked() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
     let fire_slot = ts(1_704_067_200);
-    let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
-    record.active_fire_slot = Some(fire_slot);
-    record.active_run_ref = None;
-    repo.upsert_trigger(record).await.expect("insert active");
+    repo.upsert_trigger(sample_record(trigger_id, tenant("tenant-a"), fire_slot))
+        .await
+        .expect("insert active");
+    repo.claim_due_fire(ClaimDueFireRequest {
+        tenant_id: tenant("tenant-a"),
+        trigger_id,
+        fire_slot,
+        now: fire_slot,
+    })
+    .await
+    .expect("claim fire");
     let materializer = Arc::new(RecordingMaterializer::success("content:trigger-fire"));
     let submitter = Arc::new(RecordingSubmitter::with_outcomes(Vec::new()));
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_state(
@@ -1425,7 +1441,10 @@ async fn tick_keeps_claim_only_active_fire_blocked() {
         active_lookup.clone(),
     );
 
-    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+    let report = worker
+        .tick_once(fire_slot + chrono::Duration::seconds(30))
+        .await
+        .expect("tick succeeds");
 
     assert!(matches!(
         report.results.first().map(|result| &result.outcome),
@@ -1444,6 +1463,75 @@ async fn tick_keeps_claim_only_active_fire_blocked() {
         .expect("record present");
     assert_eq!(persisted.active_fire_slot, Some(fire_slot));
     assert_eq!(persisted.active_run_ref, None);
+}
+
+#[tokio::test]
+async fn tick_recovers_stale_claim_only_active_fire_by_replaying_submit() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let replayed_run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+    let thread_id = ThreadId::new("recovered-trigger-thread").expect("thread id");
+    repo.upsert_trigger(sample_record(trigger_id, tenant("tenant-a"), fire_slot))
+        .await
+        .expect("insert active");
+    repo.claim_due_fire(ClaimDueFireRequest {
+        tenant_id: tenant("tenant-a"),
+        trigger_id,
+        fire_slot,
+        now: fire_slot,
+    })
+    .await
+    .expect("claim fire");
+    let materializer = Arc::new(RecordingMaterializer::success("content:trigger-fire"));
+    let submitter = Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
+        TrustedTriggerFireSubmitOutcome::Replayed {
+            original_run_id: replayed_run_id,
+            replayed_at: fire_slot + chrono::Duration::seconds(121),
+            thread_id: Some(thread_id.clone()),
+        },
+    )]));
+    let active_lookup = Arc::new(RecordingActiveRunLookup::default());
+    let worker = worker_with_config(
+        repo.clone(),
+        Arc::new(crate::ScheduleTriggerSourceProvider),
+        materializer.clone(),
+        submitter.clone(),
+        active_lookup.clone(),
+        TriggerPollerWorkerConfig {
+            claim_only_recovery_grace: Duration::from_secs(120),
+            ..TriggerPollerWorkerConfig::default()
+        },
+    );
+
+    let report = worker
+        .tick_once(fire_slot + chrono::Duration::seconds(121))
+        .await
+        .expect("tick succeeds");
+
+    assert_eq!(
+        report.results.first().map(|result| &result.outcome),
+        Some(&TriggerPollerFireOutcome::Replayed {
+            original_run_id: replayed_run_id
+        })
+    );
+    assert_eq!(materializer.fires().len(), 1);
+    assert_eq!(submitter.requests().len(), 1);
+    assert_eq!(active_lookup.requests().len(), 0);
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    assert_eq!(persisted.active_fire_slot, Some(fire_slot));
+    assert_eq!(persisted.active_run_ref, Some(replayed_run_id));
+    assert_eq!(persisted.last_fired_slot, Some(fire_slot));
+    let runs = repo
+        .list_trigger_run_history(tenant("tenant-a"), trigger_id, 1)
+        .await
+        .expect("load run history");
+    assert_eq!(runs[0].run_id, Some(replayed_run_id));
+    assert_eq!(runs[0].thread_id, Some(thread_id));
 }
 
 #[tokio::test]
