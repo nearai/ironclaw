@@ -15,7 +15,7 @@ use crate::events::{
     record_memory_significant_event,
 };
 use crate::indexer::MemoryDocumentIndexer;
-use crate::metadata::{MemoryWriteOptions, resolve_document_metadata};
+use crate::metadata::{MemoryBackendWriteOptions, MemoryWriteOptions, resolve_document_metadata};
 use crate::path::{
     MemoryDocumentPath, MemoryDocumentScope, ParsedMemoryPath, memory_error, memory_not_found,
 };
@@ -42,6 +42,14 @@ fn memory_append_conflict_error(path: VirtualPath) -> FilesystemError {
     )
 }
 
+/// Applies the post-enforcement allowance (if any) to the context the adapter
+/// hands to the backend.
+///
+/// The "already enforced" signal is **not** carried on the agnostic
+/// `MemoryContext`. The adapter communicates that it has already run
+/// prompt-write safety by setting `prompt_safety_already_enforced = true` on
+/// the native-owned `MemoryBackendWriteOptions` it passes to the backend write
+/// methods (see [`adapter_enforced_backend_write_options`]).
 fn memory_context_with_prompt_safety_enforcement(
     context: &MemoryContext,
     enforcement: PromptWriteSafetyEnforcement,
@@ -50,7 +58,16 @@ fn memory_context_with_prompt_safety_enforcement(
     if let Some(allowance) = enforcement.allowance {
         context = context.with_prompt_write_safety_allowance(allowance);
     }
-    context.with_prompt_write_safety_enforced()
+    context
+}
+
+/// Backend write options the adapter passes after it has already run
+/// prompt-write safety, telling the backend to skip its own re-enforcement.
+fn adapter_enforced_backend_write_options() -> MemoryBackendWriteOptions {
+    MemoryBackendWriteOptions {
+        prompt_safety_already_enforced: true,
+        ..MemoryBackendWriteOptions::default()
+    }
 }
 
 /// [`RootFilesystem`] adapter exposing any [`MemoryBackend`] as `/memory` files.
@@ -173,9 +190,12 @@ impl MemoryBackendFilesystemAdapter {
                 "memory document path must include a file path after project id",
             ));
         };
-        Ok(MemoryDocumentPath {
-            scope: parsed.scope,
-            relative_path,
+        MemoryDocumentPath::from_scope(parsed.scope, relative_path).map_err(|error| {
+            memory_error(
+                path.clone(),
+                operation,
+                format!("invalid memory document path: {error}"),
+            )
         })
     }
 }
@@ -268,8 +288,21 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
             .await?;
             backend_context = memory_context_with_prompt_safety_enforcement(&context, enforcement);
         }
+        // When the adapter has already run prompt-write safety it must tell the
+        // backend to skip its own re-enforcement; otherwise the backend
+        // enforces (options default `prompt_safety_already_enforced = false`).
+        let backend_options = if adapter_should_enforce_prompt_safety {
+            adapter_enforced_backend_write_options()
+        } else {
+            MemoryBackendWriteOptions::default()
+        };
         self.backend
-            .write_document(&backend_context, &document_path, bytes)
+            .write_document_with_backend_options(
+                &backend_context,
+                &document_path,
+                bytes,
+                &backend_options,
+            )
             .await
     }
 
@@ -350,13 +383,21 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
                 backend_context =
                     memory_context_with_prompt_safety_enforcement(&context, enforcement);
             }
+            // Mirror `write_file`: when the adapter has already enforced, the
+            // backend must skip re-enforcement; otherwise the backend enforces.
+            let backend_options = if adapter_should_enforce_prompt_safety {
+                adapter_enforced_backend_write_options()
+            } else {
+                MemoryBackendWriteOptions::default()
+            };
             match self
                 .backend
-                .compare_and_append_document(
+                .compare_and_append_document_with_backend_options(
                     &backend_context,
                     &document_path,
                     expected_previous_hash.as_deref(),
                     bytes,
+                    &backend_options,
                 )
                 .await?
             {
@@ -549,9 +590,12 @@ impl MemoryDocumentFilesystem {
                 "memory document path must include a file path after project id",
             ));
         };
-        Ok(MemoryDocumentPath {
-            scope: parsed.scope,
-            relative_path,
+        MemoryDocumentPath::from_scope(parsed.scope, relative_path).map_err(|error| {
+            memory_error(
+                path.clone(),
+                operation,
+                format!("invalid memory document path: {error}"),
+            )
         })
     }
 
