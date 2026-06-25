@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from
 import { React, html } from "../lib/html.js";
 import { useAuthSession } from "./auth.js";
 import { defaultRoute } from "./routes.js";
+import { ROUTER_BASENAME } from "./router-href.js";
 import { GatewayLayout } from "../layout/gateway-layout.js";
 import { LoginPage as LoginView } from "../pages/login/login-page.js";
 import { ChatPage } from "../pages/chat/chat-page.js";
@@ -32,7 +33,9 @@ function LoginPage({ auth }) {
   const from = fromLocation
     ? `${fromLocation.pathname || defaultRoute}${fromLocation.search || ""}${fromLocation.hash || ""}`
     : defaultRoute;
-  const redirectAfter = `/v2${from === "/" ? "" : from}`;
+  // Raw `<a href>` OAuth redirect (bypasses the router) — needs the explicit
+  // basename prefix that react-router would otherwise add for us.
+  const redirectAfter = `${ROUTER_BASENAME}${from === "/" ? "" : from}`;
 
   const handleSubmit = React.useCallback(
     (token) => {
@@ -98,7 +101,7 @@ export function App() {
   const auth = useAuthSession();
 
   return html`
-    <${BrowserRouter} basename="/v2">
+    <${BrowserRouter} basename=${ROUTER_BASENAME}>
       <${Routes}>
         <${Route} path="/login" element=${html`<${LoginPage} auth=${auth} />`} />
         <${Route} path="/" element=${html`<${AuthenticatedLayout} auth=${auth} />`}>
