@@ -1400,6 +1400,28 @@ mod postgres_tests {
     }
 
     #[tokio::test]
+    async fn postgres_put_cas_version_on_missing_path_reports_no_found_version() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let missing = vpath(&prefix, "cas_version_missing");
+        let err = fs
+            .put(
+                &missing,
+                Entry::bytes(vec![1]),
+                CasExpectation::Version(ironclaw_filesystem::RecordVersion::from_backend(1)),
+            )
+            .await
+            .expect_err("version CAS on a missing path must fail");
+        match err {
+            FilesystemError::VersionMismatch { found, .. } => {
+                assert!(found.is_none(), "missing path should report no found version, got: {found:?}");
+            }
+            other => panic!("expected VersionMismatch, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn postgres_native_put_cas_any_increments_existing_version() {
         let Some((fs, prefix)) = postgres_root().await else {
             return;

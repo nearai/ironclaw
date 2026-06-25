@@ -1267,6 +1267,18 @@ async fn postgres_put_with_client(
 /// occurred *while* diagnosing. Call sites therefore wrap the result as
 /// `Err(diagnose_put_failure(..).await?)` — the `?` propagates a diagnosis-time
 /// backend error, and the `Err(..)` surfaces the diagnosed error.
+///
+/// **Classification is best-effort and reflects current state, not the exact
+/// snapshot that failed the write.** The write's directory guard is enforced
+/// atomically within the single statement, so no incorrect write can ever
+/// commit — these follow-up reads only choose *which error variant* to report
+/// on an already-failed write. A concurrent writer mutating the directory/child
+/// row between the failed write and these reads can therefore flip the variant,
+/// but the reported variant always matches present reality, which is exactly
+/// what the canonical CAS-retry caller needs for its next attempt. We
+/// deliberately do not wrap the write + diagnosis in a transaction or higher
+/// isolation: that would add a serialization-retry error mode (and cost) to a
+/// rare path for no correctness gain.
 #[cfg(feature = "postgres")]
 async fn diagnose_put_failure(
     client: &deadpool_postgres::Object,
