@@ -55,18 +55,19 @@ use ironclaw_host_runtime::{
     HostRuntime, HostRuntimeError, HostRuntimeHealth, HostRuntimeServices, HostRuntimeStatus,
     JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeCredentialAccessSecret,
-    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, RuntimeStatusRequest,
-    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
+    RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
+    RuntimeCredentialAccountResolver, RuntimeStatusRequest, SHELL_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
     TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
     VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
     VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_handlers, builtin_first_party_package,
+    builtin_first_party_handlers, builtin_first_party_package, native_memory_first_party_package,
 };
 use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
 use ironclaw_loop_support::{
@@ -2074,7 +2075,23 @@ impl HostRuntimeCapabilityHarness {
             network_policy,
             secrets: Vec::new(),
             provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
-            additional_provider_trust: Vec::new(),
+            // Memory capabilities now belong to the sibling
+            // `ironclaw.memory.native` provider (issue #3537), not builtin, so the
+            // run-scoped capability authority must trust that provider too —
+            // otherwise memory dispatch fails closed as Unauthorized ("untrusted
+            // grant"), surfacing as a terminal `driver_unavailable`. The ceiling
+            // is the document-store provider's needs only (dispatch + read/write
+            // filesystem), matching the production composition's native trust;
+            // `capability_grants` already scopes the memory grants to those same
+            // filesystem effects so they fit within this ceiling.
+            additional_provider_trust: vec![(
+                ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER)?,
+                vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                ],
+            )],
             user_id,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
@@ -2550,9 +2567,23 @@ fn local_dev_host_runtime_with_http_egress(
     storage_root: PathBuf,
     egress: Arc<RecordingRuntimeHttpEgress>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
+    local_dev_host_runtime_with_registry_and_runtime_http_egress(
+        storage_root,
+        core_builtins_extension_registry()?,
+        egress,
+    )
+}
+
+/// The always-on first-party extension surface shared by the core-builtins
+/// harness runtimes: the `builtin` package plus the `ironclaw.memory.native`
+/// package (issue #3537), which rides the same always-on first-party lane in
+/// production composition. Both core-builtins runtimes build their registry
+/// here so the two cannot drift apart.
+fn core_builtins_extension_registry() -> HarnessResult<ExtensionRegistry> {
     let mut registry = ExtensionRegistry::new();
     registry.insert(builtin_first_party_package()?)?;
-    local_dev_host_runtime_with_registry_and_runtime_http_egress(storage_root, registry, egress)
+    registry.insert(native_memory_first_party_package()?)?;
+    Ok(registry)
 }
 
 fn host_runtime_storage_roots() -> HarnessResult<(Arc<tempfile::TempDir>, PathBuf, PathBuf)> {
@@ -2629,11 +2660,8 @@ fn local_dev_host_runtime_with_registry_and_egress(
 fn local_dev_host_runtime_with_live_http_egress(
     storage_root: PathBuf,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
-    let mut registry = ExtensionRegistry::new();
-    registry.insert(builtin_first_party_package()?)?;
-
     let services = HostRuntimeServices::new(
-        Arc::new(registry),
+        Arc::new(core_builtins_extension_registry()?),
         local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
@@ -2763,24 +2791,41 @@ fn local_dev_mount_descriptor(
 
 fn first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
     Ok(HostTrustPolicy::new(vec![Box::new(
-        AdminConfig::with_entries(vec![AdminEntry::for_local_manifest(
-            PackageId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
-            "/system/extensions/builtin/manifest.toml".to_string(),
-            None,
-            HostTrustAssignment::first_party(),
-            vec![
-                EffectKind::DispatchCapability,
-                EffectKind::ReadFilesystem,
-                EffectKind::WriteFilesystem,
-                EffectKind::DeleteFilesystem,
-                EffectKind::Network,
-                EffectKind::SpawnProcess,
-                EffectKind::ExecuteCode,
-                EffectKind::ExternalWrite,
-            ],
-            None,
-        )]),
+        AdminConfig::with_entries(vec![
+            AdminEntry::for_local_manifest(
+                PackageId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+                "/system/extensions/builtin/manifest.toml".to_string(),
+                None,
+                HostTrustAssignment::first_party(),
+                first_party_trust_effects(),
+                None,
+            ),
+            // Native memory rides the always-on first-party lane alongside
+            // builtin (issue #3537) and carries its own first-party trust entry,
+            // mirroring the production composition trust policy.
+            AdminEntry::for_local_manifest(
+                PackageId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER)?,
+                "/system/extensions/ironclaw.memory.native/manifest.toml".to_string(),
+                None,
+                HostTrustAssignment::first_party(),
+                first_party_trust_effects(),
+                None,
+            ),
+        ]),
     )])?)
+}
+
+fn first_party_trust_effects() -> Vec<EffectKind> {
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+        EffectKind::DeleteFilesystem,
+        EffectKind::Network,
+        EffectKind::SpawnProcess,
+        EffectKind::ExecuteCode,
+        EffectKind::ExternalWrite,
+    ]
 }
 
 fn github_first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
@@ -3243,18 +3288,34 @@ fn capability_grants(
         grants: capabilities
             .iter()
             .map(|capability| {
-                let mounts = mount_overrides
+                let mount_override = mount_overrides
                     .iter()
                     .find(|(override_capability, _mounts)| override_capability == capability)
-                    .map(|(_capability, mounts)| mounts.clone())
-                    .unwrap_or_else(|| mounts.clone());
+                    .map(|(_capability, mounts)| mounts.clone());
+                // A capability with a scoped memory-mount override is
+                // filesystem-scoped (the memory tools + profile_set), so it is
+                // granted only filesystem effects — never the lane-wide `Network`
+                // the HTTP tools carry. That keeps its grant within the
+                // native-memory provider's tight authority ceiling (dispatch +
+                // read/write filesystem), matching production's per-capability
+                // grants instead of forcing the native ceiling to cover network.
+                let cap_allowed_effects = if mount_override.is_some() {
+                    vec![
+                        EffectKind::DispatchCapability,
+                        EffectKind::ReadFilesystem,
+                        EffectKind::WriteFilesystem,
+                    ]
+                } else {
+                    allowed_effects.clone()
+                };
+                let mounts = mount_override.unwrap_or_else(|| mounts.clone());
                 CapabilityGrant {
                     id: CapabilityGrantId::new(),
                     capability: capability.clone(),
                     grantee: grantee.clone(),
                     issued_by: Principal::HostRuntime,
                     constraints: GrantConstraints {
-                        allowed_effects: allowed_effects.clone(),
+                        allowed_effects: cap_allowed_effects,
                         mounts,
                         network: network.clone(),
                         secrets: secrets.clone(),
