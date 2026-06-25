@@ -14,7 +14,7 @@ mod filesystem_store;
 mod ids;
 mod lifecycle;
 pub mod loop_exit;
-mod memory;
+pub(crate) mod memory;
 mod origin;
 mod request;
 mod response;

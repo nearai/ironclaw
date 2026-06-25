@@ -472,6 +472,9 @@ pub struct RebornRuntime {
     credential_refresh_worker_handle:
         Option<crate::credential_refresh_worker::CredentialRefreshWorkerRuntimeHandle>,
     trace_flush_worker: crate::trace_capture::TraceQueueFlushWorkerHandle,
+    #[cfg(feature = "root-llm-provider")]
+    skill_learning_extraction_tasks:
+        Option<Arc<crate::skill_learning::SkillLearningExtractionTasks>>,
     /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
     /// `set_trigger_post_submit_hook` fills this after `build_reborn_runtime` returns.
     /// `None` when the trigger poller is not enabled.
@@ -986,6 +989,10 @@ impl RebornRuntime {
     /// Exposed for diagnostics / readiness reporting; **not** for traffic.
     pub fn services(&self) -> &RebornServices {
         &self.services
+    }
+
+    pub(crate) fn webui_tenant_id(&self) -> &TenantId {
+        &self.thread_scope.tenant_id
     }
 
     #[cfg(test)]
@@ -1817,6 +1824,10 @@ impl RebornRuntime {
                 .await;
         }
         self.trace_flush_worker.shutdown().await;
+        #[cfg(feature = "root-llm-provider")]
+        if let Some(skill_learning_extraction_tasks) = self.skill_learning_extraction_tasks {
+            skill_learning_extraction_tasks.shutdown().await;
+        }
         self.turn_scheduler.shutdown().await;
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
@@ -2536,6 +2547,15 @@ pub async fn build_reborn_runtime(
     //    building a real gateway only to discard it wastes startup work (and, on
     //    the cold-boot path, an LLM session manager), which made
     //    timeout-sensitive tests flaky. When no override is set, build normally.
+    // Build the (optional) skill-learning provider from the resolved LLM config
+    // BEFORE the gateway consumes `llm`. Distillation/refinement runs against a
+    // stronger model (IRONCLAW_SKILL_LEARNING_MODEL), reusing the run's NEAR AI
+    // credentials with only the model overridden.
+    #[cfg(feature = "root-llm-provider")]
+    let skill_learning_provider = match llm.as_ref() {
+        Some(resolved) => build_skill_learning_provider(&resolved.config).await,
+        None => None,
+    };
     #[cfg(all(feature = "root-llm-provider", any(test, feature = "test-support")))]
     let (model_gateway, llm_cost_table, llm_reload) = match model_gateway_override {
         Some(override_gateway) => (override_gateway, None, None),
@@ -2703,6 +2723,10 @@ pub async fn build_reborn_runtime(
             }
             _ => None,
         };
+    // Clone the live projection publisher for the skill-learning sink before
+    // the milestone-sink builder consumes the original by value.
+    #[cfg(feature = "root-llm-provider")]
+    let skill_learning_publisher = Arc::clone(&live_projection_publisher);
     let milestone_sink = projection_services.with_live_progress_milestone_sink_for_publisher(
         durable_milestone_sink,
         live_projection_publisher,
@@ -2837,6 +2861,59 @@ pub async fn build_reborn_runtime(
             Arc::clone(&thread_service),
             Arc::clone(&trace_capture_scopes),
         ));
+    // Skill learning shares the turn-end seam with trace capture (composed
+    // additively, so the trace-capture path is unchanged). It is active only
+    // when a learning model is configured (a stronger model than the run's, via
+    // IRONCLAW_SKILL_LEARNING_MODEL); otherwise only trace capture runs.
+    #[cfg_attr(not(feature = "root-llm-provider"), allow(unused_mut))]
+    let mut turn_event_sinks: Vec<Arc<dyn ironclaw_turns::TurnEventSink>> =
+        vec![trace_capture_sink];
+    #[cfg(feature = "root-llm-provider")]
+    let mut skill_learning_extraction_tasks: Option<
+        Arc<crate::skill_learning::SkillLearningExtractionTasks>,
+    > = None;
+    #[cfg(feature = "root-llm-provider")]
+    if let (Some((learning_provider, learning_model)), Some(local_runtime)) =
+        (skill_learning_provider, local_runtime)
+    {
+        let inference: Arc<dyn ironclaw_skill_learning::SkillInferencePort> =
+            Arc::new(crate::skill_learning::SkillLearningInferenceAdapter::new(
+                learning_provider,
+                learning_model,
+            ));
+        // Reuse the runtime's already-built scoped skill-management port so the
+        // learned skill lands exactly where the WebUI lists it and the next run
+        // loads it. The writer evolves an existing learned skill in place when a
+        // recurring task is re-learned, using the same learning model to refine
+        // it (accumulated gotchas, bumped version) instead of accreting siblings.
+        let skill_refiner: Arc<dyn crate::skill_learning::SkillRefiner> = Arc::new(
+            crate::skill_learning::LlmSkillRefiner::new(Arc::clone(&inference)),
+        );
+        let skill_writer: Arc<dyn crate::skill_learning::SkillWriter> =
+            Arc::new(crate::skill_learning::PortSkillWriter::new(
+                Arc::clone(&local_runtime.skill_management),
+                skill_refiner,
+            ));
+        // Live "learned a skill" bubble on the run's thread stream (reuses the
+        // SkillActivation projection -> existing chat bubble).
+        let skill_learned_notifier: Arc<dyn crate::skill_learning::SkillLearnedNotifier> = Arc::new(
+            crate::skill_learning::LiveSkillLearnedNotifier::new(skill_learning_publisher),
+        );
+        let extraction_tasks = Arc::new(crate::skill_learning::SkillLearningExtractionTasks::new());
+        skill_learning_extraction_tasks = Some(Arc::clone(&extraction_tasks));
+        turn_event_sinks.push(Arc::new(
+            crate::skill_learning::SkillLearningTurnEventSink::new(
+                Arc::clone(&thread_service),
+                inference,
+                skill_writer,
+                skill_learned_notifier,
+                extraction_tasks,
+            ),
+        ));
+    }
+    let turn_event_sink: Arc<dyn ironclaw_turns::TurnEventSink> = Arc::new(
+        crate::skill_learning::CompositeTurnEventSink::new(turn_event_sinks),
+    );
 
     let communication_context_provider: Option<
         Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>,
@@ -2953,7 +3030,7 @@ pub async fn build_reborn_runtime(
         model_budget_accountant,
         safety_context: None,
         hook_security_audit_sink: Some(Arc::new(ironclaw_events::TracingSecurityAuditSink)),
-        turn_event_sink: Some(trace_capture_sink),
+        turn_event_sink: Some(turn_event_sink),
         hook_dispatcher_builder_factory,
         communication_context_provider,
         // For the production composition path, use the pre-minted wiring from
@@ -3207,6 +3284,8 @@ pub async fn build_reborn_runtime(
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         credential_refresh_worker_handle,
         trace_flush_worker,
+        #[cfg(feature = "root-llm-provider")]
+        skill_learning_extraction_tasks,
         #[cfg(feature = "slack-v2-host-beta")]
         post_submit_hook_slot: runtime_post_submit_hook_slot,
         #[cfg(any(test, feature = "test-support"))]
@@ -3338,8 +3417,15 @@ fn local_dev_selector_config(
 ) -> SkillActivationSelectorConfig {
     SkillActivationSelectorConfig {
         max_context_tokens: LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS,
+        // `ExplicitAndCriteria` (the upstream default) lets a learned skill
+        // auto-activate when a later request matches its keywords/patterns —
+        // not only when the user types `$name`/`/name`. This is what closes
+        // the learn→reuse loop: a skill distilled from one task is applied
+        // automatically on the next similar task. Explicit mentions still
+        // force-activate; criteria selection is additive and bounded by
+        // `max_active_skills` / `max_context_tokens`.
         selection_mode:
-            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly,
+            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitAndCriteria,
         regex_activation_enabled: regex_skill_activation_enabled,
         ..SkillActivationSelectorConfig::default()
     }
@@ -3366,6 +3452,7 @@ fn local_dev_filesystem_skill_context_source(
     let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
         selector_config,
         Arc::clone(&local_runtime.workspace_filesystem),
+        Arc::clone(&local_runtime.skill_auto_activate_learned),
     );
     Ok(LocalDevSkillContextSource {
         source: selectable_skills.host_skill_context_source(),
@@ -3528,6 +3615,44 @@ async fn build_production_model_gateway(
             // isn't actually in use. The budget cost table is (re)derived when a
             // real provider is configured + the binary restarts.
             Ok((gateway, None, Some(reload)))
+        }
+    }
+}
+
+/// Build a dedicated provider for the skill-learning model, when configured.
+///
+/// Skill distillation/refinement runs against a STRONGER model than the run's.
+/// The model id comes from `IRONCLAW_SKILL_LEARNING_MODEL`; it reuses the run's
+/// NEAR AI credentials/base URL with only the model overridden (NEAR AI is
+/// multi-model and honours a per-request model override). Returns `None` when
+/// unconfigured, when the backend is not NEAR AI, or when provider construction
+/// fails — in all of which cases skill learning stays disabled.
+#[cfg(feature = "root-llm-provider")]
+async fn build_skill_learning_provider(
+    config: &ironclaw_llm::LlmConfig,
+) -> Option<(Arc<dyn ironclaw_llm::LlmProvider>, String)> {
+    let model = std::env::var("IRONCLAW_SKILL_LEARNING_MODEL")
+        .ok()
+        .filter(|model| !model.trim().is_empty())?;
+    if !matches!(config.backend.as_str(), "nearai" | "near_ai" | "near") {
+        tracing::debug!(
+            backend = %config.backend,
+            "skill-learning: learning model is only wired for the nearai backend; skill learning disabled"
+        );
+        return None;
+    }
+    let mut nearai = config.nearai.clone();
+    nearai.model = model.clone();
+    let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
+    match ironclaw_llm::create_llm_provider_with_config(
+        &nearai,
+        session,
+        config.request_timeout_secs,
+    ) {
+        Ok(provider) => Some((provider, model)),
+        Err(error) => {
+            tracing::debug!(%error, "skill-learning: could not build the learning provider; skill learning disabled");
+            None
         }
     }
 }
@@ -3740,9 +3865,13 @@ mod tests {
             !cfg.regex_activation_enabled,
             "regex_skill_activation_enabled=false must propagate into SkillActivationSelectorConfig"
         );
+        // Local-dev uses criteria selection so a learned skill auto-activates on
+        // a keyword/pattern match (the learn→reuse loop), not only on an
+        // explicit `$name` mention. A revert to `ExplicitOnly` would silently
+        // break auto-reuse, so lock it here.
         assert!(matches!(
             cfg.selection_mode,
-            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly
+            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitAndCriteria
         ));
     }
 
@@ -4014,7 +4143,8 @@ mod tests {
         build_reborn_runtime,
     };
 
-    const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+    const RUNTIME_POLL_TIMEOUT: Duration = Duration::from_secs(10);
+    const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(15);
 
     async fn stop_turn_runner_worker_for_manual_state_test(runtime: &super::RebornRuntime) {
         runtime.turn_scheduler.stop_for_test().await;
@@ -6063,7 +6193,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: RUNTIME_SEND_TIMEOUT,
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -6150,7 +6280,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: RUNTIME_SEND_TIMEOUT,
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -6250,7 +6380,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: RUNTIME_SEND_TIMEOUT,
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -6326,7 +6456,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: RUNTIME_SEND_TIMEOUT,
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -6405,7 +6535,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(10),
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway_for_runtime);
 
@@ -7172,7 +7302,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(3),
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -7308,7 +7438,7 @@ mod tests {
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let result = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.execute_skill_message(&conversation, "$asset-helper use policy"),
         )
         .await
@@ -7415,7 +7545,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(3),
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -7485,7 +7615,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(3),
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -7567,7 +7697,7 @@ mod tests {
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let result = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.execute_skill_message(&conversation, "$marker-helper"),
         )
         .await
@@ -7730,7 +7860,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: RUNTIME_SEND_TIMEOUT,
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway_for_runtime);
 
@@ -8206,6 +8336,100 @@ mod tests {
             resolved.as_str(),
             "legacy-runtime-user",
             "a returning legacy SSO user keeps their UserId through the runtime accessor"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[tokio::test]
+    async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use ironclaw_webui_v2::{
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State,
+            webui_v2_router,
+        };
+        use tower::ServiceExt;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-webui-diagnostics-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-diagnostics-tenant".to_string(),
+            agent_id: "runtime-webui-diagnostics-agent".to_string(),
+            source_binding_id: "runtime-webui-diagnostics-source".to_string(),
+            reply_target_binding_id: "runtime-webui-diagnostics-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-diagnostics-tenant").unwrap(),
+            UserId::new("runtime-webui-diagnostics-owner").unwrap(),
+            Some(AgentId::new("runtime-webui-diagnostics-agent").unwrap()),
+            None,
+        );
+        let router = webui_v2_router(WebUiV2State::new(
+            bundle.api,
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+        ))
+        .layer(axum::Extension(WebUiV2Capabilities {
+            operator_webui_config: true,
+        }))
+        .layer(axum::Extension(caller));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/webchat/v2/operator/diagnostics")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body bytes");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("diagnostics json");
+        assert!(
+            json["operator_status"]["checks"]
+                .as_array()
+                .expect("status checks")
+                .iter()
+                .any(|check| check["id"] == "readiness_composition_profile"
+                    && check["status"] == "blocked"
+                    && check["summary"]
+                        .as_str()
+                        .is_some_and(|summary| summary.contains("reason=dev-only-profile"))),
+            "diagnostics route should expose readiness-derived status checks: {json}"
+        );
+        assert!(
+            json["diagnostics"]
+                .as_array()
+                .expect("diagnostics")
+                .iter()
+                .any(|diagnostic| diagnostic["reason_code"]
+                    == "operator_doctor_readiness_composition_profile_blocked"
+                    && diagnostic["key"] == "readiness_composition_profile"),
+            "diagnostics route should expose readiness-derived doctor diagnostics: {json}"
         );
 
         runtime.shutdown().await.expect("runtime shutdown");
@@ -9088,7 +9312,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(10),
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway_for_runtime);
 

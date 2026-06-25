@@ -5,7 +5,7 @@ use std::{error::Error, fmt, sync::Arc};
 use ironclaw_events::SecurityAuditSink;
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{
-    CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier,
+    CapabilitySurfaceDenyFilter, CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier,
     DecoratingLoopCapabilityPortFactory, HostIdentityContextSource, HostInputQueue,
     HostManagedModelGateway, HostSkillContextSource, HostUserProfileSource, LoopAttachmentReadPort,
     LoopCapabilityPortDecorator, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
@@ -628,8 +628,9 @@ where
         parts.subagent_spawn_limits,
         flavors::builtin_flavor_catalog(),
     )?);
-    let mut capability_factory = DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
-        .with_decorator(spawn_decorator);
+    let mut capability_factory_builder =
+        DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
+            .with_decorator(spawn_decorator);
     if parts.config.tool_disclosure.is_bridged() {
         // Startup build marker + self-test: confirms which binary is running AND
         // that the general-name matcher is actually compiled into THIS binary
@@ -650,11 +651,29 @@ where
             filter_build = ironclaw_loop_support::CAPABILITY_FILTER_RESOLUTION_BUILD,
             "reborn tool disclosure decorator wired (bridged)"
         );
-        capability_factory = capability_factory.with_decorator(Arc::new(
+        capability_factory_builder = capability_factory_builder.with_decorator(Arc::new(
             ToolDisclosureCapabilityDecorator::new(Arc::clone(&parts.capability_result_writer)),
         ));
     }
-    let capability_factory: Arc<dyn LoopCapabilityPortFactory> = Arc::new(capability_factory);
+    // TEMP(disable-spawn-subagents): explicit composition decision to remove the
+    // spawn_subagent capability from the model-facing surface across all
+    // profiles. Applied as the OUTERMOST decorator so it strips the capability
+    // whether it was surfaced by `spawn_decorator` (the rich flavor-aware tool)
+    // or by the host-runtime first-party manifest (the bare authorization stub).
+    // This is a deny list — it takes effect regardless of the resolved profile
+    // allow-set (which is `All` for top-level runs, making a profile allow-set
+    // narrowing a no-op). Empty `DISABLED_CAPABILITY_IDS` to re-enable.
+    let disabled = DISABLED_CAPABILITY_IDS
+        .iter()
+        .map(|id| CapabilityId::new(*id))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
+    if !disabled.is_empty() {
+        capability_factory_builder = capability_factory_builder
+            .with_decorator(Arc::new(DisabledCapabilitiesDecorator::new(disabled)));
+    }
+    let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
+        Arc::new(capability_factory_builder);
     let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
         Arc::new(SubagentCapabilitySurfaceResolver::new(
             parts.capability_surface_resolver,
@@ -737,6 +756,40 @@ where
             scheduler_handle,
         },
     )
+}
+
+/// Outermost decorator that strips a caller-supplied deny list from every loop
+/// capability surface (tool definitions, visible descriptors, and invocation),
+/// regardless of the resolved profile allow-set.
+/// Capabilities temporarily removed from the model-facing surface as an
+/// explicit composition decision. Applied via an outermost
+/// [`CapabilitySurfaceDenyFilter`]. Empty this slice to re-enable everything.
+const DISABLED_CAPABILITY_IDS: &[&str] =
+    &[ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID];
+
+struct DisabledCapabilitiesDecorator {
+    denied_capability_ids: Vec<CapabilityId>,
+}
+
+impl DisabledCapabilitiesDecorator {
+    fn new(denied_capability_ids: Vec<CapabilityId>) -> Self {
+        Self {
+            denied_capability_ids,
+        }
+    }
+}
+
+impl LoopCapabilityPortDecorator for DisabledCapabilitiesDecorator {
+    fn decorate(
+        &self,
+        _run_context: &LoopRunContext,
+        inner: Arc<dyn LoopCapabilityPort>,
+    ) -> Arc<dyn LoopCapabilityPort> {
+        Arc::new(CapabilitySurfaceDenyFilter::new(
+            inner,
+            self.denied_capability_ids.iter().cloned(),
+        ))
+    }
 }
 
 struct SubagentSpawnCapabilityDecorator {

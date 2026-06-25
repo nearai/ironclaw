@@ -63,7 +63,8 @@ use ironclaw_host_runtime::{
     TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
+    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
     VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface, WRITE_FILE_CAPABILITY_ID,
     builtin_first_party_handlers, builtin_first_party_package,
 };
@@ -142,7 +143,7 @@ use super::{
     extension_surface::{
         BUNDLED_EXTENSION_CAPABILITY_IDS, BUNDLED_EXTENSION_IDS, EXTENSION_LIFECYCLE_CAPABILITY_IDS,
     },
-    filesystem::local_filesystem,
+    filesystem::{BlockingTurnStatePutFilesystem, local_filesystem},
     github as github_support,
     model_replay::RebornTraceReplayModelGateway,
     product_workflow::{RebornProductWorkflowHarness, resource_scope},
@@ -164,6 +165,8 @@ type HarnessCapabilityParts = (
     Arc<dyn LoopCapabilityResultWriter>,
     HarnessCapabilityRecorder,
 );
+type HarnessTurnStorageBackend = BlockingTurnStatePutFilesystem<InMemoryBackend>;
+type HarnessTurnBackend = CompositeRootFilesystem;
 
 pub struct RebornBinaryE2EHarness {
     ingress: RebornTestIngress,
@@ -172,7 +175,7 @@ pub struct RebornBinaryE2EHarness {
     binding: ResolvedBinding,
     thread_scope: ThreadScope,
     turn_scope: TurnScope,
-    turn_store: Arc<FilesystemTurnStateStore<LocalFilesystem>>,
+    turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
     coordinator: Arc<dyn TurnCoordinator>,
     _product_harness: RebornProductWorkflowHarness,
     thread_harness: RebornThreadHarness,
@@ -199,7 +202,7 @@ pub struct RebornHarnessSharedStorage {
     product_root: Arc<tempfile::TempDir>,
     thread_backend: Arc<LocalFilesystem>,
     thread_root: Arc<tempfile::TempDir>,
-    turn_backend: Arc<LocalFilesystem>,
+    turn_backend: Arc<HarnessTurnStorageBackend>,
     turn_root: Arc<tempfile::TempDir>,
 }
 
@@ -213,9 +216,21 @@ impl RebornHarnessSharedStorage {
             product_root,
             thread_backend: Arc::new(local_filesystem(thread_root.path())?),
             thread_root,
-            turn_backend: Arc::new(local_filesystem(turn_root.path())?),
+            turn_backend: Arc::new(BlockingTurnStatePutFilesystem::new(InMemoryBackend::new())),
             turn_root,
         })
+    }
+
+    pub fn block_next_turn_state_put(&self) {
+        self.turn_backend.block_next_put();
+    }
+
+    pub async fn wait_for_blocked_turn_state_put(&self) {
+        self.turn_backend.wait_for_blocked_put().await;
+    }
+
+    pub fn release_blocked_turn_state_put(&self) {
+        self.turn_backend.release_blocked_put();
     }
 }
 
@@ -810,7 +825,10 @@ impl RebornBinaryE2EHarness {
             )
         } else {
             let turn_root = Arc::new(tempfile::tempdir()?);
-            (Arc::new(local_filesystem(turn_root.path())?), turn_root)
+            (
+                Arc::new(BlockingTurnStatePutFilesystem::new(InMemoryBackend::new())),
+                turn_root,
+            )
         };
         let turn_store = Arc::new(FilesystemTurnStateStore::new(scoped_turns_fs(
             turn_backend,
@@ -917,7 +935,7 @@ impl RebornBinaryE2EHarness {
         binding: ResolvedBinding,
         thread_scope: ThreadScope,
         turn_scope: TurnScope,
-        turn_store: Arc<FilesystemTurnStateStore<LocalFilesystem>>,
+        turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
         product_harness: RebornProductWorkflowHarness,
         thread_harness: RebornThreadHarness,
         model_gateway: RebornTraceReplayModelGateway,
@@ -1646,6 +1664,8 @@ impl HostRuntimeCapabilityHarness {
                 CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_PAUSE_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
             ],
             runtime_kind: RuntimeKind::FirstParty,
@@ -1731,6 +1751,8 @@ impl HostRuntimeCapabilityHarness {
             vec![
                 CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_PAUSE_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
             ],
             vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
@@ -3548,13 +3570,10 @@ fn route_kind_for_trigger(trigger: ProductTriggerReason) -> ProductConversationR
     }
 }
 
-fn scoped_turns_fs<F>(
-    backend: Arc<F>,
+fn scoped_turns_fs(
+    backend: Arc<HarnessTurnStorageBackend>,
     binding: &ResolvedBinding,
-) -> HarnessResult<Arc<ScopedFilesystem<F>>>
-where
-    F: RootFilesystem,
-{
+) -> HarnessResult<Arc<ScopedFilesystem<HarnessTurnBackend>>> {
     let owner_user_id = binding
         .subject_user_id
         .as_ref()
@@ -3586,7 +3605,29 @@ where
         VirtualPath::new(target).expect("valid turns target"),
         MountPermissions::read_write_list_delete(),
     )])?;
-    Ok(Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)))
+    Ok(Arc::new(ScopedFilesystem::with_fixed_view(
+        turn_state_root_filesystem(backend)?,
+        mounts,
+    )))
+}
+
+fn turn_state_root_filesystem(
+    backend: Arc<HarnessTurnStorageBackend>,
+) -> HarnessResult<Arc<HarnessTurnBackend>> {
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(
+        local_dev_mount_descriptor(
+            "/engine",
+            "reborn-harness-turn-state",
+            BackendKind::MemoryDocuments,
+            StorageClass::StructuredRecords,
+            ContentKind::StructuredRecord,
+            IndexPolicy::NotIndexed,
+            backend.capabilities(),
+        )?,
+        backend,
+    )?;
+    Ok(Arc::new(root))
 }
 
 pub fn trace_tool_call_response() -> ironclaw_loop_support::HostManagedModelResponse {

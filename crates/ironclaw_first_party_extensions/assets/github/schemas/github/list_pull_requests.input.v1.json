@@ -36,14 +36,45 @@
     "page": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 100,
-      "default": 1
+      "default": 1,
+      "description": "1-based results page."
     },
     "limit": {
       "type": "integer",
       "minimum": 1,
       "maximum": 100,
-      "default": 30
+      "default": 30,
+      "description": "Maximum number of pull requests to return."
+    },
+    "head": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536,
+      "description": "Optional head user or branch filter, for example user:branch."
+    },
+    "base": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536,
+      "description": "Optional base branch filter."
+    },
+    "sort": {
+      "type": "string",
+      "enum": [
+        "created",
+        "updated",
+        "popularity",
+        "long-running"
+      ],
+      "description": "Optional pull request sort field."
+    },
+    "direction": {
+      "type": "string",
+      "enum": [
+        "asc",
+        "desc"
+      ],
+      "description": "Sort direction when sort is supplied."
     }
   },
   "required": [

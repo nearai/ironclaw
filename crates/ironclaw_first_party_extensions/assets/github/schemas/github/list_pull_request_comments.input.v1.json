@@ -29,10 +29,32 @@
       "minimum": 1,
       "description": "Pull request number."
     },
+    "sort": {
+      "type": "string",
+      "enum": [
+        "created",
+        "updated"
+      ],
+      "description": "Optional review-comment sort field."
+    },
+    "direction": {
+      "type": "string",
+      "enum": [
+        "asc",
+        "desc"
+      ],
+      "description": "Sort direction when sort is supplied."
+    },
+    "since": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "format": "date-time",
+      "description": "Only show results updated after this ISO 8601 timestamp."
+    },
     "page": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 100,
       "default": 1
     },
     "limit": {

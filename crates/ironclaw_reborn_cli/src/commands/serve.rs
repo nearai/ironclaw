@@ -18,7 +18,7 @@ use ironclaw_reborn_composition::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
-    SlackOperatorRouteVisibility, build_slack_host_beta_mounts,
+    SlackOperatorRouteVisibility, build_slack_host_beta_runtime_mounts,
     build_webui_services_with_slack_host_beta_mounts,
 };
 use ironclaw_reborn_config::{IdentitySection, RebornProfile, seed_default_config_file_if_missing};
@@ -364,19 +364,27 @@ impl ServeCommand {
                 .context("failed to assemble Reborn runtime for `serve`")?;
             #[cfg(feature = "slack-v2-host-beta")]
             let slack_mounts = if let Some(slack_config) = slack_host_beta_config {
-                Some(
-                    build_slack_host_beta_mounts(&runtime, slack_config)
-                        .context("failed to compose Slack host-beta routes")?,
-                )
+                match build_slack_host_beta_runtime_mounts(&runtime, slack_config)
+                    .await
+                    .context("failed to compose Slack host-beta routes")
+                {
+                    Ok(mounts) => Some(mounts),
+                    Err(error) => {
+                        let shutdown_result = runtime.shutdown().await;
+                        if let Err(shutdown_error) = shutdown_result {
+                            return Err(error.context(format!(
+                                "runtime shutdown after Slack route composition failure also failed: {shutdown_error}"
+                            )));
+                        }
+                        return Err(error);
+                    }
+                }
             } else {
                 None
             };
             #[cfg(feature = "slack-v2-host-beta")]
-            let operator_route_visibility = if sso_startup.is_none() {
-                SlackOperatorRouteVisibility::Visible
-            } else {
-                SlackOperatorRouteVisibility::Hidden
-            };
+            let operator_route_visibility =
+                slack_operator_route_visibility_for_authenticator(env_authenticator.as_ref());
             #[cfg(feature = "slack-v2-host-beta")]
             let bundle: RebornWebuiBundle = build_webui_services_with_slack_host_beta_mounts(
                 &runtime,
@@ -791,6 +799,17 @@ fn resolve_webui_runtime_owner(
     Ok(webui_user_id.to_string())
 }
 
+#[cfg(feature = "slack-v2-host-beta")]
+fn slack_operator_route_visibility_for_authenticator(
+    authenticator: &dyn WebuiAuthenticator,
+) -> SlackOperatorRouteVisibility {
+    if authenticator.mounts_operator_webui_config_routes() {
+        SlackOperatorRouteVisibility::Visible
+    } else {
+        SlackOperatorRouteVisibility::Hidden
+    }
+}
+
 fn print_serve_banner(
     listen_addr: SocketAddr,
     env_token_var: &str,
@@ -892,6 +911,47 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("reborn-cli"), "message: {message}");
         assert!(message.contains("local-user"), "message: {message}");
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_operator_route_visibility_follows_authenticator_route_mount_capability() {
+        struct HiddenAuth;
+
+        #[async_trait::async_trait]
+        impl WebuiAuthenticator for HiddenAuth {
+            async fn authenticate(
+                &self,
+                _token: &str,
+            ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
+                None
+            }
+        }
+
+        struct OperatorRouteAuth;
+
+        #[async_trait::async_trait]
+        impl WebuiAuthenticator for OperatorRouteAuth {
+            async fn authenticate(
+                &self,
+                _token: &str,
+            ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
+                None
+            }
+
+            fn mounts_operator_webui_config_routes(&self) -> bool {
+                true
+            }
+        }
+
+        assert_eq!(
+            slack_operator_route_visibility_for_authenticator(&HiddenAuth),
+            SlackOperatorRouteVisibility::Hidden
+        );
+        assert_eq!(
+            slack_operator_route_visibility_for_authenticator(&OperatorRouteAuth),
+            SlackOperatorRouteVisibility::Visible
+        );
     }
 
     #[tokio::test]

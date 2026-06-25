@@ -44,9 +44,14 @@ use display_preview::{
     NoopCapabilityDisplayPreviewSource,
 };
 use live_progress::{
-    LiveProgressMilestoneSink, LiveProjectionPublisher, LiveSkillActivationObserver,
-    product_items_for_live_update,
+    LiveProgressMilestoneSink, LiveSkillActivationObserver, product_items_for_live_update,
 };
+// Crate-visible under `root-llm-provider` so the skill-learning sink can name
+// the publisher type; otherwise a module-private import for internal use only.
+#[cfg(feature = "root-llm-provider")]
+pub(crate) use live_progress::LiveProjectionPublisher;
+#[cfg(not(feature = "root-llm-provider"))]
+use live_progress::LiveProjectionPublisher;
 use runtime_replay::{
     DeliveredRuntimePayload, RuntimePayloadCandidate, RuntimePayloadResolution, RuntimePayloads,
     replay_payload_candidates, snapshot_payload_candidates,
@@ -1085,11 +1090,13 @@ fn run_status_projection_state(
 }
 
 fn run_failure_category(run: &RunStatusProjection) -> Option<SanitizedFailure> {
-    // Runtime replay categories intentionally use the event-projection namespace
-    // (model_failed, dispatch_failed, process_killed, ...), while turn lifecycle
-    // events use runner/driver failure reasons (lease_expired, driver_failed, ...).
-    // Both are sanitized product categories; clients must treat the field as an
-    // opaque category and prefer failure_summary for user-facing copy.
+    // `error_kind` is a sanitized product category sourced from the runtime
+    // event log (see `ironclaw_event_projections::apply_run_event`). At
+    // `Failed`/`Killed` status its concrete values are the dispatcher error
+    // codes (`missing_runtime_backend`, `unknown_capability`, ...), the
+    // `LoopFailureKind` codes (`model_error`, `iteration_limit`, ...), or the
+    // process fallback `unknown`. Clients must treat the field as an opaque
+    // category and prefer `failure_summary` for user-facing copy.
     matches!(
         run.status,
         RunProjectionStatus::Failed | RunProjectionStatus::Killed
@@ -1108,13 +1115,13 @@ fn run_failure_summary(run: &RunStatusProjection) -> Option<String> {
 }
 
 fn runtime_failure_summary_for_category(category: &str) -> &'static str {
+    // `category` comes from `RunStatusProjection.error_kind` (see
+    // `run_failure_category`). The only sanitized value that resolves to a
+    // dedicated message is the process fallback `unknown`; every other
+    // produced value (dispatcher codes, `LoopFailureKind` codes) intentionally
+    // falls through to the generic summary.
     match category {
-        "model_failed" => "The run failed while waiting for the model.",
-        "dispatch_failed" => "The run failed while executing a capability.",
-        "process_failed" => "The run failed while executing a runtime process.",
-        "process_killed" => "The run stopped because its runtime process was killed.",
-        "hook_failed" => "The run failed while evaluating a runtime hook.",
-        "unknown" | "unclassified" => "The run failed for an unknown reason.",
+        "unknown" => "The run failed for an unknown reason.",
         _ => "The run failed before producing a reply.",
     }
 }

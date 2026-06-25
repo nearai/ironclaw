@@ -27,7 +27,8 @@ use ironclaw_product_workflow::{
     CodexLoginStart, FsMount, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectFsFile,
-    ProjectionCursor, RebornAddMemberRequest, RebornAttachmentRequest, RebornCancelRunResponse,
+    ProjectionCursor, RebornAddMemberRequest, RebornAttachmentRequest,
+    RebornAutomationMutationResponse, RebornCancelRunResponse,
     RebornConnectableChannelListResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
     RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
     RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
@@ -935,6 +936,45 @@ pub async fn list_automations(
     Ok(Json(response))
 }
 
+/// `POST /api/webchat/v2/automations/:automation_id/pause`
+pub async fn pause_automation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(automation_id): Path<String>,
+) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .pause_automation(caller, automation_id)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/automations/:automation_id/resume`
+pub async fn resume_automation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(automation_id): Path<String>,
+) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .resume_automation(caller, automation_id)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `DELETE /api/webchat/v2/automations/:automation_id`
+pub async fn delete_automation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(automation_id): Path<String>,
+) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .delete_automation(caller, automation_id)
+        .await?;
+    Ok(Json(response))
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct ListAutomationsQuery {
     /// Optional maximum number of schedule automations to return.
@@ -1110,6 +1150,33 @@ pub async fn remove_skill(
     Path(SkillPath { name }): Path<SkillPath>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
     let response = state.services().remove_skill(caller, name).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/skills/{name}/auto-activate`
+pub async fn set_skill_auto_activate(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(SkillPath { name }): Path<SkillPath>,
+    Json(body): Json<SetSkillAutoActivateBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_skill_auto_activate(caller, name, body.enabled)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/skills/auto-activate-learned`
+pub async fn set_auto_activate_learned(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<SetSkillAutoActivateBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_auto_activate_learned(caller, body.enabled)
+        .await?;
     Ok(Json(response))
 }
 
@@ -1576,6 +1643,11 @@ pub struct InstallSkillBody {
 #[derive(Debug, Deserialize)]
 pub struct UpdateSkillBody {
     pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetSkillAutoActivateBody {
+    pub enabled: bool,
 }
 
 fn extension_package_ref_for_request(

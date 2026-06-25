@@ -112,10 +112,12 @@ pub(crate) fn spawn_trigger_poller(
     Ok(Some(TriggerPollerRuntimeHandle { cancel, handle }))
 }
 
-/// Wraps a `TrustedTriggerFireSubmitter` to invoke a post-submit hook after
-/// each successful fire submission. The hook is stored in a `OnceLock` slot so
-/// it can be wired after the poller is spawned (late-binding). If the slot is
-/// empty at submit time the hook is simply skipped.
+/// Wraps a `TrustedTriggerFireSubmitter` to start a post-submit hook after each
+/// successful fire submission. The hook is detached from the poller tick so
+/// delivery latency cannot delay fire settlement. The hook is stored in a
+/// `OnceLock` slot so it can be wired after the poller is spawned
+/// (late-binding). If the slot is empty at submit time the hook is simply
+/// skipped.
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) struct PostSubmitHookWrappedSubmitter {
     pub(crate) inner: Arc<dyn TrustedTriggerFireSubmitter>,
@@ -140,10 +142,13 @@ impl TrustedTriggerFireSubmitter for PostSubmitHookWrappedSubmitter {
         {
             // Cheap atomic read: if the slot is not yet filled the hook simply
             // doesn't fire — the poller is not restarted.
-            if let Some(hook) = self.hook_slot.get() {
-                hook.on_trigger_submitted(fire, run_id, scope.clone()).await;
+            if let Some(hook) = self.hook_slot.get().cloned() {
+                let scope = scope.clone();
+                tokio::spawn(async move {
+                    hook.on_trigger_submitted(fire, run_id, scope).await;
+                });
             } else {
-                tracing::warn!(
+                tracing::debug!(
                     target = "ironclaw::reborn::trigger_poller",
                     %run_id,
                     "triggered run accepted but post-submit hook slot not yet set (startup window); delivery skipped for this fire"
@@ -778,6 +783,7 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     mod hook_wrapper {
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, Mutex, OnceLock};
         use std::time::Duration;
 
@@ -794,6 +800,7 @@ mod tests {
             TrustedTriggerSubmitRequest,
         };
         use ironclaw_turns::{TurnRunId, TurnScope};
+        use tokio::sync::Notify;
 
         use super::super::PostSubmitHookWrappedSubmitter;
         use crate::slack_delivery::PostSubmitDeliveryHook;
@@ -864,11 +871,25 @@ mod tests {
         #[derive(Default)]
         struct RecordingHook {
             calls: Mutex<Vec<(TriggerFire, TurnRunId, TurnScope)>>,
+            notify: Notify,
         }
 
         impl RecordingHook {
             fn calls(&self) -> Vec<(TriggerFire, TurnRunId, TurnScope)> {
                 self.calls.lock().unwrap_or_else(|p| p.into_inner()).clone()
+            }
+
+            async fn wait_for_calls(
+                &self,
+                expected: usize,
+            ) -> Vec<(TriggerFire, TurnRunId, TurnScope)> {
+                loop {
+                    let calls = self.calls();
+                    if calls.len() >= expected {
+                        return calls;
+                    }
+                    self.notify.notified().await;
+                }
             }
         }
 
@@ -884,6 +905,27 @@ mod tests {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .push((fire, run_id, scope));
+                self.notify.notify_one();
+            }
+        }
+
+        struct BlockingHook {
+            entered: Arc<Notify>,
+            release: Arc<Notify>,
+            completed: Arc<AtomicBool>,
+        }
+
+        #[async_trait]
+        impl PostSubmitDeliveryHook for BlockingHook {
+            async fn on_trigger_submitted(
+                &self,
+                _fire: TriggerFire,
+                _run_id: TurnRunId,
+                _scope: TurnScope,
+            ) {
+                self.entered.notify_one();
+                self.release.notified().await;
+                self.completed.store(true, Ordering::SeqCst);
             }
         }
 
@@ -1024,7 +1066,9 @@ mod tests {
             assert_eq!(report.due_records, 1, "one due trigger must be processed");
 
             // Hook was invoked exactly once.
-            let calls = recording.calls();
+            let calls = tokio::time::timeout(Duration::from_secs(1), recording.wait_for_calls(1))
+                .await
+                .expect("hook should be invoked asynchronously");
             assert_eq!(calls.len(), 1, "hook must fire exactly once");
 
             let (recorded_fire, called_run_id, called_scope) = &calls[0];
@@ -1042,6 +1086,75 @@ mod tests {
                 Some(&recorded_fire.creator_user_id),
                 "post-submit hook must receive a TurnScope owned by the trigger creator"
             );
+        }
+
+        /// A slow hook must not delay the poller from persisting the accepted
+        /// run id; otherwise the trigger remains claim-only active and blocks
+        /// later slots until the delivery task finishes.
+        #[tokio::test]
+        async fn filled_slot_slow_hook_does_not_block_trigger_settlement() {
+            let repo = Arc::new(InMemoryTriggerRepository::default());
+            let fire_slot = Utc::now() - chrono::Duration::seconds(1);
+            let trigger_id = seed_due_trigger(&repo, fire_slot).await;
+
+            let run_id = TurnRunId::new();
+            let inner = Arc::new(FixedAcceptedSubmitter { run_id });
+            let hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>> =
+                Arc::new(OnceLock::new());
+
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let completed = Arc::new(AtomicBool::new(false));
+            hook_slot
+                .set(Arc::new(BlockingHook {
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                    completed: Arc::clone(&completed),
+                }) as Arc<dyn PostSubmitDeliveryHook>)
+                .unwrap_or_else(|_| panic!("slot set should succeed on first call"));
+
+            let wrapper = Arc::new(PostSubmitHookWrappedSubmitter {
+                inner: inner as Arc<dyn TrustedTriggerFireSubmitter>,
+                hook_slot: Arc::clone(&hook_slot),
+            });
+
+            let worker = build_worker_with_repo(
+                Arc::clone(&repo),
+                wrapper as Arc<dyn TrustedTriggerFireSubmitter>,
+            );
+            let report = tokio::time::timeout(Duration::from_secs(1), worker.tick_once(Utc::now()))
+                .await
+                .expect("slow post-submit hook must not block tick_once")
+                .expect("tick_once succeeds");
+            assert_eq!(report.due_records, 1, "one due trigger must be processed");
+
+            tokio::time::timeout(Duration::from_secs(1), entered.notified())
+                .await
+                .expect("hook task should have started");
+            assert!(
+                !completed.load(Ordering::SeqCst),
+                "hook must still be blocked until the test releases it"
+            );
+
+            let persisted = repo
+                .get_trigger(wrapper_tenant(), trigger_id)
+                .await
+                .expect("load trigger")
+                .expect("trigger present");
+            assert_eq!(
+                persisted.active_run_ref,
+                Some(run_id),
+                "accepted run id must be persisted before delivery hook completes"
+            );
+
+            release.notify_one();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !completed.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("hook task should complete after release");
         }
     }
 }

@@ -203,15 +203,11 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     let root = tempfile::tempdir().unwrap();
     let storage_root = root.path().join("local-dev");
     let skill_root = storage_root
-        .join("tenants/runtime-skill-execution-tenant/users/runtime-skill-execution-owner/skills/filesystem-review");
+        .join("tenants/runtime-skill-execution-tenant/users/runtime-skill-execution-owner/skills/policy-helper");
     std::fs::create_dir_all(skill_root.join("references")).unwrap();
     std::fs::write(
         skill_root.join("SKILL.md"),
-        skill_md(
-            "filesystem-review",
-            "filesystem-review",
-            "Use filesystem-backed review guidance.",
-        ),
+        skill_md("policy-helper", "policy-helper", "Use policy guidance."),
     )
     .unwrap();
     std::fs::write(skill_root.join("references/policy.md"), "filesystem policy").unwrap();
@@ -234,29 +230,50 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     let conversation = runtime.new_conversation().await.unwrap();
     let result = tokio::time::timeout(
         Duration::from_secs(15),
-        runtime.execute_skill_message(&conversation, "$filesystem-review"),
+        runtime.execute_skill_message(&conversation, "$policy-helper"),
     )
     .await
     .unwrap()
     .unwrap();
 
-    assert_eq!(result.plan.activations().len(), 1);
-    assert_eq!(result.plan.activations()[0].name, "filesystem-review");
-    assert_eq!(result.plan.active_bundles().len(), 1);
+    let policy_activations: Vec<_> = result
+        .plan
+        .activations()
+        .iter()
+        .filter(|activation| {
+            activation.name == "policy-helper"
+                && activation.source == Some(RebornSkillSourceKind::User)
+        })
+        .collect();
     assert_eq!(
-        result.plan.active_bundles()[0].source,
-        RebornSkillSourceKind::User
+        policy_activations.len(),
+        1,
+        "explicit user skill should activate exactly once"
     );
+    // Runtime composition may add criteria-selected system skills; this guard is
+    // specifically about the explicit filesystem-backed user skill.
+    let policy_bundles: Vec<_> = result
+        .plan
+        .active_bundles()
+        .iter()
+        .filter(|bundle| {
+            bundle.source == RebornSkillSourceKind::User && bundle.skill_name == "policy-helper"
+        })
+        .collect();
     assert_eq!(
-        result.plan.active_bundles()[0].skill_name,
-        "filesystem-review"
+        policy_bundles.len(),
+        1,
+        "explicit user skill bundle should be active exactly once"
     );
+    let activation = policy_activations[0];
+    let bundle = policy_bundles[0];
+    assert_eq!(bundle.skill_name, activation.name);
 
     let asset = runtime
         .read_skill_execution_asset(
             &conversation,
             &result.plan,
-            &result.plan.activations()[0],
+            activation,
             "references/policy.md",
         )
         .await

@@ -34,5 +34,3 @@ api_key_env = "NEARAI_API_KEY"
 
 [slack]
 enabled = false
-signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
-bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
