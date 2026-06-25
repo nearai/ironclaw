@@ -34,8 +34,9 @@ const SYSTEM_SKILLS_ROOT: &str = "/projects/system/skills";
 /// First-party skills certified to ship with IronClaw.
 ///
 /// Every skill bundled under the repo `skills/` directory and installed into
-/// the trusted system skill root (`/system/skills`) must appear in this list.
-/// Bundled skills are installed into that root, which
+/// the trusted system-skill root (`/projects/system/skills`, read via the
+/// `/system/skills` mount alias) must appear in this list. Bundled skills are
+/// installed into that root, which
 /// [`FilesystemSkillBundleRoot::system`] marks `SkillTrust::Trusted`; trusted
 /// skill instructions are exempt from the prompt-text security-vocabulary gate
 /// (see #5169), so certification is a deliberate, reviewed grant rather than an

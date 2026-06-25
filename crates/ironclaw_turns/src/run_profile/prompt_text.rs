@@ -45,14 +45,20 @@ const fn sensitive_term(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PromptTextPolicy {
     /// Whether host-assembled content is denylisted for security vocabulary,
-    /// host paths, credential-shaped values, and control characters.
+    /// host paths, and credential-shaped values. Structural and framing checks
+    /// (empty/oversize content and control characters) are enforced separately
+    /// on every surface and are NOT governed by this flag.
     ///
     /// Disabled only for [`PromptTextSurface::TrustedSkillInstruction`] —
-    /// certified/trusted skill instruction bodies. Their content is first-party
-    /// and reviewed (the skill ships certified via `CERTIFIED_SKILLS` and is
-    /// installed into the trusted system-skill root), and these denylists
-    /// false-positived constantly on legitimate skill docs that describe OAuth
-    /// headers, API keys, and host paths — failing the whole turn (#5169).
+    /// trusted skill instruction bodies. "Trusted" is exactly two provenances:
+    /// certified first-party skills (shipped via `CERTIFIED_SKILLS`, installed
+    /// into the trusted system-skill root) and user-placed local skills (the
+    /// user `skills/` root). Registry/marketplace/URL skills are `Installed`,
+    /// not trusted: they keep the full checks here and their body is withheld
+    /// from the prompt entirely. This denylist false-positived constantly on
+    /// legitimate skill docs describing OAuth headers, API keys, and host paths
+    /// — failing the whole turn (#5169).
+    ///
     /// Untrusted surfaces (memory snippets, runtime-context labels, generic
     /// model content, safe summaries) keep the full checks; those surfaces also
     /// have independent guards (`validate_loop_safe_summary`,
@@ -97,16 +103,15 @@ pub(super) fn validate_prompt_text(
     label: &'static str,
     surface: PromptTextSurface,
 ) -> Result<String, AgentLoopHostError> {
-    // Structural limits always apply, even to trusted skill content.
+    // Structural and framing limits apply on every surface, even trusted skill
+    // content: empty/oversize content and control characters (NUL/ESC/BEL,
+    // which can corrupt prompt/log/terminal framing) are not the false-positive
+    // class #5169 relaxes, so they are always rejected.
     if value.is_empty() || value.len() > surface.max_bytes() {
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::PolicyDenied,
             format!("{label} is not model-safe"),
         ));
-    }
-    // Trusted skill instructions skip content denylisting; see PromptTextPolicy.
-    if !surface.policy().enforce_content_checks {
-        return Ok(value);
     }
     if value
         .chars()
@@ -116,6 +121,11 @@ pub(super) fn validate_prompt_text(
             AgentLoopHostErrorKind::PolicyDenied,
             format!("{label} contains control characters"),
         ));
+    }
+    // The content denylist (host paths, security vocabulary, credential-shaped
+    // values) is skipped for trusted skill instructions; see PromptTextPolicy.
+    if !surface.policy().enforce_content_checks {
+        return Ok(value);
     }
     reject_sensitive_text(&value, label)?;
     Ok(value)
@@ -345,22 +355,21 @@ mod tests {
         }
     }
 
-    /// Trusted skill content also bypasses the control-character check.
+    /// Control characters corrupt prompt/log/terminal framing, so they are
+    /// rejected on every surface — including trusted skill content. The trust
+    /// gate relaxes only the vocabulary/path/credential content denylist.
     #[test]
-    fn trusted_skill_instruction_bypasses_control_characters() {
-        validate_prompt_text(
-            "bell\u{0007}inside trusted skill".to_string(),
-            "skill content",
+    fn control_characters_are_rejected_on_all_surfaces() {
+        for surface in [
             PromptTextSurface::TrustedSkillInstruction,
-        )
-        .expect("trusted skill content bypasses the control-character check");
-        let error = validate_prompt_text(
-            "bell\u{0007}inside generic content".to_string(),
-            "context content",
             PromptTextSurface::GenericModelContent,
-        )
-        .expect_err("untrusted content still rejects control characters");
-        assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+            PromptTextSurface::SafeSummary,
+        ] {
+            let error =
+                validate_prompt_text("bell\u{0007}inside content".to_string(), "content", surface)
+                    .expect_err("control characters must be rejected on all surfaces");
+            assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+        }
     }
 
     /// Structural limits (empty, byte budget) apply to every surface, including
