@@ -67,9 +67,10 @@ use ironclaw_host_runtime::builtin_first_party_package_for_process_backend;
 use ironclaw_host_runtime::memory_provider::MemoryServiceResolver;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeHttpEgressPort,
-    HostRuntimeServices, LocalHostProcessPort, ProductAuthProviderRuntimePorts, TriggerCreateHook,
+    HostRuntimeServices, LocalHostProcessPort, NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
+    ProductAuthProviderRuntimePorts, TriggerCreateHook,
     builtin_first_party_handlers_with_trigger_create_hook_and_memory_resolver,
-    builtin_first_party_package,
+    builtin_first_party_package, native_memory_first_party_package,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_loop_support::FilesystemCheckpointStateStore;
@@ -2902,7 +2903,24 @@ pub(crate) fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBu
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("built-in first-party registry is invalid: {error}"),
         })?;
+    insert_native_memory_package(&mut registry)?;
     Ok(registry)
+}
+
+/// Insert the always-on `ironclaw.memory.native` package into a registry that
+/// already holds the builtin package. Native memory rides the same always-on
+/// lane as builtin (not the catalog/lifecycle lane), so it is registered here
+/// directly rather than discovered from the extension catalog.
+fn insert_native_memory_package(registry: &mut ExtensionRegistry) -> Result<(), RebornBuildError> {
+    registry
+        .insert(native_memory_first_party_package().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("native memory first-party package is invalid: {error}"),
+            }
+        })?)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("native memory first-party registry is invalid: {error}"),
+        })
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -2921,6 +2939,7 @@ fn production_builtin_extension_registry(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("built-in first-party registry is invalid: {error}"),
         })?;
+    insert_native_memory_package(&mut registry)?;
     Ok(registry)
 }
 
@@ -2998,6 +3017,28 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
             // builtin.trace_commons.onboard (operator-invite enrollment posts to
             // an external onboarding server).
             policy.provider.authority_effects,
+            None,
+        ),
+        // Native memory rides the always-on first-party lane alongside builtin
+        // (it is registered into the builtin extension registry, not discovered
+        // from the catalog), so it carries its own first-party trust entry. The
+        // path is a stable identifier only — `for_local_manifest` does not read
+        // it — because native memory is constructed in code, not from a bundled
+        // manifest file. Its effects are the document-store provider's needs.
+        AdminEntry::for_local_manifest(
+            PackageId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER).map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("native memory first-party package id is invalid: {error}"),
+                }
+            })?,
+            "/system/extensions/ironclaw.memory.native/manifest.toml".to_string(),
+            None,
+            HostTrustAssignment::first_party(),
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ],
             None,
         ),
         AdminEntry::for_local_manifest(

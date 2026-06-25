@@ -7,8 +7,7 @@ use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage, CorrelationId,
-    DecisionSummary, EffectKind, ExtensionId, PermissionMode, ResourceUsage,
-    RuntimeDispatchErrorKind,
+    DecisionSummary, EffectKind, ExtensionId, ResourceUsage, RuntimeDispatchErrorKind,
 };
 use ironclaw_memory::{
     MemoryEventSinkError, MemoryInvocation, MemoryService, MemoryServiceError,
@@ -20,15 +19,19 @@ use ironclaw_memory::{
 };
 use serde_json::{Value, json};
 
+use crate::memory_profiles::MEMORY_DOCUMENT_STORE_PROFILE_ID;
 use crate::memory_provider::MemoryServiceResolver;
 use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest, FirstPartyCapabilityResult};
 
-use super::{first_party_capability_manifest, input_error, operation_error, resource_profile};
+use super::{input_error, native_memory_capability_manifest, operation_error};
 
-pub const MEMORY_SEARCH_CAPABILITY_ID: &str = "builtin.memory_search";
-pub const MEMORY_WRITE_CAPABILITY_ID: &str = "builtin.memory_write";
-pub const MEMORY_READ_CAPABILITY_ID: &str = "builtin.memory_read";
-pub const MEMORY_TREE_CAPABILITY_ID: &str = "builtin.memory_tree";
+// Native memory rides the always-on first-party lane (like `builtin`), as its
+// own `ironclaw.memory.native` extension. The model-facing tool names derive
+// from these ids (`.` -> `__`): `ironclaw__memory__native__{read,write,search,tree}`.
+pub const MEMORY_SEARCH_CAPABILITY_ID: &str = "ironclaw.memory.native.search";
+pub const MEMORY_WRITE_CAPABILITY_ID: &str = "ironclaw.memory.native.write";
+pub const MEMORY_READ_CAPABILITY_ID: &str = "ironclaw.memory.native.read";
+pub const MEMORY_TREE_CAPABILITY_ID: &str = "ironclaw.memory.native.tree";
 const MEMORY_PROMPT_SAFETY_EXTENSION_ID: &str = "memory.prompt_safety";
 
 struct MemoryServices {
@@ -63,35 +66,47 @@ struct CachedMemoryService {
     service: Arc<dyn MemoryService>,
 }
 
+/// Capability manifests for the `ironclaw.memory.native` extension.
+///
+/// `read`/`write` implement the `memory.document_store.v1` profile (their schema
+/// refs match the profile's required-operation refs so the conformance harness
+/// matches); `search`/`tree` are native conveniences that implement no profile.
+/// All four are model-visible; input schemas are served inline by
+/// `resolve_native_memory_input_schema_ref` (the same mechanism the builtin
+/// package uses), so no asset materialization is required on the always-on lane.
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
-        first_party_capability_manifest(
-            MEMORY_SEARCH_CAPABILITY_ID,
-            "Search Reborn persistent memory documents in the current tenant/user/agent/project scope",
-            vec![EffectKind::ReadFilesystem],
-            PermissionMode::Allow,
-            resource_profile(),
-        )?,
-        first_party_capability_manifest(
-            MEMORY_WRITE_CAPABILITY_ID,
-            "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead.",
-            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
-            PermissionMode::Allow,
-            resource_profile(),
-        )?,
-        first_party_capability_manifest(
+        native_memory_capability_manifest(
             MEMORY_READ_CAPABILITY_ID,
             "Read a Reborn persistent memory document in the current tenant/user/agent/project scope",
             vec![EffectKind::ReadFilesystem],
-            PermissionMode::Allow,
-            resource_profile(),
+            &[MEMORY_DOCUMENT_STORE_PROFILE_ID],
+            "schemas/memory/document-read.input.v1.json",
+            "schemas/memory/document-read.output.v1.json",
         )?,
-        first_party_capability_manifest(
+        native_memory_capability_manifest(
+            MEMORY_WRITE_CAPABILITY_ID,
+            "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead.",
+            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+            &[MEMORY_DOCUMENT_STORE_PROFILE_ID],
+            "schemas/memory/document-write.input.v1.json",
+            "schemas/memory/document-write.output.v1.json",
+        )?,
+        native_memory_capability_manifest(
+            MEMORY_SEARCH_CAPABILITY_ID,
+            "Search Reborn persistent memory documents in the current tenant/user/agent/project scope",
+            vec![EffectKind::ReadFilesystem],
+            &[],
+            "schemas/memory/search.input.v1.json",
+            "schemas/memory/search.output.v1.json",
+        )?,
+        native_memory_capability_manifest(
             MEMORY_TREE_CAPABILITY_ID,
             "List Reborn persistent memory documents as a compact tree",
             vec![EffectKind::ReadFilesystem],
-            PermissionMode::Allow,
-            resource_profile(),
+            &[],
+            "schemas/memory/tree.input.v1.json",
+            "schemas/memory/tree.output.v1.json",
         )?,
     ])
 }
