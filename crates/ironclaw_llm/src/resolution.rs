@@ -541,7 +541,7 @@ struct ChainSettings {
 impl Default for ChainSettings {
     fn default() -> Self {
         Self {
-            request_timeout_secs: 120,
+            request_timeout_secs: crate::config::DEFAULT_REQUEST_TIMEOUT_SECS,
             cheap_model: None,
             smart_routing_cascade: true,
             max_retries: 3,

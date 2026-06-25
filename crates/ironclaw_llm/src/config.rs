@@ -259,6 +259,62 @@ impl BedrockConfig {
     }
 }
 
+/// Default per-request LLM HTTP timeout in seconds.
+///
+/// Kept BELOW the Reborn runner lease (`ironclaw_turns`
+/// `DEFAULT_RUNNER_LEASE_TTL_SECONDS` = 90s) so the HTTP layer fails a hung
+/// request before the lease reclaims the runner. The `ironclaw_llm` crate must
+/// not depend on `ironclaw_turns`, so the relationship is documented here and
+/// enforced by an invariant test in `ironclaw_turns`.
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 60;
+
+/// Cap on the TCP/TLS handshake for an LLM HTTP request. A cold or black-holed
+/// socket fails fast here instead of hanging until the total request timeout.
+pub const CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// TCP keepalive probe interval. Surfaces a peer that died while a pooled socket
+/// sat idle, rather than hanging on the next use of a half-open connection.
+pub const TCP_KEEPALIVE_SECS: u64 = 30;
+
+/// Max idle time a pooled connection is kept before being dropped. Set at the
+/// runner-lease boundary (90s) so a silently-broken idle socket is never reused
+/// past a single lease lifetime, while still retaining warm connections across
+/// back-to-back turns.
+pub const POOL_IDLE_TIMEOUT_SECS: u64 = 90;
+
+/// Request timeout for short auxiliary HTTP calls (OAuth token exchange,
+/// session/credential refresh) that are not turn-model streams. These are quick
+/// request/response round-trips, so they use a tighter budget than a model call.
+pub const AUXILIARY_REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// Request timeout for audio transcription calls. Transcription is not a
+/// turn-model call and is not gated by the Reborn runner lease, so it keeps a
+/// longer budget for large audio uploads.
+pub const TRANSCRIPTION_REQUEST_TIMEOUT_SECS: u64 = 120;
+
+/// Base reqwest builder carrying the timeout hygiene every LLM HTTP client
+/// shares: a total-request timeout, a connect-handshake cap, TCP keepalive, and
+/// a bounded idle connection pool.
+///
+/// This is the single source of truth for those four settings — providers must
+/// build their client from this rather than re-applying the values inline, so
+/// the policy can only ever change in one place. The total request timeout is a
+/// parameter because it is legitimately per-call (a turn model stream and a
+/// one-shot OAuth token exchange should not share one budget); callers chain any
+/// site-specific options (`.redirect`, `.resolve_to_addrs`, `.default_headers`,
+/// …) onto the returned builder.
+///
+/// Pass [`DEFAULT_REQUEST_TIMEOUT_SECS`] for primary turn-model calls so the
+/// HTTP layer times out below the Reborn runner lease.
+pub fn hardened_client_builder(request_timeout_secs: u64) -> reqwest::ClientBuilder {
+    use std::time::Duration;
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(request_timeout_secs))
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .tcp_keepalive(Duration::from_secs(TCP_KEEPALIVE_SECS))
+        .pool_idle_timeout(Duration::from_secs(POOL_IDLE_TIMEOUT_SECS))
+}
+
 /// LLM provider configuration.
 ///
 /// NearAI remains the default backend with its own config struct (session auth).
@@ -283,8 +339,9 @@ pub struct LlmConfig {
     /// OpenAI Codex config (populated when backend=openai_codex).
     pub openai_codex: Option<OpenAiCodexConfig>,
     /// HTTP request timeout in seconds for LLM API calls.
-    /// Default: 120. Increase for local LLMs (Ollama, vLLM, LM Studio) that
-    /// need more time for prompt evaluation on consumer hardware.
+    /// Default: `DEFAULT_REQUEST_TIMEOUT_SECS` (60), kept below the Reborn
+    /// runner lease. Increase via `LLM_REQUEST_TIMEOUT_SECS` for local LLMs
+    /// (Ollama, vLLM, LM Studio) that need more time on consumer hardware.
     pub request_timeout_secs: u64,
     /// Generic cheap/fast model for lightweight tasks (heartbeat, routing, evaluation).
     /// Works with any backend. Set via `LLM_CHEAP_MODEL` env var.
@@ -523,6 +580,38 @@ impl GeminiOauthConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every timeout const that gates a turn-model call must sit below the
+    /// Reborn runner lease (90s, `ironclaw_turns DEFAULT_RUNNER_LEASE_TTL_SECONDS`)
+    /// so the HTTP layer fails a hung request before the lease reclaims the
+    /// runner. `ironclaw_llm` must not depend on `ironclaw_turns`, so the bound
+    /// is asserted here by literal; the turns crate owns the invariant on its
+    /// own side.
+    #[test]
+    fn client_timeout_consts_are_below_runner_lease() {
+        const LEASE_SECS: u64 = 90;
+        const {
+            assert!(DEFAULT_REQUEST_TIMEOUT_SECS < LEASE_SECS);
+            assert!(CONNECT_TIMEOUT_SECS < LEASE_SECS);
+            assert!(TCP_KEEPALIVE_SECS < LEASE_SECS);
+            // pool_idle may equal the lease boundary but must not exceed it.
+            assert!(POOL_IDLE_TIMEOUT_SECS <= LEASE_SECS);
+        }
+    }
+
+    /// The shared hardened builder must construct a client successfully with the
+    /// default request timeout. reqwest exposes no builder-field readback, so
+    /// this asserts a successful build (the four settings are applied
+    /// unconditionally by construction in `hardened_client_builder`).
+    #[test]
+    fn hardened_client_builder_builds_successfully() {
+        let result = hardened_client_builder(DEFAULT_REQUEST_TIMEOUT_SECS).build();
+        assert!(
+            result.is_ok(),
+            "hardened_client_builder must build a client: {:?}",
+            result.err()
+        );
+    }
 
     #[test]
     fn bedrock_build_applies_default_region() {
