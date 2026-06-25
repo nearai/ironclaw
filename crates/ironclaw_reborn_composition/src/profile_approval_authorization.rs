@@ -1,7 +1,7 @@
 use std::{borrow::Cow, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_approvals::{ToolPermissionOverride, persistent_approval_grant_issuer};
+use ironclaw_approvals::{ToolPermissionOverride, permission_mode_allows_persistent_approval};
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant,
@@ -45,6 +45,13 @@ pub(crate) trait ApprovalSettingsProvider: Send + Sync {
     ) -> Option<ToolPermissionOverride>;
 
     async fn global_auto_approve(&self, scope: &ResourceScope) -> bool;
+
+    async fn tool_always_allow(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        grantee: &Principal,
+    ) -> bool;
 }
 
 /// No stored overrides and global auto-approve off: the gate behaves exactly as
@@ -65,6 +72,15 @@ impl ApprovalSettingsProvider for EmptyApprovalSettingsProvider {
     }
 
     async fn global_auto_approve(&self, _scope: &ResourceScope) -> bool {
+        false
+    }
+
+    async fn tool_always_allow(
+        &self,
+        _scope: &ResourceScope,
+        _capability_id: &CapabilityId,
+        _grantee: &Principal,
+    ) -> bool {
         false
     }
 }
@@ -185,6 +201,8 @@ async fn require_approval_for_profile_policy(
     // the approval gate against the same elevated effect set so a dispatch-only
     // capability cannot be spawned as a live process without an approval gate.
     let gate_effects = approval_gate_effects(action_kind, descriptor);
+    let profile_requires_approval =
+        gate_policy.effects_require_approval(approval_policy, &gate_effects);
 
     let require_approval = || Decision::RequireApproval {
         request: approval_request(context, descriptor, estimate, action_kind),
@@ -213,23 +231,43 @@ async fn require_approval_for_profile_policy(
     if gate_policy.capability_exempt_from_approval(&descriptor.id) {
         return decision;
     }
-    // 5. Policy does not require a gate for this effect set.
-    if !gate_policy.effects_require_approval(approval_policy, &gate_effects) {
+    // 5. A matching one-shot approval lease satisfies the gate, regardless of
+    //    the global setting, so a user can resume the approval request they just
+    //    answered.
+    if has_matching_one_shot_approval_grant(context, descriptor, &gate_effects) {
         return decision;
     }
-    // 6. A matching one-shot lease or persistent always-allow grant satisfies
-    //    the gate.
-    if has_matching_approval_grant(
-        context,
-        descriptor,
-        &gate_effects,
-        approval_policy,
-        gate_policy,
-    ) {
+    let expected_grantee = Principal::Extension(descriptor.provider.clone());
+    let durable_auto_approval_eligible =
+        permission_mode_allows_persistent_approval(descriptor.default_permission);
+    // 6. A settings-scope per-tool always-allow policy satisfies the gate.
+    //    The provider verifies the active settings-page persistent policy
+    //    directly, keyed to the capability provider rather than the caller
+    //    extension, so this does not depend on whether that policy was also
+    //    preloaded into this run's grants. Legacy prompt-created persistent
+    //    grants are deliberately not enough when the tool row is "Follow
+    //    global" and the global switch is off.
+    if durable_auto_approval_eligible
+        && settings
+            .tool_always_allow(&context.resource_scope, &descriptor.id, &expected_grantee)
+            .await
+    {
         return decision;
     }
     // 7. Global auto-approve bypasses an otherwise-gated eligible tool.
-    if settings.global_auto_approve(&context.resource_scope).await {
+    if durable_auto_approval_eligible && settings.global_auto_approve(&context.resource_scope).await
+    {
+        return decision;
+    }
+    // 8. With the global switch off, eligible tools default to asking even when
+    //    the runtime profile would otherwise allow low-risk effects. This makes
+    //    the Tools page switch authoritative for #4776; explicit always-allow
+    //    grants above remain the per-tool opt-in.
+    if durable_auto_approval_eligible {
+        return require_approval();
+    }
+    // 9. Policy does not require a gate for this effect set.
+    if !profile_requires_approval {
         return decision;
     }
     require_approval()
@@ -258,16 +296,13 @@ fn approval_gate_effects(
     }
 }
 
-fn has_matching_approval_grant(
+fn has_matching_one_shot_approval_grant(
     context: &ExecutionContext,
     descriptor: &CapabilityDescriptor,
     gate_effects: &[EffectKind],
-    approval_policy: ApprovalPolicy,
-    gate_policy: &dyn ProfileApprovalGatePolicy,
 ) -> bool {
     let expected_grantee = Principal::Extension(context.extension_id.clone());
     let expected_user_approver = Principal::User(context.user_id.clone());
-    let persistent_approval_issuer = persistent_approval_grant_issuer();
     let now = chrono::Utc::now();
     context.grants.grants.iter().any(|grant| {
         let grant_unexpired = grant_is_unexpired(grant, &now);
@@ -275,19 +310,14 @@ fn has_matching_approval_grant(
             && (grant.issued_by == Principal::HostRuntime
                 || grant.issued_by == expected_user_approver)
             && grant_unexpired;
-        let persistent_approval_grant = grant.constraints.max_invocations.is_none()
-            && grant.issued_by == persistent_approval_issuer
-            && grant_unexpired;
         grant.capability == descriptor.id
-            && (one_shot_approval_grant || persistent_approval_grant)
+            && one_shot_approval_grant
             && grant.grantee == expected_grantee
             // Match against the spawn-elevated effect set so a one-shot lease
             // that does not cover SpawnProcess cannot satisfy a spawn gate.
             && gate_effects
                 .iter()
                 .all(|effect| grant.constraints.allowed_effects.contains(effect))
-            && gate_policy
-                .effects_require_approval(approval_policy, &grant.constraints.allowed_effects)
     })
 }
 
@@ -332,6 +362,7 @@ fn approval_request(
 
 #[cfg(test)]
 mod tests {
+    use ironclaw_approvals::persistent_approval_grant_issuer;
     use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
         EffectKind, ExecutionContext, ExtensionId, GrantConstraints, MountView, NetworkPolicy,
@@ -372,6 +403,7 @@ mod tests {
     struct StubSettingsProvider {
         tool_override: Option<ToolPermissionOverride>,
         global_auto_approve: bool,
+        tool_always_allow: bool,
     }
 
     #[async_trait]
@@ -386,6 +418,15 @@ mod tests {
 
         async fn global_auto_approve(&self, _scope: &ResourceScope) -> bool {
             self.global_auto_approve
+        }
+
+        async fn tool_always_allow(
+            &self,
+            _scope: &ResourceScope,
+            _capability_id: &CapabilityId,
+            _grantee: &Principal,
+        ) -> bool {
+            self.tool_always_allow
         }
     }
 
@@ -442,6 +483,7 @@ mod tests {
             StubSettingsProvider {
                 tool_override: None,
                 global_auto_approve: true,
+                tool_always_allow: false,
             },
         )
         .await;
@@ -459,6 +501,7 @@ mod tests {
             StubSettingsProvider {
                 tool_override: Some(ToolPermissionOverride::AskEachTime),
                 global_auto_approve: true,
+                tool_always_allow: false,
             },
         )
         .await;
@@ -476,6 +519,7 @@ mod tests {
             StubSettingsProvider {
                 tool_override: Some(ToolPermissionOverride::Disabled),
                 global_auto_approve: true,
+                tool_always_allow: false,
             },
         )
         .await;
@@ -498,6 +542,7 @@ mod tests {
             StubSettingsProvider {
                 tool_override: None,
                 global_auto_approve: true,
+                tool_always_allow: false,
             },
         )
         .await;
@@ -559,6 +604,17 @@ mod tests {
             approval_policy,
             Arc::new(TestGatePolicy),
             Arc::new(EmptyApprovalSettingsProvider),
+        )
+    }
+
+    fn test_authorizer_with_settings(
+        approval_policy: ApprovalPolicy,
+        settings: StubSettingsProvider,
+    ) -> Arc<dyn TrustAwareCapabilityDispatchAuthorizer> {
+        profile_approval_authorizer(
+            approval_policy,
+            Arc::new(TestGatePolicy),
+            Arc::new(settings),
         )
     }
 
@@ -640,7 +696,226 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn minimal_policy_skips_approval_gate() {
+    async fn default_allow_dispatch_requires_approval_when_global_auto_approve_is_off() {
+        let authorizer = test_authorizer(ApprovalPolicy::AskDestructive);
+
+        let echo_id = CapabilityId::new("builtin.echo").unwrap();
+        let descriptor =
+            test_descriptor_with_id(echo_id.clone(), vec![EffectKind::DispatchCapability]);
+        let ctx = test_context(CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: echo_id,
+                grantee: Principal::Extension(ExtensionId::new("builtin").unwrap()),
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            }],
+        });
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &ctx,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &test_trust_decision(),
+            )
+            .await;
+
+        assert!(
+            matches!(decision, Decision::RequireApproval { .. }),
+            "default-allow dispatch should still ask when global auto-approve is off, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_always_allow_skips_default_allow_dispatch_gate_without_loaded_grant() {
+        let authorizer = test_authorizer_with_settings(
+            ApprovalPolicy::AskDestructive,
+            StubSettingsProvider {
+                tool_override: None,
+                global_auto_approve: false,
+                tool_always_allow: true,
+            },
+        );
+
+        let echo_id = CapabilityId::new("builtin.echo").unwrap();
+        let descriptor =
+            test_descriptor_with_id(echo_id.clone(), vec![EffectKind::DispatchCapability]);
+        let ctx = test_context(CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: echo_id,
+                grantee: Principal::Extension(ExtensionId::new("builtin").unwrap()),
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            }],
+        });
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &ctx,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &test_trust_decision(),
+            )
+            .await;
+
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "settings always-allow should skip the default-allow dispatch gate without a preloaded persistent grant, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn global_auto_approve_does_not_skip_manifest_ineligible_tool() {
+        let authorizer = test_authorizer_with_settings(
+            ApprovalPolicy::AskDestructive,
+            StubSettingsProvider {
+                tool_override: None,
+                global_auto_approve: true,
+                tool_always_allow: false,
+            },
+        );
+
+        let shell_id = CapabilityId::new("builtin.shell").unwrap();
+        let mut descriptor =
+            test_descriptor_with_id(shell_id.clone(), vec![EffectKind::SpawnProcess]);
+        descriptor.default_permission = PermissionMode::Deny;
+        let ctx = test_context(CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: shell_id,
+                grantee: Principal::Extension(ExtensionId::new("builtin").unwrap()),
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::SpawnProcess],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            }],
+        });
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &ctx,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &test_trust_decision(),
+            )
+            .await;
+
+        assert!(
+            matches!(decision, Decision::RequireApproval { .. }),
+            "global auto-approve must not bypass a tool whose manifest no longer permits durable approval, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_persistent_grant_does_not_skip_manifest_ineligible_tool() {
+        let authorizer = test_authorizer_with_settings(
+            ApprovalPolicy::AskDestructive,
+            StubSettingsProvider {
+                tool_override: None,
+                global_auto_approve: false,
+                tool_always_allow: true,
+            },
+        );
+
+        let shell_id = CapabilityId::new("builtin.shell").unwrap();
+        let mut descriptor =
+            test_descriptor_with_id(shell_id.clone(), vec![EffectKind::SpawnProcess]);
+        descriptor.default_permission = PermissionMode::Deny;
+        let ctx = test_context(CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: shell_id,
+                grantee: Principal::Extension(ExtensionId::new("builtin").unwrap()),
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::SpawnProcess],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            }],
+        });
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &ctx,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &test_trust_decision(),
+            )
+            .await;
+
+        assert!(
+            matches!(decision, Decision::RequireApproval { .. }),
+            "settings persistent grant must not bypass a tool whose manifest no longer permits durable approval, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_persistent_grant_does_not_override_global_off() {
+        let authorizer = test_authorizer(ApprovalPolicy::AskDestructive);
+
+        let echo_id = CapabilityId::new("builtin.echo").unwrap();
+        let provider = ExtensionId::new("builtin").unwrap();
+        let descriptor =
+            test_descriptor_with_id(echo_id.clone(), vec![EffectKind::DispatchCapability]);
+        let ctx = test_context(CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: echo_id,
+                grantee: Principal::Extension(provider),
+                issued_by: persistent_approval_grant_issuer(),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            }],
+        });
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &ctx,
+                &descriptor,
+                &ResourceEstimate::default(),
+                &test_trust_decision(),
+            )
+            .await;
+
+        assert!(
+            matches!(decision, Decision::RequireApproval { .. }),
+            "legacy persistent grant must not bypass Follow global when global auto-approve is off, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn minimal_policy_still_asks_when_global_auto_approve_is_off() {
         let authorizer = test_authorizer(ApprovalPolicy::Minimal);
 
         let descriptor = test_descriptor(vec![EffectKind::SpawnProcess]);
@@ -671,8 +946,8 @@ mod tests {
             .await;
 
         assert!(
-            matches!(decision, Decision::Allow { .. }),
-            "Minimal policy should delegate to GrantAuthorizer and Allow, got {decision:?}"
+            matches!(decision, Decision::RequireApproval { .. }),
+            "Minimal policy should still ask when global auto-approve is off, got {decision:?}"
         );
     }
 
@@ -717,7 +992,14 @@ mod tests {
 
     #[tokio::test]
     async fn persistent_approval_grant_allows_reuse() {
-        let authorizer = test_authorizer(ApprovalPolicy::AskDestructive);
+        let authorizer = test_authorizer_with_settings(
+            ApprovalPolicy::AskDestructive,
+            StubSettingsProvider {
+                tool_override: None,
+                global_auto_approve: false,
+                tool_always_allow: true,
+            },
+        );
 
         let shell_id = CapabilityId::new("builtin.shell").unwrap();
         let descriptor = test_descriptor_with_id(shell_id.clone(), vec![EffectKind::SpawnProcess]);
@@ -750,7 +1032,7 @@ mod tests {
 
         assert!(
             matches!(decision, Decision::Allow { .. }),
-            "persistent approval grant should satisfy the local-dev gate, got {decision:?}"
+            "settings persistent approval grant should satisfy the local-dev gate, got {decision:?}"
         );
     }
 

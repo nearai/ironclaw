@@ -229,6 +229,8 @@ REBORN_V2_AUTH_TOKEN = "e2e-reborn-v2-bearer-token-0123456789abcdef"
 SEL_V2 = {
     "root":           "#v2-root",          # SPA mount point (index.html)
     "login_token":    "#v2-token",         # token input on the login/connect view
+    "sidebar":        "#gateway-sidebar",  # app navigation sidebar
+    "sidebar_toggle": "button[aria-label='Toggle sidebar']",
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
     "typing_indicator": "[data-testid='typing-indicator']",
     "msg_user":       "[data-testid='msg-user']",       # user message bubble

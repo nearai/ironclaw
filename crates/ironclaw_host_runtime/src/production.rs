@@ -1188,19 +1188,28 @@ impl DefaultHostRuntime {
             );
             return;
         }
-        let scope = PersistentApprovalScope::from_resource_scope(&context.resource_scope);
-        let lookup_results = join_all(persistent_approval_grantees(context).into_iter().map(
-            |grantee| {
-                let policies = Arc::clone(policies);
-                let key = PersistentApprovalPolicyKey {
-                    scope: scope.clone(),
-                    action,
-                    capability_id: capability_id.clone(),
-                    grantee,
-                };
-                async move { policies.lookup(&key).await }
-            },
-        ))
+        let scopes = persistent_approval_lookup_scopes(&context.resource_scope);
+        let grantees = persistent_approval_grantees(context);
+        let lookup_results = join_all(
+            scopes
+                .into_iter()
+                .flat_map(|scope| {
+                    grantees
+                        .iter()
+                        .cloned()
+                        .map(move |grantee| (scope.clone(), grantee))
+                })
+                .map(|(scope, grantee)| {
+                    let policies = Arc::clone(policies);
+                    let key = PersistentApprovalPolicyKey {
+                        scope,
+                        action,
+                        capability_id: capability_id.clone(),
+                        grantee,
+                    };
+                    async move { policies.lookup(&key).await }
+                }),
+        )
         .await;
         for policy in lookup_results {
             let policy = match policy {
@@ -1952,6 +1961,23 @@ fn persistent_approval_grantees(context: &ironclaw_host_api::ExecutionContext) -
     // `Principal::Extension`), so looking one up could never match. Persistent
     // approvals are deliberately thread-agnostic (see #4825).
     grantees
+}
+
+fn persistent_approval_lookup_scopes(scope: &ResourceScope) -> Vec<PersistentApprovalScope> {
+    let user_scope = PersistentApprovalScope {
+        tenant_id: scope.tenant_id.clone(),
+        user_id: scope.user_id.clone(),
+        agent_id: None,
+        project_id: None,
+    };
+    let legacy_scope = PersistentApprovalScope::from_resource_scope(scope);
+    if legacy_scope == user_scope {
+        vec![user_scope]
+    } else {
+        // User-scope settings-page policies intentionally win lookup order over
+        // legacy agent/project-scoped prompt policies.
+        vec![user_scope, legacy_scope]
+    }
 }
 
 fn host_runtime_spawn_input_for_capability(

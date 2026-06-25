@@ -72,6 +72,35 @@ mod tests {
         LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved)
     }
 
+    /// Turn on the global auto-approve switch for the `(tenant, user)` a run
+    /// dispatches under so a scripted tool call exercises the dispatch path
+    /// instead of stopping at the per-tool approval gate. The Tools-settings
+    /// switch is authoritative for first-party tool dispatch; enabling
+    /// it here mirrors the operator having flipped it on before letting the
+    /// agent run tools.
+    async fn enable_global_auto_approve_for_run(
+        services: &crate::RebornServices,
+        run_context: &LoopRunContext,
+        user_id: &UserId,
+    ) {
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let mut scope = run_context.scope.to_resource_scope();
+        scope.user_id = user_id.clone();
+        ironclaw_approvals::AutoApproveSettingStore::set(
+            local_runtime.auto_approve_settings.as_ref(),
+            ironclaw_approvals::AutoApproveSettingInput {
+                updated_by: ironclaw_host_api::Principal::User(user_id.clone()),
+                scope,
+                enabled: true,
+            },
+        )
+        .await
+        .expect("enabling global auto-approve should succeed");
+    }
+
     fn local_dev_minimal_approval_policy()
     -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
         let mut policy = crate::local_dev_runtime_policy().expect("local-dev policy resolves");
@@ -472,6 +501,13 @@ mod tests {
             None,
         )
         .expect("local-dev capability wiring");
+
+        enable_global_auto_approve_for_run(
+            &services,
+            &run_context,
+            &UserId::new(user).expect("user id"),
+        )
+        .await;
 
         GsuiteSurfaceHarness {
             _dir: dir,
@@ -2003,6 +2039,12 @@ mod tests {
             capability_leases: local_runtime.capability_leases.clone(),
         };
         let run_context = run_context("host-mount-read").await;
+        enable_global_auto_approve_for_run(
+            &services,
+            &run_context,
+            &UserId::new("local-yolo-host-user").expect("user id"),
+        )
+        .await;
         let port = factory
             .create_capability_port(&run_context)
             .await
@@ -2236,6 +2278,12 @@ mod tests {
             capability_leases: local_runtime.capability_leases.clone(),
         };
         let run_context = run_context("skill-install-write").await;
+        enable_global_auto_approve_for_run(
+            &services,
+            &run_context,
+            &UserId::new("local-dev-skill-port-user").expect("user id"),
+        )
+        .await;
         let port = factory
             .create_capability_port(&run_context)
             .await
@@ -2338,6 +2386,12 @@ mod tests {
             capability_leases: local_runtime.capability_leases.clone(),
         };
         let run_context = run_context("no-host-disclosure").await;
+        enable_global_auto_approve_for_run(
+            &services,
+            &run_context,
+            &UserId::new("local-dev-no-host-user").expect("user id"),
+        )
+        .await;
         let port = factory
             .create_capability_port(&run_context)
             .await
@@ -2638,6 +2692,12 @@ mod tests {
         .await
         .expect("local-dev services build");
         let run_context = run_context("extension-search-loop-port").await;
+        enable_global_auto_approve_for_run(
+            &services,
+            &run_context,
+            &UserId::new("local-dev-extension-search-user").expect("user id"),
+        )
+        .await;
         let thread_scope = ThreadScope {
             tenant_id: run_context.scope.tenant_id.clone(),
             agent_id: run_context.scope.agent_id.clone().expect("agent id"),

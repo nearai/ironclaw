@@ -19,12 +19,15 @@ export function useTools() {
     // "Saved" indicator for a permission change that didn't persist.
     mutationFn: async ({ name, state }) =>
       throwIfApiFailed(await updateToolPermission(name, state), "Save failed"),
-    onSuccess: (_data, { name, state }) => {
+    onSuccess: (data, { name, state }) => {
       queryClient.setQueryData(["settings-tools"], (old) => {
         if (!old) return old;
+        const updatedTool = data?.tool;
         return {
           ...old,
-          tools: old.tools.map((t) => (t.name === name ? { ...t, state } : t)),
+          tools: old.tools.map((t) =>
+            t.name === name ? { ...t, state, ...(updatedTool || {}) } : t
+          ),
         };
       });
       setSavedTools((prev) => ({ ...prev, [name]: true }));

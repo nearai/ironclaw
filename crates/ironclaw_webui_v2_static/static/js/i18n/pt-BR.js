@@ -368,8 +368,6 @@ registerPack("pt-BR", {
   "settings.field.maxToolIterationsDesc": "Limite de chamadas de ferramenta por turno",
   "settings.field.planning": "Planejamento",
   "settings.field.planningDesc": "Ativar planejamento multi-etapas antes da execução",
-  "settings.field.autoApproveTools": "Autoaprovar ferramentas",
-  "settings.field.autoApproveToolsDesc": "Pular aprovação para todas as chamadas",
   "settings.field.timezone": "Fuso horário",
   "settings.field.timezoneDesc": "Fuso horário IANA para trabalhos agendados",
   "settings.field.sessionIdleTimeout": "Timeout de inatividade",
@@ -474,11 +472,18 @@ registerPack("pt-BR", {
   "channels.slackAccessError": "Falha na atualização do canal Slack.",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "Sempre permitir ferramentas qualificadas",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "Aplica-se apenas a ferramentas definidas como “Seguir global”. Configurações por ferramenta substituem este controle; aprovações de piso rígido ainda serão solicitadas.",
   "tools.permissions": "Permissões de ferramentas",
   "tools.alwaysAllow": "Permitir sempre",
   "tools.askEachTime": "Perguntar sempre",
   "tools.disabled": "Desativado",
   "tools.default": "padrão",
+  "tools.followDefault": "Seguir global",
+  "tools.sourceDefault": "default permission",
+  "tools.sourceGlobal": "global setting",
+  "tools.sourceOverride": "per-tool override",
   "tools.saved": "salvo",
   "tools.permissionFor": "Permissão para {name}",
   "tools.filterPlaceholder": "Filtrar ferramentas…",

@@ -4,16 +4,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{InvocationId, ResourceScope};
+use ironclaw_extensions::SharedExtensionRegistry;
+use ironclaw_host_api::{EffectKind, InvocationId, ResourceScope};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ConnectableChannelsProductFacade, OperatorStatusService, RebornOperatorStatusCheck,
     RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornServices as ProductRebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductFacade,
-    WebUiAuthenticatedCaller,
+    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices as ProductRebornServices,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, SkillsProductFacade, WebUiAuthenticatedCaller,
 };
 
 use ironclaw_triggers::TriggerRepository;
@@ -33,6 +34,33 @@ use crate::{
 
 static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
     std::sync::LazyLock::new(ironclaw_safety::Sanitizer::new);
+
+#[derive(Clone)]
+struct ActiveRegistryOperatorToolCatalog {
+    registry: Arc<SharedExtensionRegistry>,
+}
+
+impl ActiveRegistryOperatorToolCatalog {
+    fn new(registry: Arc<SharedExtensionRegistry>) -> Self {
+        Self { registry }
+    }
+}
+
+impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
+    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo> {
+        self.registry
+            .snapshot()
+            .capabilities()
+            .map(|descriptor| RebornOperatorToolInfo {
+                capability_id: descriptor.id.clone(),
+                provider: descriptor.provider.clone(),
+                description: Arc::<str>::from(descriptor.description.as_str()),
+                default_permission: descriptor.default_permission,
+                effects: Arc::<[EffectKind]>::from(descriptor.effects.clone()),
+            })
+            .collect()
+    }
+}
 
 /// WebUI-facing Reborn service bundle for host composition.
 ///
@@ -151,6 +179,27 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         );
     }
     if let Some(local_runtime) = &services.local_runtime {
+        let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+            local_runtime.tool_permission_overrides.clone();
+        let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+            local_runtime.auto_approve_settings.clone();
+        let persistent_approval_policies: Arc<
+            dyn ironclaw_approvals::PersistentApprovalPolicyStore,
+        > = local_runtime.persistent_approval_policies.clone();
+        let tool_registry = local_runtime
+            .shared_extension_registry
+            .clone()
+            .unwrap_or_else(|| {
+                Arc::new(SharedExtensionRegistry::new(
+                    local_runtime.extension_registry.as_ref().clone(),
+                ))
+            });
+        api = api.with_operator_approval_config(
+            tool_permission_overrides,
+            auto_approve_settings,
+            persistent_approval_policies,
+            Arc::new(ActiveRegistryOperatorToolCatalog::new(tool_registry)),
+        );
         let mut lifecycle_facade =
             RebornLocalLifecycleFacade::new(local_runtime.skill_management.clone());
         if let Some(extension_management) = &local_runtime.extension_management {
@@ -849,12 +898,39 @@ fn status_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_extensions::{
+        ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    };
     use ironclaw_filesystem::LocalFilesystem;
     use ironclaw_host_api::{
-        HostPath, MountAlias, MountGrant, MountPermissions, MountView, TenantId, UserId,
-        VirtualPath,
+        HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView, TenantId,
+        UserId, VirtualPath,
     };
     use std::{path::Path, time::Duration};
+
+    #[test]
+    fn operator_tool_catalog_reads_shared_registry_updates() {
+        let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let catalog = ActiveRegistryOperatorToolCatalog::new(Arc::clone(&registry));
+
+        assert!(
+            catalog.list_operator_tools().is_empty(),
+            "empty active registry should render no operator tools"
+        );
+
+        registry
+            .insert(test_extension_package("dynamic-tools", "echo"))
+            .expect("insert dynamic extension");
+
+        let tools = catalog.list_operator_tools();
+
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.capability_id.as_str() == "dynamic-tools.echo"),
+            "catalog must read the shared registry at list time so lifecycle updates are visible"
+        );
+    }
 
     #[tokio::test]
     async fn build_webui_services_wires_lifecycle_owner_identity() {
@@ -1295,6 +1371,43 @@ mod tests {
 
     fn caller(user_id: &str) -> WebUiAuthenticatedCaller {
         caller_in_tenant("tenant-alpha", user_id)
+    }
+
+    fn test_extension_package(extension_id: &str, capability_name: &str) -> ExtensionPackage {
+        let manifest_toml = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{extension_id}"
+name = "{extension_id}"
+version = "0.1.0"
+description = "test extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/{extension_id}.wasm"
+
+[[capabilities]]
+id = "{extension_id}.{capability_name}"
+description = "{capability_name}"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/{capability_name}.input.json"
+output_schema_ref = "schemas/{capability_name}.output.json"
+"#
+        );
+        let manifest = ExtensionManifest::parse(
+            &manifest_toml,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+        )
+        .expect("manifest parses");
+        ExtensionPackage::from_manifest(
+            manifest,
+            VirtualPath::new(format!("/system/extensions/{extension_id}")).expect("root"),
+        )
+        .expect("package builds")
     }
 
     fn caller_in_tenant(tenant_id: &str, user_id: &str) -> WebUiAuthenticatedCaller {

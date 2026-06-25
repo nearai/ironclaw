@@ -661,10 +661,10 @@ async fn tick_records_failed_terminal_active_run_as_error() {
 }
 
 #[tokio::test]
-async fn tick_clears_blocked_active_run_and_unblocks_schedule() {
-    // Regression for #4986: a recurring fire parked on an approval/auth gate
-    // must not hold the active lock forever. The poller clears it, records the
-    // fire as failed, and the trigger is left schedulable again.
+async fn tick_keeps_blocked_active_run_locked_until_terminal() {
+    // A recurring fire parked on an approval/auth gate must keep its active
+    // lock until the underlying turn actually reaches a terminal state. Clearing
+    // it earlier would need to terminate the turn atomically as well.
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZX").expect("ulid");
     let fire_slot = ts(1_704_067_200);
@@ -686,25 +686,24 @@ async fn tick_clears_blocked_active_run_and_unblocks_schedule() {
 
     assert_eq!(
         report.results.last().map(|result| &result.outcome),
-        Some(&TriggerPollerFireOutcome::ClearedBlockedActive { run_id })
+        Some(&TriggerPollerFireOutcome::SkippedAlreadyActive {
+            active_fire_slot: fire_slot,
+            active_run_ref: Some(run_id),
+        })
     );
     let persisted = repo
         .get_trigger(tenant("tenant-a"), trigger_id)
         .await
         .expect("load")
         .expect("record present");
-    // Active lock released, so the next due slot can fire.
-    assert_eq!(persisted.active_fire_slot, None);
-    assert_eq!(persisted.active_run_ref, None);
+    assert_eq!(persisted.active_fire_slot, Some(fire_slot));
+    assert_eq!(persisted.active_run_ref, Some(run_id));
     assert_eq!(persisted.state, TriggerState::Scheduled);
     let runs = repo
         .list_trigger_run_history(tenant("tenant-a"), trigger_id, 10)
         .await
         .expect("list run history");
-    assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].run_id, Some(run_id));
-    assert_eq!(runs[0].status, TriggerRunHistoryStatus::Error);
-    assert!(runs[0].completed_at.is_some());
+    assert!(runs.is_empty());
 }
 
 #[tokio::test]
@@ -1569,6 +1568,42 @@ async fn tick_retryable_submit_failure_clears_active_and_keeps_slot_retryable() 
 }
 
 #[tokio::test]
+async fn tick_submit_not_found_clears_active_and_keeps_slot_retryable() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZY").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    repo.upsert_trigger(sample_record(trigger_id, tenant("tenant-a"), fire_slot))
+        .await
+        .expect("insert");
+    let worker = worker(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(vec![Err(
+            TriggerError::NotFound,
+        )])),
+        Arc::new(RecordingActiveRunLookup::default()),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert!(matches!(
+        report.results.last().map(|result| &result.outcome),
+        Some(TriggerPollerFireOutcome::RetryableFailed {
+            reason: TriggerPollerFailureReason::NotFound,
+        })
+    ));
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    assert_eq!(persisted.last_status, Some(TriggerRunStatus::Error));
+    assert_eq!(persisted.next_run_at, fire_slot);
+    assert_eq!(persisted.active_fire_slot, None);
+    assert_eq!(persisted.active_run_ref, None);
+}
+
+#[tokio::test]
 async fn tick_accepted_mark_fire_missing_reports_due_failure() {
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
     let fire_slot = ts(1_704_067_200);
@@ -2117,7 +2152,7 @@ async fn tick_fire_once_blocked_active_run_is_left_pending() {
     // clearing it would mark it Completed prematurely (before it ever fired
     // successfully). The active_fire_slot and active_run_ref must be retained so
     // the gate can still be resolved. The outcome must be SkippedAlreadyActive
-    // (the pending/skip path), not ClearedBlockedActive.
+    // (the pending/skip path), not a clearing outcome.
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
     let fire_slot = ymd_hms(2025, 1, 1, 8, 0, 0);
@@ -2138,13 +2173,13 @@ async fn tick_fire_once_blocked_active_run_is_left_pending() {
 
     let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
 
-    // The outcome must be the pending/skip path, not ClearedBlockedActive.
+    // The outcome must be the pending/skip path, not a clearing outcome.
     assert!(
         matches!(
             report.results.last().map(|r| &r.outcome),
             Some(TriggerPollerFireOutcome::SkippedAlreadyActive { .. })
         ),
-        "fire-once blocked run must produce SkippedAlreadyActive, not ClearedBlockedActive"
+        "fire-once blocked run must produce SkippedAlreadyActive"
     );
     let persisted = repo
         .get_trigger(tenant("tenant-a"), trigger_id)
@@ -2274,12 +2309,9 @@ async fn tick_fire_once_terminal_error_active_run_clears_to_completed() {
 }
 
 #[tokio::test]
-async fn tick_recurring_blocked_active_run_clears_as_failed() {
-    // Regression guard: the fire-once exemption in the Blocked arm must NOT affect
-    // recurring triggers. A recurring trigger parked on a gate must still be cleared
-    // with Error and left Scheduled so its next slot can fire.
-    // This is the same scenario as tick_clears_blocked_active_run_and_unblocks_schedule
-    // but re-stated here as an explicit policy regression guard for the Recurring branch.
+async fn tick_recurring_blocked_active_run_stays_active() {
+    // Regression guard: recurring triggers do not get a special blocked-run
+    // cleanup path. They keep active back-pressure until the turn is terminal.
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZX").expect("ulid");
     let fire_slot = ts(1_704_067_200);
@@ -2302,8 +2334,11 @@ async fn tick_recurring_blocked_active_run_clears_as_failed() {
 
     assert_eq!(
         report.results.last().map(|r| &r.outcome),
-        Some(&TriggerPollerFireOutcome::ClearedBlockedActive { run_id }),
-        "recurring blocked run must produce ClearedBlockedActive"
+        Some(&TriggerPollerFireOutcome::SkippedAlreadyActive {
+            active_fire_slot: fire_slot,
+            active_run_ref: Some(run_id),
+        }),
+        "recurring blocked run must stay active"
     );
     let persisted = repo
         .get_trigger(tenant("tenant-a"), trigger_id)
@@ -2313,17 +2348,15 @@ async fn tick_recurring_blocked_active_run_clears_as_failed() {
     assert_eq!(
         persisted.state,
         TriggerState::Scheduled,
-        "recurring blocked run must stay Scheduled after clear so the next slot can fire"
+        "recurring blocked run must remain Scheduled while active fire is locked"
     );
-    assert_eq!(persisted.active_fire_slot, None);
-    assert_eq!(persisted.active_run_ref, None);
+    assert_eq!(persisted.active_fire_slot, Some(fire_slot));
+    assert_eq!(persisted.active_run_ref, Some(run_id));
     let runs = repo
         .list_trigger_run_history(tenant("tenant-a"), trigger_id, 10)
         .await
         .expect("list run history");
-    assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].run_id, Some(run_id));
-    assert_eq!(runs[0].status, TriggerRunHistoryStatus::Error);
+    assert!(runs.is_empty());
 }
 
 #[tokio::test]
