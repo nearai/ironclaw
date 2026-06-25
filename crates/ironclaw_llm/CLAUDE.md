@@ -114,7 +114,7 @@ ID, migrate to it immediately. Advanced users can override headers via
 
 **Pricing auto-fetch:** On startup, `NearAiChatProvider` fires a background task to fetch per-model pricing from `/v1/model/list`. If the fetch fails, it silently falls back to `costs::model_cost()` / `costs::default_cost()`. Pricing is stored in-memory only.
 
-**HTTP request timeout:** The NEAR AI HTTP client has a 120-second timeout per request. Rate limit `Retry-After` headers are parsed (both delay-seconds and HTTP-date formats) and forwarded as `LlmError::RateLimited { retry_after }` for the `RetryProvider` to honor.
+**HTTP request timeout:** The NEAR AI HTTP client has a 60-second timeout per request (`DEFAULT_REQUEST_TIMEOUT_SECS` in `config.rs`). This is kept below the Reborn runner lease (90 s) so the HTTP layer fails a hung request before the lease reclaims the runner. Rate limit `Retry-After` headers are parsed (both delay-seconds and HTTP-date formats) and forwarded as `LlmError::RateLimited { retry_after }` for the `RetryProvider` to honor.
 
 ## Circuit Breaker
 

@@ -259,6 +259,15 @@ impl BedrockConfig {
     }
 }
 
+/// Default per-request LLM HTTP timeout in seconds.
+///
+/// Kept BELOW the Reborn runner lease (`ironclaw_turns`
+/// `DEFAULT_RUNNER_LEASE_TTL_SECONDS` = 90s) so the HTTP layer fails a hung
+/// request before the lease reclaims the runner. The `ironclaw_llm` crate must
+/// not depend on `ironclaw_turns`, so the relationship is documented here and
+/// enforced by an invariant test in `ironclaw_turns`.
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 60;
+
 /// LLM provider configuration.
 ///
 /// NearAI remains the default backend with its own config struct (session auth).

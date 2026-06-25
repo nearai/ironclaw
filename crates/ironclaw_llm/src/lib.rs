@@ -1226,7 +1226,7 @@ mod tests {
             provider: None,
             bedrock: None,
             gemini_oauth: None,
-            request_timeout_secs: 120,
+            request_timeout_secs: crate::config::DEFAULT_REQUEST_TIMEOUT_SECS,
             cheap_model: None,
             smart_routing_cascade: true,
             openai_codex: None,

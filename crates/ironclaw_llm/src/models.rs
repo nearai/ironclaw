@@ -396,7 +396,7 @@ pub fn build_nearai_model_fetch_config() -> crate::config::LlmConfig {
         provider: None,
         bedrock: None,
         gemini_oauth: None,
-        request_timeout_secs: 120,
+        request_timeout_secs: crate::config::DEFAULT_REQUEST_TIMEOUT_SECS,
         cheap_model: None,
         smart_routing_cascade: false,
         openai_codex: None,
