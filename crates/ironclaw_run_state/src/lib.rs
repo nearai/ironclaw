@@ -13,13 +13,13 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RecordVersion,
-    RootFilesystem, ScopedFilesystem,
+    CasApply, CasUpdateError, ContentType, Entry, FilesystemError, RootFilesystem,
+    ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
     AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, HostApiError, InvocationId,
@@ -534,13 +534,6 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
     }
 }
 
-/// Bound on the CAS retry loop. Picked deliberately small: in normal
-/// operation the in-process serialization mutex collapses contention to
-/// one writer at a time, and cross-process contention on filesystem mounts
-/// is what audit finding F2 is meant to surface — exhausting retries is
-/// expected to be a backend error, not a routine condition.
-const FILESYSTEM_CAS_RETRIES: usize = 8;
-
 /// Filesystem-backed run-state store under the `/run-state` mount alias.
 ///
 /// Construct with a [`ScopedFilesystem`] over any [`RootFilesystem`]. The
@@ -576,7 +569,7 @@ where
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
-    ) -> Result<Option<(RunRecord, RecordVersion)>, RunStateError> {
+    ) -> Result<Option<(RunRecord, ironclaw_filesystem::RecordVersion)>, RunStateError> {
         let path = run_record_path(scope, invocation_id)?;
         let Some(versioned) = self.filesystem.get(scope, &path).await? else {
             return Ok(None);
@@ -589,13 +582,11 @@ where
         }
     }
 
-    /// Read-modify-write a run record with optimistic CAS and bounded retry.
+    /// Read-modify-write a run record using the shared lock-free CAS helper.
     ///
-    /// `mutate` projects the staged record onto its new shape. The loop
-    /// re-reads on `VersionMismatch` (cross-process contention) and on
-    /// `Unsupported` falls back to `CasExpectation::Any` so the byte-only
-    /// `LocalFilesystem` path stays serializable through the in-process
-    /// lock map. (Audit finding F2.)
+    /// `mutate` projects the staged record onto its new shape. The helper's
+    /// optimistic CAS-retry loop handles cross-process contention without
+    /// holding any lock across `.await`.
     async fn apply_update<M>(
         &self,
         scope: &ResourceScope,
@@ -606,31 +597,31 @@ where
         M: FnMut(&mut RunRecord),
     {
         let path = run_record_path(scope, invocation_id)?;
-        for _ in 0..FILESYSTEM_CAS_RETRIES {
-            let (mut record, version) = self
-                .read_versioned(scope, invocation_id)
-                .await?
-                .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
-            mutate(&mut record);
-            let entry = Self::record_entry(&record)?;
-            match put_with_cas(
-                self.filesystem.as_ref(),
-                scope,
-                &path,
-                entry,
-                CasExpectation::Version(version),
-            )
-            .await
-            {
-                Ok(()) => return Ok(record),
-                Err(PutError::VersionMismatch) => continue,
-                Err(PutError::Other(error)) => return Err(error),
-            }
-        }
-        Err(RunStateError::Backend(format!(
-            "filesystem CAS retries exhausted for path {}",
-            path.as_str()
-        )))
+        let scope_clone = scope.clone();
+        cas_update(
+            self.filesystem.as_ref(),
+            scope,
+            &path,
+            |bytes: &[u8]| deserialize::<RunRecord>(bytes),
+            |record: &RunRecord| Self::record_entry(record),
+            |current: Option<RunRecord>| {
+                // Compute the outcome synchronously so the async block only
+                // captures an already-resolved `Result` (mirrors cas_snapshot.rs).
+                let outcome = (|| {
+                    let mut record =
+                        current.ok_or(RunStateError::UnknownInvocation { invocation_id })?;
+                    // Enforce scope ownership on each retry against a freshly read record.
+                    if !same_scope_owner(&record.scope, &scope_clone) {
+                        return Err(RunStateError::UnknownInvocation { invocation_id });
+                    }
+                    mutate(&mut record);
+                    Ok(CasApply::new(record.clone(), record))
+                })();
+                async move { outcome }
+            },
+        )
+        .await
+        .map_err(map_cas_error)
     }
 }
 
@@ -641,8 +632,7 @@ where
 {
     async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
         let path = run_record_path(&start.scope, start.invocation_id)?;
-        let record_lock = filesystem_record_lock(&path);
-        let _guard = record_lock.lock().await;
+        let invocation_id = start.invocation_id;
         let record = RunRecord {
             invocation_id: start.invocation_id,
             capability_id: start.capability_id,
@@ -651,22 +641,25 @@ where
             approval_request_id: None,
             error_kind: None,
         };
-        let entry = Self::record_entry(&record)?;
-        match put_with_cas(
+        let scope = record.scope.clone();
+        cas_update(
             self.filesystem.as_ref(),
-            &record.scope,
+            &scope,
             &path,
-            entry,
-            CasExpectation::Absent,
+            |bytes: &[u8]| deserialize::<RunRecord>(bytes),
+            |r: &RunRecord| Self::record_entry(r),
+            |current: Option<RunRecord>| {
+                let fresh = record.clone();
+                let outcome = if current.is_some() {
+                    Err(RunStateError::InvocationAlreadyExists { invocation_id })
+                } else {
+                    Ok(CasApply::new(fresh.clone(), fresh))
+                };
+                async move { outcome }
+            },
         )
         .await
-        {
-            Ok(()) => Ok(record),
-            Err(PutError::VersionMismatch) => Err(RunStateError::InvocationAlreadyExists {
-                invocation_id: record.invocation_id,
-            }),
-            Err(PutError::Other(error)) => Err(error),
-        }
+        .map_err(map_cas_error)
     }
 
     async fn block_approval(
@@ -675,9 +668,6 @@ where
         invocation_id: InvocationId,
         approval: ApprovalRequest,
     ) -> Result<RunRecord, RunStateError> {
-        let path = run_record_path(scope, invocation_id)?;
-        let record_lock = filesystem_record_lock(&path);
-        let _guard = record_lock.lock().await;
         self.apply_update(scope, invocation_id, |record| {
             record.status = RunStatus::BlockedApproval;
             record.approval_request_id = Some(approval.id);
@@ -692,9 +682,6 @@ where
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<RunRecord, RunStateError> {
-        let path = run_record_path(scope, invocation_id)?;
-        let record_lock = filesystem_record_lock(&path);
-        let _guard = record_lock.lock().await;
         self.apply_update(scope, invocation_id, |record| {
             record.status = RunStatus::BlockedAuth;
             record.approval_request_id = None;
@@ -708,9 +695,6 @@ where
         scope: &ResourceScope,
         invocation_id: InvocationId,
     ) -> Result<RunRecord, RunStateError> {
-        let path = run_record_path(scope, invocation_id)?;
-        let record_lock = filesystem_record_lock(&path);
-        let _guard = record_lock.lock().await;
         self.apply_update(scope, invocation_id, |record| {
             record.status = RunStatus::Completed;
             record.approval_request_id = None;
@@ -725,9 +709,6 @@ where
         invocation_id: InvocationId,
         error_kind: String,
     ) -> Result<RunRecord, RunStateError> {
-        let path = run_record_path(scope, invocation_id)?;
-        let record_lock = filesystem_record_lock(&path);
-        let _guard = record_lock.lock().await;
         self.apply_update(scope, invocation_id, |record| {
             record.status = RunStatus::Failed;
             record.approval_request_id = None;
@@ -808,7 +789,7 @@ where
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
-    ) -> Result<Option<(ApprovalRecord, RecordVersion)>, RunStateError> {
+    ) -> Result<Option<(ApprovalRecord, ironclaw_filesystem::RecordVersion)>, RunStateError> {
         let path = approval_record_path(scope, request_id)?;
         let Some(versioned) = self.filesystem.get(scope, &path).await? else {
             return Ok(None);
@@ -821,9 +802,10 @@ where
         }
     }
 
-    /// Read-modify-write an approval record with optimistic CAS and bounded
-    /// retry. Mirrors `FilesystemRunStateStore::apply_update` — see audit
-    /// finding F2.
+    /// Read-modify-write an approval record using the shared lock-free CAS helper.
+    ///
+    /// Mirrors `FilesystemRunStateStore::apply_update` — no per-record mutex,
+    /// no lock held across `.await`.
     async fn update_status(
         &self,
         scope: &ResourceScope,
@@ -831,37 +813,37 @@ where
         status: ApprovalStatus,
     ) -> Result<ApprovalRecord, RunStateError> {
         let path = approval_record_path(scope, request_id)?;
-        for _ in 0..FILESYSTEM_CAS_RETRIES {
-            let (mut record, version) = self
-                .read_versioned(scope, request_id)
-                .await?
-                .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
-            if record.status != ApprovalStatus::Pending {
-                return Err(RunStateError::ApprovalNotPending {
-                    request_id,
-                    status: record.status,
-                });
-            }
-            record.status = status;
-            let entry = Self::record_entry(&record)?;
-            match put_with_cas(
-                self.filesystem.as_ref(),
-                scope,
-                &path,
-                entry,
-                CasExpectation::Version(version),
-            )
-            .await
-            {
-                Ok(()) => return Ok(record),
-                Err(PutError::VersionMismatch) => continue,
-                Err(PutError::Other(error)) => return Err(error),
-            }
-        }
-        Err(RunStateError::Backend(format!(
-            "filesystem CAS retries exhausted for path {}",
-            path.as_str()
-        )))
+        let scope_clone = scope.clone();
+        cas_update(
+            self.filesystem.as_ref(),
+            scope,
+            &path,
+            |bytes: &[u8]| deserialize::<ApprovalRecord>(bytes),
+            |record: &ApprovalRecord| Self::record_entry(record),
+            |current: Option<ApprovalRecord>| {
+                // Compute the outcome synchronously so the async block only
+                // captures an already-resolved `Result` (mirrors cas_snapshot.rs).
+                let outcome = (|| {
+                    let mut record =
+                        current.ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
+                    // Enforce scope ownership on each retry against a freshly read record.
+                    if !same_scope_owner(&record.scope, &scope_clone) {
+                        return Err(RunStateError::UnknownApprovalRequest { request_id });
+                    }
+                    if record.status != ApprovalStatus::Pending {
+                        return Err(RunStateError::ApprovalNotPending {
+                            request_id,
+                            status: record.status,
+                        });
+                    }
+                    record.status = status;
+                    Ok(CasApply::new(record.clone(), record))
+                })();
+                async move { outcome }
+            },
+        )
+        .await
+        .map_err(map_cas_error)
     }
 }
 
@@ -876,29 +858,30 @@ where
         request: ApprovalRequest,
     ) -> Result<ApprovalRecord, RunStateError> {
         let path = approval_record_path(&scope, request.id)?;
-        let record_lock = filesystem_record_lock(&path);
-        let _guard = record_lock.lock().await;
+        let request_id = request.id;
         let record = ApprovalRecord {
-            scope,
+            scope: scope.clone(),
             request,
             status: ApprovalStatus::Pending,
         };
-        let entry = Self::record_entry(&record)?;
-        match put_with_cas(
+        cas_update(
             self.filesystem.as_ref(),
-            &record.scope,
+            &scope,
             &path,
-            entry,
-            CasExpectation::Absent,
+            |bytes: &[u8]| deserialize::<ApprovalRecord>(bytes),
+            |r: &ApprovalRecord| Self::record_entry(r),
+            |current: Option<ApprovalRecord>| {
+                let fresh = record.clone();
+                let outcome = if current.is_some() {
+                    Err(RunStateError::ApprovalRequestAlreadyExists { request_id })
+                } else {
+                    Ok(CasApply::new(fresh.clone(), fresh))
+                };
+                async move { outcome }
+            },
         )
         .await
-        {
-            Ok(()) => Ok(record),
-            Err(PutError::VersionMismatch) => Err(RunStateError::ApprovalRequestAlreadyExists {
-                request_id: record.request.id,
-            }),
-            Err(PutError::Other(error)) => Err(error),
-        }
+        .map_err(map_cas_error)
     }
 
     async fn get(
@@ -917,9 +900,6 @@ where
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
     ) -> Result<ApprovalRecord, RunStateError> {
-        let path = approval_record_path(scope, request_id)?;
-        let record_lock = filesystem_record_lock(&path);
-        let _guard = record_lock.lock().await;
         self.update_status(scope, request_id, ApprovalStatus::Approved)
             .await
     }
@@ -929,9 +909,6 @@ where
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
     ) -> Result<ApprovalRecord, RunStateError> {
-        let path = approval_record_path(scope, request_id)?;
-        let record_lock = filesystem_record_lock(&path);
-        let _guard = record_lock.lock().await;
         self.update_status(scope, request_id, ApprovalStatus::Denied)
             .await
     }
@@ -942,8 +919,6 @@ where
         request_id: ApprovalRequestId,
     ) -> Result<ApprovalRecord, RunStateError> {
         let path = approval_record_path(scope, request_id)?;
-        let record_lock = filesystem_record_lock(&path);
-        let _guard = record_lock.lock().await;
         let record = self
             .get(scope, request_id)
             .await?
@@ -1084,47 +1059,6 @@ fn join_scoped(prefix: &ScopedPath, leaf: &str) -> Result<ScopedPath, RunStateEr
     ))
 }
 
-type FilesystemRecordLock = Arc<tokio::sync::Mutex<()>>;
-
-// Per-path async serialization for filesystem-backed run/approval stores.
-//
-// Values are stored as `Weak<Mutex<()>>` so the map does not pin lock entries
-// alive once all in-flight operations on a path have released their `Arc`
-// clones. Each call:
-//
-//   1. Opportunistically prunes entries whose `Weak` no longer upgrades —
-//      keeps the map size bounded under high tenant churn (audit finding F1).
-//   2. Returns the live `Arc` if one is still in flight on this path.
-//   3. Otherwise installs a fresh `Arc` and hands back a clone.
-//
-// Race note: we hold the outer `std::sync::Mutex` for the whole upgrade-or-
-// insert window, so two callers asking for the same path receive the same
-// `Arc`; the previously-stale entry path is the only one that creates a new
-// lock, and only when no other `Arc` exists.
-static FILESYSTEM_RECORD_LOCKS: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
-    OnceLock::new();
-
-fn filesystem_record_lock(path: &ScopedPath) -> FilesystemRecordLock {
-    let locks = FILESYSTEM_RECORD_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = locks
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    // Drop entries whose owning Arc has been released. Cheap O(n) scan;
-    // run-state and approval traffic only ever holds a handful of live
-    // paths at once, and pruning here avoids a separate sweeper task.
-    guard.retain(|_, weak| weak.strong_count() > 0);
-
-    let key = path.as_str();
-    if let Some(existing) = guard.get(key).and_then(Weak::upgrade) {
-        return existing;
-    }
-
-    let fresh: FilesystemRecordLock = Arc::new(tokio::sync::Mutex::new(()));
-    guard.insert(key.to_string(), Arc::downgrade(&fresh));
-    fresh
-}
-
 fn invalid_path(error: HostApiError) -> RunStateError {
     RunStateError::InvalidPath(error.to_string())
 }
@@ -1157,118 +1091,21 @@ fn is_not_found(error: &FilesystemError) -> bool {
     matches!(error, FilesystemError::NotFound { .. })
 }
 
-/// Local error classification for the CAS-aware put helper.
-enum PutError {
-    /// Backend reported `VersionMismatch` (cross-process raced us). The
-    /// caller retries by re-reading the current record.
-    VersionMismatch,
-    /// Any other backend or serialization failure; surface to caller.
-    Other(RunStateError),
-}
-
-/// Issue a `put` honoring the requested CAS expectation.
+/// Map the shared CAS helper's [`CasUpdateError`] into a [`RunStateError`].
 ///
-/// Falls back to `CasExpectation::Any` when the backend reports `Unsupported`
-/// for the request — `LocalFilesystem` is byte-only and only accepts `Any`.
-/// On a byte-only backend the in-process record-lock map provides
-/// intra-process serialization; cross-process safety on those backends is
-/// documented as a process-local limitation
-/// (`crates/ironclaw_run_state/CLAUDE.md`).
-///
-/// On the byte-only fallback path, `CasExpectation::Absent` is emulated via
-/// a `get` precheck so callers still see `PutError::VersionMismatch` when
-/// the record already exists. The check-then-write race is closed by the
-/// in-process lock map; cross-process callers fall back to the documented
-/// process-local limitation.
-async fn put_with_cas<F>(
-    filesystem: &ScopedFilesystem<F>,
-    scope: &ResourceScope,
-    path: &ScopedPath,
-    entry: Entry,
-    cas: CasExpectation,
-) -> Result<(), PutError>
-where
-    F: RootFilesystem,
-{
-    let fallback_entry = entry.clone();
-    match filesystem.put(scope, path, entry, cas).await {
-        Ok(_) => Ok(()),
-        Err(FilesystemError::VersionMismatch { .. }) => Err(PutError::VersionMismatch),
-        Err(FilesystemError::Unsupported {
-            operation: FilesystemOperation::WriteFile,
-            ..
-        }) => {
-            if matches!(cas, CasExpectation::Absent) {
-                let existing = filesystem
-                    .get(scope, path)
-                    .await
-                    .map_err(|error| PutError::Other(error.into()))?;
-                if existing.is_some() {
-                    return Err(PutError::VersionMismatch);
-                }
-            }
-            filesystem
-                .put(scope, path, fallback_entry, CasExpectation::Any)
-                .await
-                .map(|_| ())
-                .map_err(|error| PutError::Other(error.into()))
+/// [`CasUpdateError::Apply`] carries the caller's own error straight through;
+/// all other variants are storage-layer failures. Fail-closed: a backend that
+/// cannot honor versioned CAS surfaces as a [`RunStateError::Backend`] rather
+/// than a silent blind overwrite.
+fn map_cas_error(error: CasUpdateError<RunStateError>) -> RunStateError {
+    match error {
+        CasUpdateError::Apply(inner) => inner,
+        CasUpdateError::Timeout | CasUpdateError::RetriesExhausted => {
+            RunStateError::Backend("filesystem CAS retries exhausted".to_string())
         }
-        Err(error) => Err(PutError::Other(error.into())),
-    }
-}
-
-#[cfg(test)]
-mod lock_map_tests {
-    use super::*;
-
-    /// Returns whether the lock map currently holds an entry for `key`
-    /// whose `Weak` still upgrades to a live `Arc`.
-    fn entry_is_live(key: &str) -> bool {
-        FILESYSTEM_RECORD_LOCKS
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(key)
-            .and_then(Weak::upgrade)
-            .is_some()
-    }
-
-    #[test]
-    fn filesystem_record_lock_returns_same_arc_while_holders_alive() {
-        let path = ScopedPath::new("/run-state/projects/p/runs/share.json".to_string()).unwrap();
-        let a = filesystem_record_lock(&path);
-        let b = filesystem_record_lock(&path);
-        assert!(
-            Arc::ptr_eq(&a, &b),
-            "concurrent callers must share the lock"
-        );
-    }
-
-    #[test]
-    fn filesystem_record_lock_prunes_dead_entries_on_reuse() {
-        // Hold a lock for a path, then drop it; the next call against a
-        // *different* path triggers the pruning sweep, after which the
-        // first path's entry must no longer be reachable. Demonstrates
-        // the map does not grow unboundedly with tenant/path churn
-        // (audit finding F1).
-        let path = ScopedPath::new("/run-state/projects/p/runs/prune.json".to_string()).unwrap();
-        let other = ScopedPath::new("/run-state/projects/p/runs/other.json".to_string()).unwrap();
-
-        let arc = filesystem_record_lock(&path);
-        assert!(
-            entry_is_live(path.as_str()),
-            "acquisition should produce a live entry"
-        );
-        drop(arc);
-
-        // After the Arc drops, the Weak in the map is dead. Acquire any
-        // other path to trigger the prune sweep — the dead entry for
-        // the first path must be gone afterwards.
-        let _other_arc = filesystem_record_lock(&other);
-        assert!(
-            !entry_is_live(path.as_str()),
-            "dead Weak entry should have been pruned for {}",
-            path.as_str()
-        );
+        CasUpdateError::CasUnsupported => RunStateError::Backend(
+            "backend does not support versioned compare-and-swap".to_string(),
+        ),
+        CasUpdateError::Backend(fs_err) => RunStateError::Filesystem(fs_err.to_string()),
     }
 }

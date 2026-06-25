@@ -155,15 +155,8 @@ async fn filesystem_approval_store_rejects_duplicate_pending_save() {
     );
 }
 
-fn engine_filesystem() -> ironclaw_filesystem::LocalFilesystem {
-    let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = ironclaw_filesystem::LocalFilesystem::new();
-    fs.mount_local(
-        VirtualPath::new("/engine").unwrap(),
-        HostPath::from_path_buf(storage),
-    )
-    .unwrap();
-    fs
+fn engine_filesystem() -> ironclaw_filesystem::InMemoryBackend {
+    ironclaw_filesystem::InMemoryBackend::new()
 }
 
 /// Build a [`ScopedFilesystem`] exposing `/run-state` and `/approvals`

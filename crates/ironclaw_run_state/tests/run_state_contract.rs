@@ -6,7 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    DirEntry, FileStat, FilesystemError, FilesystemOperation, LocalFilesystem, RootFilesystem,
+    DirEntry, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend, RootFilesystem,
     ScopedFilesystem,
 };
 use ironclaw_host_api::*;
@@ -898,12 +898,12 @@ async fn filesystem_run_state_store_isolates_two_tenants_with_same_user_project_
 }
 
 struct ConcurrentMissingReadFilesystem {
-    inner: LocalFilesystem,
+    inner: InMemoryBackend,
     missing_reads: AtomicUsize,
 }
 
 impl ConcurrentMissingReadFilesystem {
-    fn new(inner: LocalFilesystem) -> Self {
+    fn new(inner: InMemoryBackend) -> Self {
         Self {
             inner,
             missing_reads: AtomicUsize::new(0),
@@ -983,12 +983,12 @@ impl RootFilesystem for ConcurrentMissingReadFilesystem {
 }
 
 struct DisappearingApprovalReadFilesystem {
-    inner: LocalFilesystem,
+    inner: InMemoryBackend,
     fail_next_approval_read: AtomicBool,
 }
 
 impl DisappearingApprovalReadFilesystem {
-    fn new(inner: LocalFilesystem) -> Self {
+    fn new(inner: InMemoryBackend) -> Self {
         Self {
             inner,
             fail_next_approval_read: AtomicBool::new(false),
@@ -1065,20 +1065,14 @@ impl RootFilesystem for DisappearingApprovalReadFilesystem {
     }
 }
 
-/// Build a [`LocalFilesystem`] with `/engine` mounted to a tempdir. The
-/// `/run-state` and `/approvals` mount aliases on the outer
-/// [`ScopedFilesystem`] resolve under `/engine/...` so the legacy local-disk
-/// fault-injection wrappers (which match by post-resolution path) keep
-/// working unchanged.
-fn engine_filesystem() -> LocalFilesystem {
-    let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
-    fs.mount_local(
-        VirtualPath::new("/engine").unwrap(),
-        HostPath::from_path_buf(storage),
-    )
-    .unwrap();
-    fs
+/// Build an [`InMemoryBackend`] for use in tests. The backend supports
+/// full CAS semantics including `Version`-preconditioned writes, which
+/// `LocalFilesystem` does not. The `/run-state` and `/approvals` mount
+/// aliases on the outer [`ScopedFilesystem`] resolve under `/engine/...`
+/// so the fault-injection wrappers (which match by post-resolution path)
+/// keep working unchanged.
+fn engine_filesystem() -> InMemoryBackend {
+    InMemoryBackend::new()
 }
 
 /// Wrap a [`RootFilesystem`] in a [`ScopedFilesystem`] that exposes
