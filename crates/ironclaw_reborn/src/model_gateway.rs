@@ -1071,6 +1071,11 @@ async fn tool_response_to_host(
                     tool_name = provider_call.name.as_str(),
                     provider_call_id = provider_call.id.as_str(),
                     error_kind = ?error.kind,
+                    // The safe_summary is layer-distinct ("outside the
+                    // model-visible capability view" = visible filter, "targets a
+                    // disabled capability" = deny filter, etc.), so it names which
+                    // port in the chain rejected the call.
+                    reason = error.safe_summary.as_str(),
                     "reborn model gateway rejected provider tool call during validation"
                 );
                 return Err(map_provider_tool_output_error(error));
@@ -1086,6 +1091,7 @@ async fn tool_response_to_host(
                         tool_name = rejected_tool_name.as_str(),
                         provider_call_id = rejected_provider_call_id.as_str(),
                         error_kind = ?error.kind,
+                        reason = error.safe_summary.as_str(),
                         "reborn model gateway rejected provider tool call during registration"
                     );
                     return Err(map_provider_tool_output_error(error));
