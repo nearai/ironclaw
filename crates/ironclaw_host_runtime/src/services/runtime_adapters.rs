@@ -7,6 +7,33 @@ use std::{
 use async_trait::async_trait;
 use futures_util::FutureExt;
 use serde::Deserialize;
+use tokio::sync::Semaphore;
+
+/// Upper bound on WASM tool executions running concurrently inside
+/// `spawn_blocking`.
+///
+/// Each WASM tool call runs a synchronous wasmtime guest call. We offload it to
+/// the blocking thread pool (see [`execute_prepared_wasm`]) so it never parks a
+/// tokio *worker* thread, but the blocking pool is itself finite. Without a
+/// bound, a burst of concurrent turns (the incident: ~40 turns fanning out at
+/// once) could occupy every blocking thread, starving every other
+/// `spawn_blocking` user (DB, filesystem, etc.) and re-creating the runtime
+/// wedge one layer down. This semaphore caps in-flight native WASM executions
+/// well below the default blocking-pool ceiling (512) while staying far above
+/// steady-state demand, so normal load never waits and a storm degrades to
+/// queuing instead of pool exhaustion.
+const MAX_CONCURRENT_WASM_EXEC: usize = 64;
+
+// Enforce the bound invariant at compile time: it must be positive and stay
+// below tokio's default blocking-pool ceiling (512) so native WASM execution
+// can never monopolize the pool and starve other `spawn_blocking` users.
+const _: () = assert!(MAX_CONCURRENT_WASM_EXEC > 0 && MAX_CONCURRENT_WASM_EXEC < 512);
+
+/// Process-wide gate over concurrent native WASM execution. Shared across all
+/// `WasmRuntimeAdapter` instances because they all draw from the same blocking
+/// thread pool.
+static WASM_EXEC_SEMAPHORE: std::sync::LazyLock<Arc<Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(Semaphore::new(MAX_CONCURRENT_WASM_EXEC)));
 
 use super::wasm_diagnostics::{log_wasm_guest_error, log_wasm_runtime_error};
 use super::{
@@ -17,8 +44,8 @@ use super::{
     ResourceUsage, RootFilesystem, RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult,
     RuntimeDispatchErrorKind, RuntimeKind, ScriptError, ScriptExecutionRequest, ScriptExecutor,
     ScriptInvocation, SharedRuntimeHttpEgress, WasmError, WasmRuntimeCredentialProvider,
-    WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost, WitToolRequest,
-    WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
+    WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolExecution, WitToolHost,
+    WitToolRequest, WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
 };
 use crate::FirstPartyCapabilityError;
 
@@ -442,7 +469,7 @@ where
 }
 
 pub(super) struct WasmRuntimeAdapter {
-    runtime: WitToolRuntime,
+    runtime: Arc<WitToolRuntime>,
     host: WitToolHost,
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     runtime_http_egress: SharedRuntimeHttpEgress,
@@ -459,7 +486,7 @@ impl WasmRuntimeAdapter {
         credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     ) -> Self {
         Self {
-            runtime,
+            runtime: Arc::new(runtime),
             host,
             network_policy_store,
             runtime_http_egress,
@@ -546,7 +573,7 @@ where
         let prepared = self.prepared_guard()?.get(&cache_key).cloned();
         if let Some(prepared) = prepared {
             let host = self.host_for_scope(&request.scope, request.capability_id);
-            return execute_prepared_wasm(&self.runtime, &prepared, host, request);
+            return execute_prepared_wasm(Arc::clone(&self.runtime), prepared, host, request).await;
         }
 
         let wasm_bytes = request
@@ -573,7 +600,7 @@ where
             }
         };
         let host = self.host_for_scope(&request.scope, request.capability_id);
-        execute_prepared_wasm(&self.runtime, &prepared, host, request)
+        execute_prepared_wasm(Arc::clone(&self.runtime), prepared, host, request).await
     }
 }
 
@@ -588,9 +615,9 @@ impl WasmRuntimePolicyDiscarder for NetworkPolicyDiscarder {
     }
 }
 
-fn execute_prepared_wasm<G>(
-    runtime: &WitToolRuntime,
-    prepared: &PreparedWitTool,
+async fn execute_prepared_wasm<G>(
+    runtime: Arc<WitToolRuntime>,
+    prepared: Arc<PreparedWitTool>,
     host: WitToolHost,
     request: RuntimeAdapterRequest<'_, impl RootFilesystem, G>,
 ) -> Result<RuntimeAdapterResult, DispatchError>
@@ -616,11 +643,22 @@ where
         }
     };
     let context_json = wasm_invocation_context(request.capability_id);
-    let execution = match runtime.execute(
+    // The wasmtime guest call is synchronous and CPU/IO-bound. Running it
+    // inline on the async worker would park that worker for the full duration
+    // of WASM execution; a burst of concurrent turns (>= worker_count) could
+    // then starve the scheduler, poller, and heartbeats — the runtime wedge.
+    // Offload it to the blocking pool (mirroring legacy
+    // `src/tools/wasm/wrapper.rs`), gated by a semaphore so a storm queues
+    // instead of exhausting the blocking pool.
+    let execution = match run_wasm_execution_blocking(
+        runtime,
         prepared,
         host,
-        WitToolRequest::new(input_json).with_context(context_json),
-    ) {
+        input_json,
+        context_json,
+    )
+    .await
+    {
         Ok(execution) => execution,
         Err(error) => {
             log_wasm_runtime_error(request.capability_id, &error);
@@ -685,6 +723,37 @@ where
         usage: execution.usage,
         receipt,
     })
+}
+
+/// Run the synchronous wasmtime guest call on the blocking thread pool.
+///
+/// The owned `runtime`/`prepared`/`host` are all cheap-to-move (`WitToolRuntime`
+/// shares its `Engine` by reference count; `prepared` is an `Arc`; `WitToolHost`
+/// is `Clone`), so the closure is `Send + 'static`. A semaphore permit is held
+/// for the lifetime of the blocking task so concurrent native executions stay
+/// bounded; the permit and the task both drop on return. A `JoinError` (panic
+/// or cancellation of the blocking task) is surfaced as an execution failure.
+async fn run_wasm_execution_blocking(
+    runtime: Arc<WitToolRuntime>,
+    prepared: Arc<PreparedWitTool>,
+    host: WitToolHost,
+    input_json: String,
+    context_json: String,
+) -> Result<WitToolExecution, WasmError> {
+    let _permit = WASM_EXEC_SEMAPHORE
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| WasmError::execution_failed("wasm execution gate closed".to_string()))?;
+    tokio::task::spawn_blocking(move || {
+        runtime.execute(
+            &prepared,
+            host,
+            WitToolRequest::new(input_json).with_context(context_json),
+        )
+    })
+    .await
+    .map_err(|_| WasmError::execution_failed("wasm execution task panicked".to_string()))?
 }
 
 fn wasm_invocation_context(capability_id: &CapabilityId) -> String {
@@ -974,7 +1043,433 @@ fn wasm_error_kind(error: &WasmError) -> RuntimeDispatchErrorKind {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use ironclaw_wasm::{WasmHostError, WasmHostHttp, WasmHttpRequest, WasmHttpResponse};
+    use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
+    use wit_parser::Resolve;
+
     use super::*;
+
+    // ---------------------------------------------------------------------------
+    // WAT fixtures shared by caller-path WASM execution tests.
+    // These are intentionally minimal — they only need to build a valid component
+    // so the synchronous wasmtime guest call runs inside `spawn_blocking`.
+    // ---------------------------------------------------------------------------
+
+    /// Minimal WASM tool that returns "1" immediately, used to exercise the
+    /// happy-path through `run_wasm_execution_blocking`.
+    const SIMPLE_TOOL_WAT: &str = r#"
+(module
+  (type (;0;) (func (param i32 i32 i32)))
+  (type (;1;) (func (result i64)))
+  (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
+  (type (;3;) (func (param i32 i32 i32 i32 i32)))
+  (type (;4;) (func (param i32 i32) (result i32)))
+  (import "near:agent/host@0.3.0" "log" (func $log (type 0)))
+  (import "near:agent/host@0.3.0" "now-millis" (func $now (type 1)))
+  (import "near:agent/host@0.3.0" "workspace-read" (func $workspace_read (type 0)))
+  (import "near:agent/host@0.3.0" "http-request" (func $http_request (type 2)))
+  (import "near:agent/host@0.3.0" "tool-invoke" (func $tool_invoke (type 3)))
+  (import "near:agent/host@0.3.0" "secret-exists" (func $secret_exists (type 4)))
+  (memory (export "memory") 1)
+  (global $heap (mut i32) (i32.const 4096))
+  (data (i32.const 1024) "{\"type\":\"object\"}")
+  (data (i32.const 2048) "test fixture")
+  (data (i32.const 3072) "1")
+  (func $schema (result i32)
+    i32.const 16
+    i32.const 1024
+    i32.store
+    i32.const 20
+    i32.const 17
+    i32.store
+    i32.const 16)
+  (func $description (result i32)
+    i32.const 32
+    i32.const 2048
+    i32.store
+    i32.const 36
+    i32.const 12
+    i32.store
+    i32.const 32)
+  (func $execute (param i32 i32 i32 i32 i32) (result i32)
+    i32.const 48
+    i32.const 1
+    i32.store
+    i32.const 52
+    i32.const 3072
+    i32.store
+    i32.const 56
+    i32.const 1
+    i32.store
+    i32.const 60
+    i32.const 0
+    i32.store
+    i32.const 48)
+  (func $post (param i32))
+  (func $realloc (param $old i32) (param $old_align i32) (param $new_size i32) (param $new_align i32) (result i32)
+    (local $ret i32)
+    global.get $heap
+    local.set $ret
+    global.get $heap
+    local.get $new_size
+    i32.add
+    global.set $heap
+    local.get $ret)
+  (func $_initialize)
+  (export "near:agent/tool@0.3.0#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.3.0#execute" (func $post))
+  (export "near:agent/tool@0.3.0#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.3.0#schema" (func $post))
+  (export "near:agent/tool@0.3.0#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.3.0#description" (func $post))
+  (export "cabi_realloc" (func $realloc))
+  (export "_initialize" (func $_initialize))
+)
+"#;
+
+    /// Minimal WASM tool that makes one HTTP host call before returning "1".
+    /// Used to inject a panicking HTTP host implementation so the panic occurs
+    /// inside the `spawn_blocking` closure, exercising the JoinError→WasmError path.
+    const HTTP_CALL_TOOL_WAT: &str = r#"
+(module
+  (type (;0;) (func (param i32 i32 i32)))
+  (type (;1;) (func (result i64)))
+  (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
+  (type (;3;) (func (param i32 i32 i32 i32 i32)))
+  (type (;4;) (func (param i32 i32) (result i32)))
+  (import "near:agent/host@0.3.0" "log" (func $log (type 0)))
+  (import "near:agent/host@0.3.0" "now-millis" (func $now (type 1)))
+  (import "near:agent/host@0.3.0" "workspace-read" (func $workspace_read (type 0)))
+  (import "near:agent/host@0.3.0" "http-request" (func $http_request (type 2)))
+  (import "near:agent/host@0.3.0" "tool-invoke" (func $tool_invoke (type 3)))
+  (import "near:agent/host@0.3.0" "secret-exists" (func $secret_exists (type 4)))
+  (memory (export "memory") 1)
+  (global $heap (mut i32) (i32.const 4096))
+  (data (i32.const 128) "POST")
+  (data (i32.const 160) "https://example.test/api")
+  (data (i32.const 224) "{}")
+  (data (i32.const 256) "x")
+  (data (i32.const 1024) "{\"type\":\"object\"}")
+  (data (i32.const 2048) "test fixture")
+  (data (i32.const 3072) "1")
+  (func $schema (result i32)
+    i32.const 16
+    i32.const 1024
+    i32.store
+    i32.const 20
+    i32.const 17
+    i32.store
+    i32.const 16)
+  (func $description (result i32)
+    i32.const 32
+    i32.const 2048
+    i32.store
+    i32.const 36
+    i32.const 12
+    i32.store
+    i32.const 32)
+  (func $execute (param i32 i32 i32 i32 i32) (result i32)
+    i32.const 128
+    i32.const 4
+    i32.const 160
+    i32.const 24
+    i32.const 224
+    i32.const 2
+    i32.const 1
+    i32.const 256
+    i32.const 1
+    i32.const 0
+    i32.const 0
+    i32.const 512
+    call $http_request
+
+    i32.const 48
+    i32.const 1
+    i32.store
+    i32.const 52
+    i32.const 3072
+    i32.store
+    i32.const 56
+    i32.const 1
+    i32.store
+    i32.const 60
+    i32.const 0
+    i32.store
+    i32.const 48)
+  (func $post (param i32))
+  (func $realloc (param $old i32) (param $old_align i32) (param $new_size i32) (param $new_align i32) (result i32)
+    (local $ret i32)
+    global.get $heap
+    local.set $ret
+    global.get $heap
+    local.get $new_size
+    i32.add
+    global.set $heap
+    local.get $ret)
+  (func $_initialize)
+  (export "near:agent/tool@0.3.0#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.3.0#execute" (func $post))
+  (export "near:agent/tool@0.3.0#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.3.0#schema" (func $post))
+  (export "near:agent/tool@0.3.0#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.3.0#description" (func $post))
+  (export "cabi_realloc" (func $realloc))
+  (export "_initialize" (func $_initialize))
+)
+"#;
+
+    fn tool_component(wat_src: &str) -> Vec<u8> {
+        let mut module = wat::parse_str(wat_src).expect("fixture WAT must parse");
+        let mut resolve = Resolve::default();
+        let package = resolve
+            .push_str("tool.wit", include_str!("../../../../wit/tool.wit"))
+            .expect("tool WIT must parse");
+        let world = resolve
+            .select_world(&[package], Some("sandboxed-tool"))
+            .expect("sandboxed-tool world must exist");
+        embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8)
+            .expect("component metadata must embed");
+        ComponentEncoder::default()
+            .module(&module)
+            .expect("fixture module must decode")
+            .validate(true)
+            .encode()
+            .expect("component must encode")
+    }
+
+    // ---------------------------------------------------------------------------
+    // Caller-path tests for `run_wasm_execution_blocking`
+    // ---------------------------------------------------------------------------
+
+    /// A WASM host HTTP implementation that panics unconditionally.
+    ///
+    /// Injected into the HTTP-calling fixture to make the blocking task panic,
+    /// exercising the `JoinError → WasmError::ExecutionFailed` mapping introduced
+    /// by this branch.
+    #[derive(Debug)]
+    struct PanickingHttp;
+
+    impl WasmHostHttp for PanickingHttp {
+        fn request(&self, _request: WasmHttpRequest) -> Result<WasmHttpResponse, WasmHostError> {
+            panic!("deliberate panic inside blocking task for test");
+        }
+    }
+
+    // Serializes the two semaphore-draining tests so they cannot interfere with
+    // each other. Both tests acquire permits from the process-wide
+    // `WASM_EXEC_SEMAPHORE`, and concurrent execution would deadlock them.
+    static SEMAPHORE_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    // 3a — Panicking blocking task maps to WasmError and releases the semaphore permit.
+    //
+    // Drives the real `run_wasm_execution_blocking` with a host HTTP impl that
+    // panics, which causes the blocking task to panic. Asserts:
+    //   • The call returns `Err(WasmError::ExecutionFailed { .. })` with the static
+    //     message (i.e. the JoinError/panic payload is NOT leaked).
+    //   • `WASM_EXEC_SEMAPHORE` returns to the same permit count after the call,
+    //     confirming the permit is released even on the panic path.
+    //     We pre-drain all-but-one permits to make the leak observable: if the
+    //     panic leaked the permit, the second (successful) call would hang forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_wasm_execution_blocking_panic_maps_to_execution_failed_and_releases_permit() {
+        let _lock = SEMAPHORE_TEST_LOCK.lock().await;
+
+        let runtime = Arc::new(WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap());
+        let http_prepared = Arc::new(
+            runtime
+                .prepare("panic-http", &tool_component(HTTP_CALL_TOOL_WAT))
+                .unwrap(),
+        );
+        let simple_prepared = Arc::new(
+            runtime
+                .prepare("simple", &tool_component(SIMPLE_TOOL_WAT))
+                .unwrap(),
+        );
+
+        // Drain all-but-one permit so a leaked permit from the panicking call
+        // would make the follow-up successful call hang on permit acquire.
+        let mut held_permits = Vec::with_capacity(MAX_CONCURRENT_WASM_EXEC - 1);
+        for _ in 0..MAX_CONCURRENT_WASM_EXEC - 1 {
+            held_permits.push(
+                WASM_EXEC_SEMAPHORE
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("semaphore must not be closed"),
+            );
+        }
+        assert_eq!(WASM_EXEC_SEMAPHORE.available_permits(), 1);
+
+        // --- panic call ---
+        let panicking_host = WitToolHost::deny_all().with_http(Arc::new(PanickingHttp));
+        let result = run_wasm_execution_blocking(
+            Arc::clone(&runtime),
+            Arc::clone(&http_prepared),
+            panicking_host,
+            "{}".to_string(),
+            "{}".to_string(),
+        )
+        .await;
+
+        // The JoinError from the panic must map to WasmError::ExecutionFailed
+        // with the static message — NOT the panic payload.
+        assert!(
+            matches!(result, Err(WasmError::ExecutionFailed { .. })),
+            "expected Err(WasmError::ExecutionFailed), got: {result:?}"
+        );
+        if let Err(WasmError::ExecutionFailed { message, .. }) = &result {
+            assert_eq!(
+                message, "wasm execution task panicked",
+                "panic message must be the static string, not the JoinError payload"
+            );
+        }
+
+        // Permit must be back: semaphore must still be at 1 (not 0).
+        // If the panic leaked the permit, available_permits() would be 0 here,
+        // and the successful call below would hang.
+        assert_eq!(
+            WASM_EXEC_SEMAPHORE.available_permits(),
+            1,
+            "semaphore permit must be released even when the blocking task panics"
+        );
+
+        // --- successful call with the returned permit ---
+        let ok_result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_wasm_execution_blocking(
+                Arc::clone(&runtime),
+                Arc::clone(&simple_prepared),
+                WitToolHost::deny_all(),
+                "{}".to_string(),
+                "{}".to_string(),
+            ),
+        )
+        .await
+        .expect("second call must not hang — permit was properly returned after the panic");
+
+        assert!(
+            ok_result.is_ok(),
+            "second call must succeed after permit was returned: {ok_result:?}"
+        );
+
+        drop(held_permits);
+    }
+
+    // 3b — The real `run_wasm_execution_blocking` path is gated by the shared semaphore.
+    //
+    // Drains `WASM_EXEC_SEMAPHORE` to 0, confirms the call cannot proceed
+    // within a short deadline (demonstrating it is blocked on the semaphore),
+    // then releases all permits and verifies the call completes successfully.
+    // Uses a deterministic barrier (a `tokio::spawn` task + `is_finished` poll
+    // within a `time::timeout`) so there are no arbitrary sleeps.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_wasm_execution_blocking_is_gated_by_shared_semaphore() {
+        let _lock = SEMAPHORE_TEST_LOCK.lock().await;
+
+        let runtime = Arc::new(WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap());
+        let prepared = Arc::new(
+            runtime
+                .prepare("semaphore-gate", &tool_component(SIMPLE_TOOL_WAT))
+                .unwrap(),
+        );
+
+        // Drain all permits. Collect them so they stay alive until we choose to
+        // drop them.
+        let mut held_permits = Vec::with_capacity(MAX_CONCURRENT_WASM_EXEC);
+        for _ in 0..MAX_CONCURRENT_WASM_EXEC {
+            let permit = WASM_EXEC_SEMAPHORE
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("semaphore must not be closed");
+            held_permits.push(permit);
+        }
+        assert_eq!(
+            WASM_EXEC_SEMAPHORE.available_permits(),
+            0,
+            "all permits must be drained before the backpressure assertion"
+        );
+
+        // Kick off the call — it should block inside `run_wasm_execution_blocking`
+        // waiting to acquire the semaphore permit.
+        let runtime_clone = Arc::clone(&runtime);
+        let prepared_clone = Arc::clone(&prepared);
+        let call = tokio::spawn(async move {
+            run_wasm_execution_blocking(
+                runtime_clone,
+                prepared_clone,
+                WitToolHost::deny_all(),
+                "{}".to_string(),
+                "{}".to_string(),
+            )
+            .await
+        });
+
+        // Give the spawned task a moment to start and reach the semaphore acquire.
+        // A short yield loop is sufficient — we confirm it has NOT finished yet.
+        tokio::time::timeout(Duration::from_millis(80), async {
+            loop {
+                tokio::task::yield_now().await;
+                if call.is_finished() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect_err("the blocking call must not complete while all semaphore permits are held");
+
+        assert!(
+            !call.is_finished(),
+            "the call must still be queued while the semaphore is exhausted"
+        );
+
+        // Release all permits — the call should now be able to proceed.
+        drop(held_permits);
+
+        let result = tokio::time::timeout(Duration::from_secs(10), call)
+            .await
+            .expect("call must complete after permits are released")
+            .expect("task must not panic");
+
+        assert!(
+            result.is_ok(),
+            "execution must succeed after the semaphore is released: {result:?}"
+        );
+    }
+
+    #[test]
+    fn wasm_exec_semaphore_starts_open_at_configured_bound() {
+        // The fix offloads sync WASM execution to the blocking pool under
+        // `WASM_EXEC_SEMAPHORE`. The shared gate must start fully open at the
+        // configured bound. (The bound's positivity / sub-ceiling invariant is
+        // enforced at compile time next to the constant.)
+        assert_eq!(
+            WASM_EXEC_SEMAPHORE.available_permits(),
+            MAX_CONCURRENT_WASM_EXEC,
+            "the shared semaphore must start fully open at the configured bound"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wasm_exec_gate_bounds_concurrent_permits() {
+        // A standalone gate sized like the production one must serialize
+        // acquisitions beyond its bound rather than admitting all at once — the
+        // property that prevents a turn burst from exhausting the pool.
+        let gate = Arc::new(Semaphore::new(2));
+        let a = gate.clone().acquire_owned().await.unwrap();
+        let b = gate.clone().acquire_owned().await.unwrap();
+        assert_eq!(gate.available_permits(), 0);
+        assert!(
+            gate.clone().try_acquire_owned().is_err(),
+            "a third concurrent acquire must queue, not exceed the bound"
+        );
+        drop(a);
+        assert!(gate.clone().try_acquire_owned().is_ok());
+        drop(b);
+    }
 
     #[test]
     fn wasm_guest_error_kind_maps_structured_payloads() {
