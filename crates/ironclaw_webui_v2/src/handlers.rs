@@ -1365,6 +1365,17 @@ pub struct SettingsToolPermissionRequest {
     pub state: String,
 }
 
+fn validate_settings_tool_permission_state(state: &str) -> Result<(), WebUiV2HttpError> {
+    match state {
+        "default" | "always_allow" | "ask_each_time" | "disabled" => Ok(()),
+        _ => Err(RebornServicesError::from(WebUiInboundValidationError::new(
+            "state",
+            WebUiInboundValidationCode::InvalidValue,
+        ))
+        .into()),
+    }
+}
+
 /// `POST /api/webchat/v2/settings/tools/{capability_id}`
 pub async fn set_settings_tool_permission(
     State(state): State<WebUiV2State>,
@@ -1372,6 +1383,7 @@ pub async fn set_settings_tool_permission(
     Path(SettingsToolPermissionPath { capability_id }): Path<SettingsToolPermissionPath>,
     Json(body): Json<SettingsToolPermissionRequest>,
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    validate_settings_tool_permission_state(&body.state)?;
     let key = validate_operator_config_key(format!("tool.{capability_id}"))?;
     let response = state
         .services()
