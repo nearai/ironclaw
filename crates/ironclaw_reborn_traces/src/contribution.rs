@@ -6017,12 +6017,9 @@ pub struct AccountLoginLink {
 /// endpoints (`/v1/account/login-links`, `/v1/account/traces`, …) are built on
 /// top of this shared origin so the derivation is not duplicated.
 fn account_api_base_url(policy: &StandingTraceContributionPolicy) -> anyhow::Result<String> {
-    let issuer_url = policy
-        .upload_token_issuer_url
-        .as_deref()
-        .ok_or_else(|| {
-            anyhow::anyhow!("Trace Commons upload token issuer URL is not configured")
-        })?;
+    let issuer_url = policy.upload_token_issuer_url.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("Trace Commons upload token issuer URL is not configured")
+    })?;
     let base = issuer_url
         .trim_end_matches('/')
         .strip_suffix("/v1/trace-upload-claim")
@@ -6039,7 +6036,10 @@ fn account_api_base_url(policy: &StandingTraceContributionPolicy) -> anyhow::Res
 /// the path differs: strip `/v1/trace-upload-claim`, append
 /// `/v1/account/login-links`.
 fn account_login_links_url(policy: &StandingTraceContributionPolicy) -> anyhow::Result<String> {
-    Ok(format!("{}/v1/account/login-links", account_api_base_url(policy)?))
+    Ok(format!(
+        "{}/v1/account/login-links",
+        account_api_base_url(policy)?
+    ))
 }
 
 /// Derive the account-traces URL from the configured upload-claim issuer URL.
@@ -6102,8 +6102,8 @@ async fn mint_account_login_link_inner(
         trace_contribution_dir_for_scope_at(base_dir, Some(resolution.state_scope.as_str()))
     };
 
-    let context = TraceUploadClaimContext::for_account(resolution.subject.clone())
-        .with_scope_dir(scope_dir);
+    let context =
+        TraceUploadClaimContext::for_account(resolution.subject.clone()).with_scope_dir(scope_dir);
     let provider = DefaultTraceUploadCredentialProvider;
     let bearer = provider
         .bearer_token(&resolution.policy, &context, false)
@@ -6119,8 +6119,7 @@ async fn mint_account_login_link_inner(
             url,
             bearer_token: Some(bearer),
             json_body: Some(
-                serde_json::to_vec(&body)
-                    .context("failed to serialize login-link request body")?,
+                serde_json::to_vec(&body).context("failed to serialize login-link request body")?,
             ),
             response_body_limit: TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES as u64,
             timeout_ms: 10_000,
@@ -6132,8 +6131,8 @@ async fn mint_account_login_link_inner(
         "login-link request returned HTTP {}",
         response.status
     );
-    let parsed: serde_json::Value = serde_json::from_slice(&response.body)
-        .context("login-link response was not valid JSON")?;
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&response.body).context("login-link response was not valid JSON")?;
     let account_id = parsed["account_id"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("login-link response missing account_id field"))?
@@ -6245,8 +6244,8 @@ async fn fetch_account_traces_direct(
         trace_contribution_dir_for_scope_at(base_dir, Some(resolution.state_scope.as_str()))
     };
 
-    let context = TraceUploadClaimContext::for_account(resolution.subject.clone())
-        .with_scope_dir(scope_dir);
+    let context =
+        TraceUploadClaimContext::for_account(resolution.subject.clone()).with_scope_dir(scope_dir);
     let provider = DefaultTraceUploadCredentialProvider;
     let bearer = provider
         .bearer_token(&resolution.policy, &context, false)
@@ -6292,8 +6291,8 @@ async fn fetch_account_traces_inner(
         trace_contribution_dir_for_scope_at(base_dir, Some(resolution.state_scope.as_str()))
     };
 
-    let context = TraceUploadClaimContext::for_account(resolution.subject.clone())
-        .with_scope_dir(scope_dir);
+    let context =
+        TraceUploadClaimContext::for_account(resolution.subject.clone()).with_scope_dir(scope_dir);
     let provider = DefaultTraceUploadCredentialProvider;
     let bearer = provider
         .bearer_token(&resolution.policy, &context, false)
@@ -6317,7 +6316,6 @@ async fn fetch_account_traces_inner(
         .context("account traces response was not a valid JSON array")?;
     Ok(items)
 }
-
 
 #[cfg(test)]
 tokio::task_local! {
@@ -13132,7 +13130,9 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { let _ = axum::serve(listener, app).await; });
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
 
         let scope_dir = tempfile::tempdir().unwrap();
         crate::onboarding::DeviceKeypair::load_or_generate_pending(scope_dir.path(), "h")
@@ -13145,7 +13145,7 @@ mod tests {
             auth_mode: TraceUploadAuthMode::DeviceKey,
             upload_token_issuer_url: Some(format!("http://{addr}/v1/trace-upload-claim")),
             upload_token_issuer_allowed_hosts: std::collections::BTreeSet::from([
-                "127.0.0.1".to_string(),
+                "127.0.0.1".to_string()
             ]),
             upload_token_tenant_id: Some("tenant-dev".to_string()),
             upload_token_audience: Some("trace-commons".to_string()),
@@ -15176,7 +15176,8 @@ mod tests {
         use std::sync::{Arc, Mutex};
 
         // A syntactically valid JWT that passes validate_trace_upload_claim_response.
-        let claim_jwt = test_jwt_with_header(serde_json::json!({"alg": "EdDSA", "kid": "test-key-1"}));
+        let claim_jwt =
+            test_jwt_with_header(serde_json::json!({"alg": "EdDSA", "kid": "test-key-1"}));
         let claim_jwt_for_mock = claim_jwt.clone();
 
         // ── mock server ──────────────────────────────────────────────────────
@@ -15216,9 +15217,7 @@ mod tests {
                 }),
             );
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -15234,7 +15233,7 @@ mod tests {
             auth_mode: TraceUploadAuthMode::DeviceKey,
             upload_token_issuer_url: Some(format!("http://{addr}/v1/trace-upload-claim")),
             upload_token_issuer_allowed_hosts: std::collections::BTreeSet::from([
-                "127.0.0.1".to_string(),
+                "127.0.0.1".to_string()
             ]),
             upload_token_tenant_id: Some("tenant-dev".to_string()),
             upload_token_audience: Some("trace-commons-ingest".to_string()),
@@ -15259,10 +15258,7 @@ mod tests {
 
         // ── assertions ───────────────────────────────────────────────────────
         assert_eq!(link.url, "/account/login?code=abc");
-        assert_eq!(
-            link.account_id,
-            "11111111-1111-1111-1111-111111111111"
-        );
+        assert_eq!(link.account_id, "11111111-1111-1111-1111-111111111111");
 
         let bodies = captured.lock().unwrap();
         assert_eq!(bodies.len(), 1, "exactly one POST to login-links");
@@ -15328,8 +15324,7 @@ mod tests {
         };
         let url_no_limit = account_traces_url(&policy, None).expect("no-limit must succeed");
         assert_eq!(url_no_limit, "https://api.example.com/v1/account/traces");
-        let url_with_limit =
-            account_traces_url(&policy, Some(50)).expect("limit=50 must succeed");
+        let url_with_limit = account_traces_url(&policy, Some(50)).expect("limit=50 must succeed");
         assert_eq!(
             url_with_limit,
             "https://api.example.com/v1/account/traces?limit=50"
@@ -15339,7 +15334,8 @@ mod tests {
     #[tokio::test]
     async fn fetch_account_traces_returns_user_submissions() {
         // A syntactically valid JWT that passes validate_trace_upload_claim_response.
-        let claim_jwt = test_jwt_with_header(serde_json::json!({"alg": "EdDSA", "kid": "test-key-1"}));
+        let claim_jwt =
+            test_jwt_with_header(serde_json::json!({"alg": "EdDSA", "kid": "test-key-1"}));
         let claim_jwt_for_mock = claim_jwt.clone();
 
         // ── mock server ──────────────────────────────────────────────────────
@@ -15375,9 +15371,7 @@ mod tests {
                 }),
             );
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -15393,7 +15387,7 @@ mod tests {
             auth_mode: TraceUploadAuthMode::DeviceKey,
             upload_token_issuer_url: Some(format!("http://{addr}/v1/trace-upload-claim")),
             upload_token_issuer_allowed_hosts: std::collections::BTreeSet::from([
-                "127.0.0.1".to_string(),
+                "127.0.0.1".to_string()
             ]),
             upload_token_tenant_id: Some("tenant-dev".to_string()),
             upload_token_audience: Some("trace-commons-ingest".to_string()),
@@ -15412,10 +15406,9 @@ mod tests {
 
         // ── call under test ──────────────────────────────────────────────────
         let sink = ReqwestContributionSink;
-        let items =
-            fetch_account_traces_inner(base.path(), "tenant-dev", "alice", Some(50), &sink)
-                .await
-                .unwrap();
+        let items = fetch_account_traces_inner(base.path(), "tenant-dev", "alice", Some(50), &sink)
+            .await
+            .unwrap();
 
         // ── assertions ───────────────────────────────────────────────────────
         assert_eq!(items.len(), 1, "expected exactly one trace item");
@@ -15441,10 +15434,9 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         // No policy written — resolver returns None → lenient Ok(vec![]).
         let sink = ReqwestContributionSink;
-        let items =
-            fetch_account_traces_inner(base.path(), "tenant-dev", "alice", None, &sink)
-                .await
-                .unwrap();
+        let items = fetch_account_traces_inner(base.path(), "tenant-dev", "alice", None, &sink)
+            .await
+            .unwrap();
         assert!(items.is_empty(), "unenrolled user must return empty list");
     }
 }

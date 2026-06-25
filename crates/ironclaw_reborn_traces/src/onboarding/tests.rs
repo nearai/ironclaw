@@ -867,8 +867,7 @@ async fn instance_onboard_writes_instance_level_policy() {
     assert_eq!(outcome.tenant_id, "tenant-fake");
 
     // The policy must land at the scope-None location (no users/<hash> segment).
-    let raw = std::fs::read_to_string(instance_dir.join("policy.json"))
-        .expect("policy written");
+    let raw = std::fs::read_to_string(instance_dir.join("policy.json")).expect("policy written");
     let policy: StandingTraceContributionPolicy =
         serde_json::from_str(&raw).expect("policy parses");
     assert!(policy.enabled);
