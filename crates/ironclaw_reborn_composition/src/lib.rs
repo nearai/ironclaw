@@ -79,6 +79,7 @@ mod oauth_provider_client;
 #[cfg(feature = "openai-compat-beta")]
 mod openai_compat_serve;
 mod operator_logs;
+mod operator_service_lifecycle;
 mod outbound_delivery_capability_surface;
 mod outbound_preferences;
 mod product_auth_durable;

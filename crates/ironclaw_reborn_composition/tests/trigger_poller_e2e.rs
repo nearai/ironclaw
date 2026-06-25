@@ -758,7 +758,7 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
     assert_eq!(
         current.last_status,
         Some(TriggerRunStatus::Error),
-        "unpaired one-shot trigger must record an error status — record: {current:?}"
+        "unpaired trigger must record the retryable failure — record: {current:?}"
     );
     assert_eq!(
         current.active_fire_slot, None,

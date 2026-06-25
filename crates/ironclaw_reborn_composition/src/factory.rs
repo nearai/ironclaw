@@ -494,6 +494,7 @@ pub struct RebornLocalDevApprovalTestParts {
 
 pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
+    pub(crate) owner_user_id: UserId,
     pub(crate) approval_requests: Arc<LocalDevApprovalRequestStore>,
     pub(crate) capability_leases: Arc<LocalDevCapabilityLeaseStore>,
     pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
@@ -1714,10 +1715,11 @@ fn build_local_dev_store_graph(
         local_runtime_identity.as_ref(),
     )?;
     let skill_management =
-        build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
+        build_local_skill_management_port(owner_user_id.clone(), Arc::clone(&filesystem))?;
     let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         extension_lifecycle_surface_context,
+        owner_user_id: owner_user_id.clone(),
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         runtime_policy,
@@ -1855,12 +1857,13 @@ fn build_local_dev_store_graph(
         local_runtime_identity.as_ref(),
     )?;
     let skill_management =
-        build_local_skill_management_port(owner_user_id, Arc::clone(&filesystem))?;
+        build_local_skill_management_port(owner_user_id.clone(), Arc::clone(&filesystem))?;
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let trigger_conversation_services = local_dev_trigger_conversation_services();
     let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         extension_lifecycle_surface_context,
+        owner_user_id: owner_user_id.clone(),
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         runtime_policy,
@@ -4161,6 +4164,7 @@ mod tests {
             extension_lifecycle_surface_context: base_runtime
                 .extension_lifecycle_surface_context
                 .clone(),
+            owner_user_id: base_runtime.owner_user_id.clone(),
             approval_requests: Arc::clone(&base_runtime.approval_requests),
             capability_leases: Arc::clone(&base_runtime.capability_leases),
             runtime_policy: base_runtime.runtime_policy.clone(),
