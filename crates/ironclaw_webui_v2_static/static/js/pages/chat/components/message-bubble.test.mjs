@@ -40,6 +40,11 @@ test("markdown body and code blocks inherit readable message sizing", () => {
 test("message timestamp and actions share a hover-only meta row", () => {
   assert.match(
     messageBubbleSource,
+    /const showActions = role === "user" \|\| \(role === "assistant" && !isOptimistic\);/,
+    "optimistic user messages should keep the copy action while the assistant reply is pending",
+  );
+  assert.match(
+    messageBubbleSource,
     /<time dateTime=\$\{timestamp\} className="shrink-0 font-mono text-\[11px\] text-iron-500">\$\{timeLabel\}<\/time>/,
     "timestamp should render in the hover meta row",
   );

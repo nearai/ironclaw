@@ -1698,7 +1698,7 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
                 `)}
         </div>
       </div>
-    `;let x=z4(m),w=(n==="assistant"||n==="user")&&!u,S=n==="system"||n==="error",R=p?"max-w-[85%]":S?"mx-auto max-w-[85%]":"w-full max-w-[85%]",_=p?"":"w-full min-w-0 max-w-full",A=c==="error"&&t,T=w||A||x;return l`
+    `;let x=z4(m),w=n==="user"||n==="assistant"&&!u,S=n==="system"||n==="error",R=p?"max-w-[85%]":S?"mx-auto max-w-[85%]":"w-full max-w-[85%]",_=p?"":"w-full min-w-0 max-w-full",A=c==="error"&&t,T=w||A||x;return l`
     <div
       data-testid=${`msg-${n}`}
       className=${["group flex w-full min-w-0 flex-col",p?"items-end":"items-start"].join(" ")}

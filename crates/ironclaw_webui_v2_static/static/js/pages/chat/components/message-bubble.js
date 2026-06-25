@@ -113,7 +113,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
   }
 
   const timeLabel = formatTimestamp(timestamp);
-  const showActions = (role === "assistant" || role === "user") && !isOptimistic;
+  const showActions = role === "user" || (role === "assistant" && !isOptimistic);
   const isNotice = role === "system" || role === "error";
   const bubbleWidthClass = isUser ? "max-w-[85%]" : isNotice ? "mx-auto max-w-[85%]" : "w-full max-w-[85%]";
   const contentWidthClass = isUser ? "" : "w-full min-w-0 max-w-full";
