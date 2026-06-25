@@ -1024,6 +1024,7 @@ async fn thread_checkpoint_evidence_verifies_pending_approval_blocked_checkpoint
     let exit = LoopExit::Blocked(LoopBlocked {
         kind: LoopBlockedKind::Approval,
         gate_ref,
+        blocked_activity_id: None,
         credential_requirements: Vec::new(),
         checkpoint_id,
         state_ref,

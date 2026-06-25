@@ -67,9 +67,9 @@ pub use host::{
     LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort,
     LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, ProcessHandleSummary,
     PromptMode, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReference,
-    ProviderToolCallReplay, ProviderToolDefinition, StageCheckpointPayloadRequest,
-    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    sanitize_model_visible_text, validate_model_route_component_value,
+    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, sanitize_model_visible_text, validate_model_route_component_value,
 };
 pub use instruction_bundle::{
     InMemoryInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,

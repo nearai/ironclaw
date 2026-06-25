@@ -83,6 +83,7 @@ fn auth_error_mapping_run_state(request: &GetRunStateRequest) -> TurnRunState {
         received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: Some(GateRef::new("gate:auth-error").unwrap()), // safety: fixed test gate literal is valid.
+        blocked_activity_id: None,
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor::default(),

@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     AuthProductError, AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl,
 };
-use ironclaw_host_api::{RuntimeCredentialAccountSetup, UserId};
+use ironclaw_host_api::{
+    InvocationId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, UserId,
+};
 use ironclaw_product_adapters::{
     AuthPromptChallengeKind, AuthPromptView, ProductAdapterError, RedactedString,
 };
@@ -88,15 +90,30 @@ pub trait BlockedAuthFlowCanceller: Send + Sync {
     ) -> Result<(), AuthProductError>;
 }
 
+pub(crate) struct BlockedAuthPromptRequest<'a> {
+    pub(crate) fallback_owner_user_id: &'a UserId,
+    pub(crate) scope: &'a TurnScope,
+    pub(crate) run_id: TurnRunId,
+    pub(crate) gate_ref: &'a str,
+    pub(crate) invocation_id: Option<InvocationId>,
+    pub(crate) body: String,
+    pub(crate) credential_requirements: &'a [RuntimeCredentialAuthRequirement],
+    pub(crate) auth_challenges: Option<&'a dyn AuthChallengeProvider>,
+}
+
 pub(crate) async fn auth_prompt_view_for_blocked_auth(
-    fallback_owner_user_id: &UserId,
-    scope: &TurnScope,
-    run_id: TurnRunId,
-    gate_ref: &str,
-    body: String,
-    credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
-    auth_challenges: Option<&dyn AuthChallengeProvider>,
+    request: BlockedAuthPromptRequest<'_>,
 ) -> Result<AuthPromptView, ProductAdapterError> {
+    let BlockedAuthPromptRequest {
+        fallback_owner_user_id,
+        scope,
+        run_id,
+        gate_ref,
+        invocation_id,
+        body,
+        credential_requirements,
+        auth_challenges,
+    } = request;
     // Explicit turn owners represent shared/team subjects; actor fallback keeps
     // the existing personal/WebUI behavior for legacy scopes.
     let owner_user_id = scope
@@ -127,6 +144,7 @@ pub(crate) async fn auth_prompt_view_for_blocked_auth(
     let base_view = AuthPromptView {
         turn_run_id: run_id,
         auth_request_ref: gate_ref.to_string(),
+        invocation_id,
         headline: "Authentication required".to_string(),
         body,
         challenge_kind: None,
@@ -143,7 +161,7 @@ pub(crate) async fn auth_prompt_view_for_blocked_auth(
 
 fn auth_prompt_from_credential_requirement(
     mut view: AuthPromptView,
-    credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
+    credential_requirements: &[RuntimeCredentialAuthRequirement],
 ) -> AuthPromptView {
     let [requirement] = credential_requirements else {
         return view;

@@ -2382,6 +2382,52 @@ async fn tick_fire_once_permanent_submit_failure_completes_once_trigger() {
 }
 
 #[tokio::test]
+async fn tick_fire_once_blocked_materialization_stays_retryable() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZW").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+    record.schedule = TriggerSchedule::once(fire_slot, "UTC").expect("valid once");
+    repo.upsert_trigger(record).await.expect("insert");
+    let worker = worker_with_source_provider(
+        repo.clone(),
+        Arc::new(crate::ScheduleTriggerSourceProvider),
+        Arc::new(RecordingMaterializer::failure(
+            TriggerError::BlockedMaterialization {
+                reason: "trusted trigger inbound request blocked".to_string(),
+            },
+        )),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::default()),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert!(
+        matches!(
+            report.results.last().map(|r| &r.outcome),
+            Some(TriggerPollerFireOutcome::RetryableFailed {
+                reason: TriggerPollerFailureReason::BlockedMaterialization,
+            })
+        ),
+        "blocked materialization must fail closed as retryable"
+    );
+    let persisted = repo
+        .get_trigger(tenant("tenant-a"), trigger_id)
+        .await
+        .expect("load")
+        .expect("record present");
+    assert_eq!(
+        persisted.state,
+        TriggerState::Scheduled,
+        "blocked fire-once materialization must not complete the trigger"
+    );
+    assert_eq!(persisted.last_status, Some(TriggerRunStatus::Error));
+    assert_eq!(persisted.active_fire_slot, None);
+    assert_eq!(persisted.active_run_ref, None);
+}
+
+#[tokio::test]
 async fn tick_fire_once_permanent_pre_submit_failures_complete_once_trigger() {
     let fire_slot = ts(1_704_067_200);
     let cases = [

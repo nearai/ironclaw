@@ -800,9 +800,10 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
     let agent_id = AgentId::new(AGENT).expect("agent id");
     let trigger_id = TriggerId::new();
 
-    // Seed a past-due one-shot trigger. An unpaired external actor is retryable:
-    // the trusted trigger submitter must not send a turn, and the one-shot
-    // remains scheduled so it can fire after the actor is paired.
+    // Seed a past-due one-shot trigger. An unpaired external actor blocks
+    // trusted trigger materialization before any turn can be submitted. This
+    // is retryable: the trigger records the failed attempt, clears the active
+    // claim, and remains Scheduled until the actor is paired.
     let fire_at = Utc::now() - chrono::Duration::seconds(120);
     let record = TriggerRecord {
         trigger_id,
@@ -855,11 +856,13 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
         captured_contents
     );
 
-    // The one-shot trigger should remain scheduled after a retryable pre-submit failure.
+    // The one-shot trigger records the blocked pre-submit failure and remains
+    // retryable instead of completing the already-past slot.
     assert_eq!(
         current.state,
         TriggerState::Scheduled,
-        "unpaired trigger must remain scheduled — state: {:?}, last_status: {:?}",
+        "unpaired one-shot trigger must remain Scheduled after blocked pre-submit failure — \
+         state: {:?}, last_status: {:?}",
         current.state,
         current.last_status
     );
@@ -870,11 +873,11 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
     );
     assert_eq!(
         current.active_fire_slot, None,
-        "scheduled trigger must not keep an active fire — record: {current:?}"
+        "blocked failed one-shot trigger must not keep an active fire — record: {current:?}"
     );
     assert_eq!(
         current.active_run_ref, None,
-        "scheduled trigger must not keep an active run — record: {current:?}"
+        "blocked failed one-shot trigger must not have an active run — record: {current:?}"
     );
 }
 

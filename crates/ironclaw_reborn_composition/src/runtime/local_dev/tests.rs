@@ -37,8 +37,9 @@ mod tests {
         AcceptedMessageRef, LoopMessageRef, ReplyTargetBindingRef, RunProfileResolutionRequest,
         RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope,
         run_profile::{
-            CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-            InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, ModelProfileId,
+            CapabilityCallCandidate, CapabilityFailureKind, CapabilityInputRef,
+            CapabilityInvocation, CapabilityOutcome, InMemoryLoopHostMilestoneSink,
+            InMemoryRunProfileResolver, ModelProfileId, RegisterProviderToolCallRequest,
             VisibleCapabilityRequest,
         },
     };
@@ -173,6 +174,17 @@ mod tests {
 
     fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
         provider_tool_call_with_name("builtin_echo", arguments)
+    }
+
+    fn invocation_for_candidate(candidate: &CapabilityCallCandidate) -> CapabilityInvocation {
+        CapabilityInvocation {
+            activity_id: candidate.activity_id,
+            surface_version: candidate.surface_version.clone(),
+            capability_id: candidate.capability_id.clone(),
+            input_ref: candidate.input_ref.clone(),
+            approval_resume: None,
+            auth_resume: None,
+        }
     }
 
     struct StaticOutboundDeliveryTargetProvider {
@@ -1214,7 +1226,7 @@ mod tests {
             signature: None,
         };
         let candidate = port
-            .register_provider_tool_call(call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
             .await
             .expect("provider call stages");
         assert_eq!(
@@ -1222,13 +1234,7 @@ mod tests {
             SKILL_ACTIVATE_CAPABILITY_ID
         );
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
-                surface_version: candidate.surface_version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&candidate))
             .await
             .expect("skill activation invokes");
         assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
@@ -1382,23 +1388,19 @@ mod tests {
         // `append_capability_result_ref` and terminate the whole run; this locks
         // that regression — the capability must still complete.
         let candidate = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__project_create",
-                serde_json::json!({
-                    "name": "Build /api <svc>",
-                    "description": "Ship the project feature"
-                }),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__project_create",
+                    serde_json::json!({
+                        "name": "Build /api <svc>",
+                        "description": "Ship the project feature"
+                    }),
+                ),
             ))
             .await
             .expect("project_create call stages");
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
-                surface_version: candidate.surface_version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&candidate))
             .await
             .expect("project_create invokes");
         let message = match outcome {
@@ -1582,9 +1584,11 @@ mod tests {
         );
 
         let malformed_list = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__outbound_delivery_targets_list",
-                serde_json::Value::Null,
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_targets_list",
+                    serde_json::Value::Null,
+                ),
             ))
             .await
             .expect_err("malformed list input should fail validation");
@@ -1594,20 +1598,16 @@ mod tests {
         );
 
         let list_candidate = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__outbound_delivery_targets_list",
-                serde_json::json!({ "channel": "slack" }),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_targets_list",
+                    serde_json::json!({ "channel": "slack" }),
+                ),
             ))
             .await
             .expect("list call stages");
         let list_outcome = port
-            .invoke_capability(CapabilityInvocation {
-                surface_version: list_candidate.surface_version,
-                capability_id: list_candidate.capability_id,
-                input_ref: list_candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&list_candidate))
             .await
             .expect("list call invokes");
         let list_result_ref = match list_outcome {
@@ -1629,9 +1629,11 @@ mod tests {
         );
 
         let malformed_set = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__outbound_delivery_target_set",
-                serde_json::json!({ "target_id": "bad\nid" }),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": "bad\nid" }),
+                ),
             ))
             .await
             .expect_err("malformed set input should fail validation");
@@ -1649,23 +1651,19 @@ mod tests {
             actor_user_id.clone(),
         );
         let set_candidate = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__outbound_delivery_target_set",
-                serde_json::json!({ "target_id": slack_target_id.as_str() }),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": slack_target_id.as_str() }),
+                ),
             ))
             .await
             .expect("set call stages");
+        let set_activity_id = set_candidate.activity_id;
         let set_surface_version = set_candidate.surface_version.clone();
         let set_capability_id_from_candidate = set_candidate.capability_id.clone();
-        let set_input_ref = set_candidate.input_ref.clone();
         let blocked_outcome = port
-            .invoke_capability(CapabilityInvocation {
-                surface_version: set_surface_version.clone(),
-                capability_id: set_capability_id_from_candidate.clone(),
-                input_ref: set_input_ref.clone(),
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&set_candidate))
             .await
             .expect("set call reaches approval gate");
         let approval_resume = match blocked_outcome {
@@ -1729,6 +1727,7 @@ mod tests {
 
         let set_outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: set_activity_id,
                 surface_version: set_surface_version,
                 capability_id: set_capability_id_from_candidate,
                 input_ref: CapabilityInputRef::new("input:stale-approval-resume")
@@ -1891,20 +1890,16 @@ mod tests {
             actor_user_id.clone(),
         );
         let set_candidate = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__outbound_delivery_target_set",
-                serde_json::json!({ "target_id": slack_target_id.as_str() }),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": slack_target_id.as_str() }),
+                ),
             ))
             .await
             .expect("set call stages");
         let set_outcome = port
-            .invoke_capability(CapabilityInvocation {
-                surface_version: set_candidate.surface_version,
-                capability_id: set_candidate.capability_id,
-                input_ref: set_candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&set_candidate))
             .await
             .expect("set call invokes");
         assert!(
@@ -2217,6 +2212,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
@@ -2250,6 +2246,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
@@ -2341,6 +2338,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)
                     .expect("skill_install capability id"), // safety: built-in capability id is a valid literal.
@@ -2491,6 +2489,7 @@ mod tests {
             .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
@@ -2687,9 +2686,11 @@ mod tests {
         assert!(active_capability_ids.contains(&"github.comment_issue"));
 
         let staged_after_activation = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "github__search_issues",
-                serde_json::json!({"query": "repo:nearai/ironclaw is:issue"}),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "github__search_issues",
+                    serde_json::json!({"query": "repo:nearai/ironclaw is:issue"}),
+                ),
             ))
             .await
             .expect("provider registration resolves github after prompt-stage refresh");
@@ -2758,9 +2759,11 @@ mod tests {
             .expect("extension_search tool definition");
 
         let candidate = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                tool_definition.name,
-                serde_json::json!({"query": "gmail"}),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    tool_definition.name,
+                    serde_json::json!({"query": "gmail"}),
+                ),
             ))
             .await
             .expect("extension_search provider tool call stages");
@@ -2770,13 +2773,7 @@ mod tests {
         );
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
-                surface_version: candidate.surface_version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&candidate))
             .await
             .expect("extension_search invocation");
 
@@ -2840,7 +2837,7 @@ mod tests {
         );
         call1.id = "call-mid-response-1".to_string();
         let candidate1 = port
-            .register_provider_tool_call(call1)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call1))
             .await
             .expect("first register");
 
@@ -2883,7 +2880,7 @@ mod tests {
         );
         call2.id = "call-mid-response-2".to_string();
         let candidate2 = port
-            .register_provider_tool_call(call2)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call2))
             .await
             .expect("second register after extension activation");
 
@@ -2895,20 +2892,8 @@ mod tests {
         let batch_result = port
             .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
                 invocations: vec![
-                    ironclaw_turns::run_profile::CapabilityInvocation {
-                        surface_version: candidate1.surface_version,
-                        capability_id: candidate1.capability_id,
-                        input_ref: candidate1.input_ref,
-                        approval_resume: None,
-                        auth_resume: None,
-                    },
-                    ironclaw_turns::run_profile::CapabilityInvocation {
-                        surface_version: candidate2.surface_version,
-                        capability_id: candidate2.capability_id,
-                        input_ref: candidate2.input_ref,
-                        approval_resume: None,
-                        auth_resume: None,
-                    },
+                    invocation_for_candidate(&candidate1),
+                    invocation_for_candidate(&candidate2),
                 ],
                 stop_on_first_suspension: false,
             })
@@ -2967,21 +2952,14 @@ mod tests {
         assert_eq!(tool_definition.name, "gmail__list_messages");
 
         let candidate = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                tool_definition.name,
-                serde_json::json!({}),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(tool_definition.name, serde_json::json!({})),
             ))
             .await
             .expect("gmail provider tool call stages");
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
-                surface_version: candidate.surface_version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&candidate))
             .await
             .expect("gmail provider tool call invokes");
 

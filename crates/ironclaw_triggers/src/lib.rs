@@ -67,6 +67,8 @@ pub enum TriggerError {
     },
     #[error("invalid trigger materialization: {reason}")]
     InvalidMaterialization { reason: String },
+    #[error("trigger materialization blocked: {reason}")]
+    BlockedMaterialization { reason: String },
     #[error("trigger repository backend unavailable: {reason}")]
     Backend { reason: String },
     #[error("trigger not found")]

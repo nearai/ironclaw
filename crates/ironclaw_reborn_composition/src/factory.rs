@@ -5609,6 +5609,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[tokio::test]
     async fn local_dev_nearai_mcp_invalid_base_url_fails_build() {
         let dir = tempfile::tempdir().expect("tempdir");
