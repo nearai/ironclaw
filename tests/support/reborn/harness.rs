@@ -1609,7 +1609,7 @@ impl HostRuntimeCapabilityHarness {
     }
 
     async fn process_tools() -> HarnessResult<Self> {
-        Self::new_with_options(
+        let harness = Self::new_with_options(
             "reborn-e2e-process-tools",
             vec![
                 CapabilityId::new(ECHO_CAPABILITY_ID)?,
@@ -1629,7 +1629,11 @@ impl HostRuntimeCapabilityHarness {
             UserId::new("reborn-e2e-process-user")?,
             HostRuntimeHarnessOptions::new(MountView::default(), None),
         )
-        .await
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
     }
 
     async fn qa_smoke_tools() -> HarnessResult<Self> {
@@ -1768,6 +1772,9 @@ impl HostRuntimeCapabilityHarness {
         )
         .await?;
         harness.network_policy = http_test_policy();
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
         Ok(harness)
     }
 
@@ -1850,8 +1857,8 @@ impl HostRuntimeCapabilityHarness {
             UserId::new("reborn-e2e-trace-commons-user")?,
             // The Trace Commons write/network capabilities are
             // PermissionMode::Ask (onboard, profile_token, profile_set) — like
-            // the skill/trigger harnesses, the yolo runtime policy
-            // auto-approves them so the scripted run is not gated.
+            // the skill/trigger harnesses, the scripted run enables global
+            // auto-approve so it is not gated.
             HostRuntimeHarnessOptions::new(
                 MountView::default(),
                 Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
@@ -1864,6 +1871,9 @@ impl HostRuntimeCapabilityHarness {
         // non-empty network policy or the obligation check rejects dispatch
         // before the consent gate runs.
         harness.network_policy = http_test_policy();
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
         Ok(harness)
     }
 
