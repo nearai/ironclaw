@@ -7,3 +7,5 @@ target/
 !crates/**/*.md
 !CLAUDE.md
 node_modules/
+**/node_modules/
+crates/ironclaw_webui_v2_static/static/dist/
