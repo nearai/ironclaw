@@ -385,6 +385,29 @@ async fn build_harness_at(
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    // The Tools-settings global auto-approve switch is authoritative for
+    // first-party tool dispatch; enable it for the e2e dispatch scope so
+    // scripted tool calls complete instead of parking on the per-tool approval
+    // gate (which would otherwise leave the turn without an assistant reply).
+    runtime
+        .services()
+        .local_dev_auto_approve_settings_for_test()
+        .expect("local-dev exposes auto-approve settings for test")
+        .set(ironclaw_approvals::AutoApproveSettingInput {
+            updated_by: ironclaw_host_api::Principal::User(UserId::new(USER).expect("user")),
+            scope: ResourceScope {
+                tenant_id: TenantId::new(TENANT).expect("tenant"),
+                user_id: UserId::new(USER).expect("user"),
+                agent_id: Some(AgentId::new(AGENT).expect("agent")),
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            enabled: true,
+        })
+        .await
+        .expect("enable global auto-approve for e2e dispatch");
     let bundle = build_webui_services(&runtime, None).expect("webui bundle");
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
