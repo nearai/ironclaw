@@ -5240,6 +5240,7 @@ pub trait ContributionHttpSink: Send + Sync {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContributionHttpMethod {
+    Get,
     Post,
     Put,
     Delete,
@@ -5894,6 +5895,7 @@ async fn community_profile_http_client(
 
 fn community_profile_method_label(method: ContributionHttpMethod) -> &'static str {
     match method {
+        ContributionHttpMethod::Get => "GET",
         ContributionHttpMethod::Post => "POST",
         ContributionHttpMethod::Put => "PUT",
         ContributionHttpMethod::Delete => "DELETE",
@@ -5952,6 +5954,7 @@ async fn execute_community_profile_request(
     } else {
         let client = community_profile_http_client(policy, &url).await?;
         let reqwest_method = match method {
+            ContributionHttpMethod::Get => reqwest::Method::GET,
             ContributionHttpMethod::Post => reqwest::Method::POST,
             ContributionHttpMethod::Put => reqwest::Method::PUT,
             ContributionHttpMethod::Delete => reqwest::Method::DELETE,
@@ -6009,11 +6012,11 @@ pub struct AccountLoginLink {
     pub url: String,
 }
 
-/// Derive the account-login-links URL from the configured upload-claim issuer
-/// URL. The login-links service lives at the same origin as the issuer; only
-/// the path differs: strip `/v1/trace-upload-claim`, append
-/// `/v1/account/login-links`.
-fn account_login_links_url(policy: &StandingTraceContributionPolicy) -> anyhow::Result<String> {
+/// Extract the API base URL (origin) from the configured upload-claim issuer
+/// URL by stripping the `/v1/trace-upload-claim` suffix. Other account API
+/// endpoints (`/v1/account/login-links`, `/v1/account/traces`, …) are built on
+/// top of this shared origin so the derivation is not duplicated.
+fn account_api_base_url(policy: &StandingTraceContributionPolicy) -> anyhow::Result<String> {
     let issuer_url = policy
         .upload_token_issuer_url
         .as_deref()
@@ -6028,7 +6031,28 @@ fn account_login_links_url(policy: &StandingTraceContributionPolicy) -> anyhow::
                 "upload_token_issuer_url does not end in /v1/trace-upload-claim: {issuer_url}"
             )
         })?;
-    Ok(format!("{base}/v1/account/login-links"))
+    Ok(base.to_string())
+}
+
+/// Derive the account-login-links URL from the configured upload-claim issuer
+/// URL. The login-links service lives at the same origin as the issuer; only
+/// the path differs: strip `/v1/trace-upload-claim`, append
+/// `/v1/account/login-links`.
+fn account_login_links_url(policy: &StandingTraceContributionPolicy) -> anyhow::Result<String> {
+    Ok(format!("{}/v1/account/login-links", account_api_base_url(policy)?))
+}
+
+/// Derive the account-traces URL from the configured upload-claim issuer URL.
+/// Strip `/v1/trace-upload-claim`, append `/v1/account/traces`.
+fn account_traces_url(
+    policy: &StandingTraceContributionPolicy,
+    limit: Option<usize>,
+) -> anyhow::Result<String> {
+    let base = account_api_base_url(policy)?;
+    match limit {
+        Some(n) => Ok(format!("{base}/v1/account/traces?limit={n}")),
+        None => Ok(format!("{base}/v1/account/traces")),
+    }
 }
 
 /// Mint a one-time account login link for the given `(tenant_id, user_id)`.
@@ -6122,6 +6146,98 @@ async fn mint_account_login_link_inner(
         account_id,
         url: link_url,
     })
+}
+
+// ── Trace Commons account traces ──────────────────────────────────────────────
+
+/// A single submitted trace record as returned by `GET /v1/account/traces`.
+/// Only the fields the UI needs are projected here; unknown server fields are
+/// ignored via `#[serde(default)]` and `#[serde(deny_unknown_fields)]` is
+/// deliberately omitted.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AccountTraceItem {
+    #[serde(default)]
+    pub submission_id: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub credit_points_pending: f32,
+    #[serde(default)]
+    pub credit_points_final: Option<f32>,
+    #[serde(default)]
+    pub received_at: Option<String>,
+}
+
+/// Fetch the list of submitted traces for the given `(tenant_id, user_id)` via
+/// the caller-supplied `sink` (host egress on the agent path).
+///
+/// - Resolves the user's Trace Commons credentials; returns `Ok(vec![])` when
+///   the user is not enrolled (lenient zero-state, not an error).
+/// - Mints the per-user bearer via `DefaultTraceUploadCredentialProvider`
+///   (identical to how submission and profile-attribution flows do it).
+/// - GETs `<origin>/v1/account/traces?limit=N` and parses the JSON array into
+///   `Vec<AccountTraceItem>`. Non-2xx for an unenrolled/empty case also
+///   returns `Ok(vec![])`. Transport failures return `Err`.
+pub async fn fetch_account_traces_via_sink(
+    tenant_id: &str,
+    user_id: &str,
+    limit: Option<usize>,
+    sink: &dyn ContributionHttpSink,
+) -> anyhow::Result<Vec<AccountTraceItem>> {
+    fetch_account_traces_inner(
+        ironclaw_common::paths::ironclaw_base_dir().as_path(),
+        tenant_id,
+        user_id,
+        limit,
+        sink,
+    )
+    .await
+}
+
+/// Dir-parameterised core for [`fetch_account_traces_via_sink`].
+/// Accepts an explicit `base_dir` so tests can supply an isolated tempdir.
+async fn fetch_account_traces_inner(
+    base_dir: &std::path::Path,
+    tenant_id: &str,
+    user_id: &str,
+    limit: Option<usize>,
+    sink: &dyn ContributionHttpSink,
+) -> anyhow::Result<Vec<AccountTraceItem>> {
+    let resolution = match resolve_trace_credentials_at(base_dir, tenant_id, user_id)? {
+        Some(r) => r,
+        None => return Ok(vec![]),
+    };
+
+    let scope_dir = if resolution.subject.is_some() {
+        trace_contribution_dir_for_scope_at(base_dir, None)
+    } else {
+        trace_contribution_dir_for_scope_at(base_dir, Some(resolution.state_scope.as_str()))
+    };
+
+    let context = TraceUploadClaimContext::for_account(resolution.subject.clone())
+        .with_scope_dir(scope_dir);
+    let provider = DefaultTraceUploadCredentialProvider;
+    let bearer = provider
+        .bearer_token(&resolution.policy, &context, false)
+        .await?;
+    let url = account_traces_url(&resolution.policy, limit)?;
+    let response = sink
+        .execute(ContributionHttpRequest {
+            method: ContributionHttpMethod::Get,
+            url,
+            bearer_token: Some(bearer),
+            json_body: None,
+            response_body_limit: TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES as u64,
+            timeout_ms: 10_000,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("account traces request failed: {e}"))?;
+    if !(200..300).contains(&response.status) {
+        return Ok(vec![]);
+    }
+    let items: Vec<AccountTraceItem> = serde_json::from_slice(&response.body)
+        .context("account traces response was not a valid JSON array")?;
+    Ok(items)
 }
 
 
@@ -14941,6 +15057,7 @@ mod tests {
             req: ContributionHttpRequest,
         ) -> Result<ContributionHttpResponse, ContributionHttpError> {
             let method = match req.method {
+                ContributionHttpMethod::Get => reqwest::Method::GET,
                 ContributionHttpMethod::Post => reqwest::Method::POST,
                 ContributionHttpMethod::Put => reqwest::Method::PUT,
                 ContributionHttpMethod::Delete => reqwest::Method::DELETE,
@@ -15114,5 +15231,135 @@ mod tests {
         };
         let url = account_login_links_url(&policy).expect("valid issuer must succeed");
         assert_eq!(url, "https://api.example.com/v1/account/login-links");
+    }
+
+    #[test]
+    fn account_traces_url_correct_with_and_without_limit() {
+        let policy = StandingTraceContributionPolicy {
+            upload_token_issuer_url: Some(
+                "https://api.example.com/v1/trace-upload-claim".to_string(),
+            ),
+            ..Default::default()
+        };
+        let url_no_limit = account_traces_url(&policy, None).expect("no-limit must succeed");
+        assert_eq!(url_no_limit, "https://api.example.com/v1/account/traces");
+        let url_with_limit =
+            account_traces_url(&policy, Some(50)).expect("limit=50 must succeed");
+        assert_eq!(
+            url_with_limit,
+            "https://api.example.com/v1/account/traces?limit=50"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_account_traces_returns_user_submissions() {
+        // A syntactically valid JWT that passes validate_trace_upload_claim_response.
+        let claim_jwt = test_jwt_with_header(serde_json::json!({"alg": "EdDSA", "kid": "test-key-1"}));
+        let claim_jwt_for_mock = claim_jwt.clone();
+
+        // ── mock server ──────────────────────────────────────────────────────
+        // Two endpoints:
+        //   /v1/trace-upload-claim  — upload-claim issuer (DeviceKey mode)
+        //   /v1/account/traces      — the endpoint under test (via sink)
+        let app = axum::Router::new()
+            .route(
+                "/v1/trace-upload-claim",
+                axum::routing::post(move || {
+                    let jwt = claim_jwt_for_mock.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "access_token": jwt,
+                            "token_type": "Bearer",
+                            "expires_in": 300
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/v1/account/traces",
+                axum::routing::get(|| async {
+                    axum::Json(serde_json::json!([
+                        {
+                            "submission_id": "s1",
+                            "status": "accepted",
+                            "credit_points_pending": 1.0,
+                            "credit_points_final": 1.0,
+                            "received_at": "2026-06-25T00:00:00Z"
+                        }
+                    ]))
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        // ── isolated tempdir ─────────────────────────────────────────────────
+        let base = tempfile::tempdir().unwrap();
+
+        // Instance policy (scope None) — enables instance enrollment so
+        // resolve_trace_credentials_at returns a per-user subject.
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            auth_mode: TraceUploadAuthMode::DeviceKey,
+            upload_token_issuer_url: Some(format!("http://{addr}/v1/trace-upload-claim")),
+            upload_token_issuer_allowed_hosts: std::collections::BTreeSet::from([
+                "127.0.0.1".to_string(),
+            ]),
+            upload_token_tenant_id: Some("tenant-dev".to_string()),
+            upload_token_audience: Some("trace-commons-ingest".to_string()),
+            ..Default::default()
+        };
+        write_trace_policy_for_scope_at(base.path(), None, &policy)
+            .expect("instance policy writes");
+
+        // Generate and promote a device key at the instance scope dir so
+        // DeviceKey auth mode can sign the workload JWT without a network call.
+        let instance_dir = trace_contribution_dir_for_scope_at(base.path(), None);
+        let pending =
+            crate::onboarding::DeviceKeypair::load_or_generate_pending(&instance_dir, "testhash")
+                .unwrap();
+        pending.promote(&instance_dir, "tenant-dev").unwrap();
+
+        // ── call under test ──────────────────────────────────────────────────
+        let sink = ReqwestContributionSink;
+        let items =
+            fetch_account_traces_inner(base.path(), "tenant-dev", "alice", Some(50), &sink)
+                .await
+                .unwrap();
+
+        // ── assertions ───────────────────────────────────────────────────────
+        assert_eq!(items.len(), 1, "expected exactly one trace item");
+        assert_eq!(items[0].submission_id, "s1");
+        assert_eq!(items[0].status, "accepted");
+        assert!(
+            (items[0].credit_points_pending - 1.0).abs() < f32::EPSILON,
+            "credit_points_pending must be 1.0"
+        );
+        assert_eq!(
+            items[0].credit_points_final,
+            Some(1.0),
+            "credit_points_final must be Some(1.0)"
+        );
+        assert_eq!(
+            items[0].received_at.as_deref(),
+            Some("2026-06-25T00:00:00Z")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_account_traces_returns_empty_when_not_enrolled() {
+        let base = tempfile::tempdir().unwrap();
+        // No policy written — resolver returns None → lenient Ok(vec![]).
+        let sink = ReqwestContributionSink;
+        let items =
+            fetch_account_traces_inner(base.path(), "tenant-dev", "alice", None, &sink)
+                .await
+                .unwrap();
+        assert!(items.is_empty(), "unenrolled user must return empty list");
     }
 }

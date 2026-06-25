@@ -390,6 +390,7 @@ impl ContributionHttpSink for HostEgressContributionSink {
         req: ContributionHttpRequest,
     ) -> Result<ContributionHttpResponse, ContributionHttpError> {
         let method = match req.method {
+            ContributionHttpMethod::Get => NetworkMethod::Get,
             ContributionHttpMethod::Post => NetworkMethod::Post,
             ContributionHttpMethod::Put => NetworkMethod::Put,
             ContributionHttpMethod::Delete => NetworkMethod::Delete,
