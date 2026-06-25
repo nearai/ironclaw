@@ -88,7 +88,10 @@ pub(crate) async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(Str
         (None, None) => return static_defaults,
     };
 
-    let client = reqwest::Client::new();
+    let client = match crate::config::hardened_client_builder(5).build() {
+        Ok(c) => c,
+        Err(_) => return static_defaults,
+    };
     let mut request = client
         .get("https://api.anthropic.com/v1/models")
         .header("anthropic-version", "2023-06-01")
@@ -168,7 +171,10 @@ pub(crate) async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String
         None => return static_defaults,
     };
 
-    let client = reqwest::Client::new();
+    let client = match crate::config::hardened_client_builder(5).build() {
+        Ok(c) => c,
+        Err(_) => return static_defaults,
+    };
     let resp = match client
         .get("https://api.openai.com/v1/models")
         .bearer_auth(&api_key)
@@ -287,7 +293,10 @@ pub(crate) async fn fetch_ollama_models(base_url: &str) -> Vec<(String, String)>
     ];
 
     let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
-    let client = reqwest::Client::new();
+    let client = match crate::config::hardened_client_builder(5).build() {
+        Ok(c) => c,
+        Err(_) => return static_defaults,
+    };
 
     let resp = match client
         .get(&url)
@@ -345,7 +354,10 @@ pub(crate) async fn fetch_openai_compatible_models(
     }
 
     let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let client = reqwest::Client::new();
+    let client = match crate::config::hardened_client_builder(5).build() {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
     let mut req = client.get(&url).timeout(std::time::Duration::from_secs(5));
     if let Some(key) = cached_key {
         req = req.bearer_auth(key);
