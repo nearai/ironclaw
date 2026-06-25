@@ -188,6 +188,22 @@ pub async fn onboard(
     onboard_at_dir_with_sink(&dir, invite_url, consents, sink).await
 }
 
+/// Instance-wide enrollment: identical to [`onboard`] but writes the resulting
+/// `StandingTraceContributionPolicy` to the instance-level location
+/// (`trace_contribution_dir_for_scope(None)`), so all users without their own
+/// personal-invite enrollment inherit it via `resolve_trace_credentials`.
+///
+/// This is an admin-only operation at the call boundary (the host gates it
+/// behind `AdminScope`); the function itself only knows it targets the base dir.
+pub async fn onboard_instance_with_sink(
+    invite_url: &str,
+    consents: OnboardConsents,
+    sink: &dyn OnboardingHttpSink,
+) -> Result<OnboardOutcome, OnboardError> {
+    let dir = trace_contribution_dir_for_scope(None);
+    onboard_at_dir_with_sink(&dir, invite_url, consents, sink).await
+}
+
 /// Dir-parameterised core using the default direct-`reqwest` sink —
 /// unit-testable with tempdirs (loopback mocks). Thin wrapper around
 /// [`onboard_at_dir_with_sink`].

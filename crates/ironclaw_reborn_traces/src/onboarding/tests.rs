@@ -833,3 +833,48 @@ async fn fake_sink_403_invite_not_valid_discards_pending() {
         "pending key must be discarded on InviteNotValid through the sink"
     );
 }
+
+/// Verify that `onboard_instance_with_sink` writes the policy to the
+/// instance-level (scope `None`) location so the resolver's fallback fires.
+///
+/// Isolation note: this test writes to `trace_contribution_dir_for_scope(None)`
+/// (the real global instance dir — e.g. `~/.ironclaw/trace_contributions/`).
+/// The base dir is a `LazyLock` that cannot be overridden per-test; instead we
+/// test the wiring directly using a `FakeSink` (no network) and clean up the
+/// written files afterwards.
+#[tokio::test]
+async fn instance_onboard_writes_instance_level_policy() {
+    use crate::contribution::read_trace_policy_for_scope;
+
+    let instance_dir = trace_contribution_dir_for_scope(None);
+    // Use a loopback-shaped invite URL so origin anchoring passes; no server is
+    // bound — the FakeSink returns a canned response without touching the network.
+    let invite_url = "http://127.0.0.1:7/onboard#INVINST01";
+    // Stage the pending key at the instance dir so canned_ok_body derives the
+    // correct device_key_id that the client will cross-check.
+    let body = canned_ok_body(&instance_dir, invite_url);
+    let sink = FakeSink {
+        status: 200,
+        body,
+        posted_url: Arc::new(Mutex::new(None)),
+    };
+
+    let outcome = onboard_instance_with_sink(invite_url, OnboardConsents::default(), &sink)
+        .await
+        .expect("instance onboard succeeds");
+
+    assert_eq!(outcome.tenant_id, "tenant-fake");
+
+    // The policy must land at scope None (the instance-level location).
+    let policy = read_trace_policy_for_scope(None).expect("instance policy must be readable");
+    assert!(policy.enabled);
+    assert_eq!(
+        policy.device_key_id.as_deref(),
+        Some(outcome.device_key_id.as_str()),
+        "policy device_key_id must match outcome"
+    );
+
+    // Cleanup: remove only the files this test wrote to the global instance dir.
+    let _ = std::fs::remove_file(instance_dir.join("policy.json"));
+    let _ = std::fs::remove_dir_all(instance_dir.join("device_keys"));
+}
