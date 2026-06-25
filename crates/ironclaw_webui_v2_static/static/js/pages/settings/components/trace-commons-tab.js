@@ -2,6 +2,7 @@ import { html } from "../../../lib/html.js";
 import { Card } from "../../../design-system/card.js";
 import { useT } from "../../../lib/i18n.js";
 import { useTraceCredits } from "../hooks/useTraceCredits.js";
+import { useAccountTraces } from "../hooks/useAccountTraces.js";
 import { matchesSearch } from "../lib/settings-search.js";
 import { SettingsSearchEmpty } from "./settings-search-empty.js";
 
@@ -38,6 +39,7 @@ function StatRow({ label, value, description }) {
 export function TraceCommonsTab({ searchQuery = "" }) {
   const t = useT();
   const { credits, query, authorize } = useTraceCredits();
+  const { traces, enrolled: tracesEnrolled } = useAccountTraces();
 
   if (
     !matchesSearch(searchQuery, [
@@ -172,6 +174,52 @@ export function TraceCommonsTab({ searchQuery = "" }) {
                       ? t("traceCommons.authorizing")
                       : t("traceCommons.authorize")}
                   </button>
+                </li>
+              `
+            )}
+          </ul>
+        </div>
+      `}
+      ${tracesEnrolled && traces.length > 0 &&
+      html`
+        <div className="mt-5">
+          <h4
+            className="mb-1 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
+          >
+            ${t("traceCommons.submittedTracesTitle")}
+          </h4>
+          <ul className="space-y-2">
+            ${traces.map(
+              (trace) => html`
+                <li
+                  key=${trace.submission_id}
+                  className="rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2"
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="truncate font-mono text-[10px] text-[var(--v2-text-faint)]">
+                      ${trace.submission_id}
+                    </div>
+                    <div className="shrink-0 font-mono text-xs text-[var(--v2-text-strong)]">
+                      ${trace.status}
+                    </div>
+                  </div>
+                  <div className="mt-1 flex gap-4 text-xs text-[var(--v2-text-muted)]">
+                    <span>
+                      ${t("traceCommons.tracePendingCredit")}:${" "}
+                      <span className="font-mono text-[var(--v2-text-strong)]">
+                        ${formatCredit(trace.pending_credit)}
+                      </span>
+                    </span>
+                    <span>
+                      ${t("traceCommons.traceFinalCredit")}:${" "}
+                      <span className="font-mono text-[var(--v2-text-strong)]">
+                        ${formatCredit(trace.final_credit)}
+                      </span>
+                    </span>
+                    <span className="ml-auto shrink-0">
+                      ${formatTimestamp(trace.received_at, t)}
+                    </span>
+                  </div>
                 </li>
               `
             )}
