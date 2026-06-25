@@ -592,6 +592,7 @@ fn auth_prompt_envelope(run_id: TurnRunId) -> ProductOutboundEnvelope {
         ProductOutboundPayload::AuthPrompt(ironclaw_product_adapters::AuthPromptView {
             turn_run_id: run_id,
             auth_request_ref: "auth:test".to_string(),
+            invocation_id: None,
             headline: "Connect your account".to_string(),
             body: "The agent needs access to your Gmail.".to_string(),
             challenge_kind: None,

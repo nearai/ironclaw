@@ -37,7 +37,7 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_turns::{
     TurnStatus,
-    run_profile::{LoopCapabilityPort, ProviderToolCall},
+    run_profile::{LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest},
 };
 
 /// A model gateway that, on its first call, registers a `builtin.shell`
@@ -108,7 +108,7 @@ impl HostManagedModelGateway for ShellApprovalGateway {
         // `ApprovalRequired`, which the agent loop converts to a
         // `BlockedApproval` run state.
         let candidate = capabilities
-            .register_provider_tool_call(ProviderToolCall {
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
                 provider_id: "test-provider".to_string(),
                 provider_model_id: "test-model".to_string(),
                 turn_id: Some("provider-turn-shell-gate".to_string()),
@@ -118,7 +118,7 @@ impl HostManagedModelGateway for ShellApprovalGateway {
                 response_reasoning: None,
                 reasoning: None,
                 signature: None,
-            })
+            }))
             .await
             .map_err(model_capability_error)?;
 
