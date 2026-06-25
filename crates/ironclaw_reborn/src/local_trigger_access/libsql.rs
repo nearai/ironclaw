@@ -1,116 +1,13 @@
-//! Local-dev trigger-fire access store.
-//!
-//! This is a Reborn-owned local bootstrap access store, separate from the
-//! WebChat identity store. It runs on the same libSQL substrate file, but owns
-//! only the local `local_reborn_access` table used to satisfy the fire-time
-//! trigger authorization contract during local development.
-//!
-//! This table is not the production agent/project membership source of truth.
-//! Production and multi-tenant runtimes must wire a real membership-backed
-//! trigger access checker instead of this local bootstrap store.
-
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chrono::{SecondsFormat, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-use thiserror::Error;
 
-/// Fixed local-dev access role persisted on trigger-fire access rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalTriggerAccessRole {
-    /// Owner-level local trigger-fire access.
-    Owner,
-}
-
-impl LocalTriggerAccessRole {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Owner => "owner",
-        }
-    }
-}
-
-/// Local-dev bootstrap path that owns a trigger-fire access row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalTriggerAccessSource {
-    /// Environment-token `serve` bootstrap path.
-    LocalDevEnvBootstrap,
-    /// SSO-admitted WebUI user bootstrap path.
-    LocalDevSsoBootstrap,
-    /// CLI `run` default-owner bootstrap path.
-    LocalDevRunBootstrap,
-}
-
-impl LocalTriggerAccessSource {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::LocalDevEnvBootstrap => "local_dev_env_bootstrap",
-            Self::LocalDevSsoBootstrap => "local_dev_sso_bootstrap",
-            Self::LocalDevRunBootstrap => "local_dev_run_bootstrap",
-        }
-    }
-}
-
-/// Fixed lifecycle state persisted on local-dev access rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LocalTriggerAccessStatus {
-    Active,
-    Inactive,
-}
-
-impl LocalTriggerAccessStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Inactive => "inactive",
-        }
-    }
-}
-
-/// Failure modes of the libSQL local trigger access store.
-#[derive(Debug, Error)]
-pub enum RebornLocalTriggerAccessStoreError {
-    /// The libSQL backend (connect / migrate / query / commit) failed.
-    #[error("reborn local trigger access store backend failure: {0}")]
-    Backend(String),
-}
-
-/// Local-dev trigger access row to seed from trusted host/operator input.
-pub struct LocalTriggerAccessSeed<'a> {
-    /// Tenant scope for the local access row.
-    pub tenant_id: &'a TenantId,
-    /// User that is allowed to fire triggers for the exact scope.
-    pub user_id: &'a UserId,
-    /// Optional agent scope. `None` is stored as an exact no-agent scope, not
-    /// a wildcard.
-    pub agent_id: Option<&'a AgentId>,
-    /// Optional project scope. `None` is stored as an exact no-project scope,
-    /// not a wildcard.
-    pub project_id: Option<&'a ProjectId>,
-    /// Local role to persist on the access row.
-    pub role: LocalTriggerAccessRole,
-    /// Source for the host/operator seed path.
-    pub source: LocalTriggerAccessSource,
-}
-
-/// Current trusted local-dev access set for one bootstrap source and exact
-/// tenant/agent/project scope.
-pub struct LocalTriggerAccessReconciliation<'a> {
-    /// Tenant scope for the local access rows.
-    pub tenant_id: &'a TenantId,
-    /// Users that should keep active access for this bootstrap source/scope.
-    pub user_ids: &'a [UserId],
-    /// Optional agent scope. `None` is an exact no-agent scope, not a wildcard.
-    pub agent_id: Option<&'a AgentId>,
-    /// Optional project scope. `None` is an exact no-project scope, not a
-    /// wildcard.
-    pub project_id: Option<&'a ProjectId>,
-    /// Local role for newly inserted rows.
-    pub role: LocalTriggerAccessRole,
-    /// Source for this host/operator seed path.
-    pub source: LocalTriggerAccessSource,
-}
+use super::types::{
+    LocalTriggerAccessReconciliation, LocalTriggerAccessSeed, LocalTriggerAccessStatus,
+    LocalTriggerAccessStore, RebornLocalTriggerAccessStoreError, backend, optional_scope_key,
+};
 
 /// libSQL-backed local-dev trigger access repository.
 pub struct RebornLibSqlLocalTriggerAccessStore {
@@ -329,17 +226,40 @@ impl RebornLibSqlLocalTriggerAccessStore {
     }
 }
 
-fn backend(err: impl std::fmt::Display) -> RebornLocalTriggerAccessStoreError {
-    RebornLocalTriggerAccessStoreError::Backend(err.to_string())
-}
+#[async_trait::async_trait]
+impl LocalTriggerAccessStore for RebornLibSqlLocalTriggerAccessStore {
+    async fn seed_local_access(
+        &self,
+        seed: LocalTriggerAccessSeed<'_>,
+    ) -> Result<(), RebornLocalTriggerAccessStoreError> {
+        RebornLibSqlLocalTriggerAccessStore::seed_local_access(self, seed).await
+    }
 
-fn optional_scope_key(value: Option<&str>) -> &str {
-    value.unwrap_or("")
+    async fn reconcile_local_access(
+        &self,
+        reconciliation: LocalTriggerAccessReconciliation<'_>,
+    ) -> Result<(), RebornLocalTriggerAccessStoreError> {
+        RebornLibSqlLocalTriggerAccessStore::reconcile_local_access(self, reconciliation).await
+    }
+
+    async fn has_active_local_access(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        agent_id: Option<&AgentId>,
+        project_id: Option<&ProjectId>,
+    ) -> Result<bool, RebornLocalTriggerAccessStoreError> {
+        RebornLibSqlLocalTriggerAccessStore::has_active_local_access(
+            self, tenant_id, user_id, agent_id, project_id,
+        )
+        .await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_trigger_access::{LocalTriggerAccessRole, LocalTriggerAccessSource};
 
     async fn store() -> RebornLibSqlLocalTriggerAccessStore {
         let tmp = tempfile::tempdir().expect("tempdir");

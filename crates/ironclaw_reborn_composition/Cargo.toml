@@ -83,6 +83,7 @@ postgres = [
     "ironclaw_filesystem/postgres",
     "ironclaw_host_runtime/postgres",
     "ironclaw_reborn/filesystem-goal-store",
+    "ironclaw_reborn/filesystem-local-trigger-access",
     "ironclaw_reborn_event_store/postgres",
     "ironclaw_resources/postgres",
     "ironclaw_run_state/postgres",
