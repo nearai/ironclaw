@@ -26,6 +26,7 @@ mod github_copilot;
 pub(crate) mod github_copilot_auth;
 pub mod host;
 pub mod nearai_chat;
+pub mod normalizing;
 pub mod openai_codex_provider;
 pub(crate) mod openai_codex_session;
 mod provider;
@@ -75,6 +76,7 @@ pub use host::{
     SharedSessionSecrets,
 };
 pub use nearai_chat::{DEFAULT_MODEL, ModelInfo, NearAiChatProvider, default_models};
+pub use normalizing::NormalizingProvider;
 pub use openai_codex_provider::OpenAiCodexProvider;
 pub use openai_codex_session::{DeviceCodeStart, OpenAiCodexSessionManager};
 pub use provider::sanitize_tool_messages;
@@ -955,6 +957,14 @@ fn create_cheap_provider_for_backend(
     Ok(Some(provider))
 }
 
+/// Wrap a raw provider in `NormalizingProvider`. Single source of truth
+/// for the Layer-3 wrap — every raw provider entering the decorator
+/// stack MUST pass through this helper. Adding new raw-provider paths?
+/// Call this helper, not `NormalizingProvider::new` directly.
+fn normalized(p: Arc<dyn LlmProvider>) -> Arc<dyn LlmProvider> {
+    Arc::new(NormalizingProvider::new(p))
+}
+
 /// Build the full LLM provider chain with all configured wrappers.
 ///
 /// Applies decorators in this order:
@@ -994,12 +1004,15 @@ async fn build_provider_chain_components_with_options(
     session: Arc<SessionManager>,
     include_standalone_cheap: bool,
 ) -> Result<ProviderChainComponents, LlmError> {
-    let llm: Arc<dyn LlmProvider> = if config.backend == "openai_codex" {
+    let raw: Arc<dyn LlmProvider> = if config.backend == "openai_codex" {
         create_openai_codex_provider(config).await?
     } else {
         create_llm_provider(config, session.clone()).await?
     };
-    tracing::debug!("LLM provider initialized: {}", llm.model_name());
+    tracing::debug!("LLM provider initialized: {}", raw.model_name());
+
+    // 0. Normalize — Layer-3 shape-invariant decorator (see `normalized()`).
+    let llm: Arc<dyn LlmProvider> = normalized(raw);
 
     // 1. Retry — uses top-level LlmConfig fields (resolved from LLM_* env vars
     // with fallback to NEARAI_* for backward compatibility).
@@ -1026,6 +1039,7 @@ async fn build_provider_chain_components_with_options(
                     config.backend
                 ),
             })?;
+        let cheap: Arc<dyn LlmProvider> = normalized(cheap);
         let cheap: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
             Arc::new(RetryProvider::new(cheap, retry_config.clone()))
         } else {
@@ -1067,6 +1081,7 @@ async fn build_provider_chain_components_with_options(
             fallback = %fallback.model_name(),
             "LLM failover enabled"
         );
+        let fallback: Arc<dyn LlmProvider> = normalized(fallback);
         let fallback: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
             Arc::new(RetryProvider::new(fallback, retry_config.clone()))
         } else {
@@ -1117,9 +1132,9 @@ async fn build_provider_chain_components_with_options(
         llm
     };
 
-    // Standalone cheap LLM for heartbeat/evaluation (not part of the chain)
+    // Standalone cheap LLM for heartbeat/evaluation (not part of the chain).
     let cheap_llm = if include_standalone_cheap {
-        create_cheap_llm_provider(config, session)?
+        create_cheap_llm_provider(config, session)?.map(normalized)
     } else {
         None
     };
