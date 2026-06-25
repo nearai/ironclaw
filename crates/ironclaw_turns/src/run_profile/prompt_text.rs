@@ -51,7 +51,7 @@ struct PromptTextPolicy {
     ///
     /// Disabled only for [`PromptTextSurface::TrustedSkillInstruction`] —
     /// trusted skill instruction bodies. "Trusted" is exactly two provenances:
-    /// certified first-party skills (shipped via `CERTIFIED_SKILLS`, installed
+    /// first-party skills shipped in the repo `skills/` directory (installed
     /// into the trusted system-skill root) and user-placed local skills (the
     /// user `skills/` root). Registry/marketplace/URL skills are `Installed`,
     /// not trusted: they keep the full checks here and their body is withheld
