@@ -30,13 +30,13 @@
 
 use std::{
     sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RecordKind,
-    RecordVersion, RootFilesystem, ScopedFilesystem,
+    CasApply, CasUpdateError, ContentType, Entry, FilesystemError, RecordKind, RecordVersion,
+    RootFilesystem, ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{ResourceScope, ScopedPath, UserId};
 
@@ -58,14 +58,7 @@ use crate::{
     },
 };
 
-/// Bound on the CAS retry loop. The per-user snapshot is intentionally written
-/// with optimistic CAS instead of an in-process write gate, so bursts of
-/// same-user transitions can overlap without parking unrelated turn-state
-/// callers behind one wedged operation.
-const FILESYSTEM_CAS_RETRIES: usize = 32;
 const FILESYSTEM_APPLY_TIMEOUT: Duration = Duration::from_secs(15);
-const FILESYSTEM_CAS_BACKOFF_BASE: Duration = Duration::from_millis(2);
-const FILESYSTEM_CAS_BACKOFF_MAX: Duration = Duration::from_millis(50);
 const SNAPSHOT_READ_CACHE_TTL: Duration = Duration::from_millis(500);
 
 const TURNS_PREFIX: &str = "/turns";
@@ -251,61 +244,155 @@ where
         Fut: std::future::Future<Output = (Result<T, TurnError>, InMemoryTurnStateStore)>,
     {
         let path = snapshot_path()?;
-        match tokio::time::timeout(self.apply_timeout, self.apply_with_retry(&path, &mut apply))
-            .await
-        {
-            Ok(result) => result,
-            Err(_) => {
+        // Clear stale cache before entering the CAS loop so every retry reads
+        // through to the backend rather than a potentially stale in-process
+        // snapshot.
+        self.clear_snapshot_cache();
+
+        let scope = ResourceScope::system();
+        let limits = self.limits;
+        let admission_limit_provider = self.admission_limit_provider.clone();
+
+        // Bridge the caller's closure shape into the shape `cas_update` expects.
+        //
+        // `cas_update` signals a no-op (skip write) only when the caller returns
+        // the *same* snapshot it received via `Some(existing) == new_snapshot`.
+        // It does not handle the absent-record case (`current = None`) + default
+        // snapshot as a no-op. We model that case ourselves: when the backend has
+        // no file yet and the apply result is the default snapshot (nothing to
+        // persist), we signal no-op via a sentinel `BridgeError::NoOp(value)`.
+        // `cas_update` surfaces that as `CasUpdateError::Apply(NoOp(value))`
+        // which we handle before the final error-mapping step.
+        //
+        // We also thread the written snapshot back through `cas_update`'s `T`
+        // (as `(T, TurnPersistenceSnapshot)`) so we can populate the snapshot
+        // cache after a successful write without needing a second backend read,
+        // mirroring the old code's `store_snapshot_cache((new_snapshot, Some(version)))`.
+        let cas_future = cas_update(
+            self.filesystem.as_ref(),
+            &scope,
+            &path,
+            // decode: stored body → TurnPersistenceSnapshot.
+            |bytes: &[u8]| deserialize_snapshot(bytes).map_err(BridgeError::Real),
+            // encode: next snapshot → versioned Entry.
+            |snapshot: &TurnPersistenceSnapshot| {
+                snapshot_entry(snapshot).map_err(BridgeError::Real)
+            },
+            // apply: bridge into CasApply<TurnPersistenceSnapshot, (T, TurnPersistenceSnapshot)>,
+            // handling absent+default no-op.
+            move |current: Option<TurnPersistenceSnapshot>| {
+                let snapshot = current.clone().unwrap_or_default();
+                let store_result =
+                    InMemoryTurnStateStore::from_persistence_snapshot_with_admission_limit_provider(
+                        snapshot,
+                        limits,
+                        admission_limit_provider.clone(),
+                    );
+                let apply_fut = match store_result {
+                    Ok(store) => Ok(apply(store)),
+                    Err(e) => Err(BridgeError::<T>::Real(e)),
+                };
+                async move {
+                    let (outcome, store) = apply_fut?.await;
+                    let new_snapshot = store.persistence_snapshot();
+                    match outcome {
+                        Err(e) => Err(BridgeError::Real(e)),
+                        Ok(value) => {
+                            // Absent-record + default snapshot: signal no-op so
+                            // `cas_update` skips the write. `cas_update`'s own
+                            // no-op check only fires for `Some(existing)==new`,
+                            // so we use a sentinel error to abort the write.
+                            if current.is_none()
+                                && new_snapshot == TurnPersistenceSnapshot::default()
+                            {
+                                return Err(BridgeError::NoOp(value));
+                            }
+                            // Thread the new snapshot back alongside the caller's
+                            // outcome so the outer scope can populate the cache.
+                            Ok(CasApply::new(new_snapshot.clone(), (value, new_snapshot)))
+                        }
+                    }
+                }
+            },
+        );
+
+        // Run the CAS loop inside the apply timeout.
+        //
+        // Note: `cas_update` has its own inner timeout (`FILESYSTEM_APPLY_TIMEOUT`
+        // from the shared helper), but `self.apply_timeout` may be shorter (used
+        // in tests via `with_apply_timeout`). The outer timeout governs the
+        // overall deadline; the inner `cas_update` timeout is an additional guard
+        // at the helper level.
+        let result: Result<(T, TurnPersistenceSnapshot), CasUpdateError<BridgeError<T>>> =
+            match tokio::time::timeout(self.apply_timeout, cas_future).await {
+                Ok(result) => result,
+                Err(_) => {
+                    self.clear_snapshot_cache();
+                    return Err(TurnError::Unavailable {
+                        reason: "turn state filesystem apply timed out".to_string(),
+                    });
+                }
+            };
+
+        match result {
+            Ok((value, written_snapshot)) => {
+                // Successful write. Populate the snapshot cache with the written
+                // snapshot so the next read can skip a backend roundtrip. We
+                // don't have the new `RecordVersion` here so we store `None`;
+                // reads don't use the version and writes always re-read fresh.
+                self.store_snapshot_cache((written_snapshot, None));
+                Ok(value)
+            }
+            Err(CasUpdateError::Apply(BridgeError::NoOp(value))) => {
+                // Absent-record + default-snapshot: apply ran successfully but
+                // nothing was written. Clear cache (stale from before the loop).
                 self.clear_snapshot_cache();
-                Err(TurnError::Unavailable {
-                    reason: "turn state filesystem apply timed out".to_string(),
-                })
+                Ok(value)
+            }
+            Err(e) => {
+                self.clear_snapshot_cache();
+                Err(map_cas_error(e))
             }
         }
     }
+}
 
-    async fn apply_with_retry<T, A, Fut>(
-        &self,
-        path: &ScopedPath,
-        apply: &mut A,
-    ) -> Result<T, TurnError>
-    where
-        A: FnMut(InMemoryTurnStateStore) -> Fut,
-        Fut: std::future::Future<Output = (Result<T, TurnError>, InMemoryTurnStateStore)>,
-    {
-        for attempt in 0..FILESYSTEM_CAS_RETRIES {
-            let (snapshot, version) = self.read_snapshot_from_filesystem().await?;
-            let old_snapshot = snapshot.clone();
-            let store = self.build_in_memory_store(snapshot)?;
-            let (outcome, store) = apply(store).await;
-            let new_snapshot = store.persistence_snapshot();
+/// Internal error type used by the `apply` bridge closure so we can signal
+/// the absent-record + default-snapshot no-op through `cas_update`'s apply
+/// error channel. `NoOp(T)` carries the successful outcome; `Real(TurnError)`
+/// carries a genuine failure.
+enum BridgeError<T> {
+    /// The apply closure ran successfully and produced `T`, but the resulting
+    /// snapshot is unchanged from the default (absent → default is a no-op:
+    /// no file should be created for an empty store).
+    NoOp(T),
+    /// A genuine `TurnError` from the inner apply logic or store construction.
+    Real(TurnError),
+}
 
-            if new_snapshot == old_snapshot {
-                // This apply path read the latest snapshot directly from the
-                // backend, so any previously cached snapshot may now be stale.
-                self.clear_snapshot_cache();
-                return outcome;
-            }
-            let entry = snapshot_entry(&new_snapshot)?;
-            let cas = match version {
-                Some(version) => CasExpectation::Version(version),
-                None => CasExpectation::Absent,
-            };
-            match put_with_cas(self.filesystem.as_ref(), path, entry, cas).await {
-                Ok(version) => {
-                    self.store_snapshot_cache((new_snapshot, Some(version)));
-                    return outcome;
-                }
-                Err(PutError::VersionMismatch) => {
-                    self.clear_snapshot_cache();
-                    cas_retry_backoff(attempt).await;
-                }
-                Err(PutError::Other(error)) => return Err(error),
-            }
+/// Map a [`CasUpdateError`] carrying [`BridgeError`] into a [`TurnError`].
+///
+/// `BridgeError::NoOp` is handled by the caller before reaching this function
+/// (it's an `Ok` outcome smuggled through the error path). Only `Real` errors
+/// and storage-layer failures arrive here.
+fn map_cas_error<T>(error: CasUpdateError<BridgeError<T>>) -> TurnError {
+    match error {
+        CasUpdateError::Apply(BridgeError::Real(inner)) => inner,
+        CasUpdateError::Apply(BridgeError::NoOp(_)) => {
+            // Should be unreachable: the caller extracts NoOp before calling
+            // map_cas_error. Defensive fallback.
+            unreachable!("NoOp bridge error must be handled by the apply caller")
         }
-        Err(TurnError::Unavailable {
+        CasUpdateError::Timeout => TurnError::Unavailable {
+            reason: "turn state filesystem apply timed out".to_string(),
+        },
+        CasUpdateError::RetriesExhausted => TurnError::Unavailable {
             reason: "turn state filesystem CAS retries exhausted".to_string(),
-        })
+        },
+        CasUpdateError::CasUnsupported => TurnError::Unavailable {
+            reason: "turn state filesystem backend must support versioned CAS".to_string(),
+        },
+        CasUpdateError::Backend(fs) => fs_error(fs),
     }
 }
 
@@ -766,59 +853,6 @@ fn fs_error(error: FilesystemError) -> TurnError {
     tracing::debug!(%error, "turn state filesystem operation failed");
     TurnError::Unavailable {
         reason: "turn state persistence temporarily unavailable".to_string(),
-    }
-}
-
-async fn cas_retry_backoff(attempt: usize) {
-    let shift = attempt.min(8) as u32;
-    let multiplier = 1_u32.checked_shl(shift).unwrap_or(u32::MAX);
-    let base_delay = FILESYSTEM_CAS_BACKOFF_BASE
-        .saturating_mul(multiplier)
-        .min(FILESYSTEM_CAS_BACKOFF_MAX);
-    let jitter = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| {
-            let jitter_ceiling = base_delay.as_millis().max(1);
-            Duration::from_millis((elapsed.as_nanos() % jitter_ceiling) as u64)
-        })
-        .unwrap_or_default();
-    tokio::time::sleep(base_delay.saturating_add(jitter)).await;
-}
-
-/// Local error classification for the CAS-aware put helper.
-enum PutError {
-    /// Backend reported `VersionMismatch` (cross-process raced us). The
-    /// caller retries by re-reading the current snapshot.
-    VersionMismatch,
-    /// Any other backend or serialization failure; surface to caller.
-    Other(TurnError),
-}
-
-/// Issue a `put` honoring the requested CAS expectation.
-///
-/// Turn state is a single per-user snapshot, so this store requires a backend
-/// with real `Absent` / `Version` CAS. Falling back to `Any` would turn a
-/// stale-snapshot race into a blind overwrite.
-async fn put_with_cas<F>(
-    filesystem: &ScopedFilesystem<F>,
-    path: &ScopedPath,
-    entry: Entry,
-    cas: CasExpectation,
-) -> Result<RecordVersion, PutError>
-where
-    F: RootFilesystem,
-{
-    let scope = ResourceScope::system();
-    match filesystem.put(&scope, path, entry, cas).await {
-        Ok(version) => Ok(version),
-        Err(FilesystemError::VersionMismatch { .. }) => Err(PutError::VersionMismatch),
-        Err(FilesystemError::Unsupported {
-            operation: FilesystemOperation::WriteFile,
-            ..
-        }) => Err(PutError::Other(TurnError::Unavailable {
-            reason: "turn state filesystem backend must support versioned CAS".to_string(),
-        })),
-        Err(error) => Err(PutError::Other(fs_error(error))),
     }
 }
 
