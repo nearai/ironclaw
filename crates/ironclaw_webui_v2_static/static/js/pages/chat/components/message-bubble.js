@@ -117,13 +117,15 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
   const isNotice = role === "system" || role === "error";
   const bubbleWidthClass = isUser ? "max-w-[85%]" : isNotice ? "mx-auto max-w-[85%]" : "w-full max-w-[85%]";
   const contentWidthClass = isUser ? "" : "w-full min-w-0 max-w-full";
+  const showRetryAction = status === "error" && onRetry;
+  const showMetaRow = showActions || showRetryAction || timeLabel;
 
   return html`
     <div
       data-testid=${`msg-${role}`}
       className=${["group flex w-full min-w-0 flex-col", isUser ? "items-end" : "items-start"].join(" ")}
     >
-      <div className=${["flex min-w-0 flex-col gap-2", bubbleWidthClass].join(" ")}>
+      <div className=${["flex min-w-0 flex-col", bubbleWidthClass].join(" ")}>
         <div
           className=${[
             "text-base leading-7",
@@ -168,15 +170,18 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
             content=${typeof content === "string" ? content : ""}
           />`}
         </div>
+      </div>
 
-        ${(showActions || (status === "error" && onRetry) || timeLabel) && html`
-          <div
-            className=${[
-              "flex min-h-7 items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100",
-              isUser ? "justify-end" : "justify-start",
-            ].join(" ")}
-          >
-            ${timeLabel && html`<time dateTime=${timestamp} className="font-mono text-[11px] text-iron-500">${timeLabel}</time>`}
+      ${showMetaRow && html`
+        <div
+          className=${[
+            "mt-1 flex min-h-7 w-max max-w-[85%] flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100",
+            isUser ? "self-end justify-end" : isNotice ? "self-center justify-center" : "self-start justify-start",
+          ].join(" ")}
+        >
+          ${timeLabel && html`<time dateTime=${timestamp} className="shrink-0 font-mono text-[11px] text-iron-500">${timeLabel}</time>`}
+          ${(showActions || showRetryAction) && html`
+            <div className="flex shrink-0 items-center gap-1">
             ${showActions && html`
               <button
                 type="button"
@@ -188,7 +193,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
                 <${Icon} name=${copied ? "check" : "copy"} className="h-3.5 w-3.5" />
               </button>
             `}
-            ${status === "error" && onRetry && html`
+            ${showRetryAction && html`
               <button
                 type="button"
                 onClick=${() => onRetry(message)}
@@ -199,9 +204,10 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
                 <${Icon} name="retry" className="h-3.5 w-3.5" />
               </button>
             `}
-          </div>
-        `}
-      </div>
+            </div>
+          `}
+        </div>
+      `}
     </div>
   `;
 }
