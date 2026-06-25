@@ -4611,6 +4611,21 @@ impl TraceUploadClaimContext {
         self.subject = subject;
         self
     }
+
+    /// Context for account-management calls (e.g. minting a one-time login
+    /// link). No trace or submission identity, no consent scopes — the caller
+    /// is not submitting a trace.  Callers should chain `.with_scope_dir()` to
+    /// supply the tenant keypair directory when `DeviceKey` auth is active.
+    fn for_account(subject: Option<String>) -> Self {
+        Self {
+            trace_id: None,
+            submission_id: None,
+            consent_scopes: Vec::new(),
+            allowed_uses: Vec::new(),
+            scope_dir: None,
+            subject,
+        }
+    }
 }
 
 #[async_trait]
@@ -5981,6 +5996,130 @@ async fn execute_community_profile_request(
     }
     Ok(())
 }
+
+// ── Trace Commons account login links ────────────────────────────────────────
+
+/// A one-time browser login link that lands the contributor in their Trace
+/// Commons account.
+#[derive(Debug, Clone)]
+pub struct AccountLoginLink {
+    /// The Trace Commons account identifier the link is scoped to.
+    pub account_id: String,
+    /// The one-time login URL; typically an `/account/login?code=…` path.
+    pub url: String,
+}
+
+/// Derive the account-login-links URL from the configured upload-claim issuer
+/// URL. The login-links service lives at the same origin as the issuer; only
+/// the path differs: strip `/v1/trace-upload-claim`, append
+/// `/v1/account/login-links`.
+fn account_login_links_url(policy: &StandingTraceContributionPolicy) -> anyhow::Result<String> {
+    let issuer_url = policy
+        .upload_token_issuer_url
+        .as_deref()
+        .ok_or_else(|| {
+            anyhow::anyhow!("Trace Commons upload token issuer URL is not configured")
+        })?;
+    let stripped = issuer_url
+        .trim_end_matches('/')
+        .strip_suffix("/v1/trace-upload-claim")
+        .unwrap_or_else(|| issuer_url.trim_end_matches('/'));
+    Ok(format!("{stripped}/v1/account/login-links"))
+}
+
+/// Mint a one-time account login link for the given `(tenant_id, user_id)`.
+/// Routes the POST through the caller-supplied `sink` (host egress on the
+/// agent path) so the request obeys the deployment's network-egress policy.
+///
+/// - Resolves the user's Trace Commons credentials; returns an error if the
+///   user is not enrolled.
+/// - Mints the per-user bearer via `DefaultTraceUploadCredentialProvider`
+///   (identical to how submission and profile-attribution flows do it).
+/// - POSTs `{ "subject": <subject> }` (field omitted when `subject` is
+///   `None`, i.e. personal-invite enrollment) to `/v1/account/login-links`.
+/// - Parses the `{ account_id, url }` response into [`AccountLoginLink`].
+pub async fn mint_account_login_link_via_sink(
+    tenant_id: &str,
+    user_id: &str,
+    sink: &dyn ContributionHttpSink,
+) -> anyhow::Result<AccountLoginLink> {
+    mint_account_login_link_inner(
+        ironclaw_common::paths::ironclaw_base_dir().as_path(),
+        tenant_id,
+        user_id,
+        sink,
+    )
+    .await
+}
+
+/// Dir-parameterised core for [`mint_account_login_link_via_sink`].
+/// Accepts an explicit `base_dir` so tests can supply an isolated tempdir.
+async fn mint_account_login_link_inner(
+    base_dir: &std::path::Path,
+    tenant_id: &str,
+    user_id: &str,
+    sink: &dyn ContributionHttpSink,
+) -> anyhow::Result<AccountLoginLink> {
+    let resolution = resolve_trace_credentials_at(base_dir, tenant_id, user_id)?
+        .ok_or_else(|| anyhow::anyhow!("not enrolled in Trace Commons"))?;
+
+    // Device key location depends on enrollment type:
+    // - Instance enrollment (`subject` is `Some`): the shared device key is at
+    //   the instance scope dir (None scope).
+    // - Personal-invite enrollment (`subject` is `None`): the user's device key
+    //   is at the user scope dir.
+    let scope_dir = if resolution.subject.is_some() {
+        trace_contribution_dir_for_scope_at(base_dir, None)
+    } else {
+        trace_contribution_dir_for_scope_at(base_dir, Some(resolution.state_scope.as_str()))
+    };
+
+    let context = TraceUploadClaimContext::for_account(resolution.subject.clone())
+        .with_scope_dir(scope_dir);
+    let provider = DefaultTraceUploadCredentialProvider;
+    let bearer = provider
+        .bearer_token(&resolution.policy, &context, false)
+        .await?;
+    let url = account_login_links_url(&resolution.policy)?;
+    let body = match &resolution.subject {
+        Some(s) => serde_json::json!({ "subject": s }),
+        None => serde_json::json!({}),
+    };
+    let response = sink
+        .execute(ContributionHttpRequest {
+            method: ContributionHttpMethod::Post,
+            url,
+            bearer_token: Some(bearer),
+            json_body: Some(
+                serde_json::to_vec(&body)
+                    .context("failed to serialize login-link request body")?,
+            ),
+            response_body_limit: TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES as u64,
+            timeout_ms: 10_000,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("login-link request failed: {e}"))?;
+    anyhow::ensure!(
+        (200..300).contains(&response.status),
+        "login-link request returned HTTP {}",
+        response.status
+    );
+    let parsed: serde_json::Value = serde_json::from_slice(&response.body)
+        .context("login-link response was not valid JSON")?;
+    let account_id = parsed["account_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("login-link response missing account_id field"))?
+        .to_string();
+    let link_url = parsed["url"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("login-link response missing url field"))?
+        .to_string();
+    Ok(AccountLoginLink {
+        account_id,
+        url: link_url,
+    })
+}
+
 
 #[cfg(test)]
 tokio::task_local! {
@@ -14783,5 +14922,164 @@ mod tests {
         let req = build_trace_upload_claim_issuer_request(&policy, &ctx);
         let json = serde_json::to_value(&req).unwrap();
         assert!(json.get("subject").is_none(), "subject omitted when None");
+    }
+
+    // --- mint_account_login_link_via_sink tests ---
+
+    /// Minimal reqwest-backed ContributionHttpSink for use in unit tests that
+    /// need to exercise the sink path against a local mock server.
+    struct ReqwestContributionSink;
+
+    #[async_trait]
+    impl ContributionHttpSink for ReqwestContributionSink {
+        async fn execute(
+            &self,
+            req: ContributionHttpRequest,
+        ) -> Result<ContributionHttpResponse, ContributionHttpError> {
+            let method = match req.method {
+                ContributionHttpMethod::Post => reqwest::Method::POST,
+                ContributionHttpMethod::Put => reqwest::Method::PUT,
+                ContributionHttpMethod::Delete => reqwest::Method::DELETE,
+            };
+            let client = reqwest::Client::new();
+            let mut builder = client.request(method, &req.url);
+            if let Some(token) = req.bearer_token {
+                builder = builder.bearer_auth(token);
+            }
+            if let Some(body) = req.json_body {
+                builder = builder
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .body(body);
+            }
+            let response = builder
+                .send()
+                .await
+                .map_err(|e| ContributionHttpError::new(e.to_string()))?;
+            let status = response.status().as_u16();
+            let body = response
+                .bytes()
+                .await
+                .map_err(|e| ContributionHttpError::new(e.to_string()))?
+                .to_vec();
+            Ok(ContributionHttpResponse { status, body })
+        }
+    }
+
+    #[tokio::test]
+    async fn mint_account_login_link_posts_subject_and_returns_url() {
+        use std::sync::{Arc, Mutex};
+
+        // A syntactically valid JWT that passes validate_trace_upload_claim_response.
+        let claim_jwt = test_jwt_with_header(serde_json::json!({"alg": "EdDSA", "kid": "test-key-1"}));
+        let claim_jwt_for_mock = claim_jwt.clone();
+
+        // ── mock server ──────────────────────────────────────────────────────
+        // Two endpoints:
+        //   /v1/trace-upload-claim  — upload-claim issuer (reqwest, DeviceKey mode)
+        //   /v1/account/login-links — the endpoint under test (via sink)
+        let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = captured.clone();
+
+        let app = axum::Router::new()
+            .route(
+                "/v1/trace-upload-claim",
+                axum::routing::post(move || {
+                    let jwt = claim_jwt_for_mock.clone();
+                    async move {
+                        // Return a syntactically valid JWT so
+                        // fetch_trace_upload_claim_from_issuer is satisfied.
+                        axum::Json(serde_json::json!({
+                            "access_token": jwt,
+                            "token_type": "Bearer",
+                            "expires_in": 300
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/v1/account/login-links",
+                axum::routing::post(move |axum::Json(b): axum::Json<serde_json::Value>| {
+                    let cap = cap.clone();
+                    async move {
+                        cap.lock().unwrap().push(b);
+                        axum::Json(serde_json::json!({
+                            "account_id": "11111111-1111-1111-1111-111111111111",
+                            "url": "/account/login?code=abc"
+                        }))
+                    }
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        // ── isolated tempdir ─────────────────────────────────────────────────
+        let base = tempfile::tempdir().unwrap();
+
+        // Instance policy (scope None) — enables instance enrollment so
+        // resolve_trace_credentials_at returns a per-user subject.
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            auth_mode: TraceUploadAuthMode::DeviceKey,
+            upload_token_issuer_url: Some(format!("http://{addr}/v1/trace-upload-claim")),
+            upload_token_issuer_allowed_hosts: std::collections::BTreeSet::from([
+                "127.0.0.1".to_string(),
+            ]),
+            upload_token_tenant_id: Some("tenant-dev".to_string()),
+            upload_token_audience: Some("trace-commons-ingest".to_string()),
+            ..Default::default()
+        };
+        write_trace_policy_for_scope_at(base.path(), None, &policy)
+            .expect("instance policy writes");
+
+        // Generate and promote a device key at the instance scope dir so
+        // DeviceKey auth mode can sign the workload JWT without a network call.
+        let instance_dir = trace_contribution_dir_for_scope_at(base.path(), None);
+        let pending =
+            crate::onboarding::DeviceKeypair::load_or_generate_pending(&instance_dir, "testhash")
+                .unwrap();
+        pending.promote(&instance_dir, "tenant-dev").unwrap();
+
+        // ── call under test ──────────────────────────────────────────────────
+        let sink = ReqwestContributionSink;
+        let link = mint_account_login_link_inner(base.path(), "tenant-dev", "alice", &sink)
+            .await
+            .unwrap();
+
+        // ── assertions ───────────────────────────────────────────────────────
+        assert_eq!(link.url, "/account/login?code=abc");
+        assert_eq!(
+            link.account_id,
+            "11111111-1111-1111-1111-111111111111"
+        );
+
+        let bodies = captured.lock().unwrap();
+        assert_eq!(bodies.len(), 1, "exactly one POST to login-links");
+        let expected_subject =
+            local_pseudonymous_contributor_id(&trace_scope_key("tenant-dev", "alice"));
+        assert_eq!(
+            bodies[0]["subject"],
+            serde_json::Value::String(expected_subject),
+            "posted subject must be per-user pseudonymous id for instance enrollment"
+        );
+    }
+
+    #[tokio::test]
+    async fn mint_account_login_link_errors_when_not_enrolled() {
+        let base = tempfile::tempdir().unwrap();
+        // No policy written — resolver returns None.
+        let sink = ReqwestContributionSink;
+        let err = mint_account_login_link_inner(base.path(), "tenant-dev", "alice", &sink)
+            .await
+            .expect_err("unenrolled user must error");
+        assert!(
+            err.to_string().contains("not enrolled"),
+            "error must mention enrollment: {err}"
+        );
     }
 }
