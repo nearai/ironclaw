@@ -1962,6 +1962,7 @@ mod tests {
             agent_id: None,
             project_id: None,
             operator_webui_config: true,
+            role: ironclaw_host_api::UserRole::Member,
         }
     }
 }
