@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRef};
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
@@ -56,6 +56,14 @@ impl RecordingGateway {
             .iter()
             .flat_map(|req| req.messages.iter().map(|m| m.content.clone()))
             .collect()
+    }
+
+    async fn request_count_containing(&self, needle: &str) -> usize {
+        let snapshot = self.requests.lock().await;
+        snapshot
+            .iter()
+            .filter(|req| req.messages.iter().any(|m| m.content.contains(needle)))
+            .count()
     }
 }
 
@@ -108,6 +116,14 @@ where
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     last.expect("at least one read should have succeeded in wait_for_settled")
+}
+
+fn current_minute_slot() -> chrono::DateTime<Utc> {
+    let now_seconds = Utc::now().timestamp();
+    let minute_seconds = now_seconds - now_seconds.rem_euclid(60);
+    Utc.timestamp_opt(minute_seconds, 0)
+        .single()
+        .expect("valid minute timestamp")
 }
 
 /// Shared runtime builder. Every test passes the `TriggerPollerSettings` it
@@ -505,6 +521,101 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
     assert!(
         settled.last_run_at.is_some(),
         "builtin-created trigger should record last_run_at after poller fire"
+    );
+}
+
+#[tokio::test]
+async fn builtin_created_recurring_trigger_fires_again_after_first_run_settles() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let recording_gateway = Arc::new(RecordingGateway {
+        requests: Arc::new(TokioMutex::new(Vec::new())),
+    });
+
+    let runtime = build_runtime_with(
+        &root,
+        Arc::clone(&recording_gateway),
+        TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
+            TriggerPollerWorkerConfig {
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            },
+        ),
+    )
+    .await;
+
+    let created = invoke_trigger_create(
+        &runtime,
+        json!({
+            "name": "trigger-e2e-created-by-tool-fires-twice",
+            "prompt": TRIGGER_PROMPT,
+            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
+        }),
+    )
+    .await;
+
+    let repo = runtime
+        .trigger_repository()
+        .expect("local-dev runtime exposes trigger repository");
+    let tenant_id = TenantId::new(TENANT).expect("tenant id");
+    let trigger_id = TriggerId::parse(
+        created["trigger"]["trigger_id"]
+            .as_str()
+            .expect("created trigger id"),
+    )
+    .expect("valid trigger id");
+
+    let mut record = repo
+        .get_trigger(tenant_id.clone(), trigger_id)
+        .await
+        .expect("get created trigger")
+        .expect("created trigger persisted");
+    let first_due_slot = current_minute_slot() - chrono::Duration::minutes(1);
+    let second_due_slot = record
+        .schedule
+        .next_slot_after(first_due_slot)
+        .expect("valid recurring schedule")
+        .expect("recurring schedule should have a second slot");
+    record.next_run_at = first_due_slot;
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("make first recurring slot due");
+
+    let second = wait_for_settled(
+        &repo,
+        &tenant_id,
+        trigger_id,
+        Duration::from_secs(15),
+        |r| {
+            r.last_fired_slot
+                .map(|slot| slot >= second_due_slot)
+                .unwrap_or(false)
+                && r.last_run_at.is_some()
+                && r.last_status == Some(TriggerRunStatus::Ok)
+                && r.active_fire_slot.is_none()
+                && r.active_run_ref.is_none()
+                && r.next_run_at > second_due_slot
+        },
+    )
+    .await;
+
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    let request_count = recording_gateway
+        .request_count_containing(TRIGGER_PROMPT)
+        .await;
+    assert!(
+        request_count >= 2,
+        "recurring trigger should submit once per due slot — requests containing prompt: {request_count}"
+    );
+    assert_eq!(
+        second.state,
+        TriggerState::Scheduled,
+        "recurring trigger must remain Scheduled after the second fire — record: {second:?}"
+    );
+    assert_eq!(
+        second.last_status,
+        Some(TriggerRunStatus::Ok),
+        "second fire should settle successfully — record: {second:?}"
     );
 }
 
