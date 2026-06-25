@@ -376,8 +376,8 @@ fn classify_materializer_inbound_error(error: InboundTurnError) -> TriggerError 
                 | TurnError::LeaseMismatch
                 | TurnError::InvalidRunOriginAdapter,
         } => rejected_trigger_materialization("trusted trigger submit rejected"),
+        InboundTurnError::BindingRequired { .. } => retryable_trigger_materializer_backend_error(),
         InboundTurnError::InvalidExternalRef { .. }
-        | InboundTurnError::BindingRequired { .. }
         | InboundTurnError::AccessDenied { .. }
         | InboundTurnError::BindingConflict { .. }
         | InboundTurnError::ThreadNotFound { .. }
@@ -1209,6 +1209,18 @@ mod tests {
     }
 
     #[test]
+    fn missing_actor_binding_is_retryable_backend_failure() {
+        let error = classify_materializer_inbound_error(InboundTurnError::BindingRequired {
+            adapter_kind: "trigger_trusted".to_string(),
+            external_actor_id: "user-test".to_string(),
+        });
+
+        assert!(
+            matches!(error, TriggerError::Backend { reason } if reason == "trusted trigger submit retryable failure")
+        );
+    }
+
+    #[test]
     fn permanent_admission_rejections_are_terminal_materialization_failures() {
         let error = classify_materializer_inbound_error(InboundTurnError::TurnSubmissionFailed {
             error: TurnError::AdmissionRejected(AdmissionRejection::new(
@@ -1388,12 +1400,13 @@ mod tests {
         let report = worker
             .tick_once(fire_slot)
             .await
-            .expect("worker records permanent failure");
+            .expect("worker records retryable failure");
 
         assert!(matches!(
             report.results.last().map(|result| &result.outcome),
-            Some(TriggerPollerFireOutcome::PermanentFailed { .. })
-                | Some(TriggerPollerFireOutcome::DueFireFailed { .. })
+            Some(TriggerPollerFireOutcome::RetryableFailed {
+                reason: TriggerPollerFailureReason::Backend,
+            })
         ));
         assert_eq!(submit_turn_count.load(Ordering::SeqCst), 0);
     }

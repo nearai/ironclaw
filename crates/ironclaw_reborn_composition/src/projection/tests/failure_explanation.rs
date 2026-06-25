@@ -33,6 +33,26 @@ async fn webui_event_stream_projects_iteration_limit_failure_summary() {
     .await;
 }
 
+#[tokio::test]
+async fn webui_event_stream_projects_scheduler_heartbeat_failure_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-scheduler-heartbeat-thread",
+        "scheduler_heartbeat_failed",
+        "The run failed after the runner heartbeat could not be recorded.",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn webui_event_stream_projects_scheduler_executor_panic_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-scheduler-panic-thread",
+        "scheduler_executor_panic",
+        "The run failed because the execution driver stopped unexpectedly.",
+    )
+    .await;
+}
+
 async fn assert_failed_run_status_summary(
     thread_id: &str,
     failure_category: &str,
@@ -404,7 +424,7 @@ async fn failure_details_returns_fallback_when_model_gateway_times_out() {
                 status: TurnStatus::Failed,
                 kind: TurnEventKind::Failed,
                 blocked_gate: None,
-                sanitized_reason: Some("driver_panic".to_string()),
+                sanitized_reason: Some("scheduler_executor_panic".to_string()),
             }],
         }),
         Arc::new(FakeTurnCoordinator {

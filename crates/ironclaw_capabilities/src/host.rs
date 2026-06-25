@@ -4,8 +4,9 @@ use ironclaw_authorization::{
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityDispatchRequest, CapabilityDispatchResult,
-    CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision, DenyReason, ExecutionContext,
-    InvocationFingerprint, InvocationId, Obligation, ProcessId, ResourceEstimate, ResourceScope,
+    CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision, DenyReason, DispatchError,
+    ExecutionContext, InvocationFingerprint, InvocationId, Obligation, ProcessId, ResourceEstimate,
+    ResourceScope,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
@@ -528,6 +529,8 @@ where
                     &obligation_outcome,
                 )
                 .await;
+                let error =
+                    enrich_dispatch_error_credential_requirements(error, obligations.as_slice());
                 let invocation_error = CapabilityInvocationError::from(error);
                 apply_run_state_transition_if_configured(
                     self.run_state,
@@ -1914,6 +1917,8 @@ where
                     &obligation_outcome,
                 )
                 .await;
+                let error =
+                    enrich_dispatch_error_credential_requirements(error, obligations.as_slice());
                 let invocation_error = CapabilityInvocationError::from(error);
                 apply_run_state_transition_if_configured(
                     Some(run_state),
@@ -2253,4 +2258,245 @@ fn obligation_invocation_error_kind(error: &CapabilityInvocationError) -> &'stat
         .run_state_transition()
         .map(CapabilityRunStateTransition::error_kind)
         .unwrap_or("Dispatch")
+}
+
+/// Synthesize the auth-gate credential requirement for a runtime `AuthRequired`
+/// that carries no auth detail of its own (the WASM-style 401 case), from the
+/// capability's declared credential obligation.
+///
+/// Fires ONLY when the runtime gave no auth signal at all — both `required_secrets`
+/// and `credential_requirements` empty — AND the capability declares EXACTLY ONE
+/// credential obligation. A raw-secret-handle gate (`required_secrets` populated)
+/// must not be turned into a product-auth provider prompt; and with multiple
+/// credential obligations the failed credential cannot be attributed, so we leave
+/// the gate unmodified rather than guess the wrong provider. The downstream WebUI
+/// auth surface consumes exactly one provider (manual-token card for
+/// `ManualToken` setup, OAuth launch for `OAuth` setup).
+///
+/// FOLLOW-UP (reactive OAuth refresh on runtime 401): for an `OAuth` credential
+/// this gate is the *fallback* after refresh is exhausted — proactive refresh
+/// may already have been attempted inline at injection (within the 5-min expiry
+/// margin) or by the background keepalive worker. A runtime 401 still slips through when the token
+/// looked fresh by `expires_at` but was revoked mid-life, where one reactive
+/// "refresh + retry" before surfacing the gate would recover silently. That
+/// retry does not exist today (pre-existing gap, not introduced here); the gate
+/// remains correct for the genuinely-revoked case. Track as a resolver/egress
+/// enhancement, not a change to this enrichment.
+fn enrich_dispatch_error_credential_requirements(
+    error: DispatchError,
+    obligations: &[Obligation],
+) -> DispatchError {
+    let DispatchError::AuthRequired {
+        ref required_secrets,
+        ref credential_requirements,
+        ..
+    } = error
+    else {
+        return error;
+    };
+    if !required_secrets.is_empty() || !credential_requirements.is_empty() {
+        return error;
+    }
+    let derived: Vec<_> = obligations
+        .iter()
+        .filter_map(Obligation::credential_auth_requirement)
+        .collect();
+    let [requirement] = derived.as_slice() else {
+        return error; // zero or >1 credential obligations: do not guess
+    };
+    let DispatchError::AuthRequired {
+        capability,
+        required_secrets,
+        ..
+    } = error
+    else {
+        unreachable!("matched AuthRequired above")
+    };
+    DispatchError::AuthRequired {
+        capability,
+        required_secrets,
+        credential_requirements: vec![requirement.clone()],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::{
+        CapabilityId, ExtensionId, Obligation, RuntimeCredentialAccountProviderId,
+        RuntimeCredentialAccountSetup, SecretHandle,
+    };
+
+    fn auth_required_empty(cap: &str) -> DispatchError {
+        DispatchError::AuthRequired {
+            capability: CapabilityId::new(cap).unwrap(),
+            required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
+        }
+    }
+
+    fn auth_required_with_secrets(cap: &str) -> DispatchError {
+        DispatchError::AuthRequired {
+            capability: CapabilityId::new(cap).unwrap(),
+            required_secrets: vec![SecretHandle::new("raw_secret").unwrap()],
+            credential_requirements: Vec::new(),
+        }
+    }
+
+    fn auth_required_with_provider(cap: &str, provider: &str) -> DispatchError {
+        use ironclaw_host_api::RuntimeCredentialAuthRequirement;
+        DispatchError::AuthRequired {
+            capability: CapabilityId::new(cap).unwrap(),
+            required_secrets: Vec::new(),
+            credential_requirements: vec![RuntimeCredentialAuthRequirement {
+                provider: RuntimeCredentialAccountProviderId::new(provider).unwrap(),
+                setup: RuntimeCredentialAccountSetup::ManualToken,
+                requester_extension: ExtensionId::new(provider).unwrap(),
+                provider_scopes: Vec::new(),
+            }],
+        }
+    }
+
+    fn inject_credential_obligation(provider: &str) -> Obligation {
+        Obligation::InjectCredentialAccountOnce {
+            handle: SecretHandle::new(format!("{provider}_pat")).unwrap(),
+            provider: RuntimeCredentialAccountProviderId::new(provider).unwrap(),
+            setup: RuntimeCredentialAccountSetup::ManualToken,
+            provider_scopes: Vec::new(),
+            requester_extension: ExtensionId::new(provider).unwrap(),
+        }
+    }
+
+    // WASM case: both empty + exactly one obligation → enriched with that provider.
+    #[test]
+    fn enrich_fills_empty_from_single_credential_obligation() {
+        let error = auth_required_empty("echo.say");
+        let obligations = [inject_credential_obligation("github")];
+
+        let result = enrich_dispatch_error_credential_requirements(error, &obligations);
+
+        let DispatchError::AuthRequired {
+            credential_requirements,
+            ..
+        } = result
+        else {
+            panic!("expected AuthRequired");
+        };
+        assert_eq!(credential_requirements.len(), 1);
+        assert_eq!(
+            credential_requirements[0].provider,
+            RuntimeCredentialAccountProviderId::new("github").unwrap()
+        );
+    }
+
+    // required_secrets populated → returned unchanged (raw-secret gate must not become product-auth prompt).
+    #[test]
+    fn enrich_leaves_required_secrets_populated_unchanged() {
+        let error = auth_required_with_secrets("echo.say");
+        let obligations = [inject_credential_obligation("github")];
+
+        let result = enrich_dispatch_error_credential_requirements(error, &obligations);
+
+        let DispatchError::AuthRequired {
+            required_secrets,
+            credential_requirements,
+            ..
+        } = result
+        else {
+            panic!("expected AuthRequired");
+        };
+        assert_eq!(
+            required_secrets.len(),
+            1,
+            "required_secrets must be preserved"
+        );
+        assert!(
+            credential_requirements.is_empty(),
+            "credential_requirements must remain empty when required_secrets are present"
+        );
+    }
+
+    // credential_requirements already populated → returned unchanged (e.g. MCP runtime already supplied requirements).
+    #[test]
+    fn enrich_leaves_non_empty_credential_requirements_unchanged() {
+        let error = auth_required_with_provider("echo.say", "mcp_provider");
+        let obligations = [inject_credential_obligation("github")];
+
+        let result = enrich_dispatch_error_credential_requirements(error, &obligations);
+
+        let DispatchError::AuthRequired {
+            credential_requirements,
+            ..
+        } = result
+        else {
+            panic!("expected AuthRequired");
+        };
+        assert_eq!(credential_requirements.len(), 1);
+        assert_eq!(
+            credential_requirements[0].provider,
+            RuntimeCredentialAccountProviderId::new("mcp_provider").unwrap(),
+            "original mcp_provider must be retained, not replaced by github"
+        );
+    }
+
+    // ZERO credential obligations → unchanged (empty result, not a guess).
+    #[test]
+    fn enrich_leaves_unchanged_when_zero_credential_obligations() {
+        let error = auth_required_empty("echo.say");
+        let obligations: [Obligation; 0] = [];
+
+        let result = enrich_dispatch_error_credential_requirements(error, &obligations);
+
+        let DispatchError::AuthRequired {
+            credential_requirements,
+            ..
+        } = result
+        else {
+            panic!("expected AuthRequired");
+        };
+        assert!(
+            credential_requirements.is_empty(),
+            "zero obligations must leave credential_requirements empty"
+        );
+    }
+
+    // TWO credential obligations → NOT enriched (cannot attribute failure to one provider).
+    #[test]
+    fn enrich_leaves_unchanged_when_two_credential_obligations() {
+        let error = auth_required_empty("echo.say");
+        let obligations = [
+            inject_credential_obligation("github"),
+            inject_credential_obligation("gitlab"),
+        ];
+
+        let result = enrich_dispatch_error_credential_requirements(error, &obligations);
+
+        let DispatchError::AuthRequired {
+            credential_requirements,
+            ..
+        } = result
+        else {
+            panic!("expected AuthRequired");
+        };
+        assert!(
+            credential_requirements.is_empty(),
+            "two obligations must leave credential_requirements empty — cannot attribute which provider failed"
+        );
+    }
+
+    // Non-AuthRequired variants returned unchanged.
+    #[test]
+    fn enrich_is_noop_for_non_auth_required_variants() {
+        let error = DispatchError::UnknownCapability {
+            capability: CapabilityId::new("echo.say").unwrap(),
+        };
+        let obligations = [inject_credential_obligation("github")];
+
+        let result = enrich_dispatch_error_credential_requirements(error, &obligations);
+
+        assert!(
+            matches!(result, DispatchError::UnknownCapability { .. }),
+            "non-AuthRequired variants must be returned unchanged"
+        );
+    }
 }

@@ -47,8 +47,10 @@ pub(crate) fn classify_inbound_error(error: &InboundTurnError) -> TrustedTrigger
                 | TurnError::LeaseMismatch
                 | TurnError::InvalidRunOriginAdapter,
         } => TrustedTriggerInboundFailureKind::SubmitRejected,
+        InboundTurnError::BindingRequired { .. } => {
+            TrustedTriggerInboundFailureKind::RetryableBackend
+        }
         InboundTurnError::InvalidExternalRef { .. }
-        | InboundTurnError::BindingRequired { .. }
         | InboundTurnError::AccessDenied { .. }
         | InboundTurnError::BindingConflict { .. }
         | InboundTurnError::ThreadNotFound { .. }

@@ -128,7 +128,7 @@ not bypass domain invariants by mutating primitive storage rows directly.
 
 | Virtual area | Source of truth | Access surface | Indexed? | Notes |
 | --- | --- | --- | --- | --- |
-| `/memory` | `ironclaw_memory` DB repositories over `memory_documents`, `memory_chunks`, `memory_document_versions` | file-shaped memory docs + memory service APIs | backend-defined full-text/vector | Memory-specific path grammar lives in `ironclaw_memory`, not filesystem. |
+| `/memory` | `ironclaw_memory_native` provider — currently a `FilesystemMemoryDocumentRepository` over `RootFilesystem` (a dedicated `reborn_memory_*` SQL-table model is the deferred target), behind the `ironclaw_memory` contract | file-shaped memory docs + memory service APIs | backend-defined full-text/vector | Memory-specific path grammar is defined by the `ironclaw_memory` contract, not filesystem. |
 | `/users` | typed user/profile repositories + optional user config projection | user/profile APIs + optional file projection | no, unless projection says otherwise | User-owned durable profile and configuration areas. |
 | `/projects` | local/object/project file backend | filesystem | optional project indexer | Project source files and user-authored project artifacts. |
 | `/system/settings` | typed settings repository | typed API + optional file projection | no, unless projection says otherwise | Settings source of truth is not memory. |
@@ -187,7 +187,7 @@ Rules:
 
 - source of truth is the memory repository, preserving existing production table family where viable;
 - memory docs are file-shaped, but memory search/chunks/versions are structured derived state;
-- memory path grammar, metadata inheritance, versioning, search, prompt context, and layer rules live in `ironclaw_memory`;
+- memory path grammar, metadata inheritance, versioning, search, prompt context, and layer rules are defined by the provider-neutral `ironclaw_memory` contract and implemented in the `ironclaw_memory_native` provider (#3537 lift);
 - `ironclaw_filesystem` may route/mount memory backends but must not encode memory semantics.
 
 ### 5.3 Structured control-plane state

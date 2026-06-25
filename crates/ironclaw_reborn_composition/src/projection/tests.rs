@@ -12,10 +12,10 @@ use ironclaw_event_projections::{
 use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_host_api::{
     Action, AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId,
-    InvocationId, NetworkMethod, NetworkScheme, NetworkTarget, Principal, ResourceEstimate,
-    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAuthRequirement, RuntimeHttpEgress, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind, TenantId, ThreadId, UserId,
+    InvocationId, NetworkMethod, NetworkScheme, NetworkTarget, Principal, ProcessId,
+    ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     AuthPromptChallengeKind, CapabilityActivityStatusView, ProductOutboundEnvelope,
@@ -88,6 +88,27 @@ fn contains_run_status(
             )
         }),
         _ => false,
+    })
+}
+
+fn run_status_failure_summary(
+    events: &[ProductOutboundEnvelope],
+    invocation_id: InvocationId,
+) -> Option<String> {
+    let expected_run_id = TurnRunId::from_uuid(invocation_id.as_uuid());
+    events.iter().find_map(|event| match event.payload() {
+        ProductOutboundPayload::ProjectionSnapshot { state }
+        | ProductOutboundPayload::ProjectionUpdate { state } => {
+            state.items.iter().find_map(|item| match item {
+                ProductProjectionItem::RunStatus {
+                    run_id,
+                    failure_summary,
+                    ..
+                } if *run_id == expected_run_id => failure_summary.clone(),
+                _ => None,
+            })
+        }
+        _ => None,
     })
 }
 
