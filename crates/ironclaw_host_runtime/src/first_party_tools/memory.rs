@@ -574,7 +574,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builtin_memory_search_dispatches_through_memory_service_facade() {
+    async fn native_memory_search_dispatches_through_memory_service_facade() {
         let memory_service = Arc::new(RecordingMemoryService::default());
         let state = MemoryCapabilityState::with_memory_service_for_test(memory_service.clone());
         let request = memory_request(
