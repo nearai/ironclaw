@@ -208,7 +208,8 @@ function mergePage(older, current) {
 
 function mergeFullRefresh(fresh, current, options = {}) {
   const { preserveClientOnly = false } = options;
-  const ids = new Set(fresh.map((m) => m?.id).filter(Boolean));
+  const hydratedFresh = hydrateFreshMessages(fresh, current);
+  const ids = new Set(hydratedFresh.map((m) => m?.id).filter(Boolean));
   const preserved = current.filter((message) => {
     if (!message || typeof message.id !== "string" || ids.has(message.id)) {
       return false;
@@ -216,7 +217,31 @@ function mergeFullRefresh(fresh, current, options = {}) {
     if (isRuntimeActivityMessage(message)) return true;
     return preserveClientOnly && message.id.startsWith("err-");
   });
-  return preserved.length > 0 ? [...fresh, ...preserved] : fresh;
+  return preserved.length > 0 ? [...hydratedFresh, ...preserved] : hydratedFresh;
+}
+
+function hydrateFreshMessages(fresh, current) {
+  const currentByConfirmedId = new Map();
+  for (const message of current || []) {
+    if (!message || !message.timestamp) continue;
+    if (typeof message.id === "string") {
+      currentByConfirmedId.set(message.id, message);
+    }
+    if (typeof message.timelineMessageId === "string") {
+      currentByConfirmedId.set(`msg-${message.timelineMessageId}`, message);
+    }
+  }
+
+  if (currentByConfirmedId.size === 0) return fresh;
+  return fresh.map((message) => {
+    if (!message || message.timestamp || typeof message.id !== "string") {
+      return message;
+    }
+    const currentMessage = currentByConfirmedId.get(message.id);
+    return currentMessage?.timestamp
+      ? { ...message, timestamp: currentMessage.timestamp }
+      : message;
+  });
 }
 
 function isRuntimeActivityMessage(message) {

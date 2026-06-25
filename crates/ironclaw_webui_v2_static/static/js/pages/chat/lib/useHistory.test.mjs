@@ -239,3 +239,32 @@ test("mergeFullRefresh keeps requested client-only bubbles and lets the timeline
   assert.equal(toolCard.toolParameters, "{}");
   assert.equal(toolCard.toolResultPreview, "ok");
 });
+
+test("mergeFullRefresh carries optimistic timestamps onto confirmed messages", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      {
+        id: "msg-message-1",
+        role: "user",
+        content: "tell me a joke",
+      },
+    ],
+    [
+      {
+        id: "pending-1",
+        role: "user",
+        content: "tell me a joke",
+        timestamp: "2026-06-25T07:17:00.000Z",
+        timelineMessageId: "message-1",
+      },
+    ],
+  );
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, "msg-message-1");
+  assert.equal(merged[0].timestamp, "2026-06-25T07:17:00.000Z");
+});
