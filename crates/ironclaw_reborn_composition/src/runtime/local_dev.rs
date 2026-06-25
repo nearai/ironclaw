@@ -338,7 +338,11 @@ impl LocalDevCapabilityIo {
         let message = match durable_previews
             .thread_service
             .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
-                scope: durable_previews.thread_scope.clone(),
+                scope: ironclaw_reborn::thread_scope::ThreadScopeResolver::resolve_for_turn(
+                    &durable_previews.thread_scope,
+                    &run_context.scope,
+                    run_context.actor(),
+                ),
                 thread_id: run_context.thread_id.clone(),
                 turn_run_id: run_context.run_id.to_string(),
                 preview,
