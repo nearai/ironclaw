@@ -1,5 +1,7 @@
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+#[cfg(feature = "webui-v2-beta")]
+use std::sync::Arc;
 use std::time::Duration;
 use std::{future::Future, thread};
 
@@ -19,7 +21,7 @@ use ironclaw_reborn_composition::{
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
-    open_local_trigger_access_store,
+    LocalTriggerAccessStore, local_trigger_access_fire_checker, open_local_trigger_access_store,
 };
 use ironclaw_reborn_config::{
     REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,
@@ -240,9 +242,9 @@ async fn with_run_local_trigger_fire_access_checker(
         let profile = effective_profile(config, config_file.as_ref())?;
         let user_store_path =
             local_runtime_storage_root(config, profile).join("reborn-local-dev.db");
-        let access_store = open_local_trigger_access_store(&user_store_path)
-            .await
-            .context("failed to initialize local trigger-fire access store for `run`")?;
+        let access_store =
+            open_trigger_access_store_for_profile(&runtime_input, profile, &user_store_path)
+                .await?;
         let user_ids = [user_id];
         access_store
             .reconcile_local_access(LocalTriggerAccessReconciliation {
@@ -256,7 +258,47 @@ async fn with_run_local_trigger_fire_access_checker(
             .await
             .context("failed to reconcile local trigger-fire access for `run`")?;
 
-        Ok(runtime_input.with_trigger_fire_access_checker(access_store))
+        Ok(runtime_input
+            .with_trigger_fire_access_checker(local_trigger_access_fire_checker(access_store)))
+    }
+}
+
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) async fn open_trigger_access_store_for_profile(
+    runtime_input: &RebornRuntimeInput,
+    profile: RebornProfile,
+    local_store_path: &Path,
+) -> anyhow::Result<Arc<dyn LocalTriggerAccessStore>> {
+    match profile {
+        RebornProfile::HostedSingleTenant => {
+            #[cfg(feature = "postgres")]
+            {
+                let services = runtime_input.services.as_ref().context(
+                    "profile=hosted-single-tenant requires runtime services before trigger-fire access can be wired",
+                )?;
+                let store = services
+                    .open_hosted_single_tenant_trigger_access_store()
+                    .await
+                    .context("failed to initialize hosted trigger-fire access store")?;
+                let store: Arc<dyn LocalTriggerAccessStore> = store;
+                Ok(store)
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                let _ = runtime_input;
+                let _ = local_store_path;
+                anyhow::bail!(
+                    "profile=hosted-single-tenant requires the `postgres` feature for trigger-fire access"
+                );
+            }
+        }
+        _ => {
+            let store = open_local_trigger_access_store(local_store_path)
+                .await
+                .context("failed to initialize local trigger-fire access store")?;
+            let store: Arc<dyn LocalTriggerAccessStore> = store;
+            Ok(store)
+        }
     }
 }
 

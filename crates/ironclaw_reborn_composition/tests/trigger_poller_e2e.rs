@@ -162,6 +162,25 @@ async fn build_runtime_with(
 }
 
 async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
+    // The Tools-settings global auto-approve switch is authoritative for
+    // first-party tool dispatch; turn it on for the trigger management
+    // scope so the create call (and the poller-submitted turn that shares the
+    // same tenant/user) exercise the dispatch path instead of stopping at the
+    // per-tool approval gate.
+    let auto_approve = runtime
+        .services()
+        .local_dev_auto_approve_settings_for_test()
+        .expect("local-dev exposes auto-approve settings for test");
+    let auto_approve_scope = trigger_management_execution_context().resource_scope;
+    auto_approve
+        .set(ironclaw_approvals::AutoApproveSettingInput {
+            updated_by: Principal::User(auto_approve_scope.user_id.clone()),
+            scope: auto_approve_scope,
+            enabled: true,
+        })
+        .await
+        .expect("enable global auto-approve for trigger management dispatch");
+
     let host_runtime = runtime
         .services()
         .host_runtime

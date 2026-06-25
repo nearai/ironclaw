@@ -44,7 +44,7 @@ export const SETTINGS_SUB_ROUTES = [
   // { id: "agent", labelKey: "settings.agent", icon: "bolt" },
   // { id: "channels", labelKey: "settings.channels", icon: "send" },
   // { id: "networking", labelKey: "settings.networking", icon: "pulse" },
-  // { id: "tools", labelKey: "settings.tools", icon: "tool" },
+  { id: "tools", labelKey: "settings.tools", icon: "tool" },
   { id: "skills", labelKey: "settings.skills", icon: "file" },
   // Trace Commons is un-hidden: its api lib calls the real v2
   // `/api/webchat/v2/traces/credit` endpoint.

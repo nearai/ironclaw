@@ -52,7 +52,7 @@ ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_loop_support = { path = "../ironclaw_loop_support" }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
-ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition" }
+ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["test-support"] }
 ironclaw_reborn = { path = "../ironclaw_reborn" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_product_workflow = { path = ".", features = ["test-support"] }

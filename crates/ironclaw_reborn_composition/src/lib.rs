@@ -361,48 +361,73 @@ pub mod host_api {
     pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 }
 
+#[cfg(all(feature = "webui-v2-beta", feature = "postgres"))]
+pub use ironclaw_reborn::local_trigger_access::RebornFilesystemLocalTriggerAccessStore;
 /// Reborn-owned local trigger-fire access store, re-exported so host
 /// binaries reach it through this composition facade instead of taking a
 /// direct `ironclaw_reborn` dependency (the
 /// `reborn_cli_binary_crate_stays_separate_from_v1_root` architecture
-/// boundary forbids that). The store is a reborn-owned repository;
-/// [`open_local_trigger_access_store`] opens it so the libSQL substrate handle
-/// stays private to this facade and callers never construct one.
+/// boundary forbids that). The store is a reborn-owned repository. Local-dev
+/// callers use [`open_local_trigger_access_store`]; hosted-single-tenant
+/// callers use the filesystem-backed store through the host filesystem
+/// abstraction.
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_reborn::local_trigger_access::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSeed,
-    LocalTriggerAccessSource, RebornLibSqlLocalTriggerAccessStore,
+    LocalTriggerAccessSource, LocalTriggerAccessStore, RebornLibSqlLocalTriggerAccessStore,
     RebornLocalTriggerAccessStoreError,
 };
 
 #[cfg(feature = "webui-v2-beta")]
+struct LocalTriggerAccessFireChecker {
+    store: std::sync::Arc<dyn LocalTriggerAccessStore>,
+}
+
+#[cfg(feature = "webui-v2-beta")]
+impl LocalTriggerAccessFireChecker {
+    fn new(store: std::sync::Arc<dyn LocalTriggerAccessStore>) -> Self {
+        Self { store }
+    }
+}
+
+/// Wrap a backend-neutral local trigger access store as the runtime fire-time
+/// authorizer.
+#[cfg(feature = "webui-v2-beta")]
+pub fn local_trigger_access_fire_checker(
+    store: std::sync::Arc<dyn LocalTriggerAccessStore>,
+) -> std::sync::Arc<dyn runtime_input::TriggerFireAccessChecker> {
+    std::sync::Arc::new(LocalTriggerAccessFireChecker::new(store))
+}
+
+#[cfg(feature = "webui-v2-beta")]
 #[async_trait::async_trait]
-impl runtime_input::TriggerFireAccessChecker for RebornLibSqlLocalTriggerAccessStore {
+impl runtime_input::TriggerFireAccessChecker for LocalTriggerAccessFireChecker {
     async fn check_trigger_fire_access(
         &self,
         request: runtime_input::TriggerFireAccessCheck,
     ) -> Result<runtime_input::TriggerFireAccessDecision, runtime_input::TriggerFireAccessError>
     {
-        self.has_active_local_access(
-            &request.tenant_id,
-            &request.creator_user_id,
-            request.agent_id.as_ref(),
-            request.project_id.as_ref(),
-        )
-        .await
-        .map_err(|error| runtime_input::TriggerFireAccessError::Unavailable {
-            reason: error.to_string(),
-        })
-        .map(|allowed| {
-            if allowed {
-                runtime_input::TriggerFireAccessDecision::Allowed
-            } else {
-                runtime_input::TriggerFireAccessDecision::Denied {
-                    reason: "trigger creator does not have active local access for this scope"
-                        .to_string(),
+        self.store
+            .has_active_local_access(
+                &request.tenant_id,
+                &request.creator_user_id,
+                request.agent_id.as_ref(),
+                request.project_id.as_ref(),
+            )
+            .await
+            .map_err(|error| runtime_input::TriggerFireAccessError::Unavailable {
+                reason: error.to_string(),
+            })
+            .map(|allowed| {
+                if allowed {
+                    runtime_input::TriggerFireAccessDecision::Allowed
+                } else {
+                    runtime_input::TriggerFireAccessDecision::Denied {
+                        reason: "trigger creator does not have active local access for this scope"
+                            .to_string(),
+                    }
                 }
-            }
-        })
+            })
     }
 }
 
@@ -486,9 +511,7 @@ pub async fn open_local_trigger_access_store(
 #[cfg(all(test, feature = "webui-v2-beta"))]
 mod webui_user_access_checker_tests {
     use super::*;
-    use crate::runtime_input::{
-        TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
-    };
+    use crate::runtime_input::{TriggerFireAccessCheck, TriggerFireAccessDecision};
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 
     #[tokio::test]
@@ -515,7 +538,9 @@ mod webui_user_access_checker_tests {
             .await
             .expect("seed local access");
 
-        let allowed = store
+        let checker = local_trigger_access_fire_checker(store);
+
+        let allowed = checker
             .check_trigger_fire_access(TriggerFireAccessCheck {
                 tenant_id: tenant_id.clone(),
                 creator_user_id: user_id,
@@ -528,7 +553,7 @@ mod webui_user_access_checker_tests {
             .expect("check access");
         assert_eq!(allowed, TriggerFireAccessDecision::Allowed);
 
-        let denied = store
+        let denied = checker
             .check_trigger_fire_access(TriggerFireAccessCheck {
                 tenant_id,
                 creator_user_id: other_user_id,
