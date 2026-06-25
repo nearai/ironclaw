@@ -510,9 +510,9 @@ mod tests {
     };
 
     use crate::{
-        AcceptedMessageRef, GateRef, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
-        SourceBindingRef, TurnActor, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
-        TurnStatus,
+        AcceptedMessageRef, CapabilityActivityId, GateRef, ReplyTargetBindingRef, RunProfileId,
+        RunProfileVersion, SourceBindingRef, TurnActor, TurnError, TurnId, TurnRunId, TurnRunState,
+        TurnScope, TurnStatus,
         events::{
             EventCursor, TurnBlockedGateKind, TurnBlockedGateMetadata, TurnEventKind,
             TurnEventPage, TurnEventProjectionError, TurnEventProjectionService,
@@ -552,6 +552,20 @@ mod tests {
             }),
             sanitized_reason: Some("approval_required".to_string()),
         }
+    }
+
+    fn blocked_event_with_activity(
+        cursor: u64,
+        scope: TurnScope,
+        activity_id: CapabilityActivityId,
+    ) -> TurnLifecycleEvent {
+        let mut event = blocked_event(cursor, scope);
+        event
+            .blocked_gate
+            .as_mut()
+            .expect("blocked event has gate metadata")
+            .activity_id = Some(activity_id);
+        event
     }
 
     struct MemoryProjectionSource {
@@ -619,6 +633,7 @@ mod tests {
             ThreadId::new("thread-a").expect("thread"),
             Some(owner.clone()),
         );
+        let activity_id = CapabilityActivityId::new();
         let state = TurnRunState {
             scope,
             actor: Some(TurnActor::new(actor)),
@@ -634,7 +649,7 @@ mod tests {
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: Some(GateRef::new("gate:auth-a").expect("gate ref")),
-            blocked_activity_id: None,
+            blocked_activity_id: Some(activity_id),
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
@@ -645,6 +660,14 @@ mod tests {
         let event = TurnLifecycleEvent::from_run_state(&state, TurnEventKind::Blocked, None);
 
         assert_eq!(event.owner_user_id, Some(owner));
+        assert_eq!(
+            event
+                .blocked_gate
+                .as_ref()
+                .expect("blocked run projects gate metadata")
+                .activity_id,
+            Some(activity_id)
+        );
     }
 
     #[test]
@@ -729,6 +752,50 @@ mod tests {
                 reason: TurnError::Unavailable { reason }
             } if reason == "event store offline"
         ));
+    }
+
+    #[tokio::test]
+    async fn reducer_snapshot_keeps_activity_id_while_public_snapshot_redacts_gate_metadata() {
+        let scope = scope("thread-activity-id");
+        let activity_id = CapabilityActivityId::new();
+        let event = blocked_event_with_activity(1, scope.clone(), activity_id);
+        let source = std::sync::Arc::new(MemoryProjectionSource {
+            events: vec![event],
+        });
+
+        let reducer_snapshot = TurnEventReducerService::new(source.clone())
+            .snapshot(crate::events::TurnEventProjectionRequest {
+                scope: scope.clone(),
+                owner_user_id: None,
+                after: None,
+                limit: 10,
+            })
+            .await
+            .expect("reducer snapshot");
+
+        assert_eq!(
+            reducer_snapshot.entries[0]
+                .blocked_gate
+                .as_ref()
+                .expect("reducer keeps gate metadata")
+                .activity_id,
+            Some(activity_id)
+        );
+
+        let public_snapshot = TurnEventProjectionService::new(source)
+            .snapshot(crate::events::TurnEventProjectionRequest {
+                scope,
+                owner_user_id: None,
+                after: None,
+                limit: 10,
+            })
+            .await
+            .expect("public snapshot");
+
+        let serialized =
+            serde_json::to_string(&public_snapshot).expect("serialize public snapshot");
+        assert!(!serialized.contains("gate:approval-a"));
+        assert!(!serialized.contains(&activity_id.to_string()));
     }
 
     #[tokio::test]

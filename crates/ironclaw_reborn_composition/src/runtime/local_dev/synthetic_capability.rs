@@ -538,6 +538,7 @@ mod tests {
         TurnScope,
         run_profile::{InMemoryRunProfileResolver, VisibleCapabilityRequest},
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const TEST_CAPABILITY_ID: &str = "test.synthetic";
     const TEST_PROVIDER_TOOL_NAME: &str = "test__synthetic";
@@ -581,6 +582,24 @@ mod tests {
         }
     }
 
+    struct CountingResultWriter {
+        writes: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for CountingResultWriter {
+        async fn write_capability_result(
+            &self,
+            _write: CapabilityResultWrite<'_>,
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            Ok(CapabilityWriteResult::without_output_digest(
+                LoopResultRef::new("result:synthetic-counting").expect("valid result ref"),
+                0,
+            ))
+        }
+    }
+
     struct TestSyntheticHandler;
 
     #[async_trait]
@@ -599,6 +618,38 @@ mod tests {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Internal,
                 "test handler should not be invoked",
+            ))
+        }
+    }
+
+    struct CountingSyntheticHandler {
+        invocations: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LocalDevSyntheticCapabilityHandler for CountingSyntheticHandler {
+        fn validate_provider_arguments(
+            &self,
+            _arguments: &serde_json::Value,
+        ) -> Result<(), AgentLoopHostError> {
+            Ok(())
+        }
+
+        async fn invoke(
+            &self,
+            _invocation: LocalDevSyntheticCapabilityInvocation,
+        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            self.invocations.fetch_add(1, Ordering::SeqCst);
+            Ok(CapabilityOutcome::Completed(
+                ironclaw_turns::run_profile::CapabilityResultMessage {
+                    result_ref: LoopResultRef::new("result:synthetic-handler")
+                        .expect("valid result ref"),
+                    safe_summary: "synthetic handler completed".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    terminate_hint: false,
+                    byte_len: 0,
+                    output_digest: None,
+                },
             ))
         }
     }
@@ -622,6 +673,13 @@ mod tests {
     }
 
     async fn synthetic_port() -> LocalDevSyntheticCapabilityPort {
+        synthetic_port_with_io(Arc::new(TestSyntheticHandler), Arc::new(NoopResultWriter)).await
+    }
+
+    async fn synthetic_port_with_io(
+        handler: Arc<dyn LocalDevSyntheticCapabilityHandler>,
+        result_writer: Arc<dyn LoopCapabilityResultWriter>,
+    ) -> LocalDevSyntheticCapabilityPort {
         let capability = LocalDevSyntheticCapability::new(
             LocalDevSyntheticCapabilityDescriptor::new(
                 TEST_CAPABILITY_ID,
@@ -631,7 +689,7 @@ mod tests {
                 serde_json::json!({"type": "object"}),
             )
             .expect("descriptor"),
-            Arc::new(TestSyntheticHandler),
+            handler,
         );
         let port = LocalDevSyntheticCapabilityPort::new(
             Arc::new(EmptyLoopCapabilityPort),
@@ -642,7 +700,7 @@ mod tests {
                     .expect("input ref"),
                 input: serde_json::json!({"message": "hello"}),
             }),
-            Arc::new(NoopResultWriter),
+            result_writer,
             None,
         )
         .expect("synthetic port");
@@ -717,5 +775,44 @@ mod tests {
             "error should name the activity identity mismatch: {:?}",
             error.safe_summary
         );
+    }
+
+    #[tokio::test]
+    async fn synthetic_provider_call_rejects_invocation_activity_mismatch_before_dispatch() {
+        let handler_invocations = Arc::new(AtomicUsize::new(0));
+        let result_writes = Arc::new(AtomicUsize::new(0));
+        let port = synthetic_port_with_io(
+            Arc::new(CountingSyntheticHandler {
+                invocations: Arc::clone(&handler_invocations),
+            }),
+            Arc::new(CountingResultWriter {
+                writes: Arc::clone(&result_writes),
+            }),
+        )
+        .await;
+        let activity_id = CapabilityActivityId::new();
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
+                provider_tool_call(),
+                activity_id,
+            ))
+            .await
+            .expect("provider call registers");
+
+        let error = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: different_activity_id(activity_id),
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect_err("activity mismatch must fail before synthetic dispatch");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert_eq!(handler_invocations.load(Ordering::SeqCst), 0);
+        assert_eq!(result_writes.load(Ordering::SeqCst), 0);
     }
 }
