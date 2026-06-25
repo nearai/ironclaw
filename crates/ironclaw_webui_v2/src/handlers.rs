@@ -36,25 +36,26 @@ use ironclaw_product_workflow::{
     RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
     RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
     RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
-    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
-    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
-    RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
-    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
-    RebornProjectMemberInfo, RebornProjectResponse, RebornRemoveMemberRequest,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAttachmentCapabilities,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
+    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
+    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
+    RebornProjectResponse, RebornRemoveMemberRequest, RebornResolveGateResponse, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, SetActiveLlmRequest,
+    UpsertLlmProviderRequest, WebUiAttachmentCapabilities, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1450,6 +1451,9 @@ pub async fn get_operator_status(
 }
 
 /// `GET /api/webchat/v2/operator/logs`
+///
+/// Operator-gated version of the logs projection. The non-operator
+/// projection lives at `GET /api/webchat/v2/logs`.
 pub async fn query_operator_logs(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
@@ -1458,6 +1462,35 @@ pub async fn query_operator_logs(
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let response = state.services().query_operator_logs(caller, query).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/logs`
+///
+/// Read-only caller-scoped logs projection for non-operator WebUI sessions.
+/// The operator-wide log surface remains `GET /api/webchat/v2/operator/logs`.
+pub async fn query_logs(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<RebornOperatorLogsQuery>,
+) -> Result<Json<RebornLogQueryResponse>, WebUiV2HttpError> {
+    // The public and operator HTTP query strings intentionally share fields;
+    // convert at the handler boundary so the facade can enforce public scope.
+    let request = RebornLogQueryRequest {
+        limit: query.limit,
+        cursor: query.cursor,
+        level: query.level,
+        target: query.target,
+        thread_id: query.thread_id,
+        run_id: query.run_id,
+        turn_id: query.turn_id,
+        tool_call_id: query.tool_call_id,
+        tool_name: query.tool_name,
+        source: query.source,
+        tail: query.tail,
+        follow: query.follow,
+    };
+    let response = state.services().query_logs(caller, request).await?;
     Ok(Json(response))
 }
 

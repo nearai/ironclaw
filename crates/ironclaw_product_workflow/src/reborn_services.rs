@@ -2288,6 +2288,15 @@ pub trait RebornServicesApi: Send + Sync {
         ))
     }
 
+    async fn query_logs(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        let _ = (caller, query);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     async fn query_operator_logs(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3989,19 +3998,35 @@ impl RebornServicesApi for RebornServices {
         })
     }
 
+    async fn query_logs(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        validate_log_query_modes(query.tail, query.follow)?;
+
+        let request = bounded_log_query(query);
+        let thread_id = request.thread_id.clone().ok_or_else(|| {
+            RebornServicesError::validation(WebUiInboundValidationError::new(
+                "thread_id",
+                WebUiInboundValidationCode::MissingField,
+            ))
+        })?;
+        let thread_id = parse_thread_id_field("thread_id", thread_id)?;
+        let actor = caller.actor();
+        let scope = caller.turn_scope(thread_id);
+        self.resolve_thread_access_for_caller(caller.clone(), scope, &actor)
+            .await?;
+
+        self.operator_logs.query_logs(caller, request).await
+    }
+
     async fn query_operator_logs(
         &self,
         caller: WebUiAuthenticatedCaller,
         query: RebornOperatorLogsQuery,
     ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        if query.tail && query.follow {
-            return Err(RebornServicesError::validation(
-                WebUiInboundValidationError::new(
-                    "follow",
-                    WebUiInboundValidationCode::InvalidValue,
-                ),
-            ));
-        }
+        validate_log_query_modes(query.tail, query.follow)?;
 
         let request = bounded_operator_logs_query(query);
         let logs = self.operator_logs.query_logs(caller, request).await?;
@@ -5814,14 +5839,38 @@ fn create_thread_metadata_json(
     .map_err(|_| RebornServicesError::internal_invariant())
 }
 
+fn validate_log_query_modes(tail: bool, follow: bool) -> Result<(), RebornServicesError> {
+    if tail && follow {
+        return Err(RebornServicesError::validation(
+            WebUiInboundValidationError::new("follow", WebUiInboundValidationCode::InvalidValue),
+        ));
+    }
+    Ok(())
+}
+
 fn bounded_operator_logs_query(query: RebornOperatorLogsQuery) -> RebornLogQueryRequest {
+    bounded_log_query(RebornLogQueryRequest {
+        limit: query.limit,
+        cursor: query.cursor,
+        level: query.level,
+        target: query.target,
+        thread_id: query.thread_id,
+        run_id: query.run_id,
+        turn_id: query.turn_id,
+        tool_call_id: query.tool_call_id,
+        tool_name: query.tool_name,
+        source: query.source,
+        tail: query.tail,
+        follow: query.follow,
+    })
+}
+
+fn bounded_log_query(query: RebornLogQueryRequest) -> RebornLogQueryRequest {
     RebornLogQueryRequest {
-        limit: Some(
-            query
-                .limit
-                .unwrap_or(OPERATOR_LOGS_DEFAULT_LIMIT)
-                .clamp(1, OPERATOR_LOGS_MAX_LIMIT),
-        ),
+        limit: query
+            .limit
+            .map(|limit| limit.clamp(1, OPERATOR_LOGS_MAX_LIMIT))
+            .or(Some(OPERATOR_LOGS_DEFAULT_LIMIT)),
         cursor: bounded_operator_logs_string(query.cursor, OPERATOR_LOGS_CURSOR_MAX_BYTES),
         level: query.level,
         target: bounded_operator_logs_string(query.target, OPERATOR_LOGS_TARGET_MAX_BYTES),

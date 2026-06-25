@@ -6163,6 +6163,166 @@ async fn query_operator_logs_rejects_ambiguous_tail_follow_modes() {
 }
 
 #[tokio::test]
+async fn query_logs_requires_thread_scope() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    let err = services
+        .query_logs(
+            caller(),
+            RebornLogQueryRequest {
+                limit: None,
+                cursor: None,
+                level: None,
+                target: None,
+                thread_id: None,
+                run_id: None,
+                turn_id: None,
+                tool_call_id: None,
+                tool_name: None,
+                source: None,
+                tail: false,
+                follow: false,
+            },
+        )
+        .await
+        .expect_err("public logs require a thread scope");
+
+    assert_eq!(err.kind, RebornServicesErrorKind::Validation);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(err.field.as_deref(), Some("thread_id"));
+    assert_eq!(
+        err.validation_code,
+        Some(WebUiInboundValidationCode::MissingField)
+    );
+    assert!(operator_logs.requests().is_empty());
+}
+
+#[tokio::test]
+async fn query_logs_rejects_ambiguous_tail_follow_modes() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    let err = services
+        .query_logs(
+            caller(),
+            RebornLogQueryRequest {
+                limit: None,
+                cursor: None,
+                level: None,
+                target: None,
+                thread_id: Some("thread-alpha".to_string()),
+                run_id: None,
+                turn_id: None,
+                tool_call_id: None,
+                tool_name: None,
+                source: None,
+                tail: true,
+                follow: true,
+            },
+        )
+        .await
+        .expect_err("tail and follow cannot be combined");
+
+    assert_eq!(err.kind, RebornServicesErrorKind::Validation);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(err.field.as_deref(), Some("follow"));
+    assert_eq!(
+        err.validation_code,
+        Some(WebUiInboundValidationCode::InvalidValue)
+    );
+    assert!(operator_logs.requests().is_empty());
+}
+
+#[tokio::test]
+async fn query_logs_forwards_owned_thread_scope_to_logs_service() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    setup_owned_thread(&services, caller(), "thread-alpha").await;
+
+    services
+        .query_logs(
+            caller(),
+            RebornLogQueryRequest {
+                limit: Some(25),
+                cursor: Some("after:7".to_string()),
+                level: Some(RebornLogLevel::Info),
+                target: Some("ironclaw".to_string()),
+                thread_id: Some("thread-alpha".to_string()),
+                run_id: None,
+                turn_id: None,
+                tool_call_id: None,
+                tool_name: None,
+                source: None,
+                tail: false,
+                follow: true,
+            },
+        )
+        .await
+        .expect("owned thread logs query");
+
+    let requests = operator_logs.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].limit, Some(25));
+    assert_eq!(requests[0].cursor.as_deref(), Some("after:7"));
+    assert_eq!(requests[0].level, Some(RebornLogLevel::Info));
+    assert_eq!(requests[0].target.as_deref(), Some("ironclaw"));
+    assert_eq!(requests[0].thread_id.as_deref(), Some("thread-alpha"));
+    assert!(!requests[0].tail);
+    assert!(requests[0].follow);
+}
+
+#[tokio::test]
+async fn query_logs_rejects_thread_owned_by_another_caller() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    setup_owned_thread(&services, caller_for_user("user-bob"), "thread-bob").await;
+
+    let err = services
+        .query_logs(
+            caller(),
+            RebornLogQueryRequest {
+                limit: Some(25),
+                cursor: None,
+                level: None,
+                target: None,
+                thread_id: Some("thread-bob".to_string()),
+                run_id: None,
+                turn_id: None,
+                tool_call_id: None,
+                tool_name: None,
+                source: None,
+                tail: false,
+                follow: false,
+            },
+        )
+        .await
+        .expect_err("foreign thread logs are not caller-visible");
+
+    assert_eq!(err.status_code, 404);
+    assert_eq!(err.kind, RebornServicesErrorKind::NotFound);
+    assert!(operator_logs.requests().is_empty());
+}
+
+#[tokio::test]
 async fn operator_service_lifecycle_contract_is_implementable_from_crate_root() {
     let backend = CrateRootLifecycleBackend;
     let response = backend
