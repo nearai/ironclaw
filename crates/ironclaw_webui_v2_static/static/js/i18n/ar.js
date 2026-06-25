@@ -366,8 +366,6 @@ registerPack("ar", {
   "settings.field.maxToolIterationsDesc": "حد استدعاءات الأدوات في الدور",
   "settings.field.planning": "التخطيط",
   "settings.field.planningDesc": "تمكين التخطيط متعدد الخطوات قبل التنفيذ",
-  "settings.field.autoApproveTools": "الموافقة التلقائية على الأدوات",
-  "settings.field.autoApproveToolsDesc": "تخطي الموافقة لكل استدعاءات الأدوات",
   "settings.field.timezone": "المنطقة الزمنية",
   "settings.field.timezoneDesc": "منطقة IANA للمهام المجدولة",
   "settings.field.sessionIdleTimeout": "مهلة خمول الجلسة",

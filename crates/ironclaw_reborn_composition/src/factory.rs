@@ -427,11 +427,7 @@ pub struct RebornServices {
     /// operator LLM-key storage) can reuse the same instance product-auth uses
     /// rather than standing up a second authority.
     #[cfg_attr(
-        not(any(
-            feature = "root-llm-provider",
-            feature = "slack-v2-host-beta",
-            feature = "test-support"
-        )),
+        not(any(feature = "root-llm-provider", feature = "slack-v2-host-beta")),
         allow(dead_code)
     )]
     pub(crate) secret_store: Arc<dyn SecretStore>,
@@ -471,11 +467,7 @@ pub(crate) enum CredentialRefreshWorkerReady {
 impl RebornServices {
     /// The shared scoped secret store backing this composition.
     #[cfg_attr(
-        not(any(
-            feature = "root-llm-provider",
-            feature = "slack-v2-host-beta",
-            feature = "test-support"
-        )),
+        not(any(feature = "root-llm-provider", feature = "slack-v2-host-beta")),
         allow(dead_code)
     )]
     pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {

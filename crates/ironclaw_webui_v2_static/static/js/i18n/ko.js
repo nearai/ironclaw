@@ -366,8 +366,6 @@ registerPack("ko", {
   "settings.field.maxToolIterationsDesc": "턴당 도구 호출 제한",
   "settings.field.planning": "계획",
   "settings.field.planningDesc": "실행 전 다단계 계획 활성화",
-  "settings.field.autoApproveTools": "도구 자동 승인",
-  "settings.field.autoApproveToolsDesc": "모든 도구 호출의 승인 건너뛰기",
   "settings.field.timezone": "시간대",
   "settings.field.timezoneDesc": "예약 작업의 IANA 시간대",
   "settings.field.sessionIdleTimeout": "세션 유휴 시간 제한",

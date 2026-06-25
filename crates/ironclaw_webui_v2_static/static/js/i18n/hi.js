@@ -366,8 +366,6 @@ registerPack("hi", {
   "settings.field.maxToolIterationsDesc": "प्रति मोड़ टूल कॉल सीमा",
   "settings.field.planning": "योजना",
   "settings.field.planningDesc": "Execution से पहले multi-step planning सक्षम करें",
-  "settings.field.autoApproveTools": "ऑटो-अनुमोदन उपकरण",
-  "settings.field.autoApproveToolsDesc": "सभी tool calls के लिए approval skip करें",
   "settings.field.timezone": "समयक्षेत्र",
   "settings.field.timezoneDesc": "Scheduled work के लिए IANA timezone",
   "settings.field.sessionIdleTimeout": "सत्र निष्क्रिय समयबाह्य",

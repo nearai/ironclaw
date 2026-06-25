@@ -366,8 +366,6 @@ registerPack("fr", {
   "settings.field.maxToolIterationsDesc": "Limite d’appels d’outils par tour",
   "settings.field.planning": "Planification",
   "settings.field.planningDesc": "Activer la planification multi‑étapes avant exécution",
-  "settings.field.autoApproveTools": "Auto‑valider les outils",
-  "settings.field.autoApproveToolsDesc": "Ignorer la validation pour tous les appels d’outils",
   "settings.field.timezone": "Fuseau horaire",
   "settings.field.timezoneDesc": "Fuseau horaire IANA pour le travail planifié",
   "settings.field.sessionIdleTimeout": "Timeout d’inactivité",

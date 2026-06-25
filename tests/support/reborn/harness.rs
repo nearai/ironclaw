@@ -1584,7 +1584,7 @@ impl HostRuntimeCapabilityHarness {
     }
 
     async fn coding_read_tools() -> HarnessResult<Self> {
-        Self::new(
+        let harness = Self::new(
             "reborn-e2e-coding-read-tools",
             vec![
                 CapabilityId::new(LIST_DIR_CAPABILITY_ID)?,
@@ -1597,7 +1597,11 @@ impl HostRuntimeCapabilityHarness {
             UserId::new("reborn-e2e-coding-read-user")?,
             None,
         )
-        .await
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
     }
 
     async fn process_tools() -> HarnessResult<Self> {

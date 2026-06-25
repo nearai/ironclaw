@@ -366,8 +366,6 @@ registerPack("zh-CN", {
   "settings.field.maxToolIterationsDesc": "每轮工具调用上限",
   "settings.field.planning": "规划",
   "settings.field.planningDesc": "执行前启用多步规划",
-  "settings.field.autoApproveTools": "自动批准工具",
-  "settings.field.autoApproveToolsDesc": "跳过所有工具调用的审批",
   "settings.field.autoApproveEligibleTools": "始终允许符合条件的工具",
   "settings.field.autoApproveEligibleToolsDesc":
     "仅影响设置为“跟随全局”的工具。单工具设置会覆盖此开关；硬性审批工具仍需审批。",

@@ -366,8 +366,6 @@ registerPack("de", {
   "settings.field.maxToolIterationsDesc": "Tool‑Call‑Limit pro Turn",
   "settings.field.planning": "Planung",
   "settings.field.planningDesc": "Mehrschritt‑Planung vor Ausführung aktivieren",
-  "settings.field.autoApproveTools": "Tools automatisch freigeben",
-  "settings.field.autoApproveToolsDesc": "Freigabe für alle Tool‑Calls überspringen",
   "settings.field.timezone": "Zeitzone",
   "settings.field.timezoneDesc": "IANA‑Zeitzone für geplante Arbeit",
   "settings.field.sessionIdleTimeout": "Session‑Idle‑Timeout",

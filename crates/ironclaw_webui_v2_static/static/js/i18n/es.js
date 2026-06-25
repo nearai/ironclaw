@@ -366,8 +366,6 @@ registerPack("es", {
   "settings.field.maxToolIterationsDesc": "Límite de llamadas a herramientas por turno",
   "settings.field.planning": "Planificación",
   "settings.field.planningDesc": "Habilitar planificación multi‑paso antes de ejecutar",
-  "settings.field.autoApproveTools": "Autoaprobar herramientas",
-  "settings.field.autoApproveToolsDesc": "Omitir aprobación para todas las llamadas",
   "settings.field.timezone": "Zona horaria",
   "settings.field.timezoneDesc": "Zona horaria IANA para trabajos programados",
   "settings.field.sessionIdleTimeout": "Tiempo de inactividad de sesión",

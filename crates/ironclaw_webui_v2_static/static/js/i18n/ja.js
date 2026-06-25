@@ -366,8 +366,6 @@ registerPack("ja", {
   "settings.field.maxToolIterationsDesc": "1ターンあたりのツール呼び出し上限",
   "settings.field.planning": "プランニング",
   "settings.field.planningDesc": "実行前の多段プランニングを有効化",
-  "settings.field.autoApproveTools": "ツール自動承認",
-  "settings.field.autoApproveToolsDesc": "すべてのツール呼び出しを承認不要にする",
   "settings.field.timezone": "タイムゾーン",
   "settings.field.timezoneDesc": "スケジュール作業の IANA タイムゾーン",
   "settings.field.sessionIdleTimeout": "セッションアイドルタイムアウト",

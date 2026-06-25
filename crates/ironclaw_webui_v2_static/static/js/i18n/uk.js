@@ -366,8 +366,6 @@ registerPack("uk", {
   "settings.field.maxToolIterationsDesc": "Ліміт викликів інструментів за хід",
   "settings.field.planning": "Планування",
   "settings.field.planningDesc": "Увімкнути багатокрокове планування перед виконанням",
-  "settings.field.autoApproveTools": "Автозатвердження інструментів",
-  "settings.field.autoApproveToolsDesc": "Пропускати затвердження для всіх викликів інструментів",
   "settings.field.timezone": "Часовий пояс",
   "settings.field.timezoneDesc": "IANA часовий пояс для запланованих робіт",
   "settings.field.sessionIdleTimeout": "Таймаут неактивності сесії",
