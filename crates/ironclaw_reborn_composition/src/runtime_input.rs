@@ -6,8 +6,8 @@
 //! - **LLM configuration** (optional, behind the `root-llm-provider` feature).
 //!   Used by the composition root to construct an `LlmProviderModelGateway`
 //!   that satisfies the loop-support `HostManagedModelGateway` contract.
-//! - **Turn-runner configuration** — poll/heartbeat intervals for the worker
-//!   loop.
+//! - **Turn-runner configuration** — poll interval, heartbeat cadence, and
+//!   heartbeat write timeout for the worker loop.
 //! - **Completion polling configuration** — interval/timeout policy for
 //!   waiting on submitted turns to finish.
 //! - **Runtime identity** — tenant/agent and source/reply binding identifiers
@@ -30,7 +30,11 @@ use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
 use ironclaw_reborn::runtime::{
     DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
+    DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL as REBORN_DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
+    DEFAULT_TURN_RUNNER_HEARTBEAT_TIMEOUT as REBORN_DEFAULT_TURN_RUNNER_HEARTBEAT_TIMEOUT,
     DEFAULT_TURN_RUNNER_WORKER_COUNT,
+    MAX_TURN_RUNNER_HEARTBEAT_INTERVAL_SECS as REBORN_MAX_TURN_RUNNER_HEARTBEAT_INTERVAL_SECS,
+    MAX_TURN_RUNNER_HEARTBEAT_TIMEOUT_SECS as REBORN_MAX_TURN_RUNNER_HEARTBEAT_TIMEOUT_SECS,
 };
 use ironclaw_reborn_config::BudgetDefaults;
 #[cfg(feature = "root-llm-provider")]
@@ -70,7 +74,14 @@ impl Default for RebornRuntimeIdentity {
     }
 }
 
-pub const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+pub const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration =
+    REBORN_DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL;
+pub const DEFAULT_TURN_RUNNER_HEARTBEAT_TIMEOUT: Duration =
+    REBORN_DEFAULT_TURN_RUNNER_HEARTBEAT_TIMEOUT;
+pub const MAX_TURN_RUNNER_HEARTBEAT_INTERVAL_SECS: u64 =
+    REBORN_MAX_TURN_RUNNER_HEARTBEAT_INTERVAL_SECS;
+pub const MAX_TURN_RUNNER_HEARTBEAT_TIMEOUT_SECS: u64 =
+    REBORN_MAX_TURN_RUNNER_HEARTBEAT_TIMEOUT_SECS;
 pub const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Fire-time access request for a persisted trigger.
@@ -200,6 +211,7 @@ impl ResolvedRebornLlm {
 #[derive(Debug, Clone)]
 pub struct TurnRunnerSettings {
     pub heartbeat_interval: Duration,
+    pub heartbeat_timeout: Duration,
     pub poll_interval: Duration,
     /// Number of concurrent turn-runner worker tasks.
     pub worker_count: std::num::NonZeroUsize,
@@ -218,6 +230,7 @@ impl Default for TurnRunnerSettings {
     fn default() -> Self {
         Self {
             heartbeat_interval: DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
+            heartbeat_timeout: DEFAULT_TURN_RUNNER_HEARTBEAT_TIMEOUT,
             poll_interval: DEFAULT_TURN_RUNNER_POLL_INTERVAL,
             worker_count: DEFAULT_TURN_RUNNER_WORKER_COUNT,
             max_concurrent_runs_per_user: Some(DEFAULT_MAX_CONCURRENT_RUNS_PER_USER),

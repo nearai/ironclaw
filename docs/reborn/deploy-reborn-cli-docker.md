@@ -36,6 +36,7 @@ IRONCLAW_REBORN_SERVE_PORT=3000
 IRONCLAW_REBORN_PROFILE=local-dev
 IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
 IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli
+IRONCLAW_REBORN_RUNNER_HEARTBEAT_TIMEOUT_SECS=20
 NEARAI_BASE_URL=https://cloud-api.near.ai
 NEARAI_API_KEY=<nearai-api-key>
 ```
@@ -43,6 +44,10 @@ NEARAI_API_KEY=<nearai-api-key>
 The bundled Docker config selects NearAI in `[llm.default]`; set
 `NEARAI_API_KEY` for that provider. To change provider or model, mount a custom
 config and point `IRONCLAW_REBORN_DEFAULT_CONFIG` at it for the first start.
+`IRONCLAW_REBORN_RUNNER_HEARTBEAT_TIMEOUT_SECS` overrides
+`[runner].heartbeat_timeout_secs` at startup; use it to raise the runner
+heartbeat write deadline on already-seeded deployments without slowing the
+heartbeat cadence. Values must be integer seconds in `1..=60`.
 
 Google product-auth setup:
 

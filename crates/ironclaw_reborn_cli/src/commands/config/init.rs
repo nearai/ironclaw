@@ -181,7 +181,13 @@ default_owner  = "reborn-cli"
 # id = "red-team"
 
 [runner]
+# How often claimed runs refresh their lease.
+# Must be in 1..=60; keep it below the 90s runner lease.
 heartbeat_interval_secs = 5
+# How long a heartbeat write may take before the runner treats it as failed.
+# Can be overridden at startup with IRONCLAW_REBORN_RUNNER_HEARTBEAT_TIMEOUT_SECS.
+# Must be in 1..=60.
+heartbeat_timeout_secs  = 20
 poll_interval_ms        = 200
 
 [skills]

@@ -2971,6 +2971,7 @@ pub async fn build_reborn_runtime(
         loop_exit_evidence,
         config: DefaultPlannedRuntimeConfig {
             heartbeat_interval: runner.heartbeat_interval,
+            heartbeat_timeout: runner.heartbeat_timeout,
             poll_interval: runner.poll_interval,
             worker_count: runner.worker_count,
             ..DefaultPlannedRuntimeConfig::default()

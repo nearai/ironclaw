@@ -71,6 +71,13 @@ pub const DEFAULT_TURN_RUNNER_WORKER_COUNT: std::num::NonZeroUsize =
         None => std::num::NonZeroUsize::MIN,
     };
 
+pub const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(5);
+pub const DEFAULT_TURN_RUNNER_HEARTBEAT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(20);
+pub const MAX_TURN_RUNNER_HEARTBEAT_INTERVAL_SECS: u64 = 60;
+pub const MAX_TURN_RUNNER_HEARTBEAT_TIMEOUT_SECS: u64 = 60;
+
 /// Default per-`(tenant, ScheduledTrigger)` concurrency cap.
 ///
 /// Set below [`DEFAULT_TURN_RUNNER_WORKER_COUNT`] so background triggers can
@@ -95,6 +102,7 @@ pub const DEFAULT_MAX_CONCURRENT_RUNS_PER_USER: std::num::NonZeroU32 =
 #[derive(Debug, Clone)]
 pub struct DefaultPlannedRuntimeConfig {
     pub heartbeat_interval: std::time::Duration,
+    pub heartbeat_timeout: std::time::Duration,
     pub poll_interval: std::time::Duration,
     pub worker_count: std::num::NonZeroUsize,
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
@@ -104,7 +112,8 @@ pub struct DefaultPlannedRuntimeConfig {
 impl Default for DefaultPlannedRuntimeConfig {
     fn default() -> Self {
         Self {
-            heartbeat_interval: std::time::Duration::from_secs(10),
+            heartbeat_interval: DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
+            heartbeat_timeout: DEFAULT_TURN_RUNNER_HEARTBEAT_TIMEOUT,
             poll_interval: std::time::Duration::from_secs(5),
             worker_count: DEFAULT_TURN_RUNNER_WORKER_COUNT,
             text_only_driver: TextOnlyModelReplyDriverConfig::default(),
@@ -659,6 +668,7 @@ where
     let scheduler_config = TurnRunSchedulerConfig::default()
         .with_max_concurrent_runs(parts.config.worker_count.get())
         .with_runner_heartbeat_interval(parts.config.heartbeat_interval)
+        .with_runner_heartbeat_timeout(parts.config.heartbeat_timeout)
         .with_poll_interval(parts.config.poll_interval);
     let scheduler = TurnRunScheduler::new(Arc::clone(&transition_port), executor, scheduler_config);
     let scheduler_handle = wake_wiring.start(scheduler);

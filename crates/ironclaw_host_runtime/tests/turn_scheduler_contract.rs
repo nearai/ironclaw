@@ -1496,7 +1496,8 @@ async fn scheduler_records_failure_when_heartbeat_call_times_out() {
         executor.clone(),
         fast_config()
             .with_poll_interval(Duration::from_secs(60))
-            .with_runner_heartbeat_interval(Duration::from_millis(10)),
+            .with_runner_heartbeat_interval(Duration::from_millis(10))
+            .with_runner_heartbeat_timeout(Duration::from_millis(25)),
     );
     let handle = scheduler.start();
     let coordinator =

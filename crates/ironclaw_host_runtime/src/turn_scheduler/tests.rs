@@ -342,6 +342,22 @@ async fn heartbeat_does_not_deadlock_executor_holding_transition_lock() {
     handle.shutdown().await;
 }
 
+#[test]
+fn scheduler_config_keeps_heartbeat_interval_and_timeout_separate() {
+    let config = TurnRunSchedulerConfig::default()
+        .with_runner_heartbeat_interval(std::time::Duration::from_secs(5))
+        .with_runner_heartbeat_timeout(std::time::Duration::from_secs(20));
+
+    assert_eq!(
+        config.runner_heartbeat_interval(),
+        std::time::Duration::from_secs(5)
+    );
+    assert_eq!(
+        config.runner_heartbeat_timeout(),
+        std::time::Duration::from_secs(20)
+    );
+}
+
 /// `is_stopped()` returns `false` while the scheduler is running and the
 /// supervisor task becomes finished after `shutdown()` completes.
 ///

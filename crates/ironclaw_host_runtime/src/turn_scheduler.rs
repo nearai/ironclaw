@@ -28,6 +28,7 @@ pub struct TurnRunSchedulerConfig {
     poll_interval: Duration,
     lease_recovery_interval: Duration,
     runner_heartbeat_interval: Duration,
+    runner_heartbeat_timeout: Duration,
     claim_error_backoff: Duration,
     wake_channel_capacity: usize,
 }
@@ -39,6 +40,7 @@ impl Default for TurnRunSchedulerConfig {
             poll_interval: Duration::from_secs(5),
             lease_recovery_interval: Duration::from_secs(10),
             runner_heartbeat_interval: Duration::from_secs(30),
+            runner_heartbeat_timeout: Duration::from_secs(30),
             claim_error_backoff: Duration::from_secs(1),
             wake_channel_capacity: 128,
         }
@@ -70,6 +72,10 @@ impl TurnRunSchedulerConfig {
         self.runner_heartbeat_interval
     }
 
+    pub fn runner_heartbeat_timeout(&self) -> Duration {
+        self.runner_heartbeat_timeout
+    }
+
     pub fn claim_error_backoff(&self) -> Duration {
         self.claim_error_backoff
     }
@@ -95,6 +101,11 @@ impl TurnRunSchedulerConfig {
 
     pub fn with_runner_heartbeat_interval(mut self, runner_heartbeat_interval: Duration) -> Self {
         self.runner_heartbeat_interval = non_zero_duration(runner_heartbeat_interval);
+        self
+    }
+
+    pub fn with_runner_heartbeat_timeout(mut self, runner_heartbeat_timeout: Duration) -> Self {
+        self.runner_heartbeat_timeout = non_zero_duration(runner_heartbeat_timeout);
         self
     }
 
@@ -577,7 +588,7 @@ async fn drain_queued_runs(
                     Arc::clone(&context.executor),
                     context.command_tx.clone(),
                     permit,
-                    context.config.runner_heartbeat_interval(),
+                    context.config.clone(),
                     executor_tasks,
                 );
             }
@@ -601,7 +612,7 @@ fn spawn_executor_task(
     executor: Arc<dyn TurnRunExecutor>,
     command_tx: mpsc::Sender<SchedulerCommand>,
     permit: tokio::sync::OwnedSemaphorePermit,
-    runner_heartbeat_interval: Duration,
+    config: TurnRunSchedulerConfig,
     executor_tasks: &mut JoinSet<TurnRunId>,
 ) {
     // Tag every tracing event emitted while this run executes with its
@@ -631,7 +642,8 @@ fn spawn_executor_task(
                 run_id = %recovery_run_id_for_start,
                 "turn run started",
             );
-            let mut heartbeat_tick = interval(runner_heartbeat_interval);
+            let runner_heartbeat_timeout = config.runner_heartbeat_timeout();
+            let mut heartbeat_tick = interval(config.runner_heartbeat_interval());
             heartbeat_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
             // Consume the immediate first tick so the heartbeat loop never fires
             // at t=0. The run's lease was just issued and valid; a t=0 heartbeat
@@ -664,7 +676,7 @@ fn spawn_executor_task(
                             recovery_run_id,
                             recovery_runner_id,
                             recovery_lease_token,
-                            runner_heartbeat_interval,
+                            runner_heartbeat_timeout,
                         );
                     }
                     Some(heartbeat) = heartbeats.join(), if heartbeats.is_running() => {

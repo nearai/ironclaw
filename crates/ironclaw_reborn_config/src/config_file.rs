@@ -154,6 +154,7 @@ pub struct HarnessSection {
 #[serde(deny_unknown_fields)]
 pub struct RunnerSection {
     pub heartbeat_interval_secs: Option<u64>,
+    pub heartbeat_timeout_secs: Option<u64>,
     pub poll_interval_ms: Option<u64>,
     /// Number of concurrent turn-runner worker tasks. `None` or `0` defaults to 4. Clamped to 32.
     pub worker_count: Option<usize>,
@@ -1145,6 +1146,7 @@ mod tests {
         let toml = r#"
 [runner]
 heartbeat_interval_secs = 10
+heartbeat_timeout_secs = 20
 poll_interval_ms = 100
 worker_count = 3
 max_concurrent_runs_per_user = 2
@@ -1154,6 +1156,7 @@ max_concurrent_conversation_runs = 4
         let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
         let runner = cfg.runner.as_ref().expect("runner section present");
         assert_eq!(runner.heartbeat_interval_secs, Some(10));
+        assert_eq!(runner.heartbeat_timeout_secs, Some(20));
         assert_eq!(runner.poll_interval_ms, Some(100));
         assert_eq!(runner.worker_count, Some(3));
         assert_eq!(runner.max_concurrent_runs_per_user, Some(2));
@@ -1179,6 +1182,7 @@ max_concurrent_conversation_runs = 5
         let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
         let runner = cfg.runner.as_ref().expect("runner section present");
         assert_eq!(runner.heartbeat_interval_secs, None);
+        assert_eq!(runner.heartbeat_timeout_secs, None);
         assert_eq!(runner.poll_interval_ms, None);
         assert_eq!(runner.worker_count, Some(8));
         assert_eq!(runner.max_concurrent_runs_per_user, Some(1));
@@ -1213,6 +1217,7 @@ id = "red-team"
 
 [runner]
 heartbeat_interval_secs = 5
+heartbeat_timeout_secs = 20
 poll_interval_ms = 200
 
 [skills]

@@ -10,8 +10,9 @@ use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
 #[cfg(feature = "postgres")]
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
-    CredentialRefreshSettings, DEFAULT_TURN_RUNNER_WORKER_COUNT, OAuthClientConfig,
-    OperatorLogLayer, PollSettings, RebornBuildInput, RebornCompositionProfile,
+    CredentialRefreshSettings, DEFAULT_TURN_RUNNER_WORKER_COUNT,
+    MAX_TURN_RUNNER_HEARTBEAT_INTERVAL_SECS, MAX_TURN_RUNNER_HEARTBEAT_TIMEOUT_SECS,
+    OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput, RebornCompositionProfile,
     RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
     TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
     nearai_mcp_bootstrap_config_from_env,
@@ -28,6 +29,7 @@ use secrecy::SecretString;
 use tokio_util::sync::CancellationToken;
 
 use crate::context::RebornCliContext;
+use crate::operator_env::{strict_env_var, truncate_env_value_for_display};
 
 #[cfg(test)]
 mod test_env;
@@ -933,6 +935,7 @@ fn reject_unsupported_runtime_sections(
 }
 
 const MAX_WORKER_COUNT: usize = 32;
+const RUNNER_HEARTBEAT_TIMEOUT_SECS_ENV: &str = "IRONCLAW_REBORN_RUNNER_HEARTBEAT_TIMEOUT_SECS";
 
 /// Resolve a `[runner]` concurrency cap against the in-effect default.
 ///
@@ -951,18 +954,48 @@ fn resolve_concurrency_cap(
     }
 }
 
+fn runner_bounded_duration(source: &str, secs: u64, max_secs: u64) -> anyhow::Result<Duration> {
+    if secs == 0 {
+        anyhow::bail!("{source} must be greater than 0");
+    }
+    if secs > max_secs {
+        anyhow::bail!("{source} must be in 1..={max_secs}; got {secs}");
+    }
+    Ok(Duration::from_secs(secs))
+}
+
+fn runner_heartbeat_timeout_from_env(raw: &str) -> anyhow::Result<Duration> {
+    let secs = raw.trim().parse::<u64>().map_err(|error| {
+        let display = truncate_env_value_for_display(raw);
+        anyhow::anyhow!(
+            "{RUNNER_HEARTBEAT_TIMEOUT_SECS_ENV} must be a positive integer, got {display:?}: {error}"
+        )
+    })?;
+    runner_bounded_duration(
+        RUNNER_HEARTBEAT_TIMEOUT_SECS_ENV,
+        secs,
+        MAX_TURN_RUNNER_HEARTBEAT_TIMEOUT_SECS,
+    )
+}
+
 fn runner_settings(
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
 ) -> anyhow::Result<TurnRunnerSettings> {
     let mut settings = TurnRunnerSettings::default();
     if let Some(runner) = config_file.and_then(|file| file.runner.as_ref()) {
         if let Some(secs) = runner.heartbeat_interval_secs {
-            if secs == 0 {
-                anyhow::bail!(
-                    "config file [runner].heartbeat_interval_secs must be greater than 0"
-                );
-            }
-            settings.heartbeat_interval = Duration::from_secs(secs);
+            settings.heartbeat_interval = runner_bounded_duration(
+                "config file [runner].heartbeat_interval_secs",
+                secs,
+                MAX_TURN_RUNNER_HEARTBEAT_INTERVAL_SECS,
+            )?;
+        }
+        if let Some(secs) = runner.heartbeat_timeout_secs {
+            settings.heartbeat_timeout = runner_bounded_duration(
+                "config file [runner].heartbeat_timeout_secs",
+                secs,
+                MAX_TURN_RUNNER_HEARTBEAT_TIMEOUT_SECS,
+            )?;
         }
         if let Some(ms) = runner.poll_interval_ms {
             if ms == 0 {
@@ -1006,27 +1039,32 @@ fn runner_settings(
             settings.max_concurrent_conversation_runs,
         );
     }
+    if let Some(raw) = strict_env_var(RUNNER_HEARTBEAT_TIMEOUT_SECS_ENV)? {
+        settings.heartbeat_timeout = runner_heartbeat_timeout_from_env(&raw)?;
+    }
     Ok(settings)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, time::Duration};
 
     use ironclaw_reborn_composition::{
-        CredentialRefreshSettings, RebornCompositionProfile, TurnStatus,
-        test_support::assistant_reply_without_text_for_test,
+        CredentialRefreshSettings, DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
+        DEFAULT_TURN_RUNNER_HEARTBEAT_TIMEOUT, MAX_TURN_RUNNER_HEARTBEAT_INTERVAL_SECS,
+        MAX_TURN_RUNNER_HEARTBEAT_TIMEOUT_SECS, RebornCompositionProfile, TurnRunnerSettings,
+        TurnStatus, test_support::assistant_reply_without_text_for_test,
     };
     #[cfg(feature = "webui-v2-beta")]
     use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
     use ironclaw_reborn_config::RebornBootConfig;
 
-    use super::test_env::{EnvGuard, lock_trigger_env};
+    use super::test_env::{EnvGuard, lock_runtime_env, lock_trigger_env};
     #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
-        MAX_WORKER_COUNT, RuntimeInputCaller, RuntimeInputOptions,
-        apply_credential_refresh_override, block_on_cli, build_runtime_input,
+        MAX_WORKER_COUNT, RUNNER_HEARTBEAT_TIMEOUT_SECS_ENV, RuntimeInputCaller,
+        RuntimeInputOptions, apply_credential_refresh_override, block_on_cli, build_runtime_input,
         build_runtime_input_with_options, no_assistant_text_message, protect_reborn_log_filter,
         resolve_google_oauth_config, runner_settings,
     };
@@ -1040,12 +1078,28 @@ mod tests {
         .expect("must parse")
     }
 
+    fn runner_settings_without_heartbeat_timeout_env(
+        config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    ) -> TurnRunnerSettings {
+        let _lock = lock_runtime_env();
+        let _heartbeat_timeout = EnvGuard::clear(RUNNER_HEARTBEAT_TIMEOUT_SECS_ENV);
+        runner_settings(config_file).expect("should succeed")
+    }
+
     #[test]
     fn runner_settings_absent_runner_gives_defaults() {
-        let settings = runner_settings(None).expect("should succeed");
+        let settings = runner_settings_without_heartbeat_timeout_env(None);
         assert_eq!(
             settings.worker_count.get(),
             DEFAULT_TURN_RUNNER_WORKER_COUNT.get()
+        );
+        assert_eq!(
+            settings.heartbeat_interval,
+            DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL
+        );
+        assert_eq!(
+            settings.heartbeat_timeout,
+            DEFAULT_TURN_RUNNER_HEARTBEAT_TIMEOUT
         );
         // Out-of-box: per-user + trigger caps protect live chat from a
         // trigger storm; conversations stay uncapped.
@@ -1065,7 +1119,7 @@ mod tests {
         // A `[runner]` section that only tunes worker_count must NOT silently
         // wipe the protective cap defaults.
         let cfg = parse_runner_section("[runner]\nworker_count = 7\n");
-        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        let settings = runner_settings_without_heartbeat_timeout_env(Some(&cfg));
         assert_eq!(settings.worker_count.get(), 7);
         assert_eq!(
             settings.max_concurrent_runs_per_user.map(|v| v.get()),
@@ -1081,7 +1135,7 @@ mod tests {
     #[test]
     fn runner_settings_zero_worker_count_gives_default() {
         let cfg = parse_runner_section("[runner]\nworker_count = 0\n");
-        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        let settings = runner_settings_without_heartbeat_timeout_env(Some(&cfg));
         assert_eq!(
             settings.worker_count.get(),
             DEFAULT_TURN_RUNNER_WORKER_COUNT.get()
@@ -1091,7 +1145,7 @@ mod tests {
     #[test]
     fn runner_settings_present_worker_count_round_trips() {
         let cfg = parse_runner_section("[runner]\nworker_count = 7\n");
-        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        let settings = runner_settings_without_heartbeat_timeout_env(Some(&cfg));
         assert_eq!(settings.worker_count.get(), 7);
     }
 
@@ -1099,7 +1153,7 @@ mod tests {
     fn runner_settings_clamps_worker_count_at_max() {
         let toml = format!("[runner]\nworker_count = {}\n", MAX_WORKER_COUNT + 10);
         let cfg = parse_runner_section(&toml);
-        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        let settings = runner_settings_without_heartbeat_timeout_env(Some(&cfg));
         assert_eq!(settings.worker_count.get(), MAX_WORKER_COUNT);
     }
 
@@ -1108,7 +1162,7 @@ mod tests {
         let cfg = parse_runner_section(
             "[runner]\nmax_concurrent_runs_per_user = 0\nmax_concurrent_trigger_runs = 0\nmax_concurrent_conversation_runs = 0\n",
         );
-        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        let settings = runner_settings_without_heartbeat_timeout_env(Some(&cfg));
         assert!(settings.max_concurrent_runs_per_user.is_none());
         assert!(settings.max_concurrent_trigger_runs.is_none());
         assert!(settings.max_concurrent_conversation_runs.is_none());
@@ -1119,7 +1173,7 @@ mod tests {
         let cfg = parse_runner_section(
             "[runner]\nmax_concurrent_runs_per_user = 3\nmax_concurrent_trigger_runs = 5\nmax_concurrent_conversation_runs = 2\n",
         );
-        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        let settings = runner_settings_without_heartbeat_timeout_env(Some(&cfg));
         assert_eq!(
             settings.max_concurrent_runs_per_user.map(|v| v.get()),
             Some(3)
@@ -1131,6 +1185,98 @@ mod tests {
         assert_eq!(
             settings.max_concurrent_conversation_runs.map(|v| v.get()),
             Some(2)
+        );
+    }
+
+    #[test]
+    fn runner_settings_env_overrides_config_heartbeat_timeout_only() {
+        let _lock = lock_runtime_env();
+        let _heartbeat_timeout = EnvGuard::set(RUNNER_HEARTBEAT_TIMEOUT_SECS_ENV, "20");
+        let cfg = parse_runner_section(
+            "[runner]\nheartbeat_interval_secs = 5\nheartbeat_timeout_secs = 10\n",
+        );
+
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+
+        assert_eq!(settings.heartbeat_interval, Duration::from_secs(5));
+        assert_eq!(settings.heartbeat_timeout, Duration::from_secs(20));
+    }
+
+    #[test]
+    fn runner_settings_rejects_invalid_heartbeat_env() {
+        let _lock = lock_runtime_env();
+        let _heartbeat_timeout = EnvGuard::set(RUNNER_HEARTBEAT_TIMEOUT_SECS_ENV, "10s");
+
+        let err = runner_settings(None).expect_err("invalid heartbeat env must fail loud");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains(RUNNER_HEARTBEAT_TIMEOUT_SECS_ENV) && msg.contains("10s"),
+            "error should identify invalid heartbeat env value: {msg}"
+        );
+    }
+
+    #[test]
+    fn runner_settings_rejects_zero_heartbeat_env() {
+        let _lock = lock_runtime_env();
+        let _heartbeat_timeout = EnvGuard::set(RUNNER_HEARTBEAT_TIMEOUT_SECS_ENV, "0");
+
+        let err = runner_settings(None).expect_err("zero heartbeat env must fail loud");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains(RUNNER_HEARTBEAT_TIMEOUT_SECS_ENV) && msg.contains("greater than 0"),
+            "error should identify zero heartbeat env value: {msg}"
+        );
+    }
+
+    #[test]
+    fn runner_settings_rejects_too_large_heartbeat_env() {
+        let _lock = lock_runtime_env();
+        let too_large = (MAX_TURN_RUNNER_HEARTBEAT_TIMEOUT_SECS + 1).to_string();
+        let _heartbeat_timeout = EnvGuard::set(RUNNER_HEARTBEAT_TIMEOUT_SECS_ENV, &too_large);
+
+        let err = runner_settings(None).expect_err("oversized heartbeat env must fail loud");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains(RUNNER_HEARTBEAT_TIMEOUT_SECS_ENV) && msg.contains(&too_large),
+            "error should identify oversized heartbeat env value: {msg}"
+        );
+    }
+
+    #[test]
+    fn runner_settings_rejects_too_large_config_heartbeat_interval() {
+        let _lock = lock_runtime_env();
+        let _heartbeat_timeout = EnvGuard::clear(RUNNER_HEARTBEAT_TIMEOUT_SECS_ENV);
+        let too_large = MAX_TURN_RUNNER_HEARTBEAT_INTERVAL_SECS + 1;
+        let cfg = parse_runner_section(&format!(
+            "[runner]\nheartbeat_interval_secs = {too_large}\n"
+        ));
+
+        let err = runner_settings(Some(&cfg)).expect_err("oversized config heartbeat must fail");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("heartbeat_interval_secs") && msg.contains(&too_large.to_string()),
+            "error should identify oversized config heartbeat value: {msg}"
+        );
+    }
+
+    #[test]
+    fn runner_settings_rejects_too_large_config_heartbeat_timeout() {
+        let _lock = lock_runtime_env();
+        let _heartbeat_timeout = EnvGuard::clear(RUNNER_HEARTBEAT_TIMEOUT_SECS_ENV);
+        let too_large = MAX_TURN_RUNNER_HEARTBEAT_TIMEOUT_SECS + 1;
+        let cfg =
+            parse_runner_section(&format!("[runner]\nheartbeat_timeout_secs = {too_large}\n"));
+
+        let err = runner_settings(Some(&cfg)).expect_err("oversized config heartbeat must fail");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("heartbeat_timeout_secs") && msg.contains(&too_large.to_string()),
+            "error should identify oversized config heartbeat value: {msg}"
         );
     }
 

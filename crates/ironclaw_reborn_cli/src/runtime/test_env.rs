@@ -1,22 +1,26 @@
 //! Shared test-only env-var harness for `runtime::tests` and
-//! `runtime::trigger_poller::tests`. Both modules read or mutate the
-//! `IRONCLAW_TRIGGER_POLLER_*` env vars; without a single lock + single
-//! `EnvGuard` they would race in the same test binary.
+//! `runtime::trigger_poller::tests`. Both modules read or mutate operator
+//! control env vars; without a single lock + single `EnvGuard` they would race
+//! in the same test binary.
 //!
 //! Not exposed outside `#[cfg(test)]`.
 
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
-/// Serializes every test that touches `IRONCLAW_TRIGGER_*` env vars so
-/// they cannot race each other. cargo test runs tests in parallel by
-/// default; without this each env-mutating test would observe sibling
-/// tests' mutations. Held for the whole body of every env-touching test.
+/// Serializes every test that touches operator-control env vars so they cannot
+/// race each other. cargo test runs tests in parallel by default; without this
+/// each env-mutating test would observe sibling tests' mutations. Held for the
+/// whole body of every env-touching test.
 static TRIGGER_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 pub(super) fn lock_trigger_env() -> MutexGuard<'static, ()> {
     TRIGGER_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub(super) fn lock_runtime_env() -> MutexGuard<'static, ()> {
+    lock_trigger_env()
 }
 
 /// RAII guard that snapshots an env var on construction and restores it
