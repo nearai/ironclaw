@@ -41,6 +41,8 @@ mod gsuite;
 mod hooks;
 mod input;
 mod ironhub;
+#[cfg(feature = "webui-v2-beta")]
+mod ironhub_link_serve;
 mod lifecycle;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
@@ -167,6 +169,8 @@ pub use ironhub::{
     IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions,
     execute_reborn_ironhub_command, render_reborn_ironhub_response,
 };
+#[cfg(feature = "webui-v2-beta")]
+pub use ironhub_link_serve::{IronhubRegisterRouteState, ironhub_register_route_mount};
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{
     RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,

@@ -53,11 +53,16 @@ mod error;
 mod extension_onboarding;
 mod extension_setup_credentials;
 mod extensions;
+mod ironhub_link;
 mod lifecycle_setup;
 mod llm_config;
 mod types;
 
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
+pub use ironhub_link::{
+    IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, IronhubLinkError,
+    IronhubLinkService, IronhubRegisterRequest,
+};
 pub use llm_config::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
@@ -465,6 +470,22 @@ pub trait RebornServicesApi: Send + Sync {
         let _ = caller;
         Err(llm_config::llm_config_unavailable())
     }
+
+    async fn ironhub_register(
+        &self,
+        request: IronhubRegisterRequest,
+    ) -> Result<(), RebornServicesError> {
+        let _ = request;
+        Err(ironhub_link::ironhub_link_unavailable())
+    }
+
+    async fn ironhub_deliver_install(
+        &self,
+        request: IronhubInstallDeliveryRequest,
+    ) -> Result<IronhubInstallDeliveryResult, RebornServicesError> {
+        let _ = request;
+        Err(ironhub_link::ironhub_link_unavailable())
+    }
 }
 
 /// Default facade implementation composed at the WebUI boundary.
@@ -482,6 +503,7 @@ pub struct RebornServices {
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
+    ironhub_link: Option<Arc<dyn IronhubLinkService>>,
 }
 
 impl RebornServices {
@@ -504,6 +526,7 @@ impl RebornServices {
             skill_activation_recorder: None,
             skill_activation_clearer: None,
             llm_config: None,
+            ironhub_link: None,
         }
     }
 
@@ -514,6 +537,11 @@ impl RebornServices {
 
     pub fn with_llm_config_service(mut self, llm_config: Arc<dyn LlmConfigService>) -> Self {
         self.llm_config = Some(llm_config);
+        self
+    }
+
+    pub fn with_ironhub_link_service(mut self, ironhub_link: Arc<dyn IronhubLinkService>) -> Self {
+        self.ironhub_link = Some(ironhub_link);
         self
     }
 
@@ -1269,6 +1297,34 @@ impl RebornServicesApi for RebornServices {
             .complete_nearai_wallet_login(caller, request)
             .await
             .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn ironhub_register(
+        &self,
+        request: IronhubRegisterRequest,
+    ) -> Result<(), RebornServicesError> {
+        let service = self
+            .ironhub_link
+            .as_ref()
+            .ok_or_else(ironhub_link::ironhub_link_unavailable)?;
+        service
+            .register(request)
+            .await
+            .map_err(ironhub_link::map_ironhub_link_error)
+    }
+
+    async fn ironhub_deliver_install(
+        &self,
+        request: IronhubInstallDeliveryRequest,
+    ) -> Result<IronhubInstallDeliveryResult, RebornServicesError> {
+        let service = self
+            .ironhub_link
+            .as_ref()
+            .ok_or_else(ironhub_link::ironhub_link_unavailable)?;
+        service
+            .deliver_install(request)
+            .await
+            .map_err(ironhub_link::map_ironhub_link_error)
     }
 }
 

@@ -110,6 +110,22 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                 lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
         }
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
+
+        #[cfg(feature = "webui-v2-beta")]
+        if let (Some(extension_management), Some(host_runtime_http_egress), Some(shared_key)) = (
+            &local_runtime.extension_management,
+            &local_runtime.host_runtime_http_egress,
+            runtime.webui_ironhub_agent_shared_key(),
+        ) {
+            api = api.with_ironhub_link_service(Arc::new(
+                crate::ironhub::RebornIronhubLinkService::new(
+                    local_runtime.skill_management.clone(),
+                    extension_management.clone(),
+                    host_runtime_http_egress.clone(),
+                    shared_key,
+                ),
+            ));
+        }
     }
     if let Some(product_auth) = &services.product_auth {
         api = api.with_extension_credentials(Arc::new(ProductAuthExtensionCredentialSetup::new(

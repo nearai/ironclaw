@@ -26,6 +26,7 @@ pub const WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS: &str = "webui.v2.list_connec
 pub const WEBUI_V2_ROUTE_LIST_EXTENSIONS: &str = "webui.v2.list_extensions";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY: &str = "webui.v2.list_extension_registry";
 pub const WEBUI_V2_ROUTE_INSTALL_EXTENSION: &str = "webui.v2.install_extension";
+pub const WEBUI_V2_ROUTE_IRONHUB_DELIVER_INSTALL: &str = "webui.v2.ironhub_deliver_install";
 pub const WEBUI_V2_ROUTE_ACTIVATE_EXTENSION: &str = "webui.v2.activate_extension";
 pub const WEBUI_V2_ROUTE_REMOVE_EXTENSION: &str = "webui.v2.remove_extension";
 pub const WEBUI_V2_ROUTE_GET_EXTENSION_SETUP: &str = "webui.v2.get_extension_setup";
@@ -56,6 +57,7 @@ pub const WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS: &str = "/api/webchat/v2/ch
 pub const WEBUI_V2_PATTERN_LIST_EXTENSIONS: &str = "/api/webchat/v2/extensions";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY: &str = "/api/webchat/v2/extensions/registry";
 pub const WEBUI_V2_PATTERN_INSTALL_EXTENSION: &str = "/api/webchat/v2/extensions/install";
+pub const WEBUI_V2_PATTERN_IRONHUB_DELIVER_INSTALL: &str = "/api/webchat/v2/ironhub/install";
 pub const WEBUI_V2_PATTERN_ACTIVATE_EXTENSION: &str =
     "/api/webchat/v2/extensions/{package_id}/activate";
 pub const WEBUI_V2_PATTERN_REMOVE_EXTENSION: &str =
@@ -93,6 +95,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         list_extensions_descriptor(),
         list_extension_registry_descriptor(),
         install_extension_descriptor(),
+        ironhub_deliver_install_descriptor(),
         activate_extension_descriptor(),
         remove_extension_descriptor(),
         get_extension_setup_descriptor(),
@@ -302,6 +305,20 @@ fn install_extension_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_INSTALL_EXTENSION,
         NetworkMethod::Post,
         WEBUI_V2_PATTERN_INSTALL_EXTENSION,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn ironhub_deliver_install_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_IRONHUB_DELIVER_INSTALL,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_IRONHUB_DELIVER_INSTALL,
         mutation_policy(
             body_limit_kib(16),
             mutation_rate_limit(),

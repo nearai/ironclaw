@@ -238,6 +238,10 @@ pub struct RebornRuntime {
     /// LLM-config settings service over `providers.json` / `config.toml`.
     #[cfg(feature = "root-llm-provider")]
     boot: Option<ironclaw_reborn_config::RebornBootConfig>,
+    /// Shared HMAC key for the IronHub deep-link register/install webhooks,
+    /// carried so the WebUI facade can compose the agent-link service.
+    #[cfg(feature = "webui-v2-beta")]
+    ironhub_agent_shared_key: Option<String>,
     /// Hot-swap handle for the live LLM provider, when one was wired at boot.
     #[cfg(feature = "root-llm-provider")]
     llm_reload: Option<RebornLlmReloadParts>,
@@ -571,6 +575,21 @@ impl RebornRuntime {
     #[cfg(feature = "root-llm-provider")]
     pub(crate) fn webui_boot_config(&self) -> Option<&ironclaw_reborn_config::RebornBootConfig> {
         self.boot.as_ref()
+    }
+
+    /// Shared HMAC key for the IronHub deep-link webhooks, when one was wired
+    /// at boot. The WebUI facade uses it to compose the agent-link service.
+    #[cfg(feature = "webui-v2-beta")]
+    pub(crate) fn webui_ironhub_agent_shared_key(&self) -> Option<String> {
+        self.ironhub_agent_shared_key.clone()
+    }
+
+    /// Whether the IronHub deep-link register/install webhooks are configured
+    /// (a shared HMAC key was wired at boot). The serve path uses this to
+    /// decide whether to mount the public register webhook.
+    #[cfg(feature = "webui-v2-beta")]
+    pub fn ironhub_register_enabled(&self) -> bool {
+        self.ironhub_agent_shared_key.is_some()
     }
 
     /// The runtime's NEAR AI session manager, when an LLM seam is wired. The
@@ -1347,6 +1366,8 @@ pub async fn build_reborn_runtime(
         llm,
         #[cfg(feature = "root-llm-provider")]
         boot,
+        #[cfg(feature = "webui-v2-beta")]
+        ironhub_agent_shared_key,
         runner,
         trigger_poller,
         trigger_fire_access_checker,
@@ -1903,6 +1924,8 @@ pub async fn build_reborn_runtime(
         skill_execution_adapter,
         #[cfg(feature = "root-llm-provider")]
         boot,
+        #[cfg(feature = "webui-v2-beta")]
+        ironhub_agent_shared_key,
         #[cfg(feature = "root-llm-provider")]
         llm_reload,
     })
