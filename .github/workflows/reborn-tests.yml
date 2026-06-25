@@ -202,8 +202,21 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
+      - name: Resolve crate feature flags
+        id: crate-feature-flags
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          feature_flags="$(scripts/ci/package-feature-flags.sh "$PACKAGE")"
+          echo "feature_flags=${feature_flags}" >> "$GITHUB_OUTPUT"
+          if [[ "${feature_flags}" == *"webui-v2-beta"* ]]; then
+            echo "needs_webui_node=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_webui_node=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install Node.js for WebUI bundle builds
-        if: ${{ contains(fromJSON('["ironclaw_reborn_cli","ironclaw_reborn_composition","ironclaw_webui_v2_static"]'), matrix.package) }}
+        if: ${{ steps.crate-feature-flags.outputs.needs_webui_node == 'true' }}
         uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
         with:
           node-version: "22"
@@ -235,7 +248,7 @@ jobs:
         env:
           PACKAGE: ${{ matrix.package }}
         run: |
-          feature_flags="$(scripts/ci/package-feature-flags.sh "$PACKAGE")"
+          feature_flags="${{ steps.crate-feature-flags.outputs.feature_flags }}"
 
           if [ "$PACKAGE" = "ironclaw_reborn_composition" ]; then
             echo "Disabling incremental compilation for ironclaw_reborn_composition to keep runner disk usage bounded."
