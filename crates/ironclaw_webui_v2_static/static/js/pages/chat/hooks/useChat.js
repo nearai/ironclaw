@@ -216,6 +216,7 @@ export function useChat(threadId) {
     credentialRef: null,
     inFlight: false,
   });
+  const submitBusyRef = React.useRef(false);
 
   // Per-thread transient state must not leak across thread switches.
   // Without this reset, clicking "+ New" while the previous thread is
@@ -360,6 +361,7 @@ export function useChat(threadId) {
     // user message from the server doesn't render alongside its
     // pre-submit optimistic twin.
     onRunSettled: (_runId, { success }) => {
+      submitBusyRef.current = false;
       if (success) setPendingMessages([]);
       loadHistory(undefined, {
         preserveClientOnly: true,
@@ -398,7 +400,17 @@ export function useChat(threadId) {
       if (pendingGate || pendingGateRef.current) {
         throw approvalGatePendingSendError();
       }
-      if (isProcessingRef.current) {
+      const activeRunForSend = activeRunRef.current;
+      const activeRunBlocksSend =
+        activeRunForSend &&
+        (!targetThreadId ||
+          activeRunForSend.threadId === targetThreadId ||
+          activeRunForSend.threadId === threadId);
+      if (
+        submitBusyRef.current ||
+        isProcessingRef.current ||
+        activeRunBlocksSend
+      ) {
         return null;
       }
 
@@ -456,6 +468,7 @@ export function useChat(threadId) {
         if (shouldRenderInCurrentThread) updater();
       };
 
+      submitBusyRef.current = true;
       updateCurrentThread((prev) => [...prev, pendingRenderMessage]);
       updateSeededTarget((prev) => [...prev, pendingRenderMessage]);
 
@@ -549,6 +562,9 @@ export function useChat(threadId) {
             }
           }
           updateCurrentRunState(() => setIsProcessing(false));
+          submitBusyRef.current = false;
+        } else if (!response?.run_id) {
+          submitBusyRef.current = false;
         }
         return response;
       } catch (err) {
@@ -569,6 +585,7 @@ export function useChat(threadId) {
         updateCurrentThread(markFailed);
         updateSeededTarget(markFailed);
         updateCurrentRunState(() => setIsProcessing(false));
+        submitBusyRef.current = false;
         throw err;
       } finally {
         // Drop the optimistic from the pending ref unconditionally:
@@ -725,6 +742,7 @@ export function useChat(threadId) {
       setPendingGate(null);
       setIsProcessing(false);
       setActiveRun(null);
+      submitBusyRef.current = false;
       await cancelRunRequest({ threadId, runId, reason });
     },
     [activeRun, threadId],
