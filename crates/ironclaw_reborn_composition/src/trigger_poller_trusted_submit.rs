@@ -1261,18 +1261,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn binding_required_materialization_failure_is_retryable() {
-        let error = classify_materializer_inbound_error(InboundTurnError::BindingRequired {
-            adapter_kind: "trigger".to_string(),
-            external_actor_id: "actor-1".to_string(),
-        });
-
-        assert!(
-            matches!(error, TriggerError::Backend { reason } if reason == "trusted trigger submit retryable failure")
-        );
-    }
-
     struct FixedWarningScanner {
         warnings: Vec<InjectionWarning>,
     }

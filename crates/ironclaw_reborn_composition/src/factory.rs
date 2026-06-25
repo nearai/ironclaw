@@ -4012,6 +4012,7 @@ fn readiness_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_approvals::{AutoApproveSettingInput, AutoApproveSettingStore};
     use ironclaw_auth::{
         AuthProductScope, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
         CredentialOwnership, GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
@@ -4947,12 +4948,14 @@ mod tests {
             .await
             .expect("activate Notion MCP");
 
+        let context = notion_mcp_context("notion.notion-search");
+        enable_global_auto_approve_for_context(local_runtime, &context).await;
         let outcome = services
             .host_runtime
             .as_ref()
             .expect("host runtime")
             .invoke_capability(RuntimeCapabilityRequest::new(
-                notion_mcp_context("notion.notion-search"),
+                context,
                 CapabilityId::new("notion.notion-search").unwrap(),
                 ResourceEstimate::default(),
                 serde_json::json!({ "query": "project notes" }),
@@ -5001,12 +5004,14 @@ mod tests {
             .await
             .expect("activate Web Access");
 
+        let context = web_access_context("web-access.search");
+        enable_global_auto_approve_for_context(local_runtime, &context).await;
         let outcome = services
             .host_runtime
             .as_ref()
             .expect("host runtime")
             .invoke_capability(RuntimeCapabilityRequest::new(
-                web_access_context("web-access.search"),
+                context,
                 CapabilityId::new("web-access.search").unwrap(),
                 ResourceEstimate::default(),
                 serde_json::json!({
@@ -6134,6 +6139,26 @@ mod tests {
             MountView::new(Vec::new()).expect("valid empty mount view"),
         )
         .expect("valid execution context")
+    }
+
+    /// Turn on the global auto-approve switch for `context`'s actor scope so a
+    /// host-runtime dispatch exercises the tool path instead of stopping at the
+    /// per-tool approval gate. The Tools-settings switch is authoritative for
+    /// first-party tool dispatch (#4776); enabling it here mirrors the operator
+    /// having flipped it on before letting the agent run tools.
+    async fn enable_global_auto_approve_for_context(
+        local_runtime: &RebornLocalRuntimeServices,
+        context: &ExecutionContext,
+    ) {
+        local_runtime
+            .auto_approve_settings
+            .set(AutoApproveSettingInput {
+                updated_by: Principal::User(context.resource_scope.user_id.clone()),
+                scope: context.resource_scope.clone(),
+                enabled: true,
+            })
+            .await
+            .expect("enabling global auto-approve should succeed");
     }
 
     fn notion_mcp_context(capability_id: &str) -> ExecutionContext {
