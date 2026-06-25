@@ -2973,6 +2973,74 @@ async fn operator_config_routes_require_operator_capability() {
 }
 
 #[tokio::test]
+async fn settings_tool_routes_do_not_require_operator_capability() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/settings/tools")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/tools")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":true}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/tools/ext.search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"always_allow"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert_eq!(
+        *services.list_operator_config_calls.lock().expect("lock"),
+        1
+    );
+    assert_eq!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [
+            (
+                "agent.auto_approve_tools".to_string(),
+                serde_json::json!(true)
+            ),
+            (
+                "tool.ext.search".to_string(),
+                serde_json::json!({ "state": "always_allow" })
+            )
+        ]
+    );
+}
+
+#[tokio::test]
 async fn operator_logs_require_operator_capability() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());

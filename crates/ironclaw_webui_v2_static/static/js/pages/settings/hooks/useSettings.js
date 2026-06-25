@@ -45,6 +45,9 @@ export function useSettings() {
       if (RESTART_REQUIRED_KEYS.has(key)) {
         setNeedsRestart(true);
       }
+      if (key === "agent.auto_approve_tools") {
+        queryClient.invalidateQueries({ queryKey: ["settings-tools"] });
+      }
     },
   });
 

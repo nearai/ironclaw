@@ -1322,6 +1322,70 @@ pub async fn run_operator_setup(
     Ok(Json(response))
 }
 
+/// `GET /api/webchat/v2/settings/tools`
+pub async fn list_settings_tools(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
+    let response = state.services().list_operator_config(caller).await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsToolsAutoApproveRequest {
+    pub enabled: bool,
+}
+
+/// `POST /api/webchat/v2/settings/tools`
+pub async fn set_settings_tools_auto_approve(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<SettingsToolsAutoApproveRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_operator_config_key(
+            caller,
+            "agent.auto_approve_tools".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: serde_json::json!(body.enabled),
+            },
+        )
+        .await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsToolPermissionPath {
+    pub capability_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsToolPermissionRequest {
+    pub state: String,
+}
+
+/// `POST /api/webchat/v2/settings/tools/{capability_id}`
+pub async fn set_settings_tool_permission(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(SettingsToolPermissionPath { capability_id }): Path<SettingsToolPermissionPath>,
+    Json(body): Json<SettingsToolPermissionRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    let key = validate_operator_config_key(format!("tool.{capability_id}"))?;
+    let response = state
+        .services()
+        .set_operator_config_key(
+            caller,
+            key,
+            RebornOperatorConfigSetRequest {
+                value: serde_json::json!({ "state": body.state }),
+            },
+        )
+        .await?;
+    Ok(Json(response))
+}
+
 /// `GET /api/webchat/v2/operator/config`
 pub async fn list_operator_config(
     State(state): State<WebUiV2State>,
