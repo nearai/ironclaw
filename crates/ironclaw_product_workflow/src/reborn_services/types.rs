@@ -18,6 +18,46 @@ const OUTBOUND_DELIVERY_DISPLAY_NAME_MAX_BYTES: usize = 256;
 const OUTBOUND_DELIVERY_DESCRIPTION_MAX_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornToolPermissionsResponse {
+    pub tools: Vec<RebornToolPermissionInfo>,
+    #[serde(default)]
+    pub settings: RebornToolPermissionSettings,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornToolPermissionSettings {
+    #[serde(rename = "agent.auto_approve_tools")]
+    pub auto_approve_tools: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornToolPermissionInfo {
+    pub name: String,
+    pub description: String,
+    pub state: String,
+    pub default_state: String,
+    pub locked: bool,
+    pub effective_source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornToolPermissionSetRequest {
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornToolPermissionResponse {
+    pub tool: RebornToolPermissionInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornToolAutoApproveSetRequest {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornConnectableChannelListResponse {
     pub channels: Vec<RebornConnectableChannelInfo>,
 }

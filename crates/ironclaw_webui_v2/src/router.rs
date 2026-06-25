@@ -23,9 +23,10 @@ use crate::descriptors::{
     WEBUI_V2_PATTERN_LIST_EXTENSIONS, WEBUI_V2_PATTERN_LIST_LLM_MODELS,
     WEBUI_V2_PATTERN_REMOVE_EXTENSION, WEBUI_V2_PATTERN_RESOLVE_GATE,
     WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
-    WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_START_CODEX_LOGIN,
-    WEBUI_V2_PATTERN_START_NEARAI_LOGIN, WEBUI_V2_PATTERN_STREAM_EVENTS,
-    WEBUI_V2_PATTERN_STREAM_EVENTS_WS, WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
+    WEBUI_V2_PATTERN_SET_TOOL_PERMISSION, WEBUI_V2_PATTERN_SETUP_EXTENSION,
+    WEBUI_V2_PATTERN_START_CODEX_LOGIN, WEBUI_V2_PATTERN_START_NEARAI_LOGIN,
+    WEBUI_V2_PATTERN_STREAM_EVENTS, WEBUI_V2_PATTERN_STREAM_EVENTS_WS,
+    WEBUI_V2_PATTERN_TEST_LLM_CONNECTION, WEBUI_V2_PATTERN_TOOL_PERMISSIONS,
 };
 use crate::handlers;
 use crate::sse_capacity::SseCapacity;
@@ -158,6 +159,14 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(
             WEBUI_V2_PATTERN_SETUP_EXTENSION,
             get(handlers::get_extension_setup).post(handlers::setup_extension),
+        )
+        .route(
+            WEBUI_V2_PATTERN_TOOL_PERMISSIONS,
+            get(handlers::list_tool_permissions).post(handlers::set_tool_auto_approve),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SET_TOOL_PERMISSION,
+            post(handlers::set_tool_permission),
         );
     if options.mount_llm_config_routes {
         router = router

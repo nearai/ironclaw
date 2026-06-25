@@ -11,11 +11,21 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_approvals::{
+    AutoApproveSettingInput, AutoApproveSettingStore, PersistentApprovalAction,
+    PersistentApprovalPolicyError, PersistentApprovalPolicyInput, PersistentApprovalPolicyKey,
+    PersistentApprovalPolicyStore, ToolPermissionOverride, ToolPermissionOverrideInput,
+    ToolPermissionOverrideKey, ToolPermissionOverrideStore, ToolPermissionState,
+    permission_mode_allows_persistent_approval,
+};
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountUpdateBinding, ProviderScope,
 };
-use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, InvocationId, MountView,
+    NetworkPolicy, PermissionMode, Principal, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
     ProjectionSubscriptionRequest,
@@ -85,7 +95,9 @@ pub use types::{
     RebornOutboundPreferencesResponse, RebornResolveGateResponse, RebornResumeGateResponse,
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornStreamEventsRequest,
     RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse,
+    RebornTimelineResponse, RebornToolAutoApproveSetRequest, RebornToolPermissionInfo,
+    RebornToolPermissionResponse, RebornToolPermissionSetRequest, RebornToolPermissionSettings,
+    RebornToolPermissionsResponse,
 };
 
 type SkillActivationRecorder =
@@ -93,6 +105,28 @@ type SkillActivationRecorder =
 type SkillActivationClearer =
     dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError> + Send + Sync;
 type ThreadOperationLocks = StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebornToolInfo {
+    pub capability_id: CapabilityId,
+    pub provider: ExtensionId,
+    pub description: Arc<str>,
+    pub default_permission: PermissionMode,
+    pub effects: Vec<EffectKind>,
+}
+
+#[async_trait]
+pub trait RebornToolCatalog: Send + Sync {
+    async fn list_tools(&self) -> Result<Vec<RebornToolInfo>, RebornServicesError>;
+}
+
+#[derive(Clone)]
+struct RebornToolApprovalConfig {
+    overrides: Arc<dyn ToolPermissionOverrideStore>,
+    auto_approve: Arc<dyn AutoApproveSettingStore>,
+    persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+    tool_catalog: Arc<dyn RebornToolCatalog>,
+}
 
 #[async_trait]
 pub trait ConnectableChannelsProductFacade: Send + Sync {
@@ -494,6 +528,33 @@ pub trait RebornServicesApi: Send + Sync {
         request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError>;
 
+    async fn list_tool_permissions(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornToolPermissionsResponse, RebornServicesError> {
+        let _ = caller;
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn set_tool_permission(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability_id: String,
+        request: RebornToolPermissionSetRequest,
+    ) -> Result<RebornToolPermissionResponse, RebornServicesError> {
+        let _ = (caller, capability_id, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn set_tool_auto_approve(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornToolAutoApproveSetRequest,
+    ) -> Result<RebornToolPermissionsResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     /// LLM provider configuration: merged catalog + active selection.
     ///
     /// The six LLM-config methods default to "service unavailable" so facade
@@ -603,6 +664,7 @@ pub struct RebornServices {
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
+    tool_approval_config: Option<RebornToolApprovalConfig>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
 }
 
@@ -629,6 +691,7 @@ impl RebornServices {
             skill_activation_recorder: None,
             skill_activation_clearer: None,
             llm_config: None,
+            tool_approval_config: None,
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
@@ -640,6 +703,22 @@ impl RebornServices {
 
     pub fn with_llm_config_service(mut self, llm_config: Arc<dyn LlmConfigService>) -> Self {
         self.llm_config = Some(llm_config);
+        self
+    }
+
+    pub fn with_tool_approval_config(
+        mut self,
+        overrides: Arc<dyn ToolPermissionOverrideStore>,
+        auto_approve: Arc<dyn AutoApproveSettingStore>,
+        persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+        tool_catalog: Arc<dyn RebornToolCatalog>,
+    ) -> Self {
+        self.tool_approval_config = Some(RebornToolApprovalConfig {
+            overrides,
+            auto_approve,
+            persistent_policies,
+            tool_catalog,
+        });
         self
     }
 
@@ -1320,6 +1399,67 @@ impl RebornServicesApi for RebornServices {
             request,
         )
         .await
+    }
+
+    async fn list_tool_permissions(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornToolPermissionsResponse, RebornServicesError> {
+        let Some(config) = &self.tool_approval_config else {
+            return Ok(RebornToolPermissionsResponse {
+                tools: Vec::new(),
+                settings: RebornToolPermissionSettings::default(),
+                diagnostics: vec!["tool approval config is not wired".to_string()],
+            });
+        };
+        let scope = caller_resource_scope(&caller);
+        tool_permissions_response(config, &scope).await
+    }
+
+    async fn set_tool_permission(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability_id: String,
+        request: RebornToolPermissionSetRequest,
+    ) -> Result<RebornToolPermissionResponse, RebornServicesError> {
+        let Some(config) = &self.tool_approval_config else {
+            let _ = (caller, capability_id, request);
+            return Err(RebornServicesError::service_unavailable(false));
+        };
+        let scope = caller_resource_scope(&caller);
+        let actor = caller.actor();
+        let tool = find_tool(config, &capability_id).await?;
+        if tool_permission_locked(&tool) {
+            return Err(tool_permission_invalid_value("state"));
+        }
+        let update = parse_tool_permission_state(&request.state)?;
+        apply_tool_permission_state(config, &scope, &actor, &tool, update).await?;
+        Ok(RebornToolPermissionResponse {
+            tool: tool_permission_info(config, &scope, &tool).await?,
+        })
+    }
+
+    async fn set_tool_auto_approve(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornToolAutoApproveSetRequest,
+    ) -> Result<RebornToolPermissionsResponse, RebornServicesError> {
+        let Some(config) = &self.tool_approval_config else {
+            let _ = (caller, request);
+            return Err(RebornServicesError::service_unavailable(false));
+        };
+        let user_id = caller.user_id.clone();
+        let scope = user_tool_permission_scope(&caller_resource_scope(&caller));
+        config
+            .auto_approve
+            .set(AutoApproveSettingInput {
+                scope,
+                enabled: request.enabled,
+                updated_by: Principal::User(user_id),
+            })
+            .await
+            .map_err(tool_permission_store_error)?;
+        self.list_tool_permissions(caller).await
     }
 
     async fn get_llm_config(
@@ -2313,6 +2453,304 @@ fn gate_ref_string(gate_ref: &ironclaw_turns::GateRef) -> String {
     gate_ref.as_str().to_string()
 }
 
+fn caller_resource_scope(caller: &WebUiAuthenticatedCaller) -> ResourceScope {
+    ResourceScope {
+        tenant_id: caller.tenant_id.clone(),
+        user_id: caller.user_id.clone(),
+        agent_id: caller.agent_id.clone(),
+        project_id: caller.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
+async fn tool_permissions_response(
+    config: &RebornToolApprovalConfig,
+    scope: &ResourceScope,
+) -> Result<RebornToolPermissionsResponse, RebornServicesError> {
+    let tools = config.tool_catalog.list_tools().await?;
+    let mut infos = Vec::with_capacity(tools.len());
+    for tool in &tools {
+        infos.push(tool_permission_info(config, scope, tool).await?);
+    }
+    let user_scope = user_tool_permission_scope(scope);
+    let settings = RebornToolPermissionSettings {
+        auto_approve_tools: config
+            .auto_approve
+            .is_enabled(&user_scope)
+            .await
+            .map_err(tool_permission_store_error)?,
+    };
+    Ok(RebornToolPermissionsResponse {
+        tools: infos,
+        settings,
+        diagnostics: Vec::new(),
+    })
+}
+
+async fn tool_permission_info(
+    config: &RebornToolApprovalConfig,
+    scope: &ResourceScope,
+    tool: &RebornToolInfo,
+) -> Result<RebornToolPermissionInfo, RebornServicesError> {
+    let (state, source) = effective_tool_permission(config, scope, tool).await?;
+    Ok(RebornToolPermissionInfo {
+        name: tool.capability_id.as_str().to_string(),
+        description: tool.description.as_ref().to_string(),
+        state: tool_permission_state_wire(state).to_string(),
+        default_state: tool_permission_state_wire(default_tool_permission_state(
+            tool.default_permission,
+        ))
+        .to_string(),
+        locked: tool_permission_locked(tool),
+        effective_source: source.to_string(),
+    })
+}
+
+async fn effective_tool_permission(
+    config: &RebornToolApprovalConfig,
+    scope: &ResourceScope,
+    tool: &RebornToolInfo,
+) -> Result<(ToolPermissionState, &'static str), RebornServicesError> {
+    if tool_permission_locked(tool) {
+        return Ok((
+            default_tool_permission_state(tool.default_permission),
+            "locked",
+        ));
+    }
+
+    let user_scope = user_tool_permission_scope(scope);
+    let override_key = ToolPermissionOverrideKey::new(&user_scope, tool.capability_id.clone());
+    if let Some(record) = config
+        .overrides
+        .get(&override_key)
+        .await
+        .map_err(tool_permission_store_error)?
+    {
+        return Ok((record.state.as_state(), "override"));
+    }
+
+    let policy_key = persistent_user_policy_key(scope, tool);
+    if config
+        .persistent_policies
+        .lookup(&policy_key)
+        .await
+        .map_err(tool_permission_policy_error)?
+        .and_then(|policy| policy.active_grant())
+        .is_some()
+    {
+        return Ok((ToolPermissionState::AlwaysAllow, "override"));
+    }
+
+    let global_auto_approve = config
+        .auto_approve
+        .is_enabled(&user_scope)
+        .await
+        .map_err(tool_permission_store_error)?;
+    if global_auto_approve
+        && permission_mode_allows_persistent_approval(tool.default_permission)
+        && !tool_permission_locked(tool)
+    {
+        return Ok((ToolPermissionState::AlwaysAllow, "global"));
+    }
+
+    Ok((
+        default_tool_permission_state(tool.default_permission),
+        "default",
+    ))
+}
+
+fn default_tool_permission_state(permission: PermissionMode) -> ToolPermissionState {
+    match permission {
+        PermissionMode::Allow | PermissionMode::Ask => ToolPermissionState::AskEachTime,
+        PermissionMode::Deny => ToolPermissionState::Disabled,
+    }
+}
+
+fn tool_permission_state_wire(state: ToolPermissionState) -> &'static str {
+    match state {
+        ToolPermissionState::AlwaysAllow => "always_allow",
+        ToolPermissionState::AskEachTime => "ask",
+        ToolPermissionState::Disabled => "disabled",
+    }
+}
+
+async fn find_tool(
+    config: &RebornToolApprovalConfig,
+    capability_id: &str,
+) -> Result<RebornToolInfo, RebornServicesError> {
+    config
+        .tool_catalog
+        .list_tools()
+        .await?
+        .into_iter()
+        .find(|tool| tool.capability_id.as_str() == capability_id)
+        .ok_or_else(|| tool_permission_unknown_tool("capability_id"))
+}
+
+enum ToolPermissionUpdate {
+    Default,
+    State(ToolPermissionState),
+}
+
+fn parse_tool_permission_state(raw: &str) -> Result<ToolPermissionUpdate, RebornServicesError> {
+    match raw {
+        "default" => Ok(ToolPermissionUpdate::Default),
+        "always_allow" => Ok(ToolPermissionUpdate::State(
+            ToolPermissionState::AlwaysAllow,
+        )),
+        "ask" | "ask_each_time" => Ok(ToolPermissionUpdate::State(
+            ToolPermissionState::AskEachTime,
+        )),
+        "disabled" => Ok(ToolPermissionUpdate::State(ToolPermissionState::Disabled)),
+        _ => Err(tool_permission_invalid_value("state")),
+    }
+}
+
+async fn apply_tool_permission_state(
+    config: &RebornToolApprovalConfig,
+    scope: &ResourceScope,
+    actor: &TurnActor,
+    tool: &RebornToolInfo,
+    update: ToolPermissionUpdate,
+) -> Result<(), RebornServicesError> {
+    let user_scope = user_tool_permission_scope(scope);
+    let override_key = ToolPermissionOverrideKey::new(&user_scope, tool.capability_id.clone());
+    match update {
+        ToolPermissionUpdate::Default => {
+            config
+                .overrides
+                .clear(&override_key)
+                .await
+                .map_err(tool_permission_store_error)?;
+            revoke_persistent_policy_if_present(config, scope, tool).await
+        }
+        ToolPermissionUpdate::State(ToolPermissionState::AlwaysAllow) => {
+            config
+                .overrides
+                .clear(&override_key)
+                .await
+                .map_err(tool_permission_store_error)?;
+            config
+                .persistent_policies
+                .allow(PersistentApprovalPolicyInput {
+                    scope: user_scope,
+                    action: PersistentApprovalAction::Dispatch,
+                    capability_id: tool.capability_id.clone(),
+                    grantee: Principal::Extension(tool.provider.clone()),
+                    approved_by: Principal::User(actor.user_id.clone()),
+                    constraints: GrantConstraints {
+                        allowed_effects: tool.effects.clone(),
+                        mounts: MountView::default(),
+                        network: NetworkPolicy::default(),
+                        secrets: Vec::new(),
+                        resource_ceiling: None,
+                        expires_at: None,
+                        max_invocations: None,
+                    },
+                    source_approval_request_id: None,
+                })
+                .await
+                .map_err(tool_permission_policy_error)?;
+            Ok(())
+        }
+        ToolPermissionUpdate::State(state @ ToolPermissionState::AskEachTime)
+        | ToolPermissionUpdate::State(state @ ToolPermissionState::Disabled) => {
+            let override_state = match state {
+                ToolPermissionState::AskEachTime => ToolPermissionOverride::AskEachTime,
+                ToolPermissionState::Disabled => ToolPermissionOverride::Disabled,
+                ToolPermissionState::AlwaysAllow => unreachable!("handled above"),
+            };
+            config
+                .overrides
+                .set(ToolPermissionOverrideInput {
+                    scope: user_scope,
+                    capability_id: tool.capability_id.clone(),
+                    state: override_state,
+                    updated_by: Principal::User(actor.user_id.clone()),
+                })
+                .await
+                .map_err(tool_permission_store_error)?;
+            revoke_persistent_policy_if_present(config, scope, tool).await
+        }
+    }
+}
+
+async fn revoke_persistent_policy_if_present(
+    config: &RebornToolApprovalConfig,
+    scope: &ResourceScope,
+    tool: &RebornToolInfo,
+) -> Result<(), RebornServicesError> {
+    let key = persistent_user_policy_key(scope, tool);
+    match config.persistent_policies.revoke(&key).await {
+        Ok(_) | Err(PersistentApprovalPolicyError::UnknownPolicy) => Ok(()),
+        Err(error) => Err(tool_permission_policy_error(error)),
+    }
+}
+
+fn persistent_user_policy_key(
+    scope: &ResourceScope,
+    tool: &RebornToolInfo,
+) -> PersistentApprovalPolicyKey {
+    let user_scope = user_tool_permission_scope(scope);
+    PersistentApprovalPolicyKey::new(
+        &user_scope,
+        PersistentApprovalAction::Dispatch,
+        tool.capability_id.clone(),
+        Principal::Extension(tool.provider.clone()),
+    )
+}
+
+fn user_tool_permission_scope(scope: &ResourceScope) -> ResourceScope {
+    ResourceScope {
+        tenant_id: scope.tenant_id.clone(),
+        user_id: scope.user_id.clone(),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: scope.invocation_id,
+    }
+}
+
+fn tool_permission_locked(tool: &RebornToolInfo) -> bool {
+    tool.default_permission == PermissionMode::Deny || hard_floor_tool(tool)
+}
+
+fn hard_floor_tool(tool: &RebornToolInfo) -> bool {
+    tool.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            EffectKind::Financial | EffectKind::ModifyApproval | EffectKind::ModifyBudget
+        )
+    })
+}
+
+fn tool_permission_store_error(
+    _: ironclaw_approvals::ToolPermissionStoreError,
+) -> RebornServicesError {
+    RebornServicesError::service_unavailable(true)
+}
+
+fn tool_permission_policy_error(_: PersistentApprovalPolicyError) -> RebornServicesError {
+    RebornServicesError::service_unavailable(true)
+}
+
+fn tool_permission_invalid_value(field: &'static str) -> RebornServicesError {
+    RebornServicesError::validation(WebUiInboundValidationError::new(
+        field,
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+}
+
+fn tool_permission_unknown_tool(field: &'static str) -> RebornServicesError {
+    RebornServicesError::validation(WebUiInboundValidationError::new(
+        field,
+        WebUiInboundValidationCode::InvalidId,
+    ))
+}
+
 fn persistent_approval_unavailable() -> RebornServicesError {
     RebornServicesError::from_status_kind(
         RebornServicesErrorCode::Unavailable,
@@ -2599,5 +3037,175 @@ fn generated_thread_id(
             // Fallback remains valid under ThreadId validation rules.
             ThreadId::new("generated-thread-fallback").unwrap_or_else(|_| unreachable!())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_approvals::{
+        InMemoryAutoApproveSettingStore, InMemoryPersistentApprovalPolicyStore,
+        InMemoryToolPermissionOverrideStore,
+    };
+    use ironclaw_threads::InMemorySessionThreadService;
+    use ironclaw_turns::{DefaultTurnCoordinator, InMemoryTurnStateStore};
+
+    #[derive(Debug, Clone)]
+    struct StaticToolCatalog {
+        tools: Vec<RebornToolInfo>,
+    }
+
+    #[async_trait]
+    impl RebornToolCatalog for StaticToolCatalog {
+        async fn list_tools(&self) -> Result<Vec<RebornToolInfo>, RebornServicesError> {
+            Ok(self.tools.clone())
+        }
+    }
+
+    fn test_caller(user_id: &str) -> WebUiAuthenticatedCaller {
+        WebUiAuthenticatedCaller::new(
+            TenantId::new("tenant-alpha").expect("valid tenant"),
+            UserId::new(user_id).expect("valid user"),
+            Some(AgentId::new("agent-alpha").expect("valid agent")),
+            Some(ProjectId::new("project-alpha").expect("valid project")),
+        )
+    }
+
+    fn test_services() -> RebornServices {
+        RebornServices::new(
+            Arc::new(InMemorySessionThreadService::default()),
+            Arc::new(DefaultTurnCoordinator::new(Arc::new(
+                InMemoryTurnStateStore::default(),
+            ))),
+        )
+        .with_tool_approval_config(
+            Arc::new(InMemoryToolPermissionOverrideStore::new()),
+            Arc::new(InMemoryAutoApproveSettingStore::new()),
+            Arc::new(InMemoryPersistentApprovalPolicyStore::new()),
+            Arc::new(StaticToolCatalog {
+                tools: vec![
+                    RebornToolInfo {
+                        capability_id: CapabilityId::new("test.echo").expect("valid capability"),
+                        provider: ExtensionId::new("test-provider").expect("valid extension"),
+                        description: Arc::from("Echoes input"),
+                        default_permission: PermissionMode::Ask,
+                        effects: vec![EffectKind::DispatchCapability],
+                    },
+                    RebornToolInfo {
+                        capability_id: CapabilityId::new("test.budget").expect("valid capability"),
+                        provider: ExtensionId::new("test-provider").expect("valid extension"),
+                        description: Arc::from("Changes budget"),
+                        default_permission: PermissionMode::Ask,
+                        effects: vec![EffectKind::DispatchCapability, EffectKind::ModifyBudget],
+                    },
+                ],
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn tool_permissions_are_user_scoped_and_apply_persistent_policy() {
+        let services = test_services();
+
+        let initial = services
+            .list_tool_permissions(test_caller("user-alpha"))
+            .await
+            .expect("list tools");
+        assert_eq!(tool_state(&initial, "test.echo"), "ask");
+        assert_eq!(tool_source(&initial, "test.echo"), "default");
+        assert_eq!(tool_state(&initial, "test.budget"), "ask");
+        assert!(tool_locked(&initial, "test.budget"));
+
+        services
+            .set_tool_auto_approve(
+                test_caller("user-alpha"),
+                RebornToolAutoApproveSetRequest { enabled: true },
+            )
+            .await
+            .expect("enable global auto approve");
+        let global = services
+            .list_tool_permissions(test_caller("user-alpha"))
+            .await
+            .expect("list global tools");
+        assert_eq!(tool_state(&global, "test.echo"), "always_allow");
+        assert_eq!(tool_source(&global, "test.echo"), "global");
+        assert_eq!(
+            tool_state(&global, "test.budget"),
+            "ask",
+            "ModifyBudget tools must stay out of global always-approve"
+        );
+
+        services
+            .set_tool_permission(
+                test_caller("user-alpha"),
+                "test.echo".to_string(),
+                RebornToolPermissionSetRequest {
+                    state: "disabled".to_string(),
+                },
+            )
+            .await
+            .expect("disable tool");
+        let disabled = services
+            .list_tool_permissions(test_caller("user-alpha"))
+            .await
+            .expect("list disabled tools");
+        assert_eq!(tool_state(&disabled, "test.echo"), "disabled");
+        assert_eq!(tool_source(&disabled, "test.echo"), "override");
+
+        services
+            .set_tool_permission(
+                test_caller("user-alpha"),
+                "test.echo".to_string(),
+                RebornToolPermissionSetRequest {
+                    state: "always_allow".to_string(),
+                },
+            )
+            .await
+            .expect("always allow tool");
+        let always = services
+            .list_tool_permissions(test_caller("user-alpha"))
+            .await
+            .expect("list always tools");
+        assert_eq!(tool_state(&always, "test.echo"), "always_allow");
+        assert_eq!(tool_source(&always, "test.echo"), "override");
+
+        let other_user = services
+            .list_tool_permissions(test_caller("user-beta"))
+            .await
+            .expect("list other user tools");
+        assert_eq!(
+            tool_state(&other_user, "test.echo"),
+            "ask",
+            "tool permissions must not leak across users"
+        );
+    }
+
+    fn tool_state<'a>(response: &'a RebornToolPermissionsResponse, name: &str) -> &'a str {
+        response
+            .tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .expect("tool present")
+            .state
+            .as_str()
+    }
+
+    fn tool_source<'a>(response: &'a RebornToolPermissionsResponse, name: &str) -> &'a str {
+        response
+            .tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .expect("tool present")
+            .effective_source
+            .as_str()
+    }
+
+    fn tool_locked(response: &RebornToolPermissionsResponse, name: &str) -> bool {
+        response
+            .tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .expect("tool present")
+            .locked
     }
 }

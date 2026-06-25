@@ -8,7 +8,7 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, ResourceScope,
+    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, PermissionMode, ResourceScope,
     RuntimeCredentialRequirement, RuntimeHttpEgress, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_workflow::{
@@ -54,6 +54,8 @@ pub(crate) struct RebornLocalExtensionManagementPort {
 pub(crate) struct ActiveExtensionCapability {
     pub(crate) id: CapabilityId,
     pub(crate) provider: ExtensionId,
+    pub(crate) description: String,
+    pub(crate) default_permission: PermissionMode,
     pub(crate) effects: Vec<EffectKind>,
     pub(crate) runtime_credentials: Vec<RuntimeCredentialRequirement>,
 }
@@ -72,6 +74,8 @@ impl ActiveExtensionCapability {
         Self {
             id: descriptor.id.clone(),
             provider: descriptor.provider.clone(),
+            description: descriptor.description.clone(),
+            default_permission: descriptor.default_permission,
             effects: descriptor.effects.clone(),
             runtime_credentials: descriptor.runtime_credentials.clone(),
         }

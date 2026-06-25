@@ -159,9 +159,11 @@ pub use reborn_services::{
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornStreamEventsRequest,
     RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, SetActiveLlmRequest, StaticConnectableChannelsProductFacade,
-    UnsupportedAutomationProductFacade, UnsupportedOutboundPreferencesProductFacade,
-    UpsertLlmProviderRequest,
+    RebornTimelineResponse, RebornToolAutoApproveSetRequest, RebornToolCatalog, RebornToolInfo,
+    RebornToolPermissionInfo, RebornToolPermissionResponse, RebornToolPermissionSetRequest,
+    RebornToolPermissionSettings, RebornToolPermissionsResponse, SetActiveLlmRequest,
+    StaticConnectableChannelsProductFacade, UnsupportedAutomationProductFacade,
+    UnsupportedOutboundPreferencesProductFacade, UpsertLlmProviderRequest,
 };
 
 pub use webui_inbound::{

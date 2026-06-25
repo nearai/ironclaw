@@ -1,16 +1,26 @@
 import { apiFetch } from "../../../lib/api.js";
 
+const TOOL_SETTINGS_PATH = "/api/webchat/v2/settings/tools";
+const AUTO_APPROVE_TOOLS_KEY = "agent.auto_approve_tools";
+
 // Settings endpoints depend on v1 `/api/settings/*`, `/api/llm/*`,
 // `/api/tools/*`, `/api/skills/*`, etc. Extension reads use the v2
 // registry/list endpoints; the remaining settings APIs are TODO stubs.
 
-export function fetchSettingsExport() {
-  return Promise.resolve({ settings: {}, todo: true });
+export async function fetchSettingsExport() {
+  const tools = await apiFetch(TOOL_SETTINGS_PATH);
+  return { settings: tools.settings || {}, todo: false };
 }
 export function fetchSetting(_key) {
   return Promise.resolve(null);
 }
-export function updateSetting(_key, _value) {
+export function updateSetting(key, value) {
+  if (key === AUTO_APPROVE_TOOLS_KEY) {
+    return apiFetch(TOOL_SETTINGS_PATH, {
+      method: "POST",
+      body: JSON.stringify({ enabled: Boolean(value) }),
+    });
+  }
   return Promise.resolve({ success: false, message: "TODO: requires v2 settings endpoint" });
 }
 export function importSettings(_payload) {
@@ -80,10 +90,14 @@ export function startCodexLogin() {
   });
 }
 export function fetchTools() {
-  return Promise.resolve({ tools: [], todo: true });
+  return apiFetch(TOOL_SETTINGS_PATH);
 }
-export function updateToolPermission(_name, _state) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 tools endpoint" });
+export async function updateToolPermission(name, state) {
+  const response = await apiFetch(`${TOOL_SETTINGS_PATH}/${encodeURIComponent(name)}`, {
+    method: "POST",
+    body: JSON.stringify({ state }),
+  });
+  return { success: true, ...response };
 }
 export function fetchExtensions() {
   return apiFetch("/api/webchat/v2/extensions");

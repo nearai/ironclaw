@@ -1,14 +1,21 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use ironclaw_approvals::{
+    InMemoryAutoApproveSettingStore, InMemoryPersistentApprovalPolicyStore,
+    InMemoryToolPermissionOverrideStore,
+};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ConnectableChannelsProductFacade, RebornServices as ProductRebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind, RebornToolCatalog,
+    RebornToolInfo,
 };
 
 use crate::{
     RebornBuildError, RebornProductAuthServices, RebornReadiness, RebornRuntime,
     RebornWebuiAutomationFacade,
+    extension_lifecycle::RebornLocalExtensionManagementPort,
     lifecycle::RebornLocalLifecycleFacade,
     outbound_preferences::{EmptyOutboundDeliveryTargetInventory, RebornOutboundPreferencesFacade},
     webui_extension_credentials::ProductAuthExtensionCredentialSetup,
@@ -106,6 +113,12 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         if let Some(extension_management) = &local_runtime.extension_management {
             lifecycle_facade =
                 lifecycle_facade.with_extension_management(extension_management.clone());
+            api = api.with_tool_approval_config(
+                Arc::new(InMemoryToolPermissionOverrideStore::new()),
+                Arc::new(InMemoryAutoApproveSettingStore::new()),
+                Arc::new(InMemoryPersistentApprovalPolicyStore::new()),
+                Arc::new(LocalDevToolCatalog::new(Arc::clone(extension_management))),
+            );
         }
         if let Some(runtime_http_egress) = &local_runtime.runtime_http_egress {
             lifecycle_facade =
@@ -158,4 +171,44 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         product_auth: services.product_auth.clone(),
         readiness: services.readiness,
     })
+}
+
+struct LocalDevToolCatalog {
+    extension_management: Arc<RebornLocalExtensionManagementPort>,
+}
+
+impl LocalDevToolCatalog {
+    fn new(extension_management: Arc<RebornLocalExtensionManagementPort>) -> Self {
+        Self {
+            extension_management,
+        }
+    }
+}
+
+#[async_trait]
+impl RebornToolCatalog for LocalDevToolCatalog {
+    async fn list_tools(&self) -> Result<Vec<RebornToolInfo>, RebornServicesError> {
+        let capabilities = self
+            .extension_management
+            .active_model_visible_capabilities()
+            .await
+            .map_err(|_| RebornServicesError {
+                code: RebornServicesErrorCode::Unavailable,
+                kind: RebornServicesErrorKind::ServiceUnavailable,
+                status_code: 503,
+                retryable: true,
+                field: None,
+                validation_code: None,
+            })?;
+        Ok(capabilities
+            .into_iter()
+            .map(|capability| RebornToolInfo {
+                capability_id: capability.id,
+                provider: capability.provider,
+                description: Arc::from(capability.description),
+                default_permission: capability.default_permission,
+                effects: capability.effects,
+            })
+            .collect())
+    }
 }

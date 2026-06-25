@@ -69,6 +69,9 @@ browser-reachable.
 | `webui.v2.remove_extension` | POST | `/api/webchat/v2/extensions/{package_id}/remove` | None | `ProductWorkflow` |
 | `webui.v2.get_extension_setup` | GET | `/api/webchat/v2/extensions/{package_id}/setup` | None | `ProjectionOnly` |
 | `webui.v2.setup_extension` | POST | `/api/webchat/v2/extensions/{package_id}/setup` | None | `ProductWorkflow` |
+| `webui.v2.list_tool_permissions` | GET | `/api/webchat/v2/settings/tools` | None | `ProjectionOnly` |
+| `webui.v2.set_tool_auto_approve` | POST | `/api/webchat/v2/settings/tools` | None | `ProductWorkflow` |
+| `webui.v2.set_tool_permission` | POST | `/api/webchat/v2/settings/tools/{capability_id}` | None | `ProductWorkflow` |
 | `webui.v2.get_llm_config` | GET | `/api/webchat/v2/llm/providers` | None | `ProjectionOnly` |
 | `webui.v2.upsert_llm_provider` | POST | `/api/webchat/v2/llm/providers` | None | `ProductWorkflow` |
 | `webui.v2.delete_llm_provider` | POST | `/api/webchat/v2/llm/providers/{provider_id}/delete` | None | `ProductWorkflow` |

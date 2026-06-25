@@ -14,6 +14,26 @@ use ironclaw_host_api::{
 use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStore, ApprovalStatus, RunStateError};
 use thiserror::Error;
 
+mod auto_approve;
+mod persistent_policy;
+mod tool_permission;
+
+pub use auto_approve::{
+    AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingRecord,
+    AutoApproveSettingStore, InMemoryAutoApproveSettingStore,
+};
+pub use persistent_policy::{
+    InMemoryPersistentApprovalPolicyStore, PersistentApprovalAction, PersistentApprovalPolicy,
+    PersistentApprovalPolicyError, PersistentApprovalPolicyInput, PersistentApprovalPolicyKey,
+    PersistentApprovalPolicyStore, PersistentApprovalScope,
+    permission_mode_allows_persistent_approval, persistent_approval_grant_issuer,
+};
+pub use tool_permission::{
+    InMemoryToolPermissionOverrideStore, ToolPermissionOverride, ToolPermissionOverrideInput,
+    ToolPermissionOverrideKey, ToolPermissionOverrideRecord, ToolPermissionOverrideStore,
+    ToolPermissionState, ToolPermissionStoreError,
+};
+
 pub struct ApprovalResolver<'a, A, L>
 where
     A: ApprovalRequestStore + ?Sized,

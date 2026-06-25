@@ -32,6 +32,9 @@ pub const WEBUI_V2_ROUTE_ACTIVATE_EXTENSION: &str = "webui.v2.activate_extension
 pub const WEBUI_V2_ROUTE_REMOVE_EXTENSION: &str = "webui.v2.remove_extension";
 pub const WEBUI_V2_ROUTE_GET_EXTENSION_SETUP: &str = "webui.v2.get_extension_setup";
 pub const WEBUI_V2_ROUTE_SETUP_EXTENSION: &str = "webui.v2.setup_extension";
+pub const WEBUI_V2_ROUTE_LIST_TOOL_PERMISSIONS: &str = "webui.v2.list_tool_permissions";
+pub const WEBUI_V2_ROUTE_SET_TOOL_PERMISSION: &str = "webui.v2.set_tool_permission";
+pub const WEBUI_V2_ROUTE_SET_TOOL_AUTO_APPROVE: &str = "webui.v2.set_tool_auto_approve";
 pub const WEBUI_V2_ROUTE_GET_LLM_CONFIG: &str = "webui.v2.get_llm_config";
 pub const WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER: &str = "webui.v2.upsert_llm_provider";
 pub const WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER: &str = "webui.v2.delete_llm_provider";
@@ -65,6 +68,9 @@ pub const WEBUI_V2_PATTERN_ACTIVATE_EXTENSION: &str =
 pub const WEBUI_V2_PATTERN_REMOVE_EXTENSION: &str =
     "/api/webchat/v2/extensions/{package_id}/remove";
 pub const WEBUI_V2_PATTERN_SETUP_EXTENSION: &str = "/api/webchat/v2/extensions/{package_id}/setup";
+pub const WEBUI_V2_PATTERN_TOOL_PERMISSIONS: &str = "/api/webchat/v2/settings/tools";
+pub const WEBUI_V2_PATTERN_SET_TOOL_PERMISSION: &str =
+    "/api/webchat/v2/settings/tools/{capability_id}";
 pub const WEBUI_V2_PATTERN_GET_LLM_CONFIG: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER: &str =
@@ -103,6 +109,9 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         remove_extension_descriptor(),
         get_extension_setup_descriptor(),
         setup_extension_descriptor(),
+        list_tool_permissions_descriptor(),
+        set_tool_auto_approve_descriptor(),
+        set_tool_permission_descriptor(),
         get_llm_config_descriptor(),
         upsert_llm_provider_descriptor(),
         delete_llm_provider_descriptor(),
@@ -394,6 +403,48 @@ fn setup_extension_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_PATTERN_SETUP_EXTENSION,
         mutation_policy(
             body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn list_tool_permissions_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_TOOL_PERMISSIONS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_TOOL_PERMISSIONS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn set_tool_auto_approve_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_TOOL_AUTO_APPROVE,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_TOOL_PERMISSIONS,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn set_tool_permission_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_TOOL_PERMISSION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SET_TOOL_PERMISSION,
+        mutation_policy(
+            body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductWorkflow,

@@ -31,11 +31,12 @@ use ironclaw_product_workflow::{
     RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
     RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    RebornTimelineResponse, RebornToolAutoApproveSetRequest, RebornToolPermissionResponse,
+    RebornToolPermissionSetRequest, RebornToolPermissionsResponse, SetActiveLlmRequest,
+    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +62,39 @@ pub async fn get_session(
         user_id: caller.user_id.to_string(),
         capabilities: state.capabilities(),
     })
+}
+
+/// `GET /api/webchat/v2/settings/tools`
+pub async fn list_tool_permissions(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornToolPermissionsResponse>, WebUiV2HttpError> {
+    let response = state.services().list_tool_permissions(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/settings/tools`
+pub async fn set_tool_auto_approve(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<RebornToolAutoApproveSetRequest>,
+) -> Result<Json<RebornToolPermissionsResponse>, WebUiV2HttpError> {
+    let response = state.services().set_tool_auto_approve(caller, body).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/settings/tools/{capability_id}`
+pub async fn set_tool_permission(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(capability_id): Path<String>,
+    Json(body): Json<RebornToolPermissionSetRequest>,
+) -> Result<Json<RebornToolPermissionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_tool_permission(caller, capability_id, body)
+        .await?;
+    Ok(Json(response))
 }
 
 /// `POST /api/webchat/v2/threads`

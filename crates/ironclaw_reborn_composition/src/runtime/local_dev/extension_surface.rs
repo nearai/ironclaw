@@ -160,6 +160,8 @@ mod tests {
         let capability = ActiveExtensionCapability {
             id: CapabilityId::new(WEB_SEARCH_CAPABILITY_ID).unwrap(),
             provider: ExtensionId::new(WEB_ACCESS_EXTENSION_ID).unwrap(),
+            description: "Search the web".to_string(),
+            default_permission: ironclaw_host_api::PermissionMode::Ask,
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             runtime_credentials: Vec::new(),
         };
@@ -183,6 +185,8 @@ mod tests {
         let capability = ActiveExtensionCapability {
             id: CapabilityId::new(WEB_SEARCH_CAPABILITY_ID).unwrap(),
             provider: ExtensionId::new(WEB_ACCESS_EXTENSION_ID).unwrap(),
+            description: "Search the web".to_string(),
+            default_permission: ironclaw_host_api::PermissionMode::Ask,
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             runtime_credentials: vec![ironclaw_host_api::RuntimeCredentialRequirement {
                 handle: ironclaw_host_api::SecretHandle::new("exa_mcp_token").unwrap(),
@@ -213,6 +217,8 @@ mod tests {
             id: CapabilityId::new("gmail.list_messages").unwrap(),
             provider: ExtensionId::new(ironclaw_first_party_extensions::GMAIL_EXTENSION_ID)
                 .unwrap(),
+            description: "List Gmail messages".to_string(),
+            default_permission: ironclaw_host_api::PermissionMode::Ask,
             effects: vec![
                 EffectKind::DispatchCapability,
                 EffectKind::Network,
@@ -232,6 +238,8 @@ mod tests {
             id: CapabilityId::new("google-calendar.list_events").unwrap(),
             provider: ExtensionId::new(ironclaw_first_party_extensions::CALENDAR_EXTENSION_ID)
                 .unwrap(),
+            description: "List calendar events".to_string(),
+            default_permission: ironclaw_host_api::PermissionMode::Ask,
             effects: vec![
                 EffectKind::DispatchCapability,
                 EffectKind::Network,

@@ -9,6 +9,9 @@ ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 
 [dev-dependencies]

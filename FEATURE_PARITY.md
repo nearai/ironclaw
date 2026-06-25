@@ -339,7 +339,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | GSuite WASM tools | ✅ | 🚧 | Reborn bundles operation-level Google Drive/Docs/Sheets/Slides WASM packages with host-mediated HTTP egress, product-auth scoped bearer injection, and manifest-declared Google OAuth setup metadata; full live-recorded parity remains follow-up |
 | Hosted MCP extensions | ✅ | 🚧 | Reborn composes host-mediated MCP runtime, bundles the current Notion MCP supported tool set, wires Notion ProductAuth OAuth exchange/refresh, can use Reborn ProductAuth DCR OAuth setup through the host callback origin, and can activate hosted MCP packages with live `tools/list` schema discovery through host-staged product-auth credentials |
 | NEAR AI MCP extension | ✅ | 🚧 | Host-bundled Reborn MCP extension exposes `nearai.search` via host-mediated HTTP and `llm_nearai_api_key`; manifest-declared product-auth credentials can now be staged through the hosted MCP runtime/discovery bridge, while NEAR remains a static supported-tool adapter |
-| Tool policies (allow/deny) | ✅ | ✅ | |
+| Tool policies (allow/deny) | ✅ | ✅ | User-scoped WebUI settings can list tools, toggle global always-allow for eligible tools, and set per-tool always/ask/disabled overrides without operator privileges |
 | Exec approvals (`/approve`) | ✅ | ✅ | TUI approval overlay |
 | Tool inventory cache | ✅ | ❌ | Coalesced effective-tool inventory cache with channel-registry invalidation |
 | Pending exec approval `errorMessage` cleanup | ✅ | ❌ | Failed restart-interrupted approval-pending sessions instead of replaying stale ids |
@@ -741,7 +741,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Sandbox env sanitization | ✅ | 🚧 | Shell tool scrubs env vars (secret detection); Reborn process sandbox rejects sensitive raw env values in plans and uses placeholders for brokered credentials, but production secure-capture and MITM transport wiring remain partial |
 | `OPENCLAW_*` env block | ✅ | ❌ | Untrusted workspace `.env` cannot inject OpenClaw runtime-control vars |
 | Workspace `.env` injection blocks | ✅ | ❌ | Block `CLOUDSDK_PYTHON`, ambient Homebrew, Windows system PATH vars, `MINIMAX_API_HOST`, `npm_execpath` |
-| Tool policies | ✅ | ✅ | |
+| Tool policies | ✅ | ✅ | User-scoped WebUI settings can list tools, toggle global always-allow for eligible tools, and set per-tool always/ask/disabled overrides without operator privileges |
 | Elevated mode | ✅ | ❌ | |
 | Safe bins allowlist | ✅ | ❌ | Hardened path trust; non-user-writable absolute helpers for CLI/ffmpeg/OpenSSL |
 | LD*/DYLD* validation | ✅ | ❌ | Block Mercurial/Rust/Make env redirects in host exec sanitization |
