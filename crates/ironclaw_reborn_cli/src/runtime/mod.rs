@@ -1,5 +1,7 @@
 use std::io::{IsTerminal, Write};
-use std::path::{Path, PathBuf};
+#[cfg(feature = "webui-v2-beta")]
+use std::path::Path;
+use std::path::PathBuf;
 #[cfg(feature = "webui-v2-beta")]
 use std::sync::Arc;
 use std::time::Duration;
@@ -79,6 +81,8 @@ const REBORN_NOISY_LOG_TARGETS: &[(&str, &str)] = &[
     ("rustls", "warn"),
     ("tower", "warn"),
     ("tower_http", "warn"),
+    ("cranelift_codegen", "warn"),
+    ("wasmtime_internal_cranelift", "warn"),
     ("ironclaw_llm", "info"),
 ];
 
@@ -1190,6 +1194,8 @@ mod tests {
         assert!(filter.contains("rustls=warn"));
         assert!(filter.contains("tower=warn"));
         assert!(filter.contains("tower_http=warn"));
+        assert!(filter.contains("cranelift_codegen=warn"));
+        assert!(filter.contains("wasmtime_internal_cranelift=warn"));
         assert!(filter.contains("ironclaw_llm=info"));
     }
 

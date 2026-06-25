@@ -17,6 +17,11 @@ This crate owns the standalone `ironclaw-reborn` command surface. Keep it small,
 - no v1 runtime imports: do not depend on root `ironclaw`, `src/agent`, channels, worker, DB, setup, service, sandbox, or `ironclaw_engine`.
 - Do not add workspace dependencies beyond `ironclaw_reborn_composition`, `ironclaw_reborn_config`, `ironclaw_reborn_traces`, and `ironclaw_reborn_webui_ingress` (host-owned WebUI serve lifecycle) without an architecture test update and explicit PR rationale. Provider registry/auth/model UX should enter through the Reborn composition provider-admin facade, not a separate CLI-only path.
 
+## Logging
+
+- `IRONCLAW_REBORN_LOG=debug` is operator-facing stderr logging in hosted deployments. Broad debug filters must keep low-level dependency spam suppressed unless an operator names the dependency target explicitly.
+- When adding runtime dependencies that can emit high-volume DEBUG logs during normal startup or request handling, add them to `REBORN_NOISY_LOG_TARGETS` and extend `reborn_log_filter_suppresses_noisy_targets_for_broad_debug`.
+
 ## Adding a command
 
 1. Add `src/commands/<name>.rs` with a clap `Args` type and an `execute` method.
