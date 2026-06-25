@@ -69,6 +69,7 @@ function findNode(node, predicate) {
 }
 
 function renderChatInput({
+  onSend = async () => {},
   onCancel,
   setCalls = [],
   disabled = true,
@@ -122,7 +123,7 @@ function renderChatInput({
 
   vm.runInNewContext(chatInputSourceForTest(), context);
   const tree = context.globalThis.__testExports.ChatInput({
-    onSend: async () => {},
+    onSend,
     onCancel,
     disabled,
     sendDisabled,
@@ -194,4 +195,62 @@ test("ChatInput keeps the textarea editable when only submit is disabled", () =>
   const sendButton = findComponent(tree, components.Button);
   const sendProps = componentProps(sendButton, components.Button);
   assert.equal(sendProps.disabled, true);
+});
+
+test("ChatInput blocks Enter send when only submit is disabled", async () => {
+  let sendCalls = 0;
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: true,
+    canCancel: false,
+    draft: "draft while busy",
+    onSend: async () => {
+      sendCalls += 1;
+    },
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  let prevented = false;
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+  await Promise.resolve();
+
+  assert.equal(prevented, true);
+  assert.equal(sendCalls, 0);
+});
+
+test("ChatInput preserves draft when caller refuses send", async () => {
+  const setCalls = [];
+  const { tree } = renderChatInput({
+    setCalls,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "draft while busy",
+    onSend: async () => null,
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {},
+  });
+  await Promise.resolve();
+
+  assert.equal(
+    setCalls.some((call) => call.index === 0 && call.value === ""),
+    false,
+  );
 });
