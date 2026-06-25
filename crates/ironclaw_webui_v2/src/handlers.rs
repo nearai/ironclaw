@@ -64,6 +64,8 @@ use crate::router::{WebUiV2Capabilities, WebUiV2State};
 use crate::schema::WebChatV2EventFrame;
 use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
 
+const AUTO_APPROVE_CONFIG_KEY: &str = "agent.auto_approve_tools";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WebUiV2SessionResponse {
     pub tenant_id: String,
@@ -91,6 +93,10 @@ pub struct WebUiV2Features {
     /// `IRONCLAW_REBORN_PROJECTS`, while the surface is still being
     /// finished.
     pub reborn_projects: bool,
+    /// Effective global auto-approve setting for the authenticated caller.
+    /// The browser treats it as a bootstrap UI flag and does not inspect the
+    /// operator settings payload shape.
+    pub global_auto_approve: bool,
 }
 
 /// `GET /api/webchat/v2/session`
@@ -99,15 +105,31 @@ pub async fn get_session(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Json<WebUiV2SessionResponse> {
+    let global_auto_approve = global_auto_approve_enabled(&state, caller.clone()).await;
     Json(WebUiV2SessionResponse {
         tenant_id: caller.tenant_id.to_string(),
         user_id: caller.user_id.to_string(),
         capabilities,
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
+            global_auto_approve,
         },
         attachments: webui_attachment_capabilities(),
     })
+}
+
+async fn global_auto_approve_enabled(
+    state: &WebUiV2State,
+    caller: WebUiAuthenticatedCaller,
+) -> bool {
+    let Ok(config) = state
+        .services()
+        .get_operator_config_key(caller, AUTO_APPROVE_CONFIG_KEY.to_string())
+        .await
+    else {
+        return false;
+    };
+    config.entry.value.as_bool().unwrap_or(false)
 }
 
 /// `POST /api/webchat/v2/threads`

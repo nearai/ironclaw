@@ -522,6 +522,11 @@ mod tests {
         assert!(auth.contains("setIsSessionChecking(Boolean(nextToken))"));
         assert!(auth.contains("setIsSessionChecking(true);"));
         assert!(auth.contains("isAdmin: Boolean(session?.capabilities?.operator_webui_config)"));
+        assert!(
+            auth.contains(
+                "globalAutoApproveEnabled: Boolean(session?.features?.global_auto_approve)"
+            )
+        );
         assert!(!auth.contains("isAdmin: false"));
 
         let sidebar_nav = asset_text("js/components/sidebar-nav.js");

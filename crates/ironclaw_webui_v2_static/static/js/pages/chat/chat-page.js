@@ -3,7 +3,7 @@ import { React, html } from "../../lib/html.js";
 import { Chat } from "./chat.js";
 
 export function ChatPage() {
-  const { threadsState, gatewayStatus } = useOutletContext();
+  const { threadsState, gatewayStatus, globalAutoApproveEnabled = false } = useOutletContext();
   const { threadId: urlThreadId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
@@ -39,6 +39,7 @@ export function ChatPage() {
       composerDraft=${composerDraft}
       composerResetKey=${location.key}
       gatewayStatus=${gatewayStatus}
+      globalAutoApproveEnabled=${globalAutoApproveEnabled}
     />
   `;
 }

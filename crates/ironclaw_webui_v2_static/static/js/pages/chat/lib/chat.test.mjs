@@ -56,7 +56,11 @@ function componentProps(node, component) {
   return props;
 }
 
-function renderChat({ hookState, activeThreadId = "thread-1" }) {
+function renderChat({
+  hookState,
+  activeThreadId = "thread-1",
+  globalAutoApproveEnabled = false,
+}) {
   const components = {
     ApprovalCard() {},
     AuthGenericCard() {},
@@ -92,18 +96,10 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     },
     buildRuntimeContext: () => ({}),
     clearThreadState: () => {},
-    fetchSettingsExport: async () => ({
-      settings: { "agent.auto_approve_tools": false },
-    }),
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     setThreadState: () => {},
     useChat: () => hookState,
-    useQuery: ({ enabled }) => ({
-      data: enabled
-        ? { settings: { "agent.auto_approve_tools": false } }
-        : undefined,
-    }),
     useT: () => (key) => key,
   };
 
@@ -114,6 +110,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     onSelectThread: () => {},
     isCreatingThread: false,
     gatewayStatus: {},
+    globalAutoApproveEnabled,
   });
   return { tree, components };
 }

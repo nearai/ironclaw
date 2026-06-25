@@ -251,6 +251,7 @@ struct StubServices {
     get_operator_setup_calls: Mutex<usize>,
     run_operator_setup_calls: Mutex<Vec<OperatorSetupCall>>,
     list_operator_config_calls: Mutex<usize>,
+    operator_config_entries: Mutex<Vec<RebornOperatorConfigEntry>>,
     get_operator_config_key_calls: Mutex<Vec<String>>,
     set_operator_config_key_calls: Mutex<Vec<OperatorConfigSetCall>>,
     next_set_operator_config_key_error: Mutex<Option<RebornServicesError>>,
@@ -952,7 +953,7 @@ impl RebornServicesApi for StubServices {
     ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
         *self.list_operator_config_calls.lock().expect("lock") += 1;
         Ok(RebornOperatorConfigListResponse {
-            entries: Vec::new(),
+            entries: self.operator_config_entries.lock().expect("lock").clone(),
             precedence: Vec::new(),
             diagnostics: Vec::new(),
         })
@@ -967,6 +968,16 @@ impl RebornServicesApi for StubServices {
             .lock()
             .expect("lock")
             .push(key.clone());
+        if let Some(entry) = self
+            .operator_config_entries
+            .lock()
+            .expect("lock")
+            .iter()
+            .find(|entry| entry.key == key)
+            .cloned()
+        {
+            return Ok(RebornOperatorConfigGetResponse { entry });
+        }
         Ok(RebornOperatorConfigGetResponse {
             entry: operator_config_entry(key, serde_json::json!("configured")),
         })
@@ -2745,6 +2756,60 @@ async fn get_session_reports_reborn_projects_feature_from_state_flag() {
         assert_eq!(
             body["features"]["reborn_projects"], enabled,
             "features.reborn_projects must mirror the state flag (enabled={enabled})"
+        );
+    }
+}
+
+// The approval card hint needs the effective global auto-approve setting, but
+// the browser must receive it as a session bootstrap feature instead of reading
+// the operator settings response shape directly.
+#[tokio::test]
+async fn get_session_reports_global_auto_approve_feature_from_operator_config() {
+    for enabled in [false, true] {
+        let services = Arc::new(StubServices::default());
+        services
+            .operator_config_entries
+            .lock()
+            .expect("lock")
+            .push(RebornOperatorConfigEntry {
+                key: "agent.auto_approve_tools".to_string(),
+                value: serde_json::json!(enabled),
+                source: "override".to_string(),
+                redacted: false,
+                mutable: true,
+            });
+        let router = webui_v2_router(WebUiV2State::new(
+            services.clone(),
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+        ))
+        .layer(axum::Extension(caller()))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/webchat/v2/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body["features"]["global_auto_approve"], enabled,
+            "features.global_auto_approve must mirror operator config (enabled={enabled})"
+        );
+        assert_eq!(
+            services
+                .get_operator_config_key_calls
+                .lock()
+                .expect("lock")
+                .as_slice(),
+            ["agent.auto_approve_tools".to_string()],
+            "session handler should read the feature through the facade key path"
         );
     }
 }
