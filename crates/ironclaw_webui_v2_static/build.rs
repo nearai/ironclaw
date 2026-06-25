@@ -1,25 +1,45 @@
-//! Build-time scan of the `static/` directory.
+//! Build-time scan of the WebUI static assets.
 //!
-//! Walks every file under `static/` and emits Rust source that
-//! declares one `ASSETS` slice keyed by URL path (relative to the
-//! mount prefix). Each entry pairs an `include_bytes!` reference
-//! with a content-type string picked from the file extension.
+//! Walks every file under `static/`, builds the generated SPA bundle into
+//! OUT_DIR when `webui-v2-beta` is enabled, and emits Rust source that declares
+//! one `ASSETS` slice keyed by URL path (relative to the mount prefix). Each
+//! entry pairs an `include_bytes!` reference with a content-type string picked
+//! from the file extension.
 //!
 //! The generated source is included from `src/assets.rs`.
 
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()); // safety: build script — Cargo always sets this
     let static_dir = manifest_dir.join("static");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap()); // safety: build script — Cargo always sets this
+    let generated_dist_dir = out_dir.join("webui-v2-dist").join("dist");
 
     println!("cargo:rerun-if-changed=static");
+    println!("cargo:rerun-if-changed=frontend/build.mjs");
+    println!("cargo:rerun-if-changed=frontend/package.json");
+    println!("cargo:rerun-if-changed=frontend/package-lock.json");
     println!("cargo:rerun-if-changed=build.rs");
 
+    let webui_enabled = env::var_os("CARGO_FEATURE_WEBUI_V2_BETA").is_some();
+    if webui_enabled {
+        build_frontend_dist(&manifest_dir, &generated_dist_dir);
+    }
+
     let mut entries: Vec<(String, PathBuf)> = Vec::new();
-    collect(&static_dir, &static_dir, &mut entries);
+    collect(&static_dir, &static_dir, "", &mut entries);
+    if webui_enabled {
+        collect(
+            &generated_dist_dir,
+            &generated_dist_dir,
+            "dist",
+            &mut entries,
+        );
+    }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut src = String::new();
@@ -56,18 +76,115 @@ fn main() {
         panic!("static/index.html is required");
     }
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap()); // safety: build script — Cargo always sets this
     fs::write(out_dir.join("assets_generated.rs"), src).expect("write assets_generated.rs"); // safety: build script — fail build on write error
 }
 
-fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
+fn build_frontend_dist(manifest_dir: &Path, dist_dir: &Path) {
+    let frontend_dir = manifest_dir.join("frontend");
+
+    ensure_frontend_dependencies(&frontend_dir);
+    if dist_dir.exists() {
+        fs::remove_dir_all(dist_dir).unwrap_or_else(|error| {
+            panic!("remove stale webui dist {}: {error}", dist_dir.display())
+        });
+    }
+    run_command(
+        node_command(),
+        &["build.mjs"],
+        &frontend_dir,
+        &[("IRONCLAW_WEBUI_V2_DIST_DIR", dist_dir)],
+    );
+
+    let app_js = dist_dir.join("app.js");
+    if !app_js.is_file() {
+        panic!("frontend build did not produce {}", app_js.display());
+    }
+}
+
+fn ensure_frontend_dependencies(frontend_dir: &Path) {
+    let node_modules = frontend_dir.join("node_modules");
+    let package_json = frontend_dir.join("package.json");
+    let package_lock = frontend_dir.join("package-lock.json");
+    let install_marker = node_modules.join(".package-lock.json");
+
+    let needs_install = if !node_modules.is_dir() || !install_marker.is_file() {
+        true
+    } else {
+        let marker_modified = modified_time(&install_marker);
+        modified_time(&package_lock) > marker_modified
+            || modified_time(&package_json) > marker_modified
+    };
+
+    if needs_install {
+        run_command(
+            npm_command(),
+            &["ci", "--no-audit", "--no-fund"],
+            frontend_dir,
+            &[],
+        );
+    }
+}
+
+fn modified_time(path: &Path) -> std::time::SystemTime {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or_else(|error| panic!("read modified time for {}: {error}", path.display()))
+}
+
+fn run_command(command: &str, args: &[&str], cwd: &Path, envs: &[(&str, &Path)]) {
+    let mut cmd = Command::new(command);
+    cmd.args(args).current_dir(cwd);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+
+    let status = cmd.status().unwrap_or_else(|error| {
+        panic!(
+            "failed to run `{}` in {}: {error}",
+            std::iter::once(command)
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" "),
+            cwd.display(),
+        )
+    });
+    if !status.success() {
+        panic!(
+            "`{}` failed in {} with status {status}",
+            std::iter::once(command)
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" "),
+            cwd.display(),
+        );
+    }
+}
+
+fn npm_command() -> &'static str {
+    if cfg!(windows) { "npm.cmd" } else { "npm" }
+}
+
+fn node_command() -> &'static str {
+    if cfg!(windows) { "node.exe" } else { "node" }
+}
+
+fn collect(root: &Path, dir: &Path, url_prefix: &str, out: &mut Vec<(String, PathBuf)>) {
     let read_dir = fs::read_dir(dir).expect("read_dir static"); // safety: build script — fail build on read error
     for entry in read_dir {
         let entry = entry.expect("dir entry"); // safety: build script — fail build on bad entry
         let path = entry.path();
         let file_type = entry.file_type().expect("file type"); // safety: build script — fail build on stat error
         if file_type.is_dir() {
-            collect(root, &path, out);
+            // `static/dist` is generated output. Cargo embeds the freshly built
+            // OUT_DIR copy when WebUI v2 is enabled, so a local ignored
+            // source-tree bundle must never win by accident.
+            if url_prefix.is_empty()
+                && dir == root
+                && path.file_name().and_then(|name| name.to_str()) == Some("dist")
+            {
+                continue;
+            }
+            collect(root, &path, url_prefix, out);
         } else if file_type.is_file() {
             // `*.test.js` / `*.test.mjs` are colocated Node `node:test` unit
             // tests, not browser assets — never embed or serve them (shipping
@@ -88,6 +205,11 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
                 .map(|c| c.as_os_str().to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
                 .join("/");
+            let url = if url_prefix.is_empty() {
+                url
+            } else {
+                format!("{url_prefix}/{url}")
+            };
             out.push((url, path));
         }
     }

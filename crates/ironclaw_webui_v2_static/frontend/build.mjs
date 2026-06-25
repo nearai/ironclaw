@@ -4,11 +4,14 @@
 //         imports, plus the React ecosystem (react, react-dom,
 //         react-router, @tanstack/react-query, react-hook-form, htm)
 //         resolved from ./node_modules.
-// Output: ../static/dist/app.js  + ../static/dist/chunks/*  (locale
-//         code-split chunks, dynamically imported by lib/i18n.js).
+// Output: $IRONCLAW_WEBUI_V2_DIST_DIR/app.js + chunks/* when that env var is
+//         set, otherwise ../static/dist/app.js + chunks/* for manual local
+//         builds. Locale chunks are code-split and dynamically imported by
+//         lib/i18n.js.
 //
-// The output is committed so `cargo build` embeds it without needing
-// node. Re-run via ./build.sh after editing static/js/**.
+// Cargo invokes this in `webui-v2-beta` builds and embeds the generated output
+// from OUT_DIR. Re-run via ./build.sh after editing static/js/** when you want
+// a local static/dist preview.
 //
 // What is deliberately NOT bundled (kept as same-origin <script>/<link>
 // in index.html, vendored by vendor.sh):
@@ -25,7 +28,9 @@ import { rmSync } from "node:fs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const staticDir = resolve(here, "..", "static");
-const outdir = resolve(staticDir, "dist");
+const outdir = process.env.IRONCLAW_WEBUI_V2_DIST_DIR
+  ? resolve(process.env.IRONCLAW_WEBUI_V2_DIST_DIR)
+  : resolve(staticDir, "dist");
 
 // Clean stale chunks (hashed names accumulate across builds otherwise).
 rmSync(outdir, { recursive: true, force: true });
@@ -57,4 +62,4 @@ await build({
   logLevel: "info",
 });
 
-console.log("webui v2 bundle written to static/dist/");
+console.log(`webui v2 bundle written to ${outdir}`);
