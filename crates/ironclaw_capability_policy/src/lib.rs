@@ -35,6 +35,8 @@
 //!
 //! [nearai/ironclaw#4628]: https://github.com/nearai/ironclaw/issues/4628
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityId, PermissionMode, ProjectId, TenantId, UserId};
 use serde::{Deserialize, Serialize};
@@ -230,6 +232,72 @@ pub trait PolicyResolver: Send + Sync {
     ) -> Result<EffectivePolicy, PolicyError>;
 }
 
+impl CapabilityDefaultPolicy {
+    /// A conservative global fallback for capabilities that declare no policy:
+    /// hidden, no credential, ask before running. Fail-closed on availability.
+    pub fn conservative_fallback() -> Self {
+        Self {
+            availability: Availability::Hidden,
+            identity: IdentityMode::None,
+            approval: PermissionMode::Ask,
+            config: Value::Null,
+        }
+    }
+}
+
+/// Source of per-capability default policy (architecture doc §7).
+///
+/// The capability manifest is the source of truth; this trait decouples lookup
+/// from where manifests are registered, so a per-capability default can be
+/// sourced without adding a field to the 49-construction-site
+/// `CapabilityDescriptor`. Capabilities that declare no policy fall back to a
+/// conservative global default.
+pub trait CapabilityDefaultPolicySource: Send + Sync {
+    /// The default policy for `capability`, or the global fallback when the
+    /// capability declares none.
+    fn default_for(&self, capability: &CapabilityId) -> CapabilityDefaultPolicy;
+}
+
+/// In-memory [`CapabilityDefaultPolicySource`]: explicit per-capability entries
+/// over a global fallback. Seeded from manifest declarations at composition
+/// time.
+#[derive(Debug, Clone)]
+pub struct StaticCapabilityDefaultPolicySource {
+    fallback: CapabilityDefaultPolicy,
+    entries: HashMap<CapabilityId, CapabilityDefaultPolicy>,
+}
+
+impl StaticCapabilityDefaultPolicySource {
+    /// Create a source with the given global fallback and no entries.
+    pub fn new(fallback: CapabilityDefaultPolicy) -> Self {
+        Self {
+            fallback,
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Builder-style insert of a per-capability default.
+    #[must_use]
+    pub fn with_entry(mut self, capability: CapabilityId, policy: CapabilityDefaultPolicy) -> Self {
+        self.entries.insert(capability, policy);
+        self
+    }
+
+    /// Insert or replace a per-capability default.
+    pub fn insert(&mut self, capability: CapabilityId, policy: CapabilityDefaultPolicy) {
+        self.entries.insert(capability, policy);
+    }
+}
+
+impl CapabilityDefaultPolicySource for StaticCapabilityDefaultPolicySource {
+    fn default_for(&self, capability: &CapabilityId) -> CapabilityDefaultPolicy {
+        self.entries
+            .get(capability)
+            .cloned()
+            .unwrap_or_else(|| self.fallback.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +331,50 @@ mod tests {
             approval: None,
             config_patch: None,
         }
+    }
+
+    #[test]
+    fn default_source_returns_entry_then_fallback() {
+        let entry = CapabilityDefaultPolicy {
+            availability: Availability::Available,
+            identity: IdentityMode::None,
+            approval: PermissionMode::Allow,
+            config: json!({}),
+        };
+        let source = StaticCapabilityDefaultPolicySource::new(
+            CapabilityDefaultPolicy::conservative_fallback(),
+        )
+        .with_entry(cap(), entry.clone());
+        assert_eq!(source.default_for(&cap()), entry);
+
+        let unknown = CapabilityId::new("shell.exec").expect("valid capability id");
+        assert_eq!(
+            source.default_for(&unknown),
+            CapabilityDefaultPolicy::conservative_fallback()
+        );
+    }
+
+    #[test]
+    fn conservative_fallback_is_hidden_and_ask() {
+        let fallback = CapabilityDefaultPolicy::conservative_fallback();
+        assert_eq!(fallback.availability, Availability::Hidden);
+        assert_eq!(fallback.approval, PermissionMode::Ask);
+        assert_eq!(fallback.identity, IdentityMode::None);
+    }
+
+    #[test]
+    fn source_default_feeds_the_fold() {
+        // An admin per-user grant flips the conservative hidden default to
+        // available for one user.
+        let source = StaticCapabilityDefaultPolicySource::new(
+            CapabilityDefaultPolicy::conservative_fallback(),
+        );
+        let mut user = delta(PolicyScope::User {
+            user_id: uid("bob"),
+        });
+        user.availability = Some(Availability::Available);
+        let eff = resolve_effective_policy(&source.default_for(&cap()), &[user]);
+        assert!(eff.available);
     }
 
     #[test]
