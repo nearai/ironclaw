@@ -309,7 +309,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         // durable path (`flows.rs`). The flow record may carry a different
         // invocation_id/thread_id/mission_id than the credential account; only
         // the ownership boundary (tenant/user/agent/project + surface + session)
-        // is meaningful here. See `binding_scope_owns_account` in credential.rs:580.
+        // is meaningful here. See `binding_scope_owns_account` in credential.rs.
         if !binding_scope_owns_account(&flow_scope, account) || account.provider != flow_provider {
             return Err(AuthProductError::CrossScopeDenied);
         }
@@ -376,7 +376,8 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         // earlier flow. Full `scope_matches` equality would always fail across
         // requests. The meaningful ownership boundary is enforced by
         // `binding_scope_owns_account` (tenant/user/agent/project + surface +
-        // session); see the canonical docstring at credential.rs:580.
+        // session); see the canonical docstring on `binding_scope_owns_account`
+        // in credential.rs.
         if !binding_scope_owns_account(&flow_scope, account) || account.provider != flow_provider {
             return Err(AuthProductError::CrossScopeDenied);
         }

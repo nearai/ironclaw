@@ -190,7 +190,7 @@ where
         // legitimate cross-invocation selection. The meaningful ownership boundary
         // (tenant/user/agent/project + surface + session) is enforced by
         // `binding_scope_owns_account`; see the canonical docstring at
-        // crates/ironclaw_auth/src/credential.rs:580.
+        // crates/ironclaw_auth/src/credential.rs.
         if !binding_scope_owns_account(&record.scope, &account)
             || account.provider != record.provider
             || account.status != CredentialAccountStatus::Configured
@@ -257,7 +257,7 @@ where
         // across requests.  The enforced ownership boundary is
         // tenant/user/agent/project + surface + session; see the canonical docstring
         // on `binding_scope_owns_account` at
-        // crates/ironclaw_auth/src/credential.rs:580.
+        // crates/ironclaw_auth/src/credential.rs.
         if !binding_scope_owns_account(&record.scope, &account)
             || account.provider != record.provider
             || account.status != CredentialAccountStatus::Configured

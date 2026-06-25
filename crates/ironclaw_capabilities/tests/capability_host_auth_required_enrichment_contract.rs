@@ -13,7 +13,7 @@
 // error into a `CapabilityInvocationError`.
 //
 // These tests drive `CapabilityHost::invoke_json` — the caller — rather than
-// `enrich_auth_required_from_obligations` alone, so they cover the layer where
+// `enrich_dispatch_error_credential_requirements` alone, so they cover the layer where
 // the enrichment input (obligations) is silently dropped if the fix is absent.
 // (See `.claude/rules/testing.md` "Test Through the Caller, Not Just the Helper".)
 use async_trait::async_trait;
