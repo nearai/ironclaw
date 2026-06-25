@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use tokio::sync::Semaphore;
 
-use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
+use crate::auth_prompt::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
 use crate::slack_outbound_targets::{
     slack_conversation_id_from_reply_target_binding_ref, slack_reply_target_is_personal_dm,
 };
@@ -460,15 +460,16 @@ impl SlackFinalReplyDeliveryObserver {
                     );
                     return Ok(None);
                 };
-                let view = auth_prompt_view_for_blocked_auth(
-                    &binding.actor_user_id,
+                let view = auth_prompt_view_for_blocked_auth(BlockedAuthPromptRequest {
+                    fallback_owner_user_id: &binding.actor_user_id,
                     scope,
                     run_id,
-                    gate_ref.as_str(),
-                    "Authenticate to continue this run.".to_string(),
-                    &state.credential_requirements,
-                    self.services.auth_challenges.as_deref(),
-                )
+                    gate_ref: gate_ref.as_str(),
+                    invocation_id: None,
+                    body: "Authenticate to continue this run.".to_string(),
+                    credential_requirements: &state.credential_requirements,
+                    auth_challenges: self.services.auth_challenges.as_deref(),
+                })
                 .await?;
                 // Only link-based OAuth is allowed over Slack: the user
                 // authenticates on the provider's site via `authorization_url` and
@@ -1808,8 +1809,11 @@ fn is_accepted_auth_denial(envelope: &ProductInboundEnvelope, ack: &ProductInbou
 #[async_trait]
 pub trait PostSubmitDeliveryHook: Send + Sync {
     /// Called with the original trigger fire, the submitted run id, and the
-    /// turn scope the run was submitted under. Must not block the poller —
-    /// implementations must spawn their own tasks.
+    /// turn scope the run was submitted under. The trigger poller owns the
+    /// non-blocking handoff by invoking this hook from a detached task, so hook
+    /// latency cannot delay fire settlement. Implementations may still spawn
+    /// their own longer-lived delivery tasks when they need bounded admission or
+    /// shutdown tracking.
     async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope);
 }
 
@@ -2487,15 +2491,16 @@ async fn triggered_notification_for_state(
                 );
                 return Ok(None);
             };
-            let mut view = auth_prompt_view_for_blocked_auth(
-                &actor.user_id,
+            let mut view = auth_prompt_view_for_blocked_auth(BlockedAuthPromptRequest {
+                fallback_owner_user_id: &actor.user_id,
                 scope,
                 run_id,
-                gate_ref.as_str(),
-                "Authentication required to continue this automation.".to_string(),
-                &state.credential_requirements,
-                services.auth_challenges.as_deref(),
-            )
+                gate_ref: gate_ref.as_str(),
+                invocation_id: None,
+                body: "Authentication required to continue this automation.".to_string(),
+                credential_requirements: &state.credential_requirements,
+                auth_challenges: services.auth_challenges.as_deref(),
+            })
             .await?;
             view.body.push_str(&triggered_gate_footer(trigger_label));
             // Only link-based OAuth is allowed over Slack. The `require_direct_message_target`
@@ -3086,6 +3091,7 @@ mod tests {
                 received_at: Utc::now(),
                 checkpoint_id: None,
                 gate_ref: scripted.gate_ref,
+                blocked_activity_id: None,
                 credential_requirements: Vec::new(),
                 failure: None,
                 event_cursor: EventCursor(1),

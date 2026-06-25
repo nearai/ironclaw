@@ -129,6 +129,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
 
     let outcome = port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability id"),
             input_ref,

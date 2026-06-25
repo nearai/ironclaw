@@ -210,7 +210,11 @@ mod tests {
         );
 
         // Verify the first server is actually listening
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .pool_max_idle_per_host(0)
+            .build()
+            .expect("test HTTP client");
         let response = client
             .get(format!("http://{}/health", addr1))
             .send()

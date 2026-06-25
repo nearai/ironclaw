@@ -606,6 +606,7 @@ mod tests {
 
         fn invocation(capability: &str) -> CapabilityInvocation {
             CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("surface-v1")
                     .expect("valid surface version"),
                 capability_id: cap(capability),
