@@ -237,6 +237,7 @@ SEL_V2 = {
     "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
     "msg_system":     "[data-testid='msg-system']",     # system notice bubble
     "approval_card":  "[data-testid='approval-card']",  # approval gate card
+    "busy_gate_notice": "[data-testid='busy-gate-notice']",  # gate busy notice
     # Download chip for an agent-produced workspace file; `{path}` selects one.
     # Clicking a chip opens the shared attachment preview modal, whose footer
     # carries the Download action.

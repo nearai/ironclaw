@@ -930,7 +930,10 @@ test("useChat.send: rejected busy keeps a gate received after callback creation"
   );
   assert.equal(stateSlots.get(5).value, pendingGate);
   assert.equal(renderedMessages[0].status, "error");
-  assert.equal(renderedMessages[1].role, "system");
+  assert.deepEqual(
+    stateUpdates.filter((call) => call.index === 6).map((call) => call.value?.content),
+    ["Thread is busy, please try again."],
+  );
 });
 
 test("useChat.send: repeated busy rejection under the same gate dedupes notice", async () => {
@@ -1018,8 +1021,11 @@ test("useChat.send: repeated busy rejection under the same gate dedupes notice",
   assert.equal(userMessages.length, 2);
   assert.equal(userMessages[0].status, "error");
   assert.equal(userMessages[1].status, "error");
-  assert.equal(systemMessages.length, 1);
-  assert.match(systemMessages[0].content, /approval gate is open/i);
+  assert.equal(systemMessages.length, 0);
+  assert.equal(
+    stateUpdates.filter((call) => call.index === 6).at(-1)?.value?.content,
+    "An approval gate is open on this thread -- resolve it before continuing.",
+  );
 });
 
 test("useChat.cancelRun clears local state before cancel request resolves", async () => {
@@ -1117,13 +1123,15 @@ test("useChat clears transient run and gate state during thread switch render", 
     Math,
     React: createReactStub({
       // useChat state call order: cooldownUntil, now, activeRun,
-      // channelConnectAction, isProcessing, pendingGate, stateThreadId.
+      // channelConnectAction, isProcessing, pendingGate, busyGateNotice,
+      // stateThreadId.
       initialByIndex: new Map([
         [2, { runId: "run-old", threadId: "thread-old", status: "awaiting_gate" }],
         [3, { channel: "slack" }],
         [4, true],
         [5, { runId: "run-old", gateRef: "gate-old" }],
-        [6, "thread-old"],
+        [6, { gateKey: "thread-old\nrun-old\ngate-old", content: "busy" }],
+        [7, "thread-old"],
       ]),
       setCalls: stateUpdates,
     }),
@@ -1168,10 +1176,11 @@ test("useChat clears transient run and gate state during thread switch render", 
   runUseChatSource(context);
   context.globalThis.__testExports.useChat("thread-new");
 
-  assert.deepEqual(stateUpdates.slice(0, 5), [
-    { index: 6, value: "thread-new" },
+  assert.deepEqual(stateUpdates.slice(0, 6), [
+    { index: 7, value: "thread-new" },
     { index: 4, value: false },
     { index: 5, value: null },
+    { index: 6, value: null },
     { index: 2, value: null },
     { index: 3, value: null },
   ]);

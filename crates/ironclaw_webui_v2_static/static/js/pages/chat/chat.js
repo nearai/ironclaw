@@ -51,6 +51,7 @@ export function Chat({
     messages,
     isProcessing,
     pendingGate,
+    busyGateNotice,
     channelConnectAction,
     suggestions,
     sseStatus,
@@ -308,6 +309,16 @@ export function Chat({
                   approve(pendingGate.requestId, "always", pendingGate.kind)}
               />
             `)}
+            ${busyGateNotice &&
+            html`
+              <div
+                data-testid="busy-gate-notice"
+                role="status"
+                className="mx-auto mt-3 max-w-lg rounded-lg border border-copper/25 bg-copper/10 px-4 py-3 text-center text-sm leading-6 text-copper"
+              >
+                ${busyGateNotice.content}
+              </div>
+            `}
           <//>
 
           <${SuggestionChips}

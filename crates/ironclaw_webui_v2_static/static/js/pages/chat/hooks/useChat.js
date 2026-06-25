@@ -191,6 +191,7 @@ export function useChat(threadId) {
   const [isProcessing, setIsProcessing] = React.useState(false);
   const [pendingGate, setPendingGateState] = React.useState(null);
   const pendingGateRef = React.useRef(pendingGate);
+  const [busyGateNotice, setBusyGateNotice] = React.useState(null);
   const setPendingGate = React.useCallback((next) => {
     const current = pendingGateRef.current;
     const value =
@@ -239,6 +240,7 @@ export function useChat(threadId) {
     setStateThreadId(threadId);
     setIsProcessing(false);
     setPendingGateState(null);
+    setBusyGateNotice(null);
     setActiveRunState(null);
     setChannelConnectAction(null);
   }
@@ -246,6 +248,13 @@ export function useChat(threadId) {
   React.useEffect(() => {
     pendingGateRef.current = pendingGate;
   }, [pendingGate]);
+
+  React.useEffect(() => {
+    const currentKey = busyNoticeKey(threadId, pendingGate);
+    setBusyGateNotice((current) =>
+      current && current.gateKey !== currentKey ? null : current,
+    );
+  }, [pendingGate, threadId]);
 
   React.useEffect(() => {
     resetToolActivityState(toolActivityStateRef);
@@ -493,20 +502,23 @@ export function useChat(threadId) {
           updateSeededTarget(markRejected);
           if (response?.notice) {
             const noticeKey = busyNoticeKey(sendThreadId, gateBeforeSend);
-            const noticeMessage = {
-              id: `system-rejected-${pendingSeqRef.current++}`,
-              role: "system",
-              content: response.notice,
-              timestamp: new Date().toISOString(),
-              isOptimistic: false,
-              busyGateKey: noticeKey,
-            };
-            const appendNotice = (prev) =>
-              noticeKey && prev.some((m) => m.busyGateKey === noticeKey)
-                ? prev
-                : [...prev, noticeMessage];
-            updateCurrentThread(appendNotice);
-            updateSeededTarget(appendNotice);
+            if (noticeKey && shouldRenderInCurrentThread) {
+              setBusyGateNotice({ gateKey: noticeKey, content: response.notice });
+            } else {
+              const noticeMessage = {
+                id: `system-rejected-${pendingSeqRef.current++}`,
+                role: "system",
+                content: response.notice,
+                timestamp: new Date().toISOString(),
+                isOptimistic: false,
+              };
+              const appendNotice = (prev) => [
+                ...prev,
+                noticeMessage,
+              ];
+              updateCurrentThread(appendNotice);
+              updateSeededTarget(appendNotice);
+            }
           }
           updateCurrentRunState(() => setIsProcessing(false));
         }
@@ -717,6 +729,7 @@ export function useChat(threadId) {
     messages,
     isProcessing,
     pendingGate,
+    busyGateNotice,
     channelConnectAction,
     activeRun,
     sseStatus,
