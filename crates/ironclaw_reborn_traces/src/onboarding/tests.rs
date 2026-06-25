@@ -834,19 +834,19 @@ async fn fake_sink_403_invite_not_valid_discards_pending() {
     );
 }
 
-/// Verify that `onboard_instance_with_sink` writes the policy to the
-/// instance-level (scope `None`) location so the resolver's fallback fires.
+/// Verify that the instance-level onboarding path writes the policy to the
+/// scope-None location (no `users/<hash>` segment) under an isolated base.
 ///
-/// Isolation note: this test writes to `trace_contribution_dir_for_scope(None)`
-/// (the real global instance dir — e.g. `~/.ironclaw/trace_contributions/`).
-/// The base dir is a `LazyLock` that cannot be overridden per-test; instead we
-/// test the wiring directly using a `FakeSink` (no network) and clean up the
-/// written files afterwards.
+/// Uses `onboard_at_dir_with_sink` targeting `tempdir/trace_contributions/`
+/// — the equivalent of `trace_contribution_dir_for_scope(None)` under an
+/// arbitrary base — so the test never touches the real `~/.ironclaw/` tree.
+/// The tempdir drops automatically; no manual cleanup is required.
 #[tokio::test]
 async fn instance_onboard_writes_instance_level_policy() {
-    use crate::contribution::read_trace_policy_for_scope;
+    let base = tempfile::tempdir().expect("tempdir");
+    // scope=None → trace_contributions/ directly under the base (no users/<hash>)
+    let instance_dir = base.path().join("trace_contributions");
 
-    let instance_dir = trace_contribution_dir_for_scope(None);
     // Use a loopback-shaped invite URL so origin anchoring passes; no server is
     // bound — the FakeSink returns a canned response without touching the network.
     let invite_url = "http://127.0.0.1:7/onboard#INVINST01";
@@ -859,22 +859,23 @@ async fn instance_onboard_writes_instance_level_policy() {
         posted_url: Arc::new(Mutex::new(None)),
     };
 
-    let outcome = onboard_instance_with_sink(invite_url, OnboardConsents::default(), &sink)
-        .await
-        .expect("instance onboard succeeds");
+    let outcome =
+        onboard_at_dir_with_sink(&instance_dir, invite_url, OnboardConsents::default(), &sink)
+            .await
+            .expect("instance onboard succeeds");
 
     assert_eq!(outcome.tenant_id, "tenant-fake");
 
-    // The policy must land at scope None (the instance-level location).
-    let policy = read_trace_policy_for_scope(None).expect("instance policy must be readable");
+    // The policy must land at the scope-None location (no users/<hash> segment).
+    let raw = std::fs::read_to_string(instance_dir.join("policy.json"))
+        .expect("policy written");
+    let policy: StandingTraceContributionPolicy =
+        serde_json::from_str(&raw).expect("policy parses");
     assert!(policy.enabled);
     assert_eq!(
         policy.device_key_id.as_deref(),
         Some(outcome.device_key_id.as_str()),
         "policy device_key_id must match outcome"
     );
-
-    // Cleanup: remove only the files this test wrote to the global instance dir.
-    let _ = std::fs::remove_file(instance_dir.join("policy.json"));
-    let _ = std::fs::remove_dir_all(instance_dir.join("device_keys"));
+    // tempdir drops automatically — no manual cleanup needed
 }
