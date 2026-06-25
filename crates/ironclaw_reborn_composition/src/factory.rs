@@ -677,7 +677,7 @@ impl RebornProductionRuntimeServices {
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 impl RebornLocalRuntimeServices {
-    pub(crate) async fn durable_trigger_conversation_services(
+    pub(crate) async fn durable_conversation_services(
         &self,
     ) -> Result<RebornFilesystemConversationServices, InboundTurnError> {
         let filesystem = Arc::clone(&self.subagent_goal_filesystem);
@@ -687,6 +687,12 @@ impl RebornLocalRuntimeServices {
             })
             .await
             .cloned()
+    }
+
+    pub(crate) async fn durable_trigger_conversation_services(
+        &self,
+    ) -> Result<RebornFilesystemConversationServices, InboundTurnError> {
+        self.durable_conversation_services().await
     }
 }
 

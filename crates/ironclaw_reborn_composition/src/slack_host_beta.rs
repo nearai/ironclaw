@@ -9,7 +9,12 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_conversations::InMemoryConversationServices;
+use ironclaw_conversations::{
+    ConversationActorPairingService as RebornConversationActorPairingService,
+    ConversationBindingService as RebornConversationBindingService,
+};
 use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
 use ironclaw_product_adapters::{
@@ -391,6 +396,8 @@ pub enum SlackHostBetaBuildError {
     RuntimeHttpEgressUnavailable,
     #[error("Slack host-beta requires durable host state")]
     DurableHostStateUnavailable,
+    #[error("Slack host-beta conversation services are unavailable: {reason}")]
+    ConversationServicesUnavailable { reason: String },
     #[error("Slack host-beta outbound delivery target registration failed: {reason}")]
     OutboundDeliveryTargetRegistration { reason: String },
     #[error(
@@ -422,6 +429,26 @@ struct SlackHostBetaRuntimeParts {
     auth_flow_canceller: Option<Arc<dyn crate::BlockedAuthFlowCanceller>>,
 }
 
+#[derive(Clone)]
+struct SlackConversationPorts {
+    binding: Arc<dyn RebornConversationBindingService>,
+    actor_pairings: Arc<dyn RebornConversationActorPairingService>,
+}
+
+impl SlackConversationPorts {
+    fn from_service<T>(service: Arc<T>) -> Self
+    where
+        T: RebornConversationBindingService + RebornConversationActorPairingService + 'static,
+    {
+        let binding: Arc<dyn RebornConversationBindingService> = service.clone();
+        let actor_pairings: Arc<dyn RebornConversationActorPairingService> = service;
+        Self {
+            binding,
+            actor_pairings,
+        }
+    }
+}
+
 impl SlackHostBetaRuntimeParts {
     fn from_runtime(runtime: &RebornRuntime) -> Result<Self, SlackHostBetaBuildError> {
         let local_runtime = runtime
@@ -445,13 +472,39 @@ impl SlackHostBetaRuntimeParts {
             auth_flow_canceller: runtime.blocked_auth_flow_canceller(),
         })
     }
+
+    async fn conversation_ports(&self) -> Result<SlackConversationPorts, SlackHostBetaBuildError> {
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        {
+            let conversations = self
+                .local_runtime
+                .durable_conversation_services()
+                .await
+                .map_err(
+                    |error| SlackHostBetaBuildError::ConversationServicesUnavailable {
+                        reason: error.to_string(),
+                    },
+                )?;
+            Ok(SlackConversationPorts::from_service(Arc::new(
+                conversations,
+            )))
+        }
+        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+        {
+            Ok(SlackConversationPorts::from_service(Arc::new(
+                self.local_runtime.trigger_conversation_services.clone(),
+            )))
+        }
+    }
 }
 
-pub fn build_slack_events_route_mount(
+pub async fn build_slack_events_route_mount(
     runtime: &RebornRuntime,
     config: SlackHostBetaConfig,
 ) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
-    build_slack_host_beta_mounts(runtime, config).map(|mounts| mounts.events)
+    build_slack_host_beta_mounts(runtime, config)
+        .await
+        .map(|mounts| mounts.events)
 }
 
 /// Build a [`TriggeredRunDeliveryDriver`] that delivers triggered-run results
@@ -527,7 +580,7 @@ fn build_triggered_run_delivery_hook_from_parts(
     Ok(Arc::new(driver))
 }
 
-pub fn build_slack_host_beta_mounts(
+pub async fn build_slack_host_beta_mounts(
     runtime: &RebornRuntime,
     config: SlackHostBetaConfig,
 ) -> Result<SlackHostBetaMounts, SlackHostBetaBuildError> {
@@ -537,11 +590,8 @@ pub fn build_slack_host_beta_mounts(
     ) {
         return Err(SlackHostBetaBuildError::TenantAppSelectorRequired);
     }
-    let local_runtime = runtime
-        .services()
-        .local_runtime
-        .as_ref()
-        .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?;
+    let parts = SlackHostBetaRuntimeParts::from_runtime(runtime)?;
+    let local_runtime = Arc::clone(&parts.local_runtime);
     let state = Arc::new(FilesystemSlackHostState::new(
         Arc::clone(&local_runtime.host_state_filesystem),
         config.tenant_id.clone(),
@@ -594,11 +644,13 @@ pub fn build_slack_host_beta_mounts(
             config.installation_id.clone(),
             Arc::clone(&channel_route_store),
         ));
-    let events = build_slack_events_route_mount_with_resolvers(
-        runtime,
+    let conversation_ports = parts.conversation_ports().await?;
+    let events = build_slack_events_route_mount_with_resolvers_from_parts(
+        &parts,
         config.clone(),
         actor_user_resolver,
         Some(subject_route_resolver),
+        conversation_ports,
     )?;
     let allowed_route_subjects = std::iter::once(config.user_id.clone())
         .chain(config.shared_subject_user_id.clone())
@@ -720,26 +772,44 @@ pub async fn build_slack_host_beta_runtime_mounts(
     runtime_setup::build_runtime_mounts(runtime, config).await
 }
 
-pub fn build_slack_events_route_mount_with_actor_user_resolver(
+pub async fn build_slack_events_route_mount_with_actor_user_resolver(
     runtime: &RebornRuntime,
     config: SlackHostBetaConfig,
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
 ) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
-    build_slack_events_route_mount_with_resolvers(runtime, config, actor_user_resolver, None)
+    build_slack_events_route_mount_with_resolvers(runtime, config, actor_user_resolver, None).await
 }
 
-fn build_slack_events_route_mount_with_resolvers(
+async fn build_slack_events_route_mount_with_resolvers(
     runtime: &RebornRuntime,
     config: SlackHostBetaConfig,
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
     subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
 ) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
     let parts = SlackHostBetaRuntimeParts::from_runtime(runtime)?;
-    let record = build_slack_installation_record_with_resolvers(
+    let conversation_ports = parts.conversation_ports().await?;
+    build_slack_events_route_mount_with_resolvers_from_parts(
         &parts,
         config,
         actor_user_resolver,
         subject_route_resolver,
+        conversation_ports,
+    )
+}
+
+fn build_slack_events_route_mount_with_resolvers_from_parts(
+    parts: &SlackHostBetaRuntimeParts,
+    config: SlackHostBetaConfig,
+    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+    subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
+    conversation_ports: SlackConversationPorts,
+) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
+    let record = build_slack_installation_record_with_resolvers(
+        parts,
+        config,
+        actor_user_resolver,
+        subject_route_resolver,
+        conversation_ports,
     )?;
     Ok(slack_events_route_mount(
         SlackEventsRouteState::from_resolver(Arc::new(StaticSlackInstallationResolver::new([
@@ -753,13 +823,11 @@ fn build_slack_installation_record_with_resolvers(
     config: SlackHostBetaConfig,
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
     subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
+    conversation_ports: SlackConversationPorts,
 ) -> Result<SlackInstallationRecord, SlackHostBetaBuildError> {
     // The resolver controls inbound Slack actor binding. `config.user_id`
     // scopes host-mediated Slack bot-token egress and legacy static actor
     // mapping. Shared Slack channel execution is configured separately.
-    tracing::warn!(
-        "Slack host-beta uses in-memory conversation bindings; Slack conversation binding continuity is lost on process restart"
-    );
     let adapter_id = ProductAdapterId::new(SLACK_V2_ADAPTER_ID)
         .map_err(|reason| invalid_config("adapter_id", reason.to_string()))?;
     let token_handle = slack_bot_token_handle()?;
@@ -770,11 +838,6 @@ fn build_slack_installation_record_with_resolvers(
         auth_requirement: slack_request_signature_auth_requirement(),
     }));
 
-    let conversations = Arc::new(InMemoryConversationServices::default());
-    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
-        conversations.clone();
-    let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
-        conversations.clone();
     let mut scope = ProductInstallationScope::with_default_scope(
         config.tenant_id.clone(),
         config.agent_id.clone(),
@@ -795,12 +858,14 @@ fn build_slack_installation_record_with_resolvers(
         let route_key = slack_channel_route_key(&config.team_id, route)?;
         scope = scope.with_conversation_subject_route(route_key, route.subject_user_id.clone());
     }
-    let scope = scope.with_actor_user_resolver(actor_user_resolver, actor_pairings);
+    let scope =
+        scope.with_actor_user_resolver(actor_user_resolver, conversation_ports.actor_pairings);
     let installation_resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(adapter_id, config.installation_id.clone()),
         scope,
     )]);
-    let binding = ProductConversationBindingService::new(conversation_port, installation_resolver);
+    let binding =
+        ProductConversationBindingService::new(conversation_ports.binding, installation_resolver);
 
     let inbound = Arc::new(DefaultInboundTurnService::new(
         binding.clone(),
@@ -1021,6 +1086,7 @@ fn invalid_config(field: &'static str, reason: String) -> SlackHostBetaBuildErro
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1209,7 +1275,9 @@ mod tests {
     async fn build_slack_events_route_mount_builds_signed_route_from_reborn_runtime() {
         let (runtime, _root) = runtime().await;
 
-        let mount = build_slack_events_route_mount(&runtime, config()).expect("route builds");
+        let mount = build_slack_events_route_mount(&runtime, config())
+            .await
+            .expect("route builds");
         assert_eq!(mount.descriptors.len(), 1);
         assert!(mount.drain.is_some());
 
@@ -1253,6 +1321,7 @@ mod tests {
             config(),
             resolver.clone(),
         )
+        .await
         .expect("route builds");
 
         let body = dm_event_body();
@@ -1287,7 +1356,7 @@ mod tests {
     async fn build_slack_events_route_mount_fails_when_runtime_http_egress_unavailable() {
         let (runtime, _root) = runtime_with_host_egress_override(Some(None)).await;
 
-        let error = match build_slack_events_route_mount(&runtime, config()) {
+        let error = match build_slack_events_route_mount(&runtime, config()).await {
             Ok(_) => panic!("Slack route requires runtime HTTP egress"),
             Err(error) => error,
         };
@@ -1304,7 +1373,7 @@ mod tests {
         let (mut runtime, _root) = runtime().await;
         runtime.clear_local_runtime_for_test();
 
-        let error = match build_slack_events_route_mount(&runtime, config()) {
+        let error = match build_slack_events_route_mount(&runtime, config()).await {
             Ok(_) => panic!("Slack route requires durable host state"),
             Err(error) => error,
         };
@@ -1319,7 +1388,9 @@ mod tests {
     #[tokio::test]
     async fn slack_outbound_targets_fail_build_when_local_runtime_missing() {
         let (mut runtime, _root) = runtime().await;
-        let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
+        let mounts = build_slack_host_beta_mounts(&runtime, config())
+            .await
+            .expect("mounts");
         runtime.clear_local_runtime_for_test();
 
         let error = build_webui_services_with_slack_host_beta_mounts(
@@ -1345,7 +1416,9 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
-        let mount = build_slack_events_route_mount(&runtime, config()).expect("route builds");
+        let mount = build_slack_events_route_mount(&runtime, config())
+            .await
+            .expect("route builds");
         let body = r#"{
             "type":"event_callback",
             "team_id":"T0HOST",
@@ -1403,8 +1476,9 @@ mod tests {
             "1710000000.000011",
         );
 
-        let first_mount =
-            build_slack_events_route_mount(&runtime, config()).expect("first route builds");
+        let first_mount = build_slack_events_route_mount(&runtime, config())
+            .await
+            .expect("first route builds");
         post_signed_slack_event(&first_mount, &body).await;
         if let Some(drain) = first_mount.drain.as_ref() {
             drain.drain().await;
@@ -1417,8 +1491,9 @@ mod tests {
         )
         .await;
 
-        let rebuilt_mount =
-            build_slack_events_route_mount(&runtime, config()).expect("rebuilt route builds");
+        let rebuilt_mount = build_slack_events_route_mount(&runtime, config())
+            .await
+            .expect("rebuilt route builds");
         post_signed_slack_event(&rebuilt_mount, &body).await;
         if let Some(drain) = rebuilt_mount.drain.as_ref() {
             drain.drain().await;
@@ -1436,6 +1511,74 @@ mod tests {
         );
 
         runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn build_slack_events_route_mount_reuses_conversation_binding_after_runtime_reopen() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let user_id = Some(UserId::new(USER).expect("user"));
+
+        let runtime = runtime_with_root_and_host_egress_override(
+            root.path(),
+            Some(Some(host_egress_port_for_test(Arc::clone(&egress)))),
+        )
+        .await;
+        let mount = build_slack_events_route_mount(&runtime, config())
+            .await
+            .expect("route builds");
+        let before_restart_body = dm_event_body_with(
+            "Ev-host-beta-before-restart",
+            "before restart",
+            "1710000000.000021",
+        );
+
+        post_signed_slack_event(&mount, &before_restart_body).await;
+        if let Some(drain) = mount.drain.as_ref() {
+            drain.drain().await;
+        }
+        wait_for_slack_message_count_with_text(&runtime, user_id.clone(), "before restart", 1)
+            .await;
+        let original_thread_ids = wait_for_slack_thread_ids(&runtime, user_id.clone(), 1).await;
+        runtime.shutdown().await.expect("runtime shuts down");
+
+        let reopened_runtime = runtime_with_root_and_host_egress_override(
+            root.path(),
+            Some(Some(host_egress_port_for_test(Arc::clone(&egress)))),
+        )
+        .await;
+        let reopened_mount = build_slack_events_route_mount(&reopened_runtime, config())
+            .await
+            .expect("reopened route builds");
+        let after_restart_body = dm_event_body_with(
+            "Ev-host-beta-after-restart",
+            "after restart",
+            "1710000000.000022",
+        );
+
+        post_signed_slack_event(&reopened_mount, &after_restart_body).await;
+        if let Some(drain) = reopened_mount.drain.as_ref() {
+            drain.drain().await;
+        }
+        wait_for_slack_message_count_with_text(
+            &reopened_runtime,
+            user_id.clone(),
+            "after restart",
+            1,
+        )
+        .await;
+        let reopened_thread_ids =
+            wait_for_slack_thread_ids(&reopened_runtime, user_id.clone(), 1).await;
+
+        assert_eq!(
+            reopened_thread_ids, original_thread_ids,
+            "Slack conversation bindings should survive runtime reopen and route follow-up events to the existing thread"
+        );
+
+        reopened_runtime
+            .shutdown()
+            .await
+            .expect("runtime shuts down");
     }
 
     #[tokio::test]
@@ -1458,7 +1601,9 @@ mod tests {
         .await
         .expect("runtime builds");
 
-        let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts build");
+        let mounts = build_slack_host_beta_mounts(&runtime, config())
+            .await
+            .expect("mounts build");
         let pairing_mount =
             slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing);
 
@@ -1481,8 +1626,9 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
-        let mounts =
-            build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
+        let mounts = build_slack_host_beta_mounts(&runtime, config_without_legacy_actor())
+            .await
+            .expect("mounts");
 
         let first_body =
             dm_event_body_with("Ev-host-beta-pairing-first", "pair me", "1710000000.000020");
@@ -1575,7 +1721,9 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
-        let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
+        let mounts = build_slack_host_beta_mounts(&runtime, config())
+            .await
+            .expect("mounts");
 
         let body = app_mention_event_body_with(
             "Ev-host-beta-channel-mention",
@@ -1658,6 +1806,7 @@ mod tests {
         )))
         .await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .await
             .expect("mounts");
         let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes);
         let assign_response = route_mount
@@ -1721,6 +1870,7 @@ mod tests {
         )))
         .await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .await
             .expect("mounts");
 
         let body = app_mention_event_body_with(
@@ -1746,6 +1896,7 @@ mod tests {
     async fn slack_allowed_channels_are_reachable_through_webui_v2_app() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .await
             .expect("mounts");
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
@@ -1831,6 +1982,7 @@ mod tests {
     async fn slack_connectable_channels_advertise_admin_action_to_operator_token() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .await
             .expect("mounts");
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
@@ -1891,6 +2043,7 @@ mod tests {
     async fn slack_connectable_channels_hide_admin_action_from_sso_session_token() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .await
             .expect("mounts");
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
@@ -1980,6 +2133,7 @@ mod tests {
     async fn slack_channel_route_admin_is_reachable_through_webui_v2_app() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .await
             .expect("mounts");
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
@@ -2119,6 +2273,7 @@ mod tests {
     async fn slack_channel_routes_mount_for_sso_operator_authenticator() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .await
             .expect("mounts");
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
@@ -2186,6 +2341,7 @@ mod tests {
     async fn slack_channel_routes_not_mounted_when_operator_route_visibility_is_hidden() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .await
             .expect("mounts");
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
@@ -2227,7 +2383,9 @@ mod tests {
     #[tokio::test]
     async fn slack_host_beta_targets_wire_through_outbound_preferences_facade() {
         let (runtime, _root) = runtime().await;
-        let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
+        let mounts = build_slack_host_beta_mounts(&runtime, config())
+            .await
+            .expect("mounts");
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
             None,
@@ -2325,9 +2483,13 @@ mod tests {
     #[tokio::test]
     async fn build_slack_host_beta_mounts_allows_same_config_rebuild_without_replacement() {
         let (runtime, _root) = runtime().await;
-        let _mounts = build_slack_host_beta_mounts(&runtime, config()).expect("first mount builds");
+        let _mounts = build_slack_host_beta_mounts(&runtime, config())
+            .await
+            .expect("first mount builds");
 
-        build_slack_host_beta_mounts(&runtime, config()).expect("same-config rebuild builds");
+        build_slack_host_beta_mounts(&runtime, config())
+            .await
+            .expect("same-config rebuild builds");
 
         runtime.shutdown().await.expect("runtime shuts down");
     }
@@ -2335,14 +2497,16 @@ mod tests {
     #[tokio::test]
     async fn build_slack_host_beta_mounts_rejects_different_config_after_trigger_hook_wired() {
         let (runtime, _root) = runtime_with_trigger_poller().await;
-        let _mounts = build_slack_host_beta_mounts(&runtime, config()).expect("first mount builds");
+        let _mounts = build_slack_host_beta_mounts(&runtime, config())
+            .await
+            .expect("first mount builds");
         let mut different_config = config();
         different_config.channel_routes = vec![SlackHostBetaChannelRoute::new(
             "C1HOST",
             UserId::new(SHARED_SUBJECT).expect("shared subject"),
         )];
 
-        let error = match build_slack_host_beta_mounts(&runtime, different_config) {
+        let error = match build_slack_host_beta_mounts(&runtime, different_config).await {
             Ok(_) => panic!("different Slack mount must not replace outbound provider"),
             Err(error) => error,
         };
@@ -2362,7 +2526,9 @@ mod tests {
     #[tokio::test]
     async fn slack_host_beta_stored_and_static_routes_appear_without_duplicates() {
         let (runtime, _root) = runtime().await;
-        let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
+        let mounts = build_slack_host_beta_mounts(&runtime, config())
+            .await
+            .expect("mounts");
         let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes.clone());
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
@@ -2465,6 +2631,7 @@ mod tests {
     async fn slack_personal_dm_target_is_not_listed_without_provisioned_authority() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .await
             .expect("mounts");
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
@@ -2502,7 +2669,9 @@ mod tests {
             )
             .await
             .expect("DM target provisions");
-        let mounts = build_slack_host_beta_mounts(&runtime, config).expect("mounts");
+        let mounts = build_slack_host_beta_mounts(&runtime, config)
+            .await
+            .expect("mounts");
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
             None,
@@ -2549,7 +2718,9 @@ mod tests {
             )
             .await
             .expect("DM target provisions");
-        let mounts = build_slack_host_beta_mounts(&runtime, config).expect("mounts");
+        let mounts = build_slack_host_beta_mounts(&runtime, config)
+            .await
+            .expect("mounts");
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
             None,
@@ -2705,7 +2876,9 @@ mod tests {
             error,
             SlackPersonalDmTargetError::ProvisioningFailed(_)
         ));
-        let mounts = build_slack_host_beta_mounts(&runtime, config).expect("mounts");
+        let mounts = build_slack_host_beta_mounts(&runtime, config)
+            .await
+            .expect("mounts");
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
             None,
@@ -2741,8 +2914,9 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
-        let mounts =
-            build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
+        let mounts = build_slack_host_beta_mounts(&runtime, config_without_legacy_actor())
+            .await
+            .expect("mounts");
 
         // Step 1: unknown Slack actor sends a DM → pairing challenge issued.
         let first_body =
@@ -2784,8 +2958,9 @@ mod tests {
             let config = config_without_legacy_actor();
             let mut listed = Vec::new();
             for _ in 0..40 {
-                let mounts2 =
-                    build_slack_host_beta_mounts(&runtime, config.clone()).expect("rebuilt mounts");
+                let mounts2 = build_slack_host_beta_mounts(&runtime, config.clone())
+                    .await
+                    .expect("rebuilt mounts");
                 let bundle = build_webui_services_with_slack_host_beta_mounts(
                     &runtime,
                     None,
@@ -2947,7 +3122,9 @@ mod tests {
             .await
             .expect("second provisioning succeeds");
 
-        let mounts = build_slack_host_beta_mounts(&runtime, config).expect("mounts");
+        let mounts = build_slack_host_beta_mounts(&runtime, config)
+            .await
+            .expect("mounts");
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
             None,
@@ -2983,8 +3160,9 @@ mod tests {
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
         .await;
-        let mounts =
-            build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
+        let mounts = build_slack_host_beta_mounts(&runtime, config_without_legacy_actor())
+            .await
+            .expect("mounts");
 
         // Trigger pairing challenge.
         let first_body = dm_event_body_with(
@@ -3034,8 +3212,9 @@ mod tests {
         // call) so we know the background task ran and failed before asserting
         // that no target was persisted.
         wait_for_nth_conversations_open(&egress, 2).await;
-        let mounts2 =
-            build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
+        let mounts2 = build_slack_host_beta_mounts(&runtime, config_without_legacy_actor())
+            .await
+            .expect("mounts");
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
             None,
@@ -3077,7 +3256,9 @@ mod tests {
     #[tokio::test]
     async fn slack_host_beta_targets_ignore_other_tenant_callers() {
         let (runtime, _root) = runtime().await;
-        let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
+        let mounts = build_slack_host_beta_mounts(&runtime, config())
+            .await
+            .expect("mounts");
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
             None,
@@ -3191,6 +3372,7 @@ mod tests {
     async fn slack_host_beta_admin_route_delete_revokes_saved_outbound_target() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .await
             .expect("mounts");
         let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes.clone());
         let bundle = build_webui_services_with_slack_host_beta_mounts(
@@ -3253,7 +3435,9 @@ mod tests {
     #[tokio::test]
     async fn slack_host_beta_admin_route_owner_change_overrides_static_channel_route() {
         let (runtime, _root) = runtime().await;
-        let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
+        let mounts = build_slack_host_beta_mounts(&runtime, config())
+            .await
+            .expect("mounts");
         let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes.clone());
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
@@ -3315,6 +3499,7 @@ mod tests {
     async fn slack_host_beta_admin_route_owner_change_moves_outbound_target_authority() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .await
             .expect("mounts");
         let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes.clone());
         let bundle = build_webui_services_with_slack_host_beta_mounts(
@@ -3378,6 +3563,7 @@ mod tests {
     async fn slack_host_beta_admin_routes_feed_outbound_target_provider() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
+            .await
             .expect("mounts");
         let bundle = build_webui_services_with_slack_host_beta_mounts(
             &runtime,
@@ -3480,7 +3666,7 @@ mod tests {
         })
         .expect("team-only config still parses");
 
-        let error = match build_slack_host_beta_mounts(&runtime, team_only_config) {
+        let error = match build_slack_host_beta_mounts(&runtime, team_only_config).await {
             Ok(_) => panic!("pairing requires tenant app selector"),
             Err(error) => error,
         };
@@ -3815,12 +4001,21 @@ mod tests {
         host_egress_override: Option<Option<HostRuntimeHttpEgressPort>>,
     ) -> (RebornRuntime, tempfile::TempDir) {
         let root = tempfile::tempdir().expect("tempdir");
-        let mut build_input = RebornBuildInput::local_dev(USER, root.path().join("local-dev"))
+        let runtime =
+            runtime_with_root_and_host_egress_override(root.path(), host_egress_override).await;
+        (runtime, root)
+    }
+
+    async fn runtime_with_root_and_host_egress_override(
+        root: &Path,
+        host_egress_override: Option<Option<HostRuntimeHttpEgressPort>>,
+    ) -> RebornRuntime {
+        let mut build_input = RebornBuildInput::local_dev(USER, root.join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy().expect("local policy"));
         if let Some(host_egress) = host_egress_override {
             build_input = build_input.with_host_runtime_http_egress_for_test(host_egress);
         }
-        let runtime = build_reborn_runtime(
+        build_reborn_runtime(
             RebornRuntimeInput::from_services(build_input)
                 .with_identity(RebornRuntimeIdentity {
                     tenant_id: TENANT.to_string(),
@@ -3832,8 +4027,7 @@ mod tests {
                 .with_model_gateway_override(Arc::new(StaticGateway)),
         )
         .await
-        .expect("runtime builds");
-        (runtime, root)
+        .expect("runtime builds")
     }
 
     async fn wait_for_slack_thread_history(
@@ -3939,6 +4133,55 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    async fn wait_for_slack_thread_ids(
+        runtime: &RebornRuntime,
+        owner_user_id: Option<UserId>,
+        expected: usize,
+    ) -> Vec<String> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let thread_ids = slack_thread_ids(runtime, owner_user_id.clone()).await;
+            if thread_ids.len() >= expected {
+                return thread_ids;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "Slack thread count stayed below {expected}; latest thread IDs: {thread_ids:?}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn slack_thread_ids(
+        runtime: &RebornRuntime,
+        owner_user_id: Option<UserId>,
+    ) -> Vec<String> {
+        let thread_service = runtime.webui_thread_service();
+        let scope = ThreadScope {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            agent_id: AgentId::new(AGENT).expect("agent"),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            owner_user_id,
+            mission_id: None,
+        };
+        let threads = thread_service
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope,
+                limit: Some(100),
+                cursor: None,
+            })
+            .await
+            .expect("list Slack-created threads");
+        let mut thread_ids = threads
+            .threads
+            .into_iter()
+            .map(|thread| thread.thread_id.as_str().to_string())
+            .collect::<Vec<_>>();
+        thread_ids.sort();
+        thread_ids
     }
 
     async fn assert_no_slack_threads_for_owner(
@@ -4444,8 +4687,9 @@ mod tests {
         let (runtime, _tmp) = runtime_with_trigger_poller().await;
 
         // Wire the delivery hook by calling the production mount builder.
-        let _mounts =
-            build_slack_host_beta_mounts(&runtime, config()).expect("mounts should build");
+        let _mounts = build_slack_host_beta_mounts(&runtime, config())
+            .await
+            .expect("mounts should build");
 
         assert_due_personal_trigger_writes_delivery_record(&runtime, "hook-wiring-e2e").await;
         runtime.shutdown().await.expect("runtime shutdown");
