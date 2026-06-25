@@ -53,6 +53,53 @@ export const AUTOMATION_FILTERS = [
   { value: "completed", labelKey: "automations.filter.completed", predicate: isBrowserCompleted },
 ];
 
+// Sort options surfaced by the list's sort control. `next` is the default and
+// mirrors the natural ordering produced by `compareAutomations` (active first,
+// then soonest next run). Labels reuse the existing table column keys.
+export const AUTOMATION_SORTS = [
+  { value: "next", labelKey: "automations.table.nextRun" },
+  { value: "last", labelKey: "automations.table.lastRun" },
+  { value: "name", labelKey: "automations.table.name" },
+  { value: "status", labelKey: "automations.table.status" },
+];
+
+// Stable rank for the "status" sort: live runs first, then ones needing review,
+// then everything else.
+function statusRank(automation) {
+  if (automation?.has_running_run) return 0;
+  if (automation?.has_failed_runs) return 1;
+  if (isBrowserActive(automation)) return 2;
+  return 3;
+}
+
+// Return a re-sorted copy of `automations` for the given sort key. Defaults to
+// the natural next-run ordering so the control's default visibly matches what
+// the list already does.
+export function sortAutomations(automations, sort) {
+  const list = [...automations];
+  if (sort === "last") {
+    return list.sort(
+      (a, b) =>
+        (b.last_run_timestamp ?? Number.NEGATIVE_INFINITY) -
+        (a.last_run_timestamp ?? Number.NEGATIVE_INFINITY),
+    );
+  }
+  if (sort === "name") {
+    return list.sort((a, b) =>
+      String(a.display_name).localeCompare(String(b.display_name)),
+    );
+  }
+  if (sort === "status") {
+    return list.sort(
+      (a, b) =>
+        statusRank(a) - statusRank(b) ||
+        (nextRunTimestamp(a) ?? Number.MAX_SAFE_INTEGER) -
+          (nextRunTimestamp(b) ?? Number.MAX_SAFE_INTEGER),
+    );
+  }
+  return list.sort(compareAutomations);
+}
+
 export function normalizeAutomations(response, t, locale) {
   const automations = Array.isArray(response?.automations)
     ? response.automations
@@ -66,6 +113,25 @@ export function normalizeAutomations(response, t, locale) {
 export function filterAutomations(automations, filter) {
   const strategy = AUTOMATION_FILTERS.find((item) => item.value === filter)?.predicate;
   return strategy ? automations.filter(strategy) : automations;
+}
+
+// Pick a glyph for an automation from its schedule cadence so each list row
+// reads at a glance. Automations carry no icon in the wire payload, so the
+// icon is derived: sub-hourly cadences feel like a live pulse, hour/day
+// cadences read as a clock, and calendar-grained cadences (weekday / monthly /
+// dated) read as a calendar. Anything we can't parse falls back to a bolt.
+export function automationIcon(automation) {
+  const cron = automation?.source?.cron;
+  if (!cron || typeof cron !== "string") return "bolt";
+  const parts = cronFields(cron);
+  if (!parts) return "bolt";
+  const { minute, hour, dayOfMonth, month, dayOfWeek } = parts;
+  const everyDate = dayOfMonth === "*" && month === "*" && dayOfWeek === "*";
+  if (everyDate && hour === "*") return "pulse"; // every minute / */N minutes
+  if (everyDate && minute !== "*" && hour === "*") return "pulse";
+  const normalizedDow = normalizeDayOfWeek(dayOfWeek);
+  if (normalizedDow !== "*" || !everyDate) return "calendar"; // weekday / dated / monthly
+  return "clock"; // daily / hourly at a fixed time
 }
 
 export function automationSummary(automations) {
@@ -109,6 +175,26 @@ export function automationSummary(automations) {
 // with `Intl.DateTimeFormat` for `locale` so we don't hand-maintain weekday and
 // month tables in every pack. Timezone, when known, is appended as a neutral
 // parenthetical (omitted for minute/hour cadences where it is meaningless).
+// Epoch-ms timestamp of the soonest run across all browser-active automations,
+// or null when nothing is scheduled to fire. Mirrors the selection in
+// `automationSummary` (active-only, parseable next_run_at) but returns the raw
+// timestamp so the summary card can render a live countdown. Kept separate from
+// `automationSummary` so that function's wire shape — asserted elsewhere —
+// stays stable.
+export function soonestNextRunAt(automations) {
+  const next = automations
+    .filter(
+      (automation) =>
+        isBrowserActive(automation) && nextRunTimestamp(automation) != null,
+    )
+    .sort(
+      (a, b) =>
+        (nextRunTimestamp(a) ?? Number.MAX_SAFE_INTEGER) -
+        (nextRunTimestamp(b) ?? Number.MAX_SAFE_INTEGER),
+    )[0];
+  return next ? nextRunTimestamp(next) : null;
+}
+
 export function scheduleLabel(cron, timezone, t, locale) {
   const tr = typeof t === "function" ? t : (key) => key;
   if (!cron || typeof cron !== "string") return tr("automations.schedule.custom");
@@ -215,6 +301,41 @@ export function formatAutomationDate(value, fallback = "Unknown", locale, timezo
   }
 }
 
+// Locale-aware relative time ("2 hours ago", "in 5 minutes") via
+// Intl.RelativeTimeFormat — no hand-maintained i18n strings. Returns null for
+// missing/unparseable input so callers can omit the relative line entirely.
+export function formatRelativeTime(value, locale) {
+  if (!value) return null;
+  // Older browsers / ICU-less Node test envs lack Intl.RelativeTimeFormat;
+  // bail before constructing it so the catch can't re-throw and crash.
+  if (typeof Intl === "undefined" || !Intl.RelativeTimeFormat) return null;
+  const ts = typeof value === "number" ? value : Date.parse(value);
+  if (Number.isNaN(ts)) return null;
+  const diffMs = ts - Date.now();
+  const absSec = Math.abs(diffMs) / 1000;
+  const units = [
+    ["year", 31536000],
+    ["month", 2592000],
+    ["week", 604800],
+    ["day", 86400],
+    ["hour", 3600],
+    ["minute", 60],
+    ["second", 1],
+  ];
+  const [unit, secs] = units.find(([, s]) => absSec >= s) || ["second", 1];
+  try {
+    return new Intl.RelativeTimeFormat(locale || "en", { numeric: "auto" }).format(
+      Math.round(diffMs / 1000 / secs),
+      unit,
+    );
+  } catch (_) {
+    return new Intl.RelativeTimeFormat("en", { numeric: "auto" }).format(
+      Math.round(diffMs / 1000 / secs),
+      unit,
+    );
+  }
+}
+
 export function stateLabel(state, t) {
   const key = STATE_PRESENTATION[state]?.labelKey || "automations.state.unknown";
   return tr(t)(key);
@@ -304,6 +425,7 @@ function normalizeAutomation(automation, t, locale) {
   return {
     ...normalized,
     display_name: automation.name || tx("automations.untitled"),
+    icon: automationIcon(automation),
     schedule_timezone: automation.source?.timezone || "UTC",
     schedule_label: automationScheduleLabel(automation.source, t, locale),
     state_label: stateLabel(automation.state, t),
@@ -317,6 +439,8 @@ function normalizeAutomation(automation, t, locale) {
       locale,
     ),
     last_run_label: formatAutomationDate(lastRunAt, tx("automations.date.noRuns"), locale),
+    last_run_relative: formatRelativeTime(lastRunAt, locale),
+    last_run_timestamp: parseTimestamp(lastRunAt),
     last_status_label: lastStatusLabel(lastStatus, t),
     last_status_tone: lastStatusTone(lastStatus),
     created_label: formatAutomationDate(
@@ -378,18 +502,39 @@ export function summarizeRuns(runs) {
   return counts;
 }
 
+// Solid fill classes for the proportion bar + legend dots, paired with the
+// text tones above so the bar, the dots, and the chip labels all read as the
+// same status colour.
+const RUN_BAR_TONE = {
+  ok: "bg-emerald-400",
+  error: "bg-red-400",
+  running: "bg-sky-400",
+  unknown: "bg-iron-500",
+};
+
 // Ordered, non-empty status buckets for the recent-run summary chips. Kept in
 // the presenter (not inline in the component) so a caller-level test can assert
 // that no counted status — including `unknown` — is dropped from what the UI
-// renders. Each entry carries the i18n key suffix and the chip tone class.
+// renders. Each entry carries the i18n key suffix, the chip text tone, and the
+// solid fill class shared by the proportion bar and the legend dots.
 export function runStatusBreakdown(runs) {
   const counts = summarizeRuns(runs);
   return [
-    { key: "ok", tone: "text-emerald-300", count: counts.ok },
-    { key: "error", tone: "text-red-300", count: counts.error },
-    { key: "running", tone: "text-sky-300", count: counts.running },
-    { key: "unknown", tone: "text-iron-400", count: counts.unknown },
+    { key: "ok", tone: "text-emerald-300", barClass: RUN_BAR_TONE.ok, count: counts.ok },
+    { key: "error", tone: "text-red-300", barClass: RUN_BAR_TONE.error, count: counts.error },
+    { key: "running", tone: "text-sky-300", barClass: RUN_BAR_TONE.running, count: counts.running },
+    { key: "unknown", tone: "text-iron-400", barClass: RUN_BAR_TONE.unknown, count: counts.unknown },
   ].filter((part) => part.count > 0);
+}
+
+// Percentage of terminal (ok + error) runs that succeeded, rounded. Returns
+// null when nothing has completed yet so the UI can omit the figure rather than
+// show a misleading 0%.
+export function runSuccessRate(runs) {
+  const counts = summarizeRuns(runs);
+  const terminal = counts.ok + counts.error;
+  if (!terminal) return null;
+  return Math.round((counts.ok / terminal) * 100);
 }
 
 // The fully-resolved data the recent-run summary renders: the total label plus
@@ -406,6 +551,14 @@ export function runSummaryView(runs, t) {
   return {
     total: counts.total,
     totalText: tx("automations.runs.total", { count: counts.total }),
+    successRate: runSuccessRate(runs),
+    successRateText:
+      runSuccessRate(runs) == null
+        ? null
+        : tx("automations.successRate.visible", { percent: runSuccessRate(runs) }),
+    // The bar reuses the same ordered, non-empty buckets as the chips so the
+    // proportions, legend dots, and labels can never disagree.
+    segments: chips,
     chips,
   };
 }

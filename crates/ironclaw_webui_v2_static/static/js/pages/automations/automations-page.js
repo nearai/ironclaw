@@ -1,49 +1,44 @@
+import { useParams } from "react-router";
 import { React, html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
-import { AutomationDeliveryDefaultsPanel } from "./components/automation-delivery-defaults-panel.js";
+import { AutomationDetailPage } from "./components/automation-detail-page.js";
 import { AutomationsList } from "./components/automations-list.js";
-import { AutomationsSummaryStrip } from "./components/automations-summary-strip.js";
 import { useAutomations } from "./hooks/useAutomations.js";
 import { useOutboundDeliveryDefaults } from "./hooks/useOutboundDeliveryDefaults.js";
 
 export function AutomationsPage() {
   const t = useT();
+  const { automationId } = useParams();
   const [filter, setFilter] = React.useState("all");
-  const [selectedAutomationId, setSelectedAutomationId] = React.useState(null);
   const includeCompleted = filter === "completed";
   const automationsState = useAutomations(includeCompleted);
   const deliveryState = useOutboundDeliveryDefaults();
 
-  // A local refetch can resolve almost instantly, leaving the spinner to flash
-  // imperceptibly. Hold a minimum spin window so a manual refresh always reads
-  // as a deliberate action.
-  const [minSpin, setMinSpin] = React.useState(false);
-  const minSpinTimer = React.useRef(null);
-  React.useEffect(() => () => clearTimeout(minSpinTimer.current), []);
-  const handleRefresh = React.useCallback(() => {
-    setMinSpin(true);
-    clearTimeout(minSpinTimer.current);
-    minSpinTimer.current = setTimeout(() => setMinSpin(false), 1000);
-    automationsState.refetch();
-  }, [automationsState.refetch]);
-  const isRefreshing = automationsState.isRefreshing || minSpin;
+  // Data stays fresh on its own: a base poll plus a smart timer that pulls
+  // near-due and in-progress automations forward (see useAutomations), so there
+  // is no manual refresh control to reason about.
   const showErrorOnly =
     automationsState.error &&
     !automationsState.isLoading &&
     automationsState.automations.length === 0;
 
-  React.useEffect(() => {
-    if (!automationsState.automations.length) {
-      setSelectedAutomationId(null);
-      return;
-    }
-    const stillExists = automationsState.automations.some(
-      (automation) => automation.automation_id === selectedAutomationId
-    );
-    if (!stillExists) {
-      setSelectedAutomationId(automationsState.automations[0].automation_id);
-    }
-  }, [automationsState.automations, selectedAutomationId]);
+  // Full-screen, persistent detail view for a single automation. Reached by
+  // popping out of the list's detail modal or by deep link.
+  if (automationId) {
+    const automation =
+      automationsState.automations.find(
+        (item) => item.automation_id === automationId
+      ) || null;
+    return html`<${AutomationDetailPage}
+      automation=${automation}
+      isLoading=${automationsState.isLoading}
+      error=${automationsState.error}
+      isMutating=${automationsState.isMutating}
+      onPauseAutomation=${automationsState.pauseAutomation}
+      onResumeAutomation=${automationsState.resumeAutomation}
+      onDeleteAutomation=${automationsState.deleteAutomation}
+    />`;
+  }
 
   return html`
     <div className="flex h-full flex-col overflow-y-auto">
@@ -84,13 +79,6 @@ export function AutomationsPage() {
                     </div>
                   </div>
                 `}
-                <${AutomationsSummaryStrip}
-                  summary=${automationsState.summary}
-                  activeFilter=${filter}
-                  onSelectFilter=${setFilter}
-                />
-                <${AutomationDeliveryDefaultsPanel} deliveryState=${deliveryState} />
-
                 ${automationsState.isLoading
                   ? html`
                       <div className="space-y-4">
@@ -106,13 +94,12 @@ export function AutomationsPage() {
                   : html`
                       <${AutomationsList}
                         automations=${automationsState.automations}
+                        summary=${automationsState.summary}
+                        nextRunAt=${automationsState.nextRunAt}
                         filter=${filter}
                         onFilterChange=${setFilter}
-                        onRefresh=${handleRefresh}
-                        isRefreshing=${isRefreshing}
+                        deliveryState=${deliveryState}
                         isMutating=${automationsState.isMutating}
-                        selectedAutomationId=${selectedAutomationId}
-                        onSelectAutomation=${setSelectedAutomationId}
                         onPauseAutomation=${automationsState.pauseAutomation}
                         onResumeAutomation=${automationsState.resumeAutomation}
                         onDeleteAutomation=${automationsState.deleteAutomation}

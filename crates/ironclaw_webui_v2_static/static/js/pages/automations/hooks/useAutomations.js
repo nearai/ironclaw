@@ -11,6 +11,7 @@ import { useI18n } from "../../../lib/i18n.js";
 import {
   automationSummary,
   normalizeAutomations,
+  soonestNextRunAt,
 } from "../lib/automations-presenters.js";
 import {
   AUTOMATIONS_BASE_REFETCH_MS,
@@ -43,6 +44,10 @@ export function useAutomations(includeCompleted = false) {
   );
   const summary = React.useMemo(
     () => automationSummary(automations),
+    [automations]
+  );
+  const nextRunAt = React.useMemo(
+    () => soonestNextRunAt(automations),
     [automations]
   );
   const nextRefreshDelay = React.useMemo(
@@ -83,6 +88,7 @@ export function useAutomations(includeCompleted = false) {
   return {
     automations,
     summary,
+    nextRunAt,
     schedulerEnabled,
     isLoading: query.isLoading,
     isRefreshing: query.isFetching,
