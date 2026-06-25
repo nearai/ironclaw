@@ -116,6 +116,8 @@ ID, migrate to it immediately. Advanced users can override headers via
 
 **HTTP request timeout:** The NEAR AI HTTP client has a 60-second timeout per request (`DEFAULT_REQUEST_TIMEOUT_SECS` in `config.rs`). This is kept below the Reborn runner lease (90 s) so the HTTP layer fails a hung request before the lease reclaims the runner. Rate limit `Retry-After` headers are parsed (both delay-seconds and HTTP-date formats) and forwarded as `LlmError::RateLimited { retry_after }` for the `RetryProvider` to honor.
 
+**Shared client timeout hygiene:** Every production reqwest client in this crate is built via `config::hardened_client_builder(request_timeout_secs)`, the single source of truth for connect-timeout (`CONNECT_TIMEOUT_SECS` = 10 s), TCP keepalive (`TCP_KEEPALIVE_SECS` = 30 s), and idle-pool bound (`POOL_IDLE_TIMEOUT_SECS` = 90 s). The total request timeout stays a per-call argument so turn-model calls use `DEFAULT_REQUEST_TIMEOUT_SECS` (< lease) while auxiliary calls (OAuth/token exchange, transcription) keep their own budgets. Callers chain site-specific options (`.redirect`, `.resolve_to_addrs`, `.default_headers`) onto the returned builder. Do not re-apply these four settings inline — change them only in `config.rs`.
+
 ## Circuit Breaker
 
 State machine in `circuit_breaker.rs`:

@@ -132,13 +132,6 @@ fn parse_nearai_models(response_text: &str) -> Vec<ModelInfo> {
 /// Default NEAR AI model used when no model is configured.
 pub const DEFAULT_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
 
-/// Cap on the TCP/TLS handshake for NEAR AI requests. A cold or black-holed
-/// socket fails fast instead of hanging until the total request timeout.
-const CONNECT_TIMEOUT_SECS: u64 = 10;
-/// TCP keepalive interval so pooled sockets surface dead peers rather than
-/// hanging on a half-open connection.
-const TCP_KEEPALIVE_SECS: u64 = 30;
-
 /// Fallback model list used by the setup wizard when the `/models` API is
 /// unreachable. Returns `(model_id, display_label)` pairs.
 pub fn default_models() -> Vec<(String, String)> {
@@ -201,10 +194,7 @@ impl NearAiChatProvider {
         flatten_tool_messages: bool,
         request_timeout_secs: u64,
     ) -> Result<Self, LlmError> {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(request_timeout_secs))
-            .connect_timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
-            .tcp_keepalive(std::time::Duration::from_secs(TCP_KEEPALIVE_SECS))
+        let client = crate::config::hardened_client_builder(request_timeout_secs)
             .build()
             .map_err(|e| LlmError::RequestFailed {
                 provider: "nearai_chat".to_string(),

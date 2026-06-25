@@ -335,7 +335,11 @@ async fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvid
 /// though `curl` to the same URL works. Remote hosts keep default proxy
 /// behavior, so this is a no-op for hosted providers behind a corporate proxy.
 fn provider_http_client(provider_id: &str, base_url: &str) -> Result<reqwest::Client, LlmError> {
-    crate::url_check::build_http_client(provider_id, base_url, reqwest::Client::builder())
+    crate::url_check::build_http_client(
+        provider_id,
+        base_url,
+        crate::config::hardened_client_builder(crate::config::DEFAULT_REQUEST_TIMEOUT_SECS),
+    )
 }
 
 fn create_openai_compat_from_registry(

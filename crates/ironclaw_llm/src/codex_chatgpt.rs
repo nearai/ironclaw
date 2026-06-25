@@ -221,8 +221,16 @@ impl CodexChatGptProvider {
              Terms of Service and could break without notice."
         );
 
+        // The total request timeout is applied per-request (see
+        // `send_http_request`); the shared builder adds the connect/keepalive/
+        // pool-idle hygiene at the client level. Fall back to a bare client if
+        // the builder somehow fails so construction stays infallible.
+        let client = crate::config::hardened_client_builder(request_timeout_secs)
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
         Self {
-            client: Client::new(),
+            client,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: RwLock::new(api_key),
             configured_model: configured_model.to_string(),
