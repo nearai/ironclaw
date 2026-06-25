@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use serde::Deserialize;
+use static_assertions::const_assert;
 use tokio::sync::Semaphore;
 
 use super::runtime_adapters::wasm_error_kind;
@@ -31,7 +32,8 @@ const MAX_CONCURRENT_WASM_EXEC: usize = 64;
 // Enforce the bound invariant at compile time: it must be positive and stay
 // below tokio's default blocking-pool ceiling (512) so native WASM execution
 // can never monopolize the pool and starve other `spawn_blocking` users.
-const _: () = assert!(MAX_CONCURRENT_WASM_EXEC > 0 && MAX_CONCURRENT_WASM_EXEC < 512);
+// `const_assert!` is evaluated at compile time and cannot panic at runtime.
+const_assert!(MAX_CONCURRENT_WASM_EXEC > 0 && MAX_CONCURRENT_WASM_EXEC < 512);
 
 /// Upper bound on WASM component compilations running concurrently inside
 /// `spawn_blocking`.
@@ -45,8 +47,8 @@ const MAX_CONCURRENT_WASM_PREPARE: usize = 16;
 
 // Enforce the prepare bound at compile time: positive, smaller than the exec
 // bound (so compiles cannot crowd out hot executions), and far below the pool
-// ceiling.
-const _: () = assert!(
+// ceiling. `const_assert!` is evaluated at compile time and cannot panic at runtime.
+const_assert!(
     MAX_CONCURRENT_WASM_PREPARE > 0 && MAX_CONCURRENT_WASM_PREPARE < MAX_CONCURRENT_WASM_EXEC
 );
 
