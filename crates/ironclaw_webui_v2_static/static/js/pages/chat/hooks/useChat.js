@@ -31,6 +31,7 @@ import { useSSE } from "./useSSE.js";
 const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
 const AUTH_GATE_CREDENTIAL_STORED_ERROR =
   "credential_stored_gate_resolution_failed";
+const APPROVAL_GATE_PENDING_SEND_ERROR = "approval_gate_pending_send_blocked";
 const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
 const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
 const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
@@ -49,6 +50,14 @@ function credentialStoredGateResolutionError(cause) {
   const error = new Error("auth gate resolution failed after credential storage");
   error.safeAuthGateCode = AUTH_GATE_CREDENTIAL_STORED_ERROR;
   error.cause = cause;
+  return error;
+}
+
+function approvalGatePendingSendError() {
+  const error = new Error(
+    "Resolve the approval request before sending another message.",
+  );
+  error.safeErrorCode = APPROVAL_GATE_PENDING_SEND_ERROR;
   return error;
 }
 
@@ -344,6 +353,10 @@ export function useChat(threadId) {
       const wireAttachments = stagedAttachments.map(toWireAttachment);
       const renderAttachments = stagedAttachments.map(toRenderAttachment);
 
+      if (pendingGate) {
+        throw approvalGatePendingSendError();
+      }
+
       // Channel-connect slash commands ("/connect telegram") never carry
       // attachments; skip that detection when files are staged so an
       // upload is never misread as a command and dropped.
@@ -399,9 +412,7 @@ export function useChat(threadId) {
       };
 
       updateCurrentThread((prev) => [...prev, pendingRenderMessage]);
-      if (sendThreadId !== threadId) {
-        seedThreadMessages(sendThreadId, (prev) => [...prev, pendingRenderMessage]);
-      }
+      updateSeededTarget((prev) => [...prev, pendingRenderMessage]);
 
       updateCurrentRunState(() => {
         setIsProcessing(true);
@@ -505,7 +516,7 @@ export function useChat(threadId) {
         removePending(pendingMessagesRef.current, pendingKey, optimisticId);
       }
     },
-    [threadId, setMessages, seedThreadMessages],
+    [threadId, pendingGate, setMessages, seedThreadMessages],
   );
 
   // v2 resolveGate signature: `(resolution, { always?, credentialRef? })`.

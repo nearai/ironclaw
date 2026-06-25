@@ -559,6 +559,92 @@ test("useChat.send: target-thread thrown errors update seeded cache", async () =
   assert.deepEqual(stateUpdates.filter((update) => update.index === 4), []);
 });
 
+test("useChat.send: pending approval blocks before sendMessage", async () => {
+  const threadId = "thread-approval";
+  const pendingGate = {
+    runId: "run-gated",
+    gateRef: "gate-shell",
+    kind: "gate",
+    toolName: "builtin.shell",
+  };
+  const stateUpdates = [];
+  let sendCalls = 0;
+  let renderedMessages = [];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [4, false],
+        [5, pendingGate],
+      ]),
+      setCalls: stateUpdates,
+    }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("approval-gated sends should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("approval-gated sends should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      sendCalls += 1;
+      throw new Error("sendMessage should not be called");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await assert.rejects(
+    chat.send("new request while approval is open"),
+    (error) =>
+      error?.safeErrorCode === "approval_gate_pending_send_blocked" &&
+      /Resolve the approval request/.test(error.message),
+  );
+
+  assert.equal(sendCalls, 0);
+  assert.deepEqual(renderedMessages, []);
+  assert.deepEqual(stateUpdates, []);
+});
+
 test("useChat.cancelRun clears local state before cancel request resolves", async () => {
   const threadId = "thread-1";
   const stateUpdates = [];
