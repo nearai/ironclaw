@@ -92,10 +92,18 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     },
     buildRuntimeContext: () => ({}),
     clearThreadState: () => {},
+    fetchSettingsExport: async () => ({
+      settings: { "agent.auto_approve_tools": false },
+    }),
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     setThreadState: () => {},
     useChat: () => hookState,
+    useQuery: ({ enabled }) => ({
+      data: enabled
+        ? { settings: { "agent.auto_approve_tools": false } }
+        : undefined,
+    }),
     useT: () => (key) => key,
   };
 
@@ -311,6 +319,7 @@ test("Chat deny gate callback routes through approve compatibility path", () => 
 
   const approvalCard = findComponent(tree, components.ApprovalCard);
   const props = componentProps(approvalCard, components.ApprovalCard);
+  assert.equal(props.globalAutoApproveEnabled, false);
   props.onDeny();
   assert.deepEqual(approveCalls, [["request-1", "deny", "gate"]]);
 });

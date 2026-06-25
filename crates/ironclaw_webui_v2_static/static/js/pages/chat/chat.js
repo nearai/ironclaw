@@ -1,4 +1,5 @@
 import { React, html } from "../../lib/html.js";
+import { useQuery } from "@tanstack/react-query";
 import {
   THREAD_STATE,
   clearThreadState,
@@ -20,6 +21,7 @@ import { TypingIndicator } from "./components/typing-indicator.js";
 import { useChat } from "./hooks/useChat.js";
 import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
+import { fetchSettingsExport } from "../settings/lib/settings-api.js";
 
 /* Grace window before an active thread's sidebar state is cleared to idle.
  * Long enough for SSE to rehydrate a gate/run after a thread switch (so a
@@ -33,6 +35,14 @@ import { buildRuntimeContext } from "./lib/runtime-context.js";
  * is intentionally not instrumented; revisit this constant (not add
  * telemetry) if slow links make the re-flicker noticeable. */
 const THREAD_STATE_CLEAR_GRACE_MS = 1500;
+const AUTO_APPROVE_KEY = "agent.auto_approve_tools";
+
+function settingsAutoApproveEnabled(settings) {
+  return (
+    settings?.[AUTO_APPROVE_KEY] === true ||
+    settings?.[AUTO_APPROVE_KEY] === "true"
+  );
+}
 
 export function Chat({
   threads,
@@ -71,6 +81,16 @@ export function Chat({
     () => threads.find((thread) => thread.id === activeThreadId) || null,
     [threads, activeThreadId]
   );
+  const hasApprovalGate = Boolean(pendingGate && pendingGate.kind !== "auth_required");
+  const settingsQuery = useQuery({
+    queryKey: ["settings-export"],
+    queryFn: fetchSettingsExport,
+    staleTime: 30_000,
+    enabled: hasApprovalGate,
+  });
+  const globalAutoApproveEnabled = settingsQuery.data?.settings
+    ? settingsAutoApproveEnabled(settingsQuery.data.settings)
+    : null;
   const runtimeContext = React.useMemo(
     () => buildRuntimeContext({ gatewayStatus, activeThread }),
     [gatewayStatus, activeThread]
@@ -273,6 +293,7 @@ export function Chat({
               : html`
               <${ApprovalCard}
                 gate=${pendingGate}
+                globalAutoApproveEnabled=${globalAutoApproveEnabled}
                 onApprove=${() =>
                   approve(pendingGate.requestId, "approve", pendingGate.kind)}
                 onDeny=${() =>

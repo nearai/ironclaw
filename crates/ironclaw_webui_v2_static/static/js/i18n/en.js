@@ -130,6 +130,7 @@ registerPack("en", {
   "approval.always": "Always",
   "approval.approveAndAlways": "Approve & always allow",
   "approval.alwaysAllowToolLabel": "Always allow {tool} without asking",
+  "approval.globalAutoApproveLink": "Automatically approve and execute all actions",
   "approval.thisTool": "this tool",
   "approval.viewFullCommand": "View full command",
   "approval.showCommandPreview": "Show preview",
