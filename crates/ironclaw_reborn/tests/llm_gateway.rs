@@ -3019,17 +3019,19 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: ironclaw_turns::run_profile::RegisterProviderToolCallRequest,
     ) -> Result<
         ironclaw_turns::run_profile::CapabilityCallCandidate,
         ironclaw_turns::run_profile::AgentLoopHostError,
     > {
+        let tool_call = request.tool_call;
         self.validate_provider_tool_call(&tool_call)?;
         let input_ref =
             ironclaw_turns::run_profile::CapabilityInputRef::new(format!("input:{}", tool_call.id))
                 .unwrap();
         self.registered.lock().unwrap().push(tool_call.clone());
         Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
             capability_id: CapabilityId::new("demo.echo").unwrap(),
             input_ref,
