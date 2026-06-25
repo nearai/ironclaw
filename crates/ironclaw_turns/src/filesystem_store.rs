@@ -255,31 +255,25 @@ where
 
         // Bridge the caller's closure shape into the shape `cas_update` expects.
         //
-        // `cas_update` signals a no-op (skip write) only when the caller returns
-        // the *same* snapshot it received via `Some(existing) == new_snapshot`.
-        // It does not handle the absent-record case (`current = None`) + default
-        // snapshot as a no-op. We model that case ourselves: when the backend has
-        // no file yet and the apply result is the default snapshot (nothing to
-        // persist), we signal no-op via a sentinel `BridgeError::NoOp(value)`.
-        // `cas_update` surfaces that as `CasUpdateError::Apply(NoOp(value))`
-        // which we handle before the final error-mapping step.
-        //
-        // We also thread the written snapshot back through `cas_update`'s `T`
+        // We thread the written snapshot back through `cas_update`'s `T`
         // (as `(T, TurnPersistenceSnapshot)`) so we can populate the snapshot
-        // cache after a successful write without needing a second backend read,
-        // mirroring the old code's `store_snapshot_cache((new_snapshot, Some(version)))`.
+        // cache after a successful write without needing a second backend read.
+        //
+        // Absent-record + default-snapshot (nothing to persist) is a no-op:
+        // we return `CasApply::no_op` so `cas_update` skips the write
+        // unconditionally. The `PartialEq` fast path cannot cover this case
+        // because there is no `existing` to compare against when `current` is
+        // `None`.
         let cas_future = cas_update(
             self.filesystem.as_ref(),
             &scope,
             &path,
             // decode: stored body → TurnPersistenceSnapshot.
-            |bytes: &[u8]| deserialize_snapshot(bytes).map_err(BridgeError::Real),
+            |bytes: &[u8]| deserialize_snapshot(bytes),
             // encode: next snapshot → versioned Entry.
-            |snapshot: &TurnPersistenceSnapshot| {
-                snapshot_entry(snapshot).map_err(BridgeError::Real)
-            },
+            |snapshot: &TurnPersistenceSnapshot| snapshot_entry(snapshot),
             // apply: bridge into CasApply<TurnPersistenceSnapshot, (T, TurnPersistenceSnapshot)>,
-            // handling absent+default no-op.
+            // handling absent+default no-op via CasApply::no_op.
             move |current: Option<TurnPersistenceSnapshot>| {
                 let snapshot = current.clone().unwrap_or_default();
                 let store_result =
@@ -290,25 +284,28 @@ where
                     );
                 let apply_fut = match store_result {
                     Ok(store) => Ok(apply(store)),
-                    Err(e) => Err(BridgeError::<T>::Real(e)),
+                    Err(e) => Err(e),
                 };
                 async move {
                     let (outcome, store) = apply_fut?.await;
                     let new_snapshot = store.persistence_snapshot();
                     match outcome {
-                        Err(e) => Err(BridgeError::Real(e)),
+                        Err(e) => Err(e),
                         Ok(value) => {
-                            // Absent-record + default snapshot: signal no-op so
-                            // `cas_update` skips the write. `cas_update`'s own
-                            // no-op check only fires for `Some(existing)==new`,
-                            // so we use a sentinel error to abort the write.
+                            // Absent-record + default snapshot: no file should
+                            // be created for an empty store. Signal no-op so
+                            // `cas_update` skips the write.
                             if current.is_none()
                                 && new_snapshot == TurnPersistenceSnapshot::default()
                             {
-                                return Err(BridgeError::NoOp(value));
+                                return Ok(CasApply::no_op(
+                                    new_snapshot.clone(),
+                                    (value, new_snapshot),
+                                ));
                             }
-                            // Thread the new snapshot back alongside the caller's
-                            // outcome so the outer scope can populate the cache.
+                            // Thread the new snapshot back alongside the
+                            // caller's outcome so the outer scope can populate
+                            // the cache.
                             Ok(CasApply::new(new_snapshot.clone(), (value, new_snapshot)))
                         }
                     }
@@ -323,7 +320,7 @@ where
         // in tests via `with_apply_timeout`). The outer timeout governs the
         // overall deadline; the inner `cas_update` timeout is an additional guard
         // at the helper level.
-        let result: Result<(T, TurnPersistenceSnapshot), CasUpdateError<BridgeError<T>>> =
+        let result: Result<(T, TurnPersistenceSnapshot), CasUpdateError<TurnError>> =
             match tokio::time::timeout(self.apply_timeout, cas_future).await {
                 Ok(result) => result,
                 Err(_) => {
@@ -336,17 +333,14 @@ where
 
         match result {
             Ok((value, written_snapshot)) => {
-                // Successful write. Populate the snapshot cache with the written
-                // snapshot so the next read can skip a backend roundtrip. We
-                // don't have the new `RecordVersion` here so we store `None`;
-                // reads don't use the version and writes always re-read fresh.
+                // Successful write or explicit no-op (CasApply::no_op). Populate
+                // the snapshot cache with the resulting snapshot so the next read
+                // can skip a backend roundtrip. For a true write we cache the
+                // written snapshot; for a no-op (absent+default) we cache the
+                // default, which is observationally identical to re-reading an
+                // absent record. We store `None` for the version; reads don't use
+                // the version and writes always re-read fresh.
                 self.store_snapshot_cache((written_snapshot, None));
-                Ok(value)
-            }
-            Err(CasUpdateError::Apply(BridgeError::NoOp(value))) => {
-                // Absent-record + default-snapshot: apply ran successfully but
-                // nothing was written. Clear cache (stale from before the loop).
-                self.clear_snapshot_cache();
                 Ok(value)
             }
             Err(e) => {
@@ -357,32 +351,10 @@ where
     }
 }
 
-/// Internal error type used by the `apply` bridge closure so we can signal
-/// the absent-record + default-snapshot no-op through `cas_update`'s apply
-/// error channel. `NoOp(T)` carries the successful outcome; `Real(TurnError)`
-/// carries a genuine failure.
-enum BridgeError<T> {
-    /// The apply closure ran successfully and produced `T`, but the resulting
-    /// snapshot is unchanged from the default (absent → default is a no-op:
-    /// no file should be created for an empty store).
-    NoOp(T),
-    /// A genuine `TurnError` from the inner apply logic or store construction.
-    Real(TurnError),
-}
-
-/// Map a [`CasUpdateError`] carrying [`BridgeError`] into a [`TurnError`].
-///
-/// `BridgeError::NoOp` is handled by the caller before reaching this function
-/// (it's an `Ok` outcome smuggled through the error path). Only `Real` errors
-/// and storage-layer failures arrive here.
-fn map_cas_error<T>(error: CasUpdateError<BridgeError<T>>) -> TurnError {
+/// Map a [`CasUpdateError`] into a [`TurnError`].
+fn map_cas_error(error: CasUpdateError<TurnError>) -> TurnError {
     match error {
-        CasUpdateError::Apply(BridgeError::Real(inner)) => inner,
-        CasUpdateError::Apply(BridgeError::NoOp(_)) => {
-            // Should be unreachable: the caller extracts NoOp before calling
-            // map_cas_error. Defensive fallback.
-            unreachable!("NoOp bridge error must be handled by the apply caller")
-        }
+        CasUpdateError::Apply(inner) => inner,
         CasUpdateError::Timeout => TurnError::Unavailable {
             reason: "turn state filesystem apply timed out".to_string(),
         },
@@ -875,7 +847,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_op_apply_clears_snapshot_cache_before_returning() {
+    async fn no_op_apply_populates_cache_with_default_snapshot() {
+        // When the record is absent and the apply closure produces a default
+        // snapshot (nothing to persist), `apply` now uses `CasApply::no_op` so
+        // `cas_update` skips the write. The outer match treats the no-op as a
+        // normal `Ok((value, snapshot))` and stores the default snapshot in the
+        // cache. A cached default is observationally identical to re-reading an
+        // absent record, so this is correct and avoids a stale-version entry.
         let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
             Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
             ironclaw_host_api::MountView::new(vec![ironclaw_host_api::MountGrant::new(
@@ -886,6 +864,8 @@ mod tests {
             .unwrap(),
         ));
         let store = FilesystemTurnStateStore::new(filesystem);
+        // Pre-seed with version 99 so we can confirm it gets replaced, not just
+        // cleared.
         store.store_snapshot_cache((
             TurnPersistenceSnapshot::default(),
             Some(RecordVersion::from_backend(99)),
@@ -896,6 +876,16 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(store.fresh_cached_snapshot().is_none());
+        // Cache must be populated with the default snapshot at version None
+        // (stale version-99 entry was replaced, not retained).
+        let cached = store
+            .fresh_cached_snapshot()
+            .expect("no-op apply must populate cache with default snapshot");
+        assert_eq!(
+            cached.0,
+            TurnPersistenceSnapshot::default(),
+            "cached snapshot must be the default"
+        );
+        assert_eq!(cached.1, None, "no-op write has no record version");
     }
 }

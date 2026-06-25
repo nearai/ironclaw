@@ -478,8 +478,9 @@ where
                         SecretLeaseStatus::Expired => {
                             let already_marked = lease.status == SecretLeaseStatus::Expired;
                             if already_marked {
-                                // No-op: return unchanged record so helper skips
-                                // the write (PartialEq equality path).
+                                // Already expired: surface LeaseExpired via the apply error
+                                // path. No write is issued because the closure returns Err
+                                // (this is not the PartialEq unchanged-snapshot skip path).
                                 Err(SecretStoreError::LeaseExpired { lease_id })
                             } else {
                                 // Best-effort expiry promotion: write the updated

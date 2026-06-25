@@ -72,7 +72,7 @@
 //! [`CasUpdateError::Apply`], so a store maps the whole space in one place.
 
 use std::future::Future;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use ironclaw_host_api::{ResourceScope, ScopedPath};
 
@@ -97,22 +97,60 @@ pub const FILESYSTEM_CAS_BACKOFF_MAX: Duration = Duration::from_millis(50);
 /// Outcome of a single `apply` invocation inside [`cas_update`].
 ///
 /// `snapshot` is the next snapshot to persist; `outcome` is whatever the caller
-/// wants returned from the whole `cas_update` call on success. Returning the
-/// *unchanged* snapshot is the documented no-op signal: when `snapshot` equals
-/// the snapshot `apply` was handed, `cas_update` skips the write and returns
-/// `outcome` directly.
+/// wants returned from the whole `cas_update` call on success.
+///
+/// Two no-op signals are available, covering the two cases where `apply` should
+/// skip the write entirely:
+///
+/// 1. **Existing record, unchanged snapshot** — return `CasApply::new` with
+///    the same value that `apply` received (`Some(existing) == snapshot`).
+///    `cas_update` detects the equality and skips the write as a convenience
+///    fast-path for callers that already have an `PartialEq` snapshot.
+/// 2. **Any record state (including absent), explicit skip** — return
+///    `CasApply::no_op`. The `write: false` flag unconditionally bypasses the
+///    write regardless of what `snapshot` is set to. This is the correct signal
+///    when `current` is `None` and the computed snapshot equals a "default"
+///    value (no record should be created for an empty store), because for that
+///    case there is no `existing` to compare against.
 pub struct CasApply<S, T> {
-    /// The new snapshot to write back (or the unchanged snapshot to signal a
-    /// read-only no-op).
+    /// The new snapshot to write back. Ignored for persistence when `write` is
+    /// `false` (i.e., constructed via [`CasApply::no_op`]).
     pub snapshot: S,
     /// The value to return from [`cas_update`] on success.
     pub outcome: T,
+    /// When `false`, `cas_update` skips the write unconditionally and returns
+    /// `outcome` immediately.
+    write: bool,
 }
 
 impl<S, T> CasApply<S, T> {
-    /// Convenience constructor.
+    /// Produce a [`CasApply`] that **writes** `snapshot` back to the store.
+    ///
+    /// All existing callers use this constructor; its signature is unchanged.
+    /// If `snapshot` equals the value `apply` was handed (i.e. nothing
+    /// changed), `cas_update` still skips the write via the `PartialEq` fast
+    /// path — no API change needed for callers that rely on that behavior.
     pub fn new(snapshot: S, outcome: T) -> Self {
-        Self { snapshot, outcome }
+        Self {
+            snapshot,
+            outcome,
+            write: true,
+        }
+    }
+
+    /// Produce a [`CasApply`] that **skips** the write unconditionally.
+    ///
+    /// Use this when the caller wants to signal a no-op for a case the
+    /// `PartialEq` fast path cannot cover — primarily when `current` is `None`
+    /// (absent record) and the computed snapshot equals the type's default.
+    /// `snapshot` is carried in the struct for type-safety but is not
+    /// persisted.
+    pub fn no_op(snapshot: S, outcome: T) -> Self {
+        Self {
+            snapshot,
+            outcome,
+            write: false,
+        }
     }
 }
 
@@ -183,14 +221,20 @@ impl<E: std::fmt::Display + std::fmt::Debug> std::error::Error for CasUpdateErro
 ///   receives the current snapshot (`None` when the record is absent / first
 ///   write) and computes the next snapshot + outcome. **Must be idempotent /
 ///   re-runnable**: it is re-invoked on every CAS retry against a freshly read
-///   snapshot, so it must not mutate external state. Return the unchanged
-///   snapshot to signal a read-only no-op (no write is issued).
+///   snapshot, so it must not mutate external state.
 ///
-/// `S: PartialEq` powers the no-op fast path (skip the write when nothing
+///   Two no-op signals skip the write entirely:
+///   - Return `CasApply::no_op(snapshot, outcome)` to skip the write for any
+///     case, including when `current` is `None` (absent record).
+///   - Return `CasApply::new(unchanged_snapshot, outcome)` where
+///     `unchanged_snapshot` equals what `apply` was handed; `cas_update`
+///     detects the equality via `PartialEq` and skips the write as a
+///     convenience fast path.
+///
+/// `S: PartialEq` powers the equality fast path (skip the write when nothing
 /// changed); `S: Clone` lets each retry hand `apply` an owned snapshot while the
 /// helper retains a copy for that equality check — both mirror the turns
 /// reference.
-#[allow(clippy::too_many_arguments)]
 pub async fn cas_update<F, S, T, E, D, N, A, Fut>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
@@ -255,11 +299,23 @@ where
         // 2. Run the caller's transform against the freshly read snapshot.
         //    `apply` is re-runnable on every retry, so it receives an owned
         //    clone while `current` is retained for the no-op equality check.
-        let CasApply { snapshot, outcome } = apply(current.clone())
+        let CasApply {
+            snapshot,
+            outcome,
+            write,
+        } = apply(current.clone())
             .await
             .map_err(CasUpdateError::Apply)?;
 
-        // 3. No-op fast path: nothing changed, so skip the write entirely.
+        // 3a. Explicit no-op: caller returned CasApply::no_op — skip the write
+        //     unconditionally. This handles the absent-record + default-snapshot
+        //     case where there is no `existing` to compare against.
+        if !write {
+            return Ok(outcome);
+        }
+
+        // 3b. Equality fast-path: snapshot is unchanged from what `apply`
+        //     received, so skip the write.
         if matches!(&current, Some(existing) if *existing == snapshot) {
             return Ok(outcome);
         }
@@ -305,22 +361,27 @@ fn capabilities_support_cas(capabilities: &BackendCapabilities) -> bool {
     )
 }
 
-/// Jittered exponential backoff between CAS retries. Ported verbatim from the
-/// `ironclaw_turns` reference: 2ms base, doubling per attempt, capped at 50ms,
-/// plus up to one base-delay of jitter to de-correlate competing writers.
+/// Jittered exponential backoff between CAS retries.
+///
+/// 2ms base, doubling per attempt, capped at 50ms, plus up to one base-delay
+/// of jitter to de-correlate competing writers. Jitter is derived from a
+/// `RandomState`-seeded hash of the attempt index so it is uncorrelated across
+/// callers and works correctly on coarse-clock platforms (VMs, containers,
+/// Windows) where `SystemTime::now()` advances in 1ms or 15ms ticks and a
+/// nanosecond-modulo approach would collapse to zero on every retry.
 async fn cas_retry_backoff(attempt: usize) {
     let shift = attempt.min(8) as u32;
     let multiplier = 1_u32.checked_shl(shift).unwrap_or(u32::MAX);
     let base_delay = FILESYSTEM_CAS_BACKOFF_BASE
         .saturating_mul(multiplier)
         .min(FILESYSTEM_CAS_BACKOFF_MAX);
-    let jitter = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| {
-            let jitter_ceiling = base_delay.as_millis().max(1);
-            Duration::from_millis((elapsed.as_nanos() % jitter_ceiling) as u64)
-        })
-        .unwrap_or_default();
+    let jitter = {
+        use std::collections::hash_map::RandomState;
+        use std::hash::BuildHasher;
+        let hash = RandomState::new().hash_one(attempt);
+        let jitter_ceiling = base_delay.as_millis().max(1) as u64;
+        Duration::from_millis(hash % jitter_ceiling)
+    };
     tokio::time::sleep(base_delay.saturating_add(jitter)).await;
 }
 

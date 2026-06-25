@@ -179,6 +179,48 @@ impl RootFilesystem for AlwaysMismatchBackend {
     }
 }
 
+// ─── A backend whose `get` hangs forever ─────────────────────────────────────
+
+/// Backend that suspends on every `get` call, simulating a wedged backend
+/// operation. Used to exercise the [`super::FILESYSTEM_APPLY_TIMEOUT`]
+/// deadline. The test drives it under paused Tokio time so the 15-second
+/// deadline fires instantly without real wall-clock delay.
+struct HangingBackend;
+
+#[async_trait]
+impl RootFilesystem for HangingBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        // Advertise full CAS capability so the pre-flight gate passes and the
+        // helper enters the loop — where `get` then hangs forever.
+        BackendCapabilities::in_memory_full()
+    }
+
+    async fn get(&self, _path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        // Suspend indefinitely. With `start_paused = true` Tokio auto-advances
+        // its clock once every task is blocked on a non-timer future, which
+        // causes the `tokio::time::timeout(FILESYSTEM_APPLY_TIMEOUT, …)`
+        // wrapper in `cas_update` to fire.
+        std::future::pending().await
+    }
+
+    async fn put(
+        &self,
+        _path: &VirtualPath,
+        _entry: Entry,
+        _cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        unimplemented!("HangingBackend::put is unreachable in this test")
+    }
+
+    async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        unimplemented!("HangingBackend::list_dir is unreachable in this test")
+    }
+
+    async fn stat(&self, _path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        unimplemented!("HangingBackend::stat is unreachable in this test")
+    }
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -376,6 +418,39 @@ async fn non_cas_backend_is_rejected_not_overwritten() {
 }
 
 #[tokio::test]
+async fn no_op_constructor_skips_write_on_absent_record() {
+    // `CasApply::no_op` must skip the write even when `current` is `None`.
+    // The `PartialEq` fast path cannot fire here because there is no `existing`
+    // to compare against, so the explicit `write: false` flag is the only
+    // correct signal.
+    let fs = Arc::new(scoped(Arc::new(InMemoryBackend::new())));
+    let scope = ResourceScope::system();
+
+    let outcome = cas_update(
+        fs.as_ref(),
+        &scope,
+        &counter_path(),
+        decode_counter,
+        encode_counter,
+        |current: Option<Counter>| async move {
+            assert!(current.is_none(), "record must be absent");
+            Ok::<_, TestError>(CasApply::no_op(Counter { value: 0 }, 42u64))
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, 42u64, "no_op must return the supplied outcome");
+
+    // Critically: the file must not have been created.
+    let stored = fs.get(&scope, &counter_path()).await.unwrap();
+    assert!(
+        stored.is_none(),
+        "CasApply::no_op on an absent record must not write the record"
+    );
+}
+
+#[tokio::test]
 async fn apply_error_is_carried_through_unwrapped() {
     let fs = Arc::new(scoped(Arc::new(InMemoryBackend::new())));
     let scope = ResourceScope::system();
@@ -396,4 +471,30 @@ async fn apply_error_is_carried_through_unwrapped() {
         Err(CasUpdateError::Apply(TestError(reason))) => assert_eq!(reason, "boom"),
         other => panic!("expected Apply error carried through, got {other:?}"),
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn timeout_fires_when_backend_get_hangs() {
+    // `HangingBackend::get` suspends forever via `std::future::pending()`.
+    // With paused Tokio time the runtime auto-advances its clock the moment
+    // every task is blocked, so `tokio::time::timeout(FILESYSTEM_APPLY_TIMEOUT,
+    // …)` fires without any real wall-clock delay.
+    let fs = Arc::new(scoped(Arc::new(HangingBackend)));
+    let scope = ResourceScope::system();
+
+    let result: Result<u64, CasUpdateError<TestError>> = cas_update(
+        fs.as_ref(),
+        &scope,
+        &counter_path(),
+        decode_counter,
+        encode_counter,
+        increment,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(CasUpdateError::Timeout)),
+        "a wedged backend `get` must trigger CasUpdateError::Timeout after \
+         FILESYSTEM_APPLY_TIMEOUT elapses, got {result:?}"
+    );
 }

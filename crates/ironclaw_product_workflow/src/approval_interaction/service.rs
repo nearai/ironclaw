@@ -196,7 +196,7 @@ impl DefaultApprovalInteractionService {
                     .ensure_spawn_lease(gate.resource_scope(), gate.request().id, terms)
                     .await
             }
-            (ApprovalStatus::Denied | ApprovalStatus::Expired, _) => {
+            (ApprovalStatus::Denied | ApprovalStatus::Expired | ApprovalStatus::Discarded, _) => {
                 return Err(approval_rejected(
                     ApprovalInteractionRejectionKind::StaleGate,
                 ));
@@ -307,7 +307,7 @@ impl DefaultApprovalInteractionService {
                     .await?;
             }
             ApprovalStatus::Denied => {}
-            ApprovalStatus::Approved | ApprovalStatus::Expired => {
+            ApprovalStatus::Approved | ApprovalStatus::Expired | ApprovalStatus::Discarded => {
                 return Err(approval_rejected(
                     ApprovalInteractionRejectionKind::StaleGate,
                 ));

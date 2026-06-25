@@ -276,6 +276,7 @@ pub(crate) fn approval_not_approved_error_kind(status: ApprovalStatus) -> &'stat
         ApprovalStatus::Approved => "ApprovalApproved",
         ApprovalStatus::Denied => "ApprovalDenied",
         ApprovalStatus::Expired => "ApprovalExpired",
+        ApprovalStatus::Discarded => "ApprovalDiscarded",
     }
 }
 

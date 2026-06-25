@@ -488,6 +488,40 @@ async fn filesystem_approval_request_store_discards_pending_request() {
     assert_eq!(store.records_for_scope(&scope).await.unwrap(), Vec::new());
 }
 
+/// Regression test for the TOCTOU race: a concurrent `approve()` that wins its
+/// CAS between `discard_pending`'s read and write must not have its record
+/// clobbered.  The fix routes discard through `cas_update` so a lost CAS race
+/// retries, re-reads the now-Approved record, and returns `ApprovalNotPending`
+/// instead of deleting the terminal record.
+#[tokio::test]
+async fn filesystem_discard_does_not_clobber_resolved_approval() {
+    let fs = Arc::new(engine_filesystem());
+    let store = FilesystemApprovalRequestStore::new(scoped_run_state_fs(fs));
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    // Save the approval request (Pending) then immediately approve it.
+    store.save_pending(scope.clone(), approval).await.unwrap();
+    store.approve(&scope, request_id).await.unwrap();
+
+    // discard_pending must refuse because the record is no longer Pending.
+    let err = store.discard_pending(&scope, request_id).await.unwrap_err();
+    assert!(
+        matches!(err, RunStateError::ApprovalNotPending { .. }),
+        "expected ApprovalNotPending but got {err:?}",
+    );
+
+    // The Approved record must still be readable — discard must not clobber it.
+    let record = store
+        .get(&scope, request_id)
+        .await
+        .unwrap()
+        .expect("approved record must still exist after rejected discard");
+    assert_eq!(record.status, ApprovalStatus::Approved);
+}
+
 #[tokio::test]
 async fn in_memory_approval_store_allows_same_request_id_in_different_tenants() {
     let store = InMemoryApprovalRequestStore::new();

@@ -136,8 +136,14 @@ risk).
 
 ## Quality gate
 
-Per touched crate: `cargo fmt --all`, `cargo clippy --all-targets` (zero
-warnings), `cargo test` (+ `--features integration` where stores have it).
+Per touched crate:
+
+- `cargo fmt --all`
+- `cargo check` (default / postgres build)
+- `cargo check --no-default-features --features libsql`
+- `cargo check --all-features`
+- `cargo clippy --all --benches --tests --examples --all-features -- -D warnings`
+- `cargo test` (+ `--features integration` where stores have it)
 
 ## No new abstractions
 

@@ -66,6 +66,7 @@ pub enum ApprovalStatus {
     Approved,
     Denied,
     Expired,
+    Discarded,
 }
 
 /// Durable approval request record.
@@ -892,7 +893,8 @@ where
         Ok(self
             .read_versioned(scope, request_id)
             .await?
-            .map(|(record, _)| record))
+            .map(|(record, _)| record)
+            .filter(|record| record.status != ApprovalStatus::Discarded))
     }
 
     async fn approve(
@@ -919,18 +921,45 @@ where
         request_id: ApprovalRequestId,
     ) -> Result<ApprovalRecord, RunStateError> {
         let path = approval_record_path(scope, request_id)?;
-        let record = self
-            .get(scope, request_id)
-            .await?
-            .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
-        if record.status != ApprovalStatus::Pending {
-            return Err(RunStateError::ApprovalNotPending {
-                request_id,
-                status: record.status,
-            });
-        }
-        self.filesystem.delete(scope, &path).await?;
-        Ok(record)
+        let scope_clone = scope.clone();
+        cas_update(
+            self.filesystem.as_ref(),
+            scope,
+            &path,
+            |bytes: &[u8]| deserialize::<ApprovalRecord>(bytes),
+            |record: &ApprovalRecord| Self::record_entry(record),
+            |current: Option<ApprovalRecord>| {
+                // Compute the outcome synchronously so the async block only
+                // captures an already-resolved `Result` (mirrors cas_snapshot.rs).
+                let outcome = (|| {
+                    let record =
+                        current.ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
+                    // Enforce scope ownership on each retry against a freshly read record.
+                    if !same_scope_owner(&record.scope, &scope_clone) {
+                        return Err(RunStateError::UnknownApprovalRequest { request_id });
+                    }
+                    if record.status != ApprovalStatus::Pending {
+                        return Err(RunStateError::ApprovalNotPending {
+                            request_id,
+                            status: record.status,
+                        });
+                    }
+                    // Write a Discarded tombstone so the file still exists (preventing
+                    // a subsequent save_pending from re-using the same ID), but return
+                    // the original Pending record as the caller-visible outcome.
+                    // If approve()/deny() raced and won, the CAS put fails with
+                    // VersionMismatch → retry re-reads → sees non-Pending → returns
+                    // ApprovalNotPending without clobbering the resolved record.
+                    let original = record.clone();
+                    let mut discarded = record;
+                    discarded.status = ApprovalStatus::Discarded;
+                    Ok(CasApply::new(discarded, original))
+                })();
+                async move { outcome }
+            },
+        )
+        .await
+        .map_err(map_cas_error)
     }
 
     async fn records_for_scope(
@@ -955,7 +984,9 @@ where
                     continue;
                 };
                 let record = deserialize::<ApprovalRecord>(&versioned.entry.body)?;
-                if same_scope_owner(&record.scope, scope) {
+                if same_scope_owner(&record.scope, scope)
+                    && record.status != ApprovalStatus::Discarded
+                {
                     records.push(record);
                 }
             }
