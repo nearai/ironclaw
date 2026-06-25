@@ -463,6 +463,7 @@ mod tests {
                     poll_interval: Duration::from_millis(50),
                     fires_per_tick: 1,
                     max_concurrent_fires_per_trigger: 1,
+                    ..TriggerPollerWorkerConfig::default()
                 },
                 TriggerPollerWorkerDeps {
                     repository: repo,
