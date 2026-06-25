@@ -125,6 +125,7 @@ registerPack("pt-BR", {
   "approval.always": "Sempre",
   "approval.approveAndAlways": "Aprovar e sempre permitir",
   "approval.alwaysAllowToolLabel": "Sempre permitir {tool} sem perguntar",
+  "approval.globalAutoApproveLink": "Aprovar e executar automaticamente todas as ações",
   "approval.thisTool": "esta ferramenta",
   "approval.viewFullCommand": "Ver comando completo",
   "approval.showCommandPreview": "Mostrar prévia",
