@@ -1,0 +1,321 @@
+use std::sync::Arc;
+
+use ironclaw_filesystem::{
+    CasExpectation, ContentType, Entry, FilesystemError, RecordKind, RecordVersion, RootFilesystem,
+    ScopedFilesystem,
+};
+use ironclaw_host_api::{ResourceScope, ScopedPath};
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    EventCursor, TurnError, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState,
+    TurnStatus,
+    filesystem_store::{
+        FILESYSTEM_CAS_RETRIES, PutError, cas_retry_backoff, fs_error, put_with_cas,
+    },
+    runner::HeartbeatRequest,
+};
+
+const TURNS_RUNNER_LEASE_PREFIX: &str = "/turns/runner-leases";
+const TURNS_RUNNER_LEASE_KIND: &str = "turn_runner_lease";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RunnerLeaseRecord {
+    run_id: TurnRunId,
+    runner_id: crate::TurnRunnerId,
+    lease_token: crate::TurnLeaseToken,
+    lease_expires_at: crate::TurnTimestamp,
+    last_heartbeat_at: crate::TurnTimestamp,
+    status: TurnStatus,
+    event_cursor: EventCursor,
+}
+
+pub(super) struct RunnerLeaseSidecar<F>
+where
+    F: RootFilesystem,
+{
+    filesystem: Arc<ScopedFilesystem<F>>,
+    runner_lease_ttl: chrono::Duration,
+}
+
+impl<F> RunnerLeaseSidecar<F>
+where
+    F: RootFilesystem,
+{
+    pub(super) fn new(
+        filesystem: Arc<ScopedFilesystem<F>>,
+        runner_lease_ttl: chrono::Duration,
+    ) -> Self {
+        Self {
+            filesystem,
+            runner_lease_ttl,
+        }
+    }
+
+    pub(super) async fn overlay_snapshot(
+        &self,
+        snapshot: (TurnPersistenceSnapshot, Option<RecordVersion>),
+    ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {
+        let (mut snapshot, version) = snapshot;
+        for run in snapshot
+            .runs
+            .iter_mut()
+            .filter(|record| run_can_use_external_lease(record))
+        {
+            let Some((lease, _version)) = self.read(run.run_id).await? else {
+                continue;
+            };
+            apply_runner_lease_overlay(run, &lease);
+        }
+        Ok((snapshot, version))
+    }
+
+    pub(super) async fn seed_from_snapshot(
+        &self,
+        snapshot: &TurnPersistenceSnapshot,
+        run_id: TurnRunId,
+    ) -> Result<(), TurnError> {
+        let Some(run) = snapshot.runs.iter().find(|record| record.run_id == run_id) else {
+            return Err(TurnError::ScopeNotFound);
+        };
+        let Some(record) = runner_lease_from_run(run) else {
+            return Err(TurnError::InvalidTransition {
+                from: run.status,
+                to: TurnStatus::Running,
+            });
+        };
+        self.upsert(record).await
+    }
+
+    pub(super) async fn heartbeat(
+        &self,
+        request: HeartbeatRequest,
+    ) -> Result<EventCursor, TurnError> {
+        for attempt in 0..FILESYSTEM_CAS_RETRIES {
+            let now = chrono::Utc::now();
+            let Some((existing, version)) = self.read(request.run_id).await? else {
+                return Err(TurnError::ScopeNotFound);
+            };
+            ensure_active_runner_lease(&existing, request.runner_id, request.lease_token, now)?;
+            if existing.status != TurnStatus::Running {
+                return Err(TurnError::InvalidTransition {
+                    from: existing.status,
+                    to: TurnStatus::Running,
+                });
+            }
+            let mut next = existing.clone();
+            next.lease_expires_at = next_lease_expiry(self.runner_lease_ttl, now);
+            next.last_heartbeat_at = now;
+            match self.write(&next, CasExpectation::Version(version)).await {
+                Ok(_) => return Ok(existing.event_cursor),
+                Err(PutError::VersionMismatch) => cas_retry_backoff(attempt).await,
+                Err(PutError::Other(error)) => return Err(error),
+            }
+        }
+        Err(TurnError::Unavailable {
+            reason: "turn runner lease CAS retries exhausted".to_string(),
+        })
+    }
+
+    pub(super) async fn mark_cancel_requested(&self, run_id: TurnRunId) -> Result<(), TurnError> {
+        for attempt in 0..FILESYSTEM_CAS_RETRIES {
+            let Some((mut existing, version)) = self.read(run_id).await? else {
+                return Ok(());
+            };
+            if existing.status == TurnStatus::CancelRequested {
+                return Ok(());
+            }
+            if existing.status != TurnStatus::Running {
+                return self.delete(run_id).await;
+            }
+            existing.status = TurnStatus::CancelRequested;
+            match self
+                .write(&existing, CasExpectation::Version(version))
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(PutError::VersionMismatch) => cas_retry_backoff(attempt).await,
+                Err(PutError::Other(error)) => return Err(error),
+            }
+        }
+        Err(TurnError::Unavailable {
+            reason: "turn runner lease CAS retries exhausted".to_string(),
+        })
+    }
+
+    pub(super) async fn cleanup_after_state(&self, result: &Result<TurnRunState, TurnError>) {
+        if let Ok(state) = result
+            && !matches!(
+                state.status,
+                TurnStatus::Running | TurnStatus::CancelRequested
+            )
+        {
+            self.delete_best_effort(state.run_id).await;
+        }
+    }
+
+    pub(super) async fn delete_best_effort(&self, run_id: TurnRunId) {
+        match self.delete(run_id).await {
+            Ok(()) | Err(TurnError::ScopeNotFound) => {}
+            Err(error) => {
+                tracing::debug!(
+                    run_id = %run_id,
+                    error = %error,
+                    "failed to delete runner lease sidecar after run left runner-owned state"
+                );
+            }
+        }
+    }
+
+    async fn upsert(&self, record: RunnerLeaseRecord) -> Result<(), TurnError> {
+        for attempt in 0..FILESYSTEM_CAS_RETRIES {
+            let cas = match self.read(record.run_id).await? {
+                Some((_existing, version)) => CasExpectation::Version(version),
+                None => CasExpectation::Absent,
+            };
+            match self.write(&record, cas).await {
+                Ok(_) => return Ok(()),
+                Err(PutError::VersionMismatch) => cas_retry_backoff(attempt).await,
+                Err(PutError::Other(error)) => return Err(error),
+            }
+        }
+        Err(TurnError::Unavailable {
+            reason: "turn runner lease CAS retries exhausted".to_string(),
+        })
+    }
+
+    async fn read(
+        &self,
+        run_id: TurnRunId,
+    ) -> Result<Option<(RunnerLeaseRecord, RecordVersion)>, TurnError> {
+        let path = runner_lease_path(run_id)?;
+        match self.filesystem.get(&ResourceScope::system(), &path).await {
+            Ok(Some(versioned)) => {
+                let record = deserialize_runner_lease(&versioned.entry.body)?;
+                Ok(Some((record, versioned.version)))
+            }
+            Ok(None) => Ok(None),
+            Err(error) => Err(fs_error(error)),
+        }
+    }
+
+    async fn write(
+        &self,
+        record: &RunnerLeaseRecord,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, PutError> {
+        let path = runner_lease_path(record.run_id).map_err(PutError::Other)?;
+        put_with_cas(
+            self.filesystem.as_ref(),
+            &path,
+            runner_lease_entry(record).map_err(PutError::Other)?,
+            cas,
+        )
+        .await
+    }
+
+    async fn delete(&self, run_id: TurnRunId) -> Result<(), TurnError> {
+        let path = runner_lease_path(run_id)?;
+        match self
+            .filesystem
+            .delete(&ResourceScope::system(), &path)
+            .await
+        {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(fs_error(error)),
+        }
+    }
+}
+
+fn runner_lease_path(run_id: TurnRunId) -> Result<ScopedPath, TurnError> {
+    ScopedPath::new(format!("{TURNS_RUNNER_LEASE_PREFIX}/{run_id}.json")).map_err(|error| {
+        TurnError::Unavailable {
+            reason: format!("invalid turn runner lease path: {error}"),
+        }
+    })
+}
+
+fn next_lease_expiry(
+    runner_lease_ttl: chrono::Duration,
+    now: crate::TurnTimestamp,
+) -> crate::TurnTimestamp {
+    now.checked_add_signed(runner_lease_ttl).unwrap_or(now)
+}
+
+fn run_can_use_external_lease(record: &TurnRunRecord) -> bool {
+    matches!(
+        record.status,
+        TurnStatus::Running | TurnStatus::CancelRequested
+    ) && record.runner_id.is_some()
+        && record.lease_token.is_some()
+}
+
+fn runner_lease_from_run(record: &TurnRunRecord) -> Option<RunnerLeaseRecord> {
+    if !run_can_use_external_lease(record) {
+        return None;
+    }
+    Some(RunnerLeaseRecord {
+        run_id: record.run_id,
+        runner_id: record.runner_id?,
+        lease_token: record.lease_token?,
+        lease_expires_at: record.lease_expires_at?,
+        last_heartbeat_at: record.last_heartbeat_at?,
+        status: record.status,
+        event_cursor: record.event_cursor,
+    })
+}
+
+fn apply_runner_lease_overlay(record: &mut TurnRunRecord, lease: &RunnerLeaseRecord) {
+    if record.run_id != lease.run_id
+        || record.status != lease.status
+        || record.runner_id != Some(lease.runner_id)
+        || record.lease_token != Some(lease.lease_token)
+        || !run_can_use_external_lease(record)
+    {
+        return;
+    }
+    if record
+        .last_heartbeat_at
+        .is_some_and(|last_heartbeat_at| lease.last_heartbeat_at < last_heartbeat_at)
+    {
+        return;
+    }
+    record.last_heartbeat_at = Some(lease.last_heartbeat_at);
+    record.lease_expires_at = Some(lease.lease_expires_at);
+}
+
+fn ensure_active_runner_lease(
+    record: &RunnerLeaseRecord,
+    runner_id: crate::TurnRunnerId,
+    lease_token: crate::TurnLeaseToken,
+    now: crate::TurnTimestamp,
+) -> Result<(), TurnError> {
+    if record.runner_id != runner_id || record.lease_token != lease_token {
+        return Err(TurnError::LeaseMismatch);
+    }
+    if record.lease_expires_at <= now {
+        return Err(TurnError::Conflict {
+            reason: "turn run lease expired".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn runner_lease_entry(record: &RunnerLeaseRecord) -> Result<Entry, TurnError> {
+    let body = serde_json::to_vec(record).map_err(|error| TurnError::Unavailable {
+        reason: format!("turn runner lease serialization failed: {error}"),
+    })?;
+    let kind =
+        RecordKind::new(TURNS_RUNNER_LEASE_KIND).map_err(|error| TurnError::Unavailable {
+            reason: format!("invalid turn runner lease record kind: {error}"),
+        })?;
+    let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+    entry.kind = Some(kind);
+    Ok(entry)
+}
+
+fn deserialize_runner_lease(bytes: &[u8]) -> Result<RunnerLeaseRecord, TurnError> {
+    serde_json::from_slice(bytes).map_err(|error| TurnError::Unavailable {
+        reason: format!("turn runner lease deserialization failed: {error}"),
+    })
+}
