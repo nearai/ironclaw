@@ -6194,6 +6194,79 @@ pub async fn fetch_account_traces_via_sink(
     .await
 }
 
+/// Fetch the list of submitted traces for the given `(tenant_id, user_id)` using
+/// the crate-local hardened reqwest client (the direct/CLI path, no host-egress
+/// sink required).
+///
+/// This is the facade-safe counterpart to [`fetch_account_traces_via_sink`]: it
+/// uses the same [`trace_remote_http_client`] that trace submission uses, so it
+/// obeys the same SSRF mitigations and TLS settings without coupling the caller
+/// to a host-egress `ContributionHttpSink`. Use this from WebUI facades and any
+/// non-agent surface. Use [`fetch_account_traces_via_sink`] from the agent
+/// runtime where all egress must flow through `RuntimeHttpEgress`.
+///
+/// Returns `Ok(vec![])` when the user is not enrolled or the server returns a
+/// non-2xx status. Transport failures return `Err`.
+pub async fn fetch_account_traces(
+    tenant_id: &str,
+    user_id: &str,
+    limit: Option<usize>,
+) -> anyhow::Result<Vec<AccountTraceItem>> {
+    fetch_account_traces_direct(
+        ironclaw_common::paths::ironclaw_base_dir().as_path(),
+        tenant_id,
+        user_id,
+        limit,
+    )
+    .await
+}
+
+/// Dir-parameterised core for [`fetch_account_traces`] (direct/CLI path).
+/// Accepts an explicit `base_dir` so tests can supply an isolated tempdir.
+async fn fetch_account_traces_direct(
+    base_dir: &std::path::Path,
+    tenant_id: &str,
+    user_id: &str,
+    limit: Option<usize>,
+) -> anyhow::Result<Vec<AccountTraceItem>> {
+    let resolution = match resolve_trace_credentials_at(base_dir, tenant_id, user_id)? {
+        Some(r) => r,
+        None => return Ok(vec![]),
+    };
+
+    let scope_dir = if resolution.subject.is_some() {
+        trace_contribution_dir_for_scope_at(base_dir, None)
+    } else {
+        trace_contribution_dir_for_scope_at(base_dir, Some(resolution.state_scope.as_str()))
+    };
+
+    let context = TraceUploadClaimContext::for_account(resolution.subject.clone())
+        .with_scope_dir(scope_dir);
+    let provider = DefaultTraceUploadCredentialProvider;
+    let bearer = provider
+        .bearer_token(&resolution.policy, &context, false)
+        .await?;
+    let url = account_traces_url(&resolution.policy, limit)?;
+    let client = trace_remote_http_client()
+        .map_err(|e| anyhow::anyhow!("failed to build trace HTTP client: {e}"))?;
+    let response = client
+        .get(&url)
+        .bearer_auth(&bearer)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("account traces request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Ok(vec![]);
+    }
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to read account traces response body: {e}"))?;
+    let items: Vec<AccountTraceItem> = serde_json::from_slice(&body)
+        .context("account traces response was not a valid JSON array")?;
+    Ok(items)
+}
+
 /// Dir-parameterised core for [`fetch_account_traces_via_sink`].
 /// Accepts an explicit `base_dir` so tests can supply an isolated tempdir.
 async fn fetch_account_traces_inner(
