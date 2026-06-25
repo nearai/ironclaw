@@ -4,16 +4,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{InvocationId, ResourceScope};
+use ironclaw_extensions::SharedExtensionRegistry;
+use ironclaw_host_api::{EffectKind, InvocationId, ResourceScope};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ConnectableChannelsProductFacade, OperatorStatusService, RebornOperatorStatusCheck,
     RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornServices as ProductRebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductFacade,
-    WebUiAuthenticatedCaller,
+    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices as ProductRebornServices,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, SkillsProductFacade, WebUiAuthenticatedCaller,
 };
 
 use ironclaw_triggers::TriggerRepository;
@@ -24,6 +25,9 @@ use crate::{
     lifecycle::{
         RebornLocalLifecycleFacade, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
     },
+    outbound_delivery_capability_surface::{
+        outbound_delivery_synthetic_provider, outbound_delivery_target_set_operator_tool_info,
+    },
     outbound_preferences::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
         RebornOutboundPreferencesFacade,
@@ -33,6 +37,43 @@ use crate::{
 
 static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
     std::sync::LazyLock::new(ironclaw_safety::Sanitizer::new);
+
+#[derive(Clone)]
+struct ActiveRegistryOperatorToolCatalog {
+    registry: Arc<SharedExtensionRegistry>,
+    synthetic_tools: Arc<[RebornOperatorToolInfo]>,
+}
+
+impl ActiveRegistryOperatorToolCatalog {
+    fn new(
+        registry: Arc<SharedExtensionRegistry>,
+        synthetic_tools: Vec<RebornOperatorToolInfo>,
+    ) -> Self {
+        Self {
+            registry,
+            synthetic_tools: Arc::from(synthetic_tools),
+        }
+    }
+}
+
+impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
+    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo> {
+        let mut tools = self
+            .registry
+            .snapshot()
+            .capabilities()
+            .map(|descriptor| RebornOperatorToolInfo {
+                capability_id: descriptor.id.clone(),
+                provider: descriptor.provider.clone(),
+                description: Arc::<str>::from(descriptor.description.as_str()),
+                default_permission: descriptor.default_permission,
+                effects: Arc::<[EffectKind]>::from(descriptor.effects.clone()),
+            })
+            .collect::<Vec<_>>();
+        tools.extend(self.synthetic_tools.iter().cloned());
+        tools
+    }
+}
 
 /// WebUI-facing Reborn service bundle for host composition.
 ///
@@ -151,6 +192,46 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         );
     }
     if let Some(local_runtime) = &services.local_runtime {
+        let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+            local_runtime.tool_permission_overrides.clone();
+        let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+            local_runtime.auto_approve_settings.clone();
+        let persistent_approval_policies: Arc<
+            dyn ironclaw_approvals::PersistentApprovalPolicyStore,
+        > = local_runtime.persistent_approval_policies.clone();
+        let tool_registry = local_runtime
+            .shared_extension_registry
+            .clone()
+            .unwrap_or_else(|| {
+                Arc::new(SharedExtensionRegistry::new(
+                    local_runtime.extension_registry.as_ref().clone(),
+                ))
+            });
+        let synthetic_operator_tools = if outbound_delivery_target_providers.is_empty() {
+            Vec::new()
+        } else {
+            let provider = outbound_delivery_synthetic_provider().map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("outbound delivery synthetic provider id is invalid: {error}"),
+                }
+            })?;
+            vec![
+                outbound_delivery_target_set_operator_tool_info(provider).map_err(|error| {
+                    RebornBuildError::InvalidConfig {
+                        reason: format!("outbound delivery operator tool is invalid: {error}"),
+                    }
+                })?,
+            ]
+        };
+        api = api.with_operator_approval_config(
+            tool_permission_overrides,
+            auto_approve_settings,
+            persistent_approval_policies,
+            Arc::new(ActiveRegistryOperatorToolCatalog::new(
+                tool_registry,
+                synthetic_operator_tools,
+            )),
+        );
         let mut lifecycle_facade =
             RebornLocalLifecycleFacade::new(local_runtime.skill_management.clone());
         if let Some(extension_management) = &local_runtime.extension_management {
@@ -237,6 +318,19 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         services.readiness.clone(),
     )));
     api = api.with_operator_logs_service(crate::operator_log_buffer());
+    if let Some(local_runtime) = &services.local_runtime {
+        #[cfg(feature = "root-llm-provider")]
+        let webui_boot_config = runtime.webui_boot_config();
+        #[cfg(not(feature = "root-llm-provider"))]
+        let webui_boot_config = None;
+        api = api.with_operator_service_lifecycle_service(Arc::new(
+            crate::operator_service_lifecycle::RebornLocalServiceLifecycle::new_for_operator_with_boot_config(
+                runtime.webui_tenant_id().clone(),
+                local_runtime.owner_user_id.clone(),
+                webui_boot_config,
+            ),
+        ));
+    }
 
     // Compose the operator LLM-config settings service when the runtime was
     // assembled with a boot config. The secret store stays private to this
@@ -836,12 +930,86 @@ fn status_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_extensions::{
+        ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    };
     use ironclaw_filesystem::LocalFilesystem;
     use ironclaw_host_api::{
-        HostPath, MountAlias, MountGrant, MountPermissions, MountView, TenantId, UserId,
-        VirtualPath,
+        HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView, TenantId,
+        UserId, VirtualPath,
     };
     use std::{path::Path, time::Duration};
+
+    #[test]
+    fn operator_tool_catalog_reads_shared_registry_updates() {
+        let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let synthetic_provider =
+            outbound_delivery_synthetic_provider().expect("synthetic provider id");
+        let catalog = ActiveRegistryOperatorToolCatalog::new(
+            Arc::clone(&registry),
+            vec![
+                outbound_delivery_target_set_operator_tool_info(synthetic_provider.clone())
+                    .expect("synthetic tool info"),
+            ],
+        );
+
+        assert!(
+            catalog.list_operator_tools().iter().any(|tool| {
+                tool.capability_id.as_str()
+                    == crate::outbound_delivery_capability_surface::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID
+                    && tool.provider == synthetic_provider
+            }),
+            "synthetic outbound delivery capability must use the Settings > Tools provider key"
+        );
+
+        registry
+            .insert(test_extension_package("dynamic-tools", "echo"))
+            .expect("insert dynamic extension");
+
+        let tools = catalog.list_operator_tools();
+
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.capability_id.as_str() == "dynamic-tools.echo"),
+            "catalog must read the shared registry at list time so lifecycle updates are visible"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_webui_services_wires_lifecycle_owner_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = crate::RebornRuntimeInput::from_services(
+            crate::RebornBuildInput::local_dev("runtime-owner", dir.path().join("local-dev"))
+                .with_runtime_policy(
+                    crate::local_dev_runtime_policy().expect("local-dev policy resolves"),
+                ),
+        )
+        .with_identity(crate::RebornRuntimeIdentity {
+            tenant_id: "tenant-alpha".to_string(),
+            agent_id: "agent-alpha".to_string(),
+            source_binding_id: "webui-test-source".to_string(),
+            reply_target_binding_id: "webui-test-reply".to_string(),
+        });
+        let runtime = crate::build_reborn_runtime(input)
+            .await
+            .expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui services build");
+
+        let error = bundle
+            .api
+            .run_operator_service_lifecycle(
+                caller("bob"),
+                ironclaw_product_workflow::RebornOperatorServiceLifecycleRequest {
+                    action: ironclaw_product_workflow::RebornOperatorServiceLifecycleAction::Status,
+                },
+            )
+            .await
+            .expect_err("non-owner caller is rejected before lifecycle dispatch");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Forbidden);
+        assert_eq!(error.status_code, 403);
+    }
 
     #[tokio::test]
     async fn readiness_operator_status_service_generates_timestamp_per_call() {
@@ -1247,6 +1415,43 @@ mod tests {
 
     fn caller(user_id: &str) -> WebUiAuthenticatedCaller {
         caller_in_tenant("tenant-alpha", user_id)
+    }
+
+    fn test_extension_package(extension_id: &str, capability_name: &str) -> ExtensionPackage {
+        let manifest_toml = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{extension_id}"
+name = "{extension_id}"
+version = "0.1.0"
+description = "test extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/{extension_id}.wasm"
+
+[[capabilities]]
+id = "{extension_id}.{capability_name}"
+description = "{capability_name}"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/{capability_name}.input.json"
+output_schema_ref = "schemas/{capability_name}.output.json"
+"#
+        );
+        let manifest = ExtensionManifest::parse(
+            &manifest_toml,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+        )
+        .expect("manifest parses");
+        ExtensionPackage::from_manifest(
+            manifest,
+            VirtualPath::new(format!("/system/extensions/{extension_id}")).expect("root"),
+        )
+        .expect("package builds")
     }
 
     fn caller_in_tenant(tenant_id: &str, user_id: &str) -> WebUiAuthenticatedCaller {

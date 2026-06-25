@@ -12,11 +12,13 @@ use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
     CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
     LoopHostMilestoneSink, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
-    ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+    VisibleCapabilitySurface,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
+use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::LocalDevSelectableSkillContextSource;
 use crate::runtime::local_dev::extension_surface::LocalDevExtensionSurfaceSource;
 use crate::runtime::local_dev::outbound_delivery::outbound_delivery_capabilities;
@@ -48,6 +50,7 @@ pub(super) struct RefreshingLocalDevCapabilityPortConfig {
     pub(super) trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     pub(super) outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     pub(super) outbound_delivery_target_set_requires_approval: bool,
+    pub(super) approval_settings: Arc<dyn ApprovalSettingsProvider>,
     pub(super) approval_requests: Arc<dyn ApprovalRequestStore>,
     pub(super) capability_leases: Arc<dyn CapabilityLeaseStore>,
 }
@@ -74,6 +77,7 @@ pub(super) async fn create_refreshing_local_dev_capability_port(
         outbound_preferences_facade: config.outbound_preferences_facade,
         outbound_delivery_target_set_requires_approval: config
             .outbound_delivery_target_set_requires_approval,
+        approval_settings: config.approval_settings,
         approval_requests: config.approval_requests,
         capability_leases: config.capability_leases,
         current: StdMutex::new(None),
@@ -104,6 +108,7 @@ struct RefreshingLocalDevCapabilityPort {
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     outbound_delivery_target_set_requires_approval: bool,
+    approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
     current: StdMutex<Option<Arc<dyn LoopCapabilityPort>>>,
@@ -179,6 +184,7 @@ impl RefreshingLocalDevCapabilityPort {
                 Arc::clone(&self.approval_requests),
                 Arc::clone(&self.capability_leases),
                 self.outbound_delivery_target_set_requires_approval,
+                Arc::clone(&self.approval_settings),
             )?);
         }
         let port = wrap_local_dev_synthetic_capabilities(
@@ -269,11 +275,11 @@ impl LoopCapabilityPort for RefreshingLocalDevCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         self.current_or_refresh()
             .await?
-            .register_provider_tool_call(tool_call)
+            .register_provider_tool_call(request)
             .await
     }
 

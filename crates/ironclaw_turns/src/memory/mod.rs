@@ -83,7 +83,13 @@ fn holds_running_slot(status: TurnStatus) -> bool {
 const MAX_EVENTS: usize = 10_000;
 const MAX_TERMINAL_RECORDS: usize = 10_000;
 const MAX_IDEMPOTENCY_RECORDS: usize = 10_000;
-const DEFAULT_RUNNER_LEASE_TTL_SECONDS: i64 = 90;
+/// Default runner-lease TTL in seconds. A claimed turn's lease expires this
+/// many seconds after it is taken or last renewed; an unrenewed lease is
+/// reclaimed by `recover_expired_leases`. Primary model-call timeouts must stay
+/// below this value (enforced by an invariant test in `run_profile::model`) so
+/// a hung provider surfaces as a retryable error before the lease reclaims the
+/// runner mid-flight.
+pub(crate) const DEFAULT_RUNNER_LEASE_TTL_SECONDS: i64 = 90;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InMemoryTurnStateStoreLimits {
@@ -187,6 +193,7 @@ struct RunRecord {
     reply_target_binding_ref: ReplyTargetBindingRef,
     checkpoint_id: Option<TurnCheckpointId>,
     gate_ref: Option<crate::GateRef>,
+    blocked_activity_id: Option<crate::CapabilityActivityId>,
     credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
     failure: Option<SanitizedFailure>,
     event_cursor: EventCursor,
@@ -731,6 +738,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: cursor,
@@ -1142,6 +1150,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: cursor,
@@ -1445,6 +1454,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
             inner.apply_status_transition(transition, &record);
             record.checkpoint_id = Some(request.checkpoint_id);
             record.gate_ref = Some(request.reason.gate_ref().clone());
+            record.blocked_activity_id = None;
             record.credential_requirements = request.reason.credential_requirements().to_vec();
             record.runner_id = None;
             record.lease_token = None;
@@ -1576,6 +1586,7 @@ impl Inner {
                     reply_target_binding_ref: run.reply_target_binding_ref,
                     checkpoint_id: run.checkpoint_id,
                     gate_ref: run.gate_ref,
+                    blocked_activity_id: run.blocked_activity_id,
                     credential_requirements: run.credential_requirements,
                     failure: run.failure,
                     event_cursor: run.event_cursor,
@@ -1763,6 +1774,7 @@ impl Inner {
                     |gate_kind| crate::events::TurnBlockedGateMetadata {
                         gate_ref,
                         gate_kind,
+                        activity_id: record.blocked_activity_id,
                         credential_requirements: record.credential_requirements.clone(),
                     },
                 )
@@ -2287,7 +2299,14 @@ impl Inner {
                     checkpoint_id,
                     state_ref,
                     reason,
-                }) => self.block_claimed_record(record, checkpoint_id, state_ref, reason),
+                    blocked_activity_id,
+                }) => self.block_claimed_record(
+                    record,
+                    checkpoint_id,
+                    state_ref,
+                    reason,
+                    blocked_activity_id,
+                ),
                 LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed { failure }) => {
                     self.fail_claimed_record(record, failure)
                 }
@@ -2391,6 +2410,7 @@ impl Inner {
         checkpoint_id: TurnCheckpointId,
         state_ref: crate::run_profile::LoopCheckpointStateRef,
         reason: BlockedReason,
+        blocked_activity_id: Option<crate::CapabilityActivityId>,
     ) -> AppliedLoopTransition {
         if record.status.get() != TurnStatus::Running {
             let from = record.status.get();
@@ -2408,6 +2428,7 @@ impl Inner {
         self.apply_status_transition(transition, &record);
         record.checkpoint_id = Some(checkpoint_id);
         record.gate_ref = Some(reason.gate_ref().clone());
+        record.blocked_activity_id = blocked_activity_id;
         record.credential_requirements = reason.credential_requirements().to_vec();
         record.runner_id = None;
         record.lease_token = None;
@@ -2755,6 +2776,7 @@ impl RunRecord {
             resolved_model_route: self.resolved_model_route.clone(),
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),
+            blocked_activity_id: self.blocked_activity_id,
             credential_requirements: self.credential_requirements.clone(),
             failure: self.failure.clone(),
             event_cursor: self.event_cursor,
@@ -2788,6 +2810,7 @@ impl RunRecord {
             received_at: self.received_at,
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),
+            blocked_activity_id: self.blocked_activity_id,
             credential_requirements: self.credential_requirements.clone(),
             failure: self.failure.clone(),
             event_cursor: self.event_cursor,

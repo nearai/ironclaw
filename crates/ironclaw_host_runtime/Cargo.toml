@@ -31,6 +31,7 @@ ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_memory = { path = "../ironclaw_memory" }
+ironclaw_memory_native = { path = "../ironclaw_memory_native" }
 ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_processes = { path = "../ironclaw_processes" }

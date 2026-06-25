@@ -409,7 +409,24 @@ async fn host_runtime_services_maps_google_drive_wasm_401_to_auth_required() {
         RuntimeCapabilityOutcome::AuthRequired(gate) => {
             assert_eq!(gate.capability_id, capability_id);
             assert!(gate.required_secrets.is_empty());
-            assert!(gate.credential_requirements.is_empty());
+            // The runtime 401 carries no auth detail of its own; the capability
+            // host enriches the gate from the single credential obligation so the
+            // WebUI can launch the google OAuth re-auth flow. An empty list here is
+            // the provider-null, unsubmittable gate (#5174). Inline/background
+            // refresh already ran before injection; a runtime 401 is the genuine
+            // re-auth fallback, so the gate must surface provider + OAuth setup.
+            assert_eq!(gate.credential_requirements.len(), 1);
+            let requirement = &gate.credential_requirements[0];
+            assert_eq!(
+                requirement.provider,
+                RuntimeCredentialAccountProviderId::new("google").unwrap()
+            );
+            assert_eq!(
+                requirement.setup,
+                ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                    scopes: vec!["https://www.googleapis.com/auth/drive.readonly".to_string()]
+                }
+            );
         }
         other => panic!("expected auth-required outcome, got {other:?}"),
     }
@@ -471,7 +488,21 @@ async fn host_runtime_services_maps_google_drive_upload_wasm_401_to_auth_require
         RuntimeCapabilityOutcome::AuthRequired(gate) => {
             assert_eq!(gate.capability_id, capability_id);
             assert!(gate.required_secrets.is_empty());
-            assert!(gate.credential_requirements.is_empty());
+            // See list_files counterpart above: enrichment surfaces the single
+            // credential obligation's provider + OAuth setup so the re-auth gate is
+            // submittable (#5174). Empty would be the regressed provider-null gate.
+            assert_eq!(gate.credential_requirements.len(), 1);
+            let requirement = &gate.credential_requirements[0];
+            assert_eq!(
+                requirement.provider,
+                RuntimeCredentialAccountProviderId::new("google").unwrap()
+            );
+            assert_eq!(
+                requirement.setup,
+                ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                    scopes: vec!["https://www.googleapis.com/auth/drive".to_string()]
+                }
+            );
         }
         other => panic!("expected auth-required outcome, got {other:?}"),
     }
@@ -1095,7 +1126,7 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
     }));
     let list_my_repos = execute_bundled_github_wasm(
         "github.list_repos",
-        json!({"username": "me", "limit": 2}),
+        json!({"limit": 2}),
         Arc::clone(&list_my_repos_http),
     );
     assert_eq!(list_my_repos.error, None);

@@ -25,7 +25,7 @@ function updatePending(store, key, pendingId, patch) {
   if (next.length > 0) store.set(key, next);
 }
 
-function timelineMessageIdFromAcceptedRef(ref) {
+export function timelineMessageIdFromAcceptedRef(ref) {
   if (typeof ref !== "string") return null;
   return ref.startsWith("msg:") ? ref.slice("msg:".length) : null;
 }

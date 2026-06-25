@@ -3688,12 +3688,16 @@ mod tests {
     }
 
     fn operator_caller() -> WebUiAuthenticatedCaller {
+        // Slack admin routes now gate on the operator webui-config capability
+        // (added in #5185 — only the admin webui-v2 token may mutate admin
+        // routes). The test operator represents that authorized admin.
         WebUiAuthenticatedCaller::new(
             TenantId::new(TENANT).expect("tenant"),
             UserId::new(USER).expect("user"),
             Some(AgentId::new(AGENT).expect("agent")),
             Some(ProjectId::new(PROJECT).expect("project")),
         )
+        .with_operator_webui_config(true)
     }
 
     fn shared_subject_caller() -> WebUiAuthenticatedCaller {
