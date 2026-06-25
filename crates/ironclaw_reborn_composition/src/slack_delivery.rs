@@ -1808,8 +1808,11 @@ fn is_accepted_auth_denial(envelope: &ProductInboundEnvelope, ack: &ProductInbou
 #[async_trait]
 pub trait PostSubmitDeliveryHook: Send + Sync {
     /// Called with the original trigger fire, the submitted run id, and the
-    /// turn scope the run was submitted under. Must not block the poller —
-    /// implementations must spawn their own tasks.
+    /// turn scope the run was submitted under. The trigger poller owns the
+    /// non-blocking handoff by invoking this hook from a detached task, so hook
+    /// latency cannot delay fire settlement. Implementations may still spawn
+    /// their own longer-lived delivery tasks when they need bounded admission or
+    /// shutdown tracking.
     async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope);
 }
 

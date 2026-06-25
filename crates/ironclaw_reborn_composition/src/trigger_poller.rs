@@ -148,7 +148,7 @@ impl TrustedTriggerFireSubmitter for PostSubmitHookWrappedSubmitter {
                     hook.on_trigger_submitted(fire, run_id, scope).await;
                 });
             } else {
-                tracing::warn!(
+                tracing::debug!(
                     target = "ironclaw::reborn::trigger_poller",
                     %run_id,
                     "triggered run accepted but post-submit hook slot not yet set (startup window); delivery skipped for this fire"
