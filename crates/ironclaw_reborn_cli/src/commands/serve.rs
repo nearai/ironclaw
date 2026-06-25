@@ -23,7 +23,8 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_config::{IdentitySection, RebornProfile, seed_default_config_file_if_missing};
 use ironclaw_reborn_webui_ingress::{
-    EnvBearerAuthenticator, RebornWebuiServeOptions, serve_webui_v2,
+    DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
+    RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2,
 };
 use secrecy::SecretString;
 
@@ -81,8 +82,6 @@ impl ServeCommand {
         let config_file =
             ironclaw_reborn_config::RebornConfigFile::load(&boot_config.home().config_file_path())
                 .map_err(anyhow::Error::from)?;
-        let effective_profile =
-            crate::runtime::effective_profile(boot_config, config_file.as_ref())?;
 
         // Tenant id is host-trusted (operator-owned config), never
         // browser-influenced. Falls back to the same default the CLI's
@@ -267,7 +266,6 @@ impl ServeCommand {
         // the login wiring are assembled inside the async runtime below,
         // because opening the libSQL user store is async.
         let sso_startup = crate::commands::serve_sso::sso_startup_config_from_env(listen_addr)?;
-        reject_hosted_volume_without_sso(effective_profile, host, sso_startup.as_ref())?;
         // When SSO is enabled this same token keys the stateless session
         // HMAC, so a weak value becomes an OFFLINE forgery target: an
         // attacker who completes one legitimate login holds a
@@ -283,14 +281,14 @@ impl ServeCommand {
                  value is {token_byte_len} bytes — generate one with e.g. `openssl rand -hex 32`."
             ));
         }
-        // Substrate DB the reborn local-dev runtime opens (a second handle to
-        // the same `reborn-local-dev.db`). It backs the local trigger-fire
+        // Sidecar DB used by the local-runtime trigger-fire access checker. It
+        // backs the local trigger-fire
         // access store used to seed default-user and SSO-user trigger access;
         // canonical identity itself lives on the runtime's scoped filesystem,
         // not in this file.
-        let user_store_path =
-            crate::runtime::local_runtime_storage_root(boot_config, effective_profile)
-                .join("reborn-local-dev.db");
+        let profile = crate::runtime::effective_profile(boot_config, config_file.as_ref())?;
+        let user_store_path = crate::runtime::local_runtime_storage_root(boot_config, profile)
+            .join("reborn-local-dev.db");
         // CORS allow-origin list. Empty = fail-closed on every
         // cross-origin preflight; operators MUST opt in to the
         // specific origins the host installation actually serves.
@@ -354,6 +352,15 @@ impl ServeCommand {
                 default_project_id.as_ref(),
             )
             .await?;
+
+            let startup_serve = if matches!(
+                profile,
+                RebornProfile::HostedSingleTenant | RebornProfile::HostedSingleTenantVolume
+            ) {
+                Some(start_hosted_single_tenant_startup_listener(listen_addr).await?)
+            } else {
+                None
+            };
 
             let runtime = build_reborn_runtime(runtime_input)
                 .await
@@ -502,24 +509,24 @@ impl ServeCommand {
                 .context("failed to compose v2 Router")?;
             let (router, public_route_drains) = webui_app.into_parts();
 
-            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-            tokio::spawn(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    tracing::info!(
-                        target = "ironclaw::reborn::cli::serve",
-                        "ctrl-c received; signalling WebChat v2 graceful shutdown",
-                    );
-                    let _ = shutdown_tx.send(());
-                }
-            });
-
-            let serve_result = serve_webui_v2(RebornWebuiServeOptions {
-                addr: listen_addr,
-                router,
-                shutdown: shutdown_rx,
-                bound_addr_tx: None,
-            })
-            .await;
+            let serve_result = if let Some(startup_serve) = startup_serve {
+                startup_serve
+                    .ready_handle
+                    .publish_ready_router(router)
+                    .context("failed to publish ready WebChat v2 router")?;
+                startup_serve
+                    .serve_task
+                    .await
+                    .context("hosted single-tenant startup WebChat v2 serve task failed to join")?
+            } else {
+                serve_webui_v2(RebornWebuiServeOptions {
+                    addr: listen_addr,
+                    router,
+                    shutdown: webui_ctrl_c_shutdown(),
+                    bound_addr_tx: None,
+                })
+                .await
+            };
 
             // Always drain public route mounts before shutting down the
             // Reborn runtime. Protocol webhooks such as Slack can ACK a
@@ -540,6 +547,63 @@ impl ServeCommand {
     }
 }
 
+struct StartupServe {
+    ready_handle: DeferredWebuiRouterHandle,
+    serve_task: tokio::task::JoinHandle<Result<(), RebornWebuiServeError>>,
+}
+
+async fn start_hosted_single_tenant_startup_listener(
+    listen_addr: SocketAddr,
+) -> anyhow::Result<StartupServe> {
+    let (router, ready_handle) = deferred_webui_v2_startup_router();
+    let (bound_tx, bound_rx) = tokio::sync::oneshot::channel();
+    let serve_task = tokio::spawn(async move {
+        serve_webui_v2(RebornWebuiServeOptions {
+            addr: listen_addr,
+            router,
+            shutdown: webui_ctrl_c_shutdown(),
+            bound_addr_tx: Some(bound_tx),
+        })
+        .await
+    });
+
+    match bound_rx.await {
+        Ok(bound) => {
+            tracing::info!(
+                target = "ironclaw::reborn::cli::serve",
+                %bound,
+                "hosted single-tenant WebChat v2 startup listener is serving healthchecks before runtime assembly"
+            );
+        }
+        Err(_) => {
+            let serve_result = serve_task
+                .await
+                .context("hosted single-tenant startup WebChat v2 serve task failed to join")?;
+            serve_result.context("hosted single-tenant startup WebChat v2 serve loop failed")?;
+            anyhow::bail!("hosted single-tenant startup listener exited before binding");
+        }
+    }
+
+    Ok(StartupServe {
+        ready_handle,
+        serve_task,
+    })
+}
+
+fn webui_ctrl_c_shutdown() -> tokio::sync::oneshot::Receiver<()> {
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!(
+                target = "ironclaw::reborn::cli::serve",
+                "ctrl-c received; signalling WebChat v2 graceful shutdown",
+            );
+            let _ = shutdown_tx.send(());
+        }
+    });
+    shutdown_rx
+}
+
 fn reject_non_loopback_privileged_local_runtime(
     host: IpAddr,
     runtime_input: &RebornRuntimeInput,
@@ -554,26 +618,6 @@ fn reject_non_loopback_privileged_local_runtime(
          process, direct network, inherited environment). Bind to a loopback host such as \
          127.0.0.1 or ::1, or choose a less privileged profile."
     );
-}
-
-fn reject_hosted_volume_without_sso(
-    profile: RebornProfile,
-    host: IpAddr,
-    sso_startup: Option<&crate::commands::serve_sso::SsoStartupConfig>,
-) -> anyhow::Result<()> {
-    if profile != RebornProfile::HostedSingleTenantVolume
-        || host.is_loopback()
-        || sso_startup.is_some()
-    {
-        return Ok(());
-    }
-
-    anyhow::bail!(
-        "profile=hosted-single-tenant-volume requires WebUI SSO when binding to non-loopback \
-         address {host}. Configure IRONCLAW_REBORN_WEBUI_BASE_URL, \
-         IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID, IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET, \
-         and IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS before exposing this profile."
-    )
 }
 
 fn with_notion_dcr_oauth_backend(
@@ -851,31 +895,6 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("reborn-cli"), "message: {message}");
         assert!(message.contains("local-user"), "message: {message}");
-    }
-
-    #[test]
-    fn hosted_volume_public_listener_requires_sso() {
-        let err = reject_hosted_volume_without_sso(
-            RebornProfile::HostedSingleTenantVolume,
-            "0.0.0.0".parse().expect("ip"),
-            None,
-        )
-        .expect_err("public hosted-volume profile must require SSO");
-
-        assert!(
-            err.to_string().contains("requires WebUI SSO"),
-            "error: {err:#}"
-        );
-    }
-
-    #[test]
-    fn hosted_volume_loopback_listener_can_start_without_sso() {
-        reject_hosted_volume_without_sso(
-            RebornProfile::HostedSingleTenantVolume,
-            "127.0.0.1".parse().expect("ip"),
-            None,
-        )
-        .expect("loopback hosted-volume debug listener can use env bearer auth");
     }
 
     #[tokio::test]

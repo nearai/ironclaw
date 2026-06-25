@@ -53,7 +53,7 @@ pub use types::step::{
     StepStatus, TokenUsage,
 };
 pub use types::thread::{
-    ActiveSkillProvenance, Thread, ThreadConfig, ThreadId, ThreadState, ThreadType,
+    ActiveSkillProvenance, LlmCallPurpose, Thread, ThreadConfig, ThreadId, ThreadState, ThreadType,
 };
 
 // ── Re-exports: traits ──────────────────────────────────────

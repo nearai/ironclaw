@@ -14,9 +14,9 @@ use ironclaw_product_workflow::{
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClearActiveFireRequest,
     FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
-    FireRetryableFailedRequest, FireTerminalFailedRequest, InMemoryTriggerRepository,
-    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunRecord, TriggerSchedule, TriggerSourceKind, TriggerState,
+    FireRetryableFailedRequest, FireTerminalFailedRequest, InMemoryTriggerRepository, TriggerError,
+    TriggerId, TriggerRecord, TriggerRepository, TriggerRunRecord, TriggerSchedule,
+    TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::TurnRunId;
 
@@ -56,7 +56,6 @@ fn make_record(trigger_id: TriggerId, caller: &ProductAgentBoundCaller) -> Trigg
             expression: "0 9 * * *".to_string(),
             timezone: "UTC".to_string(),
         },
-        completion_policy: TriggerCompletionPolicy::Recurring,
         prompt: "run the daily task".to_string(),
         state: TriggerState::Scheduled,
         next_run_at: now(),
@@ -89,7 +88,6 @@ async fn seed_accepted_run(
     .await
     .expect("claim due fire");
     let run_id = TurnRunId::new();
-    let next_run_at = chrono::Utc::now() + chrono::Duration::hours(24);
     repo.mark_fire_accepted(FireAcceptedRequest {
         tenant_id: caller.tenant_id.clone(),
         trigger_id,
@@ -97,7 +95,6 @@ async fn seed_accepted_run(
         run_id,
         thread_id,
         submitted_at: fire_slot,
-        next_run_at,
     })
     .await
     .expect("mark fire accepted");
@@ -144,6 +141,7 @@ impl TriggerRepository for FailingThreadLookupRepository {
         _: Option<AgentId>,
         _: Option<ProjectId>,
         _: usize,
+        _: &[ironclaw_triggers::TriggerState],
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         Err(TriggerError::Backend {
             reason: "stub".to_string(),
@@ -390,7 +388,6 @@ async fn resolve_run_thread_scope_returns_none_for_trigger_with_no_agent_id() {
     .expect("claim due fire");
     let run_id = TurnRunId::new();
     let thread_id = ThreadId::new("01890f0f-test-7000-8000-000000null01").expect("valid thread id");
-    let next_run_at = chrono::Utc::now() + chrono::Duration::hours(24);
     repo.mark_fire_accepted(FireAcceptedRequest {
         tenant_id: c.tenant_id.clone(),
         trigger_id,
@@ -398,7 +395,6 @@ async fn resolve_run_thread_scope_returns_none_for_trigger_with_no_agent_id() {
         run_id,
         thread_id: thread_id.clone(),
         submitted_at: fire_slot,
-        next_run_at,
     })
     .await
     .expect("mark fire accepted");

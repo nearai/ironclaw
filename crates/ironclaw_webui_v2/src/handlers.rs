@@ -603,6 +603,12 @@ pub async fn get_attachment(
 /// long before checking for newly arrived events.
 const SSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Upper bound for idle `stream_events` polling. A browser tab with no
+/// pending projection events should not keep revalidating/draining through
+/// remote durable storage every second forever, especially on high-RTT
+/// hosted Postgres.
+const SSE_IDLE_POLL_MAX_INTERVAL: Duration = Duration::from_secs(3);
+
 /// SSE keep-alive cadence. axum emits an SSE comment line every interval
 /// to keep proxies from closing the idle connection.
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -612,6 +618,14 @@ const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 /// delivered event; for this surface the handler sets that to the JSON-
 /// serialized projection cursor.
 const LAST_EVENT_ID_HEADER: &str = "last-event-id";
+
+fn sse_poll_interval_for_idle_polls(idle_polls: u32) -> Duration {
+    match idle_polls {
+        0 | 1 => SSE_POLL_INTERVAL,
+        2 => Duration::from_secs(2),
+        _ => SSE_IDLE_POLL_MAX_INTERVAL,
+    }
+}
 
 /// `GET /api/webchat/v2/threads/{thread_id}/events`
 ///
@@ -710,6 +724,7 @@ fn build_sse_stream(
         let _slot_guard = slot;
         let started_at = tokio::time::Instant::now();
         let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
+        let mut idle_polls = 0_u32;
         loop {
             // Force a clean close once the budget is exhausted so the
             // browser can reconnect with Last-Event-ID; this caps single-
@@ -744,6 +759,7 @@ fn build_sse_stream(
                     return;
                 }
                 Ok(Ok(response)) => {
+                    let had_events = !response.events.is_empty();
                     if let Some(latest) = response.events.last() {
                         after_cursor = Some(latest.projection_cursor.clone());
                     }
@@ -771,9 +787,14 @@ fn build_sse_stream(
                             }
                         }
                     }
+                    idle_polls = if had_events {
+                        0
+                    } else {
+                        idle_polls.saturating_add(1)
+                    };
                     // Bound the poll sleep too so we never oversleep past the
                     // lifetime budget; the top-of-loop check then fires.
-                    let sleep_for = SSE_POLL_INTERVAL
+                    let sleep_for = sse_poll_interval_for_idle_polls(idle_polls)
                         .min(SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed()));
                     if sleep_for.is_zero() {
                         return;
@@ -896,7 +917,10 @@ pub struct ListThreadsQuery {
 /// Lists the caller-scoped schedule automations visible to the browser. The
 /// optional `?limit=N` and `?run_limit=N` queries are capped by the product
 /// workflow facade; the response is a single bounded page and does not include
-/// a cursor.
+/// a cursor. By default only active automations are returned; pass
+/// `?include_completed=true` to also include soft-completed (fire-once)
+/// automations. See [`ListAutomationsQuery`] for the full per-parameter parse
+/// behavior.
 pub async fn list_automations(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
@@ -905,6 +929,7 @@ pub async fn list_automations(
     let request = WebUiListAutomationsRequest {
         limit: query.limit,
         run_limit: query.run_limit,
+        include_completed: query.include_completed,
     };
     let response = state.services().list_automations(caller, request).await?;
     Ok(Json(response))
@@ -918,6 +943,18 @@ pub struct ListAutomationsQuery {
     /// Optional maximum number of recent runs to return per automation row.
     #[serde(default)]
     pub run_limit: Option<u32>,
+    /// When `true`, soft-completed (fire-once) automations are included
+    /// alongside active ones.
+    ///
+    /// Parse behavior (via `serde_urlencoded` / axum `Query<T>`):
+    /// - **Absent** (`?` or no param): defaults to `false` (active-only).
+    /// - **`true`** / **`false`**: parsed as the corresponding boolean.
+    /// - **Malformed** (e.g. `?include_completed=garbage`): deserialization
+    ///   fails at the `Query` extractor and the request is rejected with
+    ///   `400 Bad Request` before the handler runs. There is no silent
+    ///   fallback to `false` for unparseable values.
+    #[serde(default)]
+    pub include_completed: bool,
 }
 
 /// `GET /api/webchat/v2/traces/credit`
@@ -1073,6 +1110,33 @@ pub async fn remove_skill(
     Path(SkillPath { name }): Path<SkillPath>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
     let response = state.services().remove_skill(caller, name).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/skills/{name}/auto-activate`
+pub async fn set_skill_auto_activate(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(SkillPath { name }): Path<SkillPath>,
+    Json(body): Json<SetSkillAutoActivateBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_skill_auto_activate(caller, name, body.enabled)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/skills/auto-activate-learned`
+pub async fn set_auto_activate_learned(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<SetSkillAutoActivateBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_auto_activate_learned(caller, body.enabled)
+        .await?;
     Ok(Json(response))
 }
 
@@ -1541,6 +1605,11 @@ pub struct UpdateSkillBody {
     pub content: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SetSkillAutoActivateBody {
+    pub enabled: bool,
+}
+
 fn extension_package_ref_for_request(
     package_ref: Result<LifecyclePackageRef, ProductWorkflowError>,
     field: &'static str,
@@ -1619,6 +1688,7 @@ async fn ws_drain_loop(
     let _slot_guard = slot;
     let started_at = tokio::time::Instant::now();
     let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
+    let mut idle_polls = 0_u32;
     loop {
         let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
         if remaining.is_zero() {
@@ -1655,6 +1725,7 @@ async fn ws_drain_loop(
                 return;
             }
             Ok(Ok(response)) => {
+                let had_events = !response.events.is_empty();
                 if let Some(latest) = response.events.last() {
                     after_cursor = Some(latest.projection_cursor.clone());
                 }
@@ -1690,8 +1761,13 @@ async fn ws_drain_loop(
                         }
                     }
                 }
-                let sleep_for =
-                    SSE_POLL_INTERVAL.min(SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed()));
+                idle_polls = if had_events {
+                    0
+                } else {
+                    idle_polls.saturating_add(1)
+                };
+                let sleep_for = sse_poll_interval_for_idle_polls(idle_polls)
+                    .min(SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed()));
                 if sleep_for.is_zero() {
                     let _ = socket.close().await;
                     return;
@@ -1772,6 +1848,21 @@ async fn ws_send_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sse_poll_interval_backs_off_only_after_repeated_idle_drains() {
+        assert_eq!(sse_poll_interval_for_idle_polls(0), SSE_POLL_INTERVAL);
+        assert_eq!(sse_poll_interval_for_idle_polls(1), SSE_POLL_INTERVAL);
+        assert_eq!(sse_poll_interval_for_idle_polls(2), Duration::from_secs(2));
+        assert_eq!(
+            sse_poll_interval_for_idle_polls(3),
+            SSE_IDLE_POLL_MAX_INTERVAL
+        );
+        assert_eq!(
+            sse_poll_interval_for_idle_polls(u32::MAX),
+            SSE_IDLE_POLL_MAX_INTERVAL
+        );
+    }
 
     #[test]
     fn sanitized_filename_neutralizes_header_injection() {

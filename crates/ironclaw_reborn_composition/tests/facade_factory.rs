@@ -1006,7 +1006,11 @@ async fn production_rejects_empty_trust_policy() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
-async fn production_requires_live_turn_wake_notifier() {
+async fn production_self_mints_turn_wake_wiring() {
+    // Production no longer requires an externally-supplied turn-run wake notifier:
+    // `build_production_shaped` mints its own `SchedulerWakeWiring` so the
+    // coordinator and scheduler always share one channel. A build with every other
+    // required input present (and NO `.with_turn_run_wake_notifier`) must succeed.
     let dir = tempfile::tempdir().unwrap();
     let db = libsql_db_at(dir.path().join("reborn.db")).await;
 
@@ -1025,10 +1029,11 @@ async fn production_requires_live_turn_wake_notifier() {
     )
     .await;
 
-    assert!(matches!(
-        result,
-        Err(RebornBuildError::MissingTurnRunWakeNotifier)
-    ));
+    assert!(
+        result.is_ok(),
+        "production build must succeed with a self-minted wake wiring; got: {:?}",
+        result.err()
+    );
 }
 
 #[cfg(feature = "libsql")]
@@ -1309,8 +1314,7 @@ async fn local_dev_services_dispatch_trigger_management_through_composed_runtime
         json!({
             "name": "Daily production summary",
             "prompt": "Summarize production state",
-            "cron": "0 8 * * *",
-            "timezone": "UTC"
+            "schedule": { "kind": "cron", "expression": "0 8 * * *", "timezone": "UTC" }
         }),
     )
     .await;

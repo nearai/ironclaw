@@ -344,6 +344,31 @@ pub trait SkillsProductFacade: Send + Sync {
         let _ = (caller, name);
         Err(RebornServicesError::service_unavailable(false))
     }
+
+    /// Toggle a skill's automatic activation. Disabling keeps the skill
+    /// invokable via an explicit `/name` mention but excludes it from criteria
+    /// (keyword/regex) selection.
+    async fn set_skill_auto_activate(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Toggle the global default criteria-based skill auto-activation master
+    /// switch. Disabling leaves skills invokable via an explicit `/name`
+    /// mention but turns off keyword/criteria auto-activation for all skills.
+    async fn set_auto_activate_learned(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -491,6 +516,12 @@ impl ProductAgentBoundCaller {
 pub struct AutomationListRequest {
     pub limit: usize,
     pub run_limit: usize,
+    /// When `true`, include completed (fire-once) automations alongside the
+    /// active ones. When `false` (the default), only active automations are
+    /// returned. Facades apply `limit` after this filter, so a full page of
+    /// active automations is returned regardless of how many completed ones
+    /// exist.
+    pub include_completed: bool,
 }
 
 /// Stored scope of a trigger-fired thread, returned by
@@ -1334,6 +1365,33 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         name: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError>;
+
+    /// Toggle a skill's automatic activation (see
+    /// [`SkillsProductFacade::set_skill_auto_activate`]). Defaults to
+    /// unavailable so impls that do not surface skill management inherit a
+    /// fail-closed response.
+    async fn set_skill_auto_activate(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, name, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Toggle the global default criteria-based skill auto-activation master
+    /// switch (see [`SkillsProductFacade::set_auto_activate_learned`]).
+    /// Defaults to unavailable so impls that do not surface skill management
+    /// inherit a fail-closed response.
+    async fn set_auto_activate_learned(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let _ = (caller, enabled);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 
     async fn list_extension_registry(
         &self,
@@ -2809,7 +2867,14 @@ impl RebornServicesApi for RebornServices {
         let scheduler_enabled = self.automation_facade.scheduler_enabled();
         let automations = self
             .automation_facade
-            .list_automations(caller, AutomationListRequest { limit, run_limit })
+            .list_automations(
+                caller,
+                AutomationListRequest {
+                    limit,
+                    run_limit,
+                    include_completed: request.include_completed,
+                },
+            )
             .await?;
         Ok(RebornListAutomationsResponse {
             automations,
@@ -2907,6 +2972,27 @@ impl RebornServicesApi for RebornServices {
         content: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         self.skills_facade.update_skill(caller, name, content).await
+    }
+
+    async fn set_skill_auto_activate(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade
+            .set_skill_auto_activate(caller, name, enabled)
+            .await
+    }
+
+    async fn set_auto_activate_learned(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.skills_facade
+            .set_auto_activate_learned(caller, enabled)
+            .await
     }
 
     async fn remove_skill(

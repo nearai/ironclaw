@@ -95,10 +95,11 @@ fn build_skill_list_config(config: &RebornBootConfig) -> anyhow::Result<SkillLis
     match profile {
         RebornProfile::LocalDev
         | RebornProfile::LocalDevYolo
+        | RebornProfile::HostedSingleTenant
         | RebornProfile::HostedSingleTenantVolume => {}
         RebornProfile::Production | RebornProfile::MigrationDryRun => {
             anyhow::bail!(
-                "ironclaw-reborn skills currently supports local-runtime profiles; got profile={profile}"
+                "ironclaw-reborn skills currently supports profile=local-dev, profile=local-dev-yolo, profile=hosted-single-tenant, or profile=hosted-single-tenant-volume; got profile={profile}"
             );
         }
     }

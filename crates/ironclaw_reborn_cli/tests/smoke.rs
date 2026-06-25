@@ -115,10 +115,10 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
 
     assert!(
         dockerfile
-            .matches("webui-v2-beta,slack-v2-host-beta,postgres,libsql")
+            .matches("webui-v2-beta,slack-v2-host-beta,libsql,postgres")
             .count()
             >= 2,
-        "Dockerfile.reborn must compile both cargo-chef deps and final binary with postgres and libsql: {dockerfile}"
+        "Dockerfile.reborn must compile both cargo-chef deps and final binary with libsql and postgres: {dockerfile}"
     );
     assert!(
         dockerfile.contains("config.production.toml"),
@@ -126,7 +126,7 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
     );
     assert!(
         dockerfile.contains("config.hosted-single-tenant-volume.toml"),
-        "Dockerfile.reborn must ship the volume-backed hosted preview config: {dockerfile}"
+        "Dockerfile.reborn must ship the hosted volume seed config: {dockerfile}"
     );
     let builder_stage = dockerfile
         .split_once("FROM deps AS builder")
@@ -198,6 +198,7 @@ fn docker_reborn_production_config_uses_postgres_storage() {
         storage.secret_master_key_env.as_deref(),
         Some("IRONCLAW_REBORN_SECRET_MASTER_KEY")
     );
+    assert_eq!(storage.pool_max_size, Some(2));
 
     let policy = parsed
         .policy
@@ -207,40 +208,6 @@ fn docker_reborn_production_config_uses_postgres_storage() {
         Some("hosted_multi_tenant")
     );
     assert_eq!(policy.default_profile.as_deref(), Some("secure_default"));
-}
-
-#[test]
-fn docker_reborn_hosted_volume_config_uses_libsql_local_runtime_shape() {
-    let config = std::fs::read_to_string(
-        workspace_root().join("docker/reborn/config.hosted-single-tenant-volume.toml"),
-    )
-    .expect("docker reborn hosted volume config");
-    let parsed = ironclaw_reborn_config::RebornConfigFile::parse_text(
-        &config,
-        &workspace_root().join("docker/reborn/config.hosted-single-tenant-volume.toml"),
-    )
-    .expect("docker reborn hosted volume config parses");
-
-    let boot = parsed
-        .boot
-        .expect("docker hosted volume config must have [boot]");
-    assert_eq!(boot.profile.as_deref(), Some("hosted-single-tenant-volume"));
-    assert!(
-        parsed.storage.is_none(),
-        "hosted volume config must use the local-runtime libSQL substrate, not production storage"
-    );
-    assert!(
-        parsed.policy.is_none(),
-        "hosted volume runtime policy is resolver-owned, not config-owned"
-    );
-    assert_eq!(
-        parsed
-            .llm
-            .as_ref()
-            .and_then(|llm| llm.get("default"))
-            .and_then(|default| default.model.as_deref()),
-        Some("deepseek-ai/DeepSeek-V4-Flash")
-    );
 }
 
 #[cfg(unix)]
@@ -259,41 +226,6 @@ fn docker_reborn_entrypoint_uses_railway_volume_mount_for_home() {
         .env_clear()
         .env("PATH", fake_bin_path(&bin_dir))
         .env("HOME", temp.path().join("home"))
-        .env("RAILWAY_ENVIRONMENT", "production")
-        .env("RAILWAY_VOLUME_MOUNT_PATH", &volume)
-        .output()
-        .expect("entrypoint should run");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains(&format!("home={}", reborn_home.display())),
-        "stdout: {stdout}"
-    );
-    assert!(stdout.contains("args=--help"), "stdout: {stdout}");
-}
-
-#[cfg(unix)]
-#[test]
-fn docker_reborn_entrypoint_allows_hosted_volume_profile_under_railway_volume() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let bin_dir = temp.path().join("bin");
-    fake_reborn_bin(&bin_dir);
-    let volume = temp.path().join("railway-volume");
-    let reborn_home = volume.join("ironclaw-reborn");
-    write_reborn_config(&reborn_home, "hosted-single-tenant-volume");
-
-    let output = Command::new("/bin/sh")
-        .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
-        .arg("--help")
-        .env_clear()
-        .env("PATH", fake_bin_path(&bin_dir))
-        .env("HOME", temp.path().join("home"))
-        .env("IRONCLAW_REBORN_PROFILE", "hosted-single-tenant-volume")
         .env("RAILWAY_ENVIRONMENT", "production")
         .env("RAILWAY_VOLUME_MOUNT_PATH", &volume)
         .output()
@@ -339,35 +271,6 @@ fn docker_reborn_entrypoint_rejects_ephemeral_railway_without_volume() {
     );
     assert!(
         stderr.contains("IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY=true"),
-        "stderr: {stderr}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn docker_reborn_entrypoint_rejects_hosted_volume_profile_without_railway_volume() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let bin_dir = temp.path().join("bin");
-    fake_reborn_bin(&bin_dir);
-    let reborn_home = temp.path().join("reborn-home");
-    write_reborn_config(&reborn_home, "hosted-single-tenant-volume");
-
-    let output = Command::new("/bin/sh")
-        .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
-        .env_clear()
-        .env("PATH", fake_bin_path(&bin_dir))
-        .env("HOME", temp.path().join("home"))
-        .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("RAILWAY_ENVIRONMENT", "production")
-        .output()
-        .expect("entrypoint should run");
-
-    assert!(!output.status.success(), "entrypoint should fail closed");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains(
-            "Railway deployment using profile=hosted-single-tenant-volume requires a persistent volume"
-        ),
         "stderr: {stderr}"
     );
 }
@@ -575,6 +478,7 @@ fn profile_list_shows_supported_profiles_without_reborn_home() {
     );
     assert!(stdout.contains("local-dev (default)"), "stdout: {stdout}");
     assert!(stdout.contains("local-dev-yolo"), "stdout: {stdout}");
+    assert!(stdout.contains("hosted-single-tenant"), "stdout: {stdout}");
     assert!(
         stdout.contains("hosted-single-tenant-volume"),
         "stdout: {stdout}"
@@ -606,7 +510,7 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
     let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(json["selector"], "IRONCLAW_REBORN_PROFILE");
     let profiles = json["profiles"].as_array().expect("profiles array");
-    assert_eq!(profiles.len(), 5);
+    assert_eq!(profiles.len(), 6);
     assert!(
         profiles
             .iter()
@@ -616,6 +520,12 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
         profiles
             .iter()
             .any(|profile| profile["name"] == "local-dev-yolo" && profile["default"] == false)
+    );
+    assert!(
+        profiles
+            .iter()
+            .any(|profile| profile["name"] == "hosted-single-tenant"
+                && profile["default"] == false)
     );
     assert!(
         profiles

@@ -25,7 +25,10 @@ use crate::runtime::local_dev::skill_activation::skill_activation_capability;
 use crate::runtime::local_dev::surface_disclosure::wrap_local_dev_surface_disclosure;
 use crate::runtime::local_dev::synthetic_capability::wrap_local_dev_synthetic_capabilities;
 
-use super::{capability_io_error, host_api_agent_loop_error, local_dev_visible_capability_request};
+use super::{
+    LocalDevVisibleCapabilityInputs, capability_io_error, host_api_agent_loop_error,
+    local_dev_visible_capability_request,
+};
 
 pub(super) struct RefreshingLocalDevCapabilityPortConfig {
     pub(super) runtime: Arc<dyn HostRuntime>,
@@ -117,12 +120,14 @@ impl RefreshingLocalDevCapabilityPort {
         let visible_request = local_dev_visible_capability_request(
             &self.run_context,
             &self.fallback_user_id,
-            self.workspace_mounts.clone(),
-            self.skill_mounts.clone(),
-            self.memory_mounts.clone(),
-            self.system_extensions_lifecycle_mounts.clone(),
-            &self.policy,
-            &extension_surface,
+            LocalDevVisibleCapabilityInputs {
+                workspace_mounts: &self.workspace_mounts,
+                skill_mounts: &self.skill_mounts,
+                memory_mounts: &self.memory_mounts,
+                system_extensions_lifecycle_mounts: &self.system_extensions_lifecycle_mounts,
+                policy: &self.policy,
+                extension_surface: &extension_surface,
+            },
         )?;
         let mut factory = HostRuntimeLoopCapabilityPortFactory::new(
             Arc::clone(&self.runtime),

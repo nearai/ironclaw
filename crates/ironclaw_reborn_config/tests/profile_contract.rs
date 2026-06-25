@@ -9,6 +9,10 @@ fn profile_wire_values_are_stable() {
     assert_eq!(RebornProfile::LocalDev.as_str(), "local-dev");
     assert_eq!(RebornProfile::LocalDevYolo.as_str(), "local-dev-yolo");
     assert_eq!(
+        RebornProfile::HostedSingleTenant.as_str(),
+        "hosted-single-tenant"
+    );
+    assert_eq!(
         RebornProfile::HostedSingleTenantVolume.as_str(),
         "hosted-single-tenant-volume"
     );
@@ -23,6 +27,7 @@ fn all_profiles_are_exposed_in_display_order() {
         &[
             RebornProfile::LocalDev,
             RebornProfile::LocalDevYolo,
+            RebornProfile::HostedSingleTenant,
             RebornProfile::HostedSingleTenantVolume,
             RebornProfile::Production,
             RebornProfile::MigrationDryRun,
@@ -39,6 +44,10 @@ fn profile_parsing_accepts_expected_values() {
     assert_eq!(
         RebornProfile::from_str("local-dev-yolo"),
         Ok(RebornProfile::LocalDevYolo)
+    );
+    assert_eq!(
+        RebornProfile::from_str("hosted-single-tenant"),
+        Ok(RebornProfile::HostedSingleTenant)
     );
     assert_eq!(
         RebornProfile::from_str("hosted-single-tenant-volume"),

@@ -435,6 +435,13 @@ impl SecretStore for RecordingSecretStore {
         Ok(None)
     }
 
+    async fn metadata_for_scope(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+        Ok(Vec::new())
+    }
+
     async fn delete(
         &self,
         _scope: &ResourceScope,

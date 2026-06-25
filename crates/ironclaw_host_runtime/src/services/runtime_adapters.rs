@@ -248,6 +248,7 @@ where
             return Err(DispatchError::FirstParty {
                 kind: RuntimeDispatchErrorKind::UndeclaredCapability,
                 safe_summary: None,
+                detail: None,
             });
         };
 
@@ -263,6 +264,7 @@ where
                 DispatchError::FirstParty {
                     kind: planner_error_kind(&error),
                     safe_summary: None,
+                    detail: None,
                 }
             })?;
         tracing::debug!(
@@ -290,6 +292,7 @@ where
                 DispatchError::FirstParty {
                     kind: error.kind(),
                     safe_summary: None,
+                    detail: None,
                 }
             })?;
         tracing::debug!("first-party runtime adapter services resolved");
@@ -305,6 +308,7 @@ where
                     DispatchError::FirstParty {
                         kind: RuntimeDispatchErrorKind::Resource,
                         safe_summary: None,
+                        detail: None,
                     }
                 })?,
         };
@@ -359,8 +363,15 @@ where
                         credential_requirements,
                     }),
                     FirstPartyCapabilityError::Dispatch {
-                        kind, safe_summary, ..
-                    } => Err(DispatchError::FirstParty { kind, safe_summary }),
+                        kind,
+                        safe_summary,
+                        detail,
+                        ..
+                    } => Err(DispatchError::FirstParty {
+                        kind,
+                        safe_summary,
+                        detail: detail.map(|detail| *detail),
+                    }),
                 };
             }
             Err(_) => {
@@ -372,6 +383,7 @@ where
                 return Err(DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::Backend,
                     safe_summary: None,
+                    detail: None,
                 });
             }
         };
@@ -387,6 +399,7 @@ where
                 DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::OutputDecode,
                     safe_summary: None,
+                    detail: None,
                 }
             })?;
         let mut usage = result.usage;
@@ -408,6 +421,7 @@ where
                 return Err(DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::Resource,
                     safe_summary: None,
+                    detail: None,
                 });
             }
         };
@@ -702,6 +716,7 @@ where
         return Err(DispatchError::FirstParty {
             kind: RuntimeDispatchErrorKind::Resource,
             safe_summary: None,
+            detail: None,
         });
     }
 
@@ -792,6 +807,7 @@ fn dispatch_error_for_runtime(
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty {
             kind,
             safe_summary: None,
+            detail: None,
         },
     }
 }

@@ -10,6 +10,7 @@ pub enum RebornCompositionProfile {
     Disabled,
     LocalDev,
     LocalDevYolo,
+    HostedSingleTenant,
     HostedSingleTenantVolume,
     Production,
     MigrationDryRun,
@@ -21,6 +22,7 @@ impl RebornCompositionProfile {
             Self::Disabled => "disabled",
             Self::LocalDev => "local-dev",
             Self::LocalDevYolo => "local-dev-yolo",
+            Self::HostedSingleTenant => "hosted-single-tenant",
             Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
             Self::Production => "production",
             Self::MigrationDryRun => "migration-dry-run",
@@ -40,6 +42,7 @@ impl RebornCompositionProfile {
             Self::Disabled
             | Self::LocalDev
             | Self::LocalDevYolo
+            | Self::HostedSingleTenant
             | Self::HostedSingleTenantVolume => {
                 ironclaw_reborn_event_store::RebornProfile::LocalDev
             }
@@ -59,6 +62,7 @@ impl FromStr for RebornCompositionProfile {
             "disabled" => Ok(Self::Disabled),
             "local-dev" => Ok(Self::LocalDev),
             "local-dev-yolo" => Ok(Self::LocalDevYolo),
+            "hosted-single-tenant" => Ok(Self::HostedSingleTenant),
             "hosted-single-tenant-volume" => Ok(Self::HostedSingleTenantVolume),
             "production" => Ok(Self::Production),
             "migration-dry-run" => Ok(Self::MigrationDryRun),

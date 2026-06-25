@@ -221,10 +221,11 @@ export function projectFileContentUrl({ threadId, path } = {}) {
 
 // --- Automations ---
 
-export function listAutomations({ limit, runLimit } = {}) {
+export function listAutomations({ limit, runLimit, includeCompleted } = {}) {
   const params = new URLSearchParams();
   if (limit != null) params.set("limit", String(limit));
   if (runLimit != null) params.set("run_limit", String(runLimit));
+  if (includeCompleted === true) params.set("include_completed", "true");
   const query = params.toString();
   return apiFetch(`${V2_BASE}/automations${query ? `?${query}` : ""}`);
 }

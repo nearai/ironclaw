@@ -24,8 +24,8 @@
 //!
 //! - `append` returns a cursor whose `u64` is the underlying mount's
 //!   monotonic `SeqNo` for that path.
-//! - `read_after_cursor` calls `tail(path, SeqNo::from_backend(after))`
-//!   and applies `ReadScope` filtering in Rust over the returned records.
+//! - `read_after_cursor` drains bounded `tail` pages after
+//!   `SeqNo::from_backend(after)` and applies `ReadScope` filtering in Rust.
 //!   `next_cursor` advances past any trailing filtered records so a
 //!   `(matched, filtered, filtered)` window resumes past the last
 //!   filtered record on the next call rather than re-scanning them.
@@ -46,6 +46,8 @@ use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem, Seq
 use ironclaw_host_api::{AuditEnvelope, ResourceScope, ScopedPath};
 
 use crate::{StreamKind, durable_error};
+
+const EVENT_TAIL_SCAN_PAGE_MIN: usize = 64;
 
 /// Filesystem-backed durable runtime event log.
 pub struct FilesystemDurableEventLog<F>
@@ -112,67 +114,75 @@ where
         }
         let after = after.unwrap_or_default();
         let path = stream_path(StreamKind::Runtime, stream)?;
-        let records = self
-            .fs
-            .tail(
-                &ResourceScope::system(),
-                &path,
-                SeqNo::from_backend(after.as_u64()),
-            )
-            .await
-            .map_err(map_filesystem_tail_error)?;
-
-        if records.is_empty() && after.as_u64() > 0 {
-            // Tail returned nothing past `after`. Distinguish "consumer is
-            // caught up to head" (after == head) from "consumer asked for
-            // a foreign future cursor" (after > head) by probing the head.
-            // `tail(path, 0)` is on the cold path here — only reached when
-            // tail-after-cursor already came back empty — so the extra
-            // round trip is acceptable.
-            // PR #3679 review fix: bounded probe instead of `tail(0)` (which
-            // loaded the entire log to read its last seq — O(N) per cold
-            // call). `tail(after - 1)` returns events with seq > after - 1,
-            // i.e. seq >= after. Combined with the prior empty
-            // `tail(after)`, a non-empty probe means head == after exactly,
-            // so the consumer is caught up. An empty probe means head <
-            // after, i.e. a foreign-future cursor.
-            let probe = self
+        let mut entries = Vec::new();
+        let mut last_scanned = after;
+        let mut scan_after = after;
+        let mut first_scan = true;
+        loop {
+            let page_limit = tail_scan_page_limit(limit.saturating_sub(entries.len()));
+            let records = self
                 .fs
-                .tail(
+                .tail_bounded(
                     &ResourceScope::system(),
                     &path,
-                    SeqNo::from_backend(after.as_u64().saturating_sub(1)),
+                    SeqNo::from_backend(scan_after.as_u64()),
+                    page_limit,
                 )
                 .await
                 .map_err(map_filesystem_tail_error)?;
-            if probe.is_empty() {
-                return Err(EventError::ReplayGap {
-                    requested: after,
-                    earliest: EventCursor::origin(),
-                });
-            }
-            return Ok(EventReplay {
-                entries: Vec::new(),
-                next_cursor: after,
-            });
-        }
 
-        let mut entries = Vec::new();
-        let mut last_scanned = after;
-        for record in records {
-            let event: RuntimeEvent = runtime_event_from_trusted_json_slice(&record.payload)
-                .map_err(|error| EventError::Serialize {
-                    reason: error.to_string(),
-                })?;
-            last_scanned = EventCursor::new(record.seq.get());
-            if !filter.matches_event(&event) {
-                continue;
+            if records.is_empty() {
+                if first_scan && after.as_u64() > 0 {
+                    // Tail returned nothing past `after`. Distinguish
+                    // "consumer is caught up to head" (after == head) from
+                    // "consumer asked for a foreign future cursor"
+                    // (after > head) by probing one bounded record at
+                    // `after - 1`.
+                    let probe = self
+                        .fs
+                        .tail_bounded(
+                            &ResourceScope::system(),
+                            &path,
+                            SeqNo::from_backend(after.as_u64().saturating_sub(1)),
+                            1,
+                        )
+                        .await
+                        .map_err(map_filesystem_tail_error)?;
+                    if probe.is_empty() {
+                        return Err(EventError::ReplayGap {
+                            requested: after,
+                            earliest: EventCursor::origin(),
+                        });
+                    }
+                    return Ok(EventReplay {
+                        entries: Vec::new(),
+                        next_cursor: after,
+                    });
+                }
+                break;
             }
-            entries.push(EventLogEntry {
-                cursor: last_scanned,
-                record: event,
-            });
-            if entries.len() >= limit {
+
+            first_scan = false;
+            let fetched = records.len();
+            for record in records {
+                let event: RuntimeEvent = runtime_event_from_trusted_json_slice(&record.payload)
+                    .map_err(|error| EventError::Serialize {
+                        reason: error.to_string(),
+                    })?;
+                last_scanned = EventCursor::new(record.seq.get());
+                scan_after = last_scanned;
+                if !filter.matches_event(&event) {
+                    continue;
+                }
+                entries.push(EventLogEntry {
+                    cursor: last_scanned,
+                    record: event,
+                });
+                if entries.len() >= limit {
+                    break;
+                }
+            }
+            if entries.len() >= limit || fetched < page_limit {
                 break;
             }
         }
@@ -303,63 +313,75 @@ where
         }
         let after = after.unwrap_or_default();
         let path = stream_path(StreamKind::Audit, stream)?;
-        let records = self
-            .fs
-            .tail(
-                &ResourceScope::system(),
-                &path,
-                SeqNo::from_backend(after.as_u64()),
-            )
-            .await
-            .map_err(map_filesystem_tail_error)?;
-
-        if records.is_empty() && after.as_u64() > 0 {
-            // Same head-probe pattern as the runtime log: distinguish
-            // caught-up-to-head from foreign-future-cursor.
-            // PR #3679 review fix: bounded probe instead of `tail(0)` (which
-            // loaded the entire log to read its last seq — O(N) per cold
-            // call). `tail(after - 1)` returns events with seq > after - 1,
-            // i.e. seq >= after. Combined with the prior empty
-            // `tail(after)`, a non-empty probe means head == after exactly,
-            // so the consumer is caught up. An empty probe means head <
-            // after, i.e. a foreign-future cursor.
-            let probe = self
+        let mut entries = Vec::new();
+        let mut last_scanned = after;
+        let mut scan_after = after;
+        let mut first_scan = true;
+        loop {
+            let page_limit = tail_scan_page_limit(limit.saturating_sub(entries.len()));
+            let records = self
                 .fs
-                .tail(
+                .tail_bounded(
                     &ResourceScope::system(),
                     &path,
-                    SeqNo::from_backend(after.as_u64().saturating_sub(1)),
+                    SeqNo::from_backend(scan_after.as_u64()),
+                    page_limit,
                 )
                 .await
                 .map_err(map_filesystem_tail_error)?;
-            if probe.is_empty() {
-                return Err(EventError::ReplayGap {
-                    requested: after,
-                    earliest: EventCursor::origin(),
-                });
-            }
-            return Ok(EventReplay {
-                entries: Vec::new(),
-                next_cursor: after,
-            });
-        }
 
-        let mut entries = Vec::new();
-        let mut last_scanned = after;
-        for record in records {
-            let envelope: AuditEnvelope =
-                serde_json::from_slice(&record.payload).map_err(|error| EventError::Serialize {
-                    reason: error.to_string(),
-                })?;
-            last_scanned = EventCursor::new(record.seq.get());
-            if !filter.matches_audit(&envelope) {
-                continue;
+            if records.is_empty() {
+                if first_scan && after.as_u64() > 0 {
+                    // Same head-probe pattern as the runtime log:
+                    // distinguish caught-up-to-head from
+                    // foreign-future-cursor using one bounded record.
+                    let probe = self
+                        .fs
+                        .tail_bounded(
+                            &ResourceScope::system(),
+                            &path,
+                            SeqNo::from_backend(after.as_u64().saturating_sub(1)),
+                            1,
+                        )
+                        .await
+                        .map_err(map_filesystem_tail_error)?;
+                    if probe.is_empty() {
+                        return Err(EventError::ReplayGap {
+                            requested: after,
+                            earliest: EventCursor::origin(),
+                        });
+                    }
+                    return Ok(EventReplay {
+                        entries: Vec::new(),
+                        next_cursor: after,
+                    });
+                }
+                break;
             }
-            entries.push(EventLogEntry {
-                cursor: last_scanned,
-                record: envelope,
-            });
-            if entries.len() >= limit {
+
+            first_scan = false;
+            let fetched = records.len();
+            for record in records {
+                let envelope: AuditEnvelope =
+                    serde_json::from_slice(&record.payload).map_err(|error| {
+                        EventError::Serialize {
+                            reason: error.to_string(),
+                        }
+                    })?;
+                last_scanned = EventCursor::new(record.seq.get());
+                scan_after = last_scanned;
+                if !filter.matches_audit(&envelope) {
+                    continue;
+                }
+                entries.push(EventLogEntry {
+                    cursor: last_scanned,
+                    record: envelope,
+                });
+                if entries.len() >= limit {
+                    break;
+                }
+            }
+            if entries.len() >= limit || fetched < page_limit {
                 break;
             }
         }
@@ -378,6 +400,10 @@ where
             next_cursor,
         })
     }
+}
+
+fn tail_scan_page_limit(remaining_matches: usize) -> usize {
+    remaining_matches.max(EVENT_TAIL_SCAN_PAGE_MIN)
 }
 
 fn stream_path(kind: StreamKind, stream: &EventStreamKey) -> Result<ScopedPath, EventError> {

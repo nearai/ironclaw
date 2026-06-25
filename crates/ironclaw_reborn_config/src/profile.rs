@@ -15,6 +15,9 @@ pub enum RebornProfile {
     /// Trusted single-user local development mode with full host shell
     /// environment inheritance. Never selected by default.
     LocalDevYolo,
+    /// Hosted single-tenant startup. Uses the local-runtime product surface
+    /// with durable PostgreSQL storage.
+    HostedSingleTenant,
     /// Single-tenant hosted preview using the local-runtime substrate on a
     /// persistent volume. Intended for SSO-only Railway-style deployments while
     /// the full PostgreSQL production composition continues to mature.
@@ -28,9 +31,10 @@ pub enum RebornProfile {
 }
 
 impl RebornProfile {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::LocalDev,
         Self::LocalDevYolo,
+        Self::HostedSingleTenant,
         Self::HostedSingleTenantVolume,
         Self::Production,
         Self::MigrationDryRun,
@@ -52,6 +56,7 @@ impl RebornProfile {
         match self {
             Self::LocalDev => "local-dev",
             Self::LocalDevYolo => "local-dev-yolo",
+            Self::HostedSingleTenant => "hosted-single-tenant",
             Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
             Self::Production => "production",
             Self::MigrationDryRun => "migration-dry-run",
@@ -66,6 +71,7 @@ impl FromStr for RebornProfile {
         match value {
             "local-dev" => Ok(Self::LocalDev),
             "local-dev-yolo" => Ok(Self::LocalDevYolo),
+            "hosted-single-tenant" => Ok(Self::HostedSingleTenant),
             "hosted-single-tenant-volume" => Ok(Self::HostedSingleTenantVolume),
             "production" => Ok(Self::Production),
             "migration-dry-run" => Ok(Self::MigrationDryRun),

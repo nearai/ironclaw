@@ -50,17 +50,27 @@ pub use signed_session_login::{
 #[cfg(any(test, feature = "dev-in-memory-session"))]
 pub use session::InMemorySessionStore;
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::Router;
+use axum::{
+    Json, Router,
+    extract::{Request, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::{any, get},
+};
 use ironclaw_host_api::UserId;
 use ironclaw_reborn_composition::WebuiAuthenticator;
 use secrecy::{ExposeSecret, SecretString};
+use serde::Serialize;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::net::TcpListener;
+use tokio::sync::watch;
+use tower::ServiceExt;
 
 /// Errors raised while running the host serve loop.
 #[derive(Debug, Error)]
@@ -89,6 +99,82 @@ pub struct RebornWebuiServeOptions {
     pub router: Router,
     pub shutdown: tokio::sync::oneshot::Receiver<()>,
     pub bound_addr_tx: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
+}
+
+/// Handle used by host startup code to publish the real WebUI router
+/// after runtime assembly finishes.
+#[derive(Clone)]
+pub struct DeferredWebuiRouterHandle {
+    router_tx: watch::Sender<Option<Router>>,
+}
+
+/// Errors raised while publishing the ready router to a deferred
+/// startup listener.
+#[derive(Debug, Error)]
+pub enum DeferredWebuiRouterError {
+    #[error("deferred WebUI startup listener stopped before the runtime router became ready")]
+    ListenerStopped,
+}
+
+/// Build a startup router for orchestrator healthchecks while the
+/// host-owned runtime is still assembling.
+///
+/// `/api/health` returns healthy immediately. Every other route returns
+/// 503 until [`DeferredWebuiRouterHandle::publish_ready_router`] is
+/// called, then delegates each request to the real composed WebUI
+/// router without rebinding the listener.
+pub fn deferred_webui_v2_startup_router() -> (Router, DeferredWebuiRouterHandle) {
+    let (router_tx, router_rx) = watch::channel(None);
+    let state = DeferredWebuiRouterState { router_rx };
+    let router = Router::new()
+        .route("/api/health", get(deferred_webui_health_handler))
+        .fallback(any(deferred_webui_handler))
+        .with_state(state);
+    (router, DeferredWebuiRouterHandle { router_tx })
+}
+
+impl DeferredWebuiRouterHandle {
+    pub fn publish_ready_router(&self, router: Router) -> Result<(), DeferredWebuiRouterError> {
+        self.router_tx
+            .send(Some(router))
+            .map_err(|_| DeferredWebuiRouterError::ListenerStopped)
+    }
+}
+
+#[derive(Clone)]
+struct DeferredWebuiRouterState {
+    router_rx: watch::Receiver<Option<Router>>,
+}
+
+#[derive(Serialize)]
+struct DeferredWebuiHealthResponse {
+    status: &'static str,
+    channel: &'static str,
+}
+
+async fn deferred_webui_health_handler() -> Json<DeferredWebuiHealthResponse> {
+    Json(DeferredWebuiHealthResponse {
+        status: "healthy",
+        channel: "reborn",
+    })
+}
+
+async fn deferred_webui_handler(
+    State(state): State<DeferredWebuiRouterState>,
+    request: Request,
+) -> Response {
+    let Some(router) = state.router_rx.borrow().clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Reborn runtime is starting",
+        )
+            .into_response();
+    };
+
+    router
+        .oneshot(request)
+        .await
+        .unwrap_or_else(|err: Infallible| match err {})
 }
 
 /// Bind a `TcpListener` at `opts.addr`, run the axum serve loop with

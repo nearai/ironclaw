@@ -265,6 +265,9 @@ struct StubServices {
     /// Queued response for the next `submit_turn` call. When `Some`, the value
     /// is taken and returned instead of the default `Submitted` response.
     next_submit_response: Mutex<Option<RebornSubmitTurnResponse>>,
+    /// Records the `enabled` value each `set_auto_activate_learned` call passes,
+    /// so the handler test can assert the request body reaches the facade.
+    set_auto_activate_learned_calls: Mutex<Vec<bool>>,
     // Project routes — recorded requests so path-param-override behavior can be
     // asserted (the path id must win over any body value).
     update_project_calls: Mutex<Vec<RebornUpdateProjectRequest>>,
@@ -762,6 +765,24 @@ impl RebornServicesApi for StubServices {
         _name: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
+    }
+
+    async fn set_auto_activate_learned(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.set_auto_activate_learned_calls
+            .lock()
+            .expect("lock")
+            .push(enabled);
+        Ok(RebornSkillActionResponse {
+            success: true,
+            message: format!(
+                "Default skill auto-activation {}",
+                if enabled { "enabled" } else { "disabled" }
+            ),
+        })
     }
 
     async fn list_connectable_channels(
@@ -1425,6 +1446,40 @@ async fn send_message_rejected_busy_wire_shape() {
     );
 }
 
+// Test-through-the-caller: the handler must forward the request body's
+// `enabled` flag to `RebornServicesApi::set_auto_activate_learned`, not a
+// hardcoded value. Posting `false` and asserting the facade recorded `false`
+// catches the arg-loss class (e.g. a handler that always passes `true`).
+#[tokio::test]
+async fn set_auto_activate_learned_forwards_enabled_flag_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/auto-activate-learned")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":false}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["success"], true);
+    assert_eq!(
+        *services
+            .set_auto_activate_learned_calls
+            .lock()
+            .expect("lock"),
+        vec![false],
+        "handler must forward body.enabled=false to the facade verbatim"
+    );
+}
+
 // Replay-path variant: run metadata is None — wire must omit active_run_id, status,
 // event_cursor so the client receives no fabricated run reference it cannot query.
 #[tokio::test]
@@ -2003,6 +2058,105 @@ async fn list_automations_error_maps_to_http_status() {
     assert_eq!(body["error"], "forbidden");
     assert_eq!(body["kind"], "participant_denied");
     assert_eq!(body["retryable"], false);
+}
+
+#[tokio::test]
+async fn list_automations_include_completed_true_forwarded_to_facade() {
+    // ?include_completed=true must be parsed and forwarded as `true` in the
+    // WebUiListAutomationsRequest so the facade can widen its exclusion slice.
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations?include_completed=true")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services
+        .list_automations_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].include_completed,
+        "include_completed=true must be forwarded to the facade"
+    );
+}
+
+#[tokio::test]
+async fn list_automations_include_completed_absent_defaults_to_false() {
+    // No ?include_completed query param → `include_completed` must default to
+    // false so existing callers that do not set the flag are unaffected.
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services
+        .list_automations_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        !calls[0].include_completed,
+        "absent include_completed must default to false (active-only)"
+    );
+}
+
+// Regression: malformed `?include_completed=garbage` must be rejected at the
+// Query extractor level (400 Bad Request) before the handler or facade run.
+// The field is a plain `bool`; `serde_urlencoded` does not silently default
+// unparseable values — it returns a deserialization error, which axum maps to
+// 400. There is no silent fallback to `false`.
+#[tokio::test]
+async fn list_automations_malformed_include_completed_rejected_with_400() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations?include_completed=notabool")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "malformed include_completed must be rejected at query deserialization with 400, \
+         not silently defaulted to false"
+    );
+    assert!(
+        services
+            .list_automations_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "malformed include_completed must be rejected before reaching the facade"
+    );
 }
 
 #[tokio::test]

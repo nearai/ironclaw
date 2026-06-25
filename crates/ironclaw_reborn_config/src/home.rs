@@ -328,7 +328,7 @@ impl fmt::Display for RebornConfigError {
             ),
             Self::InvalidProfile { name, value } => write!(
                 formatter,
-                "{name} must be one of local-dev, local-dev-yolo, hosted-single-tenant-volume, production, migration-dry-run; got {value:?}"
+                "{name} must be one of local-dev, local-dev-yolo, hosted-single-tenant, hosted-single-tenant-volume, production, migration-dry-run; got {value:?}"
             ),
         }
     }
