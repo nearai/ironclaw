@@ -35,17 +35,14 @@
 mod message_lookup_index;
 mod message_sequence_index;
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex, OnceLock, Weak},
-};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::{StreamExt, future::join_all};
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FileType, FilesystemError, FilesystemOperation, Filter,
-    Page, RecordVersion, RootFilesystem, ScopedFilesystem,
+    CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FileType, FilesystemError,
+    FilesystemOperation, Filter, Page, RecordVersion, RootFilesystem, ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{HostApiError, InvocationId, ResourceScope, ScopedPath, ThreadId};
 use serde::{Deserialize, Serialize};
@@ -101,7 +98,7 @@ enum TransactionalMessageWrite {
 /// On-disk thread state record. The transcript boundary's
 /// [`SessionThreadRecord`] is the user-visible shape; this struct adds
 /// `next_sequence` so the per-thread monotonic counter is durable.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct StoredThreadRecord {
     #[serde(flatten)]
     record: SessionThreadRecord,
@@ -1062,70 +1059,69 @@ where
             None => generated_thread_id()?,
         };
         let path = thread_record_path(&request.scope, &thread_id)?;
-        let record_lock = filesystem_record_lock(&path);
-        let _guard = record_lock.lock().await;
-        if let Some((existing, _)) = self
-            .read_thread_versioned(&request.scope, &thread_id)
-            .await?
-        {
-            if existing.record.scope != request.scope {
-                return Err(SessionThreadError::ThreadScopeMismatch { thread_id });
-            }
-            return Ok(existing.record);
-        }
-        // Cross-scope collision: a thread with this id may exist under a
-        // sibling scope. Check by re-reading the path (which is scope-keyed
-        // here, so a sibling scope's record lives at a different path),
-        // then surface as `ThreadScopeMismatch` once we discover one. The
-        // path-keyed read above only catches same-scope existence; sibling
-        // existence is racy across an outer caller. For now we rely on the
-        // path uniqueness — a sibling scope cannot create the same path.
-        let now = Utc::now();
-        let record = SessionThreadRecord {
-            scope: request.scope,
-            thread_id: thread_id.clone(),
-            created_by_actor_id: request.created_by_actor_id,
-            title: request.title,
-            metadata_json: request.metadata_json,
-            goal: None,
-            created_at: Some(now),
-            updated_at: Some(now),
-        };
-        let stored = StoredThreadRecord {
-            record: record.clone(),
-            next_sequence: 1,
-        };
-        let entry = Self::thread_entry(&stored)?;
-        let resource_scope = record.scope.to_resource_scope();
-        match put_with_cas(
+        let resource_scope = request.scope.to_resource_scope();
+        // Capture request fields so the apply closure can re-run per CAS retry
+        // without moving them out.
+        let scope = request.scope;
+        let created_by_actor_id = request.created_by_actor_id;
+        let title = request.title;
+        let metadata_json = request.metadata_json;
+        let thread_id_clone = thread_id.clone();
+        cas_update(
             self.filesystem.as_ref(),
             &resource_scope,
             &path,
-            entry,
-            CasExpectation::Absent,
+            |bytes: &[u8]| deserialize::<StoredThreadRecord>(bytes),
+            |stored: &StoredThreadRecord| Self::thread_entry(stored),
+            |current: Option<StoredThreadRecord>| {
+                // Clone all request fields for this retry iteration.
+                let scope = scope.clone();
+                let created_by_actor_id = created_by_actor_id.clone();
+                let title = title.clone();
+                let metadata_json = metadata_json.clone();
+                let thread_id = thread_id_clone.clone();
+                let outcome: Result<
+                    CasApply<StoredThreadRecord, SessionThreadRecord>,
+                    SessionThreadError,
+                > = match current {
+                    Some(existing) => {
+                        // Thread already exists: scope-check and return it (no write).
+                        if existing.record.scope != scope {
+                            Err(SessionThreadError::ThreadScopeMismatch { thread_id })
+                        } else {
+                            // Unchanged snapshot → cas_update skips the write.
+                            Ok(CasApply::new(existing.clone(), existing.record))
+                        }
+                    }
+                    None => {
+                        // First writer: build a fresh record and let cas_update
+                        // persist it with CasExpectation::Absent. A concurrent
+                        // winner causes VersionMismatch → the helper re-reads and
+                        // re-runs apply, which will then see Some(existing) above
+                        // and take the scope-reconcile path.
+                        let now = Utc::now();
+                        let record = SessionThreadRecord {
+                            scope,
+                            thread_id,
+                            created_by_actor_id,
+                            title,
+                            metadata_json,
+                            goal: None,
+                            created_at: Some(now),
+                            updated_at: Some(now),
+                        };
+                        let stored = StoredThreadRecord {
+                            record: record.clone(),
+                            next_sequence: 1,
+                        };
+                        Ok(CasApply::new(stored, record))
+                    }
+                };
+                async move { outcome }
+            },
         )
         .await
-        {
-            Ok(()) => Ok(record),
-            Err(PutError::VersionMismatch) => {
-                // Someone else won the race; re-read and reconcile against
-                // the requested scope.
-                let (existing, _) = self
-                    .read_thread_versioned(&record.scope, &thread_id)
-                    .await?
-                    .ok_or_else(|| {
-                        SessionThreadError::Backend(format!(
-                            "filesystem CAS Absent rejected ensure_thread at {} but record is missing",
-                            path.as_str()
-                        ))
-                    })?;
-                if existing.record.scope != record.scope {
-                    return Err(SessionThreadError::ThreadScopeMismatch { thread_id });
-                }
-                Ok(existing.record)
-            }
-            Err(PutError::Other(error)) => Err(error),
-        }
+        .map_err(map_cas_error)
     }
 
     async fn accept_inbound_message(
@@ -2679,33 +2675,24 @@ where
     }
 }
 
-// ── Per-path async serialization (Unsupported→Any fallback) ────
-//
-// Backends without per-record versioning (LocalFilesystem) take the
-// `CasExpectation::Any` fallback path. The per-path mutex below is the
-// process-local ordering guarantee that fills in for CAS in that case.
-// Values are `Weak<Mutex<()>>` so the map does not pin lock entries alive
-// once all in-flight operations on a path have released their `Arc`
-// clones — mirrors the run-state store's lock map.
-
-type FilesystemRecordLock = Arc<tokio::sync::Mutex<()>>;
-
-static FILESYSTEM_RECORD_LOCKS: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
-    OnceLock::new();
-
-fn filesystem_record_lock(path: &ScopedPath) -> FilesystemRecordLock {
-    let locks = FILESYSTEM_RECORD_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = locks
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard.retain(|_, weak| weak.strong_count() > 0);
-    let key = path.as_str();
-    if let Some(existing) = guard.get(key).and_then(Weak::upgrade) {
-        return existing;
+/// Map the shared CAS helper's [`CasUpdateError`] into a
+/// [`SessionThreadError`].
+///
+/// [`CasUpdateError::Apply`] carries the caller's own error straight through;
+/// all other variants are storage-layer failures. Fail-closed: a backend that
+/// cannot honor versioned CAS surfaces as a [`SessionThreadError::Backend`]
+/// rather than a silent blind overwrite.
+fn map_cas_error(error: CasUpdateError<SessionThreadError>) -> SessionThreadError {
+    match error {
+        CasUpdateError::Apply(inner) => inner,
+        CasUpdateError::Timeout | CasUpdateError::RetriesExhausted => {
+            SessionThreadError::Backend("filesystem CAS retries exhausted".to_string())
+        }
+        CasUpdateError::CasUnsupported => SessionThreadError::Backend(
+            "backend does not support versioned compare-and-swap".to_string(),
+        ),
+        CasUpdateError::Backend(fs_err) => SessionThreadError::Backend(fs_err.to_string()),
     }
-    let fresh: FilesystemRecordLock = Arc::new(tokio::sync::Mutex::new(()));
-    guard.insert(key.to_string(), Arc::downgrade(&fresh));
-    fresh
 }
 
 impl From<FilesystemError> for SessionThreadError {
