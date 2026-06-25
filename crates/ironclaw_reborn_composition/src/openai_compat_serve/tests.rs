@@ -65,6 +65,73 @@ async fn openai_responses_retrieve_returns_cancelled_projection_status() {
     assert!(response.error.is_none());
 }
 
+/// Retrieve must agree with the wait path on parked runs. A run parked on a
+/// user-resolvable gate emits a `GatePrompt` but no terminal `RunStatus`, so a
+/// retrieve that only looked at `status` would report `in_progress` forever
+/// while `wait_for_response_completion` reports `incomplete`. The retrieve path
+/// must honor `parked_on_gate` and surface `Incomplete` too, so a polling client
+/// learns the run is waiting on the user.
+#[tokio::test]
+async fn openai_responses_retrieve_returns_incomplete_when_run_parks_on_gate() {
+    let fixture = ResponseReaderFixture::new("retrieve-gate").await;
+    let run_id = TurnRunId::new();
+    let reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![gate_prompt_envelope(
+            run_id,
+        )])),
+    );
+
+    let response = reader
+        .read_response(fixture.read_request(run_id))
+        .await
+        .expect("read response");
+
+    assert_eq!(
+        response.status,
+        OpenAiResponseStatus::Incomplete,
+        "a parked run must read as Incomplete on retrieve, matching the wait path"
+    );
+    assert!(response.output.is_empty());
+}
+
+/// Chat Completions must not spin forever on a run parked on a user gate.
+/// Unlike Responses, Chat Completions has no `incomplete` status, so the waiter
+/// returns a bounded, non-retryable `409 Conflict` (the run cannot produce a
+/// completion through this surface until the user resolves the gate) instead of
+/// polling until the outer HTTP timeout (the original Bug #1 symptom). A static
+/// stream carrying only a gate prompt would, on the pre-fix code, loop forever
+/// on `Ok(None)`; this test would hang.
+#[tokio::test]
+async fn openai_chat_completion_returns_conflict_when_run_parks_on_gate() {
+    let fixture = ResponseReaderFixture::new("chat-gate").await;
+    let run_id = TurnRunId::new();
+    let reader = OpenAiChatCompletionThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![gate_prompt_envelope(
+            run_id,
+        )])),
+    );
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        reader.read_chat_completion_projection(fixture.chat_request(run_id)),
+    )
+    .await
+    .expect("chat completion must return promptly on a parked run, not spin to timeout");
+
+    let error = result.expect_err("a parked run must surface an error, not a completion");
+    assert_eq!(
+        error.status_code(),
+        409,
+        "a parked chat completion must surface a 409 Conflict, not spin"
+    );
+    assert!(
+        !error.retryable(),
+        "a parked run is not resolved by retrying the request; the user must act out of band"
+    );
+}
+
 #[tokio::test]
 async fn openai_responses_retrieve_ignores_other_run_statuses() {
     let fixture = ResponseReaderFixture::new("other-run").await;
@@ -434,6 +501,25 @@ impl ResponseReaderFixture {
             requested_model: "reborn-test".to_string(),
             projection_read: self.projection_read.clone(),
             mapping: self.mapping(run_id),
+        }
+    }
+
+    fn chat_request(
+        &self,
+        run_id: TurnRunId,
+    ) -> ironclaw_reborn_openai_compat::OpenAiChatCompletionProjectionRequest {
+        ironclaw_reborn_openai_compat::OpenAiChatCompletionProjectionRequest {
+            public_id: ironclaw_reborn_openai_compat::OpenAiChatCompletionId::new("chatcmpl-test")
+                .expect("chat completion id"),
+            actor_scope: self.actor_scope.clone(),
+            accepted_ack: ProductInboundAck::Accepted {
+                accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("accepted:test")
+                    .expect("accepted ref"),
+                submitted_run_id: run_id,
+            },
+            projection_read: self.projection_read.clone(),
+            requested_model: "reborn-test".to_string(),
+            model_only_tools: None,
         }
     }
 
