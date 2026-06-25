@@ -48,6 +48,7 @@ use super::{
     WitToolRequest, WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
 };
 use crate::FirstPartyCapabilityError;
+use ironclaw_host_api::ResourceReceipt;
 
 pub(super) struct ServiceResolvedRuntimeAdapter<T> {
     inner: Arc<T>,
@@ -344,9 +345,21 @@ where
             used_prepared_reservation,
             "first-party runtime adapter resource reservation ready"
         );
+        // From here the reservation lives in an RAII guard carried across the
+        // handler `catch_unwind().await` below. If the turn scheduler drops this
+        // future mid-await (cancel/lease-expiry/timeout), `Drop` releases the
+        // reservation instead of leaking it permanently. Every early `return`
+        // below drops the still-armed guard, which releases.
+        let reservation_id = reservation.id;
+        let guard = ReservationGuard::new(request.governor, reservation_id);
+        let first_party_resource_error = || DispatchError::FirstParty {
+            kind: RuntimeDispatchErrorKind::Resource,
+            safe_summary: None,
+            detail: None,
+        };
 
         tracing::debug!(
-            reservation_id = %reservation.id,
+            reservation_id = %reservation_id,
             "first-party runtime adapter invoking handler"
         );
         let result = match AssertUnwindSafe(handler.dispatch(FirstPartyCapabilityRequest {
@@ -363,17 +376,15 @@ where
             Ok(Ok(result)) => result,
             Ok(Err(error)) => {
                 tracing::debug!(
-                    reservation_id = %reservation.id,
+                    reservation_id = %reservation_id,
                     is_auth_required = error.is_auth_required(),
                     "first-party runtime adapter handler failed"
                 );
-                if let Err(acct_err) = account_or_release_failed_first_party_execution(
-                    request.governor,
-                    reservation.id,
-                    error.usage(),
-                ) {
+                if let Err(acct_err) =
+                    guard.account_failed(error.usage(), first_party_resource_error)
+                {
                     tracing::warn!(
-                        reservation_id = %reservation.id,
+                        reservation_id = %reservation_id,
                         error = ?acct_err,
                         "first-party resource accounting failed on handler error; \
                          returning original handler error"
@@ -403,10 +414,10 @@ where
             }
             Err(_) => {
                 tracing::debug!(
-                    reservation_id = %reservation.id,
+                    reservation_id = %reservation_id,
                     "first-party runtime adapter handler panicked"
                 );
-                release_first_party_reservation(request.governor, reservation.id);
+                // Dropping `guard` releases the reservation.
                 return Err(DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::Backend,
                     safe_summary: None,
@@ -419,10 +430,10 @@ where
             .map(|bytes| bytes.len() as u64)
             .map_err(|_| {
                 tracing::debug!(
-                    reservation_id = %reservation.id,
+                    reservation_id = %reservation_id,
                     "first-party runtime adapter output serialization failed"
                 );
-                release_first_party_reservation(request.governor, reservation.id);
+                // Dropping `guard` releases the reservation.
                 DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::OutputDecode,
                     safe_summary: None,
@@ -431,16 +442,21 @@ where
             })?;
         let mut usage = result.usage;
         usage.output_bytes = usage.output_bytes.max(output_bytes);
-        let receipt = match request.governor.reconcile(reservation.id, usage.clone()) {
+        // Happy path: reconcile inline so we preserve the existing
+        // warn-on-release-error-after-reconcile-failure diagnostic. `disarm`
+        // hands reservation ownership back from the guard; both reconcile
+        // outcomes settle the reservation below.
+        let reconcile_id = guard.disarm();
+        let receipt = match request.governor.reconcile(reconcile_id, usage.clone()) {
             Ok(receipt) => receipt,
             Err(_) => {
                 tracing::debug!(
-                    reservation_id = %reservation.id,
+                    reservation_id = %reconcile_id,
                     "first-party runtime adapter resource reconcile failed"
                 );
-                if let Err(release_error) = request.governor.release(reservation.id) {
+                if let Err(release_error) = request.governor.release(reconcile_id) {
                     tracing::warn!(
-                        reservation_id = %reservation.id,
+                        reservation_id = %reconcile_id,
                         error = %release_error,
                         "failed to release first-party resource reservation after reconcile failure"
                     );
@@ -453,7 +469,7 @@ where
             }
         };
         tracing::debug!(
-            reservation_id = %reservation.id,
+            reservation_id = %reconcile_id,
             output_bytes,
             "first-party runtime adapter dispatch completed"
         );
@@ -615,6 +631,108 @@ impl WasmRuntimePolicyDiscarder for NetworkPolicyDiscarder {
     }
 }
 
+/// RAII guard over an in-flight `ResourceGovernor` reservation.
+///
+/// A reservation is added to the governor's per-scope `reserved_by_account`
+/// tally by `reserve(...)` and is only subtracted by `reconcile(...)` or
+/// `release(...)`. The governor has no TTL/sweep: a reservation that is never
+/// reconciled or released leaks permanently, eventually exhausting the scope's
+/// budget. Dispatch paths reserve *before* an `.await` (the `spawn_blocking`
+/// join for WASM, the handler `catch_unwind` for first-party), so if the
+/// surrounding future is dropped mid-`.await` — the turn scheduler cancels it on
+/// user cancel, lease expiry, or a heartbeat-store timeout — any code after the
+/// await never runs and the reservation leaks.
+///
+/// Holding this guard across the `.await` makes it part of the future's state.
+/// Dropping the future runs [`Drop`], which releases the still-armed
+/// reservation. On the normal paths the guard is settled explicitly via
+/// [`reconcile`](Self::reconcile), [`account_failed`](Self::account_failed), or
+/// [`disarm`](Self::disarm), which clears `armed` so `Drop` is a no-op and never
+/// double-releases.
+///
+/// `governor.reconcile`/`governor.release` are synchronous (see
+/// `ResourceGovernor` in `ironclaw_resources`), so calling `release` from `Drop`
+/// is sound.
+struct ReservationGuard<'g, G: ResourceGovernor + ?Sized> {
+    governor: &'g G,
+    id: ResourceReservationId,
+    armed: bool,
+}
+
+impl<'g, G: ResourceGovernor + ?Sized> ReservationGuard<'g, G> {
+    fn new(governor: &'g G, id: ResourceReservationId) -> Self {
+        Self {
+            governor,
+            id,
+            armed: true,
+        }
+    }
+
+    /// Disarm the `Drop` safety net without settling, handing reservation
+    /// ownership back to the caller. Used by the first-party happy path, which
+    /// reconciles inline so it can preserve the warn-log on a
+    /// release-after-reconcile-failure.
+    fn disarm(mut self) -> ResourceReservationId {
+        self.armed = false;
+        self.id
+    }
+
+    /// Happy path: reconcile actual usage, consuming the guard. Mirrors the
+    /// previous inline reconcile: on reconcile error, release the reservation
+    /// (release error ignored, as the previous `release_*_reservation` helpers
+    /// did) and return the caller-supplied dispatch error.
+    fn reconcile(
+        mut self,
+        usage: ResourceUsage,
+        on_reconcile_error: impl FnOnce() -> DispatchError,
+    ) -> Result<ResourceReceipt, DispatchError> {
+        self.armed = false;
+        match self.governor.reconcile(self.id, usage) {
+            Ok(receipt) => Ok(receipt),
+            Err(_) => {
+                let _ = self.governor.release(self.id);
+                Err(on_reconcile_error())
+            }
+        }
+    }
+
+    /// Failed execution: account partial usage if it has accountable effects,
+    /// otherwise release. Mirrors `account_or_release_failed_*`: no usage or
+    /// non-accountable usage releases (returning `Ok`); accountable usage
+    /// reconciles, and a reconcile failure releases and returns the
+    /// caller-supplied dispatch error.
+    fn account_failed(
+        mut self,
+        usage: Option<&ResourceUsage>,
+        on_reconcile_error: impl FnOnce() -> DispatchError,
+    ) -> Result<(), DispatchError> {
+        self.armed = false;
+        match usage {
+            Some(usage) if has_accountable_effects(usage) => {
+                if self.governor.reconcile(self.id, usage.clone()).is_err() {
+                    let _ = self.governor.release(self.id);
+                    return Err(on_reconcile_error());
+                }
+                Ok(())
+            }
+            _ => {
+                let _ = self.governor.release(self.id);
+                Ok(())
+            }
+        }
+    }
+}
+
+impl<'g, G: ResourceGovernor + ?Sized> Drop for ReservationGuard<'g, G> {
+    fn drop(&mut self) {
+        if self.armed {
+            // Cancellation / unexpected-return safety net: the reservation was
+            // never settled, so release it to avoid a permanent budget leak.
+            let _ = self.governor.release(self.id);
+        }
+    }
+}
+
 async fn execute_prepared_wasm<G>(
     runtime: Arc<WitToolRuntime>,
     prepared: Arc<PreparedWitTool>,
@@ -633,10 +751,19 @@ where
                 kind: RuntimeDispatchErrorKind::Resource,
             })?,
     };
+    // Hold the reservation in an RAII guard from here on. The guard is carried
+    // across the `run_wasm_execution_blocking().await` below, so if the turn
+    // scheduler drops this future on cancel/lease-expiry/timeout, `Drop`
+    // releases the reservation instead of leaking it permanently. Every early
+    // `return` below drops the still-armed guard, which releases.
+    let guard = ReservationGuard::new(request.governor, reservation.id);
+    let wasm_resource_error = || DispatchError::Wasm {
+        kind: RuntimeDispatchErrorKind::Resource,
+    };
     let input_json = match serde_json::to_string(&request.input) {
         Ok(json) => json,
         Err(_) => {
-            release_wasm_reservation(request.governor, reservation.id);
+            // Dropping `guard` releases the reservation.
             return Err(DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::InputEncode,
             });
@@ -662,11 +789,13 @@ where
         Ok(execution) => execution,
         Err(error) => {
             log_wasm_runtime_error(request.capability_id, &error);
-            if let Some(usage) = preserved_wasm_error_usage(&error) {
-                account_or_release_failed_wasm_execution(request.governor, reservation.id, &usage)?;
-            } else {
-                release_wasm_reservation(request.governor, reservation.id);
-            }
+            // `preserved_wasm_error_usage` returns `Some` only for accountable
+            // `ExecutionFailed` usage; `account_failed` then reconciles, and
+            // otherwise releases — matching the prior reserve/account split.
+            guard.account_failed(
+                preserved_wasm_error_usage(&error).as_ref(),
+                wasm_resource_error,
+            )?;
             return Err(DispatchError::Wasm {
                 kind: wasm_error_kind(&error),
             });
@@ -674,19 +803,11 @@ where
     };
     if let Some(error) = execution.error {
         log_wasm_guest_error(request.capability_id, &execution.logs, &error);
-        account_or_release_failed_wasm_execution(
-            request.governor,
-            reservation.id,
-            &execution.usage,
-        )?;
+        guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
         return Err(wasm_guest_dispatch_error(&error, request.capability_id));
     }
     let Some(output_json) = execution.output_json else {
-        account_or_release_failed_wasm_execution(
-            request.governor,
-            reservation.id,
-            &execution.usage,
-        )?;
+        guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
         return Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::InvalidResult,
         });
@@ -694,28 +815,13 @@ where
     let output = match serde_json::from_str(&output_json) {
         Ok(output) => output,
         Err(_) => {
-            account_or_release_failed_wasm_execution(
-                request.governor,
-                reservation.id,
-                &execution.usage,
-            )?;
+            guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
             return Err(DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::OutputDecode,
             });
         }
     };
-    let receipt = match request
-        .governor
-        .reconcile(reservation.id, execution.usage.clone())
-    {
-        Ok(receipt) => receipt,
-        Err(_) => {
-            release_wasm_reservation(request.governor, reservation.id);
-            return Err(DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-            });
-        }
-    };
+    let receipt = guard.reconcile(execution.usage.clone(), wasm_resource_error)?;
     Ok(RuntimeAdapterResult {
         output,
         display_preview: None,
@@ -729,10 +835,11 @@ where
 ///
 /// The owned `runtime`/`prepared`/`host` are all cheap-to-move (`WitToolRuntime`
 /// shares its `Engine` by reference count; `prepared` is an `Arc`; `WitToolHost`
-/// is `Clone`), so the closure is `Send + 'static`. A semaphore permit is held
-/// for the lifetime of the blocking task so concurrent native executions stay
-/// bounded; the permit and the task both drop on return. A `JoinError` (panic
-/// or cancellation of the blocking task) is surfaced as an execution failure.
+/// is `Clone`), so the closure is `Send + 'static`. A semaphore permit is acquired
+/// here and then moved into the `spawn_blocking` closure so its lifetime is tied
+/// to the blocking thread, not the outer async future — cancellation of the caller
+/// does not release the slot early. A `JoinError` (panic or cancellation of the
+/// blocking task) is surfaced as an execution failure.
 async fn run_wasm_execution_blocking(
     runtime: Arc<WitToolRuntime>,
     prepared: Arc<PreparedWitTool>,
@@ -740,12 +847,13 @@ async fn run_wasm_execution_blocking(
     input_json: String,
     context_json: String,
 ) -> Result<WitToolExecution, WasmError> {
-    let _permit = WASM_EXEC_SEMAPHORE
+    let permit = WASM_EXEC_SEMAPHORE
         .clone()
         .acquire_owned()
         .await
         .map_err(|_| WasmError::execution_failed("wasm execution gate closed".to_string()))?;
     tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         runtime.execute(
             &prepared,
             host,
@@ -763,66 +871,7 @@ fn wasm_invocation_context(capability_id: &CapabilityId) -> String {
     .to_string()
 }
 
-fn account_or_release_failed_first_party_execution<G>(
-    governor: &G,
-    reservation_id: ResourceReservationId,
-    usage: Option<&ResourceUsage>,
-) -> Result<(), DispatchError>
-where
-    G: ResourceGovernor + ?Sized,
-{
-    let Some(usage) = usage else {
-        release_first_party_reservation(governor, reservation_id);
-        return Ok(());
-    };
-    if !has_accountable_effects(usage) {
-        release_first_party_reservation(governor, reservation_id);
-        return Ok(());
-    }
-
-    if governor.reconcile(reservation_id, usage.clone()).is_err() {
-        release_first_party_reservation(governor, reservation_id);
-        return Err(DispatchError::FirstParty {
-            kind: RuntimeDispatchErrorKind::Resource,
-            safe_summary: None,
-            detail: None,
-        });
-    }
-
-    Ok(())
-}
-
 fn release_first_party_reservation<G>(governor: &G, reservation_id: ResourceReservationId)
-where
-    G: ResourceGovernor + ?Sized,
-{
-    let _ = governor.release(reservation_id);
-}
-
-fn account_or_release_failed_wasm_execution<G>(
-    governor: &G,
-    reservation_id: ResourceReservationId,
-    usage: &ResourceUsage,
-) -> Result<(), DispatchError>
-where
-    G: ResourceGovernor + ?Sized,
-{
-    if !has_accountable_effects(usage) {
-        release_wasm_reservation(governor, reservation_id);
-        return Ok(());
-    }
-
-    if governor.reconcile(reservation_id, usage.clone()).is_err() {
-        release_wasm_reservation(governor, reservation_id);
-        return Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Resource,
-        });
-    }
-
-    Ok(())
-}
-
-fn release_wasm_reservation<G>(governor: &G, reservation_id: ResourceReservationId)
 where
     G: ResourceGovernor + ?Sized,
 {
@@ -1045,11 +1094,209 @@ fn wasm_error_kind(error: &WasmError) -> RuntimeDispatchErrorKind {
 mod tests {
     use std::time::Duration;
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ironclaw_host_api::{ReservationStatus, ResourceEstimate};
+    use ironclaw_resources::{
+        AccountSnapshot, ReservationOutcome, ResourceAccount, ResourceError, ResourceLimits,
+    };
     use ironclaw_wasm::{WasmHostError, WasmHostHttp, WasmHttpRequest, WasmHttpResponse};
     use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
     use wit_parser::Resolve;
 
     use super::*;
+
+    // ---------------------------------------------------------------------------
+    // ReservationGuard unit tests
+    //
+    // These verify the RAII contract that fixes the permanent resource leak:
+    //   • An armed guard dropped without settling releases exactly once.
+    //   • An explicitly settled guard (reconcile / account_failed) does NOT
+    //     release again on Drop.
+    // ---------------------------------------------------------------------------
+
+    /// Recording governor: counts `reconcile`/`release` calls and the last id
+    /// each saw. `reserve*` are unused by the guard unit tests (the guard is
+    /// constructed directly with a known id), so they return a stub error.
+    #[derive(Debug, Default)]
+    struct RecordingGovernor {
+        reconcile_calls: AtomicUsize,
+        release_calls: AtomicUsize,
+    }
+
+    impl RecordingGovernor {
+        fn reconcile_calls(&self) -> usize {
+            self.reconcile_calls.load(Ordering::SeqCst)
+        }
+
+        fn release_calls(&self) -> usize {
+            self.release_calls.load(Ordering::SeqCst)
+        }
+
+        fn receipt(id: ResourceReservationId, status: ReservationStatus) -> ResourceReceipt {
+            ResourceReceipt {
+                id,
+                scope: ResourceScope::system(),
+                status,
+                estimate: ResourceEstimate::default(),
+                actual: None,
+            }
+        }
+    }
+
+    impl ResourceGovernor for RecordingGovernor {
+        fn set_limit(
+            &self,
+            _account: ResourceAccount,
+            _limits: ResourceLimits,
+        ) -> Result<(), ResourceError> {
+            Ok(())
+        }
+
+        fn reserve_with_outcome(
+            &self,
+            _scope: ResourceScope,
+            _estimate: ResourceEstimate,
+        ) -> Result<ReservationOutcome, ResourceError> {
+            Err(ResourceError::Storage {
+                reason: "reserve unused in guard unit tests".to_string(),
+            })
+        }
+
+        fn reserve_with_id_and_outcome(
+            &self,
+            _scope: ResourceScope,
+            _estimate: ResourceEstimate,
+            _reservation_id: ResourceReservationId,
+        ) -> Result<ReservationOutcome, ResourceError> {
+            Err(ResourceError::Storage {
+                reason: "reserve unused in guard unit tests".to_string(),
+            })
+        }
+
+        fn reconcile(
+            &self,
+            reservation_id: ResourceReservationId,
+            _actual: ResourceUsage,
+        ) -> Result<ResourceReceipt, ResourceError> {
+            self.reconcile_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Self::receipt(reservation_id, ReservationStatus::Reconciled))
+        }
+
+        fn release(
+            &self,
+            reservation_id: ResourceReservationId,
+        ) -> Result<ResourceReceipt, ResourceError> {
+            self.release_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Self::receipt(reservation_id, ReservationStatus::Released))
+        }
+
+        fn account_snapshot(
+            &self,
+            _account: &ResourceAccount,
+        ) -> Result<Option<AccountSnapshot>, ResourceError> {
+            Ok(None)
+        }
+    }
+
+    fn accountable_usage() -> ResourceUsage {
+        ResourceUsage {
+            output_bytes: 32,
+            ..ResourceUsage::default()
+        }
+    }
+
+    #[test]
+    fn reservation_guard_drop_without_settling_releases_exactly_once() {
+        let governor = RecordingGovernor::default();
+        let id = ResourceReservationId::new();
+        {
+            let _guard = ReservationGuard::new(&governor, id);
+            // Drop the still-armed guard at end of scope.
+        }
+        assert_eq!(
+            governor.release_calls(),
+            1,
+            "an armed guard dropped without settling must release exactly once"
+        );
+        assert_eq!(
+            governor.reconcile_calls(),
+            0,
+            "a dropped, unsettled guard must not reconcile"
+        );
+    }
+
+    #[test]
+    fn reservation_guard_reconcile_settles_and_drop_does_not_double_release() {
+        let governor = RecordingGovernor::default();
+        let id = ResourceReservationId::new();
+        let guard = ReservationGuard::new(&governor, id);
+        let receipt = guard
+            .reconcile(accountable_usage(), || DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::Resource,
+            })
+            .expect("reconcile must succeed");
+        assert_eq!(receipt.status, ReservationStatus::Reconciled);
+        // The guard was consumed by `reconcile`; no Drop release fires.
+        assert_eq!(governor.reconcile_calls(), 1);
+        assert_eq!(
+            governor.release_calls(),
+            0,
+            "a reconciled guard must not release on Drop"
+        );
+    }
+
+    #[test]
+    fn reservation_guard_account_failed_accountable_reconciles_without_release() {
+        let governor = RecordingGovernor::default();
+        let id = ResourceReservationId::new();
+        let guard = ReservationGuard::new(&governor, id);
+        guard
+            .account_failed(Some(&accountable_usage()), || DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::Resource,
+            })
+            .expect("account_failed with accountable usage must reconcile");
+        assert_eq!(governor.reconcile_calls(), 1);
+        assert_eq!(
+            governor.release_calls(),
+            0,
+            "accountable failed usage reconciles; it must not also release or double-release on Drop"
+        );
+    }
+
+    #[test]
+    fn reservation_guard_account_failed_non_accountable_releases_once() {
+        let governor = RecordingGovernor::default();
+        let id = ResourceReservationId::new();
+        let guard = ReservationGuard::new(&governor, id);
+        // No usage → release path; guard consumed, so Drop does not fire again.
+        guard
+            .account_failed(None, || DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::Resource,
+            })
+            .expect("account_failed with no usage releases and returns Ok");
+        assert_eq!(
+            governor.release_calls(),
+            1,
+            "non-accountable failed usage must release exactly once"
+        );
+        assert_eq!(governor.reconcile_calls(), 0);
+    }
+
+    #[test]
+    fn reservation_guard_disarm_suppresses_drop_release() {
+        let governor = RecordingGovernor::default();
+        let id = ResourceReservationId::new();
+        let guard = ReservationGuard::new(&governor, id);
+        let returned = guard.disarm();
+        assert_eq!(returned, id, "disarm returns the reservation id");
+        assert_eq!(
+            governor.release_calls(),
+            0,
+            "a disarmed guard must not release on Drop — the caller owns settlement"
+        );
+        assert_eq!(governor.reconcile_calls(), 0);
+    }
 
     // ---------------------------------------------------------------------------
     // WAT fixtures shared by caller-path WASM execution tests.
