@@ -1415,7 +1415,10 @@ mod postgres_tests {
             .expect_err("version CAS on a missing path must fail");
         match err {
             FilesystemError::VersionMismatch { found, .. } => {
-                assert!(found.is_none(), "missing path should report no found version, got: {found:?}");
+                assert!(
+                    found.is_none(),
+                    "missing path should report no found version, got: {found:?}"
+                );
             }
             other => panic!("expected VersionMismatch, got: {other:?}"),
         }

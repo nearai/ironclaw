@@ -1268,22 +1268,25 @@ async fn postgres_put_with_client(
 /// `Err(diagnose_put_failure(..).await?)` — the `?` propagates a diagnosis-time
 /// backend error, and the `Err(..)` surfaces the diagnosed error.
 ///
-/// **Classification is best-effort and reflects current state, not the exact
-/// snapshot that failed the write.** The write's directory guard is enforced
-/// atomically within the single statement, so no incorrect write can ever
-/// commit — these follow-up reads only choose *which error variant* to report
-/// on an already-failed write. A concurrent writer mutating the directory/child
-/// row between the failed write and these reads can therefore flip the variant,
-/// but the reported variant always matches present reality, which is exactly
-/// what the canonical CAS-retry caller needs for its next attempt. We
+/// **Classification is best-effort: it only reflects what these follow-up reads
+/// observe, not the exact snapshot that failed the write.** This diagnosis runs
+/// purely to pick *which error variant* to report on an already-failed write —
+/// it never writes, so it cannot itself corrupt state. A concurrent writer
+/// mutating the directory/child row between the failed write and these reads can
+/// flip the variant; the reported variant reflects the reads' observed state,
+/// which is sufficient for the canonical CAS-retry caller's next attempt. We
 /// deliberately do not wrap the write + diagnosis in a transaction or higher
 /// isolation: that would add a serialization-retry error mode (and cost) to a
-/// rare path for no correctness gain.
+/// rare path for no gain in *this* classification.
 ///
-/// This is benign *only because* the directory guard is atomic with the write.
-/// That atomicity is pinned by `put_statements_are_single_round_trip` +
-/// `put_statements_fold_in_directory_guard`; if either ever fails, the race
-/// below is no longer cosmetic and this best-effort diagnosis must be revisited.
+/// Scope note: the put write statement evaluates its directory guard against a
+/// single snapshot, which removes the old separate-pre-check-then-write TOCTOUs
+/// for the *same* path. It does NOT serialize concurrent writes to *different*
+/// parent/child paths (e.g. `put(/a)` racing `put(/a/b)`), so the file-vs-dir
+/// invariant can still be violated under cross-path write-skew. That gap is
+/// pre-existing (the old 3-read pre-check had a wider window) and tracked
+/// separately — see `put_statements_are_single_round_trip` for the boundary of
+/// what the single-statement guard does and does not guarantee.
 #[cfg(feature = "postgres")]
 async fn diagnose_put_failure(
     client: &deadpool_postgres::Object,
@@ -1705,23 +1708,24 @@ mod tests {
     /// successful put costs one round-trip. This guards against a regression
     /// re-splitting the pre-check back out into separate queries.
     ///
-    /// **This is a correctness canary, not just a perf check.** Together with
-    /// `put_statements_fold_in_directory_guard` it pins the *atomicity* of the
-    /// directory invariant: the guard predicates (`NOT EXISTS` descendant scan,
-    /// `ON CONFLICT` / `is_dir = FALSE`) are evaluated in the *same* statement
-    /// that performs the write, against one consistent snapshot. That atomicity
-    /// is what makes the best-effort classification in `diagnose_put_failure`
-    /// safe (see its doc): the follow-up reads can race a concurrent writer, but
-    /// because no bad write can commit, the race only mislabels an
-    /// already-failed write's error variant — it never corrupts data.
+    /// What this pins, precisely: the directory guard is evaluated in the *same*
+    /// statement that performs the write (one round-trip), against one snapshot —
+    /// rather than as a separate pre-check `SELECT` followed by the write. That
+    /// is the property the PR delivers, and keeping the guard folded in is what
+    /// makes the rare-path error classification in `diagnose_put_failure`
+    /// coherent (same-snapshot guard, no separate-pre-check window for the same
+    /// path).
     ///
-    /// If a future change moves a guard back out into a separate pre-check
-    /// `SELECT`, this test (or its sibling) fails — and that failure is the
-    /// signal that the TOCTOU window has stopped being benign: a concurrent
-    /// `create_dir_all(path)` landing between the pre-check and the write would
-    /// let a file be written *over* a directory, committing a state the
-    /// invariant exists to forbid. Keep the guard in the write; do not "optimize"
-    /// it into a prior read.
+    /// What this does NOT pin — read before relying on it: single-statement
+    /// evaluation is not isolation. `NOT EXISTS` is a snapshot predicate with no
+    /// range lock, so concurrent writes to *different* parent/child paths
+    /// (`put(/a)` racing `put(/a/b)`) can each pass their own guard and both
+    /// commit, leaving `/a` a file with a descendant — the file-vs-directory
+    /// invariant violated by write-skew. This gap is pre-existing (the old
+    /// 3-read pre-check had a wider window) and closing it requires path-prefix
+    /// serialization across all backends (advisory lock / SERIALIZABLE + retry),
+    /// which is out of scope for a round-trip optimization. Tracked separately;
+    /// do not read this test as a concurrency guarantee.
     #[test]
     fn put_statements_are_single_round_trip() {
         for (name, sql) in [
@@ -1732,10 +1736,9 @@ mod tests {
             assert_eq!(
                 top_level_statement_count(sql),
                 1,
-                "{name} put must be a single statement (one round-trip). A split \
-                 here breaks directory-guard atomicity: a concurrent \
-                 create_dir_all() between a separate pre-check and the write \
-                 could let a file commit over a directory. Got: {sql}"
+                "{name} put must be a single statement (one round-trip); a split \
+                 back into a separate pre-check + write reintroduces the same-path \
+                 check-then-write window this PR removed. Got: {sql}"
             );
         }
     }
