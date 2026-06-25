@@ -121,6 +121,11 @@ Reducer rules:
   capability activity must carry the same sanitized `error_kind` so refresh and
   replay paths can render refusal as a neutral declined state instead of a
   generic failure.
+- generic lifecycle projections expose only redacted lifecycle facts. Internal
+  resolver refs such as accepted-message refs, source/reply binding refs, and
+  gate refs remain in the lifecycle event/reducer substrate; reducers that need
+  them must use the raw reducer service, and those refs must not be replayed
+  through the generic public lifecycle projection surface.
 - product-facing gate projection rows must carry the run identity and gate kind
   needed to resolve the gate. When the gate is tied to a parked capability
   activity, the row also carries the stable invocation id. Auth gate rows may
@@ -132,8 +137,9 @@ Reducer rules:
   payloads for immediate UI affordances such as OAuth URLs or approval context,
   but those prompt payloads are enrichments. Approval request details remain
   prompt-only unless a product adapter defines an explicit redaction contract;
-  replay/rebase reconstruction must still work from the projection gate row's
-  own `run_id`, `gate_kind`, `gate_ref`, and any product-safe auth context.
+  replay/rebase reconstruction must still work from the product gate row's own
+  `run_id`, `gate_kind`, `gate_ref`, and any product-safe auth context. This is
+  a product gate surface, not the generic lifecycle projection surface.
 - product-facing model reasoning projections must use model-visible-sanitized
   reasoning deltas only. They are live UI hints, not canonical transcript,
   checkpoint, audit, or replay state.

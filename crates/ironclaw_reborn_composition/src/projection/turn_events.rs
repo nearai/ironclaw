@@ -21,7 +21,7 @@ use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
     GateRef, GetRunStateRequest, SanitizedFailure, TurnActor, TurnBlockedGateKind, TurnCoordinator,
     TurnError, TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError,
-    TurnEventProjectionRequest, TurnEventProjectionService, TurnEventProjectionSource,
+    TurnEventProjectionRequest, TurnEventProjectionSource, TurnEventReducerService,
     TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
     run_profile::{
         SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
@@ -73,7 +73,7 @@ pub(super) enum TurnEventBridge {
     #[default]
     Disabled,
     Enabled {
-        service: Arc<TurnEventProjectionService<dyn TurnEventProjectionSource>>,
+        service: Arc<TurnEventReducerService<dyn TurnEventProjectionSource>>,
         coordinator: Arc<dyn TurnCoordinator>,
         approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
         failure_explainer: Arc<dyn FailureExplanationProvider>,
@@ -116,7 +116,7 @@ impl TurnEventBridge {
         approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
     ) -> Self {
         Self::Enabled {
-            service: Arc::new(TurnEventProjectionService::new(source)),
+            service: Arc::new(TurnEventReducerService::new(source)),
             coordinator,
             approval_requests,
             failure_explainer: Arc::new(NoopFailureExplanationProvider),

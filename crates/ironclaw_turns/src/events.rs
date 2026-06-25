@@ -124,16 +124,19 @@ impl TurnLifecycleEvent {
 
     /// Return the transport-facing lifecycle event view.
     ///
-    /// Internal projection consumers need gate metadata to materialize
-    /// product-facing pending-gate rows. Public lifecycle snapshots still strip
-    /// owner identity; gate refs are metadata-safe opaque resolver ids and are
-    /// required for replayable gate projections.
-    pub fn into_public_projection_entry(mut self) -> Self {
-        if let Some(gate) = &mut self.blocked_gate {
-            gate.credential_requirements.clear();
+    /// `TurnLifecycleEvent` is the internal event record and may carry raw
+    /// resolver refs. Public lifecycle projections expose only redacted status
+    /// facts; reducers that need raw refs must use [`TurnEventReducerService`].
+    pub fn into_public_projection_entry(self) -> TurnLifecycleProjectionEntry {
+        TurnLifecycleProjectionEntry {
+            cursor: self.cursor,
+            scope: self.scope,
+            occurred_at: self.occurred_at,
+            run_id: self.run_id,
+            status: self.status,
+            kind: self.kind,
+            sanitized_reason: self.sanitized_reason,
         }
-        self.owner_user_id = None;
-        self
     }
 }
 
@@ -242,7 +245,27 @@ pub struct TurnEventProjectionRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnLifecycleProjectionEntry {
+    pub cursor: EventCursor,
+    pub scope: TurnScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at: Option<Timestamp>,
+    pub run_id: TurnRunId,
+    pub status: TurnStatus,
+    pub kind: TurnEventKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sanitized_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnEventProjectionSnapshot {
+    pub entries: Vec<TurnLifecycleProjectionEntry>,
+    pub next_cursor: TurnEventProjectionCursor,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnEventReducerSnapshot {
     pub entries: Vec<TurnLifecycleEvent>,
     pub next_cursor: TurnEventProjectionCursor,
     pub truncated: bool,
@@ -287,6 +310,13 @@ where
     source: Arc<S>,
 }
 
+pub struct TurnEventReducerService<S>
+where
+    S: TurnEventProjectionSource + ?Sized,
+{
+    source: Arc<S>,
+}
+
 impl<S> TurnEventProjectionService<S>
 where
     S: TurnEventProjectionSource + ?Sized,
@@ -299,69 +329,117 @@ where
         &self,
         request: TurnEventProjectionRequest,
     ) -> Result<TurnEventProjectionSnapshot, TurnEventProjectionError> {
-        self.read(request).await
+        read_public(self.source.as_ref(), request).await
     }
 
     pub async fn updates(
         &self,
         request: TurnEventProjectionRequest,
     ) -> Result<TurnEventProjectionSnapshot, TurnEventProjectionError> {
-        self.read(request).await
+        read_public(self.source.as_ref(), request).await
+    }
+}
+
+impl<S> TurnEventReducerService<S>
+where
+    S: TurnEventProjectionSource + ?Sized,
+{
+    pub fn new(source: Arc<S>) -> Self {
+        Self { source }
     }
 
-    async fn read(
+    /// Return raw scoped lifecycle events for projection reducers.
+    ///
+    /// This service preserves internal resolver refs such as gate refs so reducers
+    /// can materialize product-specific read models. Do not expose its entries
+    /// directly across transport or product API boundaries.
+    pub async fn snapshot(
         &self,
         request: TurnEventProjectionRequest,
-    ) -> Result<TurnEventProjectionSnapshot, TurnEventProjectionError> {
-        if request.limit == 0 || request.limit > MAX_TURN_EVENT_PROJECTION_LIMIT {
-            return Err(TurnEventProjectionError::InvalidRequest {
-                reason: "limit must be between 1 and MAX_TURN_EVENT_PROJECTION_LIMIT",
-            });
-        }
-        if let Some(cursor) = request.after.as_ref()
-            && cursor.scope != request.scope
-        {
-            return Err(TurnEventProjectionError::RebaseRequired {
-                requested: Box::new(cursor.clone()),
-                earliest: Box::new(TurnEventProjectionCursor::origin_for_scope(
-                    request.scope.clone(),
-                )),
-            });
-        }
-        let after = request.after.as_ref().map(|cursor| cursor.event);
-        let page = self
-            .source
-            .read_turn_events_after(
-                &request.scope,
-                request.owner_user_id.as_ref(),
-                after,
-                request.limit,
-            )
-            .await
-            .map_err(|_| TurnEventProjectionError::Source {
-                operation: "read_turn_events_after",
-            })?;
-        if let Some(rebase_cursor) = page.rebase_required {
-            return Err(TurnEventProjectionError::RebaseRequired {
-                requested: Box::new(request.after.unwrap_or_else(|| {
-                    TurnEventProjectionCursor::origin_for_scope(request.scope.clone())
-                })),
-                earliest: Box::new(TurnEventProjectionCursor::for_scope(
-                    request.scope,
-                    rebase_cursor,
-                )),
-            });
-        }
-        Ok(TurnEventProjectionSnapshot {
-            entries: page
-                .entries
-                .into_iter()
-                .map(TurnLifecycleEvent::into_public_projection_entry)
-                .collect(),
-            next_cursor: TurnEventProjectionCursor::for_scope(request.scope, page.next_cursor),
-            truncated: page.truncated,
-        })
+    ) -> Result<TurnEventReducerSnapshot, TurnEventProjectionError> {
+        read_reducer(self.source.as_ref(), request).await
     }
+
+    /// Return raw scoped lifecycle updates for projection reducers.
+    ///
+    /// See [`Self::snapshot`] for the boundary contract.
+    pub async fn updates(
+        &self,
+        request: TurnEventProjectionRequest,
+    ) -> Result<TurnEventReducerSnapshot, TurnEventProjectionError> {
+        read_reducer(self.source.as_ref(), request).await
+    }
+}
+
+async fn read_public<S>(
+    source: &S,
+    request: TurnEventProjectionRequest,
+) -> Result<TurnEventProjectionSnapshot, TurnEventProjectionError>
+where
+    S: TurnEventProjectionSource + ?Sized,
+{
+    let snapshot = read_reducer(source, request).await?;
+    Ok(TurnEventProjectionSnapshot {
+        entries: snapshot
+            .entries
+            .into_iter()
+            .map(TurnLifecycleEvent::into_public_projection_entry)
+            .collect(),
+        next_cursor: snapshot.next_cursor,
+        truncated: snapshot.truncated,
+    })
+}
+
+async fn read_reducer<S>(
+    source: &S,
+    request: TurnEventProjectionRequest,
+) -> Result<TurnEventReducerSnapshot, TurnEventProjectionError>
+where
+    S: TurnEventProjectionSource + ?Sized,
+{
+    if request.limit == 0 || request.limit > MAX_TURN_EVENT_PROJECTION_LIMIT {
+        return Err(TurnEventProjectionError::InvalidRequest {
+            reason: "limit must be between 1 and MAX_TURN_EVENT_PROJECTION_LIMIT",
+        });
+    }
+    if let Some(cursor) = request.after.as_ref()
+        && cursor.scope != request.scope
+    {
+        return Err(TurnEventProjectionError::RebaseRequired {
+            requested: Box::new(cursor.clone()),
+            earliest: Box::new(TurnEventProjectionCursor::origin_for_scope(
+                request.scope.clone(),
+            )),
+        });
+    }
+    let after = request.after.as_ref().map(|cursor| cursor.event);
+    let page = source
+        .read_turn_events_after(
+            &request.scope,
+            request.owner_user_id.as_ref(),
+            after,
+            request.limit,
+        )
+        .await
+        .map_err(|_| TurnEventProjectionError::Source {
+            operation: "read_turn_events_after",
+        })?;
+    if let Some(rebase_cursor) = page.rebase_required {
+        return Err(TurnEventProjectionError::RebaseRequired {
+            requested: Box::new(request.after.unwrap_or_else(|| {
+                TurnEventProjectionCursor::origin_for_scope(request.scope.clone())
+            })),
+            earliest: Box::new(TurnEventProjectionCursor::for_scope(
+                request.scope,
+                rebase_cursor,
+            )),
+        });
+    }
+    Ok(TurnEventReducerSnapshot {
+        entries: page.entries,
+        next_cursor: TurnEventProjectionCursor::for_scope(request.scope, page.next_cursor),
+        truncated: page.truncated,
+    })
 }
 
 pub(crate) fn project_turn_events(
@@ -433,7 +511,7 @@ mod tests {
         events::{
             EventCursor, TurnBlockedGateKind, TurnBlockedGateMetadata, TurnEventKind,
             TurnEventPage, TurnEventProjectionService, TurnEventProjectionSource,
-            TurnLifecycleEvent, project_turn_events,
+            TurnEventReducerService, TurnLifecycleEvent, project_turn_events,
         },
     };
 
@@ -547,19 +625,17 @@ mod tests {
     }
 
     #[test]
-    fn public_projection_entry_strips_owner_but_preserves_gate_metadata() {
+    fn public_projection_entry_strips_owner_and_raw_gate_metadata() {
         let event = blocked_event(1, scope("thread-a"));
+        let owner = event.owner_user_id.clone();
+        assert!(owner.is_some());
+        assert!(event.blocked_gate.is_some());
 
         let public = event.into_public_projection_entry();
 
-        let public_gate = public.blocked_gate.expect("gate metadata");
-        assert_eq!(
-            public_gate.gate_ref,
-            GateRef::new("gate:approval-a").expect("gate ref")
-        );
-        assert_eq!(public_gate.gate_kind, TurnBlockedGateKind::Approval);
-        assert!(public_gate.credential_requirements.is_empty());
-        assert_eq!(public.owner_user_id, None);
+        let serialized = serde_json::to_string(&public).expect("serialize public projection");
+        assert!(!serialized.contains("gate:approval-a"));
+        assert!(!serialized.contains("owner-a"));
         assert_eq!(
             public.sanitized_reason.as_deref(),
             Some("approval_required")
@@ -586,7 +662,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn projection_service_preserves_gate_metadata_in_snapshot() {
+    async fn projection_service_redacts_raw_gate_metadata_in_public_snapshot() {
         let scope = scope("thread-a");
         let source = MemoryProjectionSource {
             events: vec![blocked_event(1, scope.clone())],
@@ -604,7 +680,43 @@ mod tests {
             .unwrap();
 
         assert_eq!(snapshot.entries.len(), 1);
-        assert!(snapshot.entries[0].blocked_gate.is_some());
-        assert_eq!(snapshot.entries[0].owner_user_id, None);
+        let serialized = serde_json::to_string(&snapshot).expect("serialize public snapshot");
+        assert!(!serialized.contains("gate:approval-a"));
+        assert!(!serialized.contains("owner-a"));
+        assert_eq!(snapshot.entries[0].kind, TurnEventKind::Blocked);
+    }
+
+    #[tokio::test]
+    async fn reducer_service_snapshot_preserves_raw_gate_metadata() {
+        let scope = scope("thread-a");
+        let source = MemoryProjectionSource {
+            events: vec![blocked_event(1, scope.clone())],
+        };
+        let service = TurnEventReducerService::new(std::sync::Arc::new(source));
+
+        let snapshot = service
+            .snapshot(crate::events::TurnEventProjectionRequest {
+                scope,
+                owner_user_id: None,
+                after: None,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.entries.len(), 1);
+        let gate = snapshot.entries[0]
+            .blocked_gate
+            .as_ref()
+            .expect("reducer service snapshot keeps gate metadata");
+        assert_eq!(
+            gate.gate_ref,
+            GateRef::new("gate:approval-a").expect("gate ref")
+        );
+        assert_eq!(gate.gate_kind, TurnBlockedGateKind::Approval);
+        assert_eq!(
+            snapshot.entries[0].owner_user_id,
+            Some(UserId::new("owner-a").expect("owner"))
+        );
     }
 }
