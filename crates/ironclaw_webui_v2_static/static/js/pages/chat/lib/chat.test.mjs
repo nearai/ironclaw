@@ -66,6 +66,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     ConnectionStatus() {},
     EmptyState() {},
     KeyboardShortcuts() {},
+    Link() {},
     MessageList() {},
     RecoveryNotice() {},
     SuggestionChips() {},
@@ -276,7 +277,7 @@ test("Chat renders a timeline load failure as an alert instead of the empty land
 });
 
 test("Chat links to scoped logs for the active thread run", () => {
-  const { tree } = renderChat({
+  const { tree, components } = renderChat({
     hookState: {
       messages: [{ id: "message-1" }],
       isProcessing: true,
@@ -301,11 +302,12 @@ test("Chat links to scoped logs for the active thread run", () => {
     },
   });
 
-  const logsLink = findNode(tree, (node) =>
-    node.strings.some((part) => part.includes("<a") && part.includes("href=")),
-  );
+  const logsLink = findComponent(tree, components.Link);
   assert.ok(logsLink, "active chat should render a scoped logs link");
-  assert.ok(logsLink.values.includes("/v2/logs?thread_id=thread-1&run_id=run-1"));
+  assert.equal(
+    componentProps(logsLink, components.Link).to,
+    "/v2/logs?thread_id=thread-1&run_id=run-1",
+  );
   assert.ok(logsLink.values.includes("nav.logs"));
 });
 

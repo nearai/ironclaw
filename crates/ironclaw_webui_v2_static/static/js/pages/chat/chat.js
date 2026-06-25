@@ -1,4 +1,5 @@
 import { React, html } from "../../lib/html.js";
+import { Link } from "react-router";
 import { useT } from "../../lib/i18n.js";
 import {
   THREAD_STATE,
@@ -254,12 +255,12 @@ export function Chat({
               <div className="flex flex-wrap items-center gap-3">
                 <${TypingIndicator} />
                 ${activeRunLogsPath && html`
-                  <a
-                    href=${activeRunLogsPath}
+                  <${Link}
+                    to=${activeRunLogsPath}
                     className="text-xs font-medium text-signal hover:underline"
                   >
                     ${t("nav.logs")}
-                  </a>
+                  <//>
                 `}
               </div>
             `}
