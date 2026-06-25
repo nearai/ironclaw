@@ -54,7 +54,8 @@ use ironclaw_turns::{
         AgentLoopHostError, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
         InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
         LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext, NoOpBudgetAccountant,
-        NoOpPolicyGuard, PromptMode, ProviderToolCall, VisibleCapabilityRequest,
+        NoOpPolicyGuard, PromptMode, ProviderToolCall, RegisterProviderToolCallRequest,
+        VisibleCapabilityRequest,
     },
 };
 
@@ -467,6 +468,7 @@ async fn local_dev_adapter_invokes_builtin_echo_through_host_runtime_port() {
 
     let outcome = capability_port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: capability_id.clone(),
             input_ref,
@@ -583,6 +585,7 @@ async fn local_dev_adapter_invokes_builtin_shell_through_product_live_surface() 
 
     let outcome = capability_port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: capability_id.clone(),
             input_ref,
@@ -670,6 +673,7 @@ async fn local_dev_adapter_invokes_extension_scoped_grants_with_loop_driver_prin
 
     let outcome = capability_port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
             input_ref,
@@ -763,7 +767,9 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
         signature: Some("sig-provider-tool".to_string()),
     };
     let candidate = capability_port
-        .register_provider_tool_call(provider_tool_call.clone())
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+            provider_tool_call.clone(),
+        ))
         .await
         .unwrap();
 
@@ -787,7 +793,7 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
         .await
         .unwrap();
     let other_candidate = other_capability_port
-        .register_provider_tool_call(provider_tool_call)
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call))
         .await
         .unwrap();
     assert_ne!(
@@ -801,6 +807,7 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
 
     let outcome = capability_port
         .invoke_capability(CapabilityInvocation {
+            activity_id: candidate.activity_id,
             surface_version: candidate.surface_version,
             capability_id,
             input_ref: candidate.input_ref,
@@ -1042,6 +1049,7 @@ async fn local_dev_adapter_invokes_read_file_with_configured_mounts() {
 
     let outcome = capability_port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
             input_ref,

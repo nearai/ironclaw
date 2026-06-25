@@ -92,6 +92,7 @@ fn approval_blocked_mapping(
         reason: BlockedReason::Approval {
             gate_ref: GateRef::new(gate_ref.as_str()).unwrap(),
         },
+        blocked_activity_id: None,
     })
 }
 
@@ -106,6 +107,7 @@ fn dependent_blocked_mapping(
         reason: BlockedReason::AwaitDependentRun {
             gate_ref: GateRef::new(gate_ref.as_str()).unwrap(),
         },
+        blocked_activity_id: None,
     })
 }
 
@@ -6606,6 +6608,7 @@ impl TurnRunTransitionPort for AtomicLoopExitPort {
             received_at: received_at(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),

@@ -2445,9 +2445,9 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: ironclaw_turns::run_profile::RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(tool_call).await
+        self.inner.register_provider_tool_call(request).await
     }
 
     async fn visible_capabilities(
@@ -3333,10 +3333,12 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        call: ProviderToolCall,
+        request: ironclaw_turns::run_profile::RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let call = request.tool_call;
         let capability_id = self.primary_capability_id();
         Ok(CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
             capability_id: capability_id.clone(),
@@ -3636,6 +3638,7 @@ pub fn trace_tool_call_response() -> ironclaw_loop_support::HostManagedModelResp
         safe_reasoning_deltas: Vec::new(),
         usage: None,
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
             capability_id: CapabilityId::new(TEST_CAPABILITY_ID).expect("valid capability id"),

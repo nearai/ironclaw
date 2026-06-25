@@ -5,9 +5,9 @@ use ironclaw_host_api::RuntimeCredentialAuthRequirement;
 use serde::{Deserialize, Serialize, de};
 
 use crate::{
-    BlockedReason, GateRef, LoopDiagnosticRef, LoopExitId, LoopGateRef, LoopMessageRef,
-    LoopResultRef, LoopUsageSummaryRef, ResolvedRunProfile, SanitizedFailure, TurnCheckpointId,
-    TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
+    BlockedReason, CapabilityActivityId, GateRef, LoopDiagnosticRef, LoopExitId, LoopGateRef,
+    LoopMessageRef, LoopResultRef, LoopUsageSummaryRef, ResolvedRunProfile, SanitizedFailure,
+    TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         ApplyValidatedLoopExitRequest, ClaimedTurnRun, TurnRunTransitionPort, TurnRunnerOutcome,
@@ -280,6 +280,7 @@ impl LoopExit {
                             checkpoint_id: exit.checkpoint_id,
                             state_ref: exit.state_ref,
                             reason,
+                            blocked_activity_id: exit.blocked_activity_id,
                         },
                     ),
                     Err(()) => invalid_exit_decision(
@@ -355,6 +356,8 @@ pub enum LoopCompletionKind {
 pub struct LoopBlocked {
     pub kind: LoopBlockedKind,
     pub gate_ref: LoopGateRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_activity_id: Option<CapabilityActivityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     pub checkpoint_id: TurnCheckpointId,

@@ -461,7 +461,7 @@ test("useChat clears transient run and gate state during thread switch render", 
   ]);
 });
 
-test("useChat.approve deny marks the current gated tool failed before resume", async () => {
+test("useChat.approve deny marks the current gated tool declined before resume", async () => {
   const threadId = "thread-1";
   const runId = "run-1";
   const gateRef = "gate-1";
@@ -487,7 +487,13 @@ test("useChat.approve deny marks the current gated tool failed before resume", a
       initialByIndex: new Map([
         [2, { runId, threadId, status: "awaiting_gate" }],
         [4, false],
-        [5, { runId, gateRef, kind: "gate", toolName: "builtin.shell" }],
+        [5, {
+          runId,
+          gateRef,
+          kind: "gate",
+          invocationId: "invocation-1",
+          toolName: "builtin.shell",
+        }],
       ]),
       setCalls: stateUpdates,
     }),
@@ -548,8 +554,9 @@ test("useChat.approve deny marks the current gated tool failed before resume", a
     always: false,
   });
   assert.equal(renderedMessages.length, 1);
-  assert.equal(renderedMessages[0].toolStatus, "error");
-  assert.equal(renderedMessages[0].toolError, "authorization");
+  assert.equal(renderedMessages[0].toolStatus, "declined");
+  assert.equal(renderedMessages[0].toolError, "gate_declined");
+  assert.equal(renderedMessages[0].toolErrorKind, "gate_declined");
   assert.equal(renderedMessages[0].gateRef, gateRef);
   assert.deepEqual(JSON.parse(JSON.stringify(stateUpdates.slice(-3))), [
     { index: 5, value: null },
@@ -574,7 +581,13 @@ test("useChat.approve deny treats queued response without outcome as resumed", a
       initialByIndex: new Map([
         [2, { runId, threadId, status: "awaiting_gate" }],
         [4, false],
-        [5, { runId, gateRef, kind: "gate", toolName: "nearai.web_search" }],
+        [5, {
+          runId,
+          gateRef,
+          kind: "gate",
+          invocationId: "invocation-queued-response",
+          toolName: "nearai.web_search",
+        }],
       ]),
       setCalls: stateUpdates,
     }),
@@ -644,7 +657,13 @@ test("useChat.approve treats already_terminal false as resumed", async () => {
       initialByIndex: new Map([
         [2, { runId, threadId, status: "awaiting_gate" }],
         [4, false],
-        [5, { runId, gateRef, kind: "gate", toolName: "nearai.web_search" }],
+        [5, {
+          runId,
+          gateRef,
+          kind: "gate",
+          invocationId: "invocation-terminal-false",
+          toolName: "nearai.web_search",
+        }],
       ]),
       setCalls: stateUpdates,
     }),
@@ -724,7 +743,13 @@ test("useChat.approve deny with already_terminal true does not synthesize failed
       initialByIndex: new Map([
         [2, { runId, threadId, status: "awaiting_gate" }],
         [4, false],
-        [5, { runId, gateRef, kind: "gate", toolName: "nearai.web_search" }],
+        [5, {
+          runId,
+          gateRef,
+          kind: "gate",
+          invocationId: "invocation-terminal-true",
+          toolName: "nearai.web_search",
+        }],
       ]),
       setCalls: stateUpdates,
     }),
@@ -1267,7 +1292,13 @@ function createResolveGateContext({
 } = {}) {
   // useChat state call order: cooldownUntil(0), now(1), activeRun(2),
   // channelConnectAction(3), isProcessing(4), pendingGate(5).
-  const pendingGate = { runId: "run-1", gateRef: "gate-1" };
+  const pendingGate = {
+    runId: "run-1",
+    gateRef: "gate-1",
+    kind: "gate",
+    invocationId: "invocation-1",
+    toolName: "web-access.search",
+  };
   const context = {
     AbortController,
     Date,
