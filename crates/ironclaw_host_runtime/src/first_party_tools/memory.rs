@@ -18,10 +18,9 @@ use ironclaw_memory::{
     MemoryWriteStatus, PromptSafetyReasonCode, PromptWriteOperation, PromptWriteSafetyEvent,
     PromptWriteSafetyEventKind, PromptWriteSafetyEventSink,
 };
-use ironclaw_memory_native::NativeMemoryService;
 use serde_json::{Value, json};
 
-use crate::memory_binding::MemoryProviderBinding;
+use crate::memory_provider::MemoryServiceResolver;
 use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest, FirstPartyCapabilityResult};
 
 use super::{first_party_capability_manifest, input_error, operation_error, resource_profile};
@@ -39,10 +38,11 @@ struct MemoryServices {
 
 #[derive(Default)]
 pub(super) struct MemoryCapabilityState {
-    /// Resolved memory provider binding for the document-store profile (issue
-    /// #3537). `Default` is `Native`, preserving pre-binding behavior until
-    /// composition hands down a config-resolved binding.
-    binding: MemoryProviderBinding,
+    /// Single construction point for the memory provider (issue #3537). The
+    /// tools build their `MemoryService` only through this resolver; `Default`
+    /// is native, preserving pre-binding behavior until composition hands down a
+    /// config-resolved resolver.
+    resolver: MemoryServiceResolver,
     cached_memory_service: Mutex<Option<CachedMemoryService>>,
     #[cfg(test)]
     memory_service_for_test: Option<Arc<dyn MemoryService>>,
@@ -134,10 +134,10 @@ fn memory_services(
 }
 
 impl MemoryCapabilityState {
-    /// Construct with a resolved memory provider binding (issue #3537).
-    pub(crate) fn with_binding(binding: MemoryProviderBinding) -> Self {
+    /// Construct with a resolved memory provider resolver (issue #3537).
+    pub(crate) fn with_resolver(resolver: MemoryServiceResolver) -> Self {
         Self {
-            binding,
+            resolver,
             ..Default::default()
         }
     }
@@ -149,17 +149,6 @@ impl MemoryCapabilityState {
         #[cfg(test)]
         if let Some(service) = &self.memory_service_for_test {
             return Ok(Arc::clone(service));
-        }
-
-        // Fail closed: the binding decides which provider serves the document
-        // store. Only the host-bundled native provider is constructable here;
-        // a disabled or third-party binding surfaces a model-visible error
-        // rather than silently falling back to native.
-        match &self.binding {
-            MemoryProviderBinding::Native => {}
-            MemoryProviderBinding::Disabled | MemoryProviderBinding::ThirdParty { .. } => {
-                return Err(binding_unavailable_error());
-            }
         }
 
         let mut cached = self
@@ -182,10 +171,16 @@ impl MemoryCapabilityState {
             Arc::new(AuditPromptWriteSafetyEventSink { audit_sink })
                 as Arc<dyn PromptWriteSafetyEventSink>
         });
-        let service: Arc<dyn MemoryService> = Arc::new(NativeMemoryService::from_filesystem(
-            Arc::clone(&filesystem),
-            prompt_write_safety_event_sink,
-        ));
+        // Single construction point: the resolver builds the bound provider over
+        // this request's filesystem, or returns `None` (document store disabled
+        // or bound to an unimplemented third party) → fail closed with a
+        // model-visible error instead of silently using native.
+        let Some(service) = self
+            .resolver
+            .resolve_document_store(Arc::clone(&filesystem), prompt_write_safety_event_sink)
+        else {
+            return Err(binding_unavailable_error());
+        };
         *cached = Some(CachedMemoryService {
             filesystem,
             audit_sink,
@@ -197,7 +192,7 @@ impl MemoryCapabilityState {
     #[cfg(test)]
     pub(super) fn with_memory_service_for_test(memory_service: Arc<dyn MemoryService>) -> Self {
         Self {
-            binding: MemoryProviderBinding::Native,
+            resolver: MemoryServiceResolver::native(),
             cached_memory_service: Mutex::new(None),
             memory_service_for_test: Some(memory_service),
         }
@@ -537,6 +532,7 @@ mod tests {
         MemoryServiceSearchRequest, MemoryServiceSearchResponse, MemoryServiceSearchResult,
     };
 
+    use crate::memory_binding::MEMORY_DISABLED_BINDING_SENTINEL;
     use crate::{FirstPartyCapabilityRequest, InvocationServices, LocalHostProcessPort};
 
     use super::*;
@@ -640,10 +636,12 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_binding_fails_closed_at_dispatch() {
-        // Drive the real caller (dispatch -> service_for) with a Disabled
-        // binding (no test-override service), proving it fails closed instead
-        // of silently building the native provider.
-        let state = MemoryCapabilityState::with_binding(MemoryProviderBinding::Disabled);
+        // Drive the real caller (dispatch -> service_for -> resolver) with a
+        // resolver whose document store is disabled (no test-override service),
+        // proving it fails closed instead of silently building native.
+        let state = MemoryCapabilityState::with_resolver(document_store_resolver(
+            MEMORY_DISABLED_BINDING_SENTINEL,
+        ));
         let request = memory_request(
             MEMORY_SEARCH_CAPABILITY_ID,
             json!({"query": "search marker", "limit": 3}),
@@ -664,9 +662,7 @@ mod tests {
 
     #[tokio::test]
     async fn third_party_binding_fails_closed_at_dispatch() {
-        let state = MemoryCapabilityState::with_binding(MemoryProviderBinding::ThirdParty {
-            extension_id: ironclaw_host_api::ExtensionId::new("acme.honcho").unwrap(),
-        });
+        let state = MemoryCapabilityState::with_resolver(document_store_resolver("acme.honcho"));
         let request = memory_request(MEMORY_READ_CAPABILITY_ID, json!({"path": "notes/alpha.md"}));
 
         let err = dispatch(&state, &request)
@@ -676,5 +672,28 @@ mod tests {
             err.kind(),
             Some(ironclaw_host_api::RuntimeDispatchErrorKind::OperationFailed)
         );
+    }
+
+    /// A resolver whose document-store profile is bound to `extension_id`
+    /// (e.g. `memory.disabled` or a third party), for driving fail-closed
+    /// dispatch through the real resolver path.
+    fn document_store_resolver(extension_id: &str) -> MemoryServiceResolver {
+        use crate::memory_binding::{
+            MemoryBindingInput, MemoryBindingPolicy, MemoryDeploymentProfile,
+            MemoryProfileBindingEntry,
+        };
+        use crate::memory_profiles::MEMORY_DOCUMENT_STORE_PROFILE_ID;
+        use ironclaw_host_api::CapabilityProfileId;
+        let policy = MemoryBindingPolicy::resolve(MemoryBindingInput {
+            deployment: MemoryDeploymentProfile::LocalDev,
+            native_available: true,
+            bindings: vec![MemoryProfileBindingEntry {
+                profile_id: CapabilityProfileId::new(MEMORY_DOCUMENT_STORE_PROFILE_ID).unwrap(),
+                extension_id: extension_id.to_string(),
+            }],
+            overrides: Vec::new(),
+        })
+        .expect("policy resolves");
+        MemoryServiceResolver::from_policy(policy)
     }
 }

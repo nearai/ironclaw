@@ -3058,11 +3058,11 @@ pub async fn build_reborn_runtime(
         // otherwise `EmptyUserProfileSource` degrades gracefully to `None` (profile unknown).
         // `extension_filesystem` is the raw `Arc<LocalDevRootFilesystem>` (=
         // `CompositeRootFilesystem`) — the underlying RootFilesystem the workspace
-        // mounts are built from. `MemoryBackedUserProfileSource::from_filesystem`
-        // builds the native memory provider over it and reads the profile document
-        // through the provider-neutral `MemoryService::profile_read` (the provider
-        // owns scope/path resolution and resolves full virtual paths itself), so the
-        // raw `RootFilesystem` is correct here.
+        // mounts are built from. The `MemoryServiceResolver` builds the bound
+        // provider over it, and `MemoryBackedUserProfileSource` reads the profile
+        // document through the provider-neutral `MemoryService::profile_read` (the
+        // provider owns scope/path resolution and resolves full virtual paths
+        // itself), so the raw `RootFilesystem` is correct here.
         //
         // NOTE: this `Some(local_runtime) => real / None => Empty` guard intentionally
         // mirrors `identity_context_source` directly above. The production-graph path
@@ -3072,21 +3072,25 @@ pub async fn build_reborn_runtime(
         // single deferred follow-up (identity + profile together, to keep them paired);
         // do not wire only one of them here, or they will diverge. See issue #5013.
         //
-        // Profile reads honor the resolved document-store binding (issue #3537):
-        // build the native-backed profile source only when the document-store
-        // profile is bound to native. A disabled/third-party binding degrades to
-        // `Empty` (profile unknown) rather than silently reading the native
-        // provider, keeping profile reads consistent with the memory tools.
-        user_profile_source: match local_runtime {
-            Some(local_runtime) if local_runtime.memory_document_store_binding.is_native() => {
-                Arc::new(MemoryBackedUserProfileSourceAdapter(
-                    MemoryBackedUserProfileSource::from_filesystem(Arc::clone(
-                        &local_runtime.extension_filesystem,
-                    )
-                        as Arc<dyn ironclaw_filesystem::RootFilesystem>),
-                )) as Arc<dyn HostUserProfileSource>
-            }
-            _ => Arc::new(EmptyUserProfileSource) as Arc<dyn HostUserProfileSource>,
+        // Profile reads go through the same memory provider resolver as the
+        // memory tools (issue #3537): the profile source is native-backed only
+        // when the resolver yields a document-store provider. A disabled or
+        // third-party binding resolves to `None`, so this degrades to `Empty`
+        // (profile unknown) rather than silently reading native — keeping
+        // profile reads and tools consistent, from one construction point.
+        user_profile_source: match local_runtime.and_then(|local_runtime| {
+            local_runtime
+                .memory_service_resolver
+                .resolve_document_store(
+                    Arc::clone(&local_runtime.extension_filesystem)
+                        as Arc<dyn ironclaw_filesystem::RootFilesystem>,
+                    None,
+                )
+                .map(MemoryBackedUserProfileSource::new)
+        }) {
+            Some(source) => Arc::new(MemoryBackedUserProfileSourceAdapter(source))
+                as Arc<dyn HostUserProfileSource>,
+            None => Arc::new(EmptyUserProfileSource) as Arc<dyn HostUserProfileSource>,
         },
         model_policy_guard: None,
         model_budget_accountant,
