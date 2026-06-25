@@ -23,9 +23,10 @@ not a raw handle:
 
 - A first-party SQL/transaction storage port,
   `host.storage.sql_transaction.first_party`, is **HostBundled FirstParty only**.
-  It is declared as a `required_host_port` on every native memory capability and
-  validated against the host `HostPortCatalog` at manifest parse time (an
-  unknown port fails closed).
+  In the (deferred) SQL-backed variant it is declared as a `required_host_port`
+  on every native memory capability and validated against the host
+  `HostPortCatalog` at manifest parse time (an unknown port fails closed). The
+  live filesystem-backed manifest declares no host ports.
 - The `CapabilityHost` constructs a scoped `HostPortView` after
   auth/approval/obligation preparation and hands it to the first-party memory
   handler; the handler must not capture a raw service for a declared port.
@@ -43,8 +44,9 @@ not a raw handle:
 
 The vocabulary and contract are landed: the storage and audit ports
 (`host.storage.sql_transaction.first_party`, `host.events.audit`) are registered
-in `default_host_port_catalog()`, declared by the `ironclaw.memory.native`
-manifest, and validated. The **concrete `reborn_memory_*` dual-backend SQL
+in `default_host_port_catalog()`. The live `ironclaw.memory.native` manifest is
+filesystem-backed and declares **no** host ports; these stay catalogued
+vocabulary that the deferred SQL-backed variant will declare and validate against. The **concrete `reborn_memory_*` dual-backend SQL
 repository behind the storage port** is delivered behind the non-default
 `memory-native-*` feature gate. The reborn composition crates must not depend on
 the root `ironclaw` crate where the Postgres/libSQL backends live, so the
