@@ -22,6 +22,21 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing::debug;
 
+/// Canonical default for the scheduler's concurrent-run cap (the number of turn
+/// runs that may be `Running` at once on a single scheduler instance).
+///
+/// This is the single source of truth for the scheduler default. The production
+/// composition (`ironclaw_reborn`) always overrides the running config via
+/// [`TurnRunSchedulerConfig::with_max_concurrent_runs`] using its
+/// `DEFAULT_TURN_RUNNER_WORKER_COUNT` knob, which is itself *derived from* this
+/// constant — so the worker-count default and the scheduler cap are the same
+/// value by construction. (The derivation only works one way: `ironclaw_reborn`
+/// depends on `ironclaw_host_runtime`, not the reverse.)
+///
+/// `1` is a legal value but degenerate: it serializes every run through one
+/// permit. Keep this comfortably above 1.
+pub const DEFAULT_MAX_CONCURRENT_RUNS: usize = 16;
+
 #[derive(Debug, Clone)]
 pub struct TurnRunSchedulerConfig {
     max_concurrent_runs: usize,
@@ -35,7 +50,7 @@ pub struct TurnRunSchedulerConfig {
 impl Default for TurnRunSchedulerConfig {
     fn default() -> Self {
         Self {
-            max_concurrent_runs: 4,
+            max_concurrent_runs: DEFAULT_MAX_CONCURRENT_RUNS,
             poll_interval: Duration::from_secs(5),
             lease_recovery_interval: Duration::from_secs(10),
             runner_heartbeat_interval: Duration::from_secs(30),

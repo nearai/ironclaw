@@ -13,6 +13,18 @@
 
 - `turn_scheduler.rs` owns scheduler-backed run concurrency. It does not own the
   canonical loop tick or product inbound serialization.
+  - Concurrency invariant: the scheduler runs up to `max_concurrent_runs` runs in
+    parallel, one `tokio::spawn` + `OwnedSemaphorePermit` per run. The single
+    `TurnRunnerId` is the scheduler *instance*, not a per-run worker — seeing one
+    `TurnRunnerId` is expected and does NOT mean serial execution.
+  - `TurnRunSchedulerConfig::default().max_concurrent_runs` must equal
+    `DEFAULT_MAX_CONCURRENT_RUNS` (do not re-introduce a divergent literal —
+    `Default` previously hard-coded `4` while production used `16`). The
+    production worker-count default `ironclaw_reborn::DEFAULT_TURN_RUNNER_WORKER_COUNT`
+    is *derived from* `DEFAULT_MAX_CONCURRENT_RUNS`, so the scheduler cap and the
+    worker-count default are the same value by construction; keep the constant
+    above `1`. A configured `worker_count = 1` is legal but serializes all runs
+    through one slot — the CLI resolver warns on it.
 - `surface.rs` owns host-runtime capability-surface shaping and versions.
 - `production.rs` and `services.rs` compose runtime services and readiness
   evidence used by Reborn loop wiring.

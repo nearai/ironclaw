@@ -991,6 +991,19 @@ fn runner_settings(
             })?
         };
 
+        // A worker_count of 1 is legal but degenerate: it serializes every turn
+        // run through a single scheduler permit. Operators almost never want
+        // this for a multi-trigger / multi-user deployment. We honour the
+        // explicit value (silently overriding it would be surprising) but make
+        // the loss of concurrency loud at boot.
+        if settings.worker_count.get() == 1 {
+            tracing::warn!(
+                worker_count = 1,
+                "config file [runner].worker_count = 1 serializes all turn runs through one \
+                 scheduler slot; set it to >= 2 for concurrent runs"
+            );
+        }
+
         // Each cap: absent in the file → keep the struct default already in
         // `settings`; explicit `0` → "unlimited" sentinel (None); positive → cap.
         settings.max_concurrent_runs_per_user = resolve_concurrency_cap(
@@ -1101,6 +1114,81 @@ mod tests {
         let cfg = parse_runner_section(&toml);
         let settings = runner_settings(Some(&cfg)).expect("should succeed");
         assert_eq!(settings.worker_count.get(), MAX_WORKER_COUNT);
+    }
+
+    #[test]
+    fn runner_settings_worker_count_one_is_honoured() {
+        // `1` is a legal-but-degenerate value: the resolver must keep it (it
+        // does NOT silently override the operator), so the scheduler will be
+        // single-slot. The accompanying warn is asserted separately below.
+        let cfg = parse_runner_section("[runner]\nworker_count = 1\n");
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(settings.worker_count.get(), 1);
+    }
+
+    /// Run `runner_settings` for the given `[runner]` TOML under a capturing
+    /// tracing subscriber and return whether a WARN mentioning `worker_count`
+    /// was emitted. Driving the REAL resolver is the point — a unit test on the
+    /// predicate alone would not catch the warn being dropped from the path.
+    fn resolver_emits_worker_count_warn(runner_toml: &str) -> bool {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::Context;
+        use tracing_subscriber::prelude::*;
+
+        #[derive(Clone, Default)]
+        struct CaptureLayer {
+            events: Arc<Mutex<Vec<(tracing::Level, String)>>>,
+        }
+        struct MessageVisitor(String);
+        impl tracing::field::Visit for MessageVisitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+        impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                let mut visitor = MessageVisitor(String::new());
+                event.record(&mut visitor);
+                self.events
+                    .lock()
+                    .expect("lock")
+                    .push((*event.metadata().level(), visitor.0));
+            }
+        }
+
+        let layer = CaptureLayer::default();
+        let events = Arc::clone(&layer.events);
+        let subscriber = tracing_subscriber::registry().with(layer);
+
+        let cfg = parse_runner_section(runner_toml);
+        tracing::subscriber::with_default(subscriber, || {
+            runner_settings(Some(&cfg)).expect("should succeed");
+        });
+
+        events
+            .lock()
+            .expect("lock")
+            .iter()
+            .any(|(level, msg)| *level == tracing::Level::WARN && msg.contains("worker_count"))
+    }
+
+    #[test]
+    fn runner_settings_warns_on_degenerate_worker_count_one() {
+        assert!(
+            resolver_emits_worker_count_warn("[runner]\nworker_count = 1\n"),
+            "worker_count = 1 must emit a WARN about serialized runs"
+        );
+    }
+
+    #[test]
+    fn runner_settings_no_warn_on_normal_worker_count() {
+        assert!(
+            !resolver_emits_worker_count_warn("[runner]\nworker_count = 7\n"),
+            "a normal worker_count must NOT emit the serialization WARN"
+        );
     }
 
     #[test]

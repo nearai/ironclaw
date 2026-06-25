@@ -60,14 +60,17 @@ use crate::{
 
 /// Default number of turn-runner worker tasks spawned per runtime instance.
 ///
-/// Used by [`DefaultPlannedRuntimeConfig`] and [`TurnRunnerSettings`] so the
-/// value is defined exactly once and shared across all crates in the stack.
+/// Derived from the scheduler's own
+/// [`ironclaw_host_runtime::DEFAULT_MAX_CONCURRENT_RUNS`] so the worker-count
+/// default and the scheduler's concurrent-run cap are the same value by
+/// construction (no literal duplication, no drift). Used by
+/// [`DefaultPlannedRuntimeConfig`] and [`TurnRunnerSettings`].
 pub const DEFAULT_TURN_RUNNER_WORKER_COUNT: std::num::NonZeroUsize =
-    match std::num::NonZeroUsize::new(16) {
+    match std::num::NonZeroUsize::new(ironclaw_host_runtime::DEFAULT_MAX_CONCURRENT_RUNS) {
         Some(v) => v,
-        // 16 is a non-zero compile-time constant so this arm is never reached.
-        // `NonZeroUsize::MIN` (= 1) is used as a non-panicking fallback so the
-        // CI "no panics in production code" check stays green.
+        // DEFAULT_MAX_CONCURRENT_RUNS is a non-zero compile-time constant so this
+        // arm is never reached. `NonZeroUsize::MIN` (= 1) is a non-panicking
+        // fallback so the CI "no panics in production code" check stays green.
         None => std::num::NonZeroUsize::MIN,
     };
 
@@ -781,6 +784,25 @@ mod tests {
     use ironclaw_loop_support::{
         DecoratingLoopCapabilityPortFactory, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
     };
+
+    /// The worker-count default is derived from the scheduler's canonical
+    /// concurrency default, so the two are equal by construction. This test
+    /// documents and locks that contract — and asserts the shared value allows
+    /// real concurrency (> 1), which is the property a misconfiguration or a
+    /// future literal-override would silently break.
+    #[test]
+    fn worker_count_default_matches_scheduler_default() {
+        assert_eq!(
+            super::DEFAULT_TURN_RUNNER_WORKER_COUNT.get(),
+            ironclaw_host_runtime::DEFAULT_MAX_CONCURRENT_RUNS,
+            "DEFAULT_TURN_RUNNER_WORKER_COUNT must stay equal to \
+             ironclaw_host_runtime::DEFAULT_MAX_CONCURRENT_RUNS"
+        );
+        assert!(
+            super::DEFAULT_TURN_RUNNER_WORKER_COUNT.get() > 1,
+            "the default worker pool must allow concurrency (> 1)"
+        );
+    }
 
     async fn test_run_context() -> LoopRunContext {
         let tenant_id = TenantId::new("tenant-runtime-test").unwrap();

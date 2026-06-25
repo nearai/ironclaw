@@ -155,7 +155,9 @@ pub struct HarnessSection {
 pub struct RunnerSection {
     pub heartbeat_interval_secs: Option<u64>,
     pub poll_interval_ms: Option<u64>,
-    /// Number of concurrent turn-runner worker tasks. `None` or `0` defaults to 4. Clamped to 32.
+    /// Number of concurrent turn-runner worker tasks. `None` or `0` defaults to
+    /// 16 (`DEFAULT_TURN_RUNNER_WORKER_COUNT`); clamped to 32. `1` is accepted
+    /// but serializes all runs through one slot, so prefer `>= 2`.
     pub worker_count: Option<usize>,
     /// Max concurrent runs in `TurnStatus::Running` per (tenant_id, owner user_id). `None` or `0` = unlimited.
     pub max_concurrent_runs_per_user: Option<u32>,

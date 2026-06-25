@@ -17,7 +17,46 @@ use ironclaw_turns::{
     },
 };
 
-use super::{TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler, TurnRunSchedulerConfig};
+use super::{
+    DEFAULT_MAX_CONCURRENT_RUNS, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
+    TurnRunSchedulerConfig,
+};
+
+// ── Config defaults ───────────────────────────────────────────────────────
+
+/// The scheduler's `Default` concurrent-run cap must equal the canonical
+/// constant. This pins the historical regression where `Default` hard-coded `4`
+/// while the production composition used `16`, so a `Default`-only caller would
+/// silently under-provision the pool. Before the fix this asserted against `4`
+/// and failed.
+#[test]
+fn default_config_uses_canonical_max_concurrent_runs() {
+    // The default pool must allow concurrency (>1); 1 serializes all runs.
+    // Checked at compile time so the invariant holds even if the constant moves.
+    const _: () = assert!(DEFAULT_MAX_CONCURRENT_RUNS > 1);
+
+    assert_eq!(
+        TurnRunSchedulerConfig::default().max_concurrent_runs(),
+        DEFAULT_MAX_CONCURRENT_RUNS,
+        "Default scheduler config must use DEFAULT_MAX_CONCURRENT_RUNS, not a divergent literal"
+    );
+}
+
+/// `with_max_concurrent_runs` floors to a non-zero value: 0 must not produce a
+/// scheduler that can never claim a run.
+#[test]
+fn with_max_concurrent_runs_floors_zero_to_one() {
+    let config = TurnRunSchedulerConfig::default().with_max_concurrent_runs(0);
+    assert_eq!(config.max_concurrent_runs(), 1);
+}
+
+/// The exact floor boundary: an explicit `1` must be preserved as `1` (not
+/// floored up to 2, not dropped to 0). Guards a refactor that mis-edits `.max`.
+#[test]
+fn with_max_concurrent_runs_keeps_one() {
+    let config = TurnRunSchedulerConfig::default().with_max_concurrent_runs(1);
+    assert_eq!(config.max_concurrent_runs(), 1);
+}
 
 // ── Minimal fakes ────────────────────────────────────────────────────────
 
