@@ -94,6 +94,23 @@ where
         (self.resolver)(scope).map_err(FilesystemError::from)
     }
 
+    /// Capabilities advertised by the underlying [`RootFilesystem`].
+    ///
+    /// Exposed so capability-gated helpers (such as
+    /// [`cas_update`](crate::cas_update)) can fail closed before a
+    /// read-modify-write loop when the backend cannot honor compare-and-swap.
+    ///
+    /// Note on the composite router: a
+    /// [`CompositeRootFilesystem`](crate::CompositeRootFilesystem) returns
+    /// [`BackendCapabilities::default`] here because it routes per-path and
+    /// cannot answer capabilities without a concrete path. Callers that gate on
+    /// this value must therefore treat the *default/empty* shape as "unknown,
+    /// defer to op-time" rather than "no CAS", and still map an op-time
+    /// `Unsupported(WriteFile)` to their capability-missing error.
+    pub fn capabilities(&self) -> crate::BackendCapabilities {
+        self.root.capabilities()
+    }
+
     // ─── Unified entry plane ──────────────────────────────────────────────
 
     /// Write an [`Entry`] at `path` with a CAS precondition.
