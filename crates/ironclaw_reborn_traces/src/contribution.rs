@@ -4075,6 +4075,86 @@ pub fn write_trace_policy_for_scope(
     write_json_file(&trace_policy_path(scope), policy, "trace policy")
 }
 
+/// Resolved Trace Commons credentials for a (tenant, user): which local-state
+/// scope to use and the per-user subject (if any) to send to the server.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraceCredentialResolution {
+    /// The scope string whose local state (policy, device key, credits) to use.
+    pub state_scope: String,
+    /// Per-user subject to send in upload-claim / login-link requests.
+    /// `None` for the personal-invite model (device key already 1:1 with user).
+    pub subject: Option<String>,
+    /// The resolved enrollment policy.
+    pub policy: StandingTraceContributionPolicy,
+}
+
+/// Inner implementation that reads policies relative to an explicit base dir.
+/// Used by `resolve_trace_credentials` (which supplies the real base) and by
+/// tests (which supply an isolated tempdir).
+fn resolve_trace_credentials_at(
+    base_dir: &std::path::Path,
+    tenant_id: &str,
+    user_id: &str,
+) -> anyhow::Result<Option<TraceCredentialResolution>> {
+    let scope = trace_scope_key(tenant_id, user_id);
+    let contributions_base = base_dir.join("trace_contributions");
+
+    let read_policy = |scope_opt: Option<&str>| -> anyhow::Result<StandingTraceContributionPolicy> {
+        let path = match scope_opt {
+            Some(s) if !s.trim().is_empty() => contributions_base
+                .join("users")
+                .join(scope_hash(s))
+                .join("policy.json"),
+            _ => contributions_base.join("policy.json"),
+        };
+        if !path.exists() {
+            return Ok(StandingTraceContributionPolicy::default());
+        }
+        let body = std::fs::read_to_string(&path).map_err(|e| {
+            anyhow::anyhow!("failed to read trace policy {}: {}", path.display(), e)
+        })?;
+        serde_json::from_str(&body).map_err(|e| {
+            anyhow::anyhow!("failed to parse trace policy {}: {}", path.display(), e)
+        })
+    };
+
+    let personal = read_policy(Some(scope.as_str()))
+        .map_err(|e| anyhow::anyhow!("failed to read personal trace policy: {e}"))?;
+    if personal.enabled {
+        return Ok(Some(TraceCredentialResolution {
+            state_scope: scope,
+            subject: None,
+            policy: personal,
+        }));
+    }
+
+    let instance = read_policy(None)
+        .map_err(|e| anyhow::anyhow!("failed to read instance trace policy: {e}"))?;
+    if instance.enabled {
+        return Ok(Some(TraceCredentialResolution {
+            subject: Some(local_pseudonymous_contributor_id(&scope)),
+            state_scope: scope,
+            policy: instance,
+        }));
+    }
+
+    Ok(None)
+}
+
+/// Pick the user's own (personal-invite) enrollment when present and enabled,
+/// else fall back to the admin-provisioned instance enrollment (scope `None`)
+/// with a per-user pseudonymous subject. Returns `None` when neither is enabled.
+pub fn resolve_trace_credentials(
+    tenant_id: &str,
+    user_id: &str,
+) -> anyhow::Result<Option<TraceCredentialResolution>> {
+    resolve_trace_credentials_at(
+        ironclaw_common::paths::ironclaw_base_dir().as_path(),
+        tenant_id,
+        user_id,
+    )
+}
+
 pub fn mark_trace_credit_notice_due_for_scope(
     scope: Option<&str>,
 ) -> anyhow::Result<Option<CreditSummary>> {
@@ -14454,5 +14534,79 @@ mod tests {
                 .await
                 .expect_err("oversized bio must be rejected");
         assert!(error.to_string().contains("at most 280 bytes"));
+    }
+
+    // --- resolve_trace_credentials tests ---
+    // Isolation: each test uses its own tempdir passed to the private
+    // `resolve_trace_credentials_at` core, so tests are fully isolated from
+    // the global IRONCLAW_BASE_DIR and from each other (no shared state,
+    // no cleanup needed).  The public `resolve_trace_credentials` is a thin
+    // wrapper that supplies the real base dir — the core logic is tested here.
+
+    fn write_policy_at(
+        base: &std::path::Path,
+        scope: Option<&str>,
+        policy: &StandingTraceContributionPolicy,
+    ) {
+        let contributions = base.join("trace_contributions");
+        let path = match scope {
+            Some(s) if !s.trim().is_empty() => contributions
+                .join("users")
+                .join(super::scope_hash(s))
+                .join("policy.json"),
+            _ => contributions.join("policy.json"),
+        };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_string(policy).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn resolver_prefers_personal_invite_enrollment_with_no_subject() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = trace_scope_key("tenant-a", "alice");
+        let personal = StandingTraceContributionPolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        write_policy_at(dir.path(), Some(scope.as_str()), &personal);
+
+        let r = resolve_trace_credentials_at(dir.path(), "tenant-a", "alice")
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.state_scope, scope);
+        assert_eq!(r.subject, None, "personal invite carries no subject");
+        assert!(r.policy.enabled);
+    }
+
+    #[test]
+    fn resolver_falls_back_to_instance_enrollment_with_per_user_subject() {
+        let dir = tempfile::tempdir().unwrap();
+        // No personal policy; only the instance-level (scope None) policy.
+        let instance = StandingTraceContributionPolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        write_policy_at(dir.path(), None, &instance);
+
+        let r = resolve_trace_credentials_at(dir.path(), "tenant-a", "alice")
+            .unwrap()
+            .unwrap();
+        let expected_scope = trace_scope_key("tenant-a", "alice");
+        assert_eq!(
+            r.subject,
+            Some(local_pseudonymous_contributor_id(&expected_scope))
+        );
+        assert!(r.policy.enabled);
+    }
+
+    #[test]
+    fn resolver_returns_none_when_unenrolled() {
+        let dir = tempfile::tempdir().unwrap();
+        // Empty dir — no policy files at all.
+        assert!(
+            resolve_trace_credentials_at(dir.path(), "tenant-a", "alice")
+                .unwrap()
+                .is_none()
+        );
     }
 }
