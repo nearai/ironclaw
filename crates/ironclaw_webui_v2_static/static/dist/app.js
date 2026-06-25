@@ -1751,7 +1751,7 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
                 type="button"
                 onClick=${v}
                 title=${b?"Copied":"Copy message"}
-                aria-label="Copy message"
+                aria-label=${b?"Copied":"Copy message"}
                 className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100"
               >
                 <${D} name=${b?"check":"copy"} className="h-3.5 w-3.5" />

@@ -182,7 +182,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
                 type="button"
                 onClick=${copy}
                 title=${copied ? "Copied" : "Copy message"}
-                aria-label="Copy message"
+                aria-label=${copied ? "Copied" : "Copy message"}
                 className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100"
               >
                 <${Icon} name=${copied ? "check" : "copy"} className="h-3.5 w-3.5" />

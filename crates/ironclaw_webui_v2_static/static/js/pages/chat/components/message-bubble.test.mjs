@@ -55,7 +55,7 @@ test("message timestamp and actions share a hover-only meta row", () => {
   );
   assert.doesNotMatch(
     actionRow,
-    /\$\{copied \? "Copied" : "Copy"\}|>Retry</,
+    />\s*\$\{copied \? "Copied" : "Copy"\}\s*<|>Retry</,
     "hover controls should use fixed-size icons instead of text that competes with the timestamp",
   );
 });
