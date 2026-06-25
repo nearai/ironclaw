@@ -114,7 +114,7 @@ function ScopeChip({ label, value, scopeKey }) {
 
 export function LogsPage() {
   const t = useT();
-  const { isAdmin = true, threadsState } = useOutletContext() || {};
+  const { isAdmin = false, threadsState } = useOutletContext() || {};
   const {
     entries,
     totalCount,

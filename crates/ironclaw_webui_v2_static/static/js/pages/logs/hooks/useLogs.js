@@ -34,9 +34,9 @@ export function readLogScopeFromLocation(location = globalThis.location, default
   return scope;
 }
 
-// Default to the existing operator endpoint; non-operator pages pass
-// `isAdmin: false` to use the caller-scoped logs endpoint.
-export function useLogs({ isAdmin = true, defaultThreadId = null } = {}) {
+// Fail closed to caller-scoped logs if layout context is missing. Operator logs
+// are an optimization for operator-capable sessions, not the default.
+export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
   const location = useLocation();
   const locationSearch = location?.search || "";
   const scope = React.useMemo(
@@ -51,26 +51,23 @@ export function useLogs({ isAdmin = true, defaultThreadId = null } = {}) {
   const [autoScroll, setAutoScroll] = React.useState(true);
   const [isLoading, setIsLoading] = React.useState(true);
   const [error, setError] = React.useState(null);
-  const [isUnsupported, setIsUnsupported] = React.useState(false);
   const hiddenEntryIdsRef = React.useRef(new Set());
   const requestIdRef = React.useRef(0);
   const needsThreadScope = !isAdmin && !threadId;
 
   React.useEffect(() => {
-    setIsUnsupported(false);
     setError(null);
   }, [isAdmin, runId, source, threadId, toolCallId, toolName, turnId]);
 
   const loadLogs = React.useCallback(async () => {
-    if (isUnsupported || needsThreadScope) {
+    if (needsThreadScope) {
       setIsLoading(false);
       return;
     }
     const requestId = ++requestIdRef.current;
     setIsLoading(true);
     try {
-      const queryLogsFn = isAdmin ? queryOperatorLogs : queryLogs;
-      const response = await queryLogsFn({
+      const request = {
         limit: LOG_LIMIT,
         level: levelFilter === "all" ? null : levelFilter,
         target: targetFilter.trim() || null,
@@ -80,7 +77,16 @@ export function useLogs({ isAdmin = true, defaultThreadId = null } = {}) {
         toolCallId,
         toolName,
         source,
-      });
+      };
+      let response;
+      try {
+        response = await (isAdmin ? queryOperatorLogs(request) : queryLogs(request));
+      } catch (err) {
+        if (!isAdmin || !TERMINAL_UNSUPPORTED_STATUSES.has(err?.status)) {
+          throw err;
+        }
+        response = await queryLogs(request);
+      }
       if (requestId !== requestIdRef.current) return;
       const hidden = hiddenEntryIdsRef.current;
       const logs = normalizeOperatorLogsResponse(response);
@@ -89,12 +95,6 @@ export function useLogs({ isAdmin = true, defaultThreadId = null } = {}) {
       setError(null);
     } catch (err) {
       if (requestId !== requestIdRef.current) return;
-      if (isAdmin && TERMINAL_UNSUPPORTED_STATUSES.has(err?.status)) {
-        setEntries([]);
-        setError(null);
-        setIsUnsupported(true);
-        return;
-      }
       setError(err);
     } finally {
       if (requestId === requestIdRef.current) {
@@ -103,7 +103,6 @@ export function useLogs({ isAdmin = true, defaultThreadId = null } = {}) {
     }
   }, [
     isAdmin,
-    isUnsupported,
     levelFilter,
     needsThreadScope,
     runId,
@@ -120,10 +119,10 @@ export function useLogs({ isAdmin = true, defaultThreadId = null } = {}) {
   }, [loadLogs]);
 
   React.useEffect(() => {
-    if (paused || isUnsupported || needsThreadScope) return undefined;
+    if (paused || needsThreadScope) return undefined;
     const timer = setInterval(loadLogs, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [isUnsupported, loadLogs, needsThreadScope, paused]);
+  }, [loadLogs, needsThreadScope, paused]);
 
   const togglePause = React.useCallback(() => {
     setPaused((value) => !value);

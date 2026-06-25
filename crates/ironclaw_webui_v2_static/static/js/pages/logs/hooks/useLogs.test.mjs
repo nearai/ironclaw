@@ -122,8 +122,9 @@ function createHookHarness({
       for (const effect of effects) {
         effect();
       }
-      await Promise.resolve();
-      await Promise.resolve();
+      for (let i = 0; i < 20; i += 1) {
+        await Promise.resolve();
+      }
     },
     setSearch(nextSearch) {
       location = { search: nextSearch };
@@ -132,7 +133,10 @@ function createHookHarness({
 }
 
 test("useLogs reloads scoped logs once when scope changes while paused", async () => {
-  const harness = createHookHarness({ search: "?thread_id=thread-a" });
+  const harness = createHookHarness({
+    search: "?thread_id=thread-a",
+    useLogsArgs: { isAdmin: true },
+  });
 
   let result = harness.render();
   await harness.runEffects();
@@ -169,6 +173,63 @@ test("useLogs uses the non-operator endpoint when the caller is not admin", asyn
   assert.equal(harness.calls.length, 1);
   assert.equal(harness.calls[0].endpoint, "logs");
   assert.equal(harness.calls[0].threadId, "thread-a");
+});
+
+test("useLogs falls back to caller-scoped logs when operator logs reject privileges", async () => {
+  const harness = createHookHarness({
+    search: "?thread_id=thread-a",
+    useLogsArgs: { isAdmin: true },
+    queryOperatorLogsImpl: async () => {
+      const error = new Error("Operator WebUI configuration privileges required");
+      error.status = 403;
+      throw error;
+    },
+    queryLogsImpl: async () => ({
+      entries: [{ id: "fallback-entry", message: "caller scoped log" }],
+    }),
+  });
+
+  const result = harness.render();
+  await harness.runEffects();
+
+  assert.equal(harness.calls.length, 2);
+  assert.equal(harness.calls[0].endpoint, "operator");
+  assert.equal(harness.calls[0].threadId, "thread-a");
+  assert.equal(harness.calls[1].endpoint, "logs");
+  assert.equal(harness.calls[1].threadId, "thread-a");
+  assert.equal(result.status, "loading");
+
+  const settled = harness.render();
+  assert.equal(settled.error, null);
+  assert.equal(settled.entries.length, 1);
+  assert.equal(settled.entries[0].id, "fallback-entry");
+});
+
+test("useLogs surfaces the fallback error when caller-scoped logs also fail", async () => {
+  const harness = createHookHarness({
+    search: "?thread_id=thread-a",
+    useLogsArgs: { isAdmin: true },
+    queryOperatorLogsImpl: async () => {
+      const error = new Error("Operator WebUI configuration privileges required");
+      error.status = 403;
+      throw error;
+    },
+    queryLogsImpl: async () => {
+      const error = new Error("caller logs unavailable");
+      error.status = 503;
+      throw error;
+    },
+  });
+
+  harness.render();
+  await harness.runEffects();
+  const result = harness.render();
+
+  assert.equal(harness.calls.length, 2);
+  assert.equal(harness.calls[0].endpoint, "operator");
+  assert.equal(harness.calls[1].endpoint, "logs");
+  assert.equal(result.status, "error");
+  assert.equal(result.error.message, "caller logs unavailable");
 });
 
 test("useLogs falls back to the caller's active thread without exposing a clearable scope chip", async () => {
