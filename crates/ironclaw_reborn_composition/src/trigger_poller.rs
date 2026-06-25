@@ -212,7 +212,6 @@ fn jitter_delay(max: Duration) -> Duration {
     Duration::from_nanos(nanos)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
