@@ -633,15 +633,19 @@ impl RootFilesystem for PostgresRootFilesystem {
         let client = self.client().await?;
         // One multi-row INSERT via `unnest` so the SQL text is FIXED regardless
         // of batch size (keeps `prepare_cached` to a single statement) while
-        // still collapsing N appends into one round-trip. `unnest` preserves
-        // array order, so BIGSERIAL ids are assigned in payload order; we sort
-        // the RETURNING rows by id ASC to recover that order deterministically
-        // (Postgres does not guarantee RETURNING row order).
+        // still collapsing N appends into one round-trip. `WITH ORDINALITY`
+        // tags each unnested element with its 1-based position; `ORDER BY ord`
+        // forces the planner to process rows in array order so BIGSERIAL ids
+        // are assigned in payload order. Sorting the RETURNING ids ASC then
+        // deterministically recovers that order (Postgres does not guarantee
+        // RETURNING row order).
         let rows = cached_query(
             &client,
             r#"
                 INSERT INTO root_filesystem_events (path, payload)
-                SELECT $1, payload FROM unnest($2::bytea[]) AS t(payload)
+                SELECT $1, payload
+                FROM unnest($2::bytea[]) WITH ORDINALITY AS t(payload, ord)
+                ORDER BY ord
                 RETURNING id
                 "#,
             &[&path.as_str(), &payloads],

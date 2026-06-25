@@ -43,6 +43,8 @@ struct CountingEventLog {
     append_calls: AtomicUsize,
     append_batch_calls: AtomicUsize,
     batched_events: AtomicUsize,
+    /// Size of each individual `append_batch` call, in call order.
+    batch_sizes: std::sync::Mutex<Vec<usize>>,
 }
 
 impl CountingEventLog {
@@ -52,6 +54,7 @@ impl CountingEventLog {
             append_calls: AtomicUsize::new(0),
             append_batch_calls: AtomicUsize::new(0),
             batched_events: AtomicUsize::new(0),
+            batch_sizes: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -70,6 +73,10 @@ impl DurableEventLog for CountingEventLog {
         self.append_batch_calls.fetch_add(1, Ordering::SeqCst);
         self.batched_events
             .fetch_add(events.len(), Ordering::SeqCst);
+        self.batch_sizes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(events.len());
         self.inner.append_batch(events).await
     }
 
@@ -213,5 +220,82 @@ async fn crash_before_flush_loses_only_the_unflushed_tail() {
     assert_eq!(after_second.entries.len(), 8);
     for window in after_second.entries.windows(2) {
         assert!(window[0].cursor.as_u64() < window[1].cursor.as_u64());
+    }
+}
+
+#[tokio::test]
+async fn coalescing_sink_flush_splits_burst_at_max_batch() {
+    // A burst larger than `max_batch` must be split into multiple
+    // `append_batch` calls, each carrying at most `max_batch` events, so
+    // memory and per-statement parameter counts stay bounded.  The sum of all
+    // flushed events must equal the burst and the durable log must contain
+    // them in emit order.
+    const MAX_BATCH: usize = 4;
+    const BURST: usize = 10; // 10 > MAX_BATCH → expected splits: [4, 4, 2]
+
+    let log = Arc::new(CountingEventLog::new());
+    let sink = CoalescingEventSink::new(
+        Arc::clone(&log) as Arc<dyn DurableEventLog>,
+        EventBatchConfig {
+            max_batch: MAX_BATCH,
+            // Large interval so the drain loop never fires on the timer;
+            // the final batch is released only when flush() sends its ack.
+            flush_interval: Duration::from_secs(10),
+        },
+    );
+
+    let scope = scope_for("alice", "project-a");
+    let stream = EventStreamKey::from_scope(&scope);
+
+    for _ in 0..BURST {
+        sink.emit(RuntimeEvent::dispatch_requested(
+            scope.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("emit buffers without blocking");
+    }
+
+    sink.flush().await.expect("flush drains entire buffer");
+
+    // The burst must have been split into ceil(10/4) = 3 separate batches.
+    let sizes: Vec<usize> = log
+        .batch_sizes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(
+        sizes,
+        vec![4, 4, 2],
+        "burst of {BURST} with max_batch={MAX_BATCH} must split into [4,4,2]"
+    );
+    assert_eq!(
+        log.append_batch_calls.load(Ordering::SeqCst),
+        3,
+        "exactly three batched append round-trips"
+    );
+    assert_eq!(
+        log.batched_events.load(Ordering::SeqCst),
+        BURST,
+        "all {BURST} events must be durably written"
+    );
+    assert_eq!(
+        log.append_calls.load(Ordering::SeqCst),
+        0,
+        "no single-row appends on the coalesced path"
+    );
+
+    // Order preservation: all BURST events are durable and have monotonic
+    // cursors in emit order across all three flushes.
+    let replay = log
+        .read_after_cursor(&stream, &ReadScope::default(), None, 100)
+        .await
+        .expect("replay after burst flush");
+    assert_eq!(replay.entries.len(), BURST);
+    for window in replay.entries.windows(2) {
+        assert!(
+            window[0].cursor.as_u64() < window[1].cursor.as_u64(),
+            "cursors must be monotonic in emit order across batch boundaries"
+        );
     }
 }

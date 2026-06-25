@@ -27,6 +27,13 @@ use crate::runtime_event::RuntimeEvent;
 #[async_trait]
 pub trait EventSink: Send + Sync {
     async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError>;
+
+    /// Flush any buffered events to durable storage. Synchronous sinks are
+    /// already durable on `emit` return, so the default is a no-op. Write-behind
+    /// sinks override this to drain their buffer (graceful shutdown, tests).
+    async fn flush(&self) -> Result<(), EventError> {
+        Ok(())
+    }
 }
 
 /// Async audit sink used by control-plane services.

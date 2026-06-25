@@ -35,6 +35,7 @@
 //!   `tail` op cannot distinguish "after exceeds head" from "no records
 //!   yet" without a separate head probe.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -109,7 +110,7 @@ where
         // INSERT per path via the filesystem `append_batch` primitive. A
         // per-turn burst shares one stream, so it collapses to a single
         // round-trip. Results are stitched back into input order.
-        let mut order: Vec<ScopedPath> = Vec::new();
+        let mut index_by_path: HashMap<ScopedPath, usize> = HashMap::new();
         let mut groups: Vec<(ScopedPath, Vec<usize>, Vec<RuntimeEvent>)> = Vec::new();
         let mut results: Vec<Option<Result<EventLogEntry<RuntimeEvent>, EventError>>> =
             (0..events.len()).map(|_| None).collect();
@@ -118,12 +119,13 @@ where
             let stream = EventStreamKey::from_scope(&event.scope);
             match stream_path(StreamKind::Runtime, &stream) {
                 Ok(path) => {
-                    let slot = match order.iter().position(|existing| existing == &path) {
-                        Some(pos) => pos,
-                        None => {
-                            order.push(path.clone());
+                    let slot = match index_by_path.entry(path.clone()) {
+                        std::collections::hash_map::Entry::Occupied(e) => *e.get(),
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            let slot = groups.len();
+                            e.insert(slot);
                             groups.push((path, Vec::new(), Vec::new()));
-                            groups.len() - 1
+                            slot
                         }
                     };
                     groups[slot].1.push(index);

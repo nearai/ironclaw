@@ -24,16 +24,28 @@
 //! - A flush is one atomic multi-row INSERT — there is no torn batch. On a
 //!   crash, every flushed batch is durable and only the in-memory tail
 //!   (bounded by `flush_interval` or `max_batch`) is lost.
-//! - [`CoalescingEventSink::flush`] drains everything queued before the call,
-//!   for graceful shutdown and deterministic tests.
+//! - The [`EventSink::flush`] override drains everything queued before the
+//!   call, for graceful shutdown and deterministic tests.
+//! - The internal channel is bounded ([`CHANNEL_CAPACITY`]). Events emitted
+//!   while the channel is full are dropped (best-effort sink contract) and
+//!   counted via [`CoalescingEventSink::dropped_count`].
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_events::{DurableEventLog, EventError, EventSink, RuntimeEvent};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, timeout_at};
+
+/// Maximum number of [`DrainMessage`]s queued in the write-behind channel.
+///
+/// Bounds memory consumption when the durable backend stalls (DB outage,
+/// slow INSERT, etc.). ~8 k events is a generous burst headroom for normal
+/// traffic; events emitted past this limit are dropped with a `warn!` and
+/// counted by [`CoalescingEventSink::dropped_count`].
+const CHANNEL_CAPACITY: usize = 8192;
 
 /// Tuning for the write-behind coalescing event sink.
 #[derive(Debug, Clone, Copy)]
@@ -68,7 +80,8 @@ enum DrainMessage {
 /// shared drain task.
 #[derive(Clone)]
 pub struct CoalescingEventSink {
-    tx: mpsc::UnboundedSender<DrainMessage>,
+    tx: mpsc::Sender<DrainMessage>,
+    dropped: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for CoalescingEventSink {
@@ -83,20 +96,18 @@ impl std::fmt::Debug for CoalescingEventSink {
 impl CoalescingEventSink {
     /// Spawn the drain task and return a sink that buffers appends to `log`.
     pub fn new(log: Arc<dyn DurableEventLog>, config: EventBatchConfig) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let dropped = Arc::new(AtomicU64::new(0));
         tokio::spawn(drain_loop(log, config, rx));
-        Self { tx }
+        Self { tx, dropped }
     }
 
-    /// Flush every event queued before this call, awaiting durable write. Used
-    /// for graceful shutdown and deterministic tests. Returns an error only if
-    /// the drain task is no longer running.
-    pub async fn flush(&self) -> Result<(), EventError> {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        self.tx
-            .send(DrainMessage::Flush(ack_tx))
-            .map_err(|_| sink_closed())?;
-        ack_rx.await.map_err(|_| sink_closed())
+    /// Number of events dropped because the internal channel was full.
+    ///
+    /// Useful for metrics and tests. A non-zero value means the durable backend
+    /// is stalling and best-effort events are being silently discarded.
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 }
 
@@ -109,20 +120,45 @@ fn sink_closed() -> EventError {
 #[async_trait]
 impl EventSink for CoalescingEventSink {
     async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
-        // Best-effort: buffer and return immediately. A closed receiver means
-        // the drain task stopped; surface a diagnostic the caller may log, but
-        // never block or short-circuit the surrounding workflow (sink
-        // contract).
+        // Best-effort: buffer and return immediately. The channel is bounded;
+        // if it is full (drain stalled) we drop the event rather than block
+        // the caller — the sink contract forbids blocking or short-circuiting
+        // the surrounding workflow.
+        match self.tx.try_send(DrainMessage::Event(Box::new(event))) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    target = "ironclaw::reborn::event_store::coalescing",
+                    dropped = self.dropped.load(Ordering::Relaxed),
+                    "event dropped: coalescing channel at capacity ({CHANNEL_CAPACITY}); drain may be stalled"
+                );
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(sink_closed()),
+        }
+    }
+
+    /// Flush every event queued before this call, awaiting durable write. Used
+    /// for graceful shutdown and deterministic tests. Returns an error only if
+    /// the drain task is no longer running.
+    ///
+    /// Unlike [`EventSink::emit`], flush awaits channel capacity rather than
+    /// dropping on full — it is on the slow/shutdown path and must not be lost.
+    async fn flush(&self) -> Result<(), EventError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
         self.tx
-            .send(DrainMessage::Event(Box::new(event)))
-            .map_err(|_| sink_closed())
+            .send(DrainMessage::Flush(ack_tx))
+            .await
+            .map_err(|_| sink_closed())?;
+        ack_rx.await.map_err(|_| sink_closed())
     }
 }
 
 async fn drain_loop(
     log: Arc<dyn DurableEventLog>,
     config: EventBatchConfig,
-    mut rx: mpsc::UnboundedReceiver<DrainMessage>,
+    mut rx: mpsc::Receiver<DrainMessage>,
 ) {
     let max_batch = config.max_batch.max(1);
     loop {

@@ -274,6 +274,17 @@ impl RootFilesystem for CompositeRootFilesystem {
             .await
     }
 
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .append_batch(path, payloads)
+            .await
+    }
+
     async fn tail(
         &self,
         path: &VirtualPath,

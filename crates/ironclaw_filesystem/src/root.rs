@@ -189,22 +189,28 @@ pub trait RootFilesystem: Send + Sync {
     /// round-trip, returning the assigned monotonic [`SeqNo`]s in payload
     /// order. All payloads target the **same** `path`.
     ///
-    /// The default impl is a correctness-preserving fallback that loops
-    /// [`append`](Self::append), so a backend without a native batch path still
-    /// works (it just pays one round-trip per payload). SQL-backed mounts
-    /// (Postgres, libSQL) override this with a single multi-row INSERT so a
-    /// per-turn burst of event appends collapses from N round-trips to one.
-    /// Ordering is preserved: the assigned seqs are monotonic in payload order.
+    /// The return type promises atomic all-or-nothing semantics: on success all
+    /// seqs are assigned; on error none are. A per-item loop cannot honor this
+    /// contract — if the loop commits some payloads and then fails, earlier
+    /// writes are already durable but the caller only sees an `Err` with no
+    /// record of which seqs committed. Retrying the whole batch then duplicates
+    /// the committed prefix, a silent correctness bug.
+    ///
+    /// Therefore the default is [`Unsupported`](FilesystemError::Unsupported).
+    /// Backends that can write a batch atomically (Postgres/libSQL multi-row
+    /// INSERT, in-memory) **must** override this method. Ordering is preserved:
+    /// the assigned seqs must be monotonic in payload order.
+    ///
+    /// [`CompositeRootFilesystem`](crate::CompositeRootFilesystem) overrides
+    /// this to forward to the resolved mount's `append_batch`, so callers
+    /// going through the composite dispatcher will reach the backend override.
     async fn append_batch(
         &self,
         path: &VirtualPath,
         payloads: Vec<Vec<u8>>,
     ) -> Result<Vec<SeqNo>, FilesystemError> {
-        let mut seqs = Vec::with_capacity(payloads.len());
-        for payload in payloads {
-            seqs.push(self.append(path, payload).await?);
-        }
-        Ok(seqs)
+        let _ = payloads;
+        unsupported(path, FilesystemOperation::Append)
     }
 
     /// Read events at `path` starting at `from` (exclusive). Returns at most

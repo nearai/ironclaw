@@ -54,13 +54,13 @@ New `CoalescingEventSink` (`coalescing_sink.rs`) implementing `EventSink`, wrapp
 ## Durability / ordering / consistency semantics
 
 - **Ordering:** within a stream, events flush in emit order; multi-row INSERT assigns contiguous SeqNos in row order (`RETURNING id`/`seq` sorted ASC). The single drain task serializes flushes.
-- **Crash before flush:** only the unflushed in-memory tail (≤ `flush_interval` ≈ 50 ms, or ≤ `max_batch`) is lost. Everything flushed is durable. No torn batch (one INSERT is atomic).
+- **Crash before flush:** everything not yet flushed is lost — this includes the entire in-memory backlog sitting in the sink's unbounded channel, not merely the active drain window (≤ `flush_interval` ≈ 50 ms, or ≤ `max_batch`). Everything flushed is durable. No torn batch (one INSERT is atomic). The synchronous `DurableEventLog::append` path (direct callers such as `loop_driver_host`, tests) is not lossy.
 - **Read-your-writes:** reads (`read_after_cursor`/`head_cursor`) go to the durable backend directly; buffered-but-unflushed events appear after the next drain (sub-second). No hot-path consumer gates on synchronous read-after-emit (cursor is discarded at the sink; the direct `DurableEventLog::append` cursor-users — `loop_driver_host`, tests — bypass the sink and are unaffected). A subscription's startup head snapshot taken mid-buffer classifies the later-flushed events as *live* (cursor > startup_head) — correct, no split-brain, because seqs are assigned by the DB only at flush.
 - **Audit (E2):** untouched, stays synchronous.
 
 ## Red→green proof
 
-- **Count reduction:** a counting `RootFilesystem` test double counts `append` vs `append_batch`; N events through `CoalescingEventSink` → **1 `append_batch` carrying N payloads, 0 single `append`** calls; `tail` returns all N in emit order with correct seqs (one statement + ordering + content).
+- **Count reduction:** a counting `RootFilesystem` test double counts `append` vs `append_batch`; N same-stream events coalesced into a single flush window → **1 `append_batch` carrying N payloads, 0 single `append`** calls for that stream/window; `tail` returns all N in emit order with correct seqs (one statement + ordering + content). Bursts spanning multiple flush windows or multiple stream paths produce multiple `append_batch` calls (one per distinct stream path, per drain window).
 - **Per-backend primitive:** `append_batch` contract tests for in-memory (always runs), libSQL (`--features libsql`, local file), Postgres (`--features postgres`, skip when `IRONCLAW_FILESYSTEM_POSTGRES_URL`/`DATABASE_URL` unset): contiguous ordered SeqNos, `tail` round-trip equals single-append semantics, empty-input → `[]`.
 - **Crash-tail bound:** flush a batch, emit more, drop without flush → flushed batch persists, only the unflushed tail is absent.
 
