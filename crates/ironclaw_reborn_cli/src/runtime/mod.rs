@@ -10,12 +10,14 @@ use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
 #[cfg(feature = "postgres")]
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
-    CredentialRefreshSettings, DEFAULT_TURN_RUNNER_WORKER_COUNT, OAuthClientConfig,
-    OperatorLogLayer, PollSettings, RebornBuildInput, RebornCompositionProfile,
-    RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
-    TurnRunnerSettings, build_reborn_runtime, hosted_single_tenant_volume_build_input,
+    CredentialRefreshSettings, OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput,
+    RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity,
+    RebornRuntimeInput, TurnRunnerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
 };
+// Only the libsql-backed hosted single-tenant volume path consumes this builder.
+#[cfg(feature = "libsql")]
+use ironclaw_reborn_composition::hosted_single_tenant_volume_build_input;
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
@@ -29,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::RebornCliContext;
 
+mod env_util;
 #[cfg(test)]
 mod test_env;
 mod trigger_poller;
@@ -1001,6 +1004,49 @@ fn resolve_concurrency_cap(
     }
 }
 
+/// Resolve a worker-count value against the in-effect default.
+///
+/// - `None` (absent) → keep `current_default`.
+/// - `Some(0)` → explicit "unlimited" sentinel → `None`. The scheduler
+///   semaphore is then sized to `tokio::sync::Semaphore::MAX_PERMITS`, so the
+///   per-user / per-origin caps become the only concurrency bound (used to
+///   stress-test backends with no global throttle).
+/// - `Some(n)` → bounded worker count, clamped to [`MAX_WORKER_COUNT`].
+fn resolve_worker_count(
+    raw: Option<usize>,
+    current_default: Option<std::num::NonZeroUsize>,
+) -> Option<std::num::NonZeroUsize> {
+    match raw {
+        None => current_default,
+        Some(0) => None,
+        Some(n) => {
+            let clamped = n.min(MAX_WORKER_COUNT);
+            if clamped < n {
+                tracing::debug!(
+                    requested = n,
+                    clamped = MAX_WORKER_COUNT,
+                    "runner worker_count exceeds maximum; clamping (set 0 for unlimited)"
+                );
+            }
+            // clamped is in [1, MAX_WORKER_COUNT]: guaranteed non-zero.
+            std::num::NonZeroUsize::new(clamped)
+        }
+    }
+}
+
+/// Apply an `IRONCLAW_REBORN_RUNNER_*` env override for a concurrency cap onto
+/// `slot`. Absent → unchanged; `0` → unlimited (`None`); positive → that cap.
+/// Strict-presence semantics: a set-but-blank / non-numeric value is fatal.
+fn apply_cap_env_override(
+    name: &str,
+    slot: &mut Option<std::num::NonZeroU32>,
+) -> anyhow::Result<()> {
+    if let Some(raw) = env_util::strict_env_var_parsed::<u32>(name)? {
+        *slot = resolve_concurrency_cap(Some(raw), *slot);
+    }
+    Ok(())
+}
+
 fn runner_settings(
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
 ) -> anyhow::Result<TurnRunnerSettings> {
@@ -1020,26 +1066,9 @@ fn runner_settings(
             }
             settings.poll_interval = Duration::from_millis(ms);
         }
-        // worker_count: None or Some(0) → default; clamp at MAX_WORKER_COUNT.
-        let raw_worker_count = runner.worker_count.unwrap_or(0); // silent-ok: settings read [runner].worker_count — None/0 is an explicit "use default worker count" sentinel; clamped to MAX_WORKER_COUNT to protect scheduler capacity.
-        settings.worker_count = if raw_worker_count == 0 {
-            DEFAULT_TURN_RUNNER_WORKER_COUNT
-        } else {
-            let clamped = raw_worker_count.min(MAX_WORKER_COUNT);
-            if clamped < raw_worker_count {
-                tracing::debug!(
-                    requested = raw_worker_count,
-                    clamped = MAX_WORKER_COUNT,
-                    "config file [runner].worker_count exceeds maximum; clamping"
-                );
-            }
-            // clamped is in [1, 32]: guaranteed non-zero by min() + the zero branch above.
-            std::num::NonZeroUsize::new(clamped).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "config file [runner].worker_count resolved to zero (raw={raw_worker_count})"
-                )
-            })?
-        };
+        // worker_count: absent → default; `0` → unlimited (None); positive →
+        // clamp at MAX_WORKER_COUNT.
+        settings.worker_count = resolve_worker_count(runner.worker_count, settings.worker_count);
 
         // Each cap: absent in the file → keep the struct default already in
         // `settings`; explicit `0` → "unlimited" sentinel (None); positive → cap.
@@ -1056,6 +1085,29 @@ fn runner_settings(
             settings.max_concurrent_conversation_runs,
         );
     }
+
+    // Layer 1: environment-variable overrides (highest precedence, applied
+    // even when no `[runner]` config section exists). Strict-presence
+    // semantics; `0` means "unlimited" for every concurrency knob — for
+    // `worker_count` that removes the global scheduler throttle entirely.
+    if let Some(raw) =
+        env_util::strict_env_var_parsed::<usize>("IRONCLAW_REBORN_RUNNER_WORKER_COUNT")?
+    {
+        settings.worker_count = resolve_worker_count(Some(raw), settings.worker_count);
+    }
+    apply_cap_env_override(
+        "IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER",
+        &mut settings.max_concurrent_runs_per_user,
+    )?;
+    apply_cap_env_override(
+        "IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_TRIGGER_RUNS",
+        &mut settings.max_concurrent_trigger_runs,
+    )?;
+    apply_cap_env_override(
+        "IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_CONVERSATION_RUNS",
+        &mut settings.max_concurrent_conversation_runs,
+    )?;
+
     Ok(settings)
 }
 
@@ -1092,10 +1144,14 @@ mod tests {
 
     #[test]
     fn runner_settings_absent_runner_gives_defaults() {
+        // Hold the env lock + clear runner env so a sibling env-override test
+        // cannot bleed `IRONCLAW_REBORN_RUNNER_*` into this config/default case.
+        let _lock = lock_trigger_env();
+        let _env = clear_runner_env();
         let settings = runner_settings(None).expect("should succeed");
         assert_eq!(
-            settings.worker_count.get(),
-            DEFAULT_TURN_RUNNER_WORKER_COUNT.get()
+            settings.worker_count.map(|v| v.get()),
+            Some(DEFAULT_TURN_RUNNER_WORKER_COUNT.get())
         );
         // Out-of-box: per-user + trigger caps protect live chat from a
         // trigger storm; conversations stay uncapped.
@@ -1114,9 +1170,11 @@ mod tests {
     fn runner_settings_present_section_absent_caps_keep_defaults() {
         // A `[runner]` section that only tunes worker_count must NOT silently
         // wipe the protective cap defaults.
+        let _lock = lock_trigger_env();
+        let _env = clear_runner_env();
         let cfg = parse_runner_section("[runner]\nworker_count = 7\n");
         let settings = runner_settings(Some(&cfg)).expect("should succeed");
-        assert_eq!(settings.worker_count.get(), 7);
+        assert_eq!(settings.worker_count.map(|v| v.get()), Some(7));
         assert_eq!(
             settings.max_concurrent_runs_per_user.map(|v| v.get()),
             Some(3)
@@ -1129,32 +1187,43 @@ mod tests {
     }
 
     #[test]
-    fn runner_settings_zero_worker_count_gives_default() {
+    fn runner_settings_zero_worker_count_means_unlimited() {
+        // `0` is the explicit "no global throttle" sentinel: worker_count
+        // resolves to None and the scheduler semaphore is sized to
+        // Semaphore::MAX_PERMITS downstream.
+        let _lock = lock_trigger_env();
+        let _env = clear_runner_env();
         let cfg = parse_runner_section("[runner]\nworker_count = 0\n");
         let settings = runner_settings(Some(&cfg)).expect("should succeed");
-        assert_eq!(
-            settings.worker_count.get(),
-            DEFAULT_TURN_RUNNER_WORKER_COUNT.get()
-        );
+        assert!(settings.worker_count.is_none());
     }
 
     #[test]
     fn runner_settings_present_worker_count_round_trips() {
+        let _lock = lock_trigger_env();
+        let _env = clear_runner_env();
         let cfg = parse_runner_section("[runner]\nworker_count = 7\n");
         let settings = runner_settings(Some(&cfg)).expect("should succeed");
-        assert_eq!(settings.worker_count.get(), 7);
+        assert_eq!(settings.worker_count.map(|v| v.get()), Some(7));
     }
 
     #[test]
     fn runner_settings_clamps_worker_count_at_max() {
+        let _lock = lock_trigger_env();
+        let _env = clear_runner_env();
         let toml = format!("[runner]\nworker_count = {}\n", MAX_WORKER_COUNT + 10);
         let cfg = parse_runner_section(&toml);
         let settings = runner_settings(Some(&cfg)).expect("should succeed");
-        assert_eq!(settings.worker_count.get(), MAX_WORKER_COUNT);
+        assert_eq!(
+            settings.worker_count.map(|v| v.get()),
+            Some(MAX_WORKER_COUNT)
+        );
     }
 
     #[test]
     fn runner_settings_zero_caps_become_none_unlimited() {
+        let _lock = lock_trigger_env();
+        let _env = clear_runner_env();
         let cfg = parse_runner_section(
             "[runner]\nmax_concurrent_runs_per_user = 0\nmax_concurrent_trigger_runs = 0\nmax_concurrent_conversation_runs = 0\n",
         );
@@ -1166,6 +1235,8 @@ mod tests {
 
     #[test]
     fn runner_settings_nonzero_caps_round_trip() {
+        let _lock = lock_trigger_env();
+        let _env = clear_runner_env();
         let cfg = parse_runner_section(
             "[runner]\nmax_concurrent_runs_per_user = 3\nmax_concurrent_trigger_runs = 5\nmax_concurrent_conversation_runs = 2\n",
         );
@@ -1181,6 +1252,106 @@ mod tests {
         assert_eq!(
             settings.max_concurrent_conversation_runs.map(|v| v.get()),
             Some(2)
+        );
+    }
+
+    /// Clear all four runner env knobs so an ambient value in the dev/CI
+    /// environment cannot leak into a test asserting config-file/default
+    /// behavior. Returns the guards; keep them alive for the test body.
+    fn clear_runner_env() -> [EnvGuard; 4] {
+        [
+            EnvGuard::clear("IRONCLAW_REBORN_RUNNER_WORKER_COUNT"),
+            EnvGuard::clear("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER"),
+            EnvGuard::clear("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_TRIGGER_RUNS"),
+            EnvGuard::clear("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_CONVERSATION_RUNS"),
+        ]
+    }
+
+    #[test]
+    fn runner_env_worker_count_zero_means_unlimited() {
+        let _lock = lock_trigger_env();
+        let _guards = clear_runner_env();
+        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "0");
+        let settings = runner_settings(None).expect("should succeed");
+        assert!(settings.worker_count.is_none());
+    }
+
+    #[test]
+    fn runner_env_worker_count_overrides_config_file() {
+        // Env is the highest-precedence layer: it must win over a `[runner]`
+        // worker_count set in the config file.
+        let _lock = lock_trigger_env();
+        let _guards = clear_runner_env();
+        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "4");
+        let cfg = parse_runner_section("[runner]\nworker_count = 7\n");
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(settings.worker_count.map(|v| v.get()), Some(4));
+    }
+
+    #[test]
+    fn runner_env_worker_count_clamps_at_max() {
+        let _lock = lock_trigger_env();
+        let _guards = clear_runner_env();
+        let _w = EnvGuard::set(
+            "IRONCLAW_REBORN_RUNNER_WORKER_COUNT",
+            &(MAX_WORKER_COUNT + 100).to_string(),
+        );
+        let settings = runner_settings(None).expect("should succeed");
+        assert_eq!(
+            settings.worker_count.map(|v| v.get()),
+            Some(MAX_WORKER_COUNT)
+        );
+    }
+
+    #[test]
+    fn runner_env_caps_zero_means_unlimited() {
+        let _lock = lock_trigger_env();
+        let _guards = clear_runner_env();
+        let _u = EnvGuard::set("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER", "0");
+        let _t = EnvGuard::set("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_TRIGGER_RUNS", "0");
+        let settings = runner_settings(None).expect("should succeed");
+        assert!(settings.max_concurrent_runs_per_user.is_none());
+        assert!(settings.max_concurrent_trigger_runs.is_none());
+    }
+
+    #[test]
+    fn runner_env_cap_overrides_config_file() {
+        let _lock = lock_trigger_env();
+        let _guards = clear_runner_env();
+        let _u = EnvGuard::set("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER", "9");
+        let cfg = parse_runner_section("[runner]\nmax_concurrent_runs_per_user = 3\n");
+        let settings = runner_settings(Some(&cfg)).expect("should succeed");
+        assert_eq!(
+            settings.max_concurrent_runs_per_user.map(|v| v.get()),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn runner_env_blank_value_is_fatal() {
+        // Strict-presence semantics: a set-but-blank slot is an operator error,
+        // not a silent fall-through to the default.
+        let _lock = lock_trigger_env();
+        let _guards = clear_runner_env();
+        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "   ");
+        let err = runner_settings(None).expect_err("blank env value must be rejected");
+        assert!(
+            err.to_string()
+                .contains("IRONCLAW_REBORN_RUNNER_WORKER_COUNT"),
+            "error should name the offending var: {err}"
+        );
+    }
+
+    #[test]
+    fn runner_env_non_numeric_value_is_fatal() {
+        let _lock = lock_trigger_env();
+        let _guards = clear_runner_env();
+        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "lots");
+        let err = runner_settings(None).expect_err("non-numeric env value must be rejected");
+        assert!(
+            err.to_string()
+                .contains("IRONCLAW_REBORN_RUNNER_WORKER_COUNT"),
+            "error should name the offending var: {err}"
         );
     }
 

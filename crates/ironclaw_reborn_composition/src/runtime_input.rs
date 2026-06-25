@@ -201,8 +201,11 @@ impl ResolvedRebornLlm {
 pub struct TurnRunnerSettings {
     pub heartbeat_interval: Duration,
     pub poll_interval: Duration,
-    /// Number of concurrent turn-runner worker tasks.
-    pub worker_count: std::num::NonZeroUsize,
+    /// Number of concurrent turn-runner slots (the scheduler semaphore permit
+    /// count). `None` = unlimited — the scheduler is sized to
+    /// `tokio::sync::Semaphore::MAX_PERMITS`, leaving the per-user / per-origin
+    /// caps below as the only concurrency bound.
+    pub worker_count: Option<std::num::NonZeroUsize>,
     /// Max runs in `TurnStatus::Running` per (tenant_id, owner user_id).
     /// `None` = unlimited. Owner-less / actor-fallback runs are never counted.
     pub max_concurrent_runs_per_user: Option<std::num::NonZeroU32>,
@@ -219,7 +222,7 @@ impl Default for TurnRunnerSettings {
         Self {
             heartbeat_interval: DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
             poll_interval: DEFAULT_TURN_RUNNER_POLL_INTERVAL,
-            worker_count: DEFAULT_TURN_RUNNER_WORKER_COUNT,
+            worker_count: Some(DEFAULT_TURN_RUNNER_WORKER_COUNT),
             max_concurrent_runs_per_user: Some(DEFAULT_MAX_CONCURRENT_RUNS_PER_USER),
             max_concurrent_trigger_runs: Some(DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS),
             // `None` = conversations may use every slot not held by triggers.
