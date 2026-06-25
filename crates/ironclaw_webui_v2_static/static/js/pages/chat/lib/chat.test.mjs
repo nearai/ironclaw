@@ -70,6 +70,7 @@ function renderChat({
     ConnectionStatus() {},
     EmptyState() {},
     KeyboardShortcuts() {},
+    Link() {},
     MessageList() {},
     RecoveryNotice() {},
     SuggestionChips() {},
@@ -145,6 +146,38 @@ test("Chat cancel button routes through active thread run cancellation", async (
   assert.equal(props.canCancel, true);
   await props.onCancel();
   assert.deepEqual(cancelReasons, ["user_requested"]);
+});
+
+test("Chat leaves the composer editable while a run is processing", () => {
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: true,
+      pendingGate: null,
+      channelConnectAction: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+      dismissChannelConnectAction: () => {},
+    },
+  });
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const props = componentProps(chatInput, components.ChatInput);
+  assert.equal(props.disabled, false);
+  assert.equal(props.sendDisabled, true);
 });
 
 test("Chat cancel button ignores active runs from another thread", () => {
@@ -249,7 +282,7 @@ test("Chat renders a timeline load failure as an alert instead of the empty land
 });
 
 test("Chat links to scoped logs for the active thread run", () => {
-  const { tree } = renderChat({
+  const { tree, components } = renderChat({
     hookState: {
       messages: [{ id: "message-1" }],
       isProcessing: true,
@@ -274,11 +307,12 @@ test("Chat links to scoped logs for the active thread run", () => {
     },
   });
 
-  const logsLink = findNode(tree, (node) =>
-    node.strings.some((part) => part.includes("<a") && part.includes("href=")),
-  );
+  const logsLink = findComponent(tree, components.Link);
   assert.ok(logsLink, "active chat should render a scoped logs link");
-  assert.ok(logsLink.values.includes("/v2/logs?thread_id=thread-1&run_id=run-1"));
+  assert.equal(
+    componentProps(logsLink, components.Link).to,
+    "/v2/logs?thread_id=thread-1&run_id=run-1",
+  );
   assert.ok(logsLink.values.includes("nav.logs"));
 });
 
