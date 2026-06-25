@@ -339,8 +339,9 @@ pub struct LlmConfig {
     /// OpenAI Codex config (populated when backend=openai_codex).
     pub openai_codex: Option<OpenAiCodexConfig>,
     /// HTTP request timeout in seconds for LLM API calls.
-    /// Default: 120. Increase for local LLMs (Ollama, vLLM, LM Studio) that
-    /// need more time for prompt evaluation on consumer hardware.
+    /// Default: `DEFAULT_REQUEST_TIMEOUT_SECS` (60), kept below the Reborn
+    /// runner lease. Increase via `LLM_REQUEST_TIMEOUT_SECS` for local LLMs
+    /// (Ollama, vLLM, LM Studio) that need more time on consumer hardware.
     pub request_timeout_secs: u64,
     /// Generic cheap/fast model for lightweight tasks (heartbeat, routing, evaluation).
     /// Works with any backend. Set via `LLM_CHEAP_MODEL` env var.

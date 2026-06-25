@@ -9,6 +9,7 @@
 - Blocked/resumable runs keep the same-thread active lock until resume, cancel, fail, or complete. Running cancellation is two-phase: public cancel requests move to `CancelRequested`, and a trusted runner cancellation completion moves to terminal `Cancelled` and releases the lock exactly once.
 - Store lifecycle metadata and references only. Do not persist raw prompts, assistant content, tool input, secrets, host paths, or backend error details in turn state or events.
 - Keep concrete PostgreSQL/libSQL adapters and product projection/egress wiring out of the core contract unless a scoped follow-up explicitly adds them with parity tests.
+- **Model-call timeout boundary:** `run_profile/model.rs` wraps the primary model call with `PRIMARY_MODEL_CALL_TIMEOUT` (75 s). The ordering is: 60 s provider-level HTTP timeout < 75 s model-call wrapper < 90 s runner lease. An elapsed wrapper timeout maps to a retryable `AgentLoopHostErrorKind::Unavailable` error so the run is retried by the scheduler rather than silently reclaimed mid-flight by the lease.
 - Loop-framework contracts live here only when they are neutral runner/host
   protocol: `LoopFailureKind`, `AgentLoopDriver`, `AgentLoopDriverHost`,
   `LoopXxxPort` traits, run-profile descriptors, refs, prompt bundle contracts,
