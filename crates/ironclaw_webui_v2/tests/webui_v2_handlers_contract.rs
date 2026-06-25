@@ -251,6 +251,7 @@ struct StubServices {
     get_operator_setup_calls: Mutex<usize>,
     run_operator_setup_calls: Mutex<Vec<OperatorSetupCall>>,
     list_operator_config_calls: Mutex<usize>,
+    operator_config_entries: Mutex<Vec<RebornOperatorConfigEntry>>,
     get_operator_config_key_calls: Mutex<Vec<String>>,
     set_operator_config_key_calls: Mutex<Vec<OperatorConfigSetCall>>,
     next_set_operator_config_key_error: Mutex<Option<RebornServicesError>>,
@@ -952,7 +953,7 @@ impl RebornServicesApi for StubServices {
     ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
         *self.list_operator_config_calls.lock().expect("lock") += 1;
         Ok(RebornOperatorConfigListResponse {
-            entries: Vec::new(),
+            entries: self.operator_config_entries.lock().expect("lock").clone(),
             precedence: Vec::new(),
             diagnostics: Vec::new(),
         })
@@ -3038,6 +3039,118 @@ async fn settings_tool_routes_do_not_require_operator_capability() {
             )
         ]
     );
+}
+
+#[tokio::test]
+async fn settings_tool_routes_expose_only_tool_approval_config() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .extend([
+            operator_config_entry(
+                "agent.auto_approve_tools".to_string(),
+                serde_json::json!(true),
+            ),
+            operator_config_entry(
+                "tool.ext.search".to_string(),
+                serde_json::json!({ "state": "always_allow" }),
+            ),
+            operator_config_entry("provider.default".to_string(), serde_json::json!("openai")),
+            operator_config_entry("secret.api_key".to_string(), serde_json::json!("redacted")),
+        ]);
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/settings/tools")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    let keys = body["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .map(|entry| entry["key"].as_str().expect("key"))
+        .collect::<Vec<_>>();
+    assert_eq!(keys, ["agent.auto_approve_tools", "tool.ext.search"]);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/tools")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":false}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/tools/ext.search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"disabled"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert_eq!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [
+            (
+                "agent.auto_approve_tools".to_string(),
+                serde_json::json!(false)
+            ),
+            (
+                "tool.ext.search".to_string(),
+                serde_json::json!({ "state": "disabled" })
+            )
+        ],
+    );
+}
+
+#[tokio::test]
+async fn settings_tool_writes_fail_closed_when_config_service_unwired() {
+    let services = Arc::new(StubServices::default());
+    services.fail_set_operator_config_key(service_unavailable_error(false));
+    let router = router_with_capabilities(services, WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/tools/ext.search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"always_allow"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = read_json(response).await;
+    assert_eq!(body["kind"], "service_unavailable");
+    assert_eq!(body["retryable"], false);
 }
 
 #[tokio::test]

@@ -68,6 +68,10 @@ function findNode(node, predicate) {
   return null;
 }
 
+async function flushAsyncHandlers() {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
 function renderChatInput({
   onSend = async () => {},
   onCancel,
@@ -229,13 +233,17 @@ test("ChatInput blocks Enter send when only submit is disabled", async () => {
 
 test("ChatInput preserves draft when caller refuses send", async () => {
   const setCalls = [];
+  let sendCalls = 0;
   const { tree } = renderChatInput({
     setCalls,
     disabled: false,
     sendDisabled: false,
     canCancel: false,
     draft: "draft while busy",
-    onSend: async () => null,
+    onSend: async () => {
+      sendCalls += 1;
+      return null;
+    },
   });
 
   const textarea = findNode(tree, (node) =>
@@ -247,8 +255,15 @@ test("ChatInput preserves draft when caller refuses send", async () => {
     shiftKey: false,
     preventDefault: () => {},
   });
-  await Promise.resolve();
+  await flushAsyncHandlers();
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {},
+  });
+  await flushAsyncHandlers();
 
+  assert.equal(sendCalls, 2);
   assert.equal(
     setCalls.some((call) => call.index === 0 && call.value === ""),
     false,

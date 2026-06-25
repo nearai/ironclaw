@@ -64,6 +64,9 @@ use crate::router::{WebUiV2Capabilities, WebUiV2State};
 use crate::schema::WebChatV2EventFrame;
 use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
 
+const SETTINGS_TOOLS_AUTO_APPROVE_KEY: &str = "agent.auto_approve_tools";
+const SETTINGS_TOOL_CONFIG_PREFIX: &str = "tool.";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WebUiV2SessionResponse {
     pub tenant_id: String,
@@ -1327,7 +1330,11 @@ pub async fn list_settings_tools(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
-    let response = state.services().list_operator_config(caller).await?;
+    let mut response = state.services().list_operator_config(caller).await?;
+    response.entries.retain(|entry| {
+        entry.key == SETTINGS_TOOLS_AUTO_APPROVE_KEY
+            || entry.key.starts_with(SETTINGS_TOOL_CONFIG_PREFIX)
+    });
     Ok(Json(response))
 }
 
@@ -1346,7 +1353,7 @@ pub async fn set_settings_tools_auto_approve(
         .services()
         .set_operator_config_key(
             caller,
-            "agent.auto_approve_tools".to_string(),
+            SETTINGS_TOOLS_AUTO_APPROVE_KEY.to_string(),
             RebornOperatorConfigSetRequest {
                 value: serde_json::json!(body.enabled),
             },
@@ -1384,7 +1391,8 @@ pub async fn set_settings_tool_permission(
     Json(body): Json<SettingsToolPermissionRequest>,
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
     validate_settings_tool_permission_state(&body.state)?;
-    let key = validate_operator_config_key(format!("tool.{capability_id}"))?;
+    let key =
+        validate_operator_config_key(format!("{SETTINGS_TOOL_CONFIG_PREFIX}{capability_id}"))?;
     let response = state
         .services()
         .set_operator_config_key(

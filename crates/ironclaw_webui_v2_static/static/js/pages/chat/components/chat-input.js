@@ -222,9 +222,10 @@ export function ChatInput({
     } catch {
       // The failed optimistic message renders retry details in the thread.
     } finally {
+      sendBlockedRef.current = disabled || sendDisabled;
       setIsSending(false);
     }
-  }, [text, attachments, onSend, draftKey, cancelPendingDraft]);
+  }, [text, attachments, onSend, draftKey, cancelPendingDraft, disabled, sendDisabled]);
 
   const handleChange = React.useCallback(
     (e) => {
