@@ -146,6 +146,7 @@ export function AutomationDetailModal({
                 type="button"
                 variant="secondary"
                 size="sm"
+                title=${actionTitle}
                 disabled=${isMutating}
                 onClick=${handleAction}
               >

@@ -733,7 +733,7 @@ registerPack("zh-CN", {
   "automations.summary.filterAction": "显示{label}",
   "automations.summary.nextRun": "次运行时间阶段",
   "automations.summary.none": "无活动情况",
-  "automations.summary.nextRunDue": "即将运行",
+  "automations.summary.nextRunDue": "立即执行",
   "automations.summary.nextRunDetail": "系统中预期的最快运行的执行调度的发生间隔范围说明表。这将被列入下面情况列表中。",
   "automations.empty.matchingTitle": "毫无自动化操作能够符合这种要求。",
   "automations.empty.matchingDescription": "尝试通过另外调整一下筛查选项状态。可能有助于进行查看。",
