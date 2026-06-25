@@ -347,6 +347,12 @@ impl MemoryService for NativeMemoryService {
             .with_limit(request.max_snippets)
             // Full-text only: the native backend declares vector_search=false and
             // fails closed on a vector request (matches the `search` method).
+            //
+            // Regression-audit note: origin's prompt-context search left
+            // `vector=true`. `false` is intentional and correct for this provider —
+            // the native backend is FTS-only (no embeddings wired), so a vector
+            // request would fail closed and return nothing. A future
+            // vector-capable provider would set this in its own `retrieve_context`.
             .with_vector(false);
         let mut results = self
             .backend

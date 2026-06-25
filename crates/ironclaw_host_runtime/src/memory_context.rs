@@ -211,6 +211,16 @@ fn invocation_for_context_request(request: &MemoryPromptContextRequest) -> Memor
     }
 }
 
+/// Map a provider error onto the agent-loop host error surface.
+///
+/// Regression-audit note: the native provider returns `Input` both for an
+/// invalid search query and for a failed memory-scope build (`scoped_context`),
+/// so both surface here as `InvalidInvocation`. Origin mapped a failed scope
+/// build to `Internal`. The divergence is intentional and unreachable in
+/// practice: the host resolves and validates the context scope before calling
+/// `retrieve_context`, so the scope-build arm never fires; surfacing it as
+/// `InvalidInvocation` (rather than origin's `Internal`) fails closed on the
+/// same axis as the query-validation case.
 fn map_memory_service_error(error: MemoryServiceError) -> AgentLoopHostError {
     match error.kind() {
         MemoryServiceErrorKind::Input => AgentLoopHostError::new(
