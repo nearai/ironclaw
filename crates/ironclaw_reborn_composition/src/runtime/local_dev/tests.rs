@@ -665,7 +665,7 @@ mod tests {
             mission_id: None,
         };
         let actor_thread_scope = ThreadScope {
-            owner_user_id: Some(actor_user_id),
+            owner_user_id: Some(actor_user_id.clone()),
             ..base_thread_scope.clone()
         };
         let thread_service = Arc::new(InMemorySessionThreadService::default());
