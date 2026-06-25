@@ -4556,6 +4556,11 @@ struct TraceUploadClaimContext {
     /// CLI paths, static-token paths) which is fine as long as `auth_mode` is
     /// `WorkloadTokenEnv`.
     scope_dir: Option<PathBuf>,
+    /// Per-user pseudonymous subject (from `resolve_trace_credentials`). When
+    /// set and auth_mode is DeviceKey, it is sent to the issuer so the minted
+    /// claim's principal is per-user under the shared instance device key.
+    /// `None` for the personal-invite model (device key already 1:1 with user).
+    subject: Option<String>,
 }
 
 impl TraceUploadClaimContext {
@@ -4566,6 +4571,7 @@ impl TraceUploadClaimContext {
             consent_scopes: envelope.consent.scopes.clone(),
             allowed_uses: envelope.trace_card.allowed_uses.clone(),
             scope_dir: None,
+            subject: None,
         }
     }
 
@@ -4576,6 +4582,7 @@ impl TraceUploadClaimContext {
             consent_scopes: Vec::new(),
             allowed_uses: Vec::new(),
             scope_dir: None,
+            subject: None,
         }
     }
 
@@ -4586,6 +4593,7 @@ impl TraceUploadClaimContext {
             consent_scopes: Vec::new(),
             allowed_uses: Vec::new(),
             scope_dir: None,
+            subject: None,
         }
     }
 
@@ -4646,6 +4654,10 @@ struct TraceUploadClaimIssuerRequest {
     /// policy has no `upload_token_invite_code` set.
     #[serde(skip_serializing_if = "Option::is_none")]
     invite_code: Option<String>,
+    /// Per-user subject; only sent in DeviceKey mode. The server (Slice 0)
+    /// derives a per-user principal from it. Omitted when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5169,6 +5181,12 @@ fn build_trace_upload_claim_issuer_request(
             .map(str::to_owned),
         TraceUploadAuthMode::DeviceKey => None,
     };
+    // Per-user subject only applies to the device-key (instance) path; in
+    // WorkloadTokenEnv mode the workload token already identifies the principal.
+    let subject = match policy.auth_mode {
+        TraceUploadAuthMode::DeviceKey => context.subject.clone(),
+        TraceUploadAuthMode::WorkloadTokenEnv => None,
+    };
     TraceUploadClaimIssuerRequest {
         schema_version: "ironclaw.trace_upload_claim_request.v1",
         tenant_id: policy.upload_token_tenant_id.clone(),
@@ -5179,6 +5197,7 @@ fn build_trace_upload_claim_issuer_request(
         allowed_uses: context.allowed_uses.clone(),
         requested_at: Utc::now(),
         invite_code,
+        subject,
     }
 }
 
@@ -5609,6 +5628,7 @@ fn profile_attribution_claim_context(scope: Option<&str>) -> TraceUploadClaimCon
         consent_scopes: vec![ConsentScope::PublicAttribution],
         allowed_uses: Vec::new(),
         scope_dir: Some(trace_contribution_dir_for_scope(scope)),
+        subject: None,
     }
 }
 
@@ -12689,6 +12709,7 @@ mod tests {
             consent_scopes: vec![ConsentScope::DebuggingEvaluation],
             allowed_uses: Vec::new(),
             scope_dir: Some(scope_dir.path().to_path_buf()),
+            subject: None,
         };
         let claim = fetch_trace_upload_claim_from_issuer(&policy, &context, None)
             .await
@@ -14600,5 +14621,46 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn upload_claim_request_includes_subject_in_device_key_mode() {
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            auth_mode: TraceUploadAuthMode::DeviceKey,
+            upload_token_tenant_id: Some("tenant-a".to_string()),
+            ..Default::default()
+        };
+        let ctx = TraceUploadClaimContext {
+            trace_id: None,
+            submission_id: None,
+            consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+            allowed_uses: Vec::new(),
+            scope_dir: None,
+            subject: Some("sha256:deadbeef".to_string()),
+        };
+        let req = build_trace_upload_claim_issuer_request(&policy, &ctx);
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["subject"], "sha256:deadbeef");
+    }
+
+    #[test]
+    fn upload_claim_request_omits_subject_when_none() {
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            auth_mode: TraceUploadAuthMode::DeviceKey,
+            ..Default::default()
+        };
+        let ctx = TraceUploadClaimContext {
+            trace_id: None,
+            submission_id: None,
+            consent_scopes: Vec::new(),
+            allowed_uses: Vec::new(),
+            scope_dir: None,
+            subject: None,
+        };
+        let req = build_trace_upload_claim_issuer_request(&policy, &ctx);
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("subject").is_none(), "subject omitted when None");
     }
 }
