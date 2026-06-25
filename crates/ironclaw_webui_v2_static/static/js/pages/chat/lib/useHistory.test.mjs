@@ -368,3 +368,31 @@ test("mergeFullRefresh carries live assistant timestamps onto confirmed replies"
   assert.equal(merged[0].id, "msg-assistant-1");
   assert.equal(merged[0].timestamp, "2026-06-25T07:18:00.000Z");
 });
+
+test("mergeFullRefresh uses run-settled time for confirmed assistant replies", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      {
+        id: "msg-assistant-1",
+        role: "assistant",
+        content: "Here's one.",
+        isFinalReply: true,
+        turnRunId: "run-1",
+      },
+    ],
+    [],
+    {
+      finalReplyTimestampByRun: {
+        "run-1": "2026-06-25T07:19:00.000Z",
+      },
+    },
+  );
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, "msg-assistant-1");
+  assert.equal(merged[0].timestamp, "2026-06-25T07:19:00.000Z");
+});

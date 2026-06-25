@@ -77,7 +77,10 @@ export function useHistory(threadId, options = {}) {
       // reload replaces the list. A settle-triggered reload (any terminal
       // run status) uses this so recovering tool input/output previews from
       // the durable timeline doesn't erase a visible failure notice.
-      const { preserveClientOnly = false } = loadOptions;
+      const {
+        preserveClientOnly = false,
+        finalReplyTimestampByRun = null,
+      } = loadOptions;
       if (!threadId) {
         setState({ messages: [], nextCursor: null, isLoading: false, loadError: null });
         return;
@@ -119,6 +122,7 @@ export function useHistory(threadId, options = {}) {
           const cachedMessages = historyCache.get(key)?.messages || [];
           const cacheMerged = mergeFullRefresh(renderable, cachedMessages, {
             preserveClientOnly,
+            finalReplyTimestampByRun,
           });
           putCache(key, { messages: cacheMerged, nextCursor });
         }
@@ -133,6 +137,7 @@ export function useHistory(threadId, options = {}) {
           } else {
             merged = mergeFullRefresh(renderable, prev.messages, {
               preserveClientOnly,
+              finalReplyTimestampByRun,
             });
           }
           putCache(key, { messages: merged, nextCursor });
@@ -215,8 +220,10 @@ function mergePage(older, current) {
 }
 
 function mergeFullRefresh(fresh, current, options = {}) {
-  const { preserveClientOnly = false } = options;
-  const hydratedFresh = hydrateFreshMessages(fresh, current);
+  const { preserveClientOnly = false, finalReplyTimestampByRun = null } = options;
+  const hydratedFresh = hydrateFreshMessages(fresh, current, {
+    finalReplyTimestampByRun,
+  });
   const ids = new Set(hydratedFresh.map((m) => m?.id).filter(Boolean));
   const preserved = current.filter((message) => {
     if (!message || typeof message.id !== "string" || ids.has(message.id)) {
@@ -228,7 +235,8 @@ function mergeFullRefresh(fresh, current, options = {}) {
   return preserved.length > 0 ? [...hydratedFresh, ...preserved] : hydratedFresh;
 }
 
-function hydrateFreshMessages(fresh, current) {
+function hydrateFreshMessages(fresh, current, options = {}) {
+  const { finalReplyTimestampByRun = null } = options;
   const currentByConfirmedId = new Map();
   const finalAssistantByRun = new Map();
   for (const message of current || []) {
@@ -244,18 +252,30 @@ function hydrateFreshMessages(fresh, current) {
     }
   }
 
-  if (currentByConfirmedId.size === 0 && finalAssistantByRun.size === 0) return fresh;
+  if (
+    currentByConfirmedId.size === 0 &&
+    finalAssistantByRun.size === 0 &&
+    !finalReplyTimestampByRun
+  ) {
+    return fresh;
+  }
   return fresh.map((message) => {
     if (!message || message.timestamp || typeof message.id !== "string") {
       return message;
     }
+    const turnRunId = typeof message.turnRunId === "string" ? message.turnRunId : null;
     const currentMessage =
       currentByConfirmedId.get(message.id) ||
-      (isFinalAssistantMessage(message) && typeof message.turnRunId === "string"
-        ? finalAssistantByRun.get(message.turnRunId)
+      (isFinalAssistantMessage(message) && turnRunId
+        ? finalAssistantByRun.get(turnRunId)
         : null);
-    return currentMessage?.timestamp
-      ? { ...message, timestamp: currentMessage.timestamp }
+    const fallbackTimestamp =
+      isFinalAssistantMessage(message) && turnRunId
+        ? finalReplyTimestampByRun?.[turnRunId]
+        : null;
+    const timestamp = currentMessage?.timestamp || fallbackTimestamp;
+    return timestamp
+      ? { ...message, timestamp }
       : message;
   });
 }

@@ -309,7 +309,11 @@ export function useChat(threadId) {
     // pre-submit optimistic twin.
     onRunSettled: (_runId, { success }) => {
       if (success) setPendingMessages([]);
-      loadHistory(undefined, { preserveClientOnly: true });
+      loadHistory(undefined, {
+        preserveClientOnly: true,
+        finalReplyTimestampByRun:
+          _runId && success ? { [_runId]: new Date().toISOString() } : null,
+      });
     },
   });
 
