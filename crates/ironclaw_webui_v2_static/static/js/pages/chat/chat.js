@@ -86,10 +86,14 @@ export function Chat({
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
   const showLanding = !historyLoading && !hasMessages && !historyLoadError;
+  const approvalSubmitWarning = pendingGate
+    ? "Resolve the approval request before sending another message."
+    : "";
   const composerSendDisabled =
-    (isProcessing && !pendingGate) || cooldownSeconds > 0;
+    Boolean(pendingGate) || (isProcessing && !pendingGate) || cooldownSeconds > 0;
   const composerStatusText =
-    cooldownSeconds > 0 ? `Retry in ${cooldownSeconds}s` : undefined;
+    approvalSubmitWarning ||
+    (cooldownSeconds > 0 ? `Retry in ${cooldownSeconds}s` : undefined);
   // Scope the persisted composer draft to the open thread (or the
   // shared new-conversation slot when there's no active thread yet).
   const composerDraftKey = activeThreadId || NEW_DRAFT_KEY;
@@ -128,10 +132,11 @@ export function Chat({
 
   const handleSuggestion = React.useCallback(
     async (text) => {
+      if (composerSendDisabled) return;
       setSuggestions([]);
       await handleSend(text);
     },
-    [handleSend, setSuggestions]
+    [composerSendDisabled, handleSend, setSuggestions]
   );
 
   const handleCancelRun = React.useCallback(
@@ -325,6 +330,7 @@ export function Chat({
           <${SuggestionChips}
             suggestions=${suggestions}
             onSelect=${handleSuggestion}
+            disabled=${composerSendDisabled}
           />
 
           <${ChatInput}

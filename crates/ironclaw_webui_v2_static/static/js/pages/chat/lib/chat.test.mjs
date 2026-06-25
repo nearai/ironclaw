@@ -274,6 +274,11 @@ test("Chat keeps composer cancel disabled while a gate owns the run decision", (
   const chatInput = findComponent(tree, components.ChatInput);
   const props = componentProps(chatInput, components.ChatInput);
   assert.equal(props.canCancel, false);
+  assert.equal(props.sendDisabled, true);
+  assert.equal(
+    props.statusText,
+    "Resolve the approval request before sending another message.",
+  );
 });
 
 test("Chat renders a timeline load failure as an alert instead of the empty landing", () => {
