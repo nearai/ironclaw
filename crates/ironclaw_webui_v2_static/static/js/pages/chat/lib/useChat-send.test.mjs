@@ -2153,6 +2153,73 @@ test("useChat.send: rejected_busy without notice still clears isProcessing", asy
   assert.equal(lastIsProcessing?.value, false);
 });
 
+test("useChat.send: active run refuses duplicate submit before network call", async () => {
+  const threadId = "thread-busy-local";
+  let renderedMessages = [];
+  let sendCalls = 0;
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({ initialByIndex: new Map([[4, true]]) }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("busy prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("busy prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      sendCalls += 1;
+      throw new Error("busy send should not reach API");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  const response = await chat.send("second message while first run is active");
+
+  assert.equal(response, null);
+  assert.equal(sendCalls, 0);
+  assert.deepEqual(renderedMessages, []);
+});
+
 test("useChat.send: connectable channel fetch failures submit the prompt", async () => {
   let createThreadCalled = false;
   let sentContent = null;

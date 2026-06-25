@@ -254,7 +254,9 @@ export function ChatInput({
     (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        if (sendBlockedRef.current) return;
+        const domSendDisabled =
+          textareaRef.current?.dataset?.sendDisabled === "true";
+        if (domSendDisabled || sendBlockedRef.current) return;
         handleSend();
       }
     },
@@ -404,6 +406,7 @@ export function ChatInput({
           onChange=${handleChange}
           onKeyDown=${onKeyDown}
           onPaste=${onPaste}
+          data-send-disabled=${isSubmitDisabled ? "true" : "false"}
           placeholder=${placeholder}
           rows=${1}
           disabled=${disabled}

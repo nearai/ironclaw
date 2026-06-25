@@ -189,7 +189,14 @@ export function useChat(threadId) {
     setMessages,
   } = useHistory(threadId, { getPendingMessages, setPendingMessages });
 
-  const [isProcessing, setIsProcessing] = React.useState(false);
+  const [isProcessing, setIsProcessingState] = React.useState(false);
+  const isProcessingRef = React.useRef(isProcessing);
+  const setIsProcessing = React.useCallback((next) => {
+    const value =
+      typeof next === "function" ? next(isProcessingRef.current) : next;
+    isProcessingRef.current = value;
+    setIsProcessingState(value);
+  }, []);
   const [pendingGate, setPendingGateState] = React.useState(null);
   const pendingGateRef = React.useRef(pendingGate);
   const [busyGateNotice, setBusyGateNotice] = React.useState(null);
@@ -239,7 +246,7 @@ export function useChat(threadId) {
   // raw setActiveRunState rather than the activeRunRef-mutating wrapper.
   if (stateThreadId !== threadId) {
     setStateThreadId(threadId);
-    setIsProcessing(false);
+    setIsProcessingState(false);
     setPendingGateState(null);
     setBusyGateNotice(null);
     setActiveRunState(null);
@@ -253,6 +260,9 @@ export function useChat(threadId) {
   React.useEffect(() => {
     pendingGateRef.current = pendingGate;
   }, [pendingGate]);
+  React.useEffect(() => {
+    isProcessingRef.current = isProcessing;
+  }, [isProcessing]);
 
   React.useEffect(() => {
     const currentKey = busyNoticeKey(threadId, pendingGate);
@@ -385,8 +395,11 @@ export function useChat(threadId) {
       const wireAttachments = stagedAttachments.map(toWireAttachment);
       const renderAttachments = stagedAttachments.map(toRenderAttachment);
 
-      if (pendingGate) {
+      if (pendingGate || pendingGateRef.current) {
         throw approvalGatePendingSendError();
+      }
+      if (isProcessingRef.current) {
+        return null;
       }
 
       // Channel-connect slash commands ("/connect telegram") never carry
@@ -410,10 +423,6 @@ export function useChat(threadId) {
         if (!sendThreadId) {
           throw new Error("createThread returned no thread_id");
         }
-      }
-
-      if (pendingGateRef.current) {
-        throw approvalGatePendingSendError();
       }
 
       const pendingKey = sendThreadId;
@@ -573,7 +582,15 @@ export function useChat(threadId) {
         removePending(pendingMessagesRef.current, pendingKey, optimisticId);
       }
     },
-    [threadId, pendingGate, setMessages, seedThreadMessages],
+    [
+      threadId,
+      pendingGate,
+      setMessages,
+      seedThreadMessages,
+      setIsProcessing,
+      setPendingGate,
+      setActiveRun,
+    ],
   );
 
   // v2 resolveGate signature: `(resolution, { always?, credentialRef? })`.
