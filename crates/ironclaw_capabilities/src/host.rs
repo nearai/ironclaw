@@ -2275,8 +2275,8 @@ fn obligation_invocation_error_kind(error: &CapabilityInvocationError) -> &'stat
 ///
 /// FOLLOW-UP (reactive OAuth refresh on runtime 401): for an `OAuth` credential
 /// this gate is the *fallback* after refresh is exhausted — proactive refresh
-/// already runs inline at injection (within the 5-min expiry margin) and via the
-/// background keepalive worker. A runtime 401 still slips through when the token
+/// may already have been attempted inline at injection (within the 5-min expiry
+/// margin) or by the background keepalive worker. A runtime 401 still slips through when the token
 /// looked fresh by `expires_at` but was revoked mid-life, where one reactive
 /// "refresh + retry" before surfacing the gate would recover silently. That
 /// retry does not exist today (pre-existing gap, not introduced here); the gate

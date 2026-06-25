@@ -427,3 +427,87 @@ async fn invoke_json_does_not_enrich_when_multiple_credential_obligations_declar
          rather than mis-pointed at the wrong provider"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test: invoke_json does NOT enrich when required_secrets is already populated
+//
+// Regression guard: the enrichment helper bails out when `required_secrets` is
+// populated, but earlier caller-level tests only exercise the empty-required_secrets
+// path.  A future wiring regression in `CapabilityHost::invoke_json` that strips
+// the raw-secret gate and re-derives it as a provider prompt would not be caught
+// without a test that drives the caller with a pre-populated `required_secrets`.
+//
+// The authorizer DOES declare an InjectCredentialAccountOnce obligation so the
+// test proves the preservation is due to the populated `required_secrets` check,
+// not merely an absence of obligations.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn invoke_json_preserves_required_secrets_from_dispatcher() {
+    // A dispatcher that returns AuthRequired with required_secrets POPULATED
+    // and credential_requirements EMPTY — the raw-secret-handle gate case.
+    struct AuthRequiredWithSecretsDispatcher;
+
+    #[async_trait]
+    impl CapabilityDispatcher for AuthRequiredWithSecretsDispatcher {
+        async fn dispatch_json(
+            &self,
+            request: CapabilityDispatchRequest,
+        ) -> Result<CapabilityDispatchResult, DispatchError> {
+            Err(DispatchError::AuthRequired {
+                capability: request.capability_id,
+                required_secrets: vec![SecretHandle::new("raw_secret_handle").unwrap()],
+                credential_requirements: Vec::new(),
+            })
+        }
+    }
+
+    let registry = registry_with_echo_capability();
+    let obligation_provider = RuntimeCredentialAccountProviderId::new("github").unwrap();
+    let requester = ExtensionId::new("github").unwrap();
+    // Authorizer declares an InjectCredentialAccountOnce obligation — enrichment
+    // WOULD fire on an empty gate, but must be suppressed here because
+    // required_secrets is already populated.
+    let authorizer = CredentialObligationAuthorizer {
+        provider: obligation_provider,
+        setup: RuntimeCredentialAccountSetup::ManualToken,
+        requester_extension: requester,
+    };
+    let dispatcher = AuthRequiredWithSecretsDispatcher;
+    let handler = PassthroughObligationHandler;
+    let host =
+        CapabilityHost::new(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: json!({}),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    let CapabilityInvocationError::AuthorizationRequiresAuth {
+        required_secrets,
+        credential_requirements,
+        ..
+    } = err
+    else {
+        panic!("expected AuthorizationRequiresAuth, got {err:?}");
+    };
+    assert_eq!(
+        required_secrets.len(),
+        1,
+        "required_secrets from dispatcher must be preserved when non-empty"
+    );
+    assert!(
+        credential_requirements.is_empty(),
+        "credential_requirements must remain empty when required_secrets are present \
+         — enrichment from obligations must be suppressed"
+    );
+}
