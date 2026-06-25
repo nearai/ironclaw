@@ -64,6 +64,8 @@ mod wasm_credentials;
 
 pub use user_profile_source::MemoryBackedUserProfileSource;
 
+pub use memory_native_extension::native_memory_first_party_package;
+
 pub use capability_catalog::{
     HotCapabilityCatalog, HotCapabilityRecord, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES,
     publish_hot_capability_catalog,
@@ -100,7 +102,6 @@ pub use first_party_tools::{
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend_and_memory_resolver,
     builtin_first_party_package, builtin_first_party_package_for_process_backend,
-    native_memory_first_party_package,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{

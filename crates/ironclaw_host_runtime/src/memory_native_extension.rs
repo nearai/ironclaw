@@ -1,26 +1,34 @@
 //! The bundled `ironclaw.memory.native` Extension Manifest v2 (issue #3537).
 //!
-//! This module owns the host-bundled native memory extension manifest *and* the
-//! host service identity that backs it. Co-locating the two embodies the issue's
-//! "bundled TOML alone is not authority" rule: the manifest declares a
-//! `first_party` runtime whose `service` must match the host-registered native
-//! memory provider ([`NATIVE_MEMORY_PROVIDER_SERVICE`]); the binding layer
-//! (`memory_binding`) is what actually resolves that service to an
-//! `Arc<dyn MemoryService>`.
+//! This module owns the host-bundled native memory extension: its v2 TOML
+//! manifest, the host service identity that backs it, and the function that
+//! turns the bundled manifest into a registrable [`ExtensionPackage`].
 //!
-//! The manifest is parsed with [`ManifestSource::HostBundled`] (the only source
-//! eligible for a reserved `ironclaw.*` id and a `first_party` runtime) against
-//! the host's [`default_host_port_catalog`](crate::default_host_port_catalog),
-//! so the memory host ports must be registered there or parsing fails closed.
+//! Native memory is loaded on the **always-on first-party lane** (like the
+//! builtin toolset), not the catalog/lifecycle lane: [`native_memory_first_party_package`]
+//! parses the bundled TOML and the composition layer inserts the resulting
+//! package directly into the extension registry at startup. There is no
+//! install/enable lifecycle. Co-locating the manifest with the service identity
+//! embodies the issue's "bundled TOML alone is not authority" rule: the manifest
+//! declares a `first_party` runtime whose `service` must match the host-registered
+//! native memory provider ([`NATIVE_MEMORY_PROVIDER_SERVICE`]); the binding layer
+//! (`memory_binding`) resolves that service to an `Arc<dyn MemoryService>`, and
+//! the document-store profile binding is the provider-swap point.
 //!
-//! The four provider-prefixed capabilities implement the three host-defined
-//! memory profiles (see [`crate::memory_profiles`]). They are `host_internal`:
-//! the host context/interaction pipeline invokes them, and the model-facing
-//! surface stays the separate `builtin.memory_*` tools.
+//! The four capabilities are model-visible memory tools. `read`/`write` implement
+//! the `memory.document_store.v1` profile (their schema refs match the profile's
+//! required-operation refs); `search`/`tree` are native conveniences. Input
+//! schemas are served inline on the always-on lane (see
+//! `first_party_tools::resolve_native_memory_input_schema_ref`), so no asset
+//! materialization is required.
 
-use ironclaw_extensions::{ExtensionManifestV2, ManifestSource, ManifestV2Error};
+use ironclaw_extensions::{
+    ExtensionError, ExtensionManifestRecord, ExtensionManifestV2, ExtensionPackage, ManifestSource,
+    ManifestV2Error,
+};
+use ironclaw_host_api::VirtualPath;
 
-use crate::extension_contracts::default_host_port_catalog;
+use crate::extension_contracts::{default_host_api_contract_registry, default_host_port_catalog};
 
 /// Reserved host-bundled extension id for the native memory provider.
 pub const NATIVE_MEMORY_EXTENSION_ID: &str = "ironclaw.memory.native";
@@ -31,17 +39,10 @@ pub const NATIVE_MEMORY_EXTENSION_ID: &str = "ironclaw.memory.native";
 /// (via a parse-time assertion test) and the binding layer compare against.
 pub const NATIVE_MEMORY_PROVIDER_SERVICE: &str = "native_memory_provider";
 
-/// Capability id implementing `memory.context_retrieval.v1`.
-pub const NATIVE_MEMORY_CONTEXT_RETRIEVE_CAPABILITY_ID: &str =
-    "ironclaw.memory.native.context.retrieve";
-/// Capability id implementing `memory.interaction_log.v1`.
-pub const NATIVE_MEMORY_INTERACTION_RECORD_CAPABILITY_ID: &str =
-    "ironclaw.memory.native.interaction.record";
-/// Capability id implementing the read operation of `memory.document_store.v1`.
-pub const NATIVE_MEMORY_DOCUMENT_READ_CAPABILITY_ID: &str = "ironclaw.memory.native.document.read";
-/// Capability id implementing the write operation of `memory.document_store.v1`.
-pub const NATIVE_MEMORY_DOCUMENT_WRITE_CAPABILITY_ID: &str =
-    "ironclaw.memory.native.document.write";
+/// Virtual package root for the bundled native memory extension. Used as a
+/// stable identity for the registered package; on the always-on lane the
+/// manifest's schemas are served inline rather than read from this path.
+const NATIVE_MEMORY_PACKAGE_ROOT: &str = "/system/extensions/ironclaw.memory.native";
 
 /// Raw bundled manifest TOML for the native memory extension.
 pub const NATIVE_MEMORY_MANIFEST_TOML: &str = include_str!("../assets/memory_native/manifest.toml");
@@ -60,10 +61,44 @@ pub fn native_memory_manifest() -> Result<ExtensionManifestV2, ManifestV2Error> 
     )
 }
 
+/// Build the registrable package for the bundled native memory extension.
+///
+/// Parses the bundled v2 TOML against the host port catalog + API contract
+/// registry and converts it into an [`ExtensionPackage`]. The composition layer
+/// inserts this package into the always-on extension registry (alongside the
+/// builtin package), so native memory's model tools are unconditionally
+/// available without a catalog install/enable step.
+pub fn native_memory_first_party_package() -> Result<ExtensionPackage, ExtensionError> {
+    let invalid = |error: &dyn std::fmt::Display| ExtensionError::InvalidManifest {
+        reason: format!("native memory first-party package is invalid: {error}"),
+    };
+    let host_ports = default_host_port_catalog().map_err(|error| invalid(&error))?;
+    let contracts = default_host_api_contract_registry().map_err(|error| invalid(&error))?;
+    let record = ExtensionManifestRecord::from_toml_with_contracts(
+        NATIVE_MEMORY_MANIFEST_TOML,
+        ManifestSource::HostBundled,
+        &host_ports,
+        None,
+        &contracts,
+    )
+    .map_err(|error| invalid(&error))?;
+    let manifest = record
+        .manifest()
+        .clone()
+        .try_into()
+        .map_err(|error: ExtensionError| invalid(&error))?;
+    let root = VirtualPath::new(NATIVE_MEMORY_PACKAGE_ROOT)?;
+    ExtensionPackage::from_manifest_toml(manifest, root, record.raw_toml())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_extensions::ExtensionRuntimeV2;
+    use crate::{
+        MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
+        MEMORY_WRITE_CAPABILITY_ID,
+    };
+    use ironclaw_extensions::{CapabilityVisibility, ExtensionRuntimeV2};
 
     #[test]
     fn manifest_parses_as_host_bundled_first_party() {
@@ -81,8 +116,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_declares_four_host_internal_capabilities() {
-        use ironclaw_extensions::CapabilityVisibility;
+    fn manifest_declares_four_model_visible_capabilities() {
         let manifest = native_memory_manifest().expect("manifest");
         let ids: Vec<&str> = manifest
             .capabilities
@@ -92,41 +126,41 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                NATIVE_MEMORY_CONTEXT_RETRIEVE_CAPABILITY_ID,
-                NATIVE_MEMORY_INTERACTION_RECORD_CAPABILITY_ID,
-                NATIVE_MEMORY_DOCUMENT_READ_CAPABILITY_ID,
-                NATIVE_MEMORY_DOCUMENT_WRITE_CAPABILITY_ID,
+                MEMORY_READ_CAPABILITY_ID,
+                MEMORY_WRITE_CAPABILITY_ID,
+                MEMORY_SEARCH_CAPABILITY_ID,
+                MEMORY_TREE_CAPABILITY_ID,
             ]
         );
         for capability in &manifest.capabilities {
             assert_eq!(
                 capability.visibility,
-                CapabilityVisibility::HostInternal,
-                "{} must be host_internal",
+                CapabilityVisibility::Model,
+                "{} must be model-visible",
                 capability.id
             );
         }
     }
 
     #[test]
-    fn every_capability_requires_the_memory_storage_and_audit_ports() {
-        use ironclaw_host_api::{
-            HOST_EVENTS_AUDIT_PORT_ID, HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID, HostPortId,
-        };
+    fn native_memory_declares_no_host_ports() {
+        // The live native provider is filesystem-backed; it declares no storage
+        // or audit host ports. The SQL/audit ports remain catalogued vocabulary
+        // for the deferred SQL-backed milestone (see ADR 0002), but no live
+        // capability requires them.
         let manifest = native_memory_manifest().expect("manifest");
-        let storage = HostPortId::new(HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID).unwrap();
-        let audit = HostPortId::new(HOST_EVENTS_AUDIT_PORT_ID).unwrap();
         for capability in &manifest.capabilities {
             assert!(
-                capability.required_host_ports.contains(&storage),
-                "{} must require the sql_transaction storage port",
-                capability.id
-            );
-            assert!(
-                capability.required_host_ports.contains(&audit),
-                "{} must require the audit port",
+                capability.required_host_ports.is_empty(),
+                "{} must declare no required host ports",
                 capability.id
             );
         }
+    }
+
+    #[test]
+    fn native_memory_package_builds() {
+        let package = native_memory_first_party_package().expect("native memory package builds");
+        assert_eq!(package.manifest.id.as_str(), NATIVE_MEMORY_EXTENSION_ID);
     }
 }

@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "properties": {
+    "query": { "type": "string", "description": "The resolved search query" },
+    "results": {
+      "type": "array",
+      "description": "Matching memory snippets, best first",
+      "items": {
+        "type": "object",
+        "properties": {
+          "content": { "type": "string" },
+          "score": { "type": "number" },
+          "path": { "type": "string" },
+          "is_hybrid_match": { "type": "boolean" }
+        },
+        "required": ["content", "score", "path"],
+        "additionalProperties": false
+      }
+    },
+    "result_count": { "type": "integer", "description": "Number of results returned" }
+  },
+  "required": ["query", "results", "result_count"],
+  "additionalProperties": false
+}

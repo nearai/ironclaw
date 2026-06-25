@@ -1,116 +1,34 @@
 use serde_json::{Value, json};
 
-/// Inline input schemas for the native memory extension
-/// (`ironclaw.memory.native`), served by `surface.rs` exactly the way builtin
-/// schemas are. `document-{read,write}` use the `memory.document_store.v1`
-/// profile operation refs so the conformance harness matches them; `search` and
-/// `tree` use native-local refs (they implement no profile). The shapes are the
-/// former `builtin.memory_*` shapes verbatim, so dispatch validation is
-/// behavior-identical.
+/// Input schemas for the native memory extension (`ironclaw.memory.native`),
+/// served inline by `surface.rs` the way builtin schemas are.
+///
+/// The bundled v2 manifest's asset schema files are the single source of truth:
+/// they are compiled in here and parsed, rather than materialized to the
+/// filesystem, because native memory rides the always-on lane.
+/// `document-{read,write}` use the `memory.document_store.v1` profile operation
+/// refs (so the conformance harness matches them); `search`/`tree` use
+/// native-local refs (they implement no profile).
 pub(crate) fn resolve_native_memory_input_schema_ref(reference: &str) -> Option<Value> {
-    Some(match reference {
-        "schemas/memory/document-read.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Relative memory document path to read"
-                }
-            },
-            "required": ["path"],
-            "additionalProperties": false
-        }),
-        "schemas/memory/document-write.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "Full content to write or append"
-                },
-                "target": {
-                    "type": "string",
-                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'bootstrap' to clear BOOTSTRAP.md (content is ignored; the file is always cleared), or a relative memory document path.",
-                    "default": "daily_log"
-                },
-                "append": {
-                    "type": "boolean",
-                    "description": "Append to existing content when true; replace when false",
-                    "default": true
-                },
-                "metadata": {
-                    "type": "object",
-                    "description": "Optional document metadata such as skip_indexing or skip_versioning"
-                },
-                "old_string": {
-                    "type": "string",
-                    "description": "Exact text to replace; switches to patch mode"
-                },
-                "new_string": {
-                    "type": "string",
-                    "description": "Replacement text for patch mode"
-                },
-                "replace_all": {
-                    "type": "boolean",
-                    "description": "Replace every old_string occurrence in patch mode",
-                    "default": false
-                },
-                "timezone": {
-                    "type": "string",
-                    "description": "IANA timezone used only for daily_log target date resolution"
-                }
-            },
-            "additionalProperties": false
-        }),
-        "schemas/memory/search.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Preferred natural language search query for persistent memory"
-                },
-                "q": {
-                    "type": "string",
-                    "description": "Alias for query"
-                },
-                "text": {
-                    "type": "string",
-                    "description": "Alias for query"
-                },
-                "pattern": {
-                    "type": "string",
-                    "description": "Alias for query"
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 20,
-                    "default": 5,
-                    "description": "Maximum number of memory results to return"
-                }
-            },
-            "required": ["query"],
-            "additionalProperties": false
-        }),
-        "schemas/memory/tree.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Relative memory directory path to list; omit for the memory root",
-                    "default": ""
-                },
-                "depth": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10,
-                    "default": 1,
-                    "description": "Maximum directory depth to include"
-                }
-            },
-            "additionalProperties": false
-        }),
+    let raw = match reference {
+        "schemas/memory/document-read.input.v1.json" => {
+            include_str!("../../assets/memory_native/schemas/memory/document-read.input.v1.json")
+        }
+        "schemas/memory/document-write.input.v1.json" => {
+            include_str!("../../assets/memory_native/schemas/memory/document-write.input.v1.json")
+        }
+        "schemas/memory/search.input.v1.json" => {
+            include_str!("../../assets/memory_native/schemas/memory/search.input.v1.json")
+        }
+        "schemas/memory/tree.input.v1.json" => {
+            include_str!("../../assets/memory_native/schemas/memory/tree.input.v1.json")
+        }
         _ => return None,
-    })
+    };
+    // silent-ok: these are compile-embedded assets validated by the
+    // `memory_native_schema_validation` test; a malformed schema fails that test
+    // and the build, so `.ok()` here cannot silently mask a real fault.
+    serde_json::from_str(raw).ok()
 }
 
 pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value> {

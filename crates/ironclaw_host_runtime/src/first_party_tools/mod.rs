@@ -33,10 +33,10 @@ use ironclaw_first_party_extensions::coding::{
     CodingCapabilityError, CodingCapabilityKind, CodingCapabilityRequest, CodingCapabilityState,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, EffectKind, ExtensionId,
-    HostApiError, PermissionMode, ProcessBackendKind, RequestedTrustClass, ResourceCeiling,
-    ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
-    RuntimeHttpEgressError, RuntimeHttpEgressResponse, TrustClass, VirtualPath,
+    CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
+    PermissionMode, ProcessBackendKind, RequestedTrustClass, ResourceCeiling, ResourceEstimate,
+    ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgressError,
+    RuntimeHttpEgressResponse, TrustClass, VirtualPath,
 };
 
 use crate::memory_provider::MemoryServiceResolver;
@@ -82,7 +82,12 @@ pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
 /// catalog/lifecycle extension lane), so its model-facing memory tools are
 /// unconditionally available — preserving the former `builtin.memory_*`
 /// behavior. Provider-swapping stays on the document-store profile binding.
-pub const NATIVE_MEMORY_FIRST_PARTY_PROVIDER: &str = "ironclaw.memory.native";
+///
+/// Aliases the canonical id owned by [`crate::memory_native_extension`] (which
+/// also owns the bundled v2 manifest + the registrable package builder), so the
+/// surface/trust seams here and the binding layer share one identity string.
+pub const NATIVE_MEMORY_FIRST_PARTY_PROVIDER: &str =
+    crate::memory_native_extension::NATIVE_MEMORY_EXTENSION_ID;
 pub const READ_FILE_CAPABILITY_ID: &str = "builtin.read_file";
 pub const WRITE_FILE_CAPABILITY_ID: &str = "builtin.write_file";
 pub const LIST_DIR_CAPABILITY_ID: &str = "builtin.list_dir";
@@ -204,42 +209,6 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
             hooks: Vec::new(),
         },
         VirtualPath::new("/system/extensions/builtin")?,
-    )
-}
-
-/// Create the always-on first-party package for native memory
-/// (`ironclaw.memory.native`).
-///
-/// This rides the same host-bundled, always-on lane as
-/// [`builtin_first_party_package`] — not the catalog/lifecycle extension lane —
-/// so its four model-facing memory tools are unconditionally available, exactly
-/// as the former `builtin.memory_*` capabilities were. It is a distinct package
-/// only so the capabilities can carry the `ironclaw.memory.native.*` identity
-/// and `implements` the `memory.document_store.v1` profile; the document-store
-/// profile binding remains the provider-swap point.
-pub fn native_memory_first_party_package() -> Result<ExtensionPackage, ExtensionError> {
-    ExtensionPackage::from_manifest(
-        ExtensionManifest {
-            schema_version: MANIFEST_SCHEMA_VERSION.to_string(),
-            id: ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER)?,
-            name: "Reborn native memory".to_string(),
-            version: "0.1.0".to_string(),
-            description:
-                "Host-owned native memory provider implementing the document-store capability profile"
-                    .to_string(),
-            source: ManifestSource::HostBundled,
-            requested_trust: RequestedTrustClass::FirstPartyRequested,
-            // Effective first-party trust is assigned by host policy; descriptor
-            // trust stays conservative, matching the builtin package.
-            descriptor_trust_default: TrustClass::Sandbox,
-            runtime: ExtensionRuntime::FirstParty {
-                service: "native_memory_provider".to_string(),
-            },
-            host_apis: Vec::new(),
-            capabilities: memory::manifests()?,
-            hooks: Vec::new(),
-        },
-        VirtualPath::new("/system/extensions/ironclaw.memory.native")?,
     )
 }
 
@@ -514,42 +483,6 @@ fn builtin_first_party_base_registry_with_memory_resolver(
     registry.insert_handler(CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?, handler);
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)
-}
-
-/// Build a model-visible capability manifest for the native memory extension.
-///
-/// Unlike [`first_party_capability_manifest`] (which derives `builtin/`-prefixed
-/// schema refs and never `implements` a profile), this takes explicit schema
-/// refs and profile ids so `read`/`write` can declare the `document_store.v1`
-/// op refs the conformance harness matches against. `prompt_doc_ref` is `None`
-/// (in-code construction skips the v2-parse "model needs a prompt doc" rule, as
-/// the builtin memory tools did); input schemas are served inline.
-fn native_memory_capability_manifest(
-    id: &str,
-    description: &str,
-    effects: Vec<EffectKind>,
-    implements: &[&str],
-    input_schema_ref: &str,
-    output_schema_ref: &str,
-) -> Result<CapabilityManifest, ExtensionError> {
-    let implements = implements
-        .iter()
-        .map(|profile_id| CapabilityProfileId::new(*profile_id))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(CapabilityManifest {
-        id: CapabilityId::new(id)?,
-        implements,
-        description: description.to_string(),
-        effects,
-        default_permission: PermissionMode::Allow,
-        visibility: CapabilityVisibility::Model,
-        input_schema_ref: CapabilityProfileSchemaRef::new(input_schema_ref)?,
-        output_schema_ref: CapabilityProfileSchemaRef::new(output_schema_ref)?,
-        prompt_doc_ref: None,
-        required_host_ports: Vec::new(),
-        runtime_credentials: Vec::new(),
-        resource_profile: resource_profile(),
-    })
 }
 
 fn first_party_capability_manifest(

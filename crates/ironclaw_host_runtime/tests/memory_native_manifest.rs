@@ -68,19 +68,32 @@ fn aggregate_native_claim(contract: &CapabilityProfileContract) -> CapabilityPro
         .expect("claim must build")
 }
 
+/// The host-defined `memory.document_store.v1` contract from the catalog.
+fn document_store_contract() -> CapabilityProfileContract {
+    memory_capability_profiles()
+        .expect("catalog must build")
+        .into_iter()
+        .find(|contract| contract.id().as_str() == "memory.document_store.v1")
+        .expect("document_store profile must exist in the catalog")
+}
+
 #[test]
-fn native_extension_conforms_to_every_memory_profile() {
-    for contract in memory_capability_profiles().expect("catalog must build") {
-        let claim = aggregate_native_claim(&contract);
-        let report = evaluate_profile_conformance(&contract, &claim);
-        assert!(
-            report.is_conformant(),
-            "native extension must conform to {}; findings: {:?}",
-            contract.id(),
-            report.findings()
-        );
-        assert!(report.findings().is_empty());
-    }
+fn native_extension_conforms_to_the_document_store_profile() {
+    // Lean scope: the live native surface implements only
+    // `memory.document_store.v1` (via the `read` + `write` model tools). The
+    // `context_retrieval` / `interaction_log` profiles remain host-defined
+    // contracts for the deferred host-managed flow, with no live implementer, so
+    // they are not claimed here.
+    let contract = document_store_contract();
+    let claim = aggregate_native_claim(&contract);
+    let report = evaluate_profile_conformance(&contract, &claim);
+    assert!(
+        report.is_conformant(),
+        "native extension must conform to {}; findings: {:?}",
+        contract.id(),
+        report.findings()
+    );
+    assert!(report.findings().is_empty());
 }
 
 #[test]
@@ -90,12 +103,10 @@ fn every_implemented_profile_is_a_known_memory_profile() {
         .iter()
         .map(|id| CapabilityProfileId::new(*id).unwrap())
         .collect();
+    // `search`/`tree` are native conveniences that implement no portable profile,
+    // so an empty `implements` is allowed; only the profiles that ARE implemented
+    // must be known host-defined memory profiles.
     for capability in &manifest.capabilities {
-        assert!(
-            !capability.implements.is_empty(),
-            "{} must implement at least one memory profile",
-            capability.id
-        );
         for profile in &capability.implements {
             assert!(
                 known.contains(profile),
@@ -105,6 +116,15 @@ fn every_implemented_profile_is_a_known_memory_profile() {
             );
         }
     }
+    // The live surface must implement document_store (read + write).
+    let document_store = CapabilityProfileId::new("memory.document_store.v1").unwrap();
+    assert!(
+        manifest
+            .capabilities
+            .iter()
+            .any(|capability| capability.implements.contains(&document_store)),
+        "the native extension must implement memory.document_store.v1"
+    );
 }
 
 #[test]

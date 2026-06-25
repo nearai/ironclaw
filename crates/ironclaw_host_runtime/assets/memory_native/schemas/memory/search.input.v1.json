@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "Preferred natural language search query for persistent memory"
+    },
+    "q": {
+      "type": "string",
+      "description": "Alias for query"
+    },
+    "text": {
+      "type": "string",
+      "description": "Alias for query"
+    },
+    "pattern": {
+      "type": "string",
+      "description": "Alias for query"
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "default": 5,
+      "description": "Maximum number of memory results to return"
+    }
+  },
+  "required": ["query"],
+  "additionalProperties": false
+}

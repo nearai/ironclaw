@@ -2,7 +2,7 @@ schema_version = "reborn.extension_manifest.v2"
 id = "ironclaw.memory.native"
 name = "Reborn Native Memory"
 version = "0.1.0"
-description = "Host-bundled native memory provider implementing the host-defined memory capability profiles (issue #3537). The provider-prefixed capabilities below implement the portable memory profiles; the model-facing memory tools are layered separately as builtin.memory_* capabilities."
+description = "Host-bundled native memory provider (issue #3537). The model-facing memory tools below implement the host-defined memory.document_store.v1 profile; the provider is filesystem-backed and registered on the always-on first-party lane (like the builtin toolset), so the tools are unconditionally available. Provider-swapping is governed by the document-store profile binding, not by install/enable lifecycle."
 # Requested trust only; the host trust policy computes effective trust. A
 # `first_party` runtime + reserved `ironclaw.*` id are accepted only for the
 # loader-supplied `HostBundled` source, and only when a matching host service
@@ -14,54 +14,55 @@ trust = "first_party_requested"
 kind = "first_party"
 service = "native_memory_provider"
 
-# memory.context_retrieval.v1 — host-mediated, provider-neutral context retrieval
-# before a model call. host_internal: invoked by the host context pipeline, not
-# exposed to the model as a tool.
+# memory.document_store.v1 — read operation, exposed as a model-facing tool. The
+# schema refs match the document_store profile's read-operation refs so the
+# conformance harness binds this capability to that operation.
 [[capabilities]]
-id = "ironclaw.memory.native.context.retrieve"
-implements = ["memory.context_retrieval.v1"]
-description = "Retrieve bounded provider-neutral memory context snippets for a turn."
-effects = ["read_filesystem"]
-default_permission = "allow"
-visibility = "host_internal"
-input_schema_ref = "schemas/memory/context-retrieve.input.v1.json"
-output_schema_ref = "schemas/memory/context-retrieve.output.v1.json"
-required_host_ports = ["host.storage.sql_transaction.first_party", "host.events.audit"]
-
-# memory.interaction_log.v1 — host-recorded sanitized interaction logging.
-[[capabilities]]
-id = "ironclaw.memory.native.interaction.record"
-implements = ["memory.interaction_log.v1"]
-description = "Record a host-sanitized, bounded interaction into durable memory."
-effects = ["write_filesystem"]
-default_permission = "allow"
-visibility = "host_internal"
-input_schema_ref = "schemas/memory/interaction-record.input.v1.json"
-output_schema_ref = "schemas/memory/interaction-record.output.v1.json"
-required_host_ports = ["host.storage.sql_transaction.first_party", "host.events.audit"]
-
-# memory.document_store.v1 — read operation. host_internal: the model-facing
-# read tool is the separate builtin.memory_read capability.
-[[capabilities]]
-id = "ironclaw.memory.native.document.read"
+id = "ironclaw.memory.native.read"
 implements = ["memory.document_store.v1"]
-description = "Read a memory document in the current tenant/user/agent/project scope."
+description = "Read a Reborn persistent memory document in the current tenant/user/agent/project scope."
 effects = ["read_filesystem"]
 default_permission = "allow"
-visibility = "host_internal"
+visibility = "model"
 input_schema_ref = "schemas/memory/document-read.input.v1.json"
 output_schema_ref = "schemas/memory/document-read.output.v1.json"
-required_host_ports = ["host.storage.sql_transaction.first_party", "host.events.audit"]
+prompt_doc_ref = "prompts/memory-native/read.md"
 
-# memory.document_store.v1 — write operation. Host prompt-write safety runs
-# before dispatching writes to prompt-injected memory files.
+# memory.document_store.v1 — write operation, exposed as a model-facing tool.
+# Host prompt-write safety runs before dispatching writes to prompt-injected
+# memory files.
 [[capabilities]]
-id = "ironclaw.memory.native.document.write"
+id = "ironclaw.memory.native.write"
 implements = ["memory.document_store.v1"]
-description = "Write or append a memory document in the current tenant/user/agent/project scope."
-effects = ["write_filesystem"]
+description = "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead."
+effects = ["read_filesystem", "write_filesystem"]
 default_permission = "allow"
-visibility = "host_internal"
+visibility = "model"
 input_schema_ref = "schemas/memory/document-write.input.v1.json"
 output_schema_ref = "schemas/memory/document-write.output.v1.json"
-required_host_ports = ["host.storage.sql_transaction.first_party", "host.events.audit"]
+prompt_doc_ref = "prompts/memory-native/write.md"
+
+# Native search convenience. Implements no portable profile operation — it is a
+# provider-specific model tool layered on the same filesystem store.
+[[capabilities]]
+id = "ironclaw.memory.native.search"
+implements = []
+description = "Search Reborn persistent memory documents in the current tenant/user/agent/project scope."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/memory/search.input.v1.json"
+output_schema_ref = "schemas/memory/search.output.v1.json"
+prompt_doc_ref = "prompts/memory-native/search.md"
+
+# Native tree/list convenience. Implements no portable profile operation.
+[[capabilities]]
+id = "ironclaw.memory.native.tree"
+implements = []
+description = "List Reborn persistent memory documents as a compact tree."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/memory/tree.input.v1.json"
+output_schema_ref = "schemas/memory/tree.output.v1.json"
+prompt_doc_ref = "prompts/memory-native/tree.md"
