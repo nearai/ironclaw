@@ -81,6 +81,36 @@ if [ ! -f "$config_path" ]; then
   trap - EXIT HUP INT TERM
 fi
 
+if ! is_truthy "${IRONCLAW_REBORN_SLACK_ENABLED:-}" \
+  && awk '
+    /^[[:space:]]*\[/ {
+      in_slack = ($0 ~ /^[[:space:]]*\[slack\][[:space:]]*$/)
+    }
+    in_slack && /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*false[[:space:]]*$/ {
+      disabled = 1
+    }
+    in_slack && /^[[:space:]]*(signing_secret_env|bot_token_env)[[:space:]]*=/ {
+      legacy = 1
+    }
+    END { exit !(disabled && legacy) }
+  ' "$config_path"
+then
+  tmp_config="${config_path}.tmp.$$"
+  trap 'rm -f "$tmp_config"' EXIT HUP INT TERM
+  awk '
+    /^[[:space:]]*\[/ {
+      in_slack = ($0 ~ /^[[:space:]]*\[slack\][[:space:]]*$/)
+    }
+    in_slack && /^[[:space:]]*(signing_secret_env|bot_token_env)[[:space:]]*=/ {
+      next
+    }
+    { print }
+  ' "$config_path" > "$tmp_config"
+  mv "$tmp_config" "$config_path"
+  trap - EXIT HUP INT TERM
+  echo "Removed disabled legacy Slack setup fields from $config_path." >&2
+fi
+
 effective_profile="${IRONCLAW_REBORN_PROFILE:-}"
 if [ -z "$effective_profile" ]; then
   effective_profile="$(sed -n 's/^[[:space:]]*profile[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$config_path" | sed -n '1p')"

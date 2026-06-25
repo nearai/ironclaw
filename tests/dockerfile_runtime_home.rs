@@ -464,6 +464,54 @@ fn reborn_entrypoint_preserves_existing_config() {
 
 #[test]
 #[cfg(unix)]
+fn reborn_entrypoint_migrates_disabled_legacy_slack_fields() {
+    let fake = setup_fake_entrypoint();
+    std::fs::create_dir_all(&fake.home_dir).expect("home dir");
+    std::fs::write(
+        fake.home_dir.join("config.toml"),
+        r#"api_version = "ironclaw.runtime/v1"
+
+[boot]
+profile = "hosted-single-tenant-volume"
+
+[slack]
+enabled = false
+signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
+bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
+"#,
+    )
+    .expect("existing config");
+
+    let output = Command::new("sh")
+        .arg(repo_file("docker/reborn/entrypoint.sh"))
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
+        .env("IRONCLAW_REBORN_PROFILE", "hosted-single-tenant-volume")
+        .env("IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY", "true")
+        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config =
+        std::fs::read_to_string(fake.home_dir.join("config.toml")).expect("migrated config");
+    assert!(config.contains("[slack]"));
+    assert!(config.contains("enabled = false"));
+    assert!(!config.contains("signing_secret_env"));
+    assert!(!config.contains("bot_token_env"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Removed disabled legacy Slack setup fields")
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn reborn_entrypoint_rejects_default_config_outside_opt_ironclaw() {
     let fake = setup_fake_entrypoint();
     let output = Command::new("sh")

@@ -403,6 +403,8 @@ fn assert_failed_capability(
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn assert_process_capabilities_unavailable_for_processless_runtime(
     services: &RebornServices,
+    expected_shell_failure_kind: RuntimeFailureKind,
+    expected_shell_failure_message: &str,
 ) {
     let runtime = services
         .host_runtime
@@ -439,8 +441,8 @@ async fn assert_process_capabilities_unavailable_for_processless_runtime(
     assert_failed_capability(
         shell_outcome,
         SHELL_CAPABILITY_ID,
-        RuntimeFailureKind::Authorization,
-        "ProcessBackendKind::None",
+        expected_shell_failure_kind,
+        expected_shell_failure_message,
     );
 
     let spawn_outcome = runtime
@@ -732,7 +734,12 @@ async fn hosted_single_tenant_volume_hides_process_capabilities() {
         services.readiness.state,
         RebornReadinessState::HostedSingleTenantVolumePreviewValidated
     );
-    assert_process_capabilities_unavailable_for_processless_runtime(&services).await;
+    assert_process_capabilities_unavailable_for_processless_runtime(
+        &services,
+        RuntimeFailureKind::Authorization,
+        "ProcessBackendKind::None",
+    )
+    .await;
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1605,7 +1612,12 @@ async fn production_postgres_secure_default_builds_without_process_port() {
     handle.shutdown().await;
 
     assert_production_services_ready_with_first_party_runtime(&services).await;
-    assert_process_capabilities_unavailable_for_processless_runtime(&services).await;
+    assert_process_capabilities_unavailable_for_processless_runtime(
+        &services,
+        RuntimeFailureKind::MissingRuntime,
+        "unknown capability",
+    )
+    .await;
 }
 
 #[cfg(feature = "libsql")]
@@ -1634,7 +1646,12 @@ async fn production_libsql_secure_default_builds_without_process_port() {
     handle.shutdown().await;
 
     assert_production_services_ready_with_first_party_runtime(&services).await;
-    assert_process_capabilities_unavailable_for_processless_runtime(&services).await;
+    assert_process_capabilities_unavailable_for_processless_runtime(
+        &services,
+        RuntimeFailureKind::MissingRuntime,
+        "unknown capability",
+    )
+    .await;
 }
 
 #[cfg(feature = "libsql")]
