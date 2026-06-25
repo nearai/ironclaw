@@ -484,6 +484,135 @@ async fn webui_event_stream_preserves_sanitized_capability_activity_error_kind()
     }));
 }
 
+// `LoopFailed` error_kind values are the `LoopFailureKind` codes (e.g.
+// `model_error`); they are NOT the milestone-kind name `model_failed`. The
+// runtime failure-summary mapper therefore renders the generic copy for them.
+#[tokio::test]
+async fn webui_event_stream_renders_generic_summary_for_loop_failed_error_kind() {
+    let tenant_id = TenantId::new("webui-loop-failed-tenant").unwrap();
+    let user_id = UserId::new("webui-loop-failed-user").unwrap();
+    let agent_id = AgentId::new("webui-loop-failed-agent").unwrap();
+    let thread_id = ThreadId::new("webui-loop-failed-thread").unwrap();
+    let invocation_id = InvocationId::new();
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::loop_failed(
+            resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, invocation_id),
+            CapabilityId::new("loop.run").unwrap(),
+            "model_error",
+        ))
+        .await
+        .unwrap();
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let actor = TurnActor::new(user_id);
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-loop-failed-reply").unwrap(),
+    );
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        run_status_failure_summary(&events, invocation_id).as_deref(),
+        Some("The run failed before producing a reply.")
+    );
+}
+
+// `DispatchFailed` error_kind values are the `DispatchError::event_kind()`
+// codes (e.g. `missing_runtime_backend`); they are NOT the milestone-kind name
+// `dispatch_failed`. The runtime failure-summary mapper renders the generic
+// copy for them too.
+#[tokio::test]
+async fn webui_event_stream_renders_generic_summary_for_dispatch_failed_error_kind() {
+    let tenant_id = TenantId::new("webui-dispatch-failed-tenant").unwrap();
+    let user_id = UserId::new("webui-dispatch-failed-user").unwrap();
+    let agent_id = AgentId::new("webui-dispatch-failed-agent").unwrap();
+    let thread_id = ThreadId::new("webui-dispatch-failed-thread").unwrap();
+    let invocation_id = InvocationId::new();
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::dispatch_failed(
+            resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, invocation_id),
+            CapabilityId::new("loop.run").unwrap(),
+            Some(ExtensionId::new("script").unwrap()),
+            Some(RuntimeKind::Script),
+            "missing_runtime_backend",
+        ))
+        .await
+        .unwrap();
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let actor = TurnActor::new(user_id);
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-dispatch-failed-reply").unwrap(),
+    );
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        run_status_failure_summary(&events, invocation_id).as_deref(),
+        Some("The run failed before producing a reply.")
+    );
+}
+
+// `unknown` is the one runtime error_kind that resolves to a dedicated
+// message (produced by the process-failure fallback in
+// `ironclaw_host_runtime::obligations`).
+#[tokio::test]
+async fn webui_event_stream_renders_unknown_failure_summary() {
+    let tenant_id = TenantId::new("webui-unknown-tenant").unwrap();
+    let user_id = UserId::new("webui-unknown-user").unwrap();
+    let agent_id = AgentId::new("webui-unknown-agent").unwrap();
+    let thread_id = ThreadId::new("webui-unknown-thread").unwrap();
+    let invocation_id = InvocationId::new();
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::loop_failed(
+            resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, invocation_id),
+            CapabilityId::new("loop.run").unwrap(),
+            "unknown",
+        ))
+        .await
+        .unwrap();
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let actor = TurnActor::new(user_id);
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-unknown-reply").unwrap(),
+    );
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        run_status_failure_summary(&events, invocation_id).as_deref(),
+        Some("The run failed for an unknown reason.")
+    );
+}
+
 #[tokio::test]
 async fn webui_event_stream_drains_live_reasoning_projection_from_update_source() {
     let tenant_id = TenantId::new("webui-thinking-tenant").unwrap();
