@@ -1466,11 +1466,16 @@ pub async fn query_operator_logs(
 }
 
 /// `GET /api/webchat/v2/logs`
+///
+/// Read-only caller-scoped logs projection for non-operator WebUI sessions.
+/// The operator-wide log surface remains `GET /api/webchat/v2/operator/logs`.
 pub async fn query_logs(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Query(query): Query<RebornOperatorLogsQuery>,
 ) -> Result<Json<RebornLogQueryResponse>, WebUiV2HttpError> {
+    // The public and operator HTTP query strings intentionally share fields;
+    // convert at the handler boundary so the facade can enforce public scope.
     let request = RebornLogQueryRequest {
         limit: query.limit,
         cursor: query.cursor,

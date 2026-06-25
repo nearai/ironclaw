@@ -18,28 +18,32 @@ const SCOPE_QUERY_PARAMS = [
 
 export function readLogScopeFromLocation(location = globalThis.location, defaultThreadId = null) {
   const params = new URLSearchParams(location?.search || "");
-  const scope = SCOPE_QUERY_PARAMS.reduce((acc, [key, param, labelKey]) => {
+  const scope = { active: [] };
+  for (const [key, param, labelKey] of SCOPE_QUERY_PARAMS) {
     const value = params.get(param)?.trim();
     if (value) {
-      acc[key] = value;
-      acc.active.push({ key, param, labelKey, value });
+      scope[key] = value;
+      scope.active.push({ key, param, labelKey, value });
     } else {
-      acc[key] = null;
+      scope[key] = null;
     }
-    return acc;
-  }, { active: [] });
+  }
   if (!scope.threadId && defaultThreadId) {
     scope.threadId = defaultThreadId;
   }
   return scope;
 }
 
+// Default to the existing operator endpoint; non-operator pages pass
+// `isAdmin: false` to use the caller-scoped logs endpoint.
 export function useLogs({ isAdmin = true, defaultThreadId = null } = {}) {
   const location = useLocation();
+  const locationSearch = location?.search || "";
   const scope = React.useMemo(
     () => readLogScopeFromLocation(location, defaultThreadId),
-    [defaultThreadId, location.search]
+    [defaultThreadId, locationSearch]
   );
+  const { runId, source, threadId, toolCallId, toolName, turnId } = scope;
   const [entries, setEntries] = React.useState([]);
   const [levelFilter, setLevelFilter] = React.useState("all");
   const [targetFilter, setTargetFilter] = React.useState("");
@@ -61,12 +65,12 @@ export function useLogs({ isAdmin = true, defaultThreadId = null } = {}) {
         limit: LOG_LIMIT,
         level: levelFilter === "all" ? null : levelFilter,
         target: targetFilter.trim() || null,
-        threadId: scope.threadId,
-        runId: scope.runId,
-        turnId: scope.turnId,
-        toolCallId: scope.toolCallId,
-        toolName: scope.toolName,
-        source: scope.source,
+        threadId,
+        runId,
+        turnId,
+        toolCallId,
+        toolName,
+        source,
       });
       if (requestId !== requestIdRef.current) return;
       const hidden = hiddenEntryIdsRef.current;
@@ -88,7 +92,18 @@ export function useLogs({ isAdmin = true, defaultThreadId = null } = {}) {
         setIsLoading(false);
       }
     }
-  }, [isAdmin, isUnsupported, levelFilter, scope, targetFilter]);
+  }, [
+    isAdmin,
+    isUnsupported,
+    levelFilter,
+    runId,
+    source,
+    targetFilter,
+    threadId,
+    toolCallId,
+    toolName,
+    turnId,
+  ]);
 
   React.useEffect(() => {
     loadLogs();

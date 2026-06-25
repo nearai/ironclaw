@@ -177,4 +177,6 @@ test("useLogs falls back to the caller's active thread without exposing a cleara
   assert.equal(harness.calls.length, 1);
   assert.equal(harness.calls[0].endpoint, "logs");
   assert.equal(harness.calls[0].threadId, "thread-fallback");
+  assert.equal(result.scope.threadId, "thread-fallback");
+  assert.equal(result.scope.active.length, 0);
 });
