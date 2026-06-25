@@ -47,6 +47,12 @@
 - Blocked run-state approval/auth gate rendering and resume belongs to #3094;
   keep this crate's #3811 auth seam reusable by that layer without implementing
   a second gate-resolution path.
+- Local-dev/WebUI capability result plumbing may stage results in memory, but any
+  durable thread append keyed by `LoopRunContext` (for example capability display
+  preview timeline messages) must resolve the thread scope through
+  `ironclaw_reborn::thread_scope::ThreadScopeResolver::resolve_for_turn` before
+  calling `SessionThreadService`; do not append with the runtime/base
+  `ThreadScope` directly in multi-user WebUI paths.
 
 ## WebUI v2 native surface (`webui-v2-beta` feature)
 

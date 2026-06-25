@@ -10,7 +10,7 @@ mod tests {
     use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore};
     use ironclaw_host_api::{
         AgentId, CapabilityId, EffectKind, InvocationId, MountPermissions, NetworkPolicy,
-        ProjectId, TenantId, ThreadId,
+        ProjectId, TenantId, ThreadId, UserId,
     };
     use ironclaw_host_runtime::{
         APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
@@ -677,6 +677,88 @@ mod tests {
             Some(result_ref.as_str())
         );
         assert!(preview_message.tool_result_provider_call.is_none());
+        let preview_record = display_previews
+            .record_for_invocation(invocation_id)
+            .expect("live preview record");
+        assert_eq!(
+            preview_record.timeline_message_id,
+            Some(preview_message.message_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_io_writes_durable_preview_under_run_actor_owner() {
+        let actor_user_id = UserId::new("preview-actor").expect("actor user id");
+        let runtime_owner_id = UserId::new("runtime-owner").expect("runtime owner id");
+        let run_context = run_context("durable-preview-actor-owner")
+            .await
+            .with_actor(TurnActor::new(actor_user_id.clone()));
+        let base_thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: Some(runtime_owner_id),
+            mission_id: None,
+        };
+        let actor_thread_scope = ThreadScope {
+            owner_user_id: Some(actor_user_id.clone()),
+            ..base_thread_scope.clone()
+        };
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: actor_thread_scope.clone(),
+                thread_id: Some(run_context.thread_id.clone()),
+                created_by_actor_id: format!("user:{}", actor_user_id.as_str()),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("actor-owned thread exists");
+        let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+            Arc::clone(&display_previews),
+            thread_service.clone(),
+            base_thread_scope,
+        );
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(serde_json::json!({"message": "hello"})),
+            )
+            .await
+            .expect("input stages");
+        let invocation_id = InvocationId::new();
+
+        let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
+        let CapabilityWriteResult { result_ref, .. } = capability_io
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
+                invocation_id,
+                capability_id: &capability_id,
+                output: serde_json::json!({"content": "hello"}),
+                display_preview: None,
+            })
+            .await
+            .expect("result stages");
+
+        let history = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: actor_thread_scope,
+                thread_id: run_context.thread_id.clone(),
+            })
+            .await
+            .expect("actor-owned history loads");
+        let preview_message = history
+            .messages
+            .iter()
+            .find(|message| message.kind == MessageKind::CapabilityDisplayPreview)
+            .expect("durable preview message under actor owner");
+        assert_eq!(
+            preview_message.tool_result_ref.as_deref(),
+            Some(result_ref.as_str())
+        );
         let preview_record = display_previews
             .record_for_invocation(invocation_id)
             .expect("live preview record");

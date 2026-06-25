@@ -17,6 +17,7 @@ import {
   addPending,
   recordAcceptedMessageRef,
   removePending,
+  timelineMessageIdFromAcceptedRef,
 } from "../lib/pending-messages.js";
 import {
   createToolActivityState,
@@ -169,6 +170,7 @@ export function useChat(threadId) {
     isLoading: historyLoading,
     loadError: historyLoadError,
     loadHistory,
+    seedThreadMessages,
     setMessages,
   } = useHistory(threadId, { getPendingMessages, setPendingMessages });
 
@@ -308,7 +310,11 @@ export function useChat(threadId) {
     // pre-submit optimistic twin.
     onRunSettled: (_runId, { success }) => {
       if (success) setPendingMessages([]);
-      loadHistory(undefined, { preserveClientOnly: true });
+      loadHistory(undefined, {
+        preserveClientOnly: true,
+        finalReplyTimestampByRun:
+          _runId && success ? { [_runId]: new Date().toISOString() } : null,
+      });
     },
   });
 
@@ -370,23 +376,37 @@ export function useChat(threadId) {
         timestamp: new Date().toISOString(),
         isOptimistic: true,
       };
+      const pendingRenderMessage = {
+        id: pendingRecord.id,
+        role: "user",
+        content,
+        attachments: renderAttachments,
+        timestamp: pendingRecord.timestamp,
+        isOptimistic: true,
+      };
       addPending(pendingMessagesRef.current, pendingKey, pendingRecord);
 
       const optimisticId = pendingRecord.id;
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: optimisticId,
-          role: "user",
-          content,
-          attachments: renderAttachments,
-          timestamp: pendingRecord.timestamp,
-          isOptimistic: true,
-        },
-      ]);
+      const shouldRenderInCurrentThread = !threadId || sendThreadId === threadId;
+      const updateCurrentThread = (updater) => {
+        if (shouldRenderInCurrentThread) setMessages(updater);
+      };
+      const updateSeededTarget = (updater) => {
+        if (sendThreadId !== threadId) seedThreadMessages(sendThreadId, updater);
+      };
+      const updateCurrentRunState = (updater) => {
+        if (shouldRenderInCurrentThread) updater();
+      };
 
-      setIsProcessing(true);
-      setPendingGate(null);
+      updateCurrentThread((prev) => [...prev, pendingRenderMessage]);
+      if (sendThreadId !== threadId) {
+        seedThreadMessages(sendThreadId, (prev) => [...prev, pendingRenderMessage]);
+      }
+
+      updateCurrentRunState(() => {
+        setIsProcessing(true);
+        setPendingGate(null);
+      });
 
       try {
         const response = await sendMessage({
@@ -400,7 +420,7 @@ export function useChat(threadId) {
         if (threadNeedsSidebarRefresh(sendThreadId)) {
           queryClient.invalidateQueries({ queryKey: ["threads"] });
         }
-        if (response?.run_id) {
+        if (response?.run_id && shouldRenderInCurrentThread) {
           setActiveRun({
             runId: response.run_id,
             threadId: response.thread_id || sendThreadId,
@@ -408,51 +428,57 @@ export function useChat(threadId) {
             source: "local",
           });
         }
-        const timelineMessageId = recordAcceptedMessageRef(
-          pendingMessagesRef.current,
-          pendingKey,
-          optimisticId,
-          response?.accepted_message_ref,
-        );
+        const timelineMessageId =
+          recordAcceptedMessageRef(
+            pendingMessagesRef.current,
+            pendingKey,
+            optimisticId,
+            response?.accepted_message_ref,
+          ) || timelineMessageIdFromAcceptedRef(response?.accepted_message_ref);
         if (timelineMessageId) {
-          setMessages((prev) =>
+          const markAccepted = (prev) =>
             prev.map((m) =>
               m.id === optimisticId ? { ...m, timelineMessageId } : m,
-            ),
-          );
+            );
+          updateCurrentThread(markAccepted);
+          updateSeededTarget(markAccepted);
         }
         // When the thread was busy, the message is rejected (not deferred).
         // Mark the optimistic user message as failed and display the
         // server's notice (if present) as a system message so the user
         // knows to resend.
         if (response?.outcome === "rejected_busy") {
-          setMessages((prev) =>
+          const markRejected = (prev) =>
             prev.map((m) =>
               m.id === optimisticId
                 ? { ...m, isOptimistic: false, status: "error" }
                 : m,
-            ),
-          );
+            );
+          updateCurrentThread(markRejected);
+          updateSeededTarget(markRejected);
           if (response?.notice) {
-            setMessages((prev) => [
+            const noticeMessage = {
+              id: `system-rejected-${pendingSeqRef.current++}`,
+              role: "system",
+              content: response.notice,
+              timestamp: new Date().toISOString(),
+              isOptimistic: false,
+            };
+            const appendNotice = (prev) => [
               ...prev,
-              {
-                id: `system-rejected-${pendingSeqRef.current++}`,
-                role: "system",
-                content: response.notice,
-                timestamp: new Date().toISOString(),
-                isOptimistic: false,
-              },
-            ]);
+              noticeMessage,
+            ];
+            updateCurrentThread(appendNotice);
+            updateSeededTarget(appendNotice);
           }
-          setIsProcessing(false);
+          updateCurrentRunState(() => setIsProcessing(false));
         }
         return response;
       } catch (err) {
         if (err.status === 429) {
           setCooldownUntil(Date.now() + retryAfterMs(err));
         }
-        setMessages((prev) =>
+        const markFailed = (prev) =>
           prev.map((m) =>
             m.id === optimisticId
               ? {
@@ -462,9 +488,10 @@ export function useChat(threadId) {
                   error: err.message,
                 }
               : m,
-          ),
-        );
-        setIsProcessing(false);
+          );
+        updateCurrentThread(markFailed);
+        updateSeededTarget(markFailed);
+        updateCurrentRunState(() => setIsProcessing(false));
         throw err;
       } finally {
         // Drop the optimistic from the pending ref unconditionally:
@@ -478,7 +505,7 @@ export function useChat(threadId) {
         removePending(pendingMessagesRef.current, pendingKey, optimisticId);
       }
     },
-    [threadId, setMessages],
+    [threadId, setMessages, seedThreadMessages],
   );
 
   // v2 resolveGate signature: `(resolution, { always?, credentialRef? })`.
