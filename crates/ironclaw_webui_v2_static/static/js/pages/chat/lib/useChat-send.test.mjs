@@ -576,6 +576,7 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
   };
   const stateUpdates = [];
   let renderedMessages = [];
+  let sendCalls = 0;
 
   const context = {
     AbortController,
@@ -614,6 +615,7 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
     resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
     sendMessage: async () => {
+      sendCalls += 1;
       throw new Error("sendMessage should not be called");
     },
     setInterval,
@@ -647,6 +649,7 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
 
   assert.deepEqual(stateUpdates, []);
   assert.equal(renderedMessages.length, 0);
+  assert.equal(sendCalls, 0);
 });
 
 test("useChat.send: accepted send does not clear a gate received while in flight", async () => {
@@ -738,12 +741,12 @@ test("useChat.send: accepted send does not clear a gate received while in flight
   assert.deepEqual(
     stateUpdates.filter((call) => call.index === 5).map((call) => call.value),
     [replacementGate],
-    "non-busy success must not clear a gate that changed while send was in flight",
+    "non-busy success must not clear a gate received while send was in flight",
   );
   assert.equal(stateSlots.get(5).value, replacementGate);
 });
 
-test("useChat.send: rejected busy attaches notice to a gate replaced while in flight", async () => {
+test("useChat.send: rejected busy attaches notice to a gate received while in flight", async () => {
   const threadId = "thread-1";
   const replacementGate = {
     runId: "run-replacement",
@@ -833,7 +836,7 @@ test("useChat.send: rejected busy attaches notice to a gate replaced while in fl
   assert.deepEqual(
     stateUpdates.filter((call) => call.index === 5).map((call) => call.value),
     [replacementGate],
-    "busy rejection must leave a concurrently replaced gate untouched",
+    "busy rejection must leave a concurrently received gate untouched",
   );
   assert.equal(stateSlots.get(5).value, replacementGate);
   const busyNoticeUpdates = stateUpdates
@@ -1047,6 +1050,7 @@ test("useChat.send: repeated sends under the same pending gate stay blocked loca
   };
   const stateUpdates = [];
   let renderedMessages = [];
+  let sendCalls = 0;
 
   const context = {
     AbortController,
@@ -1085,6 +1089,7 @@ test("useChat.send: repeated sends under the same pending gate stay blocked loca
     resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
     sendMessage: async () => {
+      sendCalls += 1;
       throw new Error("sendMessage should not run");
     },
     setInterval,
@@ -1120,6 +1125,7 @@ test("useChat.send: repeated sends under the same pending gate stay blocked loca
 
   assert.equal(renderedMessages.length, 0);
   assert.deepEqual(stateUpdates, []);
+  assert.equal(sendCalls, 0);
 });
 
 test("useChat.cancelRun clears local state before cancel request resolves", async () => {

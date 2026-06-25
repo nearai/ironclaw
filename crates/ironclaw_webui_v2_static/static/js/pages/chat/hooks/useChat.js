@@ -516,8 +516,7 @@ export function useChat(threadId) {
               updateCurrentThread(appendNotice);
               updateSeededTarget(appendNotice);
             };
-            const noticeKey = busyNoticeKey(sendThreadId, gateBeforeSend);
-            if (noticeKey && shouldRenderInCurrentThread) {
+            if (shouldRenderInCurrentThread) {
               const currentNoticeKey = busyNoticeKey(sendThreadId, pendingGateRef.current);
               if (currentNoticeKey) {
                 setBusyGateNotice({
