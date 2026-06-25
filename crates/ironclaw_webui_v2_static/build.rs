@@ -12,6 +12,11 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
+
+const FRONTEND_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()); // safety: build script — Cargo always sets this
@@ -81,24 +86,40 @@ fn main() {
 
 fn build_frontend_dist(manifest_dir: &Path, dist_dir: &Path) {
     let frontend_dir = manifest_dir.join("frontend");
+    let staging_dist_dir = dist_dir.with_extension("building");
 
     ensure_frontend_dependencies(&frontend_dir);
-    if dist_dir.exists() {
-        fs::remove_dir_all(dist_dir).unwrap_or_else(|error| {
-            panic!("remove stale webui dist {}: {error}", dist_dir.display())
+    if staging_dist_dir.exists() {
+        fs::remove_dir_all(&staging_dist_dir).unwrap_or_else(|error| {
+            panic!(
+                "remove stale staged webui dist {}: {error}",
+                staging_dist_dir.display()
+            )
         });
     }
     run_command(
         node_command(),
         &["build.mjs"],
         &frontend_dir,
-        &[("IRONCLAW_WEBUI_V2_DIST_DIR", dist_dir)],
+        &[("IRONCLAW_WEBUI_V2_DIST_DIR", &staging_dist_dir)],
     );
 
-    let app_js = dist_dir.join("app.js");
+    let app_js = staging_dist_dir.join("app.js");
     if !app_js.is_file() {
         panic!("frontend build did not produce {}", app_js.display());
     }
+    if dist_dir.exists() {
+        fs::remove_dir_all(dist_dir).unwrap_or_else(|error| {
+            panic!("remove stale webui dist {}: {error}", dist_dir.display())
+        });
+    }
+    fs::rename(&staging_dist_dir, dist_dir).unwrap_or_else(|error| {
+        panic!(
+            "move staged webui dist {} to {}: {error}",
+            staging_dist_dir.display(),
+            dist_dir.display(),
+        )
+    });
 }
 
 fn ensure_frontend_dependencies(frontend_dir: &Path) {
@@ -132,32 +153,64 @@ fn modified_time(path: &Path) -> std::time::SystemTime {
 }
 
 fn run_command(command: &str, args: &[&str], cwd: &Path, envs: &[(&str, &Path)]) {
+    let display_command = display_command(command, args);
     let mut cmd = Command::new(command);
     cmd.args(args).current_dir(cwd);
     for (key, value) in envs {
         cmd.env(key, value);
     }
 
-    let status = cmd.status().unwrap_or_else(|error| {
+    let mut child = cmd.spawn().unwrap_or_else(|error| {
         panic!(
             "failed to run `{}` in {}: {error}",
-            std::iter::once(command)
-                .chain(args.iter().copied())
-                .collect::<Vec<_>>()
-                .join(" "),
+            display_command,
             cwd.display(),
         )
     });
+    let deadline = Instant::now() + FRONTEND_COMMAND_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let kill_result = child.kill();
+                let _ = child.wait();
+                match kill_result {
+                    Ok(()) => panic!(
+                        "`{}` timed out after {} seconds in {}",
+                        display_command,
+                        FRONTEND_COMMAND_TIMEOUT.as_secs(),
+                        cwd.display(),
+                    ),
+                    Err(error) => panic!(
+                        "`{}` timed out after {} seconds in {}, and failed to kill it: {error}",
+                        display_command,
+                        FRONTEND_COMMAND_TIMEOUT.as_secs(),
+                        cwd.display(),
+                    ),
+                }
+            }
+            Ok(None) => thread::sleep(COMMAND_POLL_INTERVAL),
+            Err(error) => panic!(
+                "failed to poll `{}` in {}: {error}",
+                display_command,
+                cwd.display(),
+            ),
+        }
+    };
     if !status.success() {
         panic!(
             "`{}` failed in {} with status {status}",
-            std::iter::once(command)
-                .chain(args.iter().copied())
-                .collect::<Vec<_>>()
-                .join(" "),
+            display_command,
             cwd.display(),
         );
     }
+}
+
+fn display_command(command: &str, args: &[&str]) -> String {
+    std::iter::once(command)
+        .chain(args.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn npm_command() -> &'static str {
