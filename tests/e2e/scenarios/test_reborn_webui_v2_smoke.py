@@ -353,6 +353,35 @@ async def test_reborn_v2_ui_send_renders_reply(reborn_v2_page, reborn_v2_server)
     )
 
 
+async def test_reborn_v2_desktop_sidebar_can_collapse_and_persist(reborn_v2_page):
+    """Desktop users can collapse the sidebar, and the preference survives reload."""
+    sidebar = reborn_v2_page.locator(SEL_V2["sidebar"])
+    toggle = reborn_v2_page.locator(SEL_V2["sidebar_toggle"])
+
+    await expect(toggle).to_be_visible(timeout=15000)
+    await expect(sidebar).to_be_visible(timeout=15000)
+
+    await toggle.click()
+    await expect(sidebar).to_be_hidden(timeout=5000)
+    await reborn_v2_page.wait_for_function(
+        "() => localStorage.getItem('ironclaw:v2-sidebar-open') === 'false'",
+        timeout=5000,
+    )
+
+    await reborn_v2_page.reload()
+    await expect(reborn_v2_page.locator(SEL_V2["chat_composer"])).to_be_visible(
+        timeout=15000
+    )
+    await expect(sidebar).to_be_hidden(timeout=5000)
+
+    await toggle.click()
+    await expect(sidebar).to_be_visible(timeout=5000)
+    await reborn_v2_page.wait_for_function(
+        "() => localStorage.getItem('ironclaw:v2-sidebar-open') === 'true'",
+        timeout=5000,
+    )
+
+
 async def test_reborn_v2_messages_omit_identity_labels(reborn_v2_page):
     """User and assistant messages render content without persistent identity labels."""
     composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
