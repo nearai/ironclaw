@@ -175,6 +175,42 @@ test("Chat leaves the composer editable while a run is processing", () => {
   assert.equal(props.sendDisabled, true);
 });
 
+test("Chat blocks sends while a run is processing", async () => {
+  let sendCount = 0;
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: true,
+      pendingGate: null,
+      channelConnectAction: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => {
+        sendCount += 1;
+        return {};
+      },
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+      dismissChannelConnectAction: () => {},
+    },
+  });
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const props = componentProps(chatInput, components.ChatInput);
+  assert.equal(await props.onSend("draft while running"), null);
+  assert.equal(sendCount, 0);
+});
+
 test("Chat cancel button ignores active runs from another thread", () => {
   const { tree, components } = renderChat({
     hookState: {

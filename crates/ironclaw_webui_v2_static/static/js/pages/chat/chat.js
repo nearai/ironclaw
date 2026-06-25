@@ -111,6 +111,7 @@ export function Chat({
       : null;
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [] } = {}) => {
+      if (composerSendDisabled) return null;
       const response = await send(content, {
         images,
         attachments,
@@ -122,7 +123,7 @@ export function Chat({
       }
       return response;
     },
-    [activeThreadId, onSelectThread, send]
+    [activeThreadId, composerSendDisabled, onSelectThread, send]
   );
 
   const handleSuggestion = React.useCallback(
