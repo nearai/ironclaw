@@ -1150,10 +1150,11 @@ const PUT_ANY_SQL: &str = r#"
 /// arm, so a successful put costs exactly one round-trip (previously:
 /// exact-entry `SELECT` + child-scan `SELECT` + the write = three).
 ///
-/// On the *rare* 0-row outcome we make one follow-up read
-/// (`diagnose_put_failure`) to reproduce the exact error the old pre-check and
-/// version read would have produced: `directory_write_error` for a directory
-/// conflict, `VersionMismatch` otherwise. The happy path never pays for it.
+/// On the *rare* 0-row outcome we make follow-up reads
+/// (`diagnose_put_failure`, up to three: `is_dir`, child-scan, then current
+/// version) to reproduce the exact error the old pre-check and version read
+/// would have produced: `directory_write_error` for a directory conflict,
+/// `VersionMismatch` otherwise. The happy path never pays for it.
 #[cfg(feature = "postgres")]
 async fn postgres_put_with_client(
     client: &deadpool_postgres::Object,

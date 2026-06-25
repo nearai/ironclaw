@@ -1466,12 +1466,11 @@ mod postgres_tests {
             return;
         };
         let dir = VirtualPath::new(format!("{prefix}/explicit")).unwrap();
-        let child = vpath(&prefix, "explicit/leaf");
         // create_dir_all materializes explicit directory rows (is_dir = TRUE).
+        // Keep `dir` childless so the exact-path explicit-directory guard
+        // (ON CONFLICT / is_dir = FALSE) is what rejects the put, not the
+        // descendant scan (covered by postgres_put_rejects_implicit_directory).
         fs.create_dir_all(&dir).await.unwrap();
-        fs.put(&child, Entry::bytes(vec![1]), CasExpectation::Absent)
-            .await
-            .unwrap();
 
         // Every CAS arm (distinct SQL: PUT_ABSENT_SQL / PUT_VERSION_SQL /
         // PUT_ANY_SQL) must refuse to overwrite the explicit directory.
