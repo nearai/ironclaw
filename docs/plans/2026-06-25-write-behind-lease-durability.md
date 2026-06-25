@@ -113,3 +113,37 @@ Driven through the **scheduler/dispatch path** (per repo testing rule), via a `L
 
 ## 11. Unresolved blockers
 **None.** Both slots signed off (Opus 4.8 ACCEPT; GPT 5.5 XHigh ACCEPT_WITH_NONBLOCKING_NOTES). Nonblocking notes folded into §4.3 (durable-runway strictness), §6 (explicit fence/`runner_id` decision), §7 T5 (additive worst-case), §8 step 2 (hard-fail on skew).
+
+## 12. Appendix — broader durable-write contention landscape (review follow-ups)
+
+Folded in from PR review (henrypark133) plus a durable-write hot-path audit. The lease heartbeat is one of a *class* of Postgres-latency-bound writes, and the deployed lease-expiry cascade has **three independent layers**. This PR's write-behind addresses one; a complete fix should cover all three.
+
+### Layer A — in-process lock convoy (→ #5234, OPEN)
+The turn-state stores hold a per-record `tokio::Mutex` across the Postgres `.await`, serializing same-path writers *in-process* before they even reach the pool. **#5234** ("remove per-record lock convoys via shared `cas_update`") removes this amplification. **The write-behind cache must compose on the post-#5234 CAS path, not the old mutex path.**
+
+### Layer B — pool starvation (cheap; do first, independent of write-behind)
+The reborn event-store Postgres pool defaults to **`DEFAULT_POSTGRES_POOL_MAX_SIZE = 2`** (`crates/ironclaw_reborn_event_store/src/lib.rs:8`), shared across **all** Postgres FS I/O (LLM output, tool results, turn/run state, event log, lease). One turn's read burst can saturate it.
+- Current state: a 30s checkout guard already exists (`POOL_CHECKOUT_TIMEOUT`, `.wait_timeout/.create_timeout/.recycle_timeout`, lib.rs:561 + 628–639), which converts the former *infinite* `Pool::get()` hang into a surfaced error before the 90s lease. So the unbounded-hang variant is closed.
+- Still wrong for a hosted cross-region profile: (i) **2 connections is far too small**; (ii) the 30s checkout is *longer* than the 15s `FILESYSTEM_APPLY_TIMEOUT`, so the apply timeout still wins on a starved write.
+- Cheap mitigations (prior to and complementary with write-behind): **raise the hosted pool size**; **reserve a small dedicated connection / separate pool for lease + SyncCritical writes** so a read burst can't starve them; **align checkout timeout below the apply timeout** so a starved write fails fast and retries instead of burning the apply budget. Note: write-behind removes the *heartbeat* from this contention, but the **drain task and every SyncCritical write still share the pool** — pool sizing is complementary, not replaced.
+
+### Layer C — synchronous hot-path writes (this PR + batch-coalesce follow-ups)
+Ranked per-turn durable-write hot paths (audit):
+
+| Hot path | Churn / turn | Class | Remedy |
+|---|---|---|---|
+| **Event-append plane** (`ironclaw_reborn_event_store` `append()` → one `INSERT … RETURNING id`, BIGSERIAL, no CAS) | **2M + 2C + … (highest)** | SyncCritical | **Durable batch-coalesce, per-step** |
+| Resource-governor snapshot (`ironclaw_resources` reserve/reconcile/release → process-global `/resources/snapshot.json` CAS) | 2 per model call, contended across **all tenants** | SyncCritical | Batch-coalesce **+ shard per-account** |
+| Capability thread-preview append (`runtime/local_dev.rs`, multi-put txn + head-CAS retry) | per capability | SyncCritical | Batch-coalesce per-turn |
+| **Runner-lease heartbeat** | per 30s | **Liveness** | **Write-behind cache (this PR)** |
+| Memory write (`ironclaw_memory_native`; FTS-only, **no embedding write**) | agent-initiated only | SyncCritical | Leave synchronous |
+| Memory search (read) | 1 per turn (FTS) | read | Minor read-cache, separate axis |
+
+**Critical distinction — two remedies, do not conflate:**
+- **Write-behind cache** = lossy + async. Valid ONLY for **liveness** writes safe to drop on crash (loss → more-eager recovery = safe direction). The lease heartbeat is the *only* one.
+- **Durable batch-coalesce** = collapse N round-trips into one multi-row `INSERT` / one transaction / tokio-postgres **pipeline** per flush window, **still durably committed before the step completes**. For the **SyncCritical** high-churn writes (events, governor, thread-append) which are source-of-truth ("LLM data is never deleted") and **must not be lost on crash**. Events are the top target: highest churn and safest to batch (O(1) `INSERT … RETURNING id`, DB serial preserves order, no CAS). **Constraint:** keep the events flush window **per-step**, not per-turn, so live SSE projections aren't stalled. (If a future analysis proves a specific event class is genuinely loss-tolerant, only *those* could move to lossy write-behind — default is durable batch.)
+
+**Round-trip reduction (all of Layer C):** wherever the drain flushes a batch or commits a set of correctness writes, use a single transaction or tokio-postgres pipelining to cut cross-region round-trips.
+
+### Recommended sequencing
+(B) raise pool size + reserve a critical connection **[cheap, immediate]** → land **#5234** (A) → this PR's lease write-behind (C) → **batch-coalesce events** (C, top) → governor shard+coalesce → thread-append coalesce. Memory stays synchronous.
