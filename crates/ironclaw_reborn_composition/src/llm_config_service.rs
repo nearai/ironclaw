@@ -23,7 +23,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ironclaw_llm::registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
-use ironclaw_llm::{NearWalletSignedMessage, OpenAiCodexConfig, OpenAiCodexSessionManager};
+use ironclaw_llm::{
+    NearWalletSignedMessage, OpenAiCodexConfig, OpenAiCodexSessionManager, default_nearai_base_url,
+};
 use ironclaw_product_workflow::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
@@ -927,7 +929,7 @@ fn provider_snapshot_base_url(
     }
 
     if provider_id.eq_ignore_ascii_case("nearai") {
-        return Some(nearai_effective_default_base_url(
+        return Some(default_nearai_base_url(
             api_key_set,
             ironclaw_common::env_helpers::env_or_override("NEARAI_BASE_URL"),
         ));
@@ -935,27 +937,6 @@ fn provider_snapshot_base_url(
 
     None
 }
-
-fn nearai_effective_default_base_url(
-    api_key_set: bool,
-    configured_base_url: Option<String>,
-) -> String {
-    if let Some(base_url) = configured_base_url
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        return base_url;
-    }
-
-    if api_key_set {
-        NEARAI_CLOUD_DEFAULT_BASE_URL.to_string()
-    } else {
-        NEARAI_PRIVATE_DEFAULT_BASE_URL.to_string()
-    }
-}
-
-const NEARAI_CLOUD_DEFAULT_BASE_URL: &str = "https://cloud-api.near.ai";
-const NEARAI_PRIVATE_DEFAULT_BASE_URL: &str = "https://private.near.ai";
 
 fn normalized_endpoint(value: Option<&str>) -> Option<String> {
     value
@@ -1122,6 +1103,7 @@ mod tests {
 
     use super::*;
     use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId};
+    use ironclaw_llm::{NEARAI_CLOUD_DEFAULT_BASE_URL, NEARAI_PRIVATE_DEFAULT_BASE_URL};
     use ironclaw_reborn_config::{RebornHome, RebornProfile};
     use ironclaw_secrets::{
         InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata,
@@ -1327,10 +1309,20 @@ mod tests {
             .expect("nearai provider in snapshot")
     }
 
+    fn clear_nearai_snapshot_env() {
+        for key in ["NEARAI_API_KEY", "NEARAI_BASE_URL"] {
+            ironclaw_common::env_helpers::remove_runtime_env(key);
+            assert!(
+                ironclaw_common::env_helpers::env_or_override(key).is_none(),
+                "{key} must be unset for this branch-specific snapshot test"
+            );
+        }
+    }
+
     #[test]
     fn nearai_default_base_url_selects_private_without_api_key() {
         assert_eq!(
-            nearai_effective_default_base_url(false, None),
+            default_nearai_base_url(false, None),
             NEARAI_PRIVATE_DEFAULT_BASE_URL
         );
     }
@@ -1338,7 +1330,7 @@ mod tests {
     #[test]
     fn nearai_default_base_url_selects_cloud_with_api_key() {
         assert_eq!(
-            nearai_effective_default_base_url(true, None),
+            default_nearai_base_url(true, None),
             NEARAI_CLOUD_DEFAULT_BASE_URL
         );
     }
@@ -1346,10 +1338,7 @@ mod tests {
     #[test]
     fn nearai_default_base_url_prefers_explicit_base_url() {
         assert_eq!(
-            nearai_effective_default_base_url(
-                false,
-                Some(" https://nearai.example.test/v1 ".to_string())
-            ),
+            default_nearai_base_url(false, Some("https://nearai.example.test/v1".to_string())),
             "https://nearai.example.test/v1"
         );
     }
@@ -1795,7 +1784,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn nearai_snapshot_exposes_effective_default_base_url() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        clear_nearai_snapshot_env();
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         let boot = boot_for_home(&reborn_home);
@@ -1803,20 +1795,19 @@ mod tests {
 
         let snapshot = service.snapshot(caller()).await.expect("snapshot");
         let nearai = nearai_provider(&snapshot);
-        let expected = nearai_effective_default_base_url(
-            env_var_present("NEARAI_API_KEY"),
-            ironclaw_common::env_helpers::env_or_override("NEARAI_BASE_URL"),
-        );
 
         assert_eq!(
             nearai.base_url.as_deref(),
-            Some(expected.as_str()),
+            Some(NEARAI_PRIVATE_DEFAULT_BASE_URL),
             "NEAR AI snapshot should show the same effective default base URL the runtime resolves"
         );
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn nearai_snapshot_uses_cloud_default_with_stored_api_key() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        clear_nearai_snapshot_env();
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         let boot = boot_for_home(&reborn_home);
@@ -1828,15 +1819,11 @@ mod tests {
 
         let snapshot = service.snapshot(caller()).await.expect("snapshot");
         let nearai = nearai_provider(&snapshot);
-        let expected = nearai_effective_default_base_url(
-            true,
-            ironclaw_common::env_helpers::env_or_override("NEARAI_BASE_URL"),
-        );
 
         assert!(nearai.api_key_set);
         assert_eq!(
             nearai.base_url.as_deref(),
-            Some(expected.as_str()),
+            Some(NEARAI_CLOUD_DEFAULT_BASE_URL),
             "stored NEAR AI API-key auth should show the cloud-api default unless NEARAI_BASE_URL overrides it"
         );
     }

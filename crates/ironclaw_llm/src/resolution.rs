@@ -438,15 +438,12 @@ fn nearai_config_from_dedicated(
     chain: &ChainSettings,
 ) -> Result<NearAiConfig, LlmError> {
     let api_key = resolved.api_key.clone();
-    let base_url = if !resolved.base_url.is_empty() {
-        resolved.base_url.clone()
-    } else if let Some(base_url) = nonempty_env("NEARAI_BASE_URL") {
-        base_url
-    } else if api_key.is_some() {
-        "https://cloud-api.near.ai".to_string()
+    let configured_base_url = if resolved.base_url.is_empty() {
+        nonempty_env("NEARAI_BASE_URL")
     } else {
-        "https://private.near.ai".to_string()
+        Some(resolved.base_url.clone())
     };
+    let base_url = default_nearai_base_url(api_key.is_some(), configured_base_url);
 
     Ok(build_nearai_config(
         NearAiRuntimeFields {
@@ -489,13 +486,19 @@ fn build_nearai_config(fields: NearAiRuntimeFields, chain: &ChainSettings) -> Ne
     }
 }
 
-fn default_nearai_base_url(api_key_present: bool, configured_base_url: Option<String>) -> String {
+pub const NEARAI_CLOUD_DEFAULT_BASE_URL: &str = "https://cloud-api.near.ai";
+pub const NEARAI_PRIVATE_DEFAULT_BASE_URL: &str = "https://private.near.ai";
+
+pub fn default_nearai_base_url(
+    api_key_present: bool,
+    configured_base_url: Option<String>,
+) -> String {
     if let Some(base_url) = configured_base_url {
         base_url
     } else if api_key_present {
-        "https://cloud-api.near.ai".to_string()
+        NEARAI_CLOUD_DEFAULT_BASE_URL.to_string()
     } else {
-        "https://private.near.ai".to_string()
+        NEARAI_PRIVATE_DEFAULT_BASE_URL.to_string()
     }
 }
 
