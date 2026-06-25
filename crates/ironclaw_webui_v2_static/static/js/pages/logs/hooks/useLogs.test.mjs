@@ -22,7 +22,12 @@ function depsChanged(previous, next) {
   return next.some((value, index) => !Object.is(value, previous[index]));
 }
 
-function createHookHarness({ search = "", useLogsArgs = {} } = {}) {
+function createHookHarness({
+  search = "",
+  useLogsArgs = {},
+  queryLogsImpl,
+  queryOperatorLogsImpl,
+} = {}) {
   const calls = [];
   const intervals = [];
   let location = { search };
@@ -86,10 +91,12 @@ function createHookHarness({ search = "", useLogsArgs = {} } = {}) {
     }),
     queryLogs: async (request) => {
       calls.push({ endpoint: "logs", ...request });
+      if (queryLogsImpl) return queryLogsImpl(request, calls.length);
       return { entries: [{ id: String(calls.length) }] };
     },
     queryOperatorLogs: async (request) => {
       calls.push({ endpoint: "operator", ...request });
+      if (queryOperatorLogsImpl) return queryOperatorLogsImpl(request, calls.length);
       return { entries: [{ id: String(calls.length) }] };
     },
     setInterval: (fn, ms) => {
@@ -179,4 +186,57 @@ test("useLogs falls back to the caller's active thread without exposing a cleara
   assert.equal(harness.calls[0].threadId, "thread-fallback");
   assert.equal(result.scope.threadId, "thread-fallback");
   assert.equal(result.scope.active.length, 0);
+});
+
+test("useLogs does not poll public logs until a thread scope is available", async () => {
+  const harness = createHookHarness({
+    useLogsArgs: { isAdmin: false },
+  });
+
+  let result = harness.render();
+  await harness.runEffects();
+
+  assert.equal(result.needsThreadScope, true);
+  assert.equal(result.status, "needs_scope");
+  assert.equal(harness.calls.length, 0);
+  assert.equal(harness.intervals.length, 0);
+
+  harness.setSearch("?thread_id=thread-a");
+  result = harness.render();
+  await harness.runEffects();
+
+  assert.equal(result.needsThreadScope, false);
+  assert.equal(harness.calls.length, 1);
+  assert.equal(harness.calls[0].endpoint, "logs");
+  assert.equal(harness.calls[0].threadId, "thread-a");
+});
+
+test("useLogs recovers public logs after a stale scoped thread returns 404", async () => {
+  const harness = createHookHarness({
+    search: "?thread_id=thread-stale",
+    useLogsArgs: { isAdmin: false },
+    queryLogsImpl: async (request, callCount) => {
+      if (request.threadId === "thread-stale") {
+        const error = new Error("not found");
+        error.status = 404;
+        throw error;
+      }
+      return { entries: [{ id: String(callCount) }] };
+    },
+  });
+
+  harness.render();
+  await harness.runEffects();
+
+  assert.equal(harness.calls.length, 1);
+  assert.equal(harness.calls[0].threadId, "thread-stale");
+
+  harness.setSearch("?thread_id=thread-good");
+  const result = harness.render();
+  await harness.runEffects();
+
+  assert.equal(result.needsThreadScope, false);
+  assert.equal(harness.calls.length, 2);
+  assert.equal(harness.calls[1].endpoint, "logs");
+  assert.equal(harness.calls[1].threadId, "thread-good");
 });

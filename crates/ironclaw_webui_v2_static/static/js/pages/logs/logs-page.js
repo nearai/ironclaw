@@ -132,6 +132,7 @@ export function LogsPage() {
     scope,
     isLoading,
     error,
+    needsThreadScope,
   } = useLogs({
     isAdmin,
     defaultThreadId: isAdmin ? null : threadsState?.activeThreadId || null,
@@ -274,7 +275,16 @@ export function LogsPage() {
               </div>
             `
           : null}
-        ${error && !hasEntries
+        ${needsThreadScope
+          ? html`
+              <div
+                data-testid="logs-select-thread-state"
+                className="flex h-full items-center justify-center text-sm text-[var(--v2-text-muted)]"
+              >
+                ${t("chat.selectConversation")}
+              </div>
+            `
+          : error && !hasEntries
           ? html`
               <div
                 className="flex h-full items-center justify-center px-6 text-center text-sm text-red-300"

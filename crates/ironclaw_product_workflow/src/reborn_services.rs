@@ -3471,8 +3471,9 @@ impl RebornServicesApi for RebornServices {
             ))
         })?;
         let thread_id = parse_thread_id_field("thread_id", thread_id)?;
+        let actor = caller.actor();
         let scope = caller.turn_scope(thread_id);
-        self.resolve_thread_history_for_caller(caller.clone(), &scope)
+        self.resolve_thread_access_for_caller(caller.clone(), scope, &actor)
             .await?;
 
         self.operator_logs.query_logs(caller, request).await

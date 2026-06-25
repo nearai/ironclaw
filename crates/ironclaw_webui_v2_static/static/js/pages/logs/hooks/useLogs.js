@@ -54,9 +54,18 @@ export function useLogs({ isAdmin = true, defaultThreadId = null } = {}) {
   const [isUnsupported, setIsUnsupported] = React.useState(false);
   const hiddenEntryIdsRef = React.useRef(new Set());
   const requestIdRef = React.useRef(0);
+  const needsThreadScope = !isAdmin && !threadId;
+
+  React.useEffect(() => {
+    setIsUnsupported(false);
+    setError(null);
+  }, [isAdmin, runId, source, threadId, toolCallId, toolName, turnId]);
 
   const loadLogs = React.useCallback(async () => {
-    if (isUnsupported) return;
+    if (isUnsupported || needsThreadScope) {
+      setIsLoading(false);
+      return;
+    }
     const requestId = ++requestIdRef.current;
     setIsLoading(true);
     try {
@@ -80,7 +89,7 @@ export function useLogs({ isAdmin = true, defaultThreadId = null } = {}) {
       setError(null);
     } catch (err) {
       if (requestId !== requestIdRef.current) return;
-      if (TERMINAL_UNSUPPORTED_STATUSES.has(err?.status)) {
+      if (isAdmin && TERMINAL_UNSUPPORTED_STATUSES.has(err?.status)) {
         setEntries([]);
         setError(null);
         setIsUnsupported(true);
@@ -96,6 +105,7 @@ export function useLogs({ isAdmin = true, defaultThreadId = null } = {}) {
     isAdmin,
     isUnsupported,
     levelFilter,
+    needsThreadScope,
     runId,
     source,
     targetFilter,
@@ -110,10 +120,10 @@ export function useLogs({ isAdmin = true, defaultThreadId = null } = {}) {
   }, [loadLogs]);
 
   React.useEffect(() => {
-    if (paused || isUnsupported) return undefined;
+    if (paused || isUnsupported || needsThreadScope) return undefined;
     const timer = setInterval(loadLogs, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [isUnsupported, loadLogs, paused]);
+  }, [isUnsupported, loadLogs, needsThreadScope, paused]);
 
   const togglePause = React.useCallback(() => {
     setPaused((value) => !value);
@@ -143,7 +153,8 @@ export function useLogs({ isAdmin = true, defaultThreadId = null } = {}) {
     serverLevel: null,
     changeServerLevel: async () => {},
     scope,
-    status: error ? "error" : isLoading ? "loading" : "ready",
+    needsThreadScope,
+    status: needsThreadScope ? "needs_scope" : error ? "error" : isLoading ? "loading" : "ready",
     isLoading,
     error,
   };
