@@ -485,7 +485,7 @@ where
 }
 
 pub(super) struct WasmRuntimeAdapter {
-    runtime: Arc<WitToolRuntime>,
+    runtime: WitToolRuntime,
     host: WitToolHost,
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     runtime_http_egress: SharedRuntimeHttpEgress,
@@ -502,7 +502,7 @@ impl WasmRuntimeAdapter {
         credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     ) -> Self {
         Self {
-            runtime: Arc::new(runtime),
+            runtime,
             host,
             network_policy_store,
             runtime_http_egress,
@@ -589,7 +589,7 @@ where
         let prepared = self.prepared_guard()?.get(&cache_key).cloned();
         if let Some(prepared) = prepared {
             let host = self.host_for_scope(&request.scope, request.capability_id);
-            return execute_prepared_wasm(Arc::clone(&self.runtime), prepared, host, request).await;
+            return execute_prepared_wasm(self.runtime.clone(), prepared, host, request).await;
         }
 
         let wasm_bytes = request
@@ -600,11 +600,15 @@ where
                 kind: RuntimeDispatchErrorKind::FilesystemDenied,
             })?;
         let prepared = Arc::new(
-            self.runtime
-                .prepare(request.package.id.as_str(), &wasm_bytes)
-                .map_err(|error| DispatchError::Wasm {
-                    kind: wasm_error_kind(&error),
-                })?,
+            run_wasm_prepare_blocking(
+                self.runtime.clone(),
+                request.package.id.as_str().to_string(),
+                wasm_bytes,
+            )
+            .await
+            .map_err(|error| DispatchError::Wasm {
+                kind: wasm_error_kind(&error),
+            })?,
         );
         let prepared = {
             let mut prepared_cache = self.prepared_guard()?;
@@ -616,7 +620,7 @@ where
             }
         };
         let host = self.host_for_scope(&request.scope, request.capability_id);
-        execute_prepared_wasm(Arc::clone(&self.runtime), prepared, host, request).await
+        execute_prepared_wasm(self.runtime.clone(), prepared, host, request).await
     }
 }
 
@@ -734,7 +738,7 @@ impl<'g, G: ResourceGovernor + ?Sized> Drop for ReservationGuard<'g, G> {
 }
 
 async fn execute_prepared_wasm<G>(
-    runtime: Arc<WitToolRuntime>,
+    runtime: WitToolRuntime,
     prepared: Arc<PreparedWitTool>,
     host: WitToolHost,
     request: RuntimeAdapterRequest<'_, impl RootFilesystem, G>,
@@ -834,14 +838,15 @@ where
 /// Run the synchronous wasmtime guest call on the blocking thread pool.
 ///
 /// The owned `runtime`/`prepared`/`host` are all cheap-to-move (`WitToolRuntime`
-/// shares its `Engine` by reference count; `prepared` is an `Arc`; `WitToolHost`
-/// is `Clone`), so the closure is `Send + 'static`. A semaphore permit is acquired
-/// here and then moved into the `spawn_blocking` closure so its lifetime is tied
-/// to the blocking thread, not the outer async future — cancellation of the caller
-/// does not release the slot early. A `JoinError` (panic or cancellation of the
-/// blocking task) is surfaced as an execution failure.
+/// is a cheap `Clone` that shares its `Engine` by reference count; `prepared` is
+/// an `Arc`; `WitToolHost` is `Clone`), so the closure is `Send + 'static`. A
+/// semaphore permit is acquired here and then moved into the `spawn_blocking`
+/// closure so its lifetime is tied to the blocking thread, not the outer async
+/// future — cancellation of the caller does not release the slot early. A
+/// `JoinError` (panic or cancellation of the blocking task) is surfaced as an
+/// execution failure.
 async fn run_wasm_execution_blocking(
-    runtime: Arc<WitToolRuntime>,
+    runtime: WitToolRuntime,
     prepared: Arc<PreparedWitTool>,
     host: WitToolHost,
     input_json: String,
@@ -862,6 +867,38 @@ async fn run_wasm_execution_blocking(
     })
     .await
     .map_err(|_| WasmError::execution_failed("wasm execution task panicked".to_string()))?
+}
+
+/// Run the synchronous wasmtime component compilation on the blocking thread pool.
+///
+/// `WitToolRuntime::prepare` performs `Component::new` (wasmtime compilation) plus
+/// metadata extraction — CPU-heavy and blocking, exactly like guest execution.
+/// Running it inline on the async worker would park that worker for the full
+/// compile; a burst of cold-cache misses (cold start or cache eviction) could then
+/// pin every async worker and re-create the runtime wedge that offloading
+/// execution fixes. So `prepare` is offloaded to the blocking pool behind the same
+/// process-wide [`WASM_EXEC_SEMAPHORE`], so a cold-miss storm queues instead of
+/// exhausting the pool. The owned `runtime` is a cheap `Clone` (shared `Engine`)
+/// and `wasm_bytes` is moved in, so the closure is `Send + 'static`. The semaphore
+/// permit is moved into the `spawn_blocking` closure so its lifetime is tied to the
+/// blocking thread, not the outer async future. A `JoinError` (panic or
+/// cancellation of the blocking task) is surfaced as an execution failure.
+async fn run_wasm_prepare_blocking(
+    runtime: WitToolRuntime,
+    package_id: String,
+    wasm_bytes: Vec<u8>,
+) -> Result<PreparedWitTool, WasmError> {
+    let permit = WASM_EXEC_SEMAPHORE
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| WasmError::execution_failed("wasm execution gate closed".to_string()))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        runtime.prepare(&package_id, &wasm_bytes)
+    })
+    .await
+    .map_err(|_| WasmError::execution_failed("wasm preparation task panicked".to_string()))?
 }
 
 fn wasm_invocation_context(capability_id: &CapabilityId) -> String {
@@ -1553,7 +1590,7 @@ mod tests {
         // --- panic call ---
         let panicking_host = WitToolHost::deny_all().with_http(Arc::new(PanickingHttp));
         let result = run_wasm_execution_blocking(
-            Arc::clone(&runtime),
+            (*runtime).clone(),
             Arc::clone(&http_prepared),
             panicking_host,
             "{}".to_string(),
@@ -1587,7 +1624,7 @@ mod tests {
         let ok_result = tokio::time::timeout(
             Duration::from_secs(10),
             run_wasm_execution_blocking(
-                Arc::clone(&runtime),
+                (*runtime).clone(),
                 Arc::clone(&simple_prepared),
                 WitToolHost::deny_all(),
                 "{}".to_string(),
@@ -1642,7 +1679,7 @@ mod tests {
 
         // Kick off the call — it should block inside `run_wasm_execution_blocking`
         // waiting to acquire the semaphore permit.
-        let runtime_clone = Arc::clone(&runtime);
+        let runtime_clone = (*runtime).clone();
         let prepared_clone = Arc::clone(&prepared);
         let call = tokio::spawn(async move {
             run_wasm_execution_blocking(
@@ -1685,6 +1722,110 @@ mod tests {
             result.is_ok(),
             "execution must succeed after the semaphore is released: {result:?}"
         );
+    }
+
+    // 3c — The real `run_wasm_prepare_blocking` path is gated by the shared semaphore.
+    //
+    // Mirrors `run_wasm_execution_blocking_is_gated_by_shared_semaphore` for the
+    // compile/prepare offload: drains `WASM_EXEC_SEMAPHORE` to 0, confirms the
+    // prepare call cannot proceed within a short deadline (it is blocked on the
+    // semaphore acquire, which happens before any compilation), then releases all
+    // permits and verifies the call completes successfully. Uses a deterministic
+    // barrier (a `tokio::spawn` task + `is_finished` poll within a `time::timeout`)
+    // so there are no arbitrary sleeps.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_wasm_prepare_blocking_is_gated_by_shared_semaphore() {
+        let _lock = SEMAPHORE_TEST_LOCK.lock().await;
+
+        let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+        let wasm_bytes = tool_component(SIMPLE_TOOL_WAT);
+
+        // Drain all permits. Collect them so they stay alive until we choose to
+        // drop them.
+        let mut held_permits = Vec::with_capacity(MAX_CONCURRENT_WASM_EXEC);
+        for _ in 0..MAX_CONCURRENT_WASM_EXEC {
+            let permit = WASM_EXEC_SEMAPHORE
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("semaphore must not be closed");
+            held_permits.push(permit);
+        }
+        assert_eq!(
+            WASM_EXEC_SEMAPHORE.available_permits(),
+            0,
+            "all permits must be drained before the backpressure assertion"
+        );
+
+        // Kick off the prepare — it should block inside `run_wasm_prepare_blocking`
+        // waiting to acquire the semaphore permit (before any compilation).
+        let runtime_clone = runtime.clone();
+        let bytes_clone = wasm_bytes.clone();
+        let call = tokio::spawn(async move {
+            run_wasm_prepare_blocking(runtime_clone, "semaphore-gate".to_string(), bytes_clone)
+                .await
+        });
+
+        // Give the spawned task a moment to start and reach the semaphore acquire.
+        // A short yield loop is sufficient — we confirm it has NOT finished yet.
+        tokio::time::timeout(Duration::from_millis(80), async {
+            loop {
+                tokio::task::yield_now().await;
+                if call.is_finished() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect_err("the prepare call must not complete while all semaphore permits are held");
+
+        assert!(
+            !call.is_finished(),
+            "the prepare call must still be queued while the semaphore is exhausted"
+        );
+
+        // Release all permits — the call should now be able to proceed.
+        drop(held_permits);
+
+        let result = tokio::time::timeout(Duration::from_secs(10), call)
+            .await
+            .expect("prepare call must complete after permits are released")
+            .expect("task must not panic");
+
+        assert!(
+            result.is_ok(),
+            "prepare must succeed after the semaphore is released: {result:?}"
+        );
+    }
+
+    // 3d — Invalid wasm bytes surface as a `WasmError` through the offloaded helper.
+    //
+    // Exercises the prepare error path through `run_wasm_prepare_blocking`: passing
+    // bytes that are not a valid component makes `Component::new` fail, which the
+    // runtime maps to `WasmError::CompilationFailed`. The offloaded helper must
+    // propagate that error (not a JoinError-mapped `ExecutionFailed`), preserving
+    // the `wasm_error_kind` mapping the dispatch path relies on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_wasm_prepare_blocking_invalid_bytes_maps_to_wasm_error() {
+        let _lock = SEMAPHORE_TEST_LOCK.lock().await;
+
+        let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+        let invalid_bytes = b"not a valid wasm component".to_vec();
+
+        let result = run_wasm_prepare_blocking(runtime, "invalid".to_string(), invalid_bytes).await;
+
+        assert!(
+            matches!(result, Err(WasmError::CompilationFailed(_))),
+            "invalid wasm bytes must surface as WasmError::CompilationFailed, got: {result:?}"
+        );
+        // Confirm the dispatch-path mapping is preserved end to end.
+        if let Err(error) = &result {
+            assert_eq!(
+                wasm_error_kind(error),
+                RuntimeDispatchErrorKind::Manifest,
+                "compilation failure must map to the Manifest dispatch kind"
+            );
+        }
     }
 
     #[test]

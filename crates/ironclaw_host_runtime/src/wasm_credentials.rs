@@ -627,4 +627,20 @@ runtime_credentials = [
             invocation_id: InvocationId::new(),
         }
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_on_credential_restage_maps_panicking_future_to_backend_on_worker_runtime() {
+        // The multi-thread runtime means Handle::try_current() succeeds, so
+        // block_on_credential_restage routes through run_credential_restage_on_worker.
+        // That function spawns the future on the dedicated restage runtime and wraps
+        // a panicking / join-failed join handle with `.unwrap_or(Err(CredentialStageError::Backend))`,
+        // so a panic must surface as Backend rather than poisoning the process.
+        let result = block_on_credential_restage(async {
+            panic!("simulated restage panic");
+            #[allow(unreachable_code)]
+            Ok::<(), CredentialStageError>(())
+        });
+
+        assert_eq!(result, Err(CredentialStageError::Backend));
+    }
 }
