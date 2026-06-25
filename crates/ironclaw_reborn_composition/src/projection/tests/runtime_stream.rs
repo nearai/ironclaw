@@ -484,31 +484,34 @@ async fn webui_event_stream_preserves_sanitized_capability_activity_error_kind()
     }));
 }
 
-// `LoopFailed` error_kind values are the `LoopFailureKind` codes (e.g.
-// `model_error`); they are NOT the milestone-kind name `model_failed`. The
-// runtime failure-summary mapper therefore renders the generic copy for them.
-#[tokio::test]
-async fn webui_event_stream_renders_generic_summary_for_loop_failed_error_kind() {
-    let tenant_id = TenantId::new("webui-loop-failed-tenant").unwrap();
-    let user_id = UserId::new("webui-loop-failed-user").unwrap();
-    let agent_id = AgentId::new("webui-loop-failed-agent").unwrap();
-    let thread_id = ThreadId::new("webui-loop-failed-thread").unwrap();
+// Shared setup/drive/assert helper for runtime failure-summary tests.
+//
+// Derives per-test IDs from `test_id`, appends the event returned by
+// `event_fn`, drains the WebUI event stream, and asserts that the
+// run-status failure summary equals `expected_summary`.
+async fn assert_runtime_failure_summary(
+    test_id: &str,
+    event_fn: impl FnOnce(ResourceScope) -> RuntimeEvent,
+    expected_summary: &str,
+) {
+    let tenant_id = TenantId::new(format!("webui-{test_id}-tenant")).unwrap();
+    let user_id = UserId::new(format!("webui-{test_id}-user")).unwrap();
+    let agent_id = AgentId::new(format!("webui-{test_id}-agent")).unwrap();
+    let thread_id = ThreadId::new(format!("webui-{test_id}-thread")).unwrap();
     let invocation_id = InvocationId::new();
+
+    let scope = resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, invocation_id);
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     event_log
-        .append(RuntimeEvent::loop_failed(
-            resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, invocation_id),
-            CapabilityId::new("loop.run").unwrap(),
-            "model_error",
-        ))
+        .append(event_fn(scope))
         .await
-        .unwrap();
+        .expect("test event append must succeed");
 
     let event_log: Arc<dyn DurableEventLog> = event_log;
     let actor = TurnActor::new(user_id);
     let services = build_reborn_projection_services(
         event_log,
-        ReplyTargetBindingRef::new("webui-loop-failed-reply").unwrap(),
+        ReplyTargetBindingRef::new(format!("webui-{test_id}-reply")).unwrap(),
     );
     let events = services
         .webui_event_stream()
@@ -518,12 +521,28 @@ async fn webui_event_stream_renders_generic_summary_for_loop_failed_error_kind()
             after_cursor: None,
         })
         .await
-        .unwrap();
+        .expect("event stream drain must succeed");
 
     assert_eq!(
         run_status_failure_summary(&events, invocation_id).as_deref(),
-        Some("The run failed before producing a reply.")
+        Some(expected_summary),
+        "test_id={test_id}: unexpected failure summary"
     );
+}
+
+// `LoopFailed` error_kind values are the `LoopFailureKind` codes (e.g.
+// `model_error`); they are NOT the milestone-kind name `model_failed`. The
+// runtime failure-summary mapper therefore renders the generic copy for them.
+#[tokio::test]
+async fn webui_event_stream_renders_generic_summary_for_loop_failed_error_kind() {
+    assert_runtime_failure_summary(
+        "loop-failed",
+        |scope| {
+            RuntimeEvent::loop_failed(scope, CapabilityId::new("loop.run").unwrap(), "model_error")
+        },
+        "The run failed before producing a reply.",
+    )
+    .await;
 }
 
 // `DispatchFailed` error_kind values are the `DispatchError::event_kind()`
@@ -532,43 +551,20 @@ async fn webui_event_stream_renders_generic_summary_for_loop_failed_error_kind()
 // copy for them too.
 #[tokio::test]
 async fn webui_event_stream_renders_generic_summary_for_dispatch_failed_error_kind() {
-    let tenant_id = TenantId::new("webui-dispatch-failed-tenant").unwrap();
-    let user_id = UserId::new("webui-dispatch-failed-user").unwrap();
-    let agent_id = AgentId::new("webui-dispatch-failed-agent").unwrap();
-    let thread_id = ThreadId::new("webui-dispatch-failed-thread").unwrap();
-    let invocation_id = InvocationId::new();
-    let event_log = Arc::new(InMemoryDurableEventLog::new());
-    event_log
-        .append(RuntimeEvent::dispatch_failed(
-            resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, invocation_id),
-            CapabilityId::new("loop.run").unwrap(),
-            Some(ExtensionId::new("script").unwrap()),
-            Some(RuntimeKind::Script),
-            "missing_runtime_backend",
-        ))
-        .await
-        .unwrap();
-
-    let event_log: Arc<dyn DurableEventLog> = event_log;
-    let actor = TurnActor::new(user_id);
-    let services = build_reborn_projection_services(
-        event_log,
-        ReplyTargetBindingRef::new("webui-dispatch-failed-reply").unwrap(),
-    );
-    let events = services
-        .webui_event_stream()
-        .drain(ProjectionSubscriptionRequest {
-            actor,
-            scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
-            after_cursor: None,
-        })
-        .await
-        .unwrap();
-
-    assert_eq!(
-        run_status_failure_summary(&events, invocation_id).as_deref(),
-        Some("The run failed before producing a reply.")
-    );
+    assert_runtime_failure_summary(
+        "dispatch-failed",
+        |scope| {
+            RuntimeEvent::dispatch_failed(
+                scope,
+                CapabilityId::new("loop.run").unwrap(),
+                Some(ExtensionId::new("script").unwrap()),
+                Some(RuntimeKind::Script),
+                "missing_runtime_backend",
+            )
+        },
+        "The run failed before producing a reply.",
+    )
+    .await;
 }
 
 // `unknown` is the one runtime error_kind that resolves to a dedicated
@@ -576,41 +572,34 @@ async fn webui_event_stream_renders_generic_summary_for_dispatch_failed_error_ki
 // `ironclaw_host_runtime::obligations`).
 #[tokio::test]
 async fn webui_event_stream_renders_unknown_failure_summary() {
-    let tenant_id = TenantId::new("webui-unknown-tenant").unwrap();
-    let user_id = UserId::new("webui-unknown-user").unwrap();
-    let agent_id = AgentId::new("webui-unknown-agent").unwrap();
-    let thread_id = ThreadId::new("webui-unknown-thread").unwrap();
-    let invocation_id = InvocationId::new();
-    let event_log = Arc::new(InMemoryDurableEventLog::new());
-    event_log
-        .append(RuntimeEvent::loop_failed(
-            resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, invocation_id),
-            CapabilityId::new("loop.run").unwrap(),
-            "unknown",
-        ))
-        .await
-        .unwrap();
+    assert_runtime_failure_summary(
+        "unknown",
+        |scope| RuntimeEvent::loop_failed(scope, CapabilityId::new("loop.run").unwrap(), "unknown"),
+        "The run failed for an unknown reason.",
+    )
+    .await;
+}
 
-    let event_log: Arc<dyn DurableEventLog> = event_log;
-    let actor = TurnActor::new(user_id);
-    let services = build_reborn_projection_services(
-        event_log,
-        ReplyTargetBindingRef::new("webui-unknown-reply").unwrap(),
-    );
-    let events = services
-        .webui_event_stream()
-        .drain(ProjectionSubscriptionRequest {
-            actor,
-            scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
-            after_cursor: None,
-        })
-        .await
-        .unwrap();
-
-    assert_eq!(
-        run_status_failure_summary(&events, invocation_id).as_deref(),
-        Some("The run failed for an unknown reason.")
-    );
+// `ProcessFailed` error_kind values (e.g. `model_error`) fall through the
+// generic `_` arm of the failure-summary mapper; they must render the same
+// generic copy as loop_failed / dispatch_failed for non-"unknown" kinds.
+#[tokio::test]
+async fn webui_event_stream_renders_generic_summary_for_process_failed_error_kind() {
+    assert_runtime_failure_summary(
+        "process-failed",
+        |scope| {
+            RuntimeEvent::process_failed(
+                scope,
+                CapabilityId::new("loop.run").unwrap(),
+                ExtensionId::new("script").unwrap(),
+                RuntimeKind::Script,
+                ProcessId::new(),
+                "model_error",
+            )
+        },
+        "The run failed before producing a reply.",
+    )
+    .await;
 }
 
 #[tokio::test]
