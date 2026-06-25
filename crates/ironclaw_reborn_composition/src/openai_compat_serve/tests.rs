@@ -227,6 +227,50 @@ async fn openai_responses_wait_returns_incomplete_when_run_parks_on_gate() {
     );
 }
 
+/// Ordering regression: when the first drain window (after_cursor: None) contains
+/// BOTH an earlier `ProjectionUpdate` carrying a `running` RunStatus AND a later
+/// `GatePrompt` for the same run, the wait loop must return `Incomplete` — not
+/// spin — because the running status predates the gate prompt in the same batch.
+///
+/// On OLD buggy code the `any(...)` scan would find the running status anywhere
+/// in the window and treat the prompt as superseded, causing an infinite poll.
+/// The fixed code uses positional comparison (`rposition`): only a RunStatus
+/// that appears AFTER the latest matching prompt supersedes it.
+#[tokio::test]
+async fn openai_responses_wait_returns_incomplete_when_run_status_precedes_gate_prompt_in_same_window()
+ {
+    let fixture = ResponseReaderFixture::new("wait-gate-ordering").await;
+    let run_id = TurnRunId::new();
+    // Envelopes in emission order: running status first, gate prompt second.
+    // Both arrive in a single drain batch (simulating after_cursor: None).
+    let mut reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![
+            run_status_envelope(fixture.thread_id.as_str(), run_id, "running"),
+            gate_prompt_envelope(run_id),
+        ])),
+    );
+    reader.poll_interval = Duration::from_millis(1);
+
+    let projection = tokio::time::timeout(
+        Duration::from_secs(2),
+        reader.wait_for_response_completion(fixture.wait_request(run_id)),
+    )
+    .await
+    .expect(
+        "wait must return promptly when a gate prompt follows a running status in the same \
+         drain window, not spin forever (ordering bug regression)",
+    )
+    .expect("parked run must surface as a projection, not an error");
+
+    assert_eq!(
+        projection.response.status,
+        OpenAiResponseStatus::Incomplete,
+        "a gate prompt that appears after a running status in the same window must surface \
+         as Incomplete; the earlier running status must not suppress the gate prompt"
+    );
+}
+
 /// Auth gates (`TurnStatus::BlockedAuth`) surface as `AuthPrompt`, not
 /// `GatePrompt`. Without treating `AuthPrompt` as a parked signal the wait loop
 /// would spin forever on an auth-parked run — the same hang as the gate case.

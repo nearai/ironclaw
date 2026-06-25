@@ -792,17 +792,19 @@ fn response_status_from_projection_events(
 /// three `Blocked*` user-resolvable states map onto these two payloads (see
 /// `TurnStatus::wait_class`'s `ParkedAwaitingUser`).
 ///
-/// A gate that is later resolved is treated as superseded: if a non-parked
-/// `RunStatus` for the same run appears anywhere in the drained window, the run
-/// has resumed and any earlier prompt is stale, so this returns `false` (the
-/// caller keeps polling rather than reporting a spurious `Incomplete`). The
-/// terminal-status check in the wait loop runs before this, so a failed/
-/// cancelled run is already returned by then.
+/// Ordering matters: a `RunStatus` that appears **after** the latest matching
+/// prompt means the run resumed past the gate, so that prompt is stale and this
+/// returns `false` (the caller keeps polling). A `RunStatus` that appears
+/// **before** the latest prompt belongs to a prior poll window and must not
+/// suppress the prompt — the first drain window with `after_cursor: None` can
+/// contain both an earlier running status and the later `GatePrompt` in the
+/// same batch. The terminal-status check in the wait loop runs before this, so
+/// a failed/cancelled run is already returned by then.
 fn run_parked_on_gate_in_events(
     events: &[ProductOutboundEnvelope],
     submitted_run_id: &str,
 ) -> bool {
-    let prompted = events.iter().any(|event| match event.payload() {
+    let last_prompt_idx = events.iter().rposition(|event| match event.payload() {
         ProductOutboundPayload::GatePrompt(prompt) => {
             prompt.turn_run_id.to_string() == submitted_run_id
         }
@@ -811,20 +813,23 @@ fn run_parked_on_gate_in_events(
         }
         _ => false,
     });
-    if !prompted {
+    let Some(prompt_idx) = last_prompt_idx else {
         return false;
-    }
-    // A non-parked RunStatus (the only kinds the wire emits are running/
-    // completed/failed/cancelled/killed) anywhere in this drain window means
-    // the run has resumed past the gate, so the earlier prompt is stale.
-    let superseded = events.iter().any(|event| match event.payload() {
+    };
+    // A RunStatus that appears after the latest prompt means the run has
+    // resumed past the gate; the prompt is stale. A status that appears
+    // before the prompt is from a prior window and must not suppress it.
+    let last_status_idx = events.iter().rposition(|event| match event.payload() {
         ProductOutboundPayload::ProjectionSnapshot { state }
         | ProductOutboundPayload::ProjectionUpdate { state } => {
             run_status_present_in_state(state, submitted_run_id)
         }
         _ => false,
     });
-    !superseded
+    match last_status_idx {
+        Some(status_idx) => prompt_idx > status_idx,
+        None => true,
+    }
 }
 
 /// True when the run emitted any `RunStatus` projection item in this state. The
