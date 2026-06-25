@@ -474,6 +474,20 @@ mod tests {
             .expect("webhook auth should verify")
     }
 
+    async fn wait_for_observer_entries(
+        entered: &AtomicUsize,
+        expected: usize,
+        failure_context: &str,
+    ) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while entered.load(Ordering::SeqCst) < expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {failure_context}"));
+    }
+
     #[tokio::test]
     async fn process_verified_webhook_immediate_ack_dispatches_workflow() {
         let parse_count = Arc::new(AtomicUsize::new(0));
@@ -624,9 +638,7 @@ mod tests {
 
         // Wait until the observer is actively blocking — i.e. the workflow has
         // durably accepted and we are now in the delivery phase.
-        while observer_entered.load(Ordering::SeqCst) == 0 {
-            tokio::task::yield_now().await;
-        }
+        wait_for_observer_entries(&observer_entered, 1, "durable observer to enter").await;
 
         // The second webhook must be admitted: admission only gates intake, not
         // the unbounded delivery wait the observer is currently sitting in.
@@ -678,9 +690,7 @@ mod tests {
 
         // Wait until the observer is blocking — the workflow returned a
         // non-durable ack, so the permit must still be held at this point.
-        while observer_entered.load(Ordering::SeqCst) == 0 {
-            tokio::task::yield_now().await;
-        }
+        wait_for_observer_entries(&observer_entered, 1, "non-durable observer to enter").await;
 
         // The permit is retained across the observer for a non-durable ack, so a
         // second intake must be rejected while the first is still in delivery.
