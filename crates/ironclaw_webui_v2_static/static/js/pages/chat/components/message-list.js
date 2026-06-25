@@ -49,6 +49,7 @@ export function MessageList({
   const latestMessageKeyRef = React.useRef(null);
   const rafRef = React.useRef(null);
   const scrollRafRef = React.useRef(null);
+  const previousScrollTopRef = React.useRef(0);
   const userScrollIntentRef = React.useRef(false);
   const [atBottom, setAtBottom] = React.useState(true);
 
@@ -73,6 +74,7 @@ export function MessageList({
       const node = containerRef.current;
       if (!node || (!force && !shouldScrollRef.current)) return;
       scrollToBottom(node);
+      previousScrollTopRef.current = node.scrollTop;
       userScrollIntentRef.current = false;
       setAtBottom(true);
     });
@@ -119,6 +121,7 @@ export function MessageList({
     const el = containerRef.current;
     if (!el) return;
     const nearBottom = isNearBottom(el);
+    previousScrollTopRef.current = el.scrollTop;
     if (nearBottom) {
       shouldScrollRef.current = true;
       userScrollIntentRef.current = false;
@@ -161,6 +164,11 @@ export function MessageList({
     const el = containerRef.current;
     if (!el) return;
     const nearBottom = isNearBottom(el);
+    const isUpwardScroll = el.scrollTop < previousScrollTopRef.current;
+    previousScrollTopRef.current = el.scrollTop;
+    if (!nearBottom && isUpwardScroll) {
+      userScrollIntentRef.current = true;
+    }
     if (nearBottom) {
       shouldScrollRef.current = true;
       userScrollIntentRef.current = false;
@@ -178,6 +186,7 @@ export function MessageList({
     const el = containerRef.current;
     if (!el) return;
     scrollToBottom(el);
+    previousScrollTopRef.current = el.scrollTop;
     shouldScrollRef.current = true;
     userScrollIntentRef.current = false;
     setAtBottom(true);

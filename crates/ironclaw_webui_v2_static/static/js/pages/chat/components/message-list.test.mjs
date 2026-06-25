@@ -148,8 +148,13 @@ test("MessageList observes content growth from streamed markdown layout", () => 
   );
   assert.match(
     messageListSource,
-    /userScrollIntentRef\.current[\s\S]*else if \(userScrollIntentRef\.current\) \{[\s\S]*shouldScrollRef\.current = false;[\s\S]*else \{[\s\S]*shouldScrollRef\.current = true;[\s\S]*followLatest\(\);/,
-    "layout-driven scroll drift should keep auto-follow enabled until the user scrolls",
+    /const previousScrollTopRef = React\.useRef\(0\);[\s\S]*const isUpwardScroll = el\.scrollTop < previousScrollTopRef\.current;[\s\S]*if \(!nearBottom && isUpwardScroll\) \{[\s\S]*userScrollIntentRef\.current = true;[\s\S]*else if \(userScrollIntentRef\.current\) \{[\s\S]*shouldScrollRef\.current = false;/,
+    "unattributed upward scrolls away from the bottom should pause follow-scroll",
+  );
+  assert.match(
+    messageListSource,
+    /else if \(userScrollIntentRef\.current\) \{[\s\S]*else \{[\s\S]*shouldScrollRef\.current = true;[\s\S]*followLatest\(\);/,
+    "layout-driven scroll drift that is not upward should keep auto-follow enabled",
   );
   assert.match(
     messageListSource,
