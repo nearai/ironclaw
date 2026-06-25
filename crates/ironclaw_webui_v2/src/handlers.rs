@@ -42,7 +42,8 @@ use ironclaw_product_workflow::{
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
     RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
+    RebornAccountTracesResponse, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornTraceHoldAuthorizeResponse,
     SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAttachmentCapabilities,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
@@ -682,6 +683,19 @@ pub async fn trace_credits(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornTraceCreditsResponse>, WebUiV2HttpError> {
     let response = state.services().trace_credits(caller).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/traces/account`
+///
+/// Read-only list of the authenticated caller's submitted Trace Commons traces,
+/// fetched per-user from the server. Scope is derived from the caller; no input
+/// is accepted. Unenrolled callers receive the zero-state, not an error.
+pub async fn trace_account_traces(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornAccountTracesResponse>, WebUiV2HttpError> {
+    let response = state.services().trace_account_traces(caller).await?;
     Ok(Json(response))
 }
 
