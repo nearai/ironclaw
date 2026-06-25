@@ -30,8 +30,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    RuntimeCapabilityRequest, RuntimeFailureKind, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -618,5 +619,202 @@ async fn onboard_unconfirmed_makes_no_network_call() {
         requests.len(),
         0,
         "no HTTP requests must reach the mock when confirmed=false"
+    );
+}
+
+/// Verify the consent gate: `account_login_link` with no `confirmed` must
+/// return `consent_required=true` without making any network call.
+#[tokio::test]
+async fn account_login_link_requires_consent() {
+    let _base_dir = setup_base_dir();
+
+    let rt = runtime();
+
+    // Use allow_all_network_policy because the capability manifest declares
+    // EffectKind::Network; the host runtime stages the network grant before
+    // dispatching. The consent gate short-circuits inside the handler before
+    // making any actual network call.
+    let result = invoke_with_context(
+        &rt,
+        TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
+        json!({}),
+        execution_context_with_network(
+            "user_login_link_consent",
+            "caller_login_link_consent",
+            TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
+            allow_all_network_policy(),
+        ),
+    )
+    .await
+    .expect("consent-gate dispatch must succeed (Ok envelope, not an Err)");
+
+    assert_eq!(
+        result["minted"],
+        json!(false),
+        "minted must be false when confirmed is absent"
+    );
+    assert_eq!(
+        result["consent_required"],
+        json!(true),
+        "consent_required must be true when confirmed is absent"
+    );
+    assert!(
+        result["message"].as_str().is_some_and(|m| !m.is_empty()),
+        "message must be non-empty"
+    );
+}
+
+/// Build a syntactically valid JWT string with the given header object.
+/// The signature segment is a literal ASCII placeholder — JWT validation
+/// in this codebase only inspects the header fields (alg, kid) and the
+/// presence of a non-empty access_token, so this is sufficient for tests.
+fn test_jwt_eddsa(kid: &str) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    let header = serde_json::json!({"alg": "EdDSA", "kid": kid});
+    format!(
+        "{}.{}.signature",
+        URL_SAFE_NO_PAD.encode(header.to_string().as_bytes()),
+        URL_SAFE_NO_PAD.encode(b"{}")
+    )
+}
+
+/// Verify the full dispatch chain for account_login_link:
+///   1. Onboard via mock server (writes local enrollment state).
+///   2. Agent invokes `builtin.trace_commons.account_login_link` with confirmed=true.
+///   3. The tool fetches a bearer token from `/v1/trace-upload-claim` (reqwest path).
+///   4. The tool POSTs to `/v1/account/login-links` (via host egress sink).
+///   5. The tool returns `minted=true` and the login URL.
+#[tokio::test]
+async fn account_login_link_through_dispatch() {
+    let _base_dir = setup_base_dir();
+
+    let claim_jwt = test_jwt_eddsa("e2e-key-1");
+    let claim_jwt_for_mock = claim_jwt.clone();
+
+    // Spawn a mock server that handles all three routes needed:
+    //   /v1/onboard              — onboarding POST (standard mock response)
+    //   /v1/trace-upload-claim   — bearer-token issuer (reqwest path, not sink)
+    //   /v1/account/login-links  — the endpoint under test (via host egress sink)
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("mock server binds");
+    let addr = listener.local_addr().expect("mock server local addr");
+
+    let app = {
+        let claim_jwt_handler = claim_jwt_for_mock.clone();
+        let addr_for_onboard = addr;
+        axum::Router::new()
+            .route(
+                "/v1/onboard",
+                axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let port = addr_for_onboard.port();
+                    async move {
+                        // Echo the device_key_id from the submitted public key —
+                        // mirrors spawn_mock_issuer's ECHO_DEVICE_KEY_ID logic.
+                        let pubkey_b64 = body["device_public_key"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                        let device_key_id = derive_device_key_id(&pubkey_b64)
+                            .unwrap_or_else(|| "sha256:unknown".to_string());
+                        axum::Json(serde_json::json!({
+                            "schema_version": "trace_commons.onboard_response.v1",
+                            "tenant_id": "tenant-login-link",
+                            "ingest_url": "https://ingest.example.com",
+                            "issuer_url": format!("http://127.0.0.1:{}/v1/trace-upload-claim", port),
+                            "audience": "trace-commons-ingest",
+                            "device_key_id": device_key_id,
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/v1/trace-upload-claim",
+                axum::routing::post(move || {
+                    let jwt = claim_jwt_handler.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "access_token": jwt,
+                            "token_type": "Bearer",
+                            "expires_in": 300
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/v1/account/login-links",
+                axum::routing::post(|| async {
+                    axum::Json(serde_json::json!({
+                        "account_id": "acc123",
+                        "url": "/account/login?code=testcode123"
+                    }))
+                }),
+            )
+    };
+
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let invite_url = format!("http://127.0.0.1:{}/onboard#LOGINLINKE2E", addr.port());
+    let rt = runtime();
+
+    // ── Step 1: Onboard ───────────────────────────────────────────────────────
+    let onboard_result = invoke_with_context(
+        &rt,
+        TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+        json!({
+            "invite_url": invite_url,
+            "include_message_text": false,
+            "include_tool_payloads": false,
+            "confirmed": true,
+        }),
+        execution_context_with_network(
+            "user_login_link_dispatch",
+            "caller_login_link_dispatch",
+            TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+            allow_all_network_policy(),
+        ),
+    )
+    .await
+    .expect("onboard must succeed before login-link test");
+    assert_eq!(
+        onboard_result["enrolled"],
+        json!(true),
+        "must be enrolled before testing login link"
+    );
+
+    // ── Step 2: Invoke account_login_link with confirmed=true ─────────────────
+    let result = invoke_with_context(
+        &rt,
+        TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
+        json!({ "confirmed": true }),
+        execution_context_with_network(
+            "user_login_link_dispatch",
+            "caller_login_link_dispatch",
+            TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
+            allow_all_network_policy(),
+        ),
+    )
+    .await
+    .expect("account_login_link dispatch must succeed");
+
+    assert_eq!(
+        result["minted"],
+        json!(true),
+        "minted must be true on success; error_code={:?}, message={:?}",
+        result.get("error_code"),
+        result.get("message"),
+    );
+    let url = result["url"].as_str().expect("url must be a string");
+    assert!(
+        url.contains("/account/login?code="),
+        "url must contain the login-link path; got: {url}"
+    );
+    assert_eq!(
+        result["account_id"],
+        json!("acc123"),
+        "account_id must match mock response"
     );
 }

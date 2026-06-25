@@ -61,9 +61,9 @@ pub use skill_management::{
 pub use spawn_subagent::SPAWN_SUBAGENT_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
 pub use trace_commons::{
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use trigger_management::TriggerManagementClock;
@@ -175,6 +175,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     trace_commons::credits_manifest()?,
                     trace_commons::profile_token_manifest()?,
                     trace_commons::profile_set_manifest()?,
+                    trace_commons::account_login_link_manifest()?,
                     profile_set::manifest()?,
                 ];
                 capabilities.extend(memory::manifests()?);
@@ -299,6 +300,10 @@ fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, H
         CapabilityId::new(TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID)?,
         handler.clone(),
     );
+    registry.insert_handler(
+        CapabilityId::new(TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID)?,
+        handler.clone(),
+    );
     registry.insert_handler(CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?, handler);
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)
@@ -417,6 +422,9 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             }
             TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID => {
                 (trace_commons::dispatch_profile_set(&request).await?, None)
+            }
+            TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID => {
+                (trace_commons::dispatch_account_login_link(&request).await?, None)
             }
             capability_id => {
                 let Some(metadata) = coding_capability_metadata(capability_id) else {

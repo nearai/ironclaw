@@ -1,12 +1,14 @@
-//! First-party Trace Commons capabilities: onboard, status, credits, profile token, and profile set.
+//! First-party Trace Commons capabilities: onboard, status, credits, profile token, profile set,
+//! and account login link.
 //!
 //! `trace_commons.onboard` drives the operator-invite enrollment flow.
 //! `trace_commons.status` is a read-only policy inspector.
 //! `trace_commons.credits` is a read-only credit balance reporter.
 //! `trace_commons.profile_token` mints a short-lived public-attribution token.
 //! `trace_commons.profile_set` updates the public community profile directly.
+//! `trace_commons.account_login_link` mints a one-time browser login URL.
 //!
-//! All five are model-visible.
+//! All six are model-visible.
 
 use std::{panic::AssertUnwindSafe, path::PathBuf, sync::Arc};
 
@@ -23,7 +25,8 @@ use ironclaw_reborn_traces::contribution::{
     COMMUNITY_PROFILE_HANDLE_MIN_CHARS, ContributionHttpError, ContributionHttpMethod,
     ContributionHttpRequest, ContributionHttpResponse, ContributionHttpSink,
     ProfileAttributionToken, StandingTraceContributionPolicy, TraceCreditReport,
-    TraceUploadAuthMode, mint_profile_attribution_token_for_scope_via_sink,
+    TraceUploadAuthMode, mint_account_login_link_via_sink,
+    mint_profile_attribution_token_for_scope_via_sink,
     read_trace_policy_for_scope, set_community_profile_for_scope_via_sink,
     trace_contribution_dir_for_scope, trace_scope_key,
 };
@@ -53,6 +56,8 @@ pub const TRACE_COMMONS_STATUS_CAPABILITY_ID: &str = "builtin.trace_commons.stat
 pub const TRACE_COMMONS_CREDITS_CAPABILITY_ID: &str = "builtin.trace_commons.credits";
 pub const TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID: &str = "builtin.trace_commons.profile_token";
 pub const TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID: &str = "builtin.trace_commons.profile_set";
+pub const TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID: &str =
+    "builtin.trace_commons.account_login_link";
 
 // ── Manifest helpers ─────────────────────────────────────────────────────────
 
@@ -171,6 +176,18 @@ pub(super) fn profile_set_manifest() -> Result<CapabilityManifest, ExtensionErro
             },
             hard_ceiling: None,
         }),
+    )
+}
+
+pub(super) fn account_login_link_manifest() -> Result<CapabilityManifest, ExtensionError> {
+    first_party_capability_manifest(
+        TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
+        "Mint a one-time Trace Commons browser login link so the user can manage their \
+         contributor account/profile in the web UI. Consent-gated: only call with \
+         confirmed=true after the user explicitly asks. Routes through host network egress.",
+        vec![EffectKind::Network, EffectKind::ExternalWrite],
+        PermissionMode::Ask,
+        resource_profile(),
     )
 }
 
@@ -960,6 +977,125 @@ fn profile_set_error_value(error: String) -> Value {
     };
     json!({
         "updated": false,
+        "error_code": error_code,
+        "message": message,
+    })
+}
+
+// ── Account login link dispatch ───────────────────────────────────────────────
+
+pub(super) async fn dispatch_account_login_link(
+    request: &FirstPartyCapabilityRequest,
+) -> Result<Value, FirstPartyCapabilityError> {
+    // Consent gate: minting a one-time login link is an account-access action.
+    // The runtime approval gate (PermissionMode::Ask) can be auto-approved in
+    // local-yolo, so this in-band confirmed=true check is the hard fail-closed
+    // boundary — mirroring dispatch_profile_token / dispatch_onboard. Never
+    // mint a login link without explicit per-conversation confirmation.
+    let confirmed = request
+        .input
+        .get("confirmed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !confirmed {
+        return Ok(json!({
+            "minted": false,
+            "consent_required": true,
+            "message": "Minting a Trace Commons browser login link opens account access for \
+        the user. Confirm with the user that they explicitly want to log in to their Trace \
+        Commons account, then call again with confirmed=true."
+        }));
+    }
+
+    let scope = trace_scope_key(
+        request.scope.tenant_id.as_str(),
+        request.scope.user_id.as_str(),
+    );
+
+    // Enrollment pre-check BEFORE extracting host egress: a not-enrolled user
+    // must get NotEnrolled guidance, not a NetworkDenied miswiring error.
+    // Mirrors dispatch_profile_token's ordering.
+    match read_trace_policy_for_scope(Some(scope.as_str())) {
+        Ok(policy) if policy.enabled => {}
+        Ok(_) => {
+            return Ok(account_login_link_error_value(
+                "not enrolled in Trace Commons".to_string(),
+            ));
+        }
+        Err(error) => return Ok(account_login_link_error_value(error.to_string())),
+    }
+
+    // The agent account_login_link path MUST route through host network egress
+    // — it must never silently fall back to a direct client (mirrors
+    // dispatch_onboard / dispatch_profile_token).
+    let egress = match request.services.runtime_http_egress.as_ref() {
+        Some(egress) => egress.clone(),
+        None => {
+            return Err(FirstPartyCapabilityError::new(
+                RuntimeDispatchErrorKind::NetworkDenied,
+            ));
+        }
+    };
+    let sink = HostEgressContributionSink {
+        egress,
+        scope: request.scope.clone(),
+        capability_id: request.capability_id.clone(),
+    };
+    match mint_account_login_link_via_sink(
+        request.scope.tenant_id.as_str(),
+        request.scope.user_id.as_str(),
+        &sink,
+    )
+    .await
+    {
+        Ok(link) => Ok(json!({
+            "minted": true,
+            "account_id": link.account_id,
+            "url": link.url,
+            "message": "Use this link to log in to your Trace Commons account in a browser. \
+        It is one-time-use and expires shortly.",
+        })),
+        Err(error) => Ok(account_login_link_error_value(error.to_string())),
+    }
+}
+
+fn account_login_link_error_value(error: String) -> Value {
+    let (error_code, message) = if error.contains("not enrolled in Trace Commons") {
+        (
+            "NotEnrolled",
+            "Trace Commons enrollment was not found for this user. Onboard with the operator invite link first.",
+        )
+    } else if error.contains("could not read policy") {
+        (
+            "PolicyReadFailed",
+            "Could not read local Trace Commons enrollment state; the policy file may be unreadable or corrupt.",
+        )
+    } else if error.contains("issuer URL is not configured")
+        || error.contains("upload_token_issuer_url")
+        || error.contains("does not end in /v1/trace-upload-claim")
+    {
+        (
+            "IssuerNotConfigured",
+            "Trace Commons enrollment is missing the upload-claim issuer URL. Re-run onboarding with a fresh invite.",
+        )
+    } else if error.contains("device key") {
+        (
+            "DeviceKeyUnavailable",
+            "Trace Commons device-key state is incomplete. Re-run onboarding with a fresh invite.",
+        )
+    } else if error.contains("login-link request returned HTTP") {
+        (
+            "IssuerRefused",
+            "The Trace Commons issuer refused to mint a login link. Ask the operator to check account/device-key status.",
+        )
+    } else {
+        (
+            "AccountLoginLinkFailed",
+            "Could not mint a Trace Commons account login link. Check enrollment status and retry.",
+        )
+    };
+    json!({
+        "minted": false,
         "error_code": error_code,
         "message": message,
     })

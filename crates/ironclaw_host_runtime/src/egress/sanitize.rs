@@ -1,6 +1,6 @@
 use ironclaw_host_api::{
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, is_sensitive_runtime_request_header,
-    is_sensitive_runtime_response_header,
+    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeKind,
+    is_sensitive_runtime_request_header, is_sensitive_runtime_response_header,
 };
 use ironclaw_network::{NetworkHttpResponse, percent_decode_url_component_lossy};
 use ironclaw_safety::{LeakDetector, http_parts_contain_manual_credentials, redact_exact_values};
@@ -9,24 +9,31 @@ pub(super) fn validate_runtime_request(
     request: &RuntimeHttpEgressRequest,
     leak_detector: &LeakDetector,
 ) -> Result<(), RuntimeHttpEgressError> {
-    if let Some((_name, _)) = request
-        .headers
-        .iter()
-        .find(|(name, _)| is_sensitive_runtime_request_header(name))
-    {
-        return Err(RuntimeHttpEgressError::Request {
-            reason: "sensitive_header_denied".to_string(),
-            request_bytes: 0,
-            response_bytes: 0,
-        });
-    }
+    // First-party requests are host-internal: the host itself constructs them
+    // and is trusted to add credential headers (e.g. Authorization: Bearer).
+    // Skip the sensitive-header and manual-credentials guards that exist to
+    // prevent untrusted plugin runtimes (WASM/MCP/Script) from smuggling
+    // credentials into outbound requests.
+    if request.runtime != RuntimeKind::FirstParty {
+        if let Some((_name, _)) = request
+            .headers
+            .iter()
+            .find(|(name, _)| is_sensitive_runtime_request_header(name))
+        {
+            return Err(RuntimeHttpEgressError::Request {
+                reason: "sensitive_header_denied".to_string(),
+                request_bytes: 0,
+                response_bytes: 0,
+            });
+        }
 
-    if runtime_request_contains_manual_credentials(request) {
-        return Err(RuntimeHttpEgressError::Request {
-            reason: "manual_credentials_denied".to_string(),
-            request_bytes: 0,
-            response_bytes: 0,
-        });
+        if runtime_request_contains_manual_credentials(request) {
+            return Err(RuntimeHttpEgressError::Request {
+                reason: "manual_credentials_denied".to_string(),
+                request_bytes: 0,
+                response_bytes: 0,
+            });
+        }
     }
 
     scan_runtime_url_for_leaks(leak_detector, &request.url)?;
