@@ -51,8 +51,9 @@ use ironclaw_product_workflow::{
     RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    RebornAccountTracesResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest,
+    UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
     WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
@@ -1027,6 +1028,19 @@ impl RebornServicesApi for StubServices {
             ok: true,
             models: vec!["model-a".to_string()],
             message: String::new(),
+        })
+    }
+
+    async fn trace_account_traces(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornAccountTracesResponse, RebornServicesError> {
+        // Hermetic zero-state stub — no filesystem or network access.
+        // Mirrors the unenrolled branch of the real `account_traces_for_user`
+        // so the contract test for `GET /traces/account` is fully self-contained.
+        Ok(RebornAccountTracesResponse {
+            enrolled: false,
+            traces: vec![],
         })
     }
 }

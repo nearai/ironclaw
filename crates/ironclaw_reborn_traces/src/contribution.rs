@@ -6168,6 +6168,11 @@ pub struct AccountTraceItem {
     pub received_at: Option<String>,
 }
 
+/// Agent-path (host-egress sink) counterpart to the direct `fetch_account_traces`.
+/// Not yet wired to a first-party capability — retained as the sink-based entry
+/// for a future `trace_commons.account_traces` agent capability, mirroring
+/// `mint_account_login_link_via_sink`. Covered by unit tests.
+///
 /// Fetch the list of submitted traces for the given `(tenant_id, user_id)` via
 /// the caller-supplied `sink` (host egress on the agent path).
 ///
@@ -6605,6 +6610,13 @@ async fn flush_trace_contribution_queue_for_scope_with_credential_provider(
             return Err(error);
         }
     };
+    // NOTE: This gates on the PER-SCOPE (personal-invite) policy only. An
+    // instance-enrolled user (enrolled at scope None via admin instance
+    // enrollment) has no enabled per-scope policy and therefore aborts here —
+    // instance-enrolled contribution is NOT yet wired into the autonomous flush
+    // path. A resolver-aware flush gate (use resolve_trace_credentials, fall back
+    // to the instance policy) is the planned follow-up. Until then, `subject_for_scope`
+    // below is effectively inert in this path. Tracking: <flush-gate follow-up>.
     if !policy.enabled {
         let error = anyhow::anyhow!("trace contribution opt-in is disabled");
         record_trace_queue_flush_failure_for_scope_unlocked(scope, &error, flush_started_at)?;
