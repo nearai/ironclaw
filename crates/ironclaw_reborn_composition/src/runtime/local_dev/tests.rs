@@ -661,7 +661,7 @@ mod tests {
             .ensure_thread(EnsureThreadRequest {
                 scope: actor_thread_scope.clone(),
                 thread_id: Some(run_context.thread_id.clone()),
-                created_by_actor_id: "user:preview-actor".to_string(),
+                created_by_actor_id: format!("user:{}", actor_user_id.as_str()),
                 title: None,
                 metadata_json: None,
             })
