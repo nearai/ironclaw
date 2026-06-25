@@ -177,3 +177,33 @@ Per-site use:
   follow-up: migrate its hand-rolled status predicate onto `wait_class()`.
 - CLI `runtime/mod.rs` and scheduler config defaults are owned by another agent;
   not touched here.
+
+### FOLLOW-UP — parked subagent child: terminalize with the diagnostic reason (near-term)
+
+PR #5250 review (codex P1) found a split-brain in Bug #3's fix: synthesizing a
+`Failed` event for a child parked on a user gate unblocks the parent but only
+writes the subagent gate store — the child's *real* run in the turn-state store
+stays `Blocked*`, so (`keeps_active_lock`) it holds the same-thread active lock
+and the gate stays user-resolvable (a later approval would resume an orphaned
+child).
+
+**Shipped now (minimal, correct lock/gate release):**
+`SubagentCompletionObserver::cancel_parked_child_run` cancels the real child run
+(`SanitizedCancelReason::Policy`) after `handle_terminal`, flipping it to
+terminal `Cancelled` (releases the lock, invalidates the gate). Gate-store
+terminal records are first-write-wins, so the parent keeps the descriptive
+synthetic `Failed` and the cancel's `Cancelled` terminal is ignored there.
+
+**Why this is interim:** the real run's terminal event carries only a generic
+`SanitizedCancelReason` category (the enum has no "parked on a gate" variant),
+not the gate diagnostic. Any consumer reading the *real* run's terminal sees
+`policy`, not the reason.
+
+**Proper fix (Option C):** add a coordinator transition to terminalize a run as
+`Failed` with a sanitized reason, so a single terminal event both releases the
+lock and carries the diagnostic — then drop the synthetic-event + cancel pair in
+favor of one transition. Deferred because it widens the `ironclaw_turns`
+contract and needs maintainer sign-off.
+
+**Urgency:** low — subagents are currently disabled, so this observer path is
+latent in production; the cancel above is a safe net for when they re-enable.

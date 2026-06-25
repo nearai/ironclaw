@@ -15,10 +15,10 @@ use ironclaw_threads::{
     ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary, UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest,
-    RunWaitClass, TurnActor, TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnEventKind,
-    TurnLifecycleEvent, TurnRunId, TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore,
-    TurnStatus, TurnTimestamp,
+    CancelRunRequest, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
+    ResumeTurnRequest, RunWaitClass, SanitizedCancelReason, TurnActor, TurnCommittedEventObserver,
+    TurnCoordinator, TurnError, TurnEventKind, TurnLifecycleEvent, TurnRunId, TurnRunRecord,
+    TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStatus, TurnTimestamp,
     events::EventCursor,
     run_profile::{AgentLoopHostError, LoopRunContext, sanitize_model_visible_text},
 };
@@ -493,6 +493,86 @@ where
         Ok(())
     }
 
+    /// Terminalize a child run that parked on a user gate it cannot resolve.
+    ///
+    /// The synthetic `Failed` event routed through [`Self::handle_terminal`]
+    /// already unblocks the parent, but it only writes to the subagent gate
+    /// store — the child's *real* run in the turn-state store stays `Blocked*`,
+    /// which (`TurnStatus::keeps_active_lock`) keeps the same-thread active lock
+    /// held and leaves the gate user-resolvable (a later approval would resume a
+    /// child whose parent already moved on). Cancelling the real run flips it
+    /// straight to terminal `Cancelled`, releasing the lock and invalidating the
+    /// gate.
+    ///
+    /// Ordering matters: this runs AFTER `handle_terminal`, so the parent-facing
+    /// outcome is the descriptive synthetic `Failed` (gate-store terminal records
+    /// are first-write-wins — see `record_child_terminal` — so the `Cancelled`
+    /// terminal this cancel emits is harmlessly ignored there and does not
+    /// re-resume the parent).
+    ///
+    /// FOLLOW-UP (subagents are currently disabled, so this path is latent): the
+    /// cancel surfaces only a generic `SanitizedCancelReason` category to any
+    /// downstream consumer of the real run's terminal event, not the gate-
+    /// specific reason. The clean fix is a coordinator "fail run with sanitized
+    /// reason" transition so a single terminal event both releases the lock and
+    /// carries the diagnostic — tracked in
+    /// `docs/plans/2026-06-25-run-wait-class.md`. Until then this cancel is the
+    /// minimal correct lock/gate release.
+    ///
+    /// Best-effort: the parent is already resumed by the time this runs, so a
+    /// cancel failure must not fail the observer (it would only re-run this
+    /// idempotent path). The bound error is logged rather than discarded.
+    async fn cancel_parked_child_run(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        actor: Option<TurnActor>,
+    ) {
+        let Some(actor) = actor else {
+            tracing::debug!(
+                run_id = %run_id,
+                "parked child cancel skipped: no actor available to authorize the cancel; \
+                 active lock not released this pass"
+            );
+            return;
+        };
+        let Some(coordinator) = self.coordinator.get() else {
+            tracing::debug!(
+                run_id = %run_id,
+                "parked child cancel skipped: coordinator not bound; active lock not released"
+            );
+            return;
+        };
+        let idempotency_key = match IdempotencyKey::new(format!("subagent-parked-cancel:{run_id}"))
+        {
+            Ok(key) => key,
+            Err(reason) => {
+                tracing::debug!(
+                    run_id = %run_id,
+                    reason = %reason,
+                    "parked child cancel skipped: could not build idempotency key"
+                );
+                return;
+            }
+        };
+        if let Err(error) = coordinator
+            .cancel_run(CancelRunRequest {
+                scope: scope.clone(),
+                actor,
+                run_id,
+                reason: SanitizedCancelReason::Policy,
+                idempotency_key,
+            })
+            .await
+        {
+            tracing::debug!(
+                run_id = %run_id,
+                error = %error,
+                "parked child cancel failed; active lock not released this pass"
+            );
+        }
+    }
+
     async fn write_terminal_result(
         &self,
         state: &AwaitedChildState,
@@ -675,7 +755,13 @@ where
     async fn observe_committed_state(&self, state: TurnRunState) -> Result<(), TurnError> {
         if is_subagent_parked_on_user_gate(state.status) {
             let event = blocked_child_as_failed_event_from_state(&state);
-            return self.handle_terminal(&event).await;
+            self.handle_terminal(&event).await?;
+            // Release the real child run's active lock and invalidate its gate;
+            // see `cancel_parked_child_run`. Runs after `handle_terminal` so the
+            // parent keeps the descriptive synthetic failure.
+            self.cancel_parked_child_run(&state.scope, state.run_id, state.actor.clone())
+                .await;
+            return Ok(());
         }
         let event = terminal_event_from_state(&state)?;
         self.handle_terminal(&event).await
@@ -683,8 +769,15 @@ where
 
     async fn observe_committed_event(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
         if is_subagent_parked_on_user_gate(event.status) {
-            let event = blocked_child_as_failed_event_from_event(&event);
-            return self.handle_terminal(&event).await;
+            let synthetic = blocked_child_as_failed_event_from_event(&event);
+            self.handle_terminal(&synthetic).await?;
+            self.cancel_parked_child_run(
+                &event.scope,
+                event.run_id,
+                event.owner_user_id.clone().map(TurnActor::new),
+            )
+            .await;
+            return Ok(());
         }
         self.handle_terminal(&event).await
     }
@@ -1209,11 +1302,16 @@ mod tests {
     #[derive(Default)]
     struct RecordingCoordinator {
         resumed: Mutex<Vec<ResumeTurnRequest>>,
+        cancelled: Mutex<Vec<CancelRunRequest>>,
     }
 
     impl RecordingCoordinator {
         fn resumes(&self) -> Vec<ResumeTurnRequest> {
             self.resumed.lock().unwrap().clone()
+        }
+
+        fn cancels(&self) -> Vec<CancelRunRequest> {
+            self.cancelled.lock().unwrap().clone()
         }
     }
 
@@ -1248,11 +1346,15 @@ mod tests {
             &self,
             request: CancelRunRequest,
         ) -> Result<CancelRunResponse, TurnError> {
-            Err(TurnError::Unavailable {
-                reason: format!(
-                    "cancel not used by completion observer tests: {}",
-                    request.run_id
-                ),
+            let run_id = request.run_id;
+            let actor = request.actor.clone();
+            self.cancelled.lock().unwrap().push(request);
+            Ok(CancelRunResponse {
+                run_id,
+                status: TurnStatus::Cancelled,
+                event_cursor: EventCursor(11),
+                already_terminal: false,
+                actor: Some(actor),
             })
         }
 
@@ -2930,6 +3032,17 @@ mod tests {
             goal_store.get(&child_scope, child_run_id),
             Err(SubagentGoalStoreError::NotFound { .. })
         ));
+
+        // The real child run is cancelled so its same-thread active lock is
+        // released and the now-stale user gate can no longer resume an orphaned
+        // child whose parent already moved on.
+        let cancels = coordinator.cancels();
+        assert_eq!(
+            cancels.len(),
+            1,
+            "a child parked on a gate must have its real run cancelled to free the active lock"
+        );
+        assert_eq!(cancels[0].run_id, child_run_id);
     }
 
     /// State-path parity: `observe_committed_state` with a `BlockedApproval` child
@@ -3139,6 +3252,17 @@ mod tests {
             goal_store.get(&child_scope, child_run_id),
             Err(SubagentGoalStoreError::NotFound { .. })
         ));
+
+        // The real child run is cancelled so its same-thread active lock is
+        // released and the now-stale user gate can no longer resume an orphaned
+        // child whose parent already moved on.
+        let cancels = coordinator.cancels();
+        assert_eq!(
+            cancels.len(),
+            1,
+            "a child parked on a gate must have its real run cancelled to free the active lock"
+        );
+        assert_eq!(cancels[0].run_id, child_run_id);
     }
 
     #[test]
