@@ -362,7 +362,17 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
                 .get(request.input_ref.as_str())
                 .cloned();
             let outcome = self.inner.invoke_capability(request).await?;
-            if matches!(outcome, CapabilityOutcome::Completed(_))
+            // Promote on a completed dispatch OR a gate suspension (approval/auth/
+            // resource). A tool the model dispatched that paused for a user action
+            // is just as "earned" as a completed one, and it MUST stay visible
+            // across the BlockedApproval/BlockedAuth resume: otherwise the per-turn
+            // disclosed set resets, the tool drops off the model-visible surface,
+            // and the model's retry is hard-rejected by the visible-surface filter
+            // ("outside the model-visible capability view") — discarding the whole
+            // response and borking the run. A hard *failure* still does NOT promote
+            // (the model may abandon it), so this does not drift toward advertising
+            // every discovered tool — only ones the model actually invoked.
+            if (matches!(outcome, CapabilityOutcome::Completed(_)) || outcome.is_suspension())
                 && let Some(capability_id) = target_capability_id
             {
                 self.promote_target(&capability_id)?;
@@ -981,10 +991,20 @@ mod tests {
             &self,
             request: CapabilityInvocation,
         ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            // Sentinel: lets a test drive a gate (approval) suspension outcome.
+            let suspends = request.capability_id.as_str() == "fixture.suspends";
             self.invocations
                 .lock()
                 .expect("invocations lock")
                 .push(request);
+            if suspends {
+                return Ok(CapabilityOutcome::ApprovalRequired {
+                    gate_ref: ironclaw_turns::LoopGateRef::new("gate:test")
+                        .expect("valid gate ref"),
+                    safe_summary: "approval needed".to_string(),
+                    approval_resume: None,
+                });
+            }
             Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: LoopResultRef::new("result:target").expect("valid result ref"),
                 safe_summary: "target completed".to_string(),
@@ -1378,6 +1398,92 @@ mod tests {
         // The recorded name must serialize into the transcript without error.
         ironclaw_safety::validate_provider_tool_name(&replay.provider_tool_name)
             .expect("recorded provider tool name is wire-safe");
+    }
+
+    #[tokio::test]
+    async fn gate_suspended_target_is_promoted_so_it_survives_the_resume() {
+        // Regression: a tool the model dispatched that paused on an approval/auth
+        // gate must stay model-visible across the resume, exactly like a completed
+        // dispatch. Otherwise the per-turn disclosed set resets on resume, the tool
+        // drops off the surface, and the model's retry is hard-rejected by the
+        // visible-surface filter ("outside the model-visible capability view") —
+        // discarding the response and borking the run. Only *invoked* tools promote
+        // (completed or gate-suspended), so a mere search/describe still does not,
+        // and the advertised surface does not balloon toward "all tools".
+        let definitions = vec![
+            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.suspends", "suspends_tool", "Needs approval"),
+            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
+            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
+            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
+            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
+        ];
+        let inner = Arc::new(SpyPort {
+            definitions,
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let promoted_by_scope = Arc::new(Mutex::new(HashMap::new()));
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::clone(&promoted_by_scope),
+        );
+
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface");
+        assert!(
+            !port
+                .tool_definitions()
+                .expect("tool definitions")
+                .iter()
+                .any(|definition| definition.name == "suspends_tool"),
+            "suspends_tool starts deferred"
+        );
+
+        // Direct-deferred call -> resolves -> dispatch -> APPROVAL suspension.
+        let target = port
+            .register_provider_tool_call(provider_call("suspends_tool", json!({"path": "demo"})))
+            .await
+            .expect("direct deferred call registers as target");
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: target.surface_version,
+                capability_id: target.capability_id,
+                input_ref: target.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("target invokes");
+        assert!(
+            outcome.is_suspension(),
+            "the gate must suspend the call, not complete it"
+        );
+
+        // The resume is a fresh decorator instance (new turn state) sharing the
+        // promoted store, exactly like the live BlockedApproval resume. The
+        // gate-blocked tool must still be advertised.
+        let next_turn = disclosure_port(
+            inner as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            promoted_by_scope,
+        );
+        next_turn
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("next visible surface");
+        assert!(
+            next_turn
+                .tool_definitions()
+                .expect("next tool definitions")
+                .iter()
+                .any(|definition| definition.name == "suspends_tool"),
+            "a gate-suspended tool must be promoted so it survives the resume"
+        );
     }
 
     #[tokio::test]
