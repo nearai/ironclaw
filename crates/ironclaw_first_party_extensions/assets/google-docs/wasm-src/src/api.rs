@@ -8,6 +8,7 @@ use crate::near::agent::host;
 use crate::types::*;
 
 const DOCS_API_BASE: &str = "https://docs.googleapis.com/v1/documents";
+const GOOGLE_API_AUTH_REQUIRED_ERROR: &str = "google_api_error_status_401";
 
 /// Make a Google Docs API call.
 fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
@@ -33,11 +34,7 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
     let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)?;
 
     if response.status < 200 || response.status >= 300 {
-        let body_text = String::from_utf8_lossy(&response.body);
-        return Err(format!(
-            "Google Docs API returned status {}: {}",
-            response.status, body_text
-        ));
+        return Err(api_status_error("Google Docs", response.status, &response.body));
     }
 
     if response.body.is_empty() {
@@ -45,6 +42,18 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
     }
 
     String::from_utf8(response.body).map_err(|e| format!("Invalid UTF-8 in response: {}", e))
+}
+
+fn api_status_error(service: &str, status: u16, body: &[u8]) -> String {
+    if status == 401 {
+        return serde_json::json!({
+            "code": GOOGLE_API_AUTH_REQUIRED_ERROR,
+            "kind": "auth_required",
+        })
+        .to_string();
+    }
+    let body_text = String::from_utf8_lossy(body);
+    format!("{service} API returned status {status}: {body_text}")
 }
 
 /// Send a batchUpdate to the document and return the parsed response.

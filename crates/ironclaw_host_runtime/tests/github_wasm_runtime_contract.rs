@@ -132,6 +132,7 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -219,6 +220,7 @@ async fn host_runtime_services_restages_github_product_auth_for_multi_request_wa
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -317,6 +319,7 @@ async fn host_runtime_services_routes_google_drive_wasm_list_files_with_scoped_g
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ya29.fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -363,6 +366,157 @@ async fn host_runtime_services_routes_google_drive_wasm_list_files_with_scoped_g
 }
 
 #[tokio::test]
+async fn host_runtime_services_maps_google_drive_wasm_401_to_auth_required() {
+    let capability_id = CapabilityId::new("google-drive.list_files").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let policy = google_drive_policy();
+    let network = RecordingNetworkHttpEgress::with_status_body(
+        401,
+        br#"{"error":{"status":"UNAUTHENTICATED","message":"Invalid Credentials"}}"#.to_vec(),
+    );
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let account_access_secret = SecretHandle::new("google_drive_access").unwrap();
+    let required_scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
+    let services = google_wasm_services_for_test!(
+        "google-drive",
+        policy.clone(),
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+        required_scopes,
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ya29.expired_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::AuthRequired(gate) => {
+            assert_eq!(gate.capability_id, capability_id);
+            assert!(gate.required_secrets.is_empty());
+            // The runtime 401 carries no auth detail of its own; the capability
+            // host enriches the gate from the single credential obligation so the
+            // WebUI can launch the google OAuth re-auth flow. An empty list here is
+            // the provider-null, unsubmittable gate (#5174). Inline/background
+            // refresh already ran before injection; a runtime 401 is the genuine
+            // re-auth fallback, so the gate must surface provider + OAuth setup.
+            assert_eq!(gate.credential_requirements.len(), 1);
+            let requirement = &gate.credential_requirements[0];
+            assert_eq!(
+                requirement.provider,
+                RuntimeCredentialAccountProviderId::new("google").unwrap()
+            );
+            assert_eq!(
+                requirement.setup,
+                ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                    scopes: vec!["https://www.googleapis.com/auth/drive.readonly".to_string()]
+                }
+            );
+        }
+        other => panic!("expected auth-required outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert!(
+        requests[0]
+            .url
+            .starts_with("https://www.googleapis.com/drive/v3/files?")
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_maps_google_drive_upload_wasm_401_to_auth_required() {
+    let capability_id = CapabilityId::new("google-drive.upload_file").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let policy = google_drive_policy();
+    let network = RecordingNetworkHttpEgress::with_status_body(
+        401,
+        br#"{"error":{"status":"UNAUTHENTICATED","message":"Invalid Credentials"}}"#.to_vec(),
+    );
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let account_access_secret = SecretHandle::new("google_drive_upload_access").unwrap();
+    let required_scopes = vec!["https://www.googleapis.com/auth/drive".to_string()];
+    let services = google_wasm_services_for_test!(
+        "google-drive",
+        policy.clone(),
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+        required_scopes,
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ya29.expired_upload_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({
+                "name": "report.txt",
+                "content": "stale token upload",
+                "mime_type": "text/plain"
+            }),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::AuthRequired(gate) => {
+            assert_eq!(gate.capability_id, capability_id);
+            assert!(gate.required_secrets.is_empty());
+            // See list_files counterpart above: enrichment surfaces the single
+            // credential obligation's provider + OAuth setup so the re-auth gate is
+            // submittable (#5174). Empty would be the regressed provider-null gate.
+            assert_eq!(gate.credential_requirements.len(), 1);
+            let requirement = &gate.credential_requirements[0];
+            assert_eq!(
+                requirement.provider,
+                RuntimeCredentialAccountProviderId::new("google").unwrap()
+            );
+            assert_eq!(
+                requirement.setup,
+                ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                    scopes: vec!["https://www.googleapis.com/auth/drive".to_string()]
+                }
+            );
+        }
+        other => panic!("expected auth-required outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Post);
+    assert!(
+        requests[0]
+            .url
+            .starts_with("https://www.googleapis.com/upload/drive/v3/files?")
+    );
+}
+
+#[tokio::test]
 async fn host_runtime_services_routes_google_docs_wasm_get_document_with_scoped_google_credential()
 {
     let capability_id = CapabilityId::new("google-docs.get_document").unwrap();
@@ -387,6 +541,7 @@ async fn host_runtime_services_routes_google_docs_wasm_get_document_with_scoped_
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ya29.fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -445,6 +600,7 @@ async fn host_runtime_services_routes_google_sheets_wasm_get_spreadsheet_with_sc
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ya29.fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -504,6 +660,7 @@ async fn host_runtime_services_routes_google_slides_wasm_get_presentation_with_s
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ya29.fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -580,6 +737,7 @@ async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() 
             scope.clone(),
             account_access_secret,
             SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
         )
         .await
         .unwrap();
@@ -961,6 +1119,24 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
         }),
     );
 
+    let list_my_repos_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"[]"#.to_vec(),
+    }));
+    let list_my_repos = execute_bundled_github_wasm(
+        "github.list_repos",
+        json!({"limit": 2}),
+        Arc::clone(&list_my_repos_http),
+    );
+    assert_eq!(list_my_repos.error, None);
+    assert_single_wasm_request(
+        &list_my_repos_http,
+        "GET",
+        "https://api.github.com/user/repos?per_page=2",
+        None,
+    );
+
     let fork_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
         status: 202,
         headers_json: "{}".to_string(),
@@ -1024,6 +1200,27 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
             "generate_release_notes": true
         }),
     );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_get_authenticated_user_uses_user_endpoint() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"login":"serrrfirat","type":"User"}"#.to_vec(),
+    }));
+    let user = execute_bundled_github_wasm(
+        "github.get_authenticated_user",
+        json!({}),
+        Arc::clone(&http),
+    );
+
+    assert_eq!(user.error, None);
+    let user: serde_json::Value =
+        serde_json::from_str(user.output_json.as_deref().unwrap()).unwrap();
+    assert_eq!(user["login"], json!("serrrfirat"));
+    assert_eq!(user["type"], json!("User"));
+    assert_single_wasm_request(&http, "GET", "https://api.github.com/user", None);
 }
 
 #[tokio::test]
@@ -1265,13 +1462,19 @@ fn wasm_error_code_or_text(execution: &WitToolExecution) -> Option<String> {
 #[derive(Debug, Clone)]
 struct RecordingNetworkHttpEgress {
     requests: Arc<std::sync::Mutex<Vec<NetworkHttpRequest>>>,
+    status: u16,
     response_body: Vec<u8>,
 }
 
 impl RecordingNetworkHttpEgress {
     fn with_body(response_body: Vec<u8>) -> Self {
+        Self::with_status_body(200, response_body)
+    }
+
+    fn with_status_body(status: u16, response_body: Vec<u8>) -> Self {
         Self {
             requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            status,
             response_body,
         }
     }
@@ -1290,7 +1493,7 @@ impl NetworkHttpEgress for RecordingNetworkHttpEgress {
         let request_bytes = request.body.len() as u64;
         self.requests.lock().unwrap().push(request);
         Ok(NetworkHttpResponse {
-            status: 200,
+            status: self.status,
             headers: Vec::new(),
             body: self.response_body.clone(),
             usage: NetworkUsage {

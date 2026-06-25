@@ -3,9 +3,10 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use ironclaw_host_api::ThreadId;
 use ironclaw_product_workflow::{
     AutomationListRequest, AutomationProductFacade, ProductAgentBoundCaller, RebornAutomationInfo,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, TriggerRunThreadScope,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    TriggerRunThreadScope,
 };
 use ironclaw_triggers::{
     TriggerError, TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus,
@@ -26,11 +27,10 @@ const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 /// pipeline would be wrong by design. Both paths converge on the same scoping
 /// contract: tenant + creator_user + agent + project.
 ///
-/// ## Future panel mutations
-///
-/// Any panel mutation added here must append an audit `RuntimeEvent` before
-/// returning (precedent: `RebornRuntime::append_webui_loop_cancelled` in
-/// `runtime.rs`).
+/// Panel mutations stay caller-scoped through the same tenant + creator_user +
+/// agent + project repository contract as reads. Route descriptors classify
+/// those endpoints as user actions so host ingress audit policy remains the
+/// outer audit boundary.
 #[derive(Clone)]
 pub struct RebornAutomationProductFacade {
     trigger_repository: Arc<dyn TriggerRepository>,
@@ -94,6 +94,21 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         // Both repository calls share one deadline so the panel read budget is
         // backend_timeout total, not per call.
         let deadline = tokio::time::Instant::now() + self.backend_timeout;
+        // Soft-completed one-shots have fired and will never run again. By
+        // default exclude them from the active automations panel so they do
+        // not clutter the list with stale entries. When `include_completed` is
+        // set the exclusion slice is empty, returning all states including
+        // Completed. The exclusion is pushed to the SQL layer so LIMIT is
+        // applied after filtering (fixes pagination undercount).
+        //
+        // Scheduled and Paused triggers are always kept; Paused triggers may be
+        // resumed by the user and still have a meaningful next_run_at slot to
+        // display.
+        let excluded_states: &[TriggerState] = if request.include_completed {
+            &[]
+        } else {
+            &[TriggerState::Completed]
+        };
         let records = tokio::time::timeout_at(
             deadline,
             self.trigger_repository.list_scoped_triggers(
@@ -102,6 +117,7 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
                 Some(caller.agent_id.clone()),
                 caller.project_id.clone(),
                 request.limit,
+                excluded_states,
             ),
         )
         .await
@@ -111,7 +127,7 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         if records.is_empty() || request.run_limit == 0 {
             return Ok(records
                 .into_iter()
-                .filter_map(|record| automation_info_from_record(record, &[]))
+                .map(|record| automation_info_from_record(record, &[]))
                 .collect());
         }
 
@@ -131,13 +147,57 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
 
         Ok(records
             .into_iter()
-            .filter_map(|record| {
+            .map(|record| {
                 let runs = runs_by_trigger
                     .remove(&record.trigger_id)
                     .unwrap_or_default();
                 automation_info_from_record(record, &runs)
             })
             .collect())
+    }
+
+    async fn pause_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.set_automation_state(caller, automation_id, TriggerState::Paused)
+            .await
+    }
+
+    async fn resume_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        self.set_automation_state(caller, automation_id, TriggerState::Scheduled)
+            .await
+    }
+
+    async fn delete_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let trigger_id = parse_trigger_id(&automation_id)?;
+        let removed = tokio::time::timeout(
+            self.backend_timeout,
+            self.trigger_repository.remove_scoped_trigger(
+                caller.tenant_id,
+                caller.user_id,
+                Some(caller.agent_id),
+                caller.project_id,
+                trigger_id,
+            ),
+        )
+        .await
+        .map_err(|_| backend_timeout_error())?
+        .map_err(map_trigger_error)?;
+
+        Ok(RebornAutomationMutationResponse {
+            updated: removed.is_some(),
+            automation: None,
+        })
     }
 
     async fn resolve_run_thread_scope(
@@ -178,12 +238,41 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
     }
 }
 
-/// Returns `true` when `trigger` would appear in the caller's `list_automations`
-/// response — i.e. the trigger matches the exact caller scope that
-/// `list_scoped_triggers` enforces (tenant_id + creator_user_id + agent_id +
-/// project_id).  This mirrors the filter in
-/// `InMemoryTriggerRepository::list_scoped_triggers` and the SQL WHERE clause
-/// used by the libSQL and PostgreSQL backends:
+impl RebornAutomationProductFacade {
+    async fn set_automation_state(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+        state: TriggerState,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let trigger_id = parse_trigger_id(&automation_id)?;
+        let record = tokio::time::timeout(
+            self.backend_timeout,
+            self.trigger_repository.set_scoped_trigger_state(
+                caller.tenant_id,
+                caller.user_id,
+                Some(caller.agent_id),
+                caller.project_id,
+                trigger_id,
+                state,
+            ),
+        )
+        .await
+        .map_err(|_| backend_timeout_error())?
+        .map_err(map_trigger_error)?;
+
+        Ok(RebornAutomationMutationResponse {
+            updated: record.is_some(),
+            automation: record.map(|record| automation_info_from_record(record, &[])),
+        })
+    }
+}
+
+/// Returns `true` when `trigger` belongs to the caller — i.e. the trigger
+/// matches the exact caller scope that `list_scoped_triggers` enforces
+/// (tenant_id + creator_user_id + agent_id + project_id).  This mirrors the
+/// filter in `InMemoryTriggerRepository::list_scoped_triggers` and the SQL
+/// WHERE clause used by the libSQL and PostgreSQL backends:
 ///
 /// ```text
 /// WHERE tenant_id    = <caller.tenant_id>
@@ -191,6 +280,17 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
 ///   AND agent_id    IS <caller.agent_id>   -- NULL-safe equality
 ///   AND project_id  IS <caller.project_id> -- NULL-safe equality
 /// ```
+///
+/// **Visibility for listing vs. thread authorization are deliberately
+/// decoupled.**  The default `list_automations` response excludes
+/// `TriggerState::Completed` triggers (soft-completed fire-once triggers) to
+/// avoid cluttering the active automations panel.  However, completed triggers
+/// remain queryable (`include_completed = true` / `trigger_list` model tool)
+/// and their run threads remain accessible — the history is retained user data.
+/// This resolver intentionally does NOT filter on trigger state: a completed
+/// trigger's run threads must stay resolvable so the user can always reach
+/// their own trigger history.  Adding a `Completed` exclusion here would
+/// regress access to run threads that are still valid retained data.
 ///
 /// **None-agent triggers are never visible** through this path.
 /// `ProductAgentBoundCaller` always carries a concrete `AgentId` (it is a
@@ -216,8 +316,8 @@ fn trigger_is_caller_visible(trigger: &TriggerRecord, caller: &ProductAgentBound
 fn automation_info_from_record(
     record: TriggerRecord,
     runs: &[TriggerRunRecord],
-) -> Option<RebornAutomationInfo> {
-    let source = automation_source_from_record(&record)?;
+) -> RebornAutomationInfo {
+    let source = automation_source_from_record(&record);
     let is_active = record.has_active_fire();
     // Completed is terminal: the stored next_run_at is a stale past slot and
     // would render as a misleading "next run" date. Paused keeps its slot so
@@ -226,7 +326,7 @@ fn automation_info_from_record(
         TriggerState::Completed => None,
         TriggerState::Scheduled | TriggerState::Paused => Some(record.next_run_at),
     };
-    Some(RebornAutomationInfo {
+    RebornAutomationInfo {
         automation_id: record.trigger_id.to_string(),
         name: record.name,
         source,
@@ -237,24 +337,28 @@ fn automation_info_from_record(
         recent_runs: runs.iter().filter_map(map_recent_run).collect(),
         is_active,
         created_at: Some(record.created_at),
-    })
+    }
 }
 
 /// Maps a trigger record's source kind + schedule to the wire DTO source.
 ///
 /// This match is exhaustive on purpose: if `TriggerSourceKind` gains a new
-/// variant, this function must be updated rather than silently returning
-/// `None` for an unknown variant.
-fn automation_source_from_record(record: &TriggerRecord) -> Option<RebornAutomationSource> {
+/// variant or `TriggerSchedule` gains a new arm, the compiler rejects the
+/// build here — preventing any new schedule type from being silently dropped.
+fn automation_source_from_record(record: &TriggerRecord) -> RebornAutomationSource {
     match record.source {
         TriggerSourceKind::Schedule => match &record.schedule {
             TriggerSchedule::Cron {
                 expression,
                 timezone,
-            } => Some(RebornAutomationSource::Schedule {
+            } => RebornAutomationSource::Schedule {
                 cron: expression.clone(),
                 timezone: timezone.clone(),
-            }),
+            },
+            TriggerSchedule::Once { at, timezone } => RebornAutomationSource::Once {
+                at: at.to_rfc3339(),
+                timezone: timezone.clone(),
+            },
         },
     }
 }
@@ -301,6 +405,22 @@ fn map_recent_run(run: &TriggerRunRecord) -> Option<RebornAutomationRecentRunInf
     })
 }
 
+fn parse_trigger_id(automation_id: &str) -> Result<TriggerId, RebornServicesError> {
+    TriggerId::parse(automation_id).map_err(|parse_error| {
+        tracing::debug!(
+            automation_id,
+            error = %parse_error,
+            "failed to parse automation trigger id"
+        );
+        services_error(
+            RebornServicesErrorCode::InvalidRequest,
+            RebornServicesErrorKind::Validation,
+            400,
+            false,
+        )
+    })
+}
+
 /// Shared 503 for repository calls that exceed the panel read deadline.
 fn backend_timeout_error() -> RebornServicesError {
     services_error(
@@ -331,6 +451,12 @@ fn map_trigger_error(error: TriggerError) -> RebornServicesError {
         | TriggerError::InvalidPollerConfig { .. }
         | TriggerError::InvalidSchedule { .. }
         | TriggerError::InvalidMaterialization { .. } => internal_invariant(),
+        TriggerError::BlockedMaterialization { .. } => services_error(
+            RebornServicesErrorCode::Forbidden,
+            RebornServicesErrorKind::ParticipantDenied,
+            403,
+            false,
+        ),
     }
 }
 

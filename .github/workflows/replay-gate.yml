@@ -45,7 +45,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: replay-gate
-          save-if: ${{ github.event_name == 'push' }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
       - name: Install cargo-insta and cargo-nextest
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2

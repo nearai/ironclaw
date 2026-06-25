@@ -1,9 +1,7 @@
 import { React, html } from "../../../lib/html.js";
 import { MarkdownRenderer } from "./markdown-renderer.js";
 import { ToolActivity } from "./tool-activity.js";
-import { Avatar } from "./avatar.js";
 import { Icon } from "../../../design-system/icons.js";
-import { useT } from "../../../lib/i18n.js";
 import { toast } from "../../../lib/toast.js";
 import { ProjectFileChips } from "./project-file-chips.js";
 import { AttachmentChip } from "./attachment-chip.js";
@@ -60,7 +58,6 @@ function ThinkingDisclosure({ content }) {
 function MessageBubbleImpl({ message, onRetry, threadId }) {
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
   const isUser = role === "user";
-  const t = useT();
   const [copied, setCopied] = React.useState(false);
   // The attachment currently open in the preview modal (null when closed).
   const [previewAttachment, setPreviewAttachment] = React.useState(null);
@@ -116,37 +113,19 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
   }
 
   const timeLabel = formatTimestamp(timestamp);
-  const showActions = (role === "assistant" || role === "user") && !isOptimistic;
+  const showActions = role === "user" || (role === "assistant" && !isOptimistic);
   const isNotice = role === "system" || role === "error";
   const bubbleWidthClass = isUser ? "max-w-[85%]" : isNotice ? "mx-auto max-w-[85%]" : "w-full max-w-[85%]";
   const contentWidthClass = isUser ? "" : "w-full min-w-0 max-w-full";
-  // Persistent identity for the two conversational roles; system / error
-  // stay as centered notices without an avatar.
-  const showIdentity = role === "user" || role === "assistant";
-  const identityName = isUser
-    ? t("chat.identityUser")
-    : t("chat.identityAssistant");
+  const showRetryAction = status === "error" && onRetry;
+  const showMetaRow = showActions || showRetryAction || timeLabel;
 
   return html`
     <div
       data-testid=${`msg-${role}`}
       className=${["group flex w-full min-w-0 flex-col", isUser ? "items-end" : "items-start"].join(" ")}
     >
-      <div className=${["flex min-w-0 flex-col gap-2", bubbleWidthClass].join(" ")}>
-        ${showIdentity &&
-        html`
-          <div
-            className=${[
-              "flex items-center gap-2 px-1",
-              isUser ? "flex-row-reverse" : "",
-            ].join(" ")}
-          >
-            <${Avatar} role=${role} />
-            <span className="text-xs font-medium text-[var(--v2-text-muted)]">
-              ${identityName}
-            </span>
-          </div>
-        `}
+      <div className=${["flex min-w-0 flex-col", bubbleWidthClass].join(" ")}>
         <div
           className=${[
             "text-base leading-7",
@@ -191,40 +170,44 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
             content=${typeof content === "string" ? content : ""}
           />`}
         </div>
+      </div>
 
-        ${(showActions || status === "error" || timeLabel) && html`
-          <div
-            className=${[
-              "flex items-center gap-1.5 px-1 text-iron-400 opacity-0 group-hover:opacity-100 focus-within:opacity-100",
-              isUser ? "justify-end" : "justify-start",
-            ].join(" ")}
-          >
+      ${showMetaRow && html`
+        <div
+          className=${[
+            "mt-1 flex min-h-7 w-max max-w-[85%] flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100",
+            isUser ? "self-end justify-end" : isNotice ? "self-center justify-center" : "self-start justify-start",
+          ].join(" ")}
+        >
+          ${timeLabel && html`<time dateTime=${timestamp} className="shrink-0 font-mono text-[11px] text-iron-500">${timeLabel}</time>`}
+          ${(showActions || showRetryAction) && html`
+            <div className="flex shrink-0 items-center gap-1">
             ${showActions && html`
               <button
                 type="button"
                 onClick=${copy}
-                aria-label="Copy message"
-                className="v2-button inline-flex items-center gap-1 rounded-md border-0 bg-transparent px-1.5 py-1 text-[11px] hover:text-iron-100"
+                title=${copied ? "Copied" : "Copy message"}
+                aria-label=${copied ? "Copied" : "Copy message"}
+                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100"
               >
                 <${Icon} name=${copied ? "check" : "copy"} className="h-3.5 w-3.5" />
-                ${copied ? "Copied" : "Copy"}
               </button>
             `}
-            ${status === "error" && onRetry && html`
+            ${showRetryAction && html`
               <button
                 type="button"
                 onClick=${() => onRetry(message)}
+                title="Retry message"
                 aria-label="Retry message"
-                className="v2-button inline-flex items-center gap-1 rounded-md border-0 bg-transparent px-1.5 py-1 text-[11px] text-red-300 hover:text-red-200"
+                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 text-red-300 hover:text-red-200"
               >
                 <${Icon} name="retry" className="h-3.5 w-3.5" />
-                Retry
               </button>
             `}
-            ${timeLabel && html`<span className="font-mono text-[10px] text-iron-500">${timeLabel}</span>`}
-          </div>
-        `}
-      </div>
+            </div>
+          `}
+        </div>
+      `}
     </div>
   `;
 }

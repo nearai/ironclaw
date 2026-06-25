@@ -7,6 +7,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::types::capability::LeaseId;
@@ -17,6 +18,8 @@ use crate::types::message::ThreadMessage;
 use crate::types::project::ProjectId;
 
 use super::{OwnerId, default_user_id};
+
+const LLM_USAGE_METADATA_USER_ID_MAX_LEN: usize = 255;
 
 /// Strongly-typed thread identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -108,6 +111,20 @@ pub enum ThreadType {
     Research,
     /// Long-running goal that spawns threads over time.
     Mission,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmCallPurpose {
+    Chat,
+}
+
+impl LlmCallPurpose {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+        }
+    }
 }
 
 // ── Thread configuration ────────────────────────────────────
@@ -307,6 +324,37 @@ impl Thread {
 
     pub fn is_owned_by(&self, user_id: &str) -> bool {
         self.owner_id().matches_user(user_id)
+    }
+
+    /// Metadata attached to engine LLM usage accounting records.
+    pub fn llm_usage_metadata(&self, purpose: LlmCallPurpose) -> HashMap<String, String> {
+        let mut metadata = HashMap::from([
+            ("thread_id".to_string(), self.id.0.to_string()),
+            ("purpose".to_string(), purpose.as_str().to_string()),
+        ]);
+        if !self.user_id.is_empty() && self.user_id.len() <= LLM_USAGE_METADATA_USER_ID_MAX_LEN {
+            metadata.insert("user_id".to_string(), self.user_id.clone());
+        }
+
+        if let Some(scope) = self
+            .metadata
+            .get("conversation_scope")
+            .and_then(|v| v.as_str())
+        {
+            metadata.insert("conversation_scope".to_string(), scope.to_string());
+        }
+        if let Some(conversation_id) = self
+            .metadata
+            .get("v1_conversation_id")
+            .and_then(|v| v.as_str())
+        {
+            metadata.insert(
+                "v1_conversation_id".to_string(),
+                conversation_id.to_string(),
+            );
+        }
+
+        metadata
     }
 
     /// Persist active skill provenance in thread metadata.
@@ -567,6 +615,43 @@ mod tests {
         )
         .with_parent(parent.id);
         assert_eq!(child.parent_id, Some(parent.id));
+    }
+
+    #[test]
+    fn llm_usage_metadata_includes_thread_identity_and_conversation_context() {
+        let mut thread = make_thread();
+        thread.metadata = serde_json::json!({
+            "conversation_scope": "scope-1",
+            "v1_conversation_id": "conv-1",
+            "ignored_non_string": 123,
+        });
+
+        let metadata = thread.llm_usage_metadata(LlmCallPurpose::Chat);
+
+        assert_eq!(metadata.get("thread_id"), Some(&thread.id.0.to_string()));
+        assert_eq!(metadata.get("user_id"), Some(&thread.user_id));
+        assert_eq!(metadata.get("purpose"), Some(&"chat".to_string()));
+        assert_eq!(
+            metadata.get("conversation_scope"),
+            Some(&"scope-1".to_string())
+        );
+        assert_eq!(
+            metadata.get("v1_conversation_id"),
+            Some(&"conv-1".to_string())
+        );
+        assert!(!metadata.contains_key("ignored_non_string"));
+    }
+
+    #[test]
+    fn llm_usage_metadata_omits_invalid_user_id() {
+        let mut thread = make_thread();
+        thread.user_id = "u".repeat(LLM_USAGE_METADATA_USER_ID_MAX_LEN + 1);
+
+        let metadata = thread.llm_usage_metadata(LlmCallPurpose::Chat);
+
+        assert!(!metadata.contains_key("user_id"));
+        assert_eq!(metadata.get("thread_id"), Some(&thread.id.0.to_string()));
+        assert_eq!(metadata.get("purpose"), Some(&"chat".to_string()));
     }
 
     // ── Title derivation ─────────────────────────────────────

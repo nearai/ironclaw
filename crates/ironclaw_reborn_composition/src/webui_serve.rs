@@ -169,6 +169,17 @@ impl WebuiAuthentication {
     }
 }
 
+/// Deployment gate for the Reborn Projects WebUI surface. Read once here
+/// (host-owned config — per the composition crate guardrails, env reads
+/// live in composition and feed builders, not in route handlers) and
+/// delivered to the browser via the `/session` `features.reborn_projects`
+/// field. Hidden by default while the surface is still being finished.
+fn reborn_projects_enabled() -> bool {
+    std::env::var("IRONCLAW_REBORN_PROJECTS")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+}
+
 /// Host-installation composition the Reborn HTTP gateway needs in
 /// addition to the [`RebornWebuiBundle`] it serves over.
 ///
@@ -612,7 +623,6 @@ pub fn webui_v2_app_with_lifecycle(
     let slack_channel_routes_mount = config
         .slack_channel_routes
         .clone()
-        .filter(|_| mount_operator_routes)
         .map(slack_channel_route_admin_route_mount);
     let public_mounts = config.public_mounts;
     let protected_mounts = config.protected_mounts;
@@ -648,7 +658,9 @@ pub fn webui_v2_app_with_lifecycle(
         descriptors.extend(mount.descriptors.iter().cloned());
     }
     #[cfg(feature = "slack-v2-host-beta")]
-    if let Some(mount) = &slack_channel_routes_mount {
+    if let Some(mount) = &slack_channel_routes_mount
+        && mount_operator_routes
+    {
         operator_descriptors.extend(mount.descriptors.iter().cloned());
         descriptors.extend(mount.descriptors.iter().cloned());
     }
@@ -682,7 +694,8 @@ pub fn webui_v2_app_with_lifecycle(
     } else {
         WebUiV2RouteOptions::without_operator_routes()
     };
-    let v2_state = WebUiV2State::new(bundle.api.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER);
+    let v2_state = WebUiV2State::new(bundle.api.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+        .with_reborn_projects_enabled(reborn_projects_enabled());
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);
@@ -707,7 +720,9 @@ pub fn webui_v2_app_with_lifecycle(
         protected_inner = protected_inner.merge(mount.protected);
     }
     #[cfg(feature = "slack-v2-host-beta")]
-    if let Some(mount) = slack_channel_routes_mount {
+    if let Some(mount) = slack_channel_routes_mount
+        && mount_operator_routes
+    {
         protected_inner = protected_inner.merge(mount.protected);
     }
     for mount in public_mounts {
@@ -891,7 +906,8 @@ async fn authenticate_request(
         auth.user_id,
         state.default_agent_id.clone(),
         state.default_project_id.clone(),
-    );
+    )
+    .with_operator_webui_config(auth.capabilities.operator_webui_config);
     request.extensions_mut().insert(caller);
     request.extensions_mut().insert(auth.capabilities);
     #[cfg(feature = "openai-compat-beta")]

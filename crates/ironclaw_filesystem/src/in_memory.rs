@@ -390,6 +390,24 @@ impl RootFilesystem for InMemoryBackend {
             .collect())
     }
 
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        let state = self.state.lock().await;
+        let Some(log) = state.event_logs.get(path.as_str()) else {
+            return Ok(Vec::new());
+        };
+        Ok(log
+            .iter()
+            .filter(|record| record.seq > from)
+            .take(max_records)
+            .cloned()
+            .collect())
+    }
+
     // Legacy bytes ops — default impls in the trait route them through put/get
     // and use our native implementations. The only one needing an explicit
     // impl is the required-method `list_dir`, which we already overrode above.

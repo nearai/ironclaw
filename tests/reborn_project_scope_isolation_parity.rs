@@ -31,30 +31,28 @@ async fn reborn_project_scope_isolation_parity() {
         Some("project-beta-e2e"),
     );
 
-    let mut project_a =
-        RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage_unscoped_worker(
-            ROOM,
-            RebornTraceReplayModelGateway::with_responses([
-                HostManagedModelResponse::assistant_reply("project alpha isolated reply"),
-            ]),
-            RecordingTestCapabilityPort::echo(),
-            project_a_scope,
-            shared_storage.clone(),
-        )
-        .await
-        .expect("project A harness");
-    let mut project_b =
-        RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage_unscoped_worker(
-            ROOM,
-            RebornTraceReplayModelGateway::with_responses([
-                HostManagedModelResponse::assistant_reply("project beta isolated reply"),
-            ]),
-            RecordingTestCapabilityPort::echo(),
-            project_b_scope,
-            shared_storage,
-        )
-        .await
-        .expect("project B harness");
+    let mut project_a = RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage(
+        ROOM,
+        RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
+            "project alpha isolated reply",
+        )]),
+        RecordingTestCapabilityPort::echo(),
+        project_a_scope,
+        shared_storage.clone(),
+    )
+    .await
+    .expect("project A harness");
+    let mut project_b = RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage(
+        ROOM,
+        RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
+            "project beta isolated reply",
+        )]),
+        RecordingTestCapabilityPort::echo(),
+        project_b_scope,
+        shared_storage,
+    )
+    .await
+    .expect("project B harness");
 
     let alpha = project_a
         .submit_text_for(ROOM, "alice", EVENT, "project alpha turn")

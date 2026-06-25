@@ -194,6 +194,7 @@ fn docker_reborn_production_config_uses_postgres_storage() {
         storage.secret_master_key_env.as_deref(),
         Some("IRONCLAW_REBORN_SECRET_MASTER_KEY")
     );
+    assert_eq!(storage.pool_max_size, Some(2));
 
     let policy = parsed
         .policy
@@ -473,6 +474,7 @@ fn profile_list_shows_supported_profiles_without_reborn_home() {
     );
     assert!(stdout.contains("local-dev (default)"), "stdout: {stdout}");
     assert!(stdout.contains("local-dev-yolo"), "stdout: {stdout}");
+    assert!(stdout.contains("hosted-single-tenant"), "stdout: {stdout}");
     assert!(stdout.contains("production"), "stdout: {stdout}");
     assert!(stdout.contains("migration-dry-run"), "stdout: {stdout}");
     assert!(
@@ -500,7 +502,7 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
     let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(json["selector"], "IRONCLAW_REBORN_PROFILE");
     let profiles = json["profiles"].as_array().expect("profiles array");
-    assert_eq!(profiles.len(), 4);
+    assert_eq!(profiles.len(), 5);
     assert!(
         profiles
             .iter()
@@ -510,6 +512,12 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
         profiles
             .iter()
             .any(|profile| profile["name"] == "local-dev-yolo" && profile["default"] == false)
+    );
+    assert!(
+        profiles
+            .iter()
+            .any(|profile| profile["name"] == "hosted-single-tenant"
+                && profile["default"] == false)
     );
     assert!(
         profiles
@@ -1466,6 +1474,123 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
         !config.contains("[llm.default]"),
         "serve seed must preserve no-LLM behavior: {config}"
     );
+}
+
+#[cfg(all(feature = "webui-v2-beta", feature = "slack-v2-host-beta"))]
+#[test]
+fn serve_env_slack_enabled_mounts_slack_events_route() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let port = unused_local_port();
+
+    let mut child = Command::new(reborn_bin())
+        .args(["serve", "--host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env_clear()
+        .env("HOME", &home)
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_REBORN_WEBUI_TOKEN", "test-token")
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
+        .env("IRONCLAW_REBORN_SLACK_ENABLED", "true")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let stderr = child.stderr.take().expect("stderr should be piped");
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines() {
+            if stderr_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut stderr_text = String::new();
+    loop {
+        if let Some(status) = child.try_wait().expect("serve child status") {
+            panic!("serve exited before binding with {status}; stderr: {stderr_text}");
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("serve did not reach listener banner; stderr: {stderr_text}");
+        }
+        match stderr_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(Ok(line)) => {
+                stderr_text.push_str(&line);
+                stderr_text.push('\n');
+                if stderr_text.contains("ironclaw-reborn: WebChat v2 listener") {
+                    break;
+                }
+            }
+            Ok(Err(error)) => panic!("failed to read serve stderr: {error}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("serve stderr closed before banner; stderr: {stderr_text}");
+            }
+        }
+    }
+
+    let status_line = match post_slack_events_status_line(port) {
+        Ok(status_line) => status_line,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{error}");
+        }
+    };
+
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        !status_line.contains(" 404 "),
+        "env-enabled Slack route should be mounted, got status line: {status_line}"
+    );
+}
+
+#[cfg(all(feature = "webui-v2-beta", feature = "slack-v2-host-beta"))]
+fn unused_local_port() -> u16 {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .expect("bind ephemeral local port")
+        .local_addr()
+        .expect("ephemeral local addr")
+        .port()
+}
+
+#[cfg(all(feature = "webui-v2-beta", feature = "slack-v2-host-beta"))]
+fn post_slack_events_status_line(port: u16) -> Result<String, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut stream = loop {
+        match std::net::TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => break stream,
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(error) => return Err(format!("connect to serve listener failed: {error}")),
+        }
+    };
+    let request = concat!(
+        "POST /webhooks/slack/events HTTP/1.1\r\n",
+        "Host: 127.0.0.1\r\n",
+        "Content-Type: application/json\r\n",
+        "Content-Length: 2\r\n",
+        "Connection: close\r\n",
+        "\r\n",
+        "{}"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("write Slack route probe failed: {error}"))?;
+    let mut reader = std::io::BufReader::new(stream);
+    let mut status_line = String::new();
+    reader
+        .read_line(&mut status_line)
+        .map_err(|error| format!("read Slack route probe status line failed: {error}"))?;
+    Ok(status_line)
 }
 
 #[cfg(feature = "webui-v2-beta")]

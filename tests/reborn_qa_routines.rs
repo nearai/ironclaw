@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_approvals::AutoApproveSettingInput;
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExecutionContext, ExtensionId, GrantConstraints, MountView, NetworkPolicy, Principal,
@@ -79,8 +80,11 @@ async fn run_routine_creation(case: RoutineCreationCase) {
                 json!({
                     "name": case.trigger_name,
                     "prompt": case.prompt,
-                    "cron": case.cron,
-                    "timezone": "UTC",
+                    "schedule": {
+                        "kind": "cron",
+                        "expression": case.cron,
+                        "timezone": "UTC"
+                    },
                 }),
             )],
             expected_tool_results: Vec::new(),
@@ -289,7 +293,24 @@ async fn build_qa_fire_runtime(
                 }),
         )
         .with_model_gateway_override(gateway);
-    build_reborn_runtime(input).await.expect("runtime builds")
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    seed_qa_fire_auto_approve(&runtime).await;
+    runtime
+}
+
+async fn seed_qa_fire_auto_approve(runtime: &RebornRuntime) {
+    let auto_approve = runtime
+        .services()
+        .local_dev_auto_approve_settings_for_test()
+        .expect("QA fire runtime exposes local-dev auto-approve settings");
+    auto_approve
+        .set(AutoApproveSettingInput {
+            scope: trigger_management_execution_context().resource_scope,
+            enabled: true,
+            updated_by: Principal::User(UserId::new(QA_USER).expect("QA user id")),
+        })
+        .await
+        .expect("seed QA fire global auto-approve");
 }
 
 #[tokio::test]
@@ -307,8 +328,11 @@ async fn reborn_qa_routine_created_by_tool_fires_and_runs_routine_prompt() {
         json!({
             "name": "Deployment health watcher",
             "prompt": QA_ROUTINE_PROMPT,
-            "cron": "*/5 * * * *",
-            "timezone": "UTC",
+            "schedule": {
+                "kind": "cron",
+                "expression": "*/5 * * * *",
+                "timezone": "UTC"
+            },
         }),
     )
     .await;
@@ -462,8 +486,11 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
         json!({
             "name": "Deployment health watcher action",
             "prompt": QA_ROUTINE_PROMPT,
-            "cron": "*/5 * * * *",
-            "timezone": "UTC",
+            "schedule": {
+                "kind": "cron",
+                "expression": "*/5 * * * *",
+                "timezone": "UTC"
+            },
         }),
     )
     .await;

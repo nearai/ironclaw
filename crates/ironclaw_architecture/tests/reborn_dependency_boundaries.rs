@@ -87,6 +87,39 @@ fn reborn_crate_dependency_boundaries_hold() {
             .collect::<Vec<_>>(),
     );
 
+    // Provider-neutral memory contract: among internal ironclaw crates it may
+    // depend ONLY on `ironclaw_host_api`. Enforced as an allowlist (forbid every
+    // other workspace ironclaw crate) so future deps — e.g. `ironclaw_turns`,
+    // `ironclaw_product_workflow`, `ironclaw_reborn` — cannot silently slip past a
+    // blocklist that only names today's offenders.
+    let memory_contract_allowed = ["ironclaw_memory", "ironclaw_host_api"];
+    assert_no_normal_workspace_deps(
+        &dependencies,
+        "ironclaw_memory",
+        workspace_ironclaw_crates(&dependencies)
+            .into_iter()
+            .filter(|name| !memory_contract_allowed.contains(name))
+            .collect::<Vec<_>>(),
+    );
+    // Native memory provider: only the contract + the host/filesystem substrate it
+    // is built on, among internal ironclaw crates.
+    let memory_native_allowed = [
+        "ironclaw_memory_native",
+        "ironclaw_host_api",
+        "ironclaw_filesystem",
+        "ironclaw_memory",
+        "ironclaw_prompt_envelope",
+        "ironclaw_safety",
+    ];
+    assert_no_normal_workspace_deps(
+        &dependencies,
+        "ironclaw_memory_native",
+        workspace_ironclaw_crates(&dependencies)
+            .into_iter()
+            .filter(|name| !memory_native_allowed.contains(name))
+            .collect::<Vec<_>>(),
+    );
+
     for rule in boundary_rules() {
         assert_no_normal_workspace_deps(&dependencies, rule.crate_name, rule.forbidden);
     }
@@ -2036,26 +2069,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         },
         BoundaryRule {
             crate_name: "ironclaw_filesystem",
-            forbidden: vec![
-                "ironclaw_authorization",
-                "ironclaw_approvals",
-                "ironclaw_capabilities",
-                "ironclaw_dispatcher",
-                "ironclaw_events",
-                "ironclaw_extensions",
-                "ironclaw_host_runtime",
-                "ironclaw_secrets",
-                "ironclaw_network",
-                "ironclaw_mcp",
-                "ironclaw_processes",
-                "ironclaw_resources",
-                "ironclaw_run_state",
-                "ironclaw_scripts",
-                "ironclaw_wasm",
-            ],
-        },
-        BoundaryRule {
-            crate_name: "ironclaw_memory",
             forbidden: vec![
                 "ironclaw_authorization",
                 "ironclaw_approvals",

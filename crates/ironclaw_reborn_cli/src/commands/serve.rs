@@ -12,23 +12,28 @@ use ironclaw_reborn_composition::build_webui_services;
 use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, LocalTriggerAccessReconciliation, LocalTriggerAccessRole,
-    LocalTriggerAccessSource, RebornBuildInput, RebornReadiness, RebornRuntimeIdentity,
-    RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
-    build_reborn_runtime, open_local_trigger_access_store, webui_v2_app_with_lifecycle,
+    LocalTriggerAccessSource, LocalTriggerAccessStore, RebornBuildInput, RebornReadiness,
+    RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator,
+    WebuiServeConfig, build_reborn_runtime, local_trigger_access_fire_checker,
+    webui_v2_app_with_lifecycle,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
-    SlackOperatorRouteVisibility, build_slack_host_beta_mounts,
+    SlackOperatorRouteVisibility, build_slack_host_beta_runtime_mounts,
     build_webui_services_with_slack_host_beta_mounts,
 };
-use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
+use ironclaw_reborn_config::{IdentitySection, RebornProfile, seed_default_config_file_if_missing};
 use ironclaw_reborn_webui_ingress::{
-    EnvBearerAuthenticator, RebornWebuiServeOptions, serve_webui_v2,
+    DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
+    RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2,
 };
 use secrecy::SecretString;
 
 use crate::context::RebornCliContext;
-use crate::runtime::{RuntimeInputOptions, resolve_google_oauth_config_from_env};
+use crate::runtime::{
+    RuntimeInputOptions, open_trigger_access_store_for_profile,
+    resolve_google_oauth_config_from_env,
+};
 
 const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 const DEFAULT_SERVE_PORT: u16 = 3000;
@@ -280,15 +285,13 @@ impl ServeCommand {
                  value is {token_byte_len} bytes — generate one with e.g. `openssl rand -hex 32`."
             ));
         }
-        // Substrate DB the reborn local-dev runtime opens (a second handle to
-        // the same `reborn-local-dev.db`). It backs the local trigger-fire
+        // Sidecar DB used by the local-runtime trigger-fire access checker. It
+        // backs the local trigger-fire
         // access store used to seed default-user and SSO-user trigger access;
         // canonical identity itself lives on the runtime's scoped filesystem,
         // not in this file.
-        let user_store_path = boot_config
-            .home()
-            .path()
-            .join("local-dev")
+        let profile = crate::runtime::effective_profile(boot_config, config_file.as_ref())?;
+        let user_store_path = crate::runtime::local_runtime_storage_root(boot_config, profile)
             .join("reborn-local-dev.db");
         // CORS allow-origin list. Empty = fail-closed on every
         // cross-origin preflight; operators MUST opt in to the
@@ -344,34 +347,63 @@ impl ServeCommand {
             .context("failed to build tokio runtime for `serve`")?;
 
         rt.block_on(async move {
-            runtime_input = with_local_trigger_fire_access_checker(
-                runtime_input,
-                &user_store_path,
-                &tenant_id,
-                &user_id,
-                &default_agent_id,
-                default_project_id.as_ref(),
-            )
-            .await?;
+            let trigger_poller_enabled = runtime_input.trigger_poller.enabled;
+            let sso_enabled = sso_startup.is_some();
+            let startup_serve = if profile == RebornProfile::HostedSingleTenant {
+                Some(start_hosted_single_tenant_startup_listener(listen_addr).await?)
+            } else {
+                None
+            };
+
+            let trigger_access_store = if trigger_poller_enabled || sso_enabled {
+                Some(
+                    open_trigger_access_store_for_profile(&runtime_input, profile, &user_store_path)
+                        .await?,
+                )
+            } else {
+                None
+            };
+            if trigger_poller_enabled {
+                let access_store = trigger_access_store
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("trigger access store was not opened"))?;
+                runtime_input = with_local_trigger_fire_access_checker(
+                    runtime_input,
+                    Arc::clone(access_store),
+                    &tenant_id,
+                    &user_id,
+                    &default_agent_id,
+                    default_project_id.as_ref(),
+                )
+                .await?;
+            }
 
             let runtime = build_reborn_runtime(runtime_input)
                 .await
                 .context("failed to assemble Reborn runtime for `serve`")?;
             #[cfg(feature = "slack-v2-host-beta")]
             let slack_mounts = if let Some(slack_config) = slack_host_beta_config {
-                Some(
-                    build_slack_host_beta_mounts(&runtime, slack_config)
-                        .context("failed to compose Slack host-beta routes")?,
-                )
+                match build_slack_host_beta_runtime_mounts(&runtime, slack_config)
+                    .await
+                    .context("failed to compose Slack host-beta routes")
+                {
+                    Ok(mounts) => Some(mounts),
+                    Err(error) => {
+                        let shutdown_result = runtime.shutdown().await;
+                        if let Err(shutdown_error) = shutdown_result {
+                            return Err(error.context(format!(
+                                "runtime shutdown after Slack route composition failure also failed: {shutdown_error}"
+                            )));
+                        }
+                        return Err(error);
+                    }
+                }
             } else {
                 None
             };
             #[cfg(feature = "slack-v2-host-beta")]
-            let operator_route_visibility = if sso_startup.is_none() {
-                SlackOperatorRouteVisibility::Visible
-            } else {
-                SlackOperatorRouteVisibility::Hidden
-            };
+            let operator_route_visibility =
+                slack_operator_route_visibility_for_authenticator(env_authenticator.as_ref());
             #[cfg(feature = "slack-v2-host-beta")]
             let bundle: RebornWebuiBundle = build_webui_services_with_slack_host_beta_mounts(
                 &runtime,
@@ -391,16 +423,13 @@ impl ServeCommand {
             .await
             .context("failed to compose OpenAI-compatible Reborn routes")?;
 
-            // Open the canonical Reborn identity resolver on the runtime's
-            // existing substrate handle (the same `reborn-local-dev.db` the
-            // runtime owns) rather than opening a second handle to the file.
-            // Only SSO-enabled WebUI needs it: an env-bearer-only deployment
-            // resolves its single configured user without any identity store,
-            // so skip opening (and its legacy migration) when SSO is disabled
-            // — otherwise a disabled-SSO deployment could fail startup on an
-            // unused identity backend. `None` also covers the case where the
-            // runtime carries no local-runtime substrate; the auth surface
-            // fails closed when SSO is configured but no resolver is available.
+            // Only SSO-enabled WebUI needs the canonical Reborn identity
+            // resolver: an env-bearer-only deployment resolves its single
+            // configured user without any identity store, so skip opening (and
+            // its legacy migration) when SSO is disabled. `None` also covers
+            // the case where the runtime carries no local-runtime substrate;
+            // the auth surface fails closed when SSO is configured but no
+            // resolver is available.
             let identity_resolver = if sso_startup.is_some() {
                 match runtime.open_reborn_identity_resolver(&tenant_id).await {
                     Some(result) => {
@@ -427,14 +456,14 @@ impl ServeCommand {
                 tenant_id.clone(),
                 session_signing_secret,
                 env_authenticator,
-                Some(
+                trigger_access_store.as_ref().map(|store| {
                     crate::commands::webui_auth::LocalTriggerAccessBootstrapConfig {
-                        access_store_path: user_store_path.clone(),
+                        store: Arc::clone(store),
                         tenant_id: tenant_id.clone(),
                         agent_id: default_agent_id.clone(),
                         project_id: default_project_id.clone(),
-                    },
-                ),
+                    }
+                }),
             )
             .await?;
 
@@ -501,24 +530,24 @@ impl ServeCommand {
                 .context("failed to compose v2 Router")?;
             let (router, public_route_drains) = webui_app.into_parts();
 
-            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-            tokio::spawn(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    tracing::info!(
-                        target = "ironclaw::reborn::cli::serve",
-                        "ctrl-c received; signalling WebChat v2 graceful shutdown",
-                    );
-                    let _ = shutdown_tx.send(());
-                }
-            });
-
-            let serve_result = serve_webui_v2(RebornWebuiServeOptions {
-                addr: listen_addr,
-                router,
-                shutdown: shutdown_rx,
-                bound_addr_tx: None,
-            })
-            .await;
+            let serve_result = if let Some(startup_serve) = startup_serve {
+                startup_serve
+                    .ready_handle
+                    .publish_ready_router(router)
+                    .context("failed to publish ready WebChat v2 router")?;
+                startup_serve
+                    .serve_task
+                    .await
+                    .context("hosted single-tenant startup WebChat v2 serve task failed to join")?
+            } else {
+                serve_webui_v2(RebornWebuiServeOptions {
+                    addr: listen_addr,
+                    router,
+                    shutdown: webui_ctrl_c_shutdown(),
+                    bound_addr_tx: None,
+                })
+                .await
+            };
 
             // Always drain public route mounts before shutting down the
             // Reborn runtime. Protocol webhooks such as Slack can ACK a
@@ -537,6 +566,63 @@ impl ServeCommand {
 
         Ok(())
     }
+}
+
+struct StartupServe {
+    ready_handle: DeferredWebuiRouterHandle,
+    serve_task: tokio::task::JoinHandle<Result<(), RebornWebuiServeError>>,
+}
+
+async fn start_hosted_single_tenant_startup_listener(
+    listen_addr: SocketAddr,
+) -> anyhow::Result<StartupServe> {
+    let (router, ready_handle) = deferred_webui_v2_startup_router();
+    let (bound_tx, bound_rx) = tokio::sync::oneshot::channel();
+    let serve_task = tokio::spawn(async move {
+        serve_webui_v2(RebornWebuiServeOptions {
+            addr: listen_addr,
+            router,
+            shutdown: webui_ctrl_c_shutdown(),
+            bound_addr_tx: Some(bound_tx),
+        })
+        .await
+    });
+
+    match bound_rx.await {
+        Ok(bound) => {
+            tracing::info!(
+                target = "ironclaw::reborn::cli::serve",
+                %bound,
+                "hosted single-tenant WebChat v2 startup listener is serving healthchecks before runtime assembly"
+            );
+        }
+        Err(_) => {
+            let serve_result = serve_task
+                .await
+                .context("hosted single-tenant startup WebChat v2 serve task failed to join")?;
+            serve_result.context("hosted single-tenant startup WebChat v2 serve loop failed")?;
+            anyhow::bail!("hosted single-tenant startup listener exited before binding");
+        }
+    }
+
+    Ok(StartupServe {
+        ready_handle,
+        serve_task,
+    })
+}
+
+fn webui_ctrl_c_shutdown() -> tokio::sync::oneshot::Receiver<()> {
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!(
+                target = "ironclaw::reborn::cli::serve",
+                "ctrl-c received; signalling WebChat v2 graceful shutdown",
+            );
+            let _ = shutdown_tx.send(());
+        }
+    });
+    shutdown_rx
 }
 
 fn reject_non_loopback_privileged_local_runtime(
@@ -659,7 +745,7 @@ fn canonical_host_name(host: &str) -> &str {
 
 async fn with_local_trigger_fire_access_checker(
     runtime_input: RebornRuntimeInput,
-    user_store_path: &std::path::Path,
+    access_store: Arc<dyn LocalTriggerAccessStore>,
     tenant_id: &TenantId,
     user_id: &UserId,
     default_agent_id: &AgentId,
@@ -669,9 +755,6 @@ async fn with_local_trigger_fire_access_checker(
         return Ok(runtime_input);
     }
 
-    let access_store = open_local_trigger_access_store(user_store_path)
-        .await
-        .context("failed to initialize local trigger-fire access store")?;
     let user_ids = [user_id.clone()];
     access_store
         .reconcile_local_access(LocalTriggerAccessReconciliation {
@@ -684,7 +767,8 @@ async fn with_local_trigger_fire_access_checker(
         })
         .await
         .context("failed to reconcile local trigger-fire access")?;
-    Ok(runtime_input.with_trigger_fire_access_checker(access_store))
+    Ok(runtime_input
+        .with_trigger_fire_access_checker(local_trigger_access_fire_checker(access_store)))
 }
 
 fn resolve_webui_default_agent(
@@ -727,6 +811,17 @@ fn resolve_webui_runtime_owner(
         ));
     }
     Ok(webui_user_id.to_string())
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+fn slack_operator_route_visibility_for_authenticator(
+    authenticator: &dyn WebuiAuthenticator,
+) -> SlackOperatorRouteVisibility {
+    if authenticator.mounts_operator_webui_config_routes() {
+        SlackOperatorRouteVisibility::Visible
+    } else {
+        SlackOperatorRouteVisibility::Hidden
+    }
 }
 
 fn print_serve_banner(
@@ -832,8 +927,81 @@ mod tests {
         assert!(message.contains("local-user"), "message: {message}");
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_operator_route_visibility_follows_authenticator_route_mount_capability() {
+        struct HiddenAuth;
+
+        #[async_trait::async_trait]
+        impl WebuiAuthenticator for HiddenAuth {
+            async fn authenticate(
+                &self,
+                _token: &str,
+            ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
+                None
+            }
+        }
+
+        struct OperatorRouteAuth;
+
+        #[async_trait::async_trait]
+        impl WebuiAuthenticator for OperatorRouteAuth {
+            async fn authenticate(
+                &self,
+                _token: &str,
+            ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
+                None
+            }
+
+            fn mounts_operator_webui_config_routes(&self) -> bool {
+                true
+            }
+        }
+
+        assert_eq!(
+            slack_operator_route_visibility_for_authenticator(&HiddenAuth),
+            SlackOperatorRouteVisibility::Hidden
+        );
+        assert_eq!(
+            slack_operator_route_visibility_for_authenticator(&OperatorRouteAuth),
+            SlackOperatorRouteVisibility::Visible
+        );
+    }
+
     #[tokio::test]
     async fn trigger_poller_disabled_does_not_wire_local_access_checker() {
+        struct PanicLocalTriggerAccessStore;
+
+        #[async_trait::async_trait]
+        impl LocalTriggerAccessStore for PanicLocalTriggerAccessStore {
+            async fn seed_local_access(
+                &self,
+                _seed: ironclaw_reborn_composition::LocalTriggerAccessSeed<'_>,
+            ) -> Result<(), ironclaw_reborn_composition::RebornLocalTriggerAccessStoreError>
+            {
+                panic!("disabled trigger poller must not seed local access")
+            }
+
+            async fn reconcile_local_access(
+                &self,
+                _reconciliation: LocalTriggerAccessReconciliation<'_>,
+            ) -> Result<(), ironclaw_reborn_composition::RebornLocalTriggerAccessStoreError>
+            {
+                panic!("disabled trigger poller must not reconcile local access")
+            }
+
+            async fn has_active_local_access(
+                &self,
+                _tenant_id: &TenantId,
+                _user_id: &UserId,
+                _agent_id: Option<&AgentId>,
+                _project_id: Option<&ProjectId>,
+            ) -> Result<bool, ironclaw_reborn_composition::RebornLocalTriggerAccessStoreError>
+            {
+                panic!("disabled trigger poller must not check local access")
+            }
+        }
+
         let dir = tempfile::tempdir().expect("tempdir");
         let tenant_id = TenantId::new("serve-trigger-disabled-tenant").expect("tenant id");
         let user_id = UserId::new("serve-trigger-disabled-user").expect("user id");
@@ -842,11 +1010,11 @@ mod tests {
             "serve-trigger-owner",
             dir.path().join("runtime"),
         ));
-        let missing_store_path = dir.path().join("missing").join("reborn-local-dev.db");
+        let access_store: Arc<dyn LocalTriggerAccessStore> = Arc::new(PanicLocalTriggerAccessStore);
 
         let runtime_input = with_local_trigger_fire_access_checker(
             runtime_input,
-            &missing_store_path,
+            access_store,
             &tenant_id,
             &user_id,
             &agent_id,
@@ -858,10 +1026,6 @@ mod tests {
         assert!(
             runtime_input.trigger_fire_access_checker.is_none(),
             "disabled trigger poller must not wire a local access checker"
-        );
-        assert!(
-            !missing_store_path.exists(),
-            "disabled trigger poller must not create the local access store"
         );
     }
 
@@ -900,7 +1064,7 @@ mod tests {
 
         let runtime_input = with_local_trigger_fire_access_checker(
             runtime_input,
-            &user_store_path,
+            access_store,
             &tenant_id,
             &user_id,
             &agent_id,
@@ -958,6 +1122,10 @@ mod tests {
         let agent_id = AgentId::new("serve-trigger-no-project-agent").expect("agent id");
         let project_id = ProjectId::new("serve-trigger-no-project-project").expect("project id");
         let user_store_path = dir.path().join("reborn-local-dev.db");
+        let access_store =
+            ironclaw_reborn_composition::open_local_trigger_access_store(&user_store_path)
+                .await
+                .expect("open local trigger access store");
         let runtime_input =
             RebornRuntimeInput::from_services(RebornBuildInput::local_dev(
                 "serve-trigger-owner",
@@ -969,7 +1137,7 @@ mod tests {
 
         let runtime_input = with_local_trigger_fire_access_checker(
             runtime_input,
-            &user_store_path,
+            access_store,
             &tenant_id,
             &user_id,
             &agent_id,

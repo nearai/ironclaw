@@ -13,13 +13,14 @@ use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AcceptedMessageRef, LoopDiagnosticRef, LoopGateRef, LoopMessageRef, LoopResultRef,
-    ProductTurnContext, RedactedCheckpointPayload, RunProfileVersion, TurnActor, TurnCheckpointId,
-    TurnId, TurnRunId, TurnScope,
+    AcceptedMessageRef, CapabilityActivityId, LoopDiagnosticRef, LoopGateRef, LoopMessageRef,
+    LoopResultRef, ProductTurnContext, RedactedCheckpointPayload, RunProfileVersion, TurnActor,
+    TurnCheckpointId, TurnId, TurnRunId, TurnScope,
 };
 
 use super::{
     compaction::{CompactionInitiator, LoopCompactionPort},
+    content_digest::ContentDigest,
     instruction_bundle::InstructionBundleFingerprint,
     model_observation::{CapabilityFailureDetail, ModelVisibleToolObservation},
     refs::{CheckpointSchemaId, LoopDriverId, ModelProfileId},
@@ -387,6 +388,13 @@ impl LoopSafeSummary {
 
     pub fn model_gateway_failed() -> Self {
         Self("model gateway failed".to_string())
+    }
+
+    /// Sanitized summary for a primary model call that exceeded its timeout.
+    /// Infallible because the literal is known to satisfy
+    /// [`validate_loop_safe_summary`].
+    pub fn model_gateway_timed_out() -> Self {
+        Self("model gateway timed out".to_string())
     }
 
     pub fn as_str(&self) -> &str {
@@ -1217,6 +1225,10 @@ pub struct AssistantReply {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityCallCandidate {
+    /// Stable activity identity assigned before capability dispatch. Hosts use
+    /// this as the runtime invocation identity, and tokenless gate checkpoints
+    /// persist it so terminal events can close the same activity.
+    pub activity_id: CapabilityActivityId,
     pub surface_version: CapabilitySurfaceVersion,
     pub capability_id: CapabilityId,
     pub input_ref: CapabilityInputRef,
@@ -1385,17 +1397,47 @@ pub struct ProviderToolCallReference {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterProviderToolCallRequest {
+    pub tool_call: ProviderToolCall,
+    /// Activity identity to bind to this provider call. When set, the host
+    /// must register the call with this id, rejecting if the same input_ref was
+    /// already registered with another id. When absent, the host creates an id
+    /// for the first registration and returns that same id for duplicate
+    /// registrations of the same input_ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_id: Option<CapabilityActivityId>,
+}
+
+impl RegisterProviderToolCallRequest {
+    pub fn new(tool_call: ProviderToolCall) -> Self {
+        Self {
+            tool_call,
+            activity_id: None,
+        }
+    }
+
+    pub fn for_activity(tool_call: ProviderToolCall, activity_id: CapabilityActivityId) -> Self {
+        Self {
+            tool_call,
+            activity_id: Some(activity_id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityInvocation {
+    /// Stable activity identity for this invocation. Runtime hosts derive
+    /// their execution identity from it rather than minting a second id.
+    pub activity_id: CapabilityActivityId,
     pub surface_version: CapabilitySurfaceVersion,
     pub capability_id: CapabilityId,
     pub input_ref: CapabilityInputRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_resume: Option<CapabilityApprovalResume>,
     /// Set when the invocation was previously auth-blocked and the auth
-    /// gate has now been resolved. Carries the original `invocation_id`
-    /// (as a resume token) so re-dispatch reuses it rather than minting a
-    /// new one, preserving any prior approval lease whose scope embeds
-    /// that id.
+    /// gate has now been resolved. Carries the original activity token so
+    /// re-dispatch reuses it rather than minting a new one, preserving any
+    /// prior approval lease whose scope embeds that id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_resume: Option<CapabilityAuthResume>,
 }
@@ -1467,16 +1509,16 @@ pub struct AuthResumeApprovalIdentity {
 
 /// Auth-gate resume identity.
 ///
-/// Carries the original invocation identifier (encoded as a resume token) so
-/// that re-dispatch after credential completion reuses the same invocation
+/// Carries the original activity identity (encoded as a resume token) so
+/// that re-dispatch after credential completion reuses the same activity
 /// rather than minting a fresh one.  When the prior invocation also passed
 /// an approval gate, `prior_approval` carries the approval identity so the
 /// host can claim the matching fingerprinted lease without requiring a second
 /// human approval.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityAuthResume {
-    /// Encodes the original invocation identifier; the host decodes it via
-    /// `invocation_id_from_resume_token` to set `context.invocation_id`.
+    /// Encodes the original activity identity so the host can reuse the
+    /// matching execution context after auth completes.
     pub resume_token: CapabilityResumeToken,
     /// Present when the invocation previously passed a one-shot approval gate.
     /// The two sub-fields are always set together; see [`AuthResumeApprovalIdentity`].
@@ -1589,6 +1631,10 @@ pub struct CapabilityResultMessage {
     /// Serialized output size in bytes — pure metadata, no PII.
     #[serde(default)]
     pub byte_len: u64,
+    /// Digest over normalized output content. Optional for backward
+    /// compatibility and for synthetic results that do not stage real output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_digest: Option<ContentDigest>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1695,6 +1741,7 @@ pub enum CapabilityFailureKind {
     Backend,
     Cancelled,
     Dispatcher,
+    GateDeclined,
     InvalidInput,
     InvalidOutput,
     MissingRuntime,
@@ -1735,6 +1782,7 @@ impl CapabilityFailureKind {
             Self::Backend => "backend",
             Self::Cancelled => "cancelled",
             Self::Dispatcher => "dispatcher",
+            Self::GateDeclined => "gate_declined",
             Self::InvalidInput => "invalid_input",
             Self::InvalidOutput => "invalid_output",
             Self::MissingRuntime => "missing_runtime",
@@ -1779,6 +1827,7 @@ impl<'de> Deserialize<'de> for CapabilityFailureKind {
             "backend" => Ok(Self::Backend),
             "cancelled" => Ok(Self::Cancelled),
             "dispatcher" => Ok(Self::Dispatcher),
+            "gate_declined" => Ok(Self::GateDeclined),
             "invalid_input" => Ok(Self::InvalidInput),
             "invalid_output" => Ok(Self::InvalidOutput),
             "missing_runtime" => Ok(Self::MissingRuntime),
@@ -1831,7 +1880,7 @@ pub trait LoopCapabilityPort: Send + Sync {
 
     async fn register_provider_tool_call(
         &self,
-        _tool_call: ProviderToolCall,
+        _request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         Err(unsupported_host_method("register_provider_tool_call"))
     }
@@ -2048,6 +2097,11 @@ pub enum LoopProgressEvent {
         gated_count: u32,
         failed_count: u32,
     },
+    CapabilityActivityFailed {
+        activity_id: CapabilityActivityId,
+        capability_id: CapabilityId,
+        reason_kind: CapabilityFailureKind,
+    },
     GateBlocked {
         iteration: u32,
         gate_kind: LoopGateKind,
@@ -2106,6 +2160,7 @@ impl LoopProgressEvent {
             Self::PromptBundleBuilt { .. } => "prompt_bundle_built",
             Self::CapabilityBatchStarted { .. } => "capability_batch_started",
             Self::CapabilityBatchCompleted { .. } => "capability_batch_completed",
+            Self::CapabilityActivityFailed { .. } => "capability_activity_failed",
             Self::GateBlocked { .. } => "gate_blocked",
             Self::CheckpointWritten { .. } => "checkpoint_written",
             Self::CompactionStarted { .. } => "compaction_started",

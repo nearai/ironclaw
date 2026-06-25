@@ -48,8 +48,7 @@ impl OpenAiCodexProvider {
     ) -> Result<Self, LlmError> {
         let account_id = extract_account_id(token)?;
         Ok(Self {
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(request_timeout_secs))
+            client: crate::config::hardened_client_builder(request_timeout_secs)
                 .build()
                 .map_err(|e| LlmError::RequestFailed {
                     provider: "openai_codex".to_string(),
@@ -316,11 +315,11 @@ impl LlmProvider for OpenAiCodexProvider {
         // Strict-mode tool schemas advertise every optional as required+nullable,
         // so the model fills unset optionals with `null` (or `""` for some codex
         // models). Strip those placeholders against each tool's original schema so
-        // only provided values reach the tool. `true`: this is a codex model.
+        // only provided values reach the tool.
         crate::tool_schema::strip_unset_optional_fields(
             &mut parsed.tool_calls,
             &request.tools,
-            true,
+            crate::tool_schema::PlaceholderStrippingMode::NullAndEmptyStrings,
         );
 
         let finish_reason = if !parsed.tool_calls.is_empty() {

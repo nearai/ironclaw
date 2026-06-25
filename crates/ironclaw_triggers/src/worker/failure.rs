@@ -1,6 +1,4 @@
-use ironclaw_host_api::Timestamp;
-
-use crate::{TriggerError, TriggerRecord};
+use crate::TriggerError;
 
 use super::TriggerPollerFailureReason;
 
@@ -8,22 +6,6 @@ use super::TriggerPollerFailureReason;
 pub(super) enum SubmitFailureKind {
     Retryable,
     Permanent,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FireFailureDisposition {
-    Retryable,
-    PermanentReschedule(Timestamp),
-    PermanentTerminal,
-}
-
-impl FireFailureDisposition {
-    pub(super) fn from_kind(kind: SubmitFailureKind, next_run_at: Timestamp) -> Self {
-        match kind {
-            SubmitFailureKind::Retryable => Self::Retryable,
-            SubmitFailureKind::Permanent => Self::PermanentReschedule(next_run_at),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +44,10 @@ pub(super) fn classify_failure(error: &TriggerError) -> FailureClassification {
             SubmitFailureKind::Permanent,
             TriggerPollerFailureReason::InvalidMaterialization,
         ),
+        TriggerError::BlockedMaterialization { .. } => (
+            SubmitFailureKind::Retryable,
+            TriggerPollerFailureReason::BlockedMaterialization,
+        ),
         TriggerError::NotFound => (
             SubmitFailureKind::Permanent,
             TriggerPollerFailureReason::NotFound,
@@ -70,14 +56,10 @@ pub(super) fn classify_failure(error: &TriggerError) -> FailureClassification {
     FailureClassification { kind, reason }
 }
 
-pub(super) fn next_run_at_after_fire(
-    record: &TriggerRecord,
-    fire_slot: Timestamp,
-) -> Result<Timestamp, TriggerError> {
-    record
-        .schedule
-        .next_slot_after(fire_slot)?
-        .ok_or_else(|| TriggerError::InvalidSchedule {
-            reason: "schedule has no next fire slot after claimed fire".to_string(),
-        })
+pub(super) fn classify_submit_failure(error: &TriggerError) -> FailureClassification {
+    let mut classification = classify_failure(error);
+    if matches!(error, TriggerError::NotFound) {
+        classification.kind = SubmitFailureKind::Retryable;
+    }
+    classification
 }

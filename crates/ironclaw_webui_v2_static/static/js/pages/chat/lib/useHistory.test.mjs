@@ -23,7 +23,7 @@ function useHistorySourceForTest() {
   }
   return `${lines.join(
     "\n",
-  )}\nglobalThis.__testExports = { useHistory, mergePreservingClientOnly };`;
+  )}\nglobalThis.__testExports = { clearHistoryCache, useHistory, mergeFullRefresh };`;
 }
 
 function createReactStub({ setCalls = [] } = {}) {
@@ -55,13 +55,13 @@ test("useHistory records a load error when timeline fetch fails", async () => {
   const setCalls = [];
   const consoleErrors = [];
   const context = {
-    authScope: () => "scope-1",
     console: {
       error: (...args) => consoleErrors.push(args),
     },
     fetchTimeline: async () => {
       throw new Error("timeline unavailable");
     },
+    authScope: () => "test-user",
     globalThis: {},
     messagesFromTimeline: () => {
       throw new Error("failed timeline should not be transformed");
@@ -81,10 +81,256 @@ test("useHistory records a load error when timeline fetch fails", async () => {
   assert.equal(consoleErrors.length, 1);
 });
 
-test("mergePreservingClientOnly keeps err-* bubbles and lets the timeline win otherwise", () => {
+test("useHistory full refresh preserves SSE-only activity messages", async () => {
+  const threadId = "thread-activity";
+  const runId = "run-activity";
+  const setCalls = [];
+  const context = {
+    console,
+    fetchTimeline: async () => ({
+      messages: [
+        {
+          message_id: "assistant-1",
+          kind: "assistant",
+          status: "finalized",
+          content: "I could not search.",
+          turn_run_id: runId,
+        },
+      ],
+      next_cursor: null,
+    }),
+    globalThis: {},
+    messagesFromTimeline: () => [
+      {
+        id: "msg-assistant-1",
+        role: "assistant",
+        content: "I could not search.",
+        status: "finalized",
+        kind: "assistant",
+        isFinalReply: true,
+        turnRunId: runId,
+      },
+    ],
+    React: createReactStub({ setCalls }),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+  const history = context.globalThis.__testExports.useHistory(threadId, {});
+  await flushMicrotasks();
+
+  history.setMessages((messages) => [
+    ...messages,
+    {
+      id: "tool-search",
+      role: "tool_activity",
+      turnRunId: runId,
+      toolName: "web-access.search",
+      toolStatus: "error",
+      toolError: "authorization",
+    },
+  ]);
+  await history.loadHistory();
+  await flushMicrotasks();
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(setCalls.at(-1).messages.map((message) => message.id))),
+    ["msg-assistant-1", "tool-search"],
+  );
+  assert.equal(setCalls.at(-1).messages[1].toolStatus, "error");
+});
+
+test("useHistory can seed a newly-created thread before navigation", async () => {
+  const setCalls = [];
+  const context = {
+    console,
+    fetchTimeline: async () => ({ messages: [], next_cursor: null }),
+    globalThis: {},
+    messagesFromTimeline: () => [],
+    React: createReactStub({ setCalls }),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+
+  const draftHistory = context.globalThis.__testExports.useHistory(null, {});
+  draftHistory.seedThreadMessages("thread-new", [
+    {
+      id: "pending-1",
+      role: "user",
+      content: "tell me a joke",
+      timestamp: "2026-06-25T07:17:00.000Z",
+      isOptimistic: true,
+    },
+  ]);
+
+  const threadHistory = context.globalThis.__testExports.useHistory("thread-new", {});
+  await flushMicrotasks();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(threadHistory.messages)), [
+    {
+      id: "pending-1",
+      role: "user",
+      content: "tell me a joke",
+      timestamp: "2026-06-25T07:17:00.000Z",
+      isOptimistic: true,
+    },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(setCalls.at(-1).messages)), [
+    {
+      id: "pending-1",
+      role: "user",
+      content: "tell me a joke",
+      timestamp: "2026-06-25T07:17:00.000Z",
+      isOptimistic: true,
+    },
+  ]);
+});
+
+test("useHistory seedThreadMessages updates an accepted first message by timeline id", async () => {
+  const context = {
+    console,
+    fetchTimeline: async () => new Promise(() => {}),
+    globalThis: {},
+    messagesFromTimeline: () => [],
+    React: createReactStub(),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+
+  const draftHistory = context.globalThis.__testExports.useHistory(null, {});
+  draftHistory.seedThreadMessages("thread-new", [
+    {
+      id: "pending-1",
+      role: "user",
+      content: "tell me a joke",
+      timestamp: "2026-06-25T07:17:00.000Z",
+    },
+  ]);
+  draftHistory.seedThreadMessages("thread-new", (messages) =>
+    messages.map((message) =>
+      message.id === "pending-1"
+        ? { ...message, timelineMessageId: "message-1" }
+        : message,
+    ),
+  );
+
+  const threadHistory = context.globalThis.__testExports.useHistory("thread-new", {});
+  assert.equal(threadHistory.messages[0].timelineMessageId, "message-1");
+});
+
+test("useHistory seedThreadMessages updates the mounted target thread", async () => {
+  const setCalls = [];
+  const context = {
+    console,
+    fetchTimeline: async () => new Promise(() => {}),
+    globalThis: {},
+    messagesFromTimeline: () => [],
+    React: createReactStub({ setCalls }),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+
+  const threadHistory = context.globalThis.__testExports.useHistory("thread-visible", {});
+  threadHistory.seedThreadMessages("thread-visible", [
+    {
+      id: "pending-1",
+      role: "user",
+      content: "visible update",
+      timestamp: "2026-06-25T07:17:00.000Z",
+      isOptimistic: true,
+    },
+  ]);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(setCalls.at(-1).messages)), [
+    {
+      id: "pending-1",
+      role: "user",
+      content: "visible update",
+      timestamp: "2026-06-25T07:17:00.000Z",
+      isOptimistic: true,
+    },
+  ]);
+});
+
+test("useHistory full refresh preserves unnumbered live gate activity after timeline tools", async () => {
+  const threadId = "thread-activity-order";
+  const runId = "run-activity-order";
+  const setCalls = [];
+  const timelineMessages = [
+    {
+      id: "tool-extension-a",
+      role: "tool_activity",
+      invocationId: "extension-a",
+      turnRunId: runId,
+      toolName: "extension_search",
+      toolStatus: "success",
+      activityOrder: 2,
+    },
+    {
+      id: "tool-extension-b",
+      role: "tool_activity",
+      invocationId: "extension-b",
+      turnRunId: runId,
+      toolName: "extension_search",
+      toolStatus: "success",
+      activityOrder: 3,
+    },
+  ];
+  const context = {
+    console,
+    fetchTimeline: async () => ({
+      messages: [],
+      next_cursor: null,
+    }),
+    globalThis: {},
+    messagesFromTimeline: () => timelineMessages,
+    React: createReactStub({ setCalls }),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+  const history = context.globalThis.__testExports.useHistory(threadId, {});
+  await flushMicrotasks();
+
+  history.setMessages((messages) => [
+    {
+      id: "tool-gate-web-search",
+      role: "tool_activity",
+      invocationId: "gate-web-search",
+      turnRunId: runId,
+      toolName: "search",
+      toolStatus: "running",
+    },
+    ...messages,
+  ]);
+  await history.loadHistory();
+  await flushMicrotasks();
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(setCalls.at(-1).messages.map((message) => [
+      message.id,
+      message.activityOrder,
+    ]))),
+    [
+      ["tool-extension-a", 2],
+      ["tool-extension-b", 3],
+      ["tool-gate-web-search", null],
+    ],
+  );
+});
+
+test("mergeFullRefresh keeps requested client-only bubbles and lets the timeline win otherwise", () => {
   const context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
-  const { mergePreservingClientOnly } = context.globalThis.__testExports;
+  const { mergeFullRefresh } = context.globalThis.__testExports;
 
   const timeline = [
     { id: "msg-user-1", role: "user" },
@@ -97,7 +343,9 @@ test("mergePreservingClientOnly keeps err-* bubbles and lets the timeline win ot
     { id: "err-run-1", role: "error", content: "run failed" },
   ];
 
-  const merged = mergePreservingClientOnly(timeline, current);
+  const merged = mergeFullRefresh(timeline, current, {
+    preserveClientOnly: true,
+  });
 
   // Timeline order is authoritative and the rich tool card replaces the
   // sparse live one; the client-only err-* bubble is preserved at the end.
@@ -108,4 +356,94 @@ test("mergePreservingClientOnly keeps err-* bubbles and lets the timeline win ot
   const toolCard = merged.find((m) => m.id === "tool-abc");
   assert.equal(toolCard.toolParameters, "{}");
   assert.equal(toolCard.toolResultPreview, "ok");
+});
+
+test("mergeFullRefresh carries optimistic timestamps onto confirmed messages", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      {
+        id: "msg-message-1",
+        role: "user",
+        content: "tell me a joke",
+      },
+    ],
+    [
+      {
+        id: "pending-1",
+        role: "user",
+        content: "tell me a joke",
+        timestamp: "2026-06-25T07:17:00.000Z",
+        timelineMessageId: "message-1",
+        isOptimistic: true,
+      },
+    ],
+  );
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, "msg-message-1");
+  assert.equal(merged[0].timestamp, "2026-06-25T07:17:00.000Z");
+});
+
+test("mergeFullRefresh carries live assistant timestamps onto confirmed replies", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      {
+        id: "msg-assistant-1",
+        role: "assistant",
+        content: "Here's one.",
+        isFinalReply: true,
+        turnRunId: "run-1",
+      },
+    ],
+    [
+      {
+        id: "reply-run-1",
+        role: "assistant",
+        content: "Here's one.",
+        timestamp: "2026-06-25T07:18:00.000Z",
+        isFinalReply: true,
+        turnRunId: "run-1",
+      },
+    ],
+  );
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, "msg-assistant-1");
+  assert.equal(merged[0].timestamp, "2026-06-25T07:18:00.000Z");
+});
+
+test("mergeFullRefresh uses run-settled time for confirmed assistant replies", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      {
+        id: "msg-assistant-1",
+        role: "assistant",
+        content: "Here's one.",
+        isFinalReply: true,
+        turnRunId: "run-1",
+      },
+    ],
+    [],
+    {
+      finalReplyTimestampByRun: {
+        "run-1": "2026-06-25T07:19:00.000Z",
+      },
+    },
+  );
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, "msg-assistant-1");
+  assert.equal(merged[0].timestamp, "2026-06-25T07:19:00.000Z");
 });

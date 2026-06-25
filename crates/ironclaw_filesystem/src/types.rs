@@ -22,6 +22,7 @@ use crate::record::RecordVersion;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilesystemOperation {
     MountLocal,
+    Connect,
     ReadFile,
     WriteFile,
     AppendFile,
@@ -44,6 +45,7 @@ impl std::fmt::Display for FilesystemOperation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::MountLocal => "mount_local",
+            Self::Connect => "connect",
             Self::ReadFile => "read_file",
             Self::WriteFile => "write_file",
             Self::AppendFile => "append_file",

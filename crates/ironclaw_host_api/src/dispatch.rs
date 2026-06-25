@@ -79,6 +79,58 @@ pub struct CapabilityDispatchResult {
     pub receipt: ResourceReceipt,
 }
 
+/// Stable input issue code for dispatch validation failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DispatchInputIssueCode {
+    MissingRequired,
+    UnexpectedField,
+    TypeMismatch,
+    InvalidValue,
+}
+
+/// Stable input issue for dispatch validation failures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchInputIssue {
+    pub path: String,
+    pub code: DispatchInputIssueCode,
+    pub expected: Option<String>,
+    pub received: Option<String>,
+    pub schema_path: Option<String>,
+}
+
+impl DispatchInputIssue {
+    pub fn new(path: impl Into<String>, code: DispatchInputIssueCode) -> Self {
+        Self {
+            path: path.into(),
+            code,
+            expected: None,
+            received: None,
+            schema_path: None,
+        }
+    }
+
+    pub fn expected(mut self, expected: impl Into<String>) -> Self {
+        self.expected = Some(expected.into());
+        self
+    }
+
+    pub fn received(mut self, received: impl Into<String>) -> Self {
+        self.received = Some(received.into());
+        self
+    }
+
+    pub fn schema_path(mut self, schema_path: impl Into<String>) -> Self {
+        self.schema_path = Some(schema_path.into());
+        self
+    }
+}
+
+/// Stable structured dispatch failure details for dispatch validation failures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchFailureDetail {
+    InvalidInput { issues: Vec<DispatchInputIssue> },
+}
+
 /// Stable, redacted runtime failure categories surfaced through the dispatch port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeDispatchErrorKind {
@@ -249,6 +301,7 @@ pub enum DispatchError {
     FirstParty {
         kind: RuntimeDispatchErrorKind,
         safe_summary: Option<String>,
+        detail: Option<DispatchFailureDetail>,
     },
 }
 
@@ -377,4 +430,26 @@ pub trait CapabilityDispatcher: Send + Sync {
         &self,
         request: CapabilityDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_input_issue_builder_methods_round_trip_optional_fields() {
+        let issue = DispatchInputIssue::new("schedule.kind", DispatchInputIssueCode::TypeMismatch)
+            .expected("string")
+            .received("number")
+            .schema_path("/properties/schedule/oneOf/0/properties/kind");
+
+        assert_eq!(issue.path, "schedule.kind");
+        assert_eq!(issue.code, DispatchInputIssueCode::TypeMismatch);
+        assert_eq!(issue.expected.as_deref(), Some("string"));
+        assert_eq!(issue.received.as_deref(), Some("number"));
+        assert_eq!(
+            issue.schema_path.as_deref(),
+            Some("/properties/schedule/oneOf/0/properties/kind")
+        );
+    }
 }

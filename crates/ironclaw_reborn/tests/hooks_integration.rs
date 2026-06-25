@@ -218,6 +218,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 0,
+            output_digest: None,
         }))
     }
 
@@ -290,6 +291,7 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 0,
+            output_digest: None,
         }))
     }
 
@@ -1074,6 +1076,7 @@ impl Fixture {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
@@ -1178,6 +1181,7 @@ fn invocation(
     capability_id: &str,
 ) -> CapabilityInvocation {
     CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface_version.clone(),
         capability_id: CapabilityId::new(capability_id).expect("capability id literal is valid"),
         input_ref: CapabilityInputRef::new(format!("input:{capability_id}"))

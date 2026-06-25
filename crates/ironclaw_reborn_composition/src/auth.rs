@@ -36,7 +36,7 @@ use crate::product_auth_runtime_credentials::{
     RuntimeCredentialAccountRefreshPort, RuntimeCredentialAccountRefreshService,
     RuntimeCredentialAccountSelectionService,
 };
-use crate::{AuthChallengeProvider, AuthChallengeView};
+use crate::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 
 pub(crate) const AUTH_CONTINUATION_DISPATCH_FAILED_CODE: &str = "auth_continuation_dispatch_failed";
 
@@ -413,7 +413,13 @@ impl RebornProductAuthServicePorts {
     pub(crate) fn into_services(
         self,
         continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
+        secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
     ) -> RebornProductAuthServices {
+        // `secret_store` is required here (not defaulted) so the store that the
+        // OAuth provider client writes access-token `expires_at` to is
+        // structurally the same store the inline-refresh margin check (A2)
+        // reads from. Defaulting it would silently split the read/write stores
+        // and make the conditional-refresh skip a no-op in production.
         RebornProductAuthServices::new(
             self.flow_manager,
             self.interaction_service,
@@ -425,6 +431,7 @@ impl RebornProductAuthServicePorts {
         )
         .with_manual_token_flow_service(self.manual_token_flow_service)
         .with_credential_account_record_source(self.credential_account_record_source)
+        .with_secret_store(secret_store)
     }
 
     pub fn with_provider_client(mut self, provider_client: Arc<dyn AuthProviderClient>) -> Self {
@@ -457,6 +464,8 @@ pub struct RebornProductAuthServices {
     cleanup_service: Arc<dyn SecretCleanupService>,
     continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
+    /// Secret store forwarded to the inline-refresh margin check (A2).
+    secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
     dcr_oauth_registry: Option<Arc<OAuthDcrProviderRegistry>>,
     oauth_gate_registry: Option<Arc<GoogleOAuthGateProviderRegistry>>,
     /// Optional read projection for WebUI/local-dev auth interactions.
@@ -502,6 +511,7 @@ impl std::fmt::Debug for RebornProductAuthServices {
                 &"Arc<dyn RebornAuthContinuationDispatcher>",
             )
             .field("security_audit_sink", &self.security_audit_sink.is_some())
+            .field("secret_store", &"<wired>")
             .field("flow_record_source", &self.flow_record_source.is_some())
             .field("dcr_oauth_registry", &self.dcr_oauth_registry.is_some())
             .field("oauth_gate_registry", &self.oauth_gate_registry.is_some())
@@ -535,6 +545,7 @@ impl RebornProductAuthServices {
             cleanup_service,
             continuation_dispatcher,
             security_audit_sink: None,
+            secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
             dcr_oauth_registry: None,
             oauth_gate_registry: None,
             flow_record_source: None,
@@ -632,6 +643,18 @@ impl RebornProductAuthServices {
         self.credential_account_record_source.clone()
     }
 
+    /// Test-support access to the owner-scoped credential account record source.
+    ///
+    /// Live fixture recorders use this to copy explicitly requested product-auth
+    /// accounts from a developer's local Reborn store into an isolated test
+    /// runtime without cloning the whole store.
+    #[cfg(feature = "test-support")]
+    pub fn credential_account_record_source_for_test(
+        &self,
+    ) -> Arc<dyn CredentialAccountRecordSource> {
+        self.credential_account_record_source()
+    }
+
     pub(crate) fn runtime_credential_account_selection_service(
         &self,
     ) -> Arc<dyn RuntimeCredentialAccountSelectionService> {
@@ -646,9 +669,20 @@ impl RebornProductAuthServices {
     pub(crate) fn runtime_credential_account_refresh_service(
         self: &Arc<Self>,
     ) -> Arc<dyn RuntimeCredentialAccountRefreshService> {
-        let refresh_port: Arc<dyn RuntimeCredentialAccountRefreshPort> = self.clone();
+        // Inline dispatch path: use the plain provider-backed service wrapped
+        // only in the in-process `refresh_locks` guard that
+        // `ProviderBackedCredentialAccountService` already owns. Cross-process
+        // serialization is handled by the background keepalive worker's leader
+        // lock (`CredentialRefreshLeaderLock`), not here.
+        //
+        // A2: Forward the secret store so the refresher can read `expires_at`
+        // metadata and skip the token-endpoint round-trip when the access token
+        // is still fresh. The margin is fixed at `DEFAULT_ACCESS_REFRESH_MARGIN`.
+        let inner_port: Arc<dyn RuntimeCredentialAccountRefreshPort> = self.clone();
+        let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = self.secret_store.clone();
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
-            refresh_port,
+            inner_port,
+            secret_store,
         ))
     }
 
@@ -715,6 +749,16 @@ impl RebornProductAuthServices {
         self
     }
 
+    /// Wire the secret store used by the inline OAuth refresh margin check
+    /// (A2). When set, the refresher reads `expires_at` metadata from the
+    /// store and skips an unnecessary token-endpoint round-trip when the
+    /// access token is still fresh. Defaults to an in-memory store (always
+    /// refreshes unconditionally — safe, backward-compatible).
+    pub fn with_secret_store(mut self, store: Arc<dyn ironclaw_secrets::SecretStore>) -> Self {
+        self.secret_store = store;
+        self
+    }
+
     /// Enable WebUI/local-dev auth-flow projection source.
     ///
     /// Exported `pub` so integration-test harnesses outside the crate can
@@ -738,11 +782,34 @@ impl RebornProductAuthServices {
     /// 4-field view in that case, which is backward-compatible.
     #[doc(hidden)]
     pub fn as_auth_challenge_provider(self: &Arc<Self>) -> Option<Arc<dyn AuthChallengeProvider>> {
-        if self.flow_record_source.is_some() {
-            Some(Arc::clone(self) as Arc<dyn AuthChallengeProvider>)
-        } else {
-            None
-        }
+        self.has_flow_record_source()
+            .then(|| Arc::clone(self) as Arc<dyn AuthChallengeProvider>)
+    }
+
+    /// Expose this service as an `Arc<dyn BlockedAuthFlowCanceller>` so the Slack
+    /// delivery path can cancel the durable `AuthFlow` record alongside the run
+    /// when it auto-denies a non-OAuth auth challenge (issue #4952).
+    ///
+    /// Returns `None` under the same condition as
+    /// [`Self::as_auth_challenge_provider`] — both flow-backed facades gate on
+    /// [`Self::has_flow_record_source`]. They stay separate accessors because they
+    /// expose distinct capability ports (`AuthChallengeProvider` vs
+    /// `BlockedAuthFlowCanceller`), but share the one wiring precondition.
+    #[doc(hidden)]
+    pub fn as_blocked_auth_flow_canceller(
+        self: &Arc<Self>,
+    ) -> Option<Arc<dyn BlockedAuthFlowCanceller>> {
+        self.has_flow_record_source()
+            .then(|| Arc::clone(self) as Arc<dyn BlockedAuthFlowCanceller>)
+    }
+
+    /// Shared precondition for the flow-backed facades: both
+    /// [`Self::as_auth_challenge_provider`] and
+    /// [`Self::as_blocked_auth_flow_canceller`] are only available when an
+    /// `AuthFlowRecordSource` projection is wired in. Defined once so the gate
+    /// cannot drift between the two accessors.
+    fn has_flow_record_source(&self) -> bool {
+        self.flow_record_source.is_some()
     }
 
     /// Refresh a credential account through the injected product-auth port.
@@ -1246,7 +1313,10 @@ impl RebornProductAuthServices {
     ) -> Self {
         let services = Arc::new(InMemoryAuthProductServices::new());
         RebornProductAuthServicePorts::from_shared(services.clone())
-            .into_services(continuation_dispatcher)
+            .into_services(
+                continuation_dispatcher,
+                Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            )
             .with_flow_record_source(services)
     }
 }
@@ -1394,6 +1464,62 @@ impl AuthChallengeProvider for RebornProductAuthServices {
     }
 }
 
+#[async_trait]
+impl BlockedAuthFlowCanceller for RebornProductAuthServices {
+    async fn cancel_blocked_auth_flow(
+        &self,
+        scope: &TurnScope,
+        owner_user_id: &UserId,
+        run_id: TurnRunId,
+        gate_ref: &str,
+    ) -> Result<(), AuthProductError> {
+        let gate_ref = AuthGateRef::new(gate_ref.to_string()).map_err(|err| {
+            AuthProductError::InvalidRequest {
+                reason: format!("invalid gate ref for auth-flow cancel: {err}"),
+            }
+        })?;
+        let Some(source) = self.flow_record_source.as_ref() else {
+            // No projection source wired in: nothing to cancel here.
+            return Ok(());
+        };
+        // `include_terminal: false` means an already-terminal flow (or a missing
+        // one) resolves to `None`, so the OAuth-callback race — where the flow
+        // completes just before auto-deny — is a graceful no-op rather than an
+        // error. We only ever cancel a flow that is still non-terminal.
+        let flow = source
+            .flow_for_turn_gate(TurnGateAuthFlowQuery {
+                owner: AuthFlowOwnerScope {
+                    tenant_id: scope.tenant_id.clone(),
+                    user_id: owner_user_id.clone(),
+                    agent_id: scope.agent_id.clone(),
+                    project_id: scope.project_id.clone(),
+                    thread_id: scope.thread_id.clone(),
+                },
+                turn_run_ref: TurnRunRef::new(run_id.to_string()).map_err(|err| {
+                    AuthProductError::InvalidRequest {
+                        reason: format!("invalid turn run ref for auth-flow cancel: {err}"),
+                    }
+                })?,
+                gate_ref,
+                include_terminal: false,
+            })
+            .await?;
+        let Some(flow) = flow else {
+            return Ok(());
+        };
+        match self.flow_manager.cancel_flow(&flow.scope, flow.id).await {
+            Ok(_) => Ok(()),
+            // The flow terminalized between our non-terminal read above and this
+            // cancel (a concurrent OAuth callback or another canceller). Already
+            // terminal is the desired end state, so honor the documented graceful
+            // no-op contract instead of surfacing the race as an error. Real
+            // lookup/scope/backend errors still propagate.
+            Err(AuthProductError::Canceled | AuthProductError::FlowAlreadyTerminal) => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1496,7 +1622,10 @@ mod tests {
 
         let ports =
             RebornProductAuthServicePorts::from_shared_with_provider(shared, provider_client);
-        let services = ports.into_services(Arc::new(NoopAuthContinuationDispatcher));
+        let services = ports.into_services(
+            Arc::new(NoopAuthContinuationDispatcher),
+            Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+        );
 
         assert_eq!(arc_data_ptr(&services.flow_manager()), shared_ptr);
         assert_eq!(arc_data_ptr(&services.interaction_service()), shared_ptr);
@@ -1754,5 +1883,539 @@ mod tests {
         ) -> Result<SecretCleanupReport, AuthProductError> {
             unreachable!("constructor tests do not call cleanup methods")
         }
+    }
+
+    // ── cancel_blocked_auth_flow facade tests ─────────────────────────────────
+
+    /// Build a minimal `RebornProductAuthServices` for `cancel_blocked_auth_flow`
+    /// tests.  The `flow_manager` is backed by `InMemoryAuthProductServices` so
+    /// callers can inspect whether `cancel_flow` was actually invoked (by checking
+    /// the flow's status after the call).  All other ports use `SharedAuthTestDouble`
+    /// (they are never called by `cancel_blocked_auth_flow`).
+    fn make_auth_services_with_flow_source(
+        auth_svc: Arc<InMemoryAuthProductServices>,
+    ) -> RebornProductAuthServices {
+        let double = Arc::new(SharedAuthTestDouble);
+        RebornProductAuthServices::new(
+            auth_svc.clone() as Arc<dyn AuthFlowManager>,
+            double.clone() as Arc<dyn AuthInteractionService>,
+            double.clone() as Arc<dyn CredentialSetupService>,
+            double.clone() as Arc<dyn CredentialAccountService>,
+            double.clone() as Arc<dyn AuthProviderClient>,
+            double.clone() as Arc<dyn SecretCleanupService>,
+            Arc::new(NoopAuthContinuationDispatcher),
+        )
+        .with_flow_record_source(auth_svc as Arc<dyn AuthFlowRecordSource>)
+    }
+
+    /// Build an `AuthProductScope` that is consistent with a `personal_turn_scope`-like
+    /// `TurnScope` used by `cancel_blocked_auth_flow`.
+    fn test_auth_product_scope() -> AuthProductScope {
+        use ironclaw_auth::AuthSurface;
+        use ironclaw_host_api::{AgentId, ResourceScope, TenantId, ThreadId, UserId};
+
+        let resource = ResourceScope {
+            tenant_id: TenantId::new("test-tenant").expect("tenant"),
+            user_id: UserId::new("creator-user").expect("user"),
+            agent_id: Some(AgentId::new("test-agent").expect("agent")),
+            project_id: None,
+            mission_id: None,
+            thread_id: Some(ThreadId::new("test-thread").expect("thread")),
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        };
+        AuthProductScope::new(resource, AuthSurface::Chat)
+    }
+
+    /// Build a minimal non-terminal `AuthFlowRecord` whose continuation matches
+    /// a `TurnGateAuthFlowQuery` for `run_id` / `gate_ref`.
+    async fn create_test_flow(
+        auth_svc: &InMemoryAuthProductServices,
+        scope: AuthProductScope,
+        run_id: TurnRunId,
+        gate_ref_str: &str,
+    ) -> AuthFlowRecord {
+        let gate_ref = AuthGateRef::new(gate_ref_str.to_string()).expect("gate ref");
+        let turn_run_ref = TurnRunRef::new(run_id.to_string()).expect("turn run ref");
+        auth_svc
+            .create_flow(NewAuthFlow {
+                id: None,
+                scope,
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: AuthProviderId::new("test-provider").expect("provider"),
+                challenge: AuthChallenge::SetupRequired {
+                    provider: AuthProviderId::new("test-provider").expect("provider"),
+                    message: "test".to_string(),
+                },
+                continuation: AuthContinuationRef::TurnGateResume {
+                    turn_run_ref,
+                    gate_ref,
+                },
+                update_binding: None,
+                opaque_state_hash: None,
+                pkce_verifier_hash: None,
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            })
+            .await
+            .expect("create test flow")
+    }
+
+    /// `cancel_blocked_auth_flow` must cancel a non-terminal flow via `flow_manager`
+    /// when `flow_record_source` returns one for the queried run/gate.
+    #[tokio::test]
+    async fn cancel_blocked_auth_flow_cancels_non_terminal_flow() {
+        use ironclaw_host_api::UserId;
+        use ironclaw_turns::TurnScope;
+
+        let auth_svc = Arc::new(InMemoryAuthProductServices::new());
+        let services = Arc::new(make_auth_services_with_flow_source(Arc::clone(&auth_svc)));
+
+        let run_id = TurnRunId::new();
+        let gate_ref_str = "gate:cancel-test";
+        let scope_resource = test_auth_product_scope();
+        let flow = create_test_flow(&auth_svc, scope_resource, run_id, gate_ref_str).await;
+
+        // Sanity: flow is non-terminal before the call.
+        assert_eq!(
+            flow.status,
+            AuthFlowStatus::AwaitingUser,
+            "pre-condition: flow must be non-terminal"
+        );
+
+        let turn_scope = TurnScope::new_with_owner(
+            ironclaw_host_api::TenantId::new("test-tenant").expect("tenant"),
+            Some(ironclaw_host_api::AgentId::new("test-agent").expect("agent")),
+            None,
+            ironclaw_host_api::ThreadId::new("test-thread").expect("thread"),
+            Some(UserId::new("creator-user").expect("owner")),
+        );
+        let owner_user_id = UserId::new("creator-user").expect("owner");
+
+        services
+            .cancel_blocked_auth_flow(&turn_scope, &owner_user_id, run_id, gate_ref_str)
+            .await
+            .expect("cancel_blocked_auth_flow must succeed");
+
+        // The flow must now be terminal (Canceled).
+        let flows = auth_svc.flow_records_snapshot();
+        let updated = flows
+            .iter()
+            .find(|f| f.id == flow.id)
+            .expect("flow must still exist after cancel");
+        assert_eq!(
+            updated.status,
+            AuthFlowStatus::Canceled,
+            "cancel_blocked_auth_flow must have cancelled the flow via flow_manager"
+        );
+    }
+
+    /// `cancel_blocked_auth_flow` is a no-op (returns `Ok`) when the
+    /// `flow_record_source` returns `None` for the queried run/gate (flow absent
+    /// or already terminal).
+    #[tokio::test]
+    async fn cancel_blocked_auth_flow_is_noop_when_flow_absent() {
+        use ironclaw_host_api::UserId;
+        use ironclaw_turns::{TurnRunId, TurnScope};
+
+        let auth_svc = Arc::new(InMemoryAuthProductServices::new());
+        let services = Arc::new(make_auth_services_with_flow_source(Arc::clone(&auth_svc)));
+
+        // No flow is seeded — `flow_for_turn_gate` returns None.
+        let turn_scope = TurnScope::new_with_owner(
+            ironclaw_host_api::TenantId::new("test-tenant").expect("tenant"),
+            Some(ironclaw_host_api::AgentId::new("test-agent").expect("agent")),
+            None,
+            ironclaw_host_api::ThreadId::new("test-thread").expect("thread"),
+            Some(UserId::new("creator-user").expect("owner")),
+        );
+        let owner_user_id = UserId::new("creator-user").expect("owner");
+        let run_id = TurnRunId::new();
+
+        let result = services
+            .cancel_blocked_auth_flow(&turn_scope, &owner_user_id, run_id, "gate:absent")
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "cancel_blocked_auth_flow must return Ok when flow is absent; got: {result:?}"
+        );
+        // No flows were created, so nothing to check in auth_svc.
+        assert!(
+            auth_svc.flow_records_snapshot().is_empty(),
+            "no flow must exist after a no-op cancel"
+        );
+    }
+
+    /// `cancel_blocked_auth_flow` must treat `Err(AuthProductError::Canceled)` and
+    /// `Err(AuthProductError::FlowAlreadyTerminal)` from `flow_manager.cancel_flow`
+    /// as `Ok(())` — these represent a concurrent terminal race where the flow
+    /// completed between the non-terminal read and the cancel call.
+    ///
+    /// Also asserts a negative case: a real backend error (e.g. `BackendUnavailable`)
+    /// still propagates as `Err` to confirm the normalization is not over-broad.
+    #[tokio::test]
+    async fn cancel_blocked_auth_flow_treats_terminal_race_as_ok() {
+        use ironclaw_auth::{
+            AuthFlowId, AuthFlowRecord, AuthProductError, AuthProductScope,
+            OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput, Timestamp,
+        };
+        use ironclaw_host_api::UserId;
+        use ironclaw_turns::TurnScope;
+
+        /// A `AuthFlowManager` whose `cancel_flow` returns a caller-supplied error
+        /// while all other methods forward to the real in-memory store.  Used to
+        /// simulate the terminal race without needing to actually put the flow in
+        /// a terminal state before the call.
+        struct TerminalRaceFlowManager {
+            inner: Arc<InMemoryAuthProductServices>,
+            cancel_error: tokio::sync::Mutex<Option<AuthProductError>>,
+        }
+
+        impl TerminalRaceFlowManager {
+            fn returning(
+                inner: Arc<InMemoryAuthProductServices>,
+                error: AuthProductError,
+            ) -> Arc<Self> {
+                Arc::new(Self {
+                    inner,
+                    cancel_error: tokio::sync::Mutex::new(Some(error)),
+                })
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl AuthFlowManager for TerminalRaceFlowManager {
+            async fn create_flow(
+                &self,
+                request: NewAuthFlow,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                self.inner.create_flow(request).await
+            }
+
+            async fn get_flow(
+                &self,
+                scope: &AuthProductScope,
+                flow_id: AuthFlowId,
+            ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+                self.inner.get_flow(scope, flow_id).await
+            }
+
+            async fn cancel_flow(
+                &self,
+                _scope: &AuthProductScope,
+                _flow_id: AuthFlowId,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                let err = self
+                    .cancel_error
+                    .lock()
+                    .await
+                    .take()
+                    .expect("cancel_flow called more than once on TerminalRaceFlowManager");
+                Err(err)
+            }
+
+            async fn claim_oauth_callback(
+                &self,
+                _scope: &AuthProductScope,
+                _request: OAuthCallbackClaimRequest,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                unreachable!("terminal-race test does not call claim_oauth_callback")
+            }
+
+            async fn complete_oauth_callback(
+                &self,
+                _scope: &AuthProductScope,
+                _input: OAuthCallbackInput,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                unreachable!("terminal-race test does not call complete_oauth_callback")
+            }
+
+            async fn complete_credential_selection(
+                &self,
+                _scope: &AuthProductScope,
+                _input: ironclaw_auth::CredentialSelectionInput,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                unreachable!("terminal-race test does not call complete_credential_selection")
+            }
+
+            async fn complete_manual_token(
+                &self,
+                _scope: &AuthProductScope,
+                _input: ironclaw_auth::ManualTokenCompletionInput,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                unreachable!("terminal-race test does not call complete_manual_token")
+            }
+
+            async fn cancel_manual_token(
+                &self,
+                _scope: &AuthProductScope,
+                _interaction_id: AuthInteractionId,
+            ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+                unreachable!("terminal-race test does not call cancel_manual_token")
+            }
+
+            async fn fail_oauth_callback(
+                &self,
+                _scope: &AuthProductScope,
+                _input: OAuthCallbackFailureInput,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                unreachable!("terminal-race test does not call fail_oauth_callback")
+            }
+
+            async fn mark_continuation_dispatched(
+                &self,
+                _scope: &AuthProductScope,
+                _flow_id: AuthFlowId,
+                _emitted_at: Timestamp,
+            ) -> Result<AuthFlowRecord, AuthProductError> {
+                unreachable!("terminal-race test does not call mark_continuation_dispatched")
+            }
+        }
+
+        // Helper: build services with a custom flow_manager but real flow_record_source.
+        let build_services_with_manager =
+            |auth_svc: Arc<InMemoryAuthProductServices>, manager: Arc<dyn AuthFlowManager>| {
+                let double = Arc::new(SharedAuthTestDouble);
+                RebornProductAuthServices::new(
+                    manager,
+                    double.clone() as Arc<dyn AuthInteractionService>,
+                    double.clone() as Arc<dyn CredentialSetupService>,
+                    double.clone() as Arc<dyn CredentialAccountService>,
+                    double.clone() as Arc<dyn AuthProviderClient>,
+                    double.clone() as Arc<dyn SecretCleanupService>,
+                    Arc::new(NoopAuthContinuationDispatcher),
+                )
+                .with_flow_record_source(auth_svc as Arc<dyn AuthFlowRecordSource>)
+            };
+
+        let turn_scope = TurnScope::new_with_owner(
+            ironclaw_host_api::TenantId::new("test-tenant").expect("tenant"),
+            Some(ironclaw_host_api::AgentId::new("test-agent").expect("agent")),
+            None,
+            ironclaw_host_api::ThreadId::new("test-thread").expect("thread"),
+            Some(UserId::new("creator-user").expect("owner")),
+        );
+        let owner_user_id = UserId::new("creator-user").expect("owner");
+        let run_id = TurnRunId::new();
+        let gate_ref_str = "gate:terminal-race-test";
+        let scope_resource = test_auth_product_scope();
+
+        // ── Case 1: cancel_flow returns Err(FlowAlreadyTerminal) → Ok(()) ───────────
+        {
+            let auth_svc = Arc::new(InMemoryAuthProductServices::new());
+            // Seed a non-terminal flow so flow_record_source returns Some(…).
+            create_test_flow(&auth_svc, scope_resource.clone(), run_id, gate_ref_str).await;
+            let manager = TerminalRaceFlowManager::returning(
+                Arc::clone(&auth_svc),
+                AuthProductError::FlowAlreadyTerminal,
+            );
+            let services = Arc::new(build_services_with_manager(auth_svc, manager));
+
+            let result = services
+                .cancel_blocked_auth_flow(&turn_scope, &owner_user_id, run_id, gate_ref_str)
+                .await;
+            assert!(
+                result.is_ok(),
+                "FlowAlreadyTerminal from cancel_flow must be normalized to Ok(()); got: {result:?}"
+            );
+        }
+
+        // ── Case 2: cancel_flow returns Err(Canceled) → Ok(()) ──────────────────────
+        {
+            let auth_svc = Arc::new(InMemoryAuthProductServices::new());
+            create_test_flow(&auth_svc, scope_resource.clone(), run_id, gate_ref_str).await;
+            let manager = TerminalRaceFlowManager::returning(
+                Arc::clone(&auth_svc),
+                AuthProductError::Canceled,
+            );
+            let services = Arc::new(build_services_with_manager(auth_svc, manager));
+
+            let result = services
+                .cancel_blocked_auth_flow(&turn_scope, &owner_user_id, run_id, gate_ref_str)
+                .await;
+            assert!(
+                result.is_ok(),
+                "Canceled from cancel_flow must be normalized to Ok(()); got: {result:?}"
+            );
+        }
+
+        // ── Negative case: cancel_flow returns a real error → Err propagates ─────────
+        {
+            let auth_svc = Arc::new(InMemoryAuthProductServices::new());
+            create_test_flow(&auth_svc, scope_resource, run_id, gate_ref_str).await;
+            let manager = TerminalRaceFlowManager::returning(
+                Arc::clone(&auth_svc),
+                AuthProductError::BackendUnavailable,
+            );
+            let services = Arc::new(build_services_with_manager(auth_svc, manager));
+
+            let result = services
+                .cancel_blocked_auth_flow(&turn_scope, &owner_user_id, run_id, gate_ref_str)
+                .await;
+            assert!(
+                matches!(result, Err(AuthProductError::BackendUnavailable)),
+                "BackendUnavailable from cancel_flow must propagate as Err; got: {result:?}"
+            );
+        }
+    }
+
+    /// `cancel_blocked_auth_flow` is a no-op (returns `Ok`) when the service
+    /// was built without a `flow_record_source`.
+    #[tokio::test]
+    async fn cancel_blocked_auth_flow_is_noop_without_flow_record_source() {
+        use ironclaw_host_api::UserId;
+        use ironclaw_turns::{TurnRunId, TurnScope};
+
+        let double = Arc::new(SharedAuthTestDouble);
+        // Build WITHOUT `.with_flow_record_source` — `flow_record_source` is None.
+        let services = Arc::new(RebornProductAuthServices::new(
+            double.clone() as Arc<dyn AuthFlowManager>,
+            double.clone() as Arc<dyn AuthInteractionService>,
+            double.clone() as Arc<dyn CredentialSetupService>,
+            double.clone() as Arc<dyn CredentialAccountService>,
+            double.clone() as Arc<dyn AuthProviderClient>,
+            double.clone() as Arc<dyn SecretCleanupService>,
+            Arc::new(NoopAuthContinuationDispatcher),
+        ));
+
+        let turn_scope = TurnScope::new_with_owner(
+            ironclaw_host_api::TenantId::new("test-tenant").expect("tenant"),
+            Some(ironclaw_host_api::AgentId::new("test-agent").expect("agent")),
+            None,
+            ironclaw_host_api::ThreadId::new("test-thread").expect("thread"),
+            Some(UserId::new("creator-user").expect("owner")),
+        );
+        let owner_user_id = UserId::new("creator-user").expect("owner");
+        let run_id = TurnRunId::new();
+
+        let result = services
+            .cancel_blocked_auth_flow(&turn_scope, &owner_user_id, run_id, "gate:no-source")
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "cancel_blocked_auth_flow must return Ok when flow_record_source is absent; got: {result:?}"
+        );
+        // SharedAuthTestDouble's cancel_flow panics with unreachable! — if we reach
+        // here without panic, cancel_flow was never called (as required).
+    }
+
+    /// `cancel_blocked_auth_flow` must return `Err(AuthProductError::InvalidRequest)`
+    /// when the supplied `gate_ref` string fails `AuthGateRef::new` validation.
+    ///
+    /// `AuthGateRef` delegates to `validate_public_text`, which rejects empty
+    /// strings ("must not be empty"). An empty `gate_ref` is therefore the
+    /// simplest value that always fails at the facade boundary — regardless of
+    /// whether any flow or source is present.
+    #[tokio::test]
+    async fn cancel_blocked_auth_flow_rejects_invalid_gate_ref() {
+        use ironclaw_host_api::UserId;
+        use ironclaw_turns::{TurnRunId, TurnScope};
+
+        let auth_svc = Arc::new(InMemoryAuthProductServices::new());
+        let services = Arc::new(make_auth_services_with_flow_source(Arc::clone(&auth_svc)));
+
+        let turn_scope = TurnScope::new_with_owner(
+            ironclaw_host_api::TenantId::new("test-tenant").expect("tenant"),
+            Some(ironclaw_host_api::AgentId::new("test-agent").expect("agent")),
+            None,
+            ironclaw_host_api::ThreadId::new("test-thread").expect("thread"),
+            Some(UserId::new("creator-user").expect("owner")),
+        );
+        let owner_user_id = UserId::new("creator-user").expect("owner");
+        let run_id = TurnRunId::new();
+
+        // Empty string is rejected by `validate_public_text` ("must not be empty").
+        let result = services
+            .cancel_blocked_auth_flow(&turn_scope, &owner_user_id, run_id, "")
+            .await;
+
+        match result {
+            Err(AuthProductError::InvalidRequest { reason }) => {
+                assert!(
+                    !reason.is_empty(),
+                    "InvalidRequest reason must be non-empty for an invalid gate ref"
+                );
+                assert!(
+                    reason.contains("invalid gate ref for auth-flow cancel"),
+                    "reason must include the caller-supplied context string; got: {reason}"
+                );
+            }
+            other => panic!("expected Err(InvalidRequest) for empty gate_ref, got: {other:?}"),
+        }
+    }
+
+    /// `cancel_blocked_auth_flow` must propagate `Err` returned by the
+    /// `flow_record_source` — a backend lookup failure must not be silently
+    /// swallowed.
+    ///
+    /// Uses a minimal local stub whose `flow_for_turn_gate` always returns
+    /// `Err(AuthProductError::BackendUnavailable)`.  This exercises the `?`
+    /// on the `source.flow_for_turn_gate(…).await?` call site.
+    #[tokio::test]
+    async fn cancel_blocked_auth_flow_propagates_flow_source_error() {
+        use ironclaw_host_api::UserId;
+        use ironclaw_turns::{TurnRunId, TurnScope};
+
+        /// A flow record source that always errors out.
+        struct AlwaysFailingFlowSource;
+
+        #[async_trait::async_trait]
+        impl AuthFlowRecordSource for AlwaysFailingFlowSource {
+            async fn flow_for_turn_gate(
+                &self,
+                _query: ironclaw_auth::TurnGateAuthFlowQuery,
+            ) -> Result<Option<ironclaw_auth::AuthFlowRecord>, AuthProductError> {
+                Err(AuthProductError::BackendUnavailable)
+            }
+
+            async fn flows_for_owner(
+                &self,
+                _owner: ironclaw_auth::AuthFlowOwnerScope,
+            ) -> Result<Vec<ironclaw_auth::AuthFlowRecord>, AuthProductError> {
+                unreachable!("flow-source-error test does not call flows_for_owner")
+            }
+        }
+
+        let double = Arc::new(SharedAuthTestDouble);
+        let services = Arc::new(
+            RebornProductAuthServices::new(
+                double.clone() as Arc<dyn AuthFlowManager>,
+                double.clone() as Arc<dyn AuthInteractionService>,
+                double.clone() as Arc<dyn CredentialSetupService>,
+                double.clone() as Arc<dyn CredentialAccountService>,
+                double.clone() as Arc<dyn AuthProviderClient>,
+                double.clone() as Arc<dyn SecretCleanupService>,
+                Arc::new(NoopAuthContinuationDispatcher),
+            )
+            .with_flow_record_source(
+                Arc::new(AlwaysFailingFlowSource) as Arc<dyn AuthFlowRecordSource>
+            ),
+        );
+
+        let turn_scope = TurnScope::new_with_owner(
+            ironclaw_host_api::TenantId::new("test-tenant").expect("tenant"),
+            Some(ironclaw_host_api::AgentId::new("test-agent").expect("agent")),
+            None,
+            ironclaw_host_api::ThreadId::new("test-thread").expect("thread"),
+            Some(UserId::new("creator-user").expect("owner")),
+        );
+        let owner_user_id = UserId::new("creator-user").expect("owner");
+        let run_id = TurnRunId::new();
+
+        // A valid gate_ref so the validation step is not the rejection point —
+        // the error must come from the source lookup.
+        let result = services
+            .cancel_blocked_auth_flow(
+                &turn_scope,
+                &owner_user_id,
+                run_id,
+                "gate:source-error-test",
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(AuthProductError::BackendUnavailable)),
+            "BackendUnavailable from flow_record_source must propagate; got: {result:?}"
+        );
     }
 }

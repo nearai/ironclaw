@@ -15,13 +15,14 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
-    CapabilityResultWrite, EmptyUserProfileSource, HostIdentityContextBuildError,
-    HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputEnvelope,
-    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
-    HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
-    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
-    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
-    loop_driver_execution_extension_id, verify_product_live_cancellation_probe,
+    CapabilityResultWrite, CapabilityWriteResult, EmptyUserProfileSource,
+    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
+    HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
+    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelRequest,
+    HostManagedModelResponse, JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver,
+    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
+    RunCancellationHandle, loop_driver_execution_extension_id,
+    verify_product_live_cancellation_probe,
 };
 use ironclaw_reborn::{
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
@@ -53,7 +54,8 @@ use ironclaw_turns::{
         AgentLoopHostError, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
         InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
         LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext, NoOpBudgetAccountant,
-        NoOpPolicyGuard, PromptMode, ProviderToolCall, VisibleCapabilityRequest,
+        NoOpPolicyGuard, PromptMode, ProviderToolCall, RegisterProviderToolCallRequest,
+        VisibleCapabilityRequest,
     },
 };
 
@@ -65,7 +67,7 @@ async fn write_capability_result_for_test(
     output: serde_json::Value,
 ) -> Result<LoopResultRef, AgentLoopHostError> {
     let capability_id = capability_id(capability);
-    let (result_ref, _byte_len) = io
+    let CapabilityWriteResult { result_ref, .. } = io
         .write_capability_result(CapabilityResultWrite {
             run_context,
             input_ref,
@@ -149,7 +151,7 @@ async fn capability_io_write_capability_result_returns_serialized_payload_byte_l
     let expected_len = serde_json::to_vec(&output).expect("serialize").len() as u64;
     let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
 
-    let (_, byte_len) = io
+    let CapabilityWriteResult { byte_len, .. } = io
         .write_capability_result(CapabilityResultWrite {
             run_context: &run_context,
             input_ref: &input_ref,
@@ -402,7 +404,7 @@ async fn visible_capability_request_preserves_custom_provider_trust_decision() {
 }
 
 #[tokio::test]
-async fn local_dev_adapter_invokes_builtin_echo_through_host_runtime_port() {
+async fn local_dev_adapter_gates_builtin_echo_when_global_auto_approve_is_off() {
     let root = tempfile::tempdir().unwrap();
     let services = build_reborn_services(RebornBuildInput::local_dev(
         "builtin-echo-owner",
@@ -466,6 +468,7 @@ async fn local_dev_adapter_invokes_builtin_echo_through_host_runtime_port() {
 
     let outcome = capability_port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: capability_id.clone(),
             input_ref,
@@ -474,14 +477,16 @@ async fn local_dev_adapter_invokes_builtin_echo_through_host_runtime_port() {
         })
         .await
         .unwrap();
-    let CapabilityOutcome::Completed(completed) = outcome else {
-        panic!("expected completed builtin echo outcome, got {outcome:?}");
+    let CapabilityOutcome::ApprovalRequired {
+        approval_resume: Some(resume),
+        ..
+    } = outcome
+    else {
+        panic!("expected builtin echo approval gate, got {outcome:?}");
     };
-    assert_eq!(completed.safe_summary, "capability completed");
     assert_eq!(
-        io.result_for_ref(&run_context, &completed.result_ref)
-            .unwrap(),
-        serde_json::json!("hello product live")
+        resume.input,
+        serde_json::json!({ "message": "hello product live" })
     );
 }
 
@@ -582,6 +587,7 @@ async fn local_dev_adapter_invokes_builtin_shell_through_product_live_surface() 
 
     let outcome = capability_port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: capability_id.clone(),
             input_ref,
@@ -612,6 +618,12 @@ async fn local_dev_adapter_invokes_extension_scoped_grants_with_loop_driver_prin
     .await
     .unwrap();
     let run_context = loop_run_context("extension-grant").await;
+    enable_global_auto_approve_for_run(
+        &services,
+        &run_context,
+        UserId::new("user-extension-grant").unwrap(),
+    )
+    .await;
     let io = Arc::new(ProductLiveCapabilityIo::default());
     let input_ref = io
         .stage_input(
@@ -669,6 +681,7 @@ async fn local_dev_adapter_invokes_extension_scoped_grants_with_loop_driver_prin
 
     let outcome = capability_port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
             input_ref,
@@ -697,6 +710,12 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
     .await
     .unwrap();
     let run_context = loop_run_context("provider-tool").await;
+    enable_global_auto_approve_for_run(
+        &services,
+        &run_context,
+        UserId::new("user-provider-tool").unwrap(),
+    )
+    .await;
     let io = Arc::new(ProductLiveCapabilityIo::default());
     let capability_id = capability_id(ECHO_CAPABILITY_ID);
     let adapters = ProductLivePlannedRuntimeAdapters::from_services(
@@ -762,7 +781,9 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
         signature: Some("sig-provider-tool".to_string()),
     };
     let candidate = capability_port
-        .register_provider_tool_call(provider_tool_call.clone())
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+            provider_tool_call.clone(),
+        ))
         .await
         .unwrap();
 
@@ -786,7 +807,7 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
         .await
         .unwrap();
     let other_candidate = other_capability_port
-        .register_provider_tool_call(provider_tool_call)
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call))
         .await
         .unwrap();
     assert_ne!(
@@ -800,6 +821,7 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
 
     let outcome = capability_port
         .invoke_capability(CapabilityInvocation {
+            activity_id: candidate.activity_id,
             surface_version: candidate.surface_version,
             capability_id,
             input_ref: candidate.input_ref,
@@ -989,6 +1011,12 @@ async fn local_dev_adapter_invokes_read_file_with_configured_mounts() {
             .await
             .unwrap();
     let run_context = loop_run_context("read-file").await;
+    enable_global_auto_approve_for_run(
+        &services,
+        &run_context,
+        UserId::new("user-read-file").unwrap(),
+    )
+    .await;
     let io = Arc::new(ProductLiveCapabilityIo::default());
     let input_ref = io
         .stage_input(
@@ -1041,6 +1069,7 @@ async fn local_dev_adapter_invokes_read_file_with_configured_mounts() {
 
     let outcome = capability_port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
             input_ref,
@@ -1313,6 +1342,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         hook_security_audit_sink: None,
         turn_event_sink: None,
         communication_context_provider: None,
+        scheduler_wake_wiring: None,
     })
     .expect("adapter bundle should satisfy the product-live readiness gate");
 
@@ -1487,6 +1517,30 @@ impl ProductLiveCapabilityAuthorityResolver for RecordingAuthorityResolver {
             EffectiveTrustClass::user_trusted(),
         ))
     }
+}
+
+// The Tools-settings global auto-approve switch is authoritative for
+// first-party tool dispatch; enabling it for the dispatch `(tenant,
+// user)` lets a scripted call exercise the dispatch path instead of stopping
+// at the per-tool approval gate.
+async fn enable_global_auto_approve_for_run(
+    services: &RebornServices,
+    run_context: &LoopRunContext,
+    user_id: UserId,
+) {
+    let store = services
+        .local_dev_auto_approve_settings_for_test()
+        .expect("local-dev exposes auto-approve settings for test");
+    let mut scope = run_context.scope.to_resource_scope();
+    scope.user_id = user_id;
+    store
+        .set(ironclaw_approvals::AutoApproveSettingInput {
+            updated_by: Principal::User(scope.user_id.clone()),
+            scope,
+            enabled: true,
+        })
+        .await
+        .expect("enable global auto-approve for product-live dispatch");
 }
 
 async fn loop_run_context(label: &str) -> LoopRunContext {
@@ -1707,8 +1761,11 @@ impl LoopCapabilityResultWriter for UnusedCapabilityIo {
     async fn write_capability_result(
         &self,
         _write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
-        Ok((LoopResultRef::new("result:adapter-test").unwrap(), 0))
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+        Ok(CapabilityWriteResult::without_output_digest(
+            LoopResultRef::new("result:adapter-test").unwrap(),
+            0,
+        ))
     }
 }
 

@@ -307,7 +307,7 @@ impl LifecycleProductAction {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LifecycleProductPayload {
     ExtensionSearch {
-        extensions: Vec<LifecycleExtensionSummary>,
+        extensions: Vec<LifecycleSearchExtensionSummary>,
         count: usize,
     },
     ExtensionList {
@@ -361,6 +361,14 @@ pub struct LifecycleExtensionSummary {
     pub credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onboarding: Option<LifecycleExtensionOnboarding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleSearchExtensionSummary {
+    #[serde(flatten)]
+    pub summary: LifecycleExtensionSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_phase: Option<LifecyclePhase>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

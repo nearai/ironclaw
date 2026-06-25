@@ -14,6 +14,7 @@ const ROUTE_ICONS = {
   automations: "calendar",
   missions: "flag",
   extensions: "plug",
+  logs: "list",
   settings: "settings",
   admin: "shield",
 };

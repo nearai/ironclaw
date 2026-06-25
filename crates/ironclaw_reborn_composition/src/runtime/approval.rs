@@ -13,6 +13,7 @@ use crate::local_dev_capability_policy::{
     LocalDevApprovalPolicyAction, LocalDevCapabilityPolicy, LocalDevCapabilityPolicyError,
     local_dev_one_shot_lease_approval,
 };
+use crate::outbound_delivery_capability_surface::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID;
 
 use super::local_dev::extension_surface::LocalDevExtensionSurfaceSource;
 
@@ -22,6 +23,7 @@ pub(super) struct LocalDevApprovalLeaseTermsProvider {
     workspace_mounts: MountView,
     skill_mounts: MountView,
     memory_mounts: MountView,
+    system_extensions_lifecycle_mounts: MountView,
     extension_surface_source: LocalDevExtensionSurfaceSource,
 }
 
@@ -32,6 +34,7 @@ impl LocalDevApprovalLeaseTermsProvider {
         workspace_mounts: MountView,
         skill_mounts: MountView,
         memory_mounts: MountView,
+        system_extensions_lifecycle_mounts: MountView,
         extension_surface_source: LocalDevExtensionSurfaceSource,
     ) -> Self {
         Self {
@@ -40,6 +43,7 @@ impl LocalDevApprovalLeaseTermsProvider {
             workspace_mounts,
             skill_mounts,
             memory_mounts,
+            system_extensions_lifecycle_mounts,
             extension_surface_source,
         }
     }
@@ -143,6 +147,7 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
             &self.workspace_mounts,
             &self.skill_mounts,
             &self.memory_mounts,
+            &self.system_extensions_lifecycle_mounts,
         ) {
             Ok(approval) => Ok(approval),
             Err(LocalDevCapabilityPolicyError::MissingGrant { .. }) => {
@@ -170,6 +175,25 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
             return Err(ProductWorkflowError::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
             });
+        }
+        if action.capability_id().as_str() == OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID {
+            match self.policy.lease_approval_for(
+                action,
+                &self.workspace_mounts,
+                &self.skill_mounts,
+                &self.memory_mounts,
+                &self.system_extensions_lifecycle_mounts,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(LocalDevCapabilityPolicyError::MissingGrant { .. }) => {}
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        "local-dev persistent approval terms are unavailable"
+                    );
+                    return Err(lease_terms_unavailable());
+                }
+            }
         }
         if self
             .active_extension_persistent_approval_allowed(action)
@@ -229,6 +253,7 @@ mod tests {
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
             Arc::new(local_dev_capability_policy().expect("policy parses")),
             Arc::new(ExtensionRegistry::new()),
+            MountView::default(),
             MountView::default(),
             MountView::default(),
             MountView::default(),
@@ -301,6 +326,7 @@ mod tests {
             MountView::default(),
             MountView::default(),
             MountView::default(),
+            MountView::default(),
             source,
         );
         let request_id = ApprovalRequestId::new();
@@ -351,6 +377,7 @@ mod tests {
             MountView::default(),
             MountView::default(),
             MountView::default(),
+            MountView::default(),
             source,
         );
         let gate = approval_gate_record(
@@ -388,6 +415,7 @@ mod tests {
             MountView::default(),
             MountView::default(),
             MountView::default(),
+            MountView::default(),
             source,
         );
         let gate = approval_gate_record(
@@ -403,6 +431,35 @@ mod tests {
             .persistent_approval_allowed(&gate)
             .await
             .expect("active extension default ask should allow explicit persistent approval");
+    }
+
+    #[tokio::test]
+    async fn outbound_delivery_target_set_allows_persistent_approval() {
+        let capability =
+            CapabilityId::new(OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID).expect("capability id");
+        let caller = ExtensionId::new("loop-driver").expect("caller id");
+        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
+            Arc::new(local_dev_capability_policy().expect("policy parses")),
+            Arc::new(ExtensionRegistry::new()),
+            MountView::default(),
+            MountView::default(),
+            MountView::default(),
+            MountView::default(),
+            LocalDevExtensionSurfaceSource::default(),
+        );
+        let gate = approval_gate_record(
+            ApprovalRequestId::new(),
+            Principal::Extension(caller),
+            Action::Dispatch {
+                capability,
+                estimated_resources: ResourceEstimate::default(),
+            },
+        );
+
+        terms_provider
+            .persistent_approval_allowed(&gate)
+            .await
+            .expect("outbound delivery target set should allow persistent approval");
     }
 
     #[tokio::test]
@@ -422,6 +479,7 @@ mod tests {
         let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
             Arc::new(local_dev_capability_policy().expect("policy parses")),
             Arc::new(ExtensionRegistry::new()),
+            MountView::default(),
             MountView::default(),
             MountView::default(),
             MountView::default(),

@@ -28,6 +28,10 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
+use ironclaw_reborn::runtime::{
+    DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
+    DEFAULT_TURN_RUNNER_WORKER_COUNT,
+};
 use ironclaw_reborn_config::BudgetDefaults;
 #[cfg(feature = "root-llm-provider")]
 use ironclaw_reborn_config::RebornBootConfig;
@@ -197,6 +201,17 @@ impl ResolvedRebornLlm {
 pub struct TurnRunnerSettings {
     pub heartbeat_interval: Duration,
     pub poll_interval: Duration,
+    /// Number of concurrent turn-runner worker tasks.
+    pub worker_count: std::num::NonZeroUsize,
+    /// Max runs in `TurnStatus::Running` per (tenant_id, owner user_id).
+    /// `None` = unlimited. Owner-less / actor-fallback runs are never counted.
+    pub max_concurrent_runs_per_user: Option<std::num::NonZeroU32>,
+    /// Max runs in `TurnStatus::Running` for `ScheduledTrigger` origin.
+    /// `None` = unlimited.
+    pub max_concurrent_trigger_runs: Option<std::num::NonZeroU32>,
+    /// Max runs in `TurnStatus::Running` for `Inbound` or `WebUi` origin.
+    /// `None` = unlimited.
+    pub max_concurrent_conversation_runs: Option<std::num::NonZeroU32>,
 }
 
 impl Default for TurnRunnerSettings {
@@ -204,6 +219,11 @@ impl Default for TurnRunnerSettings {
         Self {
             heartbeat_interval: DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
             poll_interval: DEFAULT_TURN_RUNNER_POLL_INTERVAL,
+            worker_count: DEFAULT_TURN_RUNNER_WORKER_COUNT,
+            max_concurrent_runs_per_user: Some(DEFAULT_MAX_CONCURRENT_RUNS_PER_USER),
+            max_concurrent_trigger_runs: Some(DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS),
+            // `None` = conversations may use every slot not held by triggers.
+            max_concurrent_conversation_runs: None,
         }
     }
 }
@@ -220,6 +240,74 @@ impl Default for PollSettings {
         Self {
             interval: Duration::from_millis(100),
             max_total: Duration::from_secs(180),
+        }
+    }
+}
+
+/// Configuration for the background Google OAuth credential keepalive worker.
+///
+/// The worker handles background keepalive refreshes (B2/B3): it periodically
+/// refreshes Google OAuth accounts that are idle (by `updated_at`) to prevent
+/// the 7-day refresh-token death window from expiring during periods of
+/// inactivity.
+///
+/// The inline access-token expiry gate is controlled by the fixed
+/// `DEFAULT_ACCESS_REFRESH_MARGIN` constant in
+/// `product_auth_runtime_credentials.rs`; it is not configurable here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialRefreshSettings {
+    /// Whether the worker is enabled. Defaults to `false`; use
+    /// `CredentialRefreshSettings::enabled()` to turn on.
+    pub enabled: bool,
+    /// How often the worker wakes and sweeps for idle accounts.
+    ///
+    /// Default: 6 hours.
+    pub interval: Duration,
+    /// How old (by `updated_at`) an account must be before it is considered
+    /// idle and eligible for a proactive refresh.
+    ///
+    /// Default: 2 days — well under the 7-day refresh-token idle-death window,
+    /// with headroom for downtime or deployment gaps.
+    pub idle_threshold: Duration,
+    /// Maximum random jitter applied once at worker startup before the first
+    /// tick. Spreading startup jitter across the multi-process deployment
+    /// prevents a thundering herd at first boot. The advisory-lock wrapper
+    /// (A4) serializes concurrent refreshes, but jitter reduces unnecessary
+    /// contention. Default: `Duration::ZERO`.
+    pub startup_jitter_max: Duration,
+    /// Maximum random jitter appended to each inter-tick sleep.
+    /// Default: `Duration::ZERO`.
+    pub tick_jitter_max: Duration,
+    /// Maximum number of candidate accounts processed per tick. Bounds the
+    /// work done in a single sweep to avoid a large initial backfill
+    /// overloading the token endpoint.
+    ///
+    /// Default: 5.
+    pub max_per_tick: usize,
+}
+
+impl Default for CredentialRefreshSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval: Duration::from_secs(6 * 3600),
+            idle_threshold: Duration::from_secs(2 * 24 * 3600),
+            startup_jitter_max: Duration::ZERO,
+            tick_jitter_max: Duration::ZERO,
+            max_per_tick: 5,
+        }
+    }
+}
+
+impl CredentialRefreshSettings {
+    /// Return a settings value with the worker enabled and all other fields at
+    /// their defaults.
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            // 5-minute spread prevents fleet-wide sweep storms on simultaneous startup.
+            startup_jitter_max: Duration::from_secs(300),
+            ..Self::default()
         }
     }
 }
@@ -297,6 +385,7 @@ pub struct RebornRuntimeInput {
     pub boot: Option<RebornBootConfig>,
     pub runner: TurnRunnerSettings,
     pub trigger_poller: TriggerPollerSettings,
+    pub credential_refresh: CredentialRefreshSettings,
     pub trigger_fire_access_checker: Option<Arc<dyn TriggerFireAccessChecker>>,
     pub poll: PollSettings,
     pub identity: RebornRuntimeIdentity,
@@ -354,6 +443,7 @@ impl RebornRuntimeInput {
             boot: None,
             runner: TurnRunnerSettings::default(),
             trigger_poller: TriggerPollerSettings::default(),
+            credential_refresh: CredentialRefreshSettings::default(),
             trigger_fire_access_checker: None,
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
@@ -461,6 +551,14 @@ impl RebornRuntimeInput {
 
     pub fn with_trigger_poller_settings(mut self, trigger_poller: TriggerPollerSettings) -> Self {
         self.trigger_poller = trigger_poller;
+        self
+    }
+
+    pub fn with_credential_refresh_settings(
+        mut self,
+        credential_refresh: CredentialRefreshSettings,
+    ) -> Self {
+        self.credential_refresh = credential_refresh;
         self
     }
 

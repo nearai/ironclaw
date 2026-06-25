@@ -214,6 +214,9 @@ TABS = ["chat", "memory", "jobs", "routines", "settings"]
 AUTH_TOKEN = "e2e-test-token"
 OWNER_SCOPE_ID = "e2e-owner-scope"
 HTTP_WEBHOOK_SECRET = "e2e-http-webhook-secret"
+EMULATE_GOOGLE_BEARER = "mock-refreshed-access-token"
+EMULATE_SLACK_BEARER = "emulate-slack-token"
+EMULATE_GITHUB_BEARER = "ghp_emulate_github_token"
 
 # Bearer token for the Reborn WebUI v2 surface (`ironclaw-reborn serve`).
 # Must be >= 32 bytes: `serve` also uses this value as the SSO session-signing
@@ -226,9 +229,15 @@ REBORN_V2_AUTH_TOKEN = "e2e-reborn-v2-bearer-token-0123456789abcdef"
 SEL_V2 = {
     "root":           "#v2-root",          # SPA mount point (index.html)
     "login_token":    "#v2-token",         # token input on the login/connect view
+    "sidebar":        "#gateway-sidebar",  # app navigation sidebar
+    "sidebar_toggle": "button[aria-label='Toggle sidebar']",
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
+    "typing_indicator": "[data-testid='typing-indicator']",
     "msg_user":       "[data-testid='msg-user']",       # user message bubble
     "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
+    "msg_system":     "[data-testid='msg-system']",     # system notice bubble
+    "approval_card":  "[data-testid='approval-card']",  # approval gate card
+    "busy_gate_notice": "[data-testid='busy-gate-notice']",  # gate busy notice
     # Download chip for an agent-produced workspace file; `{path}` selects one.
     # Clicking a chip opens the shared attachment preview modal, whose footer
     # carries the Download action.

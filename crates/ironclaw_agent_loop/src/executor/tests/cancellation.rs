@@ -595,6 +595,7 @@ async fn cancellation_after_capability_batch_preserves_completed_result() {
                 progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
                 terminate_hint: true,
                 byte_len: 0,
+                output_digest: None,
             })],
             stopped_on_suspension: false,
         }])
