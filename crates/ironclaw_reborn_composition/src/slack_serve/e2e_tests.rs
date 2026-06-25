@@ -1827,6 +1827,7 @@ fn turn_state(
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref,
+        blocked_activity_id: None,
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor::default(),

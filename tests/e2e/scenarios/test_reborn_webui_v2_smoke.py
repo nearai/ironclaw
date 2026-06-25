@@ -353,6 +353,56 @@ async def test_reborn_v2_ui_send_renders_reply(reborn_v2_page, reborn_v2_server)
     )
 
 
+async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v2_page):
+    """The composer stays editable while the current assistant run is still active."""
+    composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
+    await composer.fill("editable composer slow response")
+    await composer.press("Enter")
+
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+        "editable composer slow response", timeout=15000
+    )
+    await expect(
+        reborn_v2_page.locator(SEL_V2["typing_indicator"])
+    ).to_be_visible(timeout=15000)
+
+    await expect(composer).to_be_enabled()
+    await composer.fill("draft while the reply is still running")
+    await expect(composer).to_have_value("draft while the reply is still running")
+
+    await composer.press("Enter")
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
+
+
+async def test_reborn_v2_desktop_sidebar_can_collapse_and_persist(reborn_v2_page):
+    """Desktop users can collapse the sidebar, and the preference survives reload."""
+    sidebar = reborn_v2_page.locator(SEL_V2["sidebar"])
+    toggle = reborn_v2_page.locator(SEL_V2["sidebar_toggle"])
+
+    await expect(toggle).to_be_visible(timeout=15000)
+    await expect(sidebar).to_be_visible(timeout=15000)
+
+    await toggle.click()
+    await expect(sidebar).to_be_hidden(timeout=5000)
+    await reborn_v2_page.wait_for_function(
+        "() => localStorage.getItem('ironclaw:v2-sidebar-open') === 'false'",
+        timeout=5000,
+    )
+
+    await reborn_v2_page.reload()
+    await expect(reborn_v2_page.locator(SEL_V2["chat_composer"])).to_be_visible(
+        timeout=15000
+    )
+    await expect(sidebar).to_be_hidden(timeout=5000)
+
+    await toggle.click()
+    await expect(sidebar).to_be_visible(timeout=5000)
+    await reborn_v2_page.wait_for_function(
+        "() => localStorage.getItem('ironclaw:v2-sidebar-open') === 'true'",
+        timeout=5000,
+    )
+
+
 async def test_reborn_v2_messages_omit_identity_labels(reborn_v2_page):
     """User and assistant messages render content without persistent identity labels."""
     composer = reborn_v2_page.locator(SEL_V2["chat_composer"])

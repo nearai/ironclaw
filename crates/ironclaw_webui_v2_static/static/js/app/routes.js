@@ -21,6 +21,7 @@ export const primaryRoutes = [
   { id: "automations", path: "/automations", labelKey: "nav.automations" },
   { id: "missions", path: "/missions", labelKey: "nav.missions", hidden: true },
   { id: "extensions", path: "/extensions", labelKey: "nav.extensions" },
+  { id: "logs", path: "/logs", labelKey: "nav.logs", hidden: true },
   { id: "settings", path: "/settings", labelKey: "nav.settings", hidden: false },
   { id: "admin", path: "/admin", labelKey: "nav.admin", hidden: true },
 ];
@@ -32,7 +33,7 @@ export const routeSectionDefs = [
   },
   {
     labelKey: "nav.sectionSystem",
-    ids: ["extensions", "settings", "admin"],
+    ids: ["extensions", "logs", "settings", "admin"],
   },
 ];
 
@@ -44,7 +45,7 @@ export const SETTINGS_SUB_ROUTES = [
   // { id: "agent", labelKey: "settings.agent", icon: "bolt" },
   // { id: "channels", labelKey: "settings.channels", icon: "send" },
   // { id: "networking", labelKey: "settings.networking", icon: "pulse" },
-  // { id: "tools", labelKey: "settings.tools", icon: "tool" },
+  { id: "tools", labelKey: "settings.tools", icon: "tool" },
   { id: "skills", labelKey: "settings.skills", icon: "file" },
   // Trace Commons is un-hidden: its api lib calls the real v2
   // `/api/webchat/v2/traces/credit` endpoint.

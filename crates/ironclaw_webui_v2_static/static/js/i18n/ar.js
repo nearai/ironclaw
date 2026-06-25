@@ -133,6 +133,7 @@ registerPack("ar", {
   "tool.tabParameters": "المعلمات",
   "tool.tabResult": "النتيجة",
   "tool.tabError": "خطأ",
+  "tool.tabDeclined": "مرفوض",
   "tool.noDetail": "لا توجد تفاصيل إضافية.",
   "tool.runFile": "استكشاف ملف {n}",
   "tool.runFiles": "استكشاف ملفات {n}",
@@ -144,6 +145,7 @@ registerPack("ar", {
   "tool.runOthers": "أدوات {n}",
   "tool.exitOk": "نجحت",
   "tool.exitError": "فشلت",
+  "tool.exitDeclined": "مرفوض",
   "tool.exitRunning": "قيد التشغيل...",
   "tool.riskRead": "القراءة",
   "tool.riskWrite": "كتابة الملفات",
@@ -366,8 +368,6 @@ registerPack("ar", {
   "settings.field.maxToolIterationsDesc": "حد استدعاءات الأدوات في الدور",
   "settings.field.planning": "التخطيط",
   "settings.field.planningDesc": "تمكين التخطيط متعدد الخطوات قبل التنفيذ",
-  "settings.field.autoApproveTools": "الموافقة التلقائية على الأدوات",
-  "settings.field.autoApproveToolsDesc": "تخطي الموافقة لكل استدعاءات الأدوات",
   "settings.field.timezone": "المنطقة الزمنية",
   "settings.field.timezoneDesc": "منطقة IANA للمهام المجدولة",
   "settings.field.sessionIdleTimeout": "مهلة خمول الجلسة",
@@ -472,11 +472,18 @@ registerPack("ar", {
   "channels.slackAccessError": "فشل تحديث قناة Slack.",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "السماح دائمًا بالأدوات المؤهلة",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "ينطبق فقط على الأدوات المضبوطة على \"اتباع الإعداد العام\". إعدادات كل أداة تتجاوز هذا المفتاح؛ وبوابات الموافقة ذات الحد الصارم ستظل تطلب الموافقة.",
   "tools.permissions": "أذونات الأدوات",
   "tools.alwaysAllow": "السماح دائمًا",
   "tools.askEachTime": "السؤال كل مرة",
   "tools.disabled": "معطّل",
   "tools.default": "افتراضي",
+  "tools.followDefault": "اتباع الإعداد العام",
+  "tools.sourceDefault": "default permission",
+  "tools.sourceGlobal": "global setting",
+  "tools.sourceOverride": "per-tool override",
   "tools.saved": "تم الحفظ",
   "tools.permissionFor": "إذن لـ {name}",
   "tools.filterPlaceholder": "تصفية الأدوات…",
@@ -511,6 +518,20 @@ registerPack("ar", {
   "skills.removed": "تمت إزالة المهارة \"{name}\"",
   "skills.activatesOn": "يتم تفعيلها عند",
   "skills.imported": "المستوردة",
+  "skills.defaultAutoActivationEnabled": "تفعيل المهارات التلقائي الافتراضي مفعّل",
+  "skills.defaultAutoActivationDisabled": "تفعيل المهارات التلقائي الافتراضي معطّل",
+  "skills.defaultAutoActivationOnDesc":
+    "تتفعّل المهارات تلقائيًا بالكلمات المفتاحية عند تطابق الطلبات. أوقفه لطلب /name صريح.",
+  "skills.defaultAutoActivationOffDesc":
+    "لا تعمل المهارات إلا عند كتابة /name. فعّله للسماح بالتفعيل التلقائي بالكلمات المفتاحية.",
+  "skills.defaultAutoActivationOnButton": "الافتراضي: مفعّل",
+  "skills.defaultAutoActivationOffButton": "الافتراضي: معطّل",
+  "skills.autoActivateOnTitle":
+    "التفعيل التلقائي مفعّل — يعمل عند تطابق الطلبات. انقر لجعله صريحًا فقط عبر /name.",
+  "skills.autoActivateOffTitle":
+    "صريح فقط — يعمل فقط عند كتابة /name. انقر لتفعيل التشغيل التلقائي.",
+  "skills.autoActivateOnLabel": "التفعيل التلقائي: مفعّل",
+  "skills.autoActivateOffLabel": "التفعيل التلقائي: معطّل",
 
   // Settings — users tab
   "users.title": "المستخدمون ({count})",

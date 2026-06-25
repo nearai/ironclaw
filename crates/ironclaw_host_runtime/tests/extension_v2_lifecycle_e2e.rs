@@ -166,18 +166,27 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         "github.create_repo",
         "github.list_issues",
         "github.create_issue",
+        "github.update_issue",
+        "github.add_issue_labels",
+        "github.remove_issue_label",
+        "github.add_issue_assignees",
+        "github.remove_issue_assignees",
         "github.get_issue",
         "github.list_issue_comments",
         "github.create_issue_comment",
         "github.comment_issue",
         "github.list_pull_requests",
         "github.create_pull_request",
+        "github.update_pull_request",
         "github.get_pull_request",
         "github.get_pull_request_files",
         "github.create_pr_review",
         "github.list_pull_request_comments",
         "github.reply_pull_request_comment",
         "github.get_pull_request_reviews",
+        "github.list_pull_request_review_threads",
+        "github.resolve_review_thread",
+        "github.unresolve_review_thread",
         "github.get_combined_status",
         "github.merge_pull_request",
         "github.get_authenticated_user",
@@ -195,10 +204,14 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         "github.create_release",
         "github.trigger_workflow",
         "github.get_workflow_runs",
+        "github.get_workflow_run_jobs",
+        "github.get_workflow_run_artifacts",
+        "github.rerun_failed_workflow_run_jobs",
+        "github.rerun_workflow_job",
         "github.fork_repo",
         "github.handle_webhook",
     ];
-    assert_eq!(expected_github_capability_ids.len(), 35);
+    assert_eq!(expected_github_capability_ids.len(), 48);
     assert_eq!(
         package
             .capabilities
@@ -318,7 +331,7 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
             .as_slice(),
         expected_github_capability_ids
     );
-    assert_eq!(hot_catalog.capabilities.len(), 35);
+    assert_eq!(hot_catalog.capabilities.len(), 48);
 
     let search = hot_catalog
         .get(&CapabilityId::new("github.search_issues").unwrap())

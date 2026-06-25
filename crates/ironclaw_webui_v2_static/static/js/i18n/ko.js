@@ -133,6 +133,7 @@ registerPack("ko", {
   "tool.tabParameters": "매개 변수",
   "tool.tabResult": "결과",
   "tool.tabError": "Error",
+  "tool.tabDeclined": "거부됨",
   "tool.noDetail": "추가 세부 정보가 없습니다.",
   "tool.runFile": "탐색된 {n} 파일",
   "tool.runFiles": "탐색된 {n} 파일",
@@ -144,6 +145,7 @@ registerPack("ko", {
   "tool.runOthers": "{n} 도구",
   "tool.exitOk": "성공",
   "tool.exitError": "실패",
+  "tool.exitDeclined": "거부됨",
   "tool.exitRunning": "실행…",
   "tool.riskRead": "읽기",
   "tool.riskWrite": "파일 쓰기",
@@ -366,8 +368,6 @@ registerPack("ko", {
   "settings.field.maxToolIterationsDesc": "턴당 도구 호출 제한",
   "settings.field.planning": "계획",
   "settings.field.planningDesc": "실행 전 다단계 계획 활성화",
-  "settings.field.autoApproveTools": "도구 자동 승인",
-  "settings.field.autoApproveToolsDesc": "모든 도구 호출의 승인 건너뛰기",
   "settings.field.timezone": "시간대",
   "settings.field.timezoneDesc": "예약 작업의 IANA 시간대",
   "settings.field.sessionIdleTimeout": "세션 유휴 시간 제한",
@@ -472,11 +472,18 @@ registerPack("ko", {
   "channels.slackAccessError": "Slack 채널 업데이트에 실패했습니다.",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "대상 도구 항상 허용",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "“전역 설정 따르기”로 설정된 도구에만 적용됩니다. 도구별 설정이 이 스위치를 덮어쓰며, 하드 플로어 승인 게이트는 계속 승인을 요청합니다.",
   "tools.permissions": "도구 권한",
   "tools.alwaysAllow": "항상 허용",
   "tools.askEachTime": "매번 확인",
   "tools.disabled": "비활성화",
   "tools.default": "기본값",
+  "tools.followDefault": "전역 설정 따르기",
+  "tools.sourceDefault": "default permission",
+  "tools.sourceGlobal": "global setting",
+  "tools.sourceOverride": "per-tool override",
   "tools.saved": "저장됨",
   "tools.permissionFor": "{name} 권한",
   "tools.filterPlaceholder": "도구 필터링…",
@@ -511,6 +518,20 @@ registerPack("ko", {
   "skills.removed": "제거된 스킬 \"{name}\"",
   "skills.activatesOn": "활성화",
   "skills.imported": "가져온",
+  "skills.defaultAutoActivationEnabled": "기본 스킬 자동 활성화 켜짐",
+  "skills.defaultAutoActivationDisabled": "기본 스킬 자동 활성화 꺼짐",
+  "skills.defaultAutoActivationOnDesc":
+    "일치하는 요청에서 키워드로 스킬이 자동 활성화됩니다. 명시적인 /name을 요구하려면 끄세요.",
+  "skills.defaultAutoActivationOffDesc":
+    "스킬은 /name을 입력할 때만 실행됩니다. 키워드 자동 활성화를 허용하려면 켜세요.",
+  "skills.defaultAutoActivationOnButton": "기본값: 켜짐",
+  "skills.defaultAutoActivationOffButton": "기본값: 꺼짐",
+  "skills.autoActivateOnTitle":
+    "자동 활성화 켜짐 — 일치하는 요청에서 실행됩니다. 클릭하면 /name 명시 실행만 허용합니다.",
+  "skills.autoActivateOffTitle":
+    "명시 실행만 — /name을 입력할 때만 실행됩니다. 클릭하면 자동 활성화를 켭니다.",
+  "skills.autoActivateOnLabel": "자동 활성화: 켜짐",
+  "skills.autoActivateOffLabel": "자동 활성화: 꺼짐",
 
   // Settings — users tab
   "users.title": "사용자 ({count})",

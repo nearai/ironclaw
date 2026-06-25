@@ -133,6 +133,7 @@ registerPack("uk", {
   "tool.tabParameters": "Параметри",
   "tool.tabResult": "Результат",
   "tool.tabError": "Error",
+  "tool.tabDeclined": "Відхилено",
   "tool.noDetail": "Без додаткових деталей.",
   "tool.runFile": "досліджено файл {n}",
   "tool.runFiles": "досліджено файли {n}",
@@ -144,6 +145,7 @@ registerPack("uk", {
   "tool.runOthers": "інструменти {n}",
   "tool.exitOk": "успішно",
   "tool.exitError": "не вдалося",
+  "tool.exitDeclined": "відхилено",
   "tool.exitRunning": "працює…",
   "tool.riskRead": "читає",
   "tool.riskWrite": "записує файли",
@@ -366,8 +368,6 @@ registerPack("uk", {
   "settings.field.maxToolIterationsDesc": "Ліміт викликів інструментів за хід",
   "settings.field.planning": "Планування",
   "settings.field.planningDesc": "Увімкнути багатокрокове планування перед виконанням",
-  "settings.field.autoApproveTools": "Автозатвердження інструментів",
-  "settings.field.autoApproveToolsDesc": "Пропускати затвердження для всіх викликів інструментів",
   "settings.field.timezone": "Часовий пояс",
   "settings.field.timezoneDesc": "IANA часовий пояс для запланованих робіт",
   "settings.field.sessionIdleTimeout": "Таймаут неактивності сесії",
@@ -472,11 +472,18 @@ registerPack("uk", {
   "channels.slackAccessError": "Помилка оновлення каналу Slack.",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "Завжди дозволяти придатні інструменти",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "Застосовується лише до інструментів із режимом «Дотримуватися глобальних». Налаштування окремого інструмента перекривають цей перемикач; жорсткі межі схвалення все одно вимагатимуть підтвердження.",
   "tools.permissions": "Дозволи інструментів",
   "tools.alwaysAllow": "Завжди дозволяти",
   "tools.askEachTime": "Питати щоразу",
   "tools.disabled": "Вимкнено",
   "tools.default": "за замовчуванням",
+  "tools.followDefault": "Дотримуватися глобальних",
+  "tools.sourceDefault": "default permission",
+  "tools.sourceGlobal": "global setting",
+  "tools.sourceOverride": "per-tool override",
   "tools.saved": "збережено",
   "tools.permissionFor": "Дозвіл для {name}",
   "tools.filterPlaceholder": "Фільтрувати інструменти…",
@@ -511,6 +518,20 @@ registerPack("uk", {
   "skills.removed": "Видалено навик \"{name}\"",
   "skills.activatesOn": "Активується вкл",
   "skills.imported": "імпортовано",
+  "skills.defaultAutoActivationEnabled": "Автоактивацію навичок за замовчуванням увімкнено",
+  "skills.defaultAutoActivationDisabled": "Автоактивацію навичок за замовчуванням вимкнено",
+  "skills.defaultAutoActivationOnDesc":
+    "Навички автоматично активуються за ключовими словами для відповідних запитів. Вимкніть, щоб вимагати явне /name.",
+  "skills.defaultAutoActivationOffDesc":
+    "Навички запускаються лише коли ви вводите /name. Увімкніть, щоб дозволити автоактивацію за ключовими словами.",
+  "skills.defaultAutoActivationOnButton": "За замовчуванням: увімкнено",
+  "skills.defaultAutoActivationOffButton": "За замовчуванням: вимкнено",
+  "skills.autoActivateOnTitle":
+    "Автоактивацію увімкнено — запускається для відповідних запитів. Натисніть, щоб вимагати /name.",
+  "skills.autoActivateOffTitle":
+    "Лише явно — запускається тільки коли ви вводите /name. Натисніть, щоб увімкнути автоактивацію.",
+  "skills.autoActivateOnLabel": "Автоактивація: увімкнено",
+  "skills.autoActivateOffLabel": "Автоактивація: вимкнено",
 
   // Settings — users tab
   "users.title": "Користувачі ({count})",

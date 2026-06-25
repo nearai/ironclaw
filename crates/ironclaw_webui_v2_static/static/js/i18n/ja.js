@@ -133,6 +133,7 @@ registerPack("ja", {
   "tool.tabParameters": "パラメーター",
   "tool.tabResult": "結果",
   "tool.tabError": "エラー",
+  "tool.tabDeclined": "拒否済み",
   "tool.noDetail": "追加の詳細なし。",
   "tool.runFile": "探索された {n} ファイル",
   "tool.runFiles": "探索された {n} ファイル",
@@ -144,6 +145,7 @@ registerPack("ja", {
   "tool.runOthers": "{n} ツール",
   "tool.exitOk": "成功",
   "tool.exitError": "失敗",
+  "tool.exitDeclined": "拒否済み",
   "tool.exitRunning": "実行中…",
   "tool.riskRead": "読み取り",
   "tool.riskWrite": "ファイルの書き込み",
@@ -366,8 +368,6 @@ registerPack("ja", {
   "settings.field.maxToolIterationsDesc": "1ターンあたりのツール呼び出し上限",
   "settings.field.planning": "プランニング",
   "settings.field.planningDesc": "実行前の多段プランニングを有効化",
-  "settings.field.autoApproveTools": "ツール自動承認",
-  "settings.field.autoApproveToolsDesc": "すべてのツール呼び出しを承認不要にする",
   "settings.field.timezone": "タイムゾーン",
   "settings.field.timezoneDesc": "スケジュール作業の IANA タイムゾーン",
   "settings.field.sessionIdleTimeout": "セッションアイドルタイムアウト",
@@ -472,11 +472,18 @@ registerPack("ja", {
   "channels.slackAccessError": "Slack チャネルの更新に失敗しました。",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "対象ツールを常に許可",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "「グローバルに従う」に設定されたツールにのみ適用されます。ツールごとの設定がこの切り替えより優先され、ハードフロアの承認ゲートでは引き続き承認が必要です。",
   "tools.permissions": "ツール権限",
   "tools.alwaysAllow": "常に許可",
   "tools.askEachTime": "毎回確認",
   "tools.disabled": "無効",
   "tools.default": "デフォルト",
+  "tools.followDefault": "グローバルに従う",
+  "tools.sourceDefault": "default permission",
+  "tools.sourceGlobal": "global setting",
+  "tools.sourceOverride": "per-tool override",
   "tools.saved": "保存済み",
   "tools.permissionFor": "{name} の権限",
   "tools.filterPlaceholder": "ツールをフィルタ…",
@@ -511,6 +518,20 @@ registerPack("ja", {
   "skills.removed": "スキル「{name}」を削除",
   "skills.activatesOn": "にアクティブ化します",
   "skills.imported": "輸入された",
+  "skills.defaultAutoActivationEnabled": "デフォルトのスキル自動有効化はオンです",
+  "skills.defaultAutoActivationDisabled": "デフォルトのスキル自動有効化はオフです",
+  "skills.defaultAutoActivationOnDesc":
+    "一致するリクエストではキーワードでスキルが自動有効化されます。明示的な /name を必須にするにはオフにします。",
+  "skills.defaultAutoActivationOffDesc":
+    "スキルは /name を入力したときだけ実行されます。キーワードで自動有効化するにはオンにします。",
+  "skills.defaultAutoActivationOnButton": "デフォルト: オン",
+  "skills.defaultAutoActivationOffButton": "デフォルト: オフ",
+  "skills.autoActivateOnTitle":
+    "自動有効化オン — 一致するリクエストで実行されます。クリックすると /name のみになります。",
+  "skills.autoActivateOffTitle":
+    "明示実行のみ — /name を入力したときだけ実行されます。クリックすると自動有効化します。",
+  "skills.autoActivateOnLabel": "自動有効化: オン",
+  "skills.autoActivateOffLabel": "自動有効化: オフ",
 
   // Settings — users tab
   "users.title": "ユーザー ({count})",

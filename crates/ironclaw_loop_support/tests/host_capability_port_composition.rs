@@ -29,7 +29,7 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInvocation,
         InMemoryLoopHostMilestoneSink, LoopCapabilityPort, LoopRunContext, ProviderToolCall,
-        VisibleCapabilityRequest,
+        RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     },
 };
 
@@ -179,7 +179,7 @@ async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_ove
         "message": "hello\nfrom provider\r\n\twith tab"
     });
     let candidate = port
-        .register_provider_tool_call(ProviderToolCall {
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
             provider_id: "provider".to_string(),
             provider_model_id: "model".to_string(),
             turn_id: Some("turn_1".to_string()),
@@ -189,7 +189,7 @@ async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_ove
             response_reasoning: None,
             reasoning: None,
             signature: None,
-        })
+        }))
         .await
         .expect("provider tool call should stage input");
 
@@ -213,6 +213,7 @@ async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_ove
     );
     let outcome = port
         .invoke_capability(CapabilityInvocation {
+            activity_id: candidate.activity_id,
             surface_version: candidate.surface_version,
             capability_id: candidate.capability_id,
             input_ref: candidate.input_ref,

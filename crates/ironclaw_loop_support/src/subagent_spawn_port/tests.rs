@@ -11,12 +11,14 @@ use ironclaw_threads::{
     UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunResponse, EventCursor, GetRunStateRequest,
+    AcceptedMessageRef, CancelRunResponse, CapabilityActivityId, EventCursor, GetRunStateRequest,
     InMemoryRunProfileResolver, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
     RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SpawnTreeReservation,
     SubmitTurnRequest, TurnId, TurnRunProfile, TurnRunRecord, TurnRunState, TurnStateStore,
     TurnStatus,
-    run_profile::{CapabilityResultMessage, CapabilitySurfaceVersion},
+    run_profile::{
+        CapabilityResultMessage, CapabilitySurfaceVersion, RegisterProviderToolCallRequest,
+    },
 };
 use serde_json::json;
 
@@ -195,7 +197,7 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         if *self.visible_calls.lock().unwrap() == 0 {
             return Err(AgentLoopHostError::new(
@@ -203,8 +205,9 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
                 "surface not primed",
             ));
         }
-        self.register_calls.lock().unwrap().push(tool_call);
+        self.register_calls.lock().unwrap().push(request.tool_call);
         Ok(CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             effective_capability_ids: vec![
@@ -274,9 +277,9 @@ impl LoopCapabilityPort for StrictSpawnAuthPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.register_calls.lock().unwrap().push(tool_call);
+        self.register_calls.lock().unwrap().push(request.tool_call);
         Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             "strict inner does not accept spawn provider tool names",
@@ -962,7 +965,15 @@ fn custom_tool_definition() -> ProviderToolDefinition {
 }
 
 fn invocation(capability_id: &str) -> CapabilityInvocation {
+    invocation_for_activity(capability_id, ironclaw_turns::CapabilityActivityId::new())
+}
+
+fn invocation_for_activity(
+    capability_id: &str,
+    activity_id: CapabilityActivityId,
+) -> CapabilityInvocation {
     CapabilityInvocation {
+        activity_id,
         surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
         capability_id: CapabilityId::new(capability_id).unwrap(),
         input_ref: input_ref(),
@@ -1034,6 +1045,7 @@ fn turn_record(run_context: &LoopRunContext, subagent_depth: u32) -> TurnRunReco
         resolved_model_route: None,
         checkpoint_id: None,
         gate_ref: None,
+        blocked_activity_id: None,
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(1),
@@ -1083,7 +1095,7 @@ async fn spawn_test_port(
         deps,
         Vec::new(),
     );
-    port.auth_input_refs.lock().unwrap().insert(input_ref());
+    authorize_spawn_input(&port);
     port
 }
 
@@ -1158,7 +1170,7 @@ fn spawn_test_port_with_codec_and_recorders(
         deps,
         Vec::new(),
     );
-    port.auth_input_refs.lock().unwrap().insert(input_ref());
+    authorize_spawn_input(&port);
     SpawnPortWithRecorders {
         port,
         child_runs,
@@ -1167,8 +1179,32 @@ fn spawn_test_port_with_codec_and_recorders(
     }
 }
 
+fn authorize_spawn_input(port: &SubagentSpawnCapabilityPort) -> CapabilityActivityId {
+    authorize_spawn_input_ref(port, input_ref())
+}
+
+fn authorize_spawn_input_ref(
+    port: &SubagentSpawnCapabilityPort,
+    input_ref: CapabilityInputRef,
+) -> CapabilityActivityId {
+    let activity_id = CapabilityActivityId::new();
+    port.register_test_spawn_authorization(input_ref, activity_id);
+    activity_id
+}
+
 async fn invoke_spawn(port: &SubagentSpawnCapabilityPort) -> CapabilityOutcome {
+    let activity_id = port
+        .test_spawn_authorization(&input_ref())
+        .unwrap_or_default();
+    invoke_spawn_for_activity(port, activity_id).await
+}
+
+async fn invoke_spawn_for_activity(
+    port: &SubagentSpawnCapabilityPort,
+    activity_id: CapabilityActivityId,
+) -> CapabilityOutcome {
     port.invoke_capability(CapabilityInvocation {
+        activity_id,
         surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
         capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         input_ref: input_ref(),
@@ -1503,7 +1539,9 @@ async fn spawn_provider_tool_call_is_registered_for_spawn_dispatch() {
         spawn_test_port_with_inner(context, inner.clone(), Arc::new(RegisteringSpawnInputCodec));
 
     let candidate = port
-        .register_provider_tool_call(spawn_provider_tool_call())
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+            spawn_provider_tool_call(),
+        ))
         .await
         .expect("provider tool call registration");
 
@@ -1512,14 +1550,156 @@ async fn spawn_provider_tool_call_is_registered_for_spawn_dispatch() {
         DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID
     );
     assert_eq!(candidate.input_ref.as_str(), "input:spawn-provider");
-    assert!(
-        port.auth_input_refs
-            .lock()
-            .unwrap()
-            .contains(&candidate.input_ref)
-    );
+    assert!(port.test_spawn_authorization_contains(&candidate.input_ref));
     assert_eq!(*inner.visible_calls.lock().unwrap(), 1);
     assert_eq!(inner.register_calls.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn spawn_provider_tool_call_registration_for_activity_uses_requested_activity() {
+    let context = test_run_context("spawn-register-for-activity").await;
+    let inner = Arc::new(SurfacePrimedSpawnAuthPort::default());
+    let port =
+        spawn_test_port_with_inner(context, inner.clone(), Arc::new(RegisteringSpawnInputCodec));
+    let activity_id = CapabilityActivityId::new();
+
+    let candidate = port
+        .register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
+            spawn_provider_tool_call(),
+            activity_id,
+        ))
+        .await
+        .expect("provider tool call registration");
+
+    assert_eq!(candidate.activity_id, activity_id);
+    assert_eq!(
+        candidate.capability_id.as_str(),
+        DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID
+    );
+    assert_eq!(candidate.input_ref.as_str(), "input:spawn-provider");
+    assert_eq!(*inner.visible_calls.lock().unwrap(), 1);
+    assert_eq!(inner.register_calls.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn duplicate_spawn_provider_tool_call_registration_reuses_activity_id() {
+    let context = test_run_context("spawn-register-duplicate").await;
+    let inner = Arc::new(SurfacePrimedSpawnAuthPort::default());
+    let port =
+        spawn_test_port_with_inner(context, inner.clone(), Arc::new(RegisteringSpawnInputCodec));
+    let tool_call = spawn_provider_tool_call();
+
+    let first = port
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(tool_call.clone()))
+        .await
+        .expect("first provider tool call registration");
+    let second = port
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(tool_call))
+        .await
+        .expect("duplicate provider tool call registration");
+
+    assert_eq!(second.input_ref, first.input_ref);
+    assert_eq!(second.activity_id, first.activity_id);
+    assert_eq!(*inner.visible_calls.lock().unwrap(), 2);
+    assert_eq!(inner.register_calls.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn duplicate_spawn_provider_tool_call_registration_rejects_changed_activity_id() {
+    let context = test_run_context("spawn-register-changed-activity").await;
+    let inner = Arc::new(SurfacePrimedSpawnAuthPort::default());
+    let port =
+        spawn_test_port_with_inner(context, inner.clone(), Arc::new(RegisteringSpawnInputCodec));
+    let tool_call = spawn_provider_tool_call();
+
+    let first_activity_id = CapabilityActivityId::new();
+    port.register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
+        tool_call.clone(),
+        first_activity_id,
+    ))
+    .await
+    .expect("first provider tool call registration");
+
+    let error = port
+        .register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
+            tool_call,
+            CapabilityActivityId::new(),
+        ))
+        .await
+        .expect_err("changed activity id should be rejected");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(
+        error
+            .safe_summary
+            .contains("provider tool-call activity identity changed"),
+        "unexpected error: {}",
+        error.safe_summary
+    );
+    assert_eq!(*inner.visible_calls.lock().unwrap(), 2);
+    assert_eq!(inner.register_calls.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn spawn_provider_tool_call_invoke_rejects_changed_activity_id_before_child_submit() {
+    let context = test_run_context_with_agent_actor("spawn-invoke-changed-activity").await;
+    let inner = Arc::new(SurfacePrimedSpawnAuthPort::default());
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let port = SubagentSpawnCapabilityPort::new(
+        inner.clone(),
+        context.clone(),
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        Arc::new(SubagentSpawnDeps {
+            coordinator: Arc::new(StaticCoordinator),
+            child_runs: child_runs.clone(),
+            turn_state_store: Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0)))),
+            thread_service: Arc::new(InMemorySessionThreadService::default()),
+            goal_store: Arc::new(NoopGoalStore),
+            gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+            definition_resolver: Arc::new(StaticDefinitionResolver {
+                resolved: Some(subagent_definition(false)),
+                parent: None,
+            }),
+            spawn_input_codec: Arc::new(RegisteringSpawnInputCodec),
+            result_writer: Arc::new(NoopResultWriter),
+        }),
+        Vec::new(),
+    );
+
+    let candidate = port
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+            spawn_provider_tool_call(),
+        ))
+        .await
+        .expect("provider tool call registration");
+    let changed_activity_id = CapabilityActivityId::new();
+    assert_ne!(changed_activity_id, candidate.activity_id);
+
+    let error = port
+        .invoke_capability(CapabilityInvocation {
+            activity_id: changed_activity_id,
+            surface_version: candidate.surface_version,
+            capability_id: candidate.capability_id,
+            input_ref: candidate.input_ref,
+            approval_resume: None,
+            auth_resume: None,
+        })
+        .await
+        .expect_err("changed activity id should fail before spawn side effects");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(
+        error
+            .safe_summary
+            .contains("registered provider tool-call activity identity"),
+        "unexpected error: {}",
+        error.safe_summary
+    );
+    assert!(
+        child_runs.requests().is_empty(),
+        "mismatched activity id must not submit a child run"
+    );
 }
 
 #[tokio::test]
@@ -1532,7 +1712,7 @@ async fn spawn_provider_tool_call_registration_rejects_missing_turn_id() {
     call.turn_id = None;
 
     let error = port
-        .register_provider_tool_call(call)
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
         .await
         .expect_err("provider tool call missing turn id rejects");
 
@@ -1572,7 +1752,9 @@ async fn spawn_provider_tool_call_registration_does_not_require_inner_spawn_name
     );
 
     let candidate = port
-        .register_provider_tool_call(spawn_provider_tool_call())
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+            spawn_provider_tool_call(),
+        ))
         .await
         .expect("provider tool call registration");
 
@@ -1590,17 +1772,13 @@ async fn spawn_provider_tool_call_registration_does_not_require_inner_spawn_name
             .as_str(),
         SPAWN_SUBAGENT_PROVIDER_TOOL_NAME
     );
-    assert!(
-        port.auth_input_refs
-            .lock()
-            .unwrap()
-            .contains(&candidate.input_ref)
-    );
+    assert!(port.test_spawn_authorization_contains(&candidate.input_ref));
     assert_eq!(*inner.visible_calls.lock().unwrap(), 1);
     assert_eq!(inner.register_calls.lock().unwrap().len(), 0);
 
     let outcome = port
         .invoke_capability(CapabilityInvocation {
+            activity_id: candidate.activity_id,
             surface_version: candidate.surface_version.clone(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             input_ref: candidate.input_ref.clone(),
@@ -1708,8 +1886,12 @@ async fn invoke_spawn_fails_when_parent_record_is_missing() {
     )
     .await;
 
+    let activity_id = port
+        .test_spawn_authorization(&input_ref())
+        .expect("spawn authorization");
     let error = port
         .invoke_capability(CapabilityInvocation {
+            activity_id,
             surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             input_ref: input_ref(),
@@ -1791,7 +1973,7 @@ async fn invoke_spawn_submits_child_run_through_spawn_tree_port() {
         deps,
         Vec::new(),
     );
-    port.auth_input_refs.lock().unwrap().insert(input_ref());
+    authorize_spawn_input(&port);
 
     let outcome = invoke_spawn(&port).await;
 
@@ -1869,13 +2051,13 @@ async fn invoke_capability_batch_handles_mixed_spawn_and_non_spawn_invocations()
         deps,
         Vec::new(),
     );
-    port.auth_input_refs.lock().unwrap().insert(input_ref());
+    let activity_id = authorize_spawn_input(&port);
 
     let outcome = port
         .invoke_capability_batch(CapabilityBatchInvocation {
             invocations: vec![
                 invocation("regular.one"),
-                invocation(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID),
+                invocation_for_activity(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, activity_id),
                 invocation("regular.two"),
             ],
             stop_on_first_suspension: false,
@@ -1937,12 +2119,12 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
         deps,
         Vec::new(),
     );
-    port.auth_input_refs.lock().unwrap().insert(input_ref());
+    let activity_id = authorize_spawn_input(&port);
 
     let error = port
         .invoke_capability_batch(CapabilityBatchInvocation {
             invocations: vec![
-                invocation(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID),
+                invocation_for_activity(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, activity_id),
                 invocation("regular.fails"),
             ],
             stop_on_first_suspension: false,
@@ -1979,7 +2161,7 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
         Err(SessionThreadError::UnknownThread { .. })
     ));
 
-    port.auth_input_refs.lock().unwrap().insert(input_ref());
+    authorize_spawn_input(&port);
     assert!(
         matches!(
             invoke_spawn(&port).await,
@@ -2023,12 +2205,12 @@ async fn invoke_capability_batch_stops_on_first_spawn_suspension_when_requested(
         deps,
         Vec::new(),
     );
-    port.auth_input_refs.lock().unwrap().insert(input_ref());
+    let activity_id = authorize_spawn_input(&port);
 
     let outcome = port
         .invoke_capability_batch(CapabilityBatchInvocation {
             invocations: vec![
-                invocation(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID),
+                invocation_for_activity(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, activity_id),
                 invocation("regular.after"),
             ],
             stop_on_first_suspension: true,
@@ -2102,11 +2284,8 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
     );
     let input_ref_a = CapabilityInputRef::new("input:spawn-a").unwrap();
     let input_ref_b = CapabilityInputRef::new("input:spawn-b").unwrap();
-    {
-        let mut refs = port.auth_input_refs.lock().unwrap();
-        refs.insert(input_ref_a.clone());
-        refs.insert(input_ref_b.clone());
-    }
+    let activity_id_a = authorize_spawn_input_ref(&port, input_ref_a.clone());
+    let activity_id_b = authorize_spawn_input_ref(&port, input_ref_b.clone());
 
     let spawn_id = CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap();
     let inner_id = CapabilityId::new("inner.suspended").unwrap();
@@ -2115,6 +2294,7 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
         .invoke_capability_batch(CapabilityBatchInvocation {
             invocations: vec![
                 CapabilityInvocation {
+                    activity_id: activity_id_a,
                     surface_version: surface_version.clone(),
                     capability_id: spawn_id.clone(),
                     input_ref: input_ref_a,
@@ -2122,6 +2302,7 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
                     auth_resume: None,
                 },
                 CapabilityInvocation {
+                    activity_id: activity_id_b,
                     surface_version: surface_version.clone(),
                     capability_id: spawn_id,
                     input_ref: input_ref_b,
@@ -2129,6 +2310,7 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
                     auth_resume: None,
                 },
                 CapabilityInvocation {
+                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version,
                     capability_id: inner_id,
                     input_ref: CapabilityInputRef::new("input:inner").unwrap(),
@@ -2185,10 +2367,11 @@ async fn invoke_spawn_cancels_child_when_post_submit_thread_mark_fails() {
         deps,
         Vec::new(),
     );
-    port.auth_input_refs.lock().unwrap().insert(input_ref());
+    let activity_id = authorize_spawn_input(&port);
 
     let error = port
         .invoke_capability(CapabilityInvocation {
+            activity_id,
             surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             input_ref: input_ref(),
@@ -2410,9 +2593,14 @@ async fn invoke_spawn_propagates_decode_rejection_before_side_effects() {
         }),
     );
 
+    let activity_id = harness
+        .port
+        .test_spawn_authorization(&input_ref())
+        .expect("spawn authorization");
     let error = harness
         .port
         .invoke_capability(CapabilityInvocation {
+            activity_id,
             surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             input_ref: input_ref(),
@@ -2443,10 +2631,15 @@ async fn invoke_spawn_batch_propagates_decode_rejection_before_side_effects() {
         }),
     );
 
+    let activity_id = harness
+        .port
+        .test_spawn_authorization(&input_ref())
+        .expect("spawn authorization");
     let error = harness
         .port
         .invoke_capability_batch(CapabilityBatchInvocation {
             invocations: vec![CapabilityInvocation {
+                activity_id,
                 surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
                 capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
                 input_ref: input_ref(),
@@ -2636,13 +2829,11 @@ async fn invoke_batch_coalesces_blocking_spawns_under_single_gate() {
     );
     let input_ref_a = CapabilityInputRef::new("input:spawn-a").unwrap();
     let input_ref_b = CapabilityInputRef::new("input:spawn-b").unwrap();
-    {
-        let mut refs = port.auth_input_refs.lock().unwrap();
-        refs.insert(input_ref_a.clone());
-        refs.insert(input_ref_b.clone());
-    }
+    let activity_id_a = authorize_spawn_input_ref(&port, input_ref_a.clone());
+    let activity_id_b = authorize_spawn_input_ref(&port, input_ref_b.clone());
 
-    let make_invocation = |input_ref: CapabilityInputRef| CapabilityInvocation {
+    let make_invocation = |input_ref: CapabilityInputRef, activity_id| CapabilityInvocation {
+        activity_id,
         surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
         capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         input_ref,
@@ -2651,7 +2842,10 @@ async fn invoke_batch_coalesces_blocking_spawns_under_single_gate() {
     };
     let batch_outcome = port
         .invoke_capability_batch(CapabilityBatchInvocation {
-            invocations: vec![make_invocation(input_ref_a), make_invocation(input_ref_b)],
+            invocations: vec![
+                make_invocation(input_ref_a, activity_id_a),
+                make_invocation(input_ref_b, activity_id_b),
+            ],
             stop_on_first_suspension: true,
         })
         .await
@@ -2724,11 +2918,8 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
     let input_ref_a = CapabilityInputRef::new("input:spawn-a").unwrap();
     let input_ref_inner = CapabilityInputRef::new("input:inner").unwrap();
     let input_ref_b = CapabilityInputRef::new("input:spawn-b").unwrap();
-    {
-        let mut refs = port.auth_input_refs.lock().unwrap();
-        refs.insert(input_ref_a.clone());
-        refs.insert(input_ref_b.clone());
-    }
+    let activity_id_a = authorize_spawn_input_ref(&port, input_ref_a.clone());
+    let activity_id_b = authorize_spawn_input_ref(&port, input_ref_b.clone());
 
     let spawn_id = CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap();
     let inner_id = CapabilityId::new("inner.echo").unwrap();
@@ -2737,6 +2928,7 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
         .invoke_capability_batch(CapabilityBatchInvocation {
             invocations: vec![
                 CapabilityInvocation {
+                    activity_id: activity_id_a,
                     surface_version: surface_version.clone(),
                     capability_id: spawn_id.clone(),
                     input_ref: input_ref_a,
@@ -2744,6 +2936,7 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
                     auth_resume: None,
                 },
                 CapabilityInvocation {
+                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version: surface_version.clone(),
                     capability_id: inner_id,
                     input_ref: input_ref_inner,
@@ -2751,6 +2944,7 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
                     auth_resume: None,
                 },
                 CapabilityInvocation {
+                    activity_id: activity_id_b,
                     surface_version,
                     capability_id: spawn_id,
                     input_ref: input_ref_b,
@@ -2827,11 +3021,12 @@ async fn invoke_batch_skips_shared_gate_for_single_blocking_spawn() {
         deps,
         Vec::new(),
     );
-    port.auth_input_refs.lock().unwrap().insert(input_ref());
+    let activity_id = authorize_spawn_input(&port);
 
     let batch_outcome = port
         .invoke_capability_batch(CapabilityBatchInvocation {
             invocations: vec![CapabilityInvocation {
+                activity_id,
                 surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
                 capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
                 input_ref: input_ref(),
@@ -2925,7 +3120,7 @@ async fn spawn_subagent_propagates_byte_len_from_result_writer() {
         deps,
         Vec::new(),
     );
-    port.auth_input_refs.lock().unwrap().insert(input_ref());
+    authorize_spawn_input(&port);
 
     let outcome = invoke_spawn(&port).await;
 
@@ -3118,7 +3313,7 @@ async fn spawn_provider_tool_call_registration_accepts_subagent_type_wire_key() 
 
     // Register succeeds — validation accepts `subagent_type` as the wire key.
     let candidate = port
-        .register_provider_tool_call(call)
+        .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
         .await
         .expect("registration must succeed with subagent_type wire key");
 
@@ -3131,6 +3326,7 @@ async fn spawn_provider_tool_call_registration_accepts_subagent_type_wire_key() 
     // Invoke the registered capability and assert the spawn is dispatched.
     let outcome = port
         .invoke_capability(CapabilityInvocation {
+            activity_id: candidate.activity_id,
             surface_version: candidate.surface_version.clone(),
             capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             input_ref: candidate.input_ref.clone(),
