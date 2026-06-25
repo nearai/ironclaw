@@ -230,6 +230,7 @@ function mergeFullRefresh(fresh, current, options = {}) {
 
 function hydrateFreshMessages(fresh, current) {
   const currentByConfirmedId = new Map();
+  const finalAssistantByRun = new Map();
   for (const message of current || []) {
     if (!message || !message.timestamp) continue;
     if (typeof message.id === "string") {
@@ -238,18 +239,29 @@ function hydrateFreshMessages(fresh, current) {
     if (typeof message.timelineMessageId === "string") {
       currentByConfirmedId.set(`msg-${message.timelineMessageId}`, message);
     }
+    if (isFinalAssistantMessage(message) && typeof message.turnRunId === "string") {
+      finalAssistantByRun.set(message.turnRunId, message);
+    }
   }
 
-  if (currentByConfirmedId.size === 0) return fresh;
+  if (currentByConfirmedId.size === 0 && finalAssistantByRun.size === 0) return fresh;
   return fresh.map((message) => {
     if (!message || message.timestamp || typeof message.id !== "string") {
       return message;
     }
-    const currentMessage = currentByConfirmedId.get(message.id);
+    const currentMessage =
+      currentByConfirmedId.get(message.id) ||
+      (isFinalAssistantMessage(message) && typeof message.turnRunId === "string"
+        ? finalAssistantByRun.get(message.turnRunId)
+        : null);
     return currentMessage?.timestamp
       ? { ...message, timestamp: currentMessage.timestamp }
       : message;
   });
+}
+
+function isFinalAssistantMessage(message) {
+  return message?.role === "assistant" && message?.isFinalReply === true;
 }
 
 function isRuntimeActivityMessage(message) {

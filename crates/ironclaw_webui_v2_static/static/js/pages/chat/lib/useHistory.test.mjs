@@ -336,3 +336,35 @@ test("mergeFullRefresh carries optimistic timestamps onto confirmed messages", (
   assert.equal(merged[0].id, "msg-message-1");
   assert.equal(merged[0].timestamp, "2026-06-25T07:17:00.000Z");
 });
+
+test("mergeFullRefresh carries live assistant timestamps onto confirmed replies", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      {
+        id: "msg-assistant-1",
+        role: "assistant",
+        content: "Here's one.",
+        isFinalReply: true,
+        turnRunId: "run-1",
+      },
+    ],
+    [
+      {
+        id: "reply-run-1",
+        role: "assistant",
+        content: "Here's one.",
+        timestamp: "2026-06-25T07:18:00.000Z",
+        isFinalReply: true,
+        turnRunId: "run-1",
+      },
+    ],
+  );
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, "msg-assistant-1");
+  assert.equal(merged[0].timestamp, "2026-06-25T07:18:00.000Z");
+});
