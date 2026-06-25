@@ -48,7 +48,34 @@ function componentProps(node, component) {
   return props;
 }
 
-function renderChatInput({ onCancel, setCalls = [] } = {}) {
+function templateProps(node) {
+  const props = {};
+  for (let index = 0; index < node.values.length; index += 1) {
+    const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9]*)=\s*$/)?.[1];
+    if (name) props[name] = node.values[index];
+  }
+  return props;
+}
+
+function findNode(node, predicate) {
+  if (!node || typeof node !== "object") return null;
+  if (Array.isArray(node.strings) && predicate(node)) return node;
+  if (!Array.isArray(node.values)) return null;
+  for (const value of node.values) {
+    const found = findNode(value, predicate);
+    if (found) return found;
+  }
+  return null;
+}
+
+function renderChatInput({
+  onCancel,
+  setCalls = [],
+  disabled = true,
+  sendDisabled,
+  canCancel = true,
+  draft = "",
+} = {}) {
   const components = {
     Button() {},
     Icon() {},
@@ -86,7 +113,7 @@ function renderChatInput({ onCancel, setCalls = [] } = {}) {
     NEW_DRAFT_KEY: "__new__",
     clearDraft: () => {},
     clearStagedAttachments: () => {},
-    getDraft: () => "",
+    getDraft: () => draft,
     getStagedAttachments: () => [],
     setDraft: () => {},
     setStagedAttachments: () => {},
@@ -97,8 +124,9 @@ function renderChatInput({ onCancel, setCalls = [] } = {}) {
   const tree = context.globalThis.__testExports.ChatInput({
     onSend: async () => {},
     onCancel,
-    disabled: true,
-    canCancel: true,
+    disabled,
+    sendDisabled,
+    canCancel,
   });
   return { tree, components };
 }
@@ -146,4 +174,24 @@ test("ChatInput cancel button resets cancelling state after rejection", async ()
     { index: 4, value: true },
     { index: 4, value: false },
   ]);
+});
+
+test("ChatInput keeps the textarea editable when only submit is disabled", () => {
+  const { tree, components } = renderChatInput({
+    disabled: false,
+    sendDisabled: true,
+    canCancel: false,
+    draft: "next thought",
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  assert.equal(textareaProps.disabled, false);
+  assert.equal(textareaProps.value, "next thought");
+
+  const sendButton = findComponent(tree, components.Button);
+  const sendProps = componentProps(sendButton, components.Button);
+  assert.equal(sendProps.disabled, true);
 });

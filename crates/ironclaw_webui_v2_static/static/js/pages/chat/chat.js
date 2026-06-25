@@ -81,7 +81,8 @@ export function Chat({
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
   const showLanding = !historyLoading && !hasMessages && !historyLoadError;
-  const composerDisabled = (isProcessing && !pendingGate) || cooldownSeconds > 0;
+  const composerSendDisabled =
+    (isProcessing && !pendingGate) || cooldownSeconds > 0;
   const composerStatusText =
     cooldownSeconds > 0 ? `Retry in ${cooldownSeconds}s` : undefined;
   // Scope the persisted composer draft to the open thread (or the
@@ -208,7 +209,8 @@ export function Chat({
           <${EmptyState}
             onSuggestion=${handleSuggestion}
             onSend=${handleSend}
-            disabled=${composerDisabled}
+            disabled=${false}
+            sendDisabled=${composerSendDisabled}
             initialText=${composerDraft}
             resetKey=${composerResetKey}
             draftKey=${composerDraftKey}
@@ -290,7 +292,8 @@ export function Chat({
 
           <${ChatInput}
             onSend=${handleSend}
-            disabled=${composerDisabled}
+            disabled=${false}
+            sendDisabled=${composerSendDisabled}
             initialText=${composerDraft}
             resetKey=${composerResetKey}
             draftKey=${composerDraftKey}

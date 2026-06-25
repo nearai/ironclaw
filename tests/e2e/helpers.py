@@ -230,6 +230,7 @@ SEL_V2 = {
     "root":           "#v2-root",          # SPA mount point (index.html)
     "login_token":    "#v2-token",         # token input on the login/connect view
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
+    "typing_indicator": "[data-testid='typing-indicator']",
     "msg_user":       "[data-testid='msg-user']",       # user message bubble
     "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
     # Download chip for an agent-produced workspace file; `{path}` selects one.
