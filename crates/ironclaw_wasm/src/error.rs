@@ -29,9 +29,9 @@ pub enum WasmError {
 impl WasmError {
     /// Construct an [`WasmError::ExecutionFailed`] with default usage/logs.
     ///
-    /// Used by the runtime itself and by callers that offload execution (e.g.
-    /// the host runtime's `spawn_blocking` wrapper) and need to map a task
-    /// join failure into an execution error.
+    /// Used by the runtime itself and by any blocking-offload wrapper (execution
+    /// or preparation) that needs to map a semaphore acquire failure, a task
+    /// join error, or a blocking-task panic into a structured error.
     pub fn execution_failed(message: String) -> Self {
         Self::ExecutionFailed {
             message,

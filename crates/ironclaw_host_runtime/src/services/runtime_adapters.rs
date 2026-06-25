@@ -917,7 +917,7 @@ async fn run_wasm_prepare_blocking(
         .clone()
         .acquire_owned()
         .await
-        .map_err(|_| WasmError::execution_failed("wasm execution gate closed".to_string()))?;
+        .map_err(|_| WasmError::execution_failed("wasm preparation gate closed".to_string()))?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         runtime.prepare(&package_id, &wasm_bytes)
@@ -1875,6 +1875,67 @@ mod tests {
         drop(held_permits);
     }
 
+    // 3c3 — Decoupling guarantee (inverse): a full `WASM_PREPARE_SEMAPHORE` does NOT
+    // block hot execution.
+    //
+    // Drains all `WASM_PREPARE_SEMAPHORE` permits, then asserts that
+    // `run_wasm_execution_blocking` still completes promptly because it uses the
+    // independent `WASM_EXEC_SEMAPHORE`. This is the symmetric complement of 3c2:
+    // a cold-compile storm that has saturated the prepare gate must not starve
+    // already-prepared hot executions waiting on their own gate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wasm_execution_is_not_blocked_by_full_prepare_semaphore() {
+        let _lock = SEMAPHORE_TEST_LOCK.lock().await;
+
+        let runtime = Arc::new(WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap());
+        let prepared = Arc::new(
+            runtime
+                .prepare("decoupled-gate-exec", &tool_component(SIMPLE_TOOL_WAT))
+                .unwrap(),
+        );
+
+        // Drain ALL prepare permits — simulates a cold-compile storm that has
+        // saturated the prepare gate while a hot-execution call arrives.
+        let mut held_permits = Vec::with_capacity(MAX_CONCURRENT_WASM_PREPARE);
+        for _ in 0..MAX_CONCURRENT_WASM_PREPARE {
+            let permit = WASM_PREPARE_SEMAPHORE
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("semaphore must not be closed");
+            held_permits.push(permit);
+        }
+        assert_eq!(
+            WASM_PREPARE_SEMAPHORE.available_permits(),
+            0,
+            "all prepare permits must be drained before testing execution independence"
+        );
+
+        // Execution must complete promptly — it uses WASM_EXEC_SEMAPHORE, not
+        // WASM_PREPARE_SEMAPHORE, so the exhausted prepare gate must not block it.
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_wasm_execution_blocking(
+                (*runtime).clone(),
+                Arc::clone(&prepared),
+                WitToolHost::deny_all(),
+                "{}".to_string(),
+                "{}".to_string(),
+            ),
+        )
+        .await
+        .expect(
+            "execution must not block when the prepare semaphore is full — gates are independent",
+        );
+
+        assert!(
+            result.is_ok(),
+            "execution must succeed even with prepare semaphore fully drained: {result:?}"
+        );
+
+        drop(held_permits);
+    }
+
     // 3d — Invalid wasm bytes surface as a `WasmError` through the offloaded helper.
     //
     // Exercises the prepare error path through `run_wasm_prepare_blocking`: passing
@@ -1905,8 +1966,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn wasm_exec_semaphore_starts_open_at_configured_bound() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wasm_exec_semaphore_starts_open_at_configured_bound() {
+        let _lock = SEMAPHORE_TEST_LOCK.lock().await;
         // The fix offloads sync WASM execution to the blocking pool under
         // `WASM_EXEC_SEMAPHORE`. The shared gate must start fully open at the
         // configured bound. (The bound's positivity / sub-ceiling invariant is
