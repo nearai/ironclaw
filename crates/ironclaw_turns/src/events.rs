@@ -288,8 +288,12 @@ pub enum TurnEventProjectionError {
         requested: Box<TurnEventProjectionCursor>,
         earliest: Box<TurnEventProjectionCursor>,
     },
-    #[error("turn event projection source failed during {operation}")]
-    Source { operation: &'static str },
+    #[error("turn event projection source failed during {operation}: {reason}")]
+    Source {
+        operation: &'static str,
+        #[source]
+        reason: TurnError,
+    },
 }
 
 #[async_trait]
@@ -421,8 +425,9 @@ where
             request.limit,
         )
         .await
-        .map_err(|_| TurnEventProjectionError::Source {
+        .map_err(|reason| TurnEventProjectionError::Source {
             operation: "read_turn_events_after",
+            reason,
         })?;
     if let Some(rebase_cursor) = page.rebase_required {
         return Err(TurnEventProjectionError::RebaseRequired {
@@ -510,8 +515,9 @@ mod tests {
         TurnStatus,
         events::{
             EventCursor, TurnBlockedGateKind, TurnBlockedGateMetadata, TurnEventKind,
-            TurnEventPage, TurnEventProjectionService, TurnEventProjectionSource,
-            TurnEventReducerService, TurnLifecycleEvent, project_turn_events,
+            TurnEventPage, TurnEventProjectionError, TurnEventProjectionService,
+            TurnEventProjectionSource, TurnEventReducerService, TurnLifecycleEvent,
+            project_turn_events,
         },
     };
 
@@ -569,6 +575,23 @@ mod tests {
                 limit,
                 EventCursor::default(),
             ))
+        }
+    }
+
+    struct FailingProjectionSource;
+
+    #[async_trait]
+    impl TurnEventProjectionSource for FailingProjectionSource {
+        async fn read_turn_events_after(
+            &self,
+            _scope: &TurnScope,
+            _owner_user_id: Option<&UserId>,
+            _after: Option<EventCursor>,
+            _limit: usize,
+        ) -> Result<TurnEventPage, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "event store offline".to_string(),
+            })
         }
     }
 
@@ -684,6 +707,28 @@ mod tests {
         assert!(!serialized.contains("gate:approval-a"));
         assert!(!serialized.contains("owner-a"));
         assert_eq!(snapshot.entries[0].kind, TurnEventKind::Blocked);
+    }
+
+    #[tokio::test]
+    async fn projection_service_preserves_source_read_error_cause() {
+        let service = TurnEventProjectionService::new(std::sync::Arc::new(FailingProjectionSource));
+        let error = service
+            .snapshot(crate::events::TurnEventProjectionRequest {
+                scope: scope("thread-source-error"),
+                owner_user_id: None,
+                after: None,
+                limit: 10,
+            })
+            .await
+            .expect_err("source error should propagate");
+
+        assert!(matches!(
+            error,
+            TurnEventProjectionError::Source {
+                operation: "read_turn_events_after",
+                reason: TurnError::Unavailable { reason }
+            } if reason == "event store offline"
+        ));
     }
 
     #[tokio::test]

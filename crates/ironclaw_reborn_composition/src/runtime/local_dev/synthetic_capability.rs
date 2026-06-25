@@ -11,10 +11,10 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDescriptorView,
-        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion, ConcurrencyHint,
-        LoopCapabilityPort, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
+        ConcurrencyHint, LoopCapabilityPort, LoopRunContext, ProviderToolCall,
+        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
+        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -136,11 +136,18 @@ struct LocalDevSyntheticCapabilityPort {
     capabilities_by_id: HashMap<CapabilityId, LocalDevSyntheticCapability>,
     capability_ids_by_provider_tool_name: HashMap<String, CapabilityId>,
     current_surface_version: StdMutex<Option<CapabilitySurfaceVersion>>,
+    provider_tool_call_registrations:
+        StdMutex<HashMap<String, SyntheticProviderToolCallRegistration>>,
     /// Synthetic calls resolve input + write the result here, bypassing the
     /// inner `HostRuntimeLoopCapabilityPort` input hook. Hold the observer so we
     /// can emit `on_capability_input` ourselves — otherwise consumers see the
     /// result event (from `LocalDevCapabilityIo`) with no matching input.
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+}
+
+struct SyntheticProviderToolCallRegistration {
+    activity_id: CapabilityActivityId,
+    capability_id: CapabilityId,
 }
 
 impl LocalDevSyntheticCapabilityPort {
@@ -178,6 +185,7 @@ impl LocalDevSyntheticCapabilityPort {
             capabilities_by_id,
             capability_ids_by_provider_tool_name,
             current_surface_version: StdMutex::new(None),
+            provider_tool_call_registrations: StdMutex::new(HashMap::new()),
             trajectory_observer,
         })
     }
@@ -212,15 +220,15 @@ impl LocalDevSyntheticCapabilityPort {
     async fn register_synthetic_provider_tool_call(
         &self,
         tool_call: ProviderToolCall,
-        activity_id: CapabilityActivityId,
+        activity_id: Option<CapabilityActivityId>,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         let Some((capability_id, _)) = self.synthetic_provider_call(&tool_call) else {
             return self
                 .inner
-                .register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
+                .register_provider_tool_call(RegisterProviderToolCallRequest {
                     tool_call,
                     activity_id,
-                ))
+                })
                 .await;
         };
         let capability_id = capability_id.clone();
@@ -235,6 +243,8 @@ impl LocalDevSyntheticCapabilityPort {
             .input_resolver
             .register_provider_tool_call_input(&self.run_context, &tool_call)
             .await?;
+        let activity_id =
+            self.record_provider_tool_call_registration(&input_ref, &capability_id, activity_id)?;
         Ok(CapabilityCallCandidate {
             activity_id,
             surface_version: self.current_surface_version()?,
@@ -253,6 +263,63 @@ impl LocalDevSyntheticCapabilityPort {
                 signature: tool_call.signature,
             }),
         })
+    }
+
+    fn record_provider_tool_call_registration(
+        &self,
+        input_ref: &CapabilityInputRef,
+        capability_id: &CapabilityId,
+        activity_id: Option<CapabilityActivityId>,
+    ) -> Result<CapabilityActivityId, AgentLoopHostError> {
+        let mut registrations = self.provider_tool_call_registrations.lock().map_err(|_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                "synthetic provider tool-call registration store lock failed",
+            )
+        })?;
+        let record = registrations
+            .entry(input_ref.as_str().to_string())
+            .or_insert_with(|| SyntheticProviderToolCallRegistration {
+                activity_id: activity_id.unwrap_or_default(),
+                capability_id: capability_id.clone(),
+            });
+        if record.capability_id != *capability_id {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool-call capability identity changed",
+            ));
+        }
+        if let Some(activity_id) = activity_id
+            && record.activity_id != activity_id
+        {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool-call activity identity changed",
+            ));
+        }
+        Ok(record.activity_id)
+    }
+
+    fn validate_provider_tool_call_registration_activity(
+        &self,
+        input_ref: &CapabilityInputRef,
+        activity_id: CapabilityActivityId,
+    ) -> Result<(), AgentLoopHostError> {
+        let registrations = self.provider_tool_call_registrations.lock().map_err(|_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                "synthetic provider tool-call registration store lock failed",
+            )
+        })?;
+        if let Some(registration) = registrations.get(input_ref.as_str())
+            && registration.activity_id != activity_id
+        {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "registered provider tool-call activity identity does not match the requested activity",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -324,10 +391,7 @@ impl LoopCapabilityPort for LocalDevSyntheticCapabilityPort {
         } = request;
         if self.synthetic_provider_call(&tool_call).is_some() {
             return self
-                .register_synthetic_provider_tool_call(
-                    tool_call,
-                    activity_id.unwrap_or_else(CapabilityActivityId::new),
-                )
+                .register_synthetic_provider_tool_call(tool_call, activity_id)
                 .await;
         }
         self.inner
@@ -392,6 +456,15 @@ impl LoopCapabilityPort for LocalDevSyntheticCapabilityPort {
                  these resume modes are mutually exclusive",
             ));
         }
+        let effective_input_ref = request
+            .approval_resume
+            .as_ref()
+            .map(|resume| &resume.input_ref)
+            .unwrap_or(&request.input_ref);
+        self.validate_provider_tool_call_registration_activity(
+            effective_input_ref,
+            request.activity_id,
+        )?;
         let input = match request.approval_resume.as_ref() {
             Some(resume) => resume.input.clone(),
             None => {
@@ -449,5 +522,200 @@ impl LoopCapabilityPort for LocalDevSyntheticCapabilityPort {
             outcomes,
             stopped_on_suspension,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_loop_support::{
+        CapabilityResultWrite, CapabilityWriteResult, EmptyLoopCapabilityPort,
+    };
+    use ironclaw_turns::{
+        LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId,
+        TurnScope,
+        run_profile::{InMemoryRunProfileResolver, VisibleCapabilityRequest},
+    };
+
+    const TEST_CAPABILITY_ID: &str = "test.synthetic";
+    const TEST_PROVIDER_TOOL_NAME: &str = "test__synthetic";
+
+    struct FixedInputResolver {
+        input_ref: CapabilityInputRef,
+        input: serde_json::Value,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityInputResolver for FixedInputResolver {
+        async fn resolve_capability_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
+        ) -> Result<serde_json::Value, AgentLoopHostError> {
+            Ok(self.input.clone())
+        }
+
+        async fn register_provider_tool_call_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _tool_call: &ProviderToolCall,
+        ) -> Result<CapabilityInputRef, AgentLoopHostError> {
+            Ok(self.input_ref.clone())
+        }
+    }
+
+    struct NoopResultWriter;
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for NoopResultWriter {
+        async fn write_capability_result(
+            &self,
+            _write: CapabilityResultWrite<'_>,
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            Ok(CapabilityWriteResult::without_output_digest(
+                LoopResultRef::new("result:synthetic-test").expect("valid result ref"),
+                0,
+            ))
+        }
+    }
+
+    struct TestSyntheticHandler;
+
+    #[async_trait]
+    impl LocalDevSyntheticCapabilityHandler for TestSyntheticHandler {
+        fn validate_provider_arguments(
+            &self,
+            _arguments: &serde_json::Value,
+        ) -> Result<(), AgentLoopHostError> {
+            Ok(())
+        }
+
+        async fn invoke(
+            &self,
+            _invocation: LocalDevSyntheticCapabilityInvocation,
+        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                "test handler should not be invoked",
+            ))
+        }
+    }
+
+    async fn run_context() -> LoopRunContext {
+        let profile = InMemoryRunProfileResolver::default()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("profile resolves");
+        LoopRunContext::new(
+            TurnScope::new(
+                TenantId::new("tenant-synthetic-registration").expect("tenant id"),
+                Some(AgentId::new("agent-synthetic-registration").expect("agent id")),
+                Some(ProjectId::new("project-synthetic-registration").expect("project id")),
+                ThreadId::new("thread-synthetic-registration").expect("thread id"),
+            ),
+            TurnId::new(),
+            TurnRunId::new(),
+            profile,
+        )
+    }
+
+    async fn synthetic_port() -> LocalDevSyntheticCapabilityPort {
+        let capability = LocalDevSyntheticCapability::new(
+            LocalDevSyntheticCapabilityDescriptor::new(
+                TEST_CAPABILITY_ID,
+                TEST_PROVIDER_TOOL_NAME,
+                "Synthetic test capability",
+                ConcurrencyHint::SafeForParallel,
+                serde_json::json!({"type": "object"}),
+            )
+            .expect("descriptor"),
+            Arc::new(TestSyntheticHandler),
+        );
+        let port = LocalDevSyntheticCapabilityPort::new(
+            Arc::new(EmptyLoopCapabilityPort),
+            vec![capability],
+            run_context().await,
+            Arc::new(FixedInputResolver {
+                input_ref: CapabilityInputRef::new("input:synthetic-provider-call")
+                    .expect("input ref"),
+                input: serde_json::json!({"message": "hello"}),
+            }),
+            Arc::new(NoopResultWriter),
+            None,
+        )
+        .expect("synthetic port");
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+        port
+    }
+
+    fn provider_tool_call() -> ProviderToolCall {
+        ProviderToolCall {
+            provider_id: "test-provider".to_string(),
+            provider_model_id: "test-model".to_string(),
+            turn_id: Some("provider-turn-1".to_string()),
+            id: "provider-call-1".to_string(),
+            name: TEST_PROVIDER_TOOL_NAME.to_string(),
+            arguments: serde_json::json!({"message": "hello"}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }
+    }
+
+    fn different_activity_id(activity_id: CapabilityActivityId) -> CapabilityActivityId {
+        loop {
+            let candidate = CapabilityActivityId::new();
+            if candidate != activity_id {
+                return candidate;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_synthetic_provider_call_reuses_activity_id_for_same_input_ref() {
+        let port = synthetic_port().await;
+        let first = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call()))
+            .await
+            .expect("first registration");
+        let second = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call()))
+            .await
+            .expect("duplicate registration");
+
+        assert_eq!(second.input_ref, first.input_ref);
+        assert_eq!(second.activity_id, first.activity_id);
+    }
+
+    #[tokio::test]
+    async fn synthetic_provider_call_rejects_explicit_activity_id_change_for_same_input_ref() {
+        let port = synthetic_port().await;
+        let activity_id = CapabilityActivityId::new();
+        let first = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
+                provider_tool_call(),
+                activity_id,
+            ))
+            .await
+            .expect("first registration");
+        let error = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
+                provider_tool_call(),
+                different_activity_id(activity_id),
+            ))
+            .await
+            .expect_err("activity id changes must be rejected");
+
+        assert_eq!(first.activity_id, activity_id);
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(
+            error.safe_summary.contains("activity identity"),
+            "error should name the activity identity mismatch: {:?}",
+            error.safe_summary
+        );
     }
 }

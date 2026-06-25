@@ -282,18 +282,28 @@ function isObsoleteProjectionGate(
   batchRunStatusByRunId,
   latestRunIdRef,
   stalePromptRunIds,
+  promptRunIdRef,
 ) {
-  if (pendingGate?.runId && stalePromptRunIds?.has(pendingGate.runId)) {
+  const runId = pendingGate?.runId || null;
+  if (!runId) return true;
+  if (stalePromptRunIds?.has(runId)) {
     return true;
   }
-  const batchStatus = pendingGate?.runId
-    ? batchRunStatusByRunId?.get(pendingGate.runId)
-    : null;
+  const batchStatus = batchRunStatusByRunId?.get(runId);
   if (batchStatus) return !GATE_ACTIVE_RUN_STATUSES.has(batchStatus);
   const activeRun = activeRunRef?.current;
-  if (activeRun?.runId && activeRun.runId !== pendingGate?.runId) return true;
-  const latestRunId = latestRunIdRef?.current || null;
-  if (latestRunId && latestRunId !== pendingGate?.runId) return true;
+  const activeRunId = activeRun?.runId || latestRunIdRef?.current || null;
+  if (activeRunId && runId !== activeRunId) return true;
+  const activePromptRunIsCurrent = promptRunIdRef?.current === activeRunId;
+  if (
+    activeRunId &&
+    runId === activeRunId &&
+    !activePromptRunIsCurrent &&
+    activeRun?.status &&
+    !GATE_ACTIVE_RUN_STATUSES.has(activeRun.status)
+  ) {
+    return true;
+  }
   if (!activeRun?.runId) return false;
   if (!activeRun.status) return false;
   return !GATE_ACTIVE_RUN_STATUSES.has(activeRun.status);
@@ -545,6 +555,7 @@ function applyProjectionItems({
           batchRunStatusByRunId,
           latestRunIdRef,
           stalePromptRunIds,
+          promptRunIdRef,
         ) &&
         !isLocallyResolvedGate(locallyResolvedGatesRef, runId, pendingGate.gateRef)
       ) {
