@@ -10,10 +10,11 @@ pub(super) fn children_of(
     scope: &TurnScope,
     run_id: TurnRunId,
 ) -> Vec<TurnRunRecord> {
-    let Some(parent) = snapshot.runs.iter().find(|record| record.run_id == run_id) else {
-        return Vec::new();
-    };
-    if parent.scope != *scope {
+    if !snapshot
+        .runs
+        .iter()
+        .any(|record| record.run_id == run_id && record.scope == *scope)
+    {
         return Vec::new();
     }
     let mut children: Vec<TurnRunRecord> = snapshot

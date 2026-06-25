@@ -2077,6 +2077,37 @@ async fn filesystem_spawn_tree_reads_are_scope_checked() {
             .unwrap(),
     );
 
+    let versioned = backend
+        .get(&snapshot_virtual_path())
+        .await
+        .unwrap()
+        .expect("snapshot after child submit");
+    let mut snapshot: TurnPersistenceSnapshot =
+        serde_json::from_slice(&versioned.entry.body).unwrap();
+    let mut shadow_parent = snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == parent && record.scope == parent_scope)
+        .expect("parent run in snapshot")
+        .clone();
+    shadow_parent.scope = TurnScope::new(
+        TenantId::new("shadow-tenant").unwrap(),
+        Some(AgentId::new("agent1").unwrap()),
+        Some(ProjectId::new("project1").unwrap()),
+        ThreadId::new("thread-fs-scope-shadow").unwrap(),
+    );
+    snapshot.runs.insert(0, shadow_parent);
+    let mut entry = versioned.entry;
+    entry.body = serde_json::to_vec_pretty(&snapshot).unwrap();
+    backend
+        .put(
+            &snapshot_virtual_path(),
+            entry,
+            CasExpectation::Version(versioned.version),
+        )
+        .await
+        .unwrap();
+
     let reopened = FilesystemTurnStateStore::new(scoped);
     assert_eq!(
         reopened
