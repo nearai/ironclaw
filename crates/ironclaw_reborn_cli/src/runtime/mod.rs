@@ -1257,7 +1257,10 @@ mod tests {
 
     #[test]
     fn no_assistant_text_message_formats_failed_reply_with_category() {
-        let reply = assistant_reply_without_text_for_test(TurnStatus::Failed, Some("driver_panic"));
+        let reply = assistant_reply_without_text_for_test(
+            TurnStatus::Failed,
+            Some("scheduler_executor_panic"),
+        );
 
         let message = no_assistant_text_message(&reply);
 
@@ -1266,7 +1269,7 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("failure_category=driver_panic"),
+            message.contains("failure_category=scheduler_executor_panic"),
             "{message}"
         );
         assert!(message.contains("status=Failed"), "{message}");
