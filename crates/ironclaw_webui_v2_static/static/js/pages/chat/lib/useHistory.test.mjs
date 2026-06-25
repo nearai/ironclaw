@@ -141,6 +141,74 @@ test("useHistory full refresh preserves SSE-only activity messages", async () =>
   assert.equal(setCalls.at(-1).messages[1].toolStatus, "error");
 });
 
+test("useHistory can seed a newly-created thread before navigation", async () => {
+  const context = {
+    console,
+    fetchTimeline: async () => new Promise(() => {}),
+    globalThis: {},
+    messagesFromTimeline: () => [],
+    React: createReactStub(),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+
+  const draftHistory = context.globalThis.__testExports.useHistory(null, {});
+  draftHistory.seedThreadMessages("thread-new", [
+    {
+      id: "pending-1",
+      role: "user",
+      content: "tell me a joke",
+      timestamp: "2026-06-25T07:17:00.000Z",
+    },
+  ]);
+
+  const threadHistory = context.globalThis.__testExports.useHistory("thread-new", {});
+  assert.deepEqual(JSON.parse(JSON.stringify(threadHistory.messages)), [
+    {
+      id: "pending-1",
+      role: "user",
+      content: "tell me a joke",
+      timestamp: "2026-06-25T07:17:00.000Z",
+    },
+  ]);
+});
+
+test("useHistory seedThreadMessages updates an accepted first message by timeline id", async () => {
+  const context = {
+    console,
+    fetchTimeline: async () => new Promise(() => {}),
+    globalThis: {},
+    messagesFromTimeline: () => [],
+    React: createReactStub(),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+
+  const draftHistory = context.globalThis.__testExports.useHistory(null, {});
+  draftHistory.seedThreadMessages("thread-new", [
+    {
+      id: "pending-1",
+      role: "user",
+      content: "tell me a joke",
+      timestamp: "2026-06-25T07:17:00.000Z",
+    },
+  ]);
+  draftHistory.seedThreadMessages("thread-new", (messages) =>
+    messages.map((message) =>
+      message.id === "pending-1"
+        ? { ...message, timelineMessageId: "message-1" }
+        : message,
+    ),
+  );
+
+  const threadHistory = context.globalThis.__testExports.useHistory("thread-new", {});
+  assert.equal(threadHistory.messages[0].timelineMessageId, "message-1");
+});
+
 test("useHistory full refresh preserves unnumbered live gate activity after timeline tools", async () => {
   const threadId = "thread-activity-order";
   const runId = "run-activity-order";

@@ -169,6 +169,7 @@ export function useChat(threadId) {
     isLoading: historyLoading,
     loadError: historyLoadError,
     loadHistory,
+    seedThreadMessages,
     setMessages,
   } = useHistory(threadId, { getPendingMessages, setPendingMessages });
 
@@ -370,20 +371,21 @@ export function useChat(threadId) {
         timestamp: new Date().toISOString(),
         isOptimistic: true,
       };
+      const pendingRenderMessage = {
+        id: pendingRecord.id,
+        role: "user",
+        content,
+        attachments: renderAttachments,
+        timestamp: pendingRecord.timestamp,
+        isOptimistic: true,
+      };
       addPending(pendingMessagesRef.current, pendingKey, pendingRecord);
 
       const optimisticId = pendingRecord.id;
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: optimisticId,
-          role: "user",
-          content,
-          attachments: renderAttachments,
-          timestamp: pendingRecord.timestamp,
-          isOptimistic: true,
-        },
-      ]);
+      setMessages((prev) => [...prev, pendingRenderMessage]);
+      if (sendThreadId !== threadId) {
+        seedThreadMessages(sendThreadId, (prev) => [...prev, pendingRenderMessage]);
+      }
 
       setIsProcessing(true);
       setPendingGate(null);
@@ -420,6 +422,13 @@ export function useChat(threadId) {
               m.id === optimisticId ? { ...m, timelineMessageId } : m,
             ),
           );
+          if (sendThreadId !== threadId) {
+            seedThreadMessages(sendThreadId, (prev) =>
+              prev.map((m) =>
+                m.id === optimisticId ? { ...m, timelineMessageId } : m,
+              ),
+            );
+          }
         }
         // When the thread was busy, the message is rejected (not deferred).
         // Mark the optimistic user message as failed and display the
@@ -478,7 +487,7 @@ export function useChat(threadId) {
         removePending(pendingMessagesRef.current, pendingKey, optimisticId);
       }
     },
-    [threadId, setMessages],
+    [threadId, setMessages, seedThreadMessages],
   );
 
   // v2 resolveGate signature: `(resolution, { always?, credentialRef? })`.

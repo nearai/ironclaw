@@ -187,6 +187,14 @@ export function useHistory(threadId, options = {}) {
     isLoading: state.isLoading,
     loadError: state.loadError,
     loadHistory,
+    seedThreadMessages: (targetThreadId, updater) => {
+      if (!targetThreadId) return;
+      const key = cacheKey(targetThreadId);
+      const entry = historyCache.get(key) || { messages: [], nextCursor: null };
+      const messages =
+        typeof updater === "function" ? updater(entry.messages || []) : updater;
+      putCache(key, { messages, nextCursor: entry.nextCursor || null });
+    },
     setMessages: (updater) =>
       setState((s) => {
         const messages =
