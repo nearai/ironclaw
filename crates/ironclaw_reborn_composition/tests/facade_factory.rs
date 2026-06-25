@@ -1286,6 +1286,23 @@ async fn local_dev_services_dispatch_trigger_management_through_composed_runtime
     .await
     .expect("local-dev services should build with trigger management runtime");
 
+    // The Tools-settings global auto-approve switch is authoritative for
+    // first-party tool dispatch; turn it on for the dispatch scope so
+    // these trigger management calls exercise the dispatch path instead of
+    // stopping at the per-tool approval gate.
+    let auto_approve = services
+        .local_dev_auto_approve_settings_for_test()
+        .expect("local-dev exposes auto-approve settings for test");
+    let auto_approve_scope = trigger_management_execution_context().resource_scope;
+    auto_approve
+        .set(ironclaw_approvals::AutoApproveSettingInput {
+            updated_by: Principal::User(auto_approve_scope.user_id.clone()),
+            scope: auto_approve_scope,
+            enabled: true,
+        })
+        .await
+        .expect("enable global auto-approve for trigger management dispatch");
+
     let runtime = services
         .host_runtime
         .as_deref()

@@ -111,7 +111,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
     // Turn on the global auto-approve switch for this run's actor scope so the
     // scripted shell call exercises the dispatch path instead of stopping at the
     // per-tool approval gate (the Tools-settings switch is authoritative for
-    // first-party tool dispatch, #4776).
+    // first-party tool dispatch).
     {
         let mut scope = run_context.scope.to_resource_scope();
         scope.user_id = UserId::new("local-dev-shell-user").expect("user id");

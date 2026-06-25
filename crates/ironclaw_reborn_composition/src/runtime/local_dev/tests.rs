@@ -75,7 +75,7 @@ mod tests {
     /// Turn on the global auto-approve switch for the `(tenant, user)` a run
     /// dispatches under so a scripted tool call exercises the dispatch path
     /// instead of stopping at the per-tool approval gate. The Tools-settings
-    /// switch is authoritative for first-party tool dispatch (#4776); enabling
+    /// switch is authoritative for first-party tool dispatch; enabling
     /// it here mirrors the operator having flipped it on before letting the
     /// agent run tools.
     async fn enable_global_auto_approve_for_run(

@@ -6144,7 +6144,7 @@ mod tests {
     /// Turn on the global auto-approve switch for `context`'s actor scope so a
     /// host-runtime dispatch exercises the tool path instead of stopping at the
     /// per-tool approval gate. The Tools-settings switch is authoritative for
-    /// first-party tool dispatch (#4776); enabling it here mirrors the operator
+    /// first-party tool dispatch; enabling it here mirrors the operator
     /// having flipped it on before letting the agent run tools.
     async fn enable_global_auto_approve_for_context(
         local_runtime: &RebornLocalRuntimeServices,

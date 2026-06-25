@@ -1458,7 +1458,7 @@ impl RebornRuntime {
     /// Test-only: enable the global auto-approve switch for this runtime's
     /// actor scope so a scripted turn exercises the dispatch path instead of
     /// blocking on the per-tool approval gate. The Tools-settings switch is
-    /// authoritative for first-party tool dispatch (#4776); turning it on here
+    /// authoritative for first-party tool dispatch; turning it on here
     /// mirrors what an operator would do before letting the agent run tools.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn enable_global_auto_approve_for_test(&self, conversation: &ConversationId) {
