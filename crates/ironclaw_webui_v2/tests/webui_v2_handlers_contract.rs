@@ -231,6 +231,10 @@ struct StubServices {
     delete_thread_calls: Mutex<Vec<RebornDeleteThreadRequest>>,
     submit_turn_calls: Mutex<Vec<WebUiSendMessageRequest>>,
     get_timeline_calls: Mutex<Vec<RebornTimelineRequest>>,
+    global_auto_approve_enabled: Mutex<bool>,
+    global_auto_approve_calls: Mutex<usize>,
+    stall_global_auto_approve: Mutex<bool>,
+    next_global_auto_approve_error: Mutex<Option<RebornServicesError>>,
     read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
     read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
@@ -363,6 +367,25 @@ impl StubServices {
 
 #[async_trait]
 impl RebornServicesApi for StubServices {
+    async fn global_auto_approve_enabled(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<bool, RebornServicesError> {
+        *self.global_auto_approve_calls.lock().expect("lock") += 1;
+        if *self.stall_global_auto_approve.lock().expect("lock") {
+            std::future::pending::<()>().await;
+        }
+        if let Some(error) = self
+            .next_global_auto_approve_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(error);
+        }
+        Ok(*self.global_auto_approve_enabled.lock().expect("lock"))
+    }
+
     async fn create_thread(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -2760,24 +2783,14 @@ async fn get_session_reports_reborn_projects_feature_from_state_flag() {
     }
 }
 
-// The approval card hint needs the effective global auto-approve setting, but
-// the browser must receive it as a session bootstrap feature instead of reading
-// the operator settings response shape directly.
+// The approval card hint needs the effective global auto-approve setting. Keep
+// that as a narrow facade read surfaced through the session bootstrap feature,
+// not an operator config key lookup from the browser or route handler.
 #[tokio::test]
-async fn get_session_reports_global_auto_approve_feature_from_operator_config() {
+async fn get_session_reports_global_auto_approve_feature_from_facade() {
     for enabled in [false, true] {
         let services = Arc::new(StubServices::default());
-        services
-            .operator_config_entries
-            .lock()
-            .expect("lock")
-            .push(RebornOperatorConfigEntry {
-                key: "agent.auto_approve_tools".to_string(),
-                value: serde_json::json!(enabled),
-                source: "override".to_string(),
-                redacted: false,
-                mutable: true,
-            });
+        *services.global_auto_approve_enabled.lock().expect("lock") = enabled;
         let router = webui_v2_router(WebUiV2State::new(
             services.clone(),
             DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
@@ -2800,18 +2813,81 @@ async fn get_session_reports_global_auto_approve_feature_from_operator_config() 
         let body = read_json(response).await;
         assert_eq!(
             body["features"]["global_auto_approve"], enabled,
-            "features.global_auto_approve must mirror operator config (enabled={enabled})"
+            "features.global_auto_approve must mirror the facade flag (enabled={enabled})"
         );
         assert_eq!(
+            *services.global_auto_approve_calls.lock().expect("lock"),
+            1,
+            "session handler should read the feature through the narrow facade"
+        );
+        assert!(
             services
                 .get_operator_config_key_calls
                 .lock()
                 .expect("lock")
-                .as_slice(),
-            ["agent.auto_approve_tools".to_string()],
-            "session handler should read the feature through the facade key path"
+                .is_empty(),
+            "session handler must not read arbitrary operator config keys"
         );
     }
+}
+
+#[tokio::test]
+async fn get_session_defaults_global_auto_approve_false_when_facade_read_fails() {
+    let services = Arc::new(StubServices::default());
+    *services
+        .next_global_auto_approve_error
+        .lock()
+        .expect("lock") = Some(service_unavailable_error(false));
+    let router = webui_v2_router(WebUiV2State::new(
+        services.clone(),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["features"]["global_auto_approve"], false);
+    assert_eq!(*services.global_auto_approve_calls.lock().expect("lock"), 1);
+}
+
+#[tokio::test]
+async fn get_session_defaults_global_auto_approve_false_when_facade_stalls() {
+    let services = Arc::new(StubServices::default());
+    *services.stall_global_auto_approve.lock().expect("lock") = true;
+    let router = webui_v2_router(WebUiV2State::new(
+        services.clone(),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["features"]["global_auto_approve"], false);
+    assert_eq!(*services.global_auto_approve_calls.lock().expect("lock"), 1);
 }
 
 #[tokio::test]

@@ -64,7 +64,7 @@ use crate::router::{WebUiV2Capabilities, WebUiV2State};
 use crate::schema::WebChatV2EventFrame;
 use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
 
-const AUTO_APPROVE_CONFIG_KEY: &str = "agent.auto_approve_tools";
+const GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WebUiV2SessionResponse {
@@ -105,10 +105,12 @@ pub async fn get_session(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Json<WebUiV2SessionResponse> {
-    let global_auto_approve = global_auto_approve_enabled(&state, caller.clone()).await;
+    let tenant_id = caller.tenant_id.to_string();
+    let user_id = caller.user_id.to_string();
+    let global_auto_approve = global_auto_approve_enabled(&state, caller).await;
     Json(WebUiV2SessionResponse {
-        tenant_id: caller.tenant_id.to_string(),
-        user_id: caller.user_id.to_string(),
+        tenant_id,
+        user_id,
         capabilities,
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
@@ -122,14 +124,25 @@ async fn global_auto_approve_enabled(
     state: &WebUiV2State,
     caller: WebUiAuthenticatedCaller,
 ) -> bool {
-    let Ok(config) = state
-        .services()
-        .get_operator_config_key(caller, AUTO_APPROVE_CONFIG_KEY.to_string())
-        .await
-    else {
-        return false;
-    };
-    config.entry.value.as_bool().unwrap_or(false)
+    match tokio::time::timeout(
+        GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT,
+        state.services().global_auto_approve_enabled(caller),
+    )
+    .await
+    {
+        Ok(Ok(enabled)) => enabled,
+        Ok(Err(error)) => {
+            tracing::debug!(?error, "failed to read global auto-approve session feature");
+            false
+        }
+        Err(_) => {
+            tracing::debug!(
+                timeout_ms = GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT.as_millis(),
+                "timed out reading global auto-approve session feature"
+            );
+            false
+        }
+    }
 }
 
 /// `POST /api/webchat/v2/threads`
