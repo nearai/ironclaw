@@ -1077,6 +1077,83 @@ async fn cached_execute(
     client.execute(&statement, params).await
 }
 
+/// `CasExpectation::Absent` put: insert iff `path` is not an implicit directory
+/// (no descendant in the half-open `[prefix/, prefix0)` range); the `ON CONFLICT
+/// DO NOTHING` also blocks an explicit directory or existing file at `path`.
+#[cfg(feature = "postgres")]
+const PUT_ABSENT_SQL: &str = r#"
+    INSERT INTO root_filesystem_entries
+        (path, contents, is_dir, content_type, kind, indexed, version)
+    SELECT $1, $2, FALSE, $3, $4, $5, 1
+    WHERE NOT EXISTS (
+        SELECT 1 FROM root_filesystem_entries
+        WHERE path >= $6 AND path < $7
+        LIMIT 1
+    )
+    ON CONFLICT (path) DO NOTHING
+    "#;
+
+/// `CasExpectation::Version` put: update the file row at the expected version,
+/// rejecting an explicit directory (`is_dir = FALSE`) and — for parity with the
+/// insert arms — any implicit-directory descendant.
+#[cfg(feature = "postgres")]
+const PUT_VERSION_SQL: &str = r#"
+    UPDATE root_filesystem_entries
+    SET contents = $1,
+        content_type = $2,
+        kind = $3,
+        indexed = $4,
+        version = version + 1,
+        updated_at = NOW()
+    WHERE path = $5 AND is_dir = FALSE AND version = $6
+      AND NOT EXISTS (
+          SELECT 1 FROM root_filesystem_entries AS child
+          WHERE child.path >= $7 AND child.path < $8
+          LIMIT 1
+      )
+    "#;
+
+/// `CasExpectation::Any` put: upsert unless a descendant makes `path` an
+/// implicit directory; the `ON CONFLICT` guard rejects an explicit directory.
+/// `RETURNING version` removes the separate version read-back.
+#[cfg(feature = "postgres")]
+const PUT_ANY_SQL: &str = r#"
+    INSERT INTO root_filesystem_entries
+        (path, contents, is_dir, content_type, kind, indexed, version)
+    SELECT $1, $2, FALSE, $3, $4, $5, 1
+    WHERE NOT EXISTS (
+        SELECT 1 FROM root_filesystem_entries
+        WHERE path >= $6 AND path < $7
+        LIMIT 1
+    )
+    ON CONFLICT (path) DO UPDATE SET
+        contents = EXCLUDED.contents,
+        content_type = EXCLUDED.content_type,
+        kind = EXCLUDED.kind,
+        indexed = EXCLUDED.indexed,
+        version = root_filesystem_entries.version + 1,
+        updated_at = NOW()
+    WHERE root_filesystem_entries.is_dir = FALSE
+    RETURNING version
+    "#;
+
+/// CAS put for the Postgres backend.
+///
+/// **Round-trip budget: 1 statement on the happy path.** The directory
+/// invariant — reject writing a file where (a) an explicit directory exists at
+/// the exact path or (b) an implicit-directory child exists — is folded into the
+/// single write statement rather than issued as two separate `SELECT`
+/// pre-checks. Each CAS arm guards the write with a `NOT EXISTS` descendant scan
+/// over the half-open `[prefix/, prefix0)` range (rejecting implicit
+/// directories). An explicit directory at `path` is rejected by the
+/// `ON CONFLICT` clause in the INSERT arms and by `is_dir = FALSE` in the UPDATE
+/// arm, so a successful put costs exactly one round-trip (previously:
+/// exact-entry `SELECT` + child-scan `SELECT` + the write = three).
+///
+/// On the *rare* 0-row outcome we make one follow-up read
+/// (`diagnose_put_failure`) to reproduce the exact error the old pre-check and
+/// version read would have produced: `directory_write_error` for a directory
+/// conflict, `VersionMismatch` otherwise. The happy path never pays for it.
 #[cfg(feature = "postgres")]
 async fn postgres_put_with_client(
     client: &deadpool_postgres::Object,
@@ -1084,13 +1161,6 @@ async fn postgres_put_with_client(
     entry: Entry,
     cas: CasExpectation,
 ) -> Result<RecordVersion, FilesystemError> {
-    if matches!(
-        postgres_exact_entry_with_client(client, path).await?,
-        Some((_, FileType::Directory, _))
-    ) || postgres_has_child_entry_with_client(client, path).await?
-    {
-        return Err(directory_write_error(path.clone()));
-    }
     let indexed_json =
         serde_json::to_value(&entry.indexed).map_err(|_| FilesystemError::SerializeIndexed {
             path: path.clone(),
@@ -1100,51 +1170,43 @@ async fn postgres_put_with_client(
     let content_type_str = entry.content_type.as_str().to_string();
     let body = entry.body;
     let path_str = path.as_str();
+    let (child_lower, child_upper) = descendant_path_range(path);
 
     match cas {
         CasExpectation::Absent => {
+            // INSERT only when no descendant (implicit directory) exists; the
+            // half-open range excludes `path` itself, so it never sees the row
+            // being inserted. ON CONFLICT DO NOTHING also yields 0 rows when an
+            // explicit directory already occupies `path` — disambiguated below.
             let rows = cached_execute(
                 client,
-                r#"
-                    INSERT INTO root_filesystem_entries
-                        (path, contents, is_dir, content_type, kind, indexed, version)
-                    VALUES ($1, $2, FALSE, $3, $4, $5, 1)
-                    ON CONFLICT (path) DO NOTHING
-                    "#,
+                PUT_ABSENT_SQL,
                 &[
                     &path_str,
                     &body,
                     &content_type_str,
                     &kind_str,
                     &indexed_json,
+                    &child_lower,
+                    &child_upper,
                 ],
             )
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
             if rows == 0 {
-                let found = postgres_current_version_with_client(client, path).await?;
-                return Err(FilesystemError::VersionMismatch {
-                    path: path.clone(),
-                    expected: None,
-                    found,
-                });
+                return Err(diagnose_put_failure(client, path, None).await?);
             }
             Ok(RecordVersion::from_backend(1))
         }
         CasExpectation::Version(expected) => {
             let expected_raw = record_version_to_i64(path, expected)?;
+            // A `Version` CAS implies the file row already exists, so a child
+            // under a file path is impossible by construction; the `NOT EXISTS`
+            // descendant guard is carried for defense-in-depth parity with the
+            // INSERT arms. `is_dir = FALSE` rejects an explicit directory.
             let rows = cached_execute(
                 client,
-                r#"
-                    UPDATE root_filesystem_entries
-                    SET contents = $1,
-                        content_type = $2,
-                        kind = $3,
-                        indexed = $4,
-                        version = version + 1,
-                        updated_at = NOW()
-                    WHERE path = $5 AND is_dir = FALSE AND version = $6
-                    "#,
+                PUT_VERSION_SQL,
                 &[
                     &body,
                     &content_type_str,
@@ -1152,43 +1214,32 @@ async fn postgres_put_with_client(
                     &indexed_json,
                     &path_str,
                     &expected_raw,
+                    &child_lower,
+                    &child_upper,
                 ],
             )
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::WriteFile, error))?;
             if rows == 0 {
-                let found = postgres_current_version_with_client(client, path).await?;
-                return Err(FilesystemError::VersionMismatch {
-                    path: path.clone(),
-                    expected: Some(expected),
-                    found,
-                });
+                return Err(diagnose_put_failure(client, path, Some(expected)).await?);
             }
             Ok(expected.next())
         }
         CasExpectation::Any => {
+            // Upsert unless a descendant makes `path` an implicit directory; the
+            // ON CONFLICT guard rejects an explicit directory at `path`. A 0-row
+            // RETURNING is therefore always a directory conflict for `Any`.
             let row = cached_query_opt(
                 client,
-                r#"
-                    INSERT INTO root_filesystem_entries
-                        (path, contents, is_dir, content_type, kind, indexed, version)
-                    VALUES ($1, $2, FALSE, $3, $4, $5, 1)
-                    ON CONFLICT (path) DO UPDATE SET
-                        contents = EXCLUDED.contents,
-                        content_type = EXCLUDED.content_type,
-                        kind = EXCLUDED.kind,
-                        indexed = EXCLUDED.indexed,
-                        version = root_filesystem_entries.version + 1,
-                        updated_at = NOW()
-                    WHERE root_filesystem_entries.is_dir = FALSE
-                    RETURNING version
-                    "#,
+                PUT_ANY_SQL,
                 &[
                     &path_str,
                     &body,
                     &content_type_str,
                     &kind_str,
                     &indexed_json,
+                    &child_lower,
+                    &child_upper,
                 ],
             )
             .await
@@ -1200,6 +1251,38 @@ async fn postgres_put_with_client(
             record_version_from_i64(path, version)
         }
     }
+}
+
+/// Diagnose the precise error for a CAS put that wrote 0 rows.
+///
+/// Only reached on the (rare) failure path. Distinguishes a directory conflict
+/// (explicit directory at `path`, or an implicit-directory child) from a CAS
+/// version mismatch — exactly the information the old pre-check + version read
+/// produced, but issued only when the write actually failed.
+///
+/// The return type is `Result<FilesystemError, FilesystemError>` because the
+/// diagnosis itself issues reads: the **`Ok`** value is the diagnosed error to
+/// surface to the caller, and the **`Err`** value is a backend failure that
+/// occurred *while* diagnosing. Call sites therefore wrap the result as
+/// `Err(diagnose_put_failure(..).await?)` — the `?` propagates a diagnosis-time
+/// backend error, and the `Err(..)` surfaces the diagnosed error.
+#[cfg(feature = "postgres")]
+async fn diagnose_put_failure(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+    expected: Option<RecordVersion>,
+) -> Result<FilesystemError, FilesystemError> {
+    if postgres_is_dir_with_client(client, path).await?
+        || postgres_has_child_entry_with_client(client, path).await?
+    {
+        return Ok(directory_write_error(path.clone()));
+    }
+    let found = postgres_current_version_with_client(client, path).await?;
+    Ok(FilesystemError::VersionMismatch {
+        path: path.clone(),
+        expected,
+        found,
+    })
 }
 
 #[cfg(feature = "postgres")]
@@ -1276,32 +1359,24 @@ async fn postgres_current_version_with_client(
     .transpose()
 }
 
+/// Whether an explicit directory row exists at the exact `path`.
+///
+/// Used only on the rare CAS-put failure path. Selects the `is_dir` flag alone
+/// and never reads `OCTET_LENGTH(contents)`, so it does not touch the
+/// (potentially TOAST'd) body to answer a question that only needs one boolean.
 #[cfg(feature = "postgres")]
-async fn postgres_exact_entry_with_client(
+async fn postgres_is_dir_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
-) -> Result<Option<(u64, FileType, Option<std::time::SystemTime>)>, FilesystemError> {
+) -> Result<bool, FilesystemError> {
     let row = cached_query_opt(
         client,
-        "SELECT OCTET_LENGTH(contents)::bigint AS len, is_dir, EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_epoch FROM root_filesystem_entries WHERE path = $1",
+        "SELECT is_dir FROM root_filesystem_entries WHERE path = $1",
         &[&path.as_str()],
     )
     .await
     .map_err(|error| db_error(path.clone(), FilesystemOperation::Stat, error))?;
-    Ok(row.map(|row| {
-        let len: i64 = row.get("len");
-        let is_dir: bool = row.get("is_dir");
-        let updated_at_epoch: i64 = row.get("updated_at_epoch");
-        (
-            if is_dir { 0 } else { len.max(0) as u64 },
-            if is_dir {
-                FileType::Directory
-            } else {
-                FileType::File
-            },
-            system_time_from_unix_seconds(updated_at_epoch),
-        )
-    }))
+    Ok(row.is_some_and(|row| row.get::<_, bool>("is_dir")))
 }
 
 #[cfg(feature = "postgres")]
@@ -1595,5 +1670,76 @@ mod tests {
             postgres_migration_connect_backoff(20),
             POSTGRES_MIGRATION_CONNECT_MAX_BACKOFF
         );
+    }
+
+    /// Returns the number of top-level statements in a SQL string by counting
+    /// statement terminators (`;`) that are not inside a quoted literal. The
+    /// put statements use no string literals containing `;`, so a simple
+    /// non-empty trailing-segment count is exact here.
+    fn top_level_statement_count(sql: &str) -> usize {
+        sql.split(';').filter(|s| !s.trim().is_empty()).count()
+    }
+
+    /// The CAS put round-trip fix: each `CasExpectation` arm must issue exactly
+    /// ONE statement. Before the fix, a put ran three round-trips — an
+    /// exact-entry `SELECT`, a child-scan `SELECT`, then the write. The
+    /// directory invariant is now folded into the single write statement, so a
+    /// successful put costs one round-trip. This guards against a regression
+    /// re-splitting the pre-check back out into separate queries.
+    #[test]
+    fn put_statements_are_single_round_trip() {
+        for (name, sql) in [
+            ("absent", PUT_ABSENT_SQL),
+            ("version", PUT_VERSION_SQL),
+            ("any", PUT_ANY_SQL),
+        ] {
+            assert_eq!(
+                top_level_statement_count(sql),
+                1,
+                "{name} put must be a single statement (one round-trip), got: {sql}"
+            );
+        }
+    }
+
+    /// Each put statement must carry the folded directory invariant guard so it
+    /// rejects writing a file over a directory without a separate pre-check
+    /// round-trip. Every arm guards implicit directories with a `NOT EXISTS`
+    /// descendant scan. Explicit directories are rejected differently per arm:
+    /// the INSERT arms (`PUT_ABSENT_SQL`, `PUT_ANY_SQL`) rely on `ON CONFLICT`
+    /// (the existing directory row collides on the `path` primary key), while
+    /// the UPDATE arm (`PUT_VERSION_SQL`) and the `PUT_ANY_SQL` conflict clause
+    /// use an explicit `is_dir = FALSE` predicate.
+    #[test]
+    fn put_statements_fold_in_directory_guard() {
+        // Implicit-directory (descendant) guard — every arm.
+        assert!(PUT_ABSENT_SQL.contains("NOT EXISTS"));
+        assert!(PUT_VERSION_SQL.contains("NOT EXISTS"));
+        assert!(PUT_ANY_SQL.contains("NOT EXISTS"));
+        // Explicit-directory: INSERT arms reject via ON CONFLICT on the path PK.
+        assert!(PUT_ABSENT_SQL.contains("ON CONFLICT (path)"));
+        assert!(PUT_ANY_SQL.contains("ON CONFLICT (path)"));
+        // Explicit-directory: the UPDATE arm and the upsert conflict clause use
+        // an explicit is_dir = FALSE predicate.
+        assert!(PUT_VERSION_SQL.contains("is_dir = FALSE"));
+        assert!(PUT_ANY_SQL.contains("is_dir = FALSE"));
+    }
+
+    /// The descendant range is the half-open `[prefix/, prefix0)` band that the
+    /// folded `NOT EXISTS` child guard scans. A wrong bound would silently
+    /// mis-scope the directory invariant, so pin the exact bytes and the
+    /// sort-order invariant (`'/'` < real children < `'0'`).
+    #[test]
+    fn descendant_path_range_is_half_open_child_band() {
+        let path = VirtualPath::new("/secrets/a/b").unwrap();
+        let (lower, upper) = descendant_path_range(&path);
+        assert_eq!(lower, "/secrets/a/b/");
+        assert_eq!(upper, "/secrets/a/b0");
+        let (lower, upper) = (lower.as_str(), upper.as_str());
+        assert!(lower < upper);
+        // A real descendant sorts inside the band; the path itself and a
+        // sibling sharing the prefix do not.
+        assert!("/secrets/a/b/child" >= lower && "/secrets/a/b/child" < upper);
+        assert!("/secrets/a/b" < lower); // the path itself is excluded
+        assert!("/secrets/a/bb" >= upper); // prefix-sharing sibling excluded
     }
 }
