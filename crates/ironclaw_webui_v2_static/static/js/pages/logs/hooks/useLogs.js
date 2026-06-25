@@ -30,12 +30,6 @@ export function readLogScopeFromLocation(location = globalThis.location, default
   }, { active: [] });
   if (!scope.threadId && defaultThreadId) {
     scope.threadId = defaultThreadId;
-    scope.active.unshift({
-      key: "threadId",
-      param: "thread_id",
-      labelKey: "logs.scope.thread",
-      value: defaultThreadId,
-    });
   }
   return scope;
 }

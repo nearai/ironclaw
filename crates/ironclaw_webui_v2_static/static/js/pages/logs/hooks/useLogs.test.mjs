@@ -164,14 +164,16 @@ test("useLogs uses the non-operator endpoint when the caller is not admin", asyn
   assert.equal(harness.calls[0].threadId, "thread-a");
 });
 
-test("useLogs falls back to the caller's active thread when no thread scope is in the URL", async () => {
+test("useLogs falls back to the caller's active thread without exposing a clearable scope chip", async () => {
   const harness = createHookHarness({
     useLogsArgs: { isAdmin: false, defaultThreadId: "thread-fallback" },
   });
 
-  harness.render();
+  const result = harness.render();
   await harness.runEffects();
 
+  assert.equal(result.scope.threadId, "thread-fallback");
+  assert.equal(result.scope.active.length, 0);
   assert.equal(harness.calls.length, 1);
   assert.equal(harness.calls[0].endpoint, "logs");
   assert.equal(harness.calls[0].threadId, "thread-fallback");

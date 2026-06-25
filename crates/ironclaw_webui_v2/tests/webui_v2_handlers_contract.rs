@@ -62,8 +62,9 @@ use ironclaw_product_workflow::{
     RebornTimelineRequest, RebornTimelineResponse, RebornUpdateMemberRoleRequest,
     RebornUpdateProjectRequest, SetActiveLlmRequest, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
+    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -1035,6 +1036,17 @@ impl RebornServicesApi for StubServices {
         _caller: WebUiAuthenticatedCaller,
         request: RebornLogQueryRequest,
     ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        if request.tail && request.follow {
+            return Err(RebornServicesError {
+                code: RebornServicesErrorCode::InvalidRequest,
+                kind: RebornServicesErrorKind::Validation,
+                status_code: 400,
+                retryable: false,
+                field: Some("follow".to_string()),
+                validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+            });
+        }
+
         self.query_logs_calls.lock().expect("lock").push(request);
         Ok(RebornLogQueryResponse {
             source: "test".to_string(),
@@ -3014,6 +3026,30 @@ async fn logs_are_available_without_operator_capability() {
     assert_eq!(log_calls[0].source.as_deref(), Some("slack"));
     assert!(log_calls[0].follow);
     assert!(!log_calls[0].tail);
+}
+
+#[tokio::test]
+async fn logs_reject_ambiguous_tail_follow_modes() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/logs?tail=true&follow=true")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["field"], "follow");
+    assert_eq!(body["validation_code"], "invalid_value");
+    assert!(services.query_logs_calls.lock().expect("lock").is_empty());
 }
 
 #[tokio::test]

@@ -6154,6 +6154,46 @@ async fn query_operator_logs_rejects_ambiguous_tail_follow_modes() {
 }
 
 #[tokio::test]
+async fn query_logs_rejects_ambiguous_tail_follow_modes() {
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_logs_service(operator_logs.clone());
+
+    let err = services
+        .query_logs(
+            caller(),
+            RebornLogQueryRequest {
+                limit: None,
+                cursor: None,
+                level: None,
+                target: None,
+                thread_id: None,
+                run_id: None,
+                turn_id: None,
+                tool_call_id: None,
+                tool_name: None,
+                source: None,
+                tail: true,
+                follow: true,
+            },
+        )
+        .await
+        .expect_err("tail and follow cannot be combined");
+
+    assert_eq!(err.kind, RebornServicesErrorKind::Validation);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(err.field.as_deref(), Some("follow"));
+    assert_eq!(
+        err.validation_code,
+        Some(WebUiInboundValidationCode::InvalidValue)
+    );
+    assert!(operator_logs.requests().is_empty());
+}
+
+#[tokio::test]
 async fn operator_service_lifecycle_contract_is_implementable_from_crate_root() {
     let backend = CrateRootLifecycleBackend;
     let response = backend
