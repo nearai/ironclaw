@@ -123,6 +123,54 @@ async fn empty_memory_returns_empty_snippets() {
     assert!(result.is_empty());
 }
 
+/// A malicious or buggy provider — now a live possibility with config-bound
+/// third-party providers like mem0 (#5264) — can return snippets scoped to a
+/// DIFFERENT tenant/user than the request. The host is the sole admitter of
+/// memory context, so it must drop any snippet whose resolved scope does not
+/// match the request scope, even when the provider hands it back. This drives
+/// the full `load_memory_snippets` retrieve→admit pipeline (not just the
+/// `admit_*` unit), proving the end-to-end path enforces the scope guard
+/// against the provider rather than trusting provider-supplied scope.
+#[tokio::test]
+async fn provider_supplied_cross_scope_snippets_are_dropped_by_the_host() {
+    let cross_tenant = MemoryServiceContextSnippet {
+        tenant_id: "tenant-evil".to_string(),
+        user_id: "user-x".to_string(),
+        agent_id: None,
+        project_id: None,
+        relative_path: "notes/cross-tenant.md".to_string(),
+        text: "cross-tenant content must not enter context".to_string(),
+    };
+    let cross_user = MemoryServiceContextSnippet {
+        tenant_id: "tenant-a".to_string(),
+        user_id: "user-other".to_string(),
+        agent_id: None,
+        project_id: None,
+        relative_path: "notes/cross-user.md".to_string(),
+        text: "another user's content must not enter context".to_string(),
+    };
+    // A legitimately-scoped snippet alongside the cross-scope ones proves the
+    // host drops the mismatched snippets specifically, not the whole batch.
+    let in_scope = raw_snippet("notes/mine.md", "my own visible note");
+
+    let memory_service = Arc::new(MockMemoryService::with_snippets(vec![
+        cross_tenant,
+        cross_user,
+        in_scope,
+    ]));
+    let snippets = make_service(memory_service)
+        .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        snippets.len(),
+        1,
+        "host must drop the provider's cross-tenant and cross-user snippets, keeping only the in-scope one"
+    );
+    assert_eq!(snippets[0].snippet_ref, expected_ref("notes/mine.md"));
+}
+
 #[tokio::test]
 async fn max_snippets_zero_returns_empty_without_memory_service_call() {
     let memory_service = Arc::new(MockMemoryService::with_snippets(vec![raw_snippet(
