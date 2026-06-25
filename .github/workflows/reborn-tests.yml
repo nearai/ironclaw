@@ -204,8 +204,7 @@ jobs:
 
       - name: Install mold and clang
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang mold
+          scripts/ci/install-ci-apt-packages.sh clang mold
           test -x /usr/bin/mold
 
       - name: Restore Rust cache
@@ -278,8 +277,7 @@ jobs:
 
       - name: Install mold and clang
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang mold
+          scripts/ci/install-ci-apt-packages.sh clang mold
           test -x /usr/bin/mold
 
       - name: Verify mold linker is active
@@ -366,8 +364,7 @@ jobs:
 
       - name: Install mold
         run: |
-          sudo apt-get update
-          sudo apt-get install -y mold
+          scripts/ci/install-ci-apt-packages.sh mold
           test -x /usr/bin/mold
 
       - name: Install Rust

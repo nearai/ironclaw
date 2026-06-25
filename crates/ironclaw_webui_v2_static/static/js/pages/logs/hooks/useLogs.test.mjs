@@ -249,6 +249,50 @@ test("useLogs falls back to the caller's active thread without exposing a cleara
   assert.equal(result.scope.active.length, 0);
 });
 
+test("useLogs clears stale entries and ignores prior in-flight loads when scope changes", async () => {
+  const pending = [];
+  const harness = createHookHarness({
+    search: "?thread_id=thread-a",
+    useLogsArgs: { isAdmin: false },
+    queryLogsImpl: async (request) => new Promise((resolve) => {
+      pending.push({ request, resolve });
+    }),
+  });
+
+  harness.render();
+  await harness.runEffects();
+  assert.equal(pending.length, 1);
+  pending[0].resolve({ entries: [{ id: "thread-a-entry" }] });
+  await harness.runEffects();
+  let result = harness.render();
+  assert.equal(result.entries.length, 1);
+  assert.equal(result.entries[0].id, "thread-a-entry");
+
+  harness.intervals[0].fn();
+  await Promise.resolve();
+  assert.equal(pending.length, 2);
+  assert.equal(pending[1].request.threadId, "thread-a");
+
+  harness.setSearch("?thread_id=thread-b");
+  result = harness.render();
+  await harness.runEffects();
+  result = harness.render();
+  assert.equal(result.entries.length, 0);
+  assert.equal(pending.length, 3);
+  assert.equal(pending[2].request.threadId, "thread-b");
+
+  pending[1].resolve({ entries: [{ id: "late-thread-a-entry" }] });
+  await harness.runEffects();
+  result = harness.render();
+  assert.equal(result.entries.length, 0);
+
+  pending[2].resolve({ entries: [{ id: "thread-b-entry" }] });
+  await harness.runEffects();
+  result = harness.render();
+  assert.equal(result.entries.length, 1);
+  assert.equal(result.entries[0].id, "thread-b-entry");
+});
+
 test("useLogs does not poll public logs until a thread scope is available", async () => {
   const harness = createHookHarness({
     useLogsArgs: { isAdmin: false },

@@ -476,6 +476,7 @@ pub enum WebUiInboundValidationCode {
     TooLong,
     InvalidControlCharacter,
     InvalidId,
+    UnknownKey,
     InvalidValue,
 }
 

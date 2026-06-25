@@ -74,8 +74,9 @@ use ironclaw_turns::{
         LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort,
         LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort,
         NoOpBudgetAccountant, NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition,
-        RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
-        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        RegisterProviderToolCallRequest, RunScopedHookMilestoneSink, StageCheckpointPayloadRequest,
+        SystemInferencePort, UpdateAssistantDraft, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -199,9 +200,9 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(tool_call).await
+        self.inner.register_provider_tool_call(request).await
     }
 
     async fn visible_capabilities(
@@ -1869,11 +1870,9 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
-        self.capabilities
-            .register_provider_tool_call(tool_call)
-            .await
+        self.capabilities.register_provider_tool_call(request).await
     }
 
     async fn visible_capabilities(
@@ -2394,6 +2393,7 @@ mod hook_resolver_adapter_tests {
 
     fn invocation(input_ref: &str) -> CapabilityInvocation {
         CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("v1")
                 .expect("surface version literal valid"),
             capability_id: CapabilityId::new("cap.test").expect("capability id literal valid"),

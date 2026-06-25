@@ -56,6 +56,8 @@ export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
   const needsThreadScope = !isAdmin && !threadId;
 
   React.useEffect(() => {
+    requestIdRef.current += 1;
+    setEntries([]);
     setError(null);
   }, [isAdmin, runId, source, threadId, toolCallId, toolName, turnId]);
 

@@ -1,7 +1,7 @@
 //! Contract tests for [`FilesystemTurnStateStore`] against a
 //! [`ScopedFilesystem`] over a CAS-capable filesystem backend. The persistent
-//! shape is a single `/turns/state.json` snapshot keyed by the [`MountView`]
-//! target.
+//! shape is a lower-churn `/turns/state.json` snapshot plus per-run lease
+//! sidecars keyed by the [`MountView`] target.
 
 use std::{
     sync::{
@@ -15,9 +15,9 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CasExpectation, CompositeRootFilesystem,
-    ContentKind, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, Filter,
-    InMemoryBackend, IndexPolicy, IndexSpec, LocalFilesystem, MountDescriptor, Page, RecordVersion,
-    RootFilesystem, ScopedFilesystem, StorageClass, VersionedEntry,
+    ContentKind, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend,
+    IndexPolicy, LocalFilesystem, MountDescriptor, RecordVersion, RootFilesystem, ScopedFilesystem,
+    StorageClass, VersionedEntry,
 };
 use ironclaw_host_api::{
     AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, ScopedPath,
@@ -26,11 +26,14 @@ use ironclaw_host_api::{
 use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, FilesystemTurnStateStore, GetRunStateRequest,
     IdempotencyKey, InMemoryRunProfileResolver, ProductTurnContext, ReplyTargetBindingRef,
-    RunOriginAdapter, RunProfileRequest, SourceBindingRef, SubmitChildRunRequest,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnError, TurnLeaseToken, TurnOriginKind,
-    TurnOwner, TurnRunId, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore, TurnStateStore,
-    TurnStatus,
-    runner::{ClaimRunRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort},
+    RunOriginAdapter, RunProfileRequest, SanitizedCancelReason, SourceBindingRef,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnError,
+    TurnLeaseToken, TurnOriginKind, TurnOwner, TurnPersistenceSnapshot, TurnRunId, TurnRunnerId,
+    TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    runner::{
+        ClaimRunRequest, CompleteRunRequest, HeartbeatRequest, RecoverExpiredLeasesRequest,
+        TurnRunTransitionPort,
+    },
 };
 
 /// Build a CAS-capable backend; local-dev and production mount `/turns` under
@@ -165,6 +168,43 @@ fn snapshot_virtual_path() -> VirtualPath {
     VirtualPath::new("/engine/tenants/test-tenant/users/test-user/turns/state.json").unwrap()
 }
 
+fn runner_lease_virtual_path(run_id: TurnRunId) -> VirtualPath {
+    VirtualPath::new(format!(
+        "/engine/tenants/test-tenant/users/test-user/turns/runner-leases/{run_id}.json"
+    ))
+    .unwrap()
+}
+
+async fn overwrite_snapshot_lease_expiry(
+    backend: &InMemoryBackend,
+    run_id: TurnRunId,
+    lease_expires_at: chrono::DateTime<Utc>,
+) {
+    let versioned = backend
+        .get(&snapshot_virtual_path())
+        .await
+        .unwrap()
+        .expect("snapshot");
+    let mut snapshot: TurnPersistenceSnapshot =
+        serde_json::from_slice(&versioned.entry.body).unwrap();
+    let run = snapshot
+        .runs
+        .iter_mut()
+        .find(|record| record.run_id == run_id)
+        .expect("run in snapshot");
+    run.lease_expires_at = Some(lease_expires_at);
+    let mut entry = versioned.entry;
+    entry.body = serde_json::to_vec_pretty(&snapshot).unwrap();
+    backend
+        .put(
+            &snapshot_virtual_path(),
+            entry,
+            CasExpectation::Version(versioned.version),
+        )
+        .await
+        .unwrap();
+}
+
 struct BlockingPutFilesystem<F> {
     inner: F,
     block_next_put: AtomicBool,
@@ -196,6 +236,59 @@ impl<F> BlockingPutFilesystem<F> {
 
     fn release_blocked_put(&self) {
         self.release_put.notify_one();
+    }
+}
+
+struct BlockingSnapshotPutFilesystem<F> {
+    inner: F,
+    block_snapshot_puts: AtomicBool,
+    snapshot_put_blocked: AtomicBool,
+    snapshot_put_started: tokio::sync::Notify,
+    release_snapshot_puts: tokio::sync::Notify,
+}
+
+struct RejectSnapshotGetFilesystem<F> {
+    inner: F,
+    reject_snapshot_gets: AtomicBool,
+}
+
+impl<F> BlockingSnapshotPutFilesystem<F> {
+    fn new(inner: F) -> Self {
+        Self {
+            inner,
+            block_snapshot_puts: AtomicBool::new(false),
+            snapshot_put_blocked: AtomicBool::new(false),
+            snapshot_put_started: tokio::sync::Notify::new(),
+            release_snapshot_puts: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn block_snapshot_puts(&self) {
+        self.block_snapshot_puts.store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_for_blocked_snapshot_put(&self) {
+        while !self.snapshot_put_blocked.load(Ordering::SeqCst) {
+            self.snapshot_put_started.notified().await;
+        }
+    }
+
+    fn release_snapshot_puts(&self) {
+        self.block_snapshot_puts.store(false, Ordering::SeqCst);
+        self.release_snapshot_puts.notify_waiters();
+    }
+}
+
+impl<F> RejectSnapshotGetFilesystem<F> {
+    fn new(inner: F) -> Self {
+        Self {
+            inner,
+            reject_snapshot_gets: AtomicBool::new(false),
+        }
+    }
+
+    fn reject_snapshot_gets(&self) {
+        self.reject_snapshot_gets.store(true, Ordering::SeqCst);
     }
 }
 
@@ -270,6 +363,25 @@ struct VersionMismatchFilesystem<F> {
 impl<F> VersionMismatchFilesystem<F> {
     fn new(inner: F) -> Self {
         Self { inner }
+    }
+}
+
+struct OneShotRunnerLeaseVersionMismatchFilesystem<F> {
+    inner: F,
+    reject_next_runner_lease_put: AtomicBool,
+}
+
+impl<F> OneShotRunnerLeaseVersionMismatchFilesystem<F> {
+    fn new(inner: F) -> Self {
+        Self {
+            inner,
+            reject_next_runner_lease_put: AtomicBool::new(false),
+        }
+    }
+
+    fn reject_next_runner_lease_put(&self) {
+        self.reject_next_runner_lease_put
+            .store(true, Ordering::SeqCst);
     }
 }
 
@@ -375,6 +487,55 @@ where
 }
 
 #[async_trait]
+impl<F> RootFilesystem for OneShotRunnerLeaseVersionMismatchFilesystem<F>
+where
+    F: RootFilesystem,
+{
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        if path.as_str().contains("/turns/runner-leases/")
+            && self
+                .reject_next_runner_lease_put
+                .swap(false, Ordering::SeqCst)
+        {
+            return Err(FilesystemError::VersionMismatch {
+                path: path.clone(),
+                expected: match cas {
+                    CasExpectation::Any | CasExpectation::Absent => None,
+                    CasExpectation::Version(version) => Some(version),
+                },
+                found: None,
+            });
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+}
+
+#[async_trait]
 impl<F> RootFilesystem for BlockingPutFilesystem<F>
 where
     F: RootFilesystem,
@@ -406,33 +567,92 @@ where
         self.inner.list_dir(path).await
     }
 
-    async fn list_dir_bounded(
-        &self,
-        path: &VirtualPath,
-        max_entries: usize,
-    ) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir_bounded(path, max_entries).await
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+}
+
+#[async_trait]
+impl<F> RootFilesystem for BlockingSnapshotPutFilesystem<F>
+where
+    F: RootFilesystem,
+{
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
     }
 
-    async fn query(
+    async fn put(
         &self,
         path: &VirtualPath,
-        filter: &Filter,
-        page: Page,
-    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
-        self.inner.query(path, filter, page).await
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        if path == &snapshot_virtual_path() && self.block_snapshot_puts.load(Ordering::SeqCst) {
+            self.snapshot_put_blocked.store(true, Ordering::SeqCst);
+            self.snapshot_put_started.notify_one();
+            while self.block_snapshot_puts.load(Ordering::SeqCst) {
+                self.release_snapshot_puts.notified().await;
+            }
+            self.snapshot_put_blocked.store(false, Ordering::SeqCst);
+        }
+        self.inner.put(path, entry, cas).await
     }
 
-    async fn ensure_index(
-        &self,
-        path: &VirtualPath,
-        spec: &IndexSpec,
-    ) -> Result<(), FilesystemError> {
-        self.inner.ensure_index(path, spec).await
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
     }
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+}
+
+#[async_trait]
+impl<F> RootFilesystem for RejectSnapshotGetFilesystem<F>
+where
+    F: RootFilesystem,
+{
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        if path == &snapshot_virtual_path() && self.reject_snapshot_gets.load(Ordering::SeqCst) {
+            return Err(FilesystemError::PermissionDenied {
+                path: ScopedPath::new(path.as_str().to_string()).expect("scoped path"),
+                operation: FilesystemOperation::ReadFile,
+            });
+        }
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
     }
 }
 
@@ -494,31 +714,6 @@ where
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
         self.inner.list_dir(path).await
-    }
-
-    async fn list_dir_bounded(
-        &self,
-        path: &VirtualPath,
-        max_entries: usize,
-    ) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir_bounded(path, max_entries).await
-    }
-
-    async fn query(
-        &self,
-        path: &VirtualPath,
-        filter: &Filter,
-        page: Page,
-    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
-        self.inner.query(path, filter, page).await
-    }
-
-    async fn ensure_index(
-        &self,
-        path: &VirtualPath,
-        spec: &IndexSpec,
-    ) -> Result<(), FilesystemError> {
-        self.inner.ensure_index(path, spec).await
     }
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
@@ -600,6 +795,508 @@ async fn filesystem_turn_state_store_does_not_write_unchanged_idle_runner_snapsh
         matches!(err, FilesystemError::NotFound { .. }),
         "idle no-op runner polling must not create or rewrite the snapshot: {err:?}"
     );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_store_heartbeat_updates_lease_without_rewriting_snapshot() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateStore::new(scoped);
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let request = submit_request_for(
+        turn_scope("thread-fs-heartbeat-sidecar"),
+        "idem-fs-heartbeat-sidecar",
+    );
+    let response = store
+        .submit_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    let claimed = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.state.run_id, run_id);
+
+    let version_after_claim = backend
+        .get(&snapshot_virtual_path())
+        .await
+        .unwrap()
+        .expect("snapshot after claim")
+        .version;
+    let claimed_snapshot = store.persistence_snapshot().await.unwrap();
+    let claimed_run = claimed_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("claimed run");
+    let first_heartbeat_at = claimed_run.last_heartbeat_at.expect("heartbeat timestamp");
+    let first_expiry = claimed_run.lease_expires_at.expect("lease expiry");
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+
+    let version_after_heartbeat = backend
+        .get(&snapshot_virtual_path())
+        .await
+        .unwrap()
+        .expect("snapshot after heartbeat")
+        .version;
+    assert_eq!(
+        version_after_heartbeat, version_after_claim,
+        "heartbeat must refresh the runner lease without rewriting state.json"
+    );
+    let heartbeat_snapshot = store.persistence_snapshot().await.unwrap();
+    let heartbeat_run = heartbeat_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("heartbeat run");
+    assert!(
+        heartbeat_run
+            .last_heartbeat_at
+            .expect("heartbeat timestamp")
+            > first_heartbeat_at,
+        "heartbeat read model should expose the refreshed sidecar timestamp"
+    );
+    assert!(
+        heartbeat_run.lease_expires_at.expect("lease expiry") > first_expiry,
+        "heartbeat read model should expose the refreshed sidecar expiry"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_store_heartbeat_backfills_missing_runner_lease_sidecar() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateStore::new(scoped);
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let request = submit_request_for(
+        turn_scope("thread-fs-heartbeat-sidecar-backfill"),
+        "idem-fs-heartbeat-sidecar-backfill",
+    );
+    let response = store
+        .submit_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let claimed_snapshot = store.persistence_snapshot().await.unwrap();
+    let first_heartbeat_at = claimed_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .and_then(|record| record.last_heartbeat_at)
+        .expect("claimed heartbeat timestamp");
+
+    backend
+        .delete(&runner_lease_virtual_path(run_id))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .expect("heartbeat should lazily seed a missing sidecar from state.json");
+
+    let heartbeat_snapshot = store.persistence_snapshot().await.unwrap();
+    let heartbeat_run = heartbeat_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .expect("heartbeat run");
+    assert!(
+        heartbeat_run
+            .last_heartbeat_at
+            .expect("heartbeat timestamp")
+            > first_heartbeat_at,
+        "lazy sidecar backfill must still expose the refreshed heartbeat"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_store_recover_expired_leases_uses_runner_lease_sidecar() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateStore::new(scoped);
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let request = submit_request_for(
+        turn_scope("thread-fs-recover-sidecar"),
+        "idem-fs-recover-sidecar",
+    );
+    let response = store
+        .submit_turn(request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let claimed_snapshot = store.persistence_snapshot().await.unwrap();
+    let first_expiry = claimed_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .and_then(|record| record.lease_expires_at)
+        .expect("claimed lease expiry");
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+    let heartbeat_snapshot = store.persistence_snapshot().await.unwrap();
+    let refreshed_expiry = heartbeat_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .and_then(|record| record.lease_expires_at)
+        .expect("refreshed lease expiry");
+    assert!(refreshed_expiry > first_expiry);
+
+    let not_yet_recovered = store
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: first_expiry + chrono::Duration::milliseconds(1),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        not_yet_recovered.recovered.is_empty(),
+        "recovery must use sidecar expiry instead of stale state.json expiry"
+    );
+
+    let recovered = store
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: refreshed_expiry + chrono::Duration::milliseconds(1),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(recovered.recovered.len(), 1);
+    assert_eq!(recovered.recovered[0].run_id, run_id);
+    assert_eq!(recovered.recovered[0].status, TurnStatus::Failed);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_store_complete_run_uses_runner_lease_sidecar() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateStore::new(scoped);
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let request = submit_request_for(
+        turn_scope("thread-fs-complete-sidecar"),
+        "idem-fs-complete-sidecar",
+    );
+    let response = store
+        .submit_turn(request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+
+    overwrite_snapshot_lease_expiry(&backend, run_id, Utc::now() - chrono::Duration::seconds(1))
+        .await;
+
+    let completed = store
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .expect("terminal transition must validate against sidecar lease metadata");
+    assert_eq!(completed.status, TurnStatus::Completed);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_store_heartbeat_retries_runner_lease_sidecar_cas() {
+    let backend = Arc::new(OneShotRunnerLeaseVersionMismatchFilesystem::new(
+        engine_filesystem(),
+    ));
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateStore::new(scoped);
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let request = submit_request_for(
+        turn_scope("thread-fs-heartbeat-sidecar-cas"),
+        "idem-fs-heartbeat-sidecar-cas",
+    );
+    let response = store
+        .submit_turn(request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let claimed_snapshot = store.persistence_snapshot().await.unwrap();
+    let first_heartbeat_at = claimed_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .and_then(|record| record.last_heartbeat_at)
+        .expect("claimed heartbeat timestamp");
+
+    backend.reject_next_runner_lease_put();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .expect("heartbeat should retry sidecar CAS version mismatch");
+
+    let heartbeat_snapshot = store.persistence_snapshot().await.unwrap();
+    let heartbeat_at = heartbeat_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .and_then(|record| record.last_heartbeat_at)
+        .expect("heartbeat timestamp");
+    assert!(heartbeat_at > first_heartbeat_at);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_store_heartbeat_does_not_read_snapshot() {
+    let backend = Arc::new(RejectSnapshotGetFilesystem::new(engine_filesystem()));
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateStore::new(scoped);
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let response = store
+        .submit_turn(
+            submit_request_for(
+                turn_scope("thread-fs-heartbeat-sidecar-only"),
+                "idem-fs-heartbeat-sidecar-only",
+            ),
+            &AllowAllTurnAdmissionPolicy,
+            &resolver,
+        )
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    let claimed = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.state.run_id, run_id);
+
+    backend.reject_snapshot_gets();
+    store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .expect("heartbeat must use only the runner lease sidecar");
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_store_cancel_requested_heartbeat_uses_sidecar_status() {
+    let backend = Arc::new(RejectSnapshotGetFilesystem::new(engine_filesystem()));
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateStore::new(scoped);
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let request = submit_request_for(
+        turn_scope("thread-fs-heartbeat-cancel-sidecar"),
+        "idem-fs-heartbeat-cancel-sidecar",
+    );
+    let response = store
+        .submit_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let cancel = store
+        .request_cancel(ironclaw_turns::CancelRunRequest {
+            scope: request.scope,
+            actor: turn_actor(),
+            run_id,
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("idem-fs-heartbeat-cancel-request").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(cancel.status, TurnStatus::CancelRequested);
+
+    backend.reject_snapshot_gets();
+    let heartbeat = store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        heartbeat,
+        TurnError::InvalidTransition {
+            from: TurnStatus::CancelRequested,
+            to: TurnStatus::Running,
+        }
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_store_heartbeat_succeeds_while_snapshot_put_is_blocked() {
+    let backend = Arc::new(BlockingSnapshotPutFilesystem::new(engine_filesystem()));
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = Arc::new(FilesystemTurnStateStore::new(scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let request = submit_request_for(
+        turn_scope("thread-fs-heartbeat-blocked-snapshot"),
+        "idem-fs-heartbeat-blocked-snapshot",
+    );
+    let response = store
+        .submit_turn(request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    let claimed = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.state.run_id, run_id);
+
+    backend.block_snapshot_puts();
+    let blocked_store = Arc::clone(&store);
+    let blocked_writer = tokio::spawn(async move {
+        let resolver = InMemoryRunProfileResolver::default();
+        blocked_store
+            .submit_turn(
+                submit_request_for(
+                    turn_scope("thread-fs-heartbeat-blocked-writer"),
+                    "idem-fs-heartbeat-blocked-writer",
+                ),
+                &AllowAllTurnAdmissionPolicy,
+                &resolver,
+            )
+            .await
+    });
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        backend.wait_for_blocked_snapshot_put(),
+    )
+    .await
+    .expect("writer should reach the blocked state.json put");
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        store.heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        }),
+    )
+    .await
+    .expect("heartbeat must not wait behind a blocked state.json put")
+    .unwrap();
+
+    backend.release_snapshot_puts();
+    blocked_writer.await.unwrap().unwrap();
 }
 
 fn child_run_request(
@@ -1379,6 +2076,37 @@ async fn filesystem_spawn_tree_reads_are_scope_checked() {
             .await
             .unwrap(),
     );
+
+    let versioned = backend
+        .get(&snapshot_virtual_path())
+        .await
+        .unwrap()
+        .expect("snapshot after child submit");
+    let mut snapshot: TurnPersistenceSnapshot =
+        serde_json::from_slice(&versioned.entry.body).unwrap();
+    let mut shadow_parent = snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == parent && record.scope == parent_scope)
+        .expect("parent run in snapshot")
+        .clone();
+    shadow_parent.scope = TurnScope::new(
+        TenantId::new("shadow-tenant").unwrap(),
+        Some(AgentId::new("agent1").unwrap()),
+        Some(ProjectId::new("project1").unwrap()),
+        ThreadId::new("thread-fs-scope-shadow").unwrap(),
+    );
+    snapshot.runs.insert(0, shadow_parent);
+    let mut entry = versioned.entry;
+    entry.body = serde_json::to_vec_pretty(&snapshot).unwrap();
+    backend
+        .put(
+            &snapshot_virtual_path(),
+            entry,
+            CasExpectation::Version(versioned.version),
+        )
+        .await
+        .unwrap();
 
     let reopened = FilesystemTurnStateStore::new(scoped);
     assert_eq!(

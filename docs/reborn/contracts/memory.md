@@ -2,7 +2,7 @@
 
 **Status:** Contract-freeze draft
 **Date:** 2026-04-25
-**Target crate:** `crates/ironclaw_memory` plus service composition crates
+**Target crate:** `crates/ironclaw_memory` (provider-neutral contract) + `crates/ironclaw_memory_native` (native provider implementation), plus service composition crates
 **Depends on:** [`host-api.md`](host-api.md), [`filesystem.md`](filesystem.md), [`storage-placement.md`](storage-placement.md), [`network.md`](network.md), [`secrets.md`](secrets.md), [`events-projections.md`](events-projections.md)
 
 ---
@@ -10,6 +10,14 @@
 ## 1. Purpose
 
 `ironclaw_memory` owns durable memory/workspace document semantics for Reborn.
+
+> **Crate split (#3537 lift):** `ironclaw_memory` is now the provider-neutral
+> contract (the `MemoryService` trait, operation DTOs, and scope/path/metadata
+> value types). The concrete native implementation of the responsibilities below
+> — repository seams, chunking/indexing/embeddings/search, prompt-context
+> assembly, and seeding/bootstrap/profile sync — lives in
+> `ironclaw_memory_native`. A provider crate depends on `ironclaw_memory`, never
+> the reverse.
 
 It is responsible for:
 

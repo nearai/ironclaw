@@ -11,9 +11,15 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_approvals::{
+    PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+};
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
-use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, ApprovalRequestId, CapabilityId, EffectKind, ExtensionId, InvocationId,
+    PermissionMode, Principal, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
@@ -46,10 +52,11 @@ use ironclaw_product_workflow::{
     RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornGetProjectRequest,
     RebornGetRunStateRequest, RebornListMembersRequest, RebornListMembersResponse,
     RebornListProjectsRequest, RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorConfigDiagnosticSeverity, RebornOperatorLogsQuery,
-    RebornOperatorSetupRequest, RebornOperatorSetupStatus, RebornOperatorStatusCheck,
-    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornLogQueryResponse, RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigSetRequest,
+    RebornOperatorLogsQuery, RebornOperatorSetupRequest, RebornOperatorSetupStatus,
+    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
+    RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOperatorToolCatalog,
+    RebornOperatorToolInfo, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
@@ -475,6 +482,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(17),
@@ -571,6 +579,7 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(29),
@@ -7938,6 +7947,418 @@ fn services_with_setup_llm_config(
         Arc::new(FakeTurnCoordinator::default()),
     )
     .with_llm_config_service(llm_config)
+}
+
+#[derive(Clone)]
+struct StaticOperatorToolCatalogForTest {
+    tools: Vec<RebornOperatorToolInfo>,
+}
+
+impl RebornOperatorToolCatalog for StaticOperatorToolCatalogForTest {
+    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo> {
+        self.tools.clone()
+    }
+}
+
+fn services_with_operator_approval_config() -> RebornServices {
+    services_with_operator_approval_config_parts().0
+}
+
+fn services_with_operator_approval_config_parts() -> (
+    RebornServices,
+    Arc<ironclaw_approvals::InMemoryPersistentApprovalPolicyStore>,
+) {
+    let persistent_policies =
+        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_operator_approval_config(
+        Arc::new(ironclaw_approvals::InMemoryToolPermissionOverrideStore::new()),
+        Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new()),
+        persistent_policies.clone(),
+        Arc::new(StaticOperatorToolCatalogForTest {
+            tools: vec![
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("tool.alpha").expect("capability id"),
+                    provider: ExtensionId::new("extension.alpha").expect("extension id"),
+                    description: Arc::from("Alpha tool"),
+                    default_permission: PermissionMode::Ask,
+                    effects: Arc::from([EffectKind::ExecuteCode]),
+                },
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("tool.default_allow").expect("capability id"),
+                    provider: ExtensionId::new("extension.default_allow").expect("extension id"),
+                    description: Arc::from("Default-allow tool"),
+                    default_permission: PermissionMode::Allow,
+                    effects: Arc::from([EffectKind::DispatchCapability]),
+                },
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("tool.locked").expect("capability id"),
+                    provider: ExtensionId::new("extension.locked").expect("extension id"),
+                    description: Arc::from("Locked tool"),
+                    default_permission: PermissionMode::Deny,
+                    effects: Arc::from([]),
+                },
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("tool.financial").expect("capability id"),
+                    provider: ExtensionId::new("extension.financial").expect("extension id"),
+                    description: Arc::from("Financial tool"),
+                    default_permission: PermissionMode::Ask,
+                    effects: Arc::from([EffectKind::Financial]),
+                },
+            ],
+        }),
+    );
+    (services, persistent_policies)
+}
+
+fn operator_config_entry_value<'a>(
+    response: &'a ironclaw_product_workflow::RebornOperatorConfigListResponse,
+    key: &str,
+) -> &'a serde_json::Value {
+    &response
+        .entries
+        .iter()
+        .find(|entry| entry.key == key)
+        .unwrap_or_else(|| panic!("{key} entry"))
+        .value
+}
+
+fn operator_policy_scope_for_test(tenant_id: &str, user_id: &str) -> ResourceScope {
+    ResourceScope {
+        tenant_id: TenantId::new(tenant_id).expect("tenant id"),
+        user_id: UserId::new(user_id).expect("user id"),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
+#[tokio::test]
+async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
+    let (services, persistent_policies) = services_with_operator_approval_config_parts();
+
+    let initial = services
+        .list_operator_config(caller())
+        .await
+        .expect("operator config");
+    assert_eq!(
+        operator_config_entry_value(&initial, "agent.auto_approve_tools"),
+        &json!(false)
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.alpha")["state"],
+        "ask_each_time"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.alpha")["effective_source"],
+        "global"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.default_allow")["state"],
+        "ask_each_time",
+        "default-allow tools must still ask while global auto-approve is off"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.default_allow")["effective_source"],
+        "global"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.locked")["state"],
+        "disabled"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.financial")["state"],
+        "ask_each_time"
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.financial")["locked"],
+        true
+    );
+    assert_eq!(
+        operator_config_entry_value(&initial, "tool.tool.financial")["effective_source"],
+        "locked"
+    );
+
+    let financial_error = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.financial".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "always_allow" }),
+            },
+        )
+        .await
+        .expect_err("hard-floor tool cannot be made always-allow");
+    assert_eq!(
+        financial_error.code,
+        RebornServicesErrorCode::InvalidRequest
+    );
+    assert_eq!(financial_error.kind, RebornServicesErrorKind::Validation);
+    assert_eq!(
+        financial_error.validation_code,
+        Some(WebUiInboundValidationCode::InvalidValue)
+    );
+
+    services
+        .set_operator_config_key(
+            caller(),
+            "agent.auto_approve_tools".to_string(),
+            RebornOperatorConfigSetRequest { value: json!(true) },
+        )
+        .await
+        .expect("enable global auto approve");
+
+    let globally_allowed = services
+        .get_operator_config_key(caller(), "tool.tool.alpha".to_string())
+        .await
+        .expect("tool config");
+    assert_eq!(globally_allowed.entry.value["state"], "always_allow");
+    assert_eq!(globally_allowed.entry.value["effective_source"], "global");
+
+    let default_allow_global = services
+        .get_operator_config_key(caller(), "tool.tool.default_allow".to_string())
+        .await
+        .expect("default-allow tool config");
+    assert_eq!(default_allow_global.entry.value["state"], "always_allow");
+    assert_eq!(
+        default_allow_global.entry.value["effective_source"],
+        "global"
+    );
+
+    let ask_override = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "ask_each_time" }),
+            },
+        )
+        .await
+        .expect("ask each time override");
+    assert_eq!(ask_override.entry.value["state"], "ask_each_time");
+    assert_eq!(ask_override.entry.value["effective_source"], "override");
+
+    let follows_global = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "default" }),
+            },
+        )
+        .await
+        .expect("clear tool override");
+    assert_eq!(follows_global.entry.value["state"], "always_allow");
+    assert_eq!(follows_global.entry.value["effective_source"], "global");
+
+    let disabled = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "disabled" }),
+            },
+        )
+        .await
+        .expect("disable tool");
+    assert_eq!(disabled.entry.value["state"], "disabled");
+    assert_eq!(disabled.entry.value["effective_source"], "override");
+
+    let allowed = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "always_allow" }),
+            },
+        )
+        .await
+        .expect("always allow tool");
+    assert_eq!(allowed.entry.value["state"], "always_allow");
+    assert_eq!(allowed.entry.value["effective_source"], "override");
+
+    let operator_scope = operator_policy_scope_for_test("tenant-alpha", "user-alpha");
+    let extension_key = PersistentApprovalPolicyKey::new(
+        &operator_scope,
+        PersistentApprovalAction::Dispatch,
+        CapabilityId::new("tool.alpha").expect("capability id"),
+        Principal::Extension(ExtensionId::new("extension.alpha").expect("extension id")),
+    );
+    assert!(
+        persistent_policies
+            .lookup(&extension_key)
+            .await
+            .expect("lookup extension-grantee policy")
+            .and_then(|policy| policy.active_grant())
+            .is_some(),
+        "settings-page always_allow must write the provider extension grantee"
+    );
+
+    let user_key = PersistentApprovalPolicyKey::new(
+        &operator_scope,
+        PersistentApprovalAction::Dispatch,
+        CapabilityId::new("tool.alpha").expect("capability id"),
+        Principal::User(UserId::new("user-alpha").expect("user id")),
+    );
+    assert!(
+        persistent_policies
+            .lookup(&user_key)
+            .await
+            .expect("lookup user-grantee policy")
+            .is_none(),
+        "settings-page always_allow must not write a user-grantee policy"
+    );
+
+    let reset = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "default" }),
+            },
+        )
+        .await
+        .expect("clear persistent always-allow");
+    assert_eq!(reset.entry.value["state"], "always_allow");
+    assert_eq!(reset.entry.value["effective_source"], "global");
+    assert!(
+        persistent_policies
+            .lookup(&extension_key)
+            .await
+            .expect("lookup extension-grantee policy after reset")
+            .and_then(|policy| policy.active_grant())
+            .is_none(),
+        "default must clear the settings-page persistent always-allow policy"
+    );
+}
+
+#[tokio::test]
+async fn operator_config_is_scoped_by_tenant_and_user() {
+    let services = services_with_operator_approval_config();
+    let alice_tenant_a = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("alice").expect("user"),
+        Some(AgentId::new("agent-alpha").expect("agent")),
+        Some(ProjectId::new("project-alpha").expect("project")),
+    );
+    let bob_tenant_a = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("bob").expect("user"),
+        Some(AgentId::new("agent-alpha").expect("agent")),
+        Some(ProjectId::new("project-alpha").expect("project")),
+    );
+    let alice_tenant_a_other_project = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("alice").expect("user"),
+        Some(AgentId::new("agent-beta").expect("agent")),
+        Some(ProjectId::new("project-beta").expect("project")),
+    );
+    let alice_tenant_b = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-beta").expect("tenant"),
+        UserId::new("alice").expect("user"),
+        Some(AgentId::new("agent-alpha").expect("agent")),
+        Some(ProjectId::new("project-alpha").expect("project")),
+    );
+
+    services
+        .set_operator_config_key(
+            alice_tenant_a.clone(),
+            "agent.auto_approve_tools".to_string(),
+            RebornOperatorConfigSetRequest { value: json!(true) },
+        )
+        .await
+        .expect("alice enables auto approve in tenant alpha");
+    services
+        .set_operator_config_key(
+            alice_tenant_a.clone(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "disabled" }),
+            },
+        )
+        .await
+        .expect("alice disables tool in tenant alpha");
+
+    let alice_alpha = services
+        .get_operator_config_key(alice_tenant_a, "tool.tool.alpha".to_string())
+        .await
+        .expect("alice alpha tool config");
+    assert_eq!(alice_alpha.entry.value["state"], "disabled");
+    assert_eq!(alice_alpha.entry.value["effective_source"], "override");
+
+    let alice_alpha_other_project = services
+        .list_operator_config(alice_tenant_a_other_project)
+        .await
+        .expect("same tenant/user operator config");
+    assert_eq!(
+        operator_config_entry_value(&alice_alpha_other_project, "agent.auto_approve_tools"),
+        &json!(true),
+        "auto-approve settings are scoped by tenant/user, not agent/project"
+    );
+    assert_eq!(
+        operator_config_entry_value(&alice_alpha_other_project, "tool.tool.alpha")["state"],
+        "disabled",
+        "tool overrides are scoped by tenant/user, not agent/project"
+    );
+    assert_eq!(
+        operator_config_entry_value(&alice_alpha_other_project, "tool.tool.alpha")["effective_source"],
+        "override"
+    );
+
+    for caller in [bob_tenant_a, alice_tenant_b] {
+        let config = services
+            .list_operator_config(caller)
+            .await
+            .expect("isolated operator config");
+        assert_eq!(
+            operator_config_entry_value(&config, "agent.auto_approve_tools"),
+            &json!(false),
+            "auto-approve must not leak across user or tenant"
+        );
+        assert_eq!(
+            operator_config_entry_value(&config, "tool.tool.alpha")["state"],
+            "ask_each_time",
+            "tool override must not leak across user or tenant"
+        );
+        assert_eq!(
+            operator_config_entry_value(&config, "tool.tool.alpha")["effective_source"],
+            "global"
+        );
+    }
+}
+
+#[tokio::test]
+async fn operator_config_reports_unknown_keys_distinct_from_invalid_values() {
+    let services = services_with_operator_approval_config();
+
+    let unknown_key = services
+        .get_operator_config_key(caller(), "tool.tool.missing".to_string())
+        .await
+        .expect_err("unknown tool key");
+    assert_eq!(
+        unknown_key.validation_code,
+        Some(WebUiInboundValidationCode::UnknownKey)
+    );
+
+    let invalid_value = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "sometimes" }),
+            },
+        )
+        .await
+        .expect_err("invalid tool state");
+    assert_eq!(
+        invalid_value.validation_code,
+        Some(WebUiInboundValidationCode::InvalidValue)
+    );
 }
 
 #[tokio::test]

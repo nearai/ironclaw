@@ -12,13 +12,15 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use futures::future::try_join_all;
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountUpdateBinding, ProviderScope,
 };
 use ironclaw_host_api::{
-    AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    AgentId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, InvocationId, PermissionMode,
+    Principal, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
@@ -78,6 +80,13 @@ pub use trace_credits::{RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResp
 pub use fs_browse::{
     FilesystemBrowseReader, FsMount, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
     RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
+};
+use ironclaw_approvals::{
+    AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingStore,
+    PersistentApprovalAction, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverride,
+    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
+    ToolPermissionState, permission_mode_allows_persistent_approval,
 };
 pub use llm_config::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
@@ -139,6 +148,30 @@ type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError> + Send + Sync;
 type SkillActivationClearer =
     dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError> + Send + Sync;
+
+const AUTO_APPROVE_CONFIG_KEY: &str = "agent.auto_approve_tools";
+const TOOL_CONFIG_PREFIX: &str = "tool.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebornOperatorToolInfo {
+    pub capability_id: CapabilityId,
+    pub provider: ExtensionId,
+    pub description: Arc<str>,
+    pub default_permission: PermissionMode,
+    pub effects: Arc<[EffectKind]>,
+}
+
+pub trait RebornOperatorToolCatalog: Send + Sync {
+    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo>;
+}
+
+#[derive(Clone)]
+struct RebornOperatorApprovalConfig {
+    overrides: Arc<dyn ToolPermissionOverrideStore>,
+    auto_approve: Arc<dyn AutoApproveSettingStore>,
+    persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+    tool_catalog: Arc<dyn RebornOperatorToolCatalog>,
+}
 type ThreadOperationLocks = StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>;
 
 const OPERATOR_LOGS_DEFAULT_LIMIT: u32 = 100;
@@ -879,6 +912,402 @@ fn setup_response_from_llm_snapshot(
         ],
         diagnostics,
     }
+}
+
+fn caller_resource_scope(caller: &WebUiAuthenticatedCaller) -> ResourceScope {
+    ResourceScope {
+        tenant_id: caller.tenant_id.clone(),
+        user_id: caller.user_id.clone(),
+        agent_id: caller.agent_id.clone(),
+        project_id: caller.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
+fn operator_config_not_wired_response() -> RebornOperatorConfigListResponse {
+    RebornOperatorConfigListResponse {
+        entries: Vec::new(),
+        precedence: Vec::new(),
+        diagnostics: vec![operator_config_surface_not_wired_diagnostic()],
+    }
+}
+
+fn operator_config_unknown_key_error(field: &'static str) -> RebornServicesError {
+    RebornServicesError::validation(WebUiInboundValidationError::new(
+        field,
+        WebUiInboundValidationCode::UnknownKey,
+    ))
+}
+
+fn operator_config_invalid_value(field: &'static str) -> RebornServicesError {
+    RebornServicesError::validation(WebUiInboundValidationError::new(
+        field,
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+}
+
+fn operator_config_store_error(error: impl std::fmt::Display) -> RebornServicesError {
+    RebornServicesError::internal_from(error)
+}
+
+async fn auto_approve_config_entry(
+    config: &RebornOperatorApprovalConfig,
+    scope: &ResourceScope,
+) -> Result<RebornOperatorConfigEntry, RebornServicesError> {
+    let operator_scope = operator_tool_permission_scope(scope);
+    let key = AutoApproveSettingKey::from_resource_scope(&operator_scope);
+    let record = config
+        .auto_approve
+        .get(&key)
+        .await
+        .map_err(operator_config_store_error)?;
+    let enabled = record.as_ref().is_some_and(|record| record.enabled);
+    Ok(RebornOperatorConfigEntry {
+        key: AUTO_APPROVE_CONFIG_KEY.to_string(),
+        value: serde_json::json!(enabled),
+        source: if record.is_some() {
+            "override".to_string()
+        } else {
+            "default".to_string()
+        },
+        redacted: false,
+        mutable: true,
+    })
+}
+
+fn find_operator_tool(
+    config: &RebornOperatorApprovalConfig,
+    raw_capability_id: &str,
+) -> Result<RebornOperatorToolInfo, RebornServicesError> {
+    config
+        .tool_catalog
+        .list_operator_tools()
+        .into_iter()
+        .find(|tool| tool.capability_id.as_str() == raw_capability_id)
+        .ok_or_else(|| operator_config_unknown_key_error("key"))
+}
+
+async fn tool_config_entry(
+    config: &RebornOperatorApprovalConfig,
+    scope: &ResourceScope,
+    tool: &RebornOperatorToolInfo,
+) -> Result<RebornOperatorConfigEntry, RebornServicesError> {
+    let context =
+        operator_tool_permission_context(config, scope, std::slice::from_ref(tool)).await?;
+    tool_config_entry_with_context(&context, tool).await
+}
+
+async fn tool_config_entry_with_context(
+    context: &OperatorToolPermissionContext,
+    tool: &RebornOperatorToolInfo,
+) -> Result<RebornOperatorConfigEntry, RebornServicesError> {
+    let (state, source) = effective_tool_permission(context, tool).await?;
+    let default_state = default_tool_permission_state(tool.default_permission);
+    let locked = tool_permission_locked(tool);
+    let value = serde_json::json!({
+        "name": tool.capability_id.as_str(),
+        "description": tool.description.as_ref(),
+        "state": tool_permission_state_wire(state),
+        "default_state": tool_permission_state_wire(if locked && hard_floor_tool(tool) {
+            ToolPermissionState::AskEachTime
+        } else {
+            default_state
+        }),
+        "locked": locked,
+        "effective_source": source,
+    });
+    Ok(RebornOperatorConfigEntry {
+        key: format!("{TOOL_CONFIG_PREFIX}{}", tool.capability_id),
+        value,
+        source: source.to_string(),
+        redacted: false,
+        mutable: !locked,
+    })
+}
+
+struct OperatorToolPermissionContext {
+    global_auto_approve: bool,
+    overrides: HashMap<CapabilityId, ToolPermissionOverride>,
+    persistent_active: HashSet<CapabilityId>,
+}
+
+async fn operator_tool_permission_context(
+    config: &RebornOperatorApprovalConfig,
+    scope: &ResourceScope,
+    tools: &[RebornOperatorToolInfo],
+) -> Result<OperatorToolPermissionContext, RebornServicesError> {
+    let operator_scope = operator_tool_permission_scope(scope);
+    let global_auto_approve = config
+        .auto_approve
+        .is_enabled(&operator_scope)
+        .await
+        .map_err(operator_config_store_error)?;
+    let override_records = try_join_all(
+        tools
+            .iter()
+            .filter(|tool| !tool_permission_locked(tool))
+            .map(|tool| {
+                let key =
+                    ToolPermissionOverrideKey::new(&operator_scope, tool.capability_id.clone());
+                async move {
+                    config
+                        .overrides
+                        .get(&key)
+                        .await
+                        .map(|record| (tool.capability_id.clone(), record))
+                        .map_err(operator_config_store_error)
+                }
+            }),
+    )
+    .await?;
+    let overrides = override_records
+        .into_iter()
+        .filter_map(|(capability_id, record)| record.map(|record| (capability_id, record.state)))
+        .collect::<HashMap<_, _>>();
+    let persistent_records = try_join_all(
+        tools
+            .iter()
+            .filter(|tool| {
+                !tool_permission_locked(tool) && !overrides.contains_key(&tool.capability_id)
+            })
+            .map(|tool| {
+                let operator_scope = operator_scope.clone();
+                async move {
+                    persistent_user_policy_active(config, &operator_scope, tool)
+                        .await
+                        .map(|active| (tool.capability_id.clone(), active))
+                }
+            }),
+    )
+    .await?;
+    let persistent_active = persistent_records
+        .into_iter()
+        .filter_map(|(capability_id, active)| active.then_some(capability_id))
+        .collect();
+    Ok(OperatorToolPermissionContext {
+        global_auto_approve,
+        overrides,
+        persistent_active,
+    })
+}
+
+async fn effective_tool_permission(
+    context: &OperatorToolPermissionContext,
+    tool: &RebornOperatorToolInfo,
+) -> Result<(ToolPermissionState, &'static str), RebornServicesError> {
+    if tool.default_permission == PermissionMode::Deny {
+        return Ok((ToolPermissionState::Disabled, "default"));
+    }
+    if hard_floor_tool(tool) {
+        return Ok((ToolPermissionState::AskEachTime, "locked"));
+    }
+
+    if let Some(state) = context.overrides.get(&tool.capability_id) {
+        return Ok((state.as_state(), "override"));
+    }
+
+    if context.persistent_active.contains(&tool.capability_id) {
+        return Ok((ToolPermissionState::AlwaysAllow, "override"));
+    }
+
+    if permission_mode_allows_persistent_approval(tool.default_permission) {
+        if context.global_auto_approve {
+            return Ok((ToolPermissionState::AlwaysAllow, "global"));
+        }
+        return Ok((ToolPermissionState::AskEachTime, "global"));
+    }
+
+    Ok((
+        default_tool_permission_state(tool.default_permission),
+        "default",
+    ))
+}
+
+async fn persistent_user_policy_active(
+    config: &RebornOperatorApprovalConfig,
+    operator_scope: &ResourceScope,
+    tool: &RebornOperatorToolInfo,
+) -> Result<bool, RebornServicesError> {
+    let key = persistent_user_policy_key(operator_scope, tool);
+    Ok(config
+        .persistent_policies
+        .lookup(&key)
+        .await
+        .map_err(operator_config_store_error)?
+        .and_then(|policy| policy.active_grant())
+        .is_some())
+}
+
+fn persistent_user_policy_key(
+    scope: &ResourceScope,
+    tool: &RebornOperatorToolInfo,
+) -> PersistentApprovalPolicyKey {
+    let operator_scope = operator_tool_permission_scope(scope);
+    PersistentApprovalPolicyKey::new(
+        &operator_scope,
+        PersistentApprovalAction::Dispatch,
+        tool.capability_id.clone(),
+        Principal::Extension(tool.provider.clone()),
+    )
+}
+
+fn operator_tool_permission_scope(scope: &ResourceScope) -> ResourceScope {
+    ResourceScope {
+        tenant_id: scope.tenant_id.clone(),
+        user_id: scope.user_id.clone(),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: scope.invocation_id,
+    }
+}
+
+fn tool_permission_locked(tool: &RebornOperatorToolInfo) -> bool {
+    tool.default_permission == PermissionMode::Deny || hard_floor_tool(tool)
+}
+
+fn hard_floor_tool(tool: &RebornOperatorToolInfo) -> bool {
+    tool.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            EffectKind::Financial | EffectKind::ModifyApproval | EffectKind::ModifyBudget
+        )
+    })
+}
+
+fn default_tool_permission_state(permission: PermissionMode) -> ToolPermissionState {
+    match permission {
+        PermissionMode::Allow | PermissionMode::Ask => ToolPermissionState::AskEachTime,
+        PermissionMode::Deny => ToolPermissionState::Disabled,
+    }
+}
+
+fn tool_permission_state_wire(state: ToolPermissionState) -> &'static str {
+    match state {
+        ToolPermissionState::AlwaysAllow => "always_allow",
+        ToolPermissionState::AskEachTime => "ask_each_time",
+        ToolPermissionState::Disabled => "disabled",
+    }
+}
+
+enum ToolPermissionUpdate {
+    Default,
+    State(ToolPermissionState),
+}
+
+fn parse_tool_permission_state(
+    value: &serde_json::Value,
+) -> Result<ToolPermissionUpdate, RebornServicesError> {
+    let raw = value
+        .as_str()
+        .or_else(|| value.get("state").and_then(serde_json::Value::as_str))
+        .ok_or_else(|| operator_config_invalid_value("state"))?;
+    match raw {
+        "default" => Ok(ToolPermissionUpdate::Default),
+        "always_allow" => Ok(ToolPermissionUpdate::State(
+            ToolPermissionState::AlwaysAllow,
+        )),
+        // Backward-compatible read alias from earlier Tools UI payloads. The
+        // service always writes the canonical `ask_each_time` wire value.
+        "ask_each_time" | "ask" => Ok(ToolPermissionUpdate::State(
+            ToolPermissionState::AskEachTime,
+        )),
+        "disabled" => Ok(ToolPermissionUpdate::State(ToolPermissionState::Disabled)),
+        _ => Err(operator_config_invalid_value("state")),
+    }
+}
+
+async fn apply_tool_permission_state(
+    config: &RebornOperatorApprovalConfig,
+    scope: &ResourceScope,
+    actor: &TurnActor,
+    tool: &RebornOperatorToolInfo,
+    update: ToolPermissionUpdate,
+) -> Result<(), RebornServicesError> {
+    match update {
+        ToolPermissionUpdate::Default => {
+            let operator_scope = operator_tool_permission_scope(scope);
+            config
+                .overrides
+                .clear(&ToolPermissionOverrideKey::new(
+                    &operator_scope,
+                    tool.capability_id.clone(),
+                ))
+                .await
+                .map_err(operator_config_store_error)?;
+            match config
+                .persistent_policies
+                .revoke(&persistent_user_policy_key(&operator_scope, tool))
+                .await
+            {
+                Ok(_) | Err(PersistentApprovalPolicyError::UnknownPolicy) => {}
+                Err(error) => return Err(operator_config_store_error(error)),
+            }
+        }
+        ToolPermissionUpdate::State(ToolPermissionState::AlwaysAllow) => {
+            let operator_scope = operator_tool_permission_scope(scope);
+            config
+                .overrides
+                .clear(&ToolPermissionOverrideKey::new(
+                    &operator_scope,
+                    tool.capability_id.clone(),
+                ))
+                .await
+                .map_err(operator_config_store_error)?;
+            config
+                .persistent_policies
+                .allow(PersistentApprovalPolicyInput {
+                    scope: operator_scope,
+                    action: PersistentApprovalAction::Dispatch,
+                    capability_id: tool.capability_id.clone(),
+                    grantee: Principal::Extension(tool.provider.clone()),
+                    approved_by: Principal::User(actor.user_id.clone()),
+                    constraints: GrantConstraints {
+                        allowed_effects: tool.effects.as_ref().to_vec(),
+                        mounts: Default::default(),
+                        network: Default::default(),
+                        secrets: Vec::new(),
+                        resource_ceiling: None,
+                        expires_at: None,
+                        max_invocations: None,
+                    },
+                    source_approval_request_id: None,
+                })
+                .await
+                .map_err(operator_config_store_error)?;
+        }
+        ToolPermissionUpdate::State(state @ ToolPermissionState::AskEachTime)
+        | ToolPermissionUpdate::State(state @ ToolPermissionState::Disabled) => {
+            let operator_scope = operator_tool_permission_scope(scope);
+            let override_state = match state {
+                ToolPermissionState::AskEachTime => ToolPermissionOverride::AskEachTime,
+                ToolPermissionState::Disabled => ToolPermissionOverride::Disabled,
+                ToolPermissionState::AlwaysAllow => unreachable!(),
+            };
+            config
+                .overrides
+                .set(ToolPermissionOverrideInput {
+                    scope: operator_scope.clone(),
+                    capability_id: tool.capability_id.clone(),
+                    state: override_state,
+                    updated_by: Principal::User(actor.user_id.clone()),
+                })
+                .await
+                .map_err(operator_config_store_error)?;
+            match config
+                .persistent_policies
+                .revoke(&persistent_user_policy_key(&operator_scope, tool))
+                .await
+            {
+                Ok(_) | Err(PersistentApprovalPolicyError::UnknownPolicy) => {}
+                Err(error) => return Err(operator_config_store_error(error)),
+            }
+        }
+    }
+    Ok(())
 }
 
 const LLM_BASE_URL_MAX_BYTES: usize = 2048;
@@ -1944,6 +2373,7 @@ pub struct RebornServices {
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
+    operator_approval_config: Option<RebornOperatorApprovalConfig>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
 }
 
@@ -1979,6 +2409,7 @@ impl RebornServices {
             skill_activation_recorder: None,
             skill_activation_clearer: None,
             llm_config: None,
+            operator_approval_config: None,
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
@@ -2043,6 +2474,22 @@ impl RebornServices {
 
     pub fn with_llm_config_service(mut self, llm_config: Arc<dyn LlmConfigService>) -> Self {
         self.llm_config = Some(llm_config);
+        self
+    }
+
+    pub fn with_operator_approval_config(
+        mut self,
+        overrides: Arc<dyn ToolPermissionOverrideStore>,
+        auto_approve: Arc<dyn AutoApproveSettingStore>,
+        persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+        tool_catalog: Arc<dyn RebornOperatorToolCatalog>,
+    ) -> Self {
+        self.operator_approval_config = Some(RebornOperatorApprovalConfig {
+            overrides,
+            auto_approve,
+            persistent_policies,
+            tool_catalog,
+        });
         self
     }
 
@@ -2278,6 +2725,101 @@ impl RebornServicesApi for RebornServices {
             Vec::new(),
             host_state,
         ))
+    }
+
+    async fn list_operator_config(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
+        let _ = caller;
+        let Some(config) = &self.operator_approval_config else {
+            return Ok(operator_config_not_wired_response());
+        };
+        let scope = caller_resource_scope(&caller);
+        let mut entries = vec![auto_approve_config_entry(config, &scope).await?];
+        let tools = config.tool_catalog.list_operator_tools();
+        let tool_context = operator_tool_permission_context(config, &scope, &tools).await?;
+        entries.extend(
+            try_join_all(
+                tools
+                    .iter()
+                    .map(|tool| tool_config_entry_with_context(&tool_context, tool)),
+            )
+            .await?,
+        );
+        Ok(RebornOperatorConfigListResponse {
+            entries,
+            precedence: vec![
+                "locked".to_string(),
+                "override".to_string(),
+                "global".to_string(),
+                "default".to_string(),
+            ],
+            diagnostics: Vec::new(),
+        })
+    }
+
+    async fn get_operator_config_key(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        key: String,
+    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        let Some(config) = &self.operator_approval_config else {
+            let _ = (caller, key);
+            return Err(RebornServicesError::service_unavailable(false));
+        };
+        let scope = caller_resource_scope(&caller);
+        let entry = if key == AUTO_APPROVE_CONFIG_KEY {
+            auto_approve_config_entry(config, &scope).await?
+        } else if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
+            let tool = find_operator_tool(config, capability_id)?;
+            tool_config_entry(config, &scope, &tool).await?
+        } else {
+            return Err(operator_config_unknown_key_error("key"));
+        };
+        Ok(RebornOperatorConfigGetResponse { entry })
+    }
+
+    async fn set_operator_config_key(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        key: String,
+        request: RebornOperatorConfigSetRequest,
+    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        let Some(config) = &self.operator_approval_config else {
+            let _ = (caller, key, request);
+            return Err(RebornServicesError::service_unavailable(false));
+        };
+        let scope = caller_resource_scope(&caller);
+        let actor = caller.actor();
+        let entry = if key == AUTO_APPROVE_CONFIG_KEY {
+            let enabled = request
+                .value
+                .as_bool()
+                .ok_or_else(|| operator_config_invalid_value("value"))?;
+            let operator_scope = operator_tool_permission_scope(&scope);
+            config
+                .auto_approve
+                .set(AutoApproveSettingInput {
+                    scope: operator_scope,
+                    enabled,
+                    updated_by: Principal::User(actor.user_id.clone()),
+                })
+                .await
+                .map_err(operator_config_store_error)?;
+            auto_approve_config_entry(config, &scope).await?
+        } else if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
+            let tool = find_operator_tool(config, capability_id)?;
+            if tool_permission_locked(&tool) {
+                return Err(operator_config_invalid_value("state"));
+            }
+            let state = parse_tool_permission_state(&request.value)?;
+            apply_tool_permission_state(config, &scope, &actor, &tool, state).await?;
+            tool_config_entry(config, &scope, &tool).await?
+        } else {
+            return Err(operator_config_unknown_key_error("key"));
+        };
+        Ok(RebornOperatorConfigGetResponse { entry })
     }
 
     /// `requested_thread_id` makes the caller's choice authoritative.

@@ -108,6 +108,24 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         capability_leases: local_runtime.capability_leases.clone(),
     };
     let run_context = run_context("shell-workdir").await;
+    // Turn on the global auto-approve switch for this run's actor scope so the
+    // scripted shell call exercises the dispatch path instead of stopping at the
+    // per-tool approval gate (the Tools-settings switch is authoritative for
+    // first-party tool dispatch).
+    {
+        let mut scope = run_context.scope.to_resource_scope();
+        scope.user_id = UserId::new("local-dev-shell-user").expect("user id");
+        ironclaw_approvals::AutoApproveSettingStore::set(
+            local_runtime.auto_approve_settings.as_ref(),
+            ironclaw_approvals::AutoApproveSettingInput {
+                updated_by: ironclaw_host_api::Principal::User(scope.user_id.clone()),
+                scope,
+                enabled: true,
+            },
+        )
+        .await
+        .expect("enabling global auto-approve should succeed");
+    }
     let port = factory
         .create_capability_port(&run_context)
         .await
@@ -129,6 +147,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
 
     let outcome = port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability id"),
             input_ref,

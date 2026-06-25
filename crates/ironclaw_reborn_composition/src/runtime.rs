@@ -990,6 +990,10 @@ impl RebornRuntime {
         &self.services
     }
 
+    pub(crate) fn webui_tenant_id(&self) -> &TenantId {
+        &self.thread_scope.tenant_id
+    }
+
     #[cfg(test)]
     #[allow(
         dead_code,
@@ -1449,6 +1453,28 @@ impl RebornRuntime {
         conversation: &ConversationId,
     ) -> ironclaw_host_api::ResourceScope {
         self.turn_scope_for(&conversation.0).to_resource_scope()
+    }
+
+    /// Test-only: enable the global auto-approve switch for this runtime's
+    /// actor scope so a scripted turn exercises the dispatch path instead of
+    /// blocking on the per-tool approval gate. The Tools-settings switch is
+    /// authoritative for first-party tool dispatch; turning it on here
+    /// mirrors what an operator would do before letting the agent run tools.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn enable_global_auto_approve_for_test(&self, conversation: &ConversationId) {
+        let store = self
+            .services
+            .local_dev_auto_approve_settings_for_test()
+            .expect("local-dev runtime should expose an auto-approve setting store");
+        let scope = self.turn_scope_for(&conversation.0).to_resource_scope();
+        store
+            .set(ironclaw_approvals::AutoApproveSettingInput {
+                updated_by: ironclaw_host_api::Principal::User(scope.user_id.clone()),
+                scope,
+                enabled: true,
+            })
+            .await
+            .expect("enabling global auto-approve should succeed");
     }
 
     /// Apply the outcome of a resolved [`BudgetApprovalGate`]: when the
@@ -4101,8 +4127,9 @@ mod tests {
         TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
         run_profile::{
             InMemoryRunProfileResolver, LoopCapabilityPort, LoopCheckpointStateRef, LoopRunContext,
-            ModelProfileId, ProviderToolCall, RunProfileResolutionRequest, RunProfileResolver,
-            SkillVisibility, VisibleCapabilityRequest,
+            ModelProfileId, ProviderToolCall, RegisterProviderToolCallRequest,
+            RunProfileResolutionRequest, RunProfileResolver, SkillVisibility,
+            VisibleCapabilityRequest,
         },
         runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort},
     };
@@ -4317,17 +4344,19 @@ mod tests {
                 .find(|definition| definition.capability_id == echo_id)
                 .expect("echo provider tool definition");
             let candidate = capabilities
-                .register_provider_tool_call(ProviderToolCall {
-                    provider_id: "test-provider".to_string(),
-                    provider_model_id: "test-model".to_string(),
-                    turn_id: Some("provider-turn-1".to_string()),
-                    id: "call-1".to_string(),
-                    name: echo_tool.name,
-                    arguments: serde_json::json!({"message": "hello from tool"}),
-                    response_reasoning: None,
-                    reasoning: None,
-                    signature: None,
-                })
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                    ProviderToolCall {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        turn_id: Some("provider-turn-1".to_string()),
+                        id: "call-1".to_string(),
+                        name: echo_tool.name,
+                        arguments: serde_json::json!({"message": "hello from tool"}),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: None,
+                    },
+                ))
                 .await
                 .map_err(model_capability_error)?;
             Ok(HostManagedModelResponse::capability_calls(
@@ -4383,17 +4412,19 @@ mod tests {
             // ~2.4 KB message: far over the 512-byte string preview cap.
             let big_message = LARGE_ECHO_MESSAGE.repeat(100);
             let candidate = capabilities
-                .register_provider_tool_call(ProviderToolCall {
-                    provider_id: "test-provider".to_string(),
-                    provider_model_id: "test-model".to_string(),
-                    turn_id: Some("provider-turn-1".to_string()),
-                    id: "call-1".to_string(),
-                    name: echo_tool.name,
-                    arguments: serde_json::json!({ "message": big_message }),
-                    response_reasoning: None,
-                    reasoning: None,
-                    signature: None,
-                })
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                    ProviderToolCall {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        turn_id: Some("provider-turn-1".to_string()),
+                        id: "call-1".to_string(),
+                        name: echo_tool.name,
+                        arguments: serde_json::json!({ "message": big_message }),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: None,
+                    },
+                ))
                 .await
                 .map_err(model_capability_error)?;
             Ok(HostManagedModelResponse::capability_calls(
@@ -4437,17 +4468,19 @@ mod tests {
                 .find(|definition| definition.capability_id == notion_search_id)
                 .expect("activated Notion capability should be visible");
             let candidate = capabilities
-                .register_provider_tool_call(ProviderToolCall {
-                    provider_id: "test-provider".to_string(),
-                    provider_model_id: "test-model".to_string(),
-                    turn_id: Some("provider-turn-auth-gate".to_string()),
-                    id: "call-auth-gate".to_string(),
-                    name: notion_tool.name,
-                    arguments: serde_json::json!({ "query": "project notes" }),
-                    response_reasoning: None,
-                    reasoning: None,
-                    signature: None,
-                })
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                    ProviderToolCall {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        turn_id: Some("provider-turn-auth-gate".to_string()),
+                        id: "call-auth-gate".to_string(),
+                        name: notion_tool.name,
+                        arguments: serde_json::json!({ "query": "project notes" }),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: None,
+                    },
+                ))
                 .await
                 .map_err(model_capability_error)?;
             Ok(HostManagedModelResponse::capability_calls(
@@ -4510,17 +4543,19 @@ mod tests {
                 .find(|definition| definition.capability_id == list_dir_id)
                 .expect("list_dir provider tool definition");
             let candidate = capabilities
-                .register_provider_tool_call(ProviderToolCall {
-                    provider_id: "test-provider".to_string(),
-                    provider_model_id: "test-model".to_string(),
-                    turn_id: Some("provider-turn-1".to_string()),
-                    id: "call-1".to_string(),
-                    name: list_dir_tool.name,
-                    arguments: serde_json::json!({"path": "/workspace"}),
-                    response_reasoning: None,
-                    reasoning: None,
-                    signature: None,
-                })
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                    ProviderToolCall {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        turn_id: Some("provider-turn-1".to_string()),
+                        id: "call-1".to_string(),
+                        name: list_dir_tool.name,
+                        arguments: serde_json::json!({"path": "/workspace"}),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: None,
+                    },
+                ))
                 .await
                 .map_err(model_capability_error)?;
             Ok(HostManagedModelResponse::capability_calls(
@@ -6551,6 +6586,9 @@ mod tests {
             .expect("activate Notion MCP");
 
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let outcome = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message_until_gate(&conversation, "search Notion"),
@@ -6824,6 +6862,9 @@ mod tests {
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let reply = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "use echo tool"),
@@ -6969,6 +7010,9 @@ mod tests {
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let reply = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "use echo tool"),
@@ -7039,6 +7083,9 @@ mod tests {
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let reply = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "echo a big payload"),
@@ -7853,6 +7900,9 @@ mod tests {
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let reply = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "list workspace"),
@@ -9218,7 +9268,9 @@ mod tests {
                     signature: None,
                 };
                 let candidate1 = capabilities
-                    .register_provider_tool_call(call1.clone())
+                    .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                        call1.clone(),
+                    ))
                     .await
                     .map_err(model_capability_error)?;
 
@@ -9261,7 +9313,7 @@ mod tests {
                 call1.id = "call-multi-2".to_string();
                 call1.arguments = serde_json::json!({"message": "hello from call 2"});
                 let candidate2 = capabilities
-                    .register_provider_tool_call(call1)
+                    .register_provider_tool_call(RegisterProviderToolCallRequest::new(call1))
                     .await
                     .map_err(model_capability_error)?;
 
@@ -9326,6 +9378,9 @@ mod tests {
             .expect("facade slot should be empty before seeding");
 
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let reply = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "use echo tool twice"),
