@@ -162,6 +162,28 @@ impl CapabilityCatalog {
         self.entries.iter().map(|entry| &entry.definition)
     }
 
+    /// Names of the discoverable (non-core) tools, for the always-on catalog index
+    /// carried in the `tool_search` description.
+    ///
+    /// Names only — NOT descriptions. The index is validated as a capability
+    /// safe-description (hard 4096-byte cap + a sensitive-content denylist), and
+    /// arbitrary tool descriptions both blow the byte budget and can carry
+    /// denylisted substrings (`/users/`, `token`, …) that fail the whole turn.
+    /// Tool names are self-descriptive (`google-calendar.list_events`) and the
+    /// model loads the real schema + description on demand via `tool_describe`.
+    ///
+    /// Core tools are omitted (already advertised with full schemas every turn).
+    /// The discoverable set is fixed at catalog construction (tier never changes
+    /// with promotion), so this index is constant per `CapabilitySurfaceVersion`
+    /// and therefore prefix-cache stable. Sorted by name (the catalog is sorted).
+    pub(crate) fn discoverable_tool_names(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.tier == ToolTier::Discoverable)
+            .map(|entry| entry.definition.name.clone())
+            .collect()
+    }
+
     pub(crate) fn search_result(&self, name: &str) -> Option<CatalogSearchResult> {
         self.entry_by_name(name)
             .map(CatalogSearchResult::from_entry)
@@ -385,12 +407,14 @@ fn bridge_tool_definitions_with_tokens() -> impl Iterator<Item = BridgeDefinitio
         .map(|(definition, est_schema_tokens)| (definition, *est_schema_tokens))
 }
 
-fn advertised_bridge_tool_definitions(deferred_count: usize) -> Vec<(ProviderToolDefinition, u32)> {
+fn advertised_bridge_tool_definitions(
+    catalog: &CapabilityCatalog,
+) -> Vec<(ProviderToolDefinition, u32)> {
     bridge_tool_definitions_with_tokens()
         .map(|(definition, est_schema_tokens)| {
             let mut advertised = definition.clone();
             if advertised.name == TOOL_SEARCH_NAME {
-                advertised.description = count_aware_tool_search_description(deferred_count);
+                advertised.description = catalog_index_tool_search_description(catalog);
                 let est_schema_tokens = estimate_definition_tokens(&advertised);
                 return (advertised, est_schema_tokens);
             }
@@ -404,10 +428,52 @@ fn advertised_bridge_tool_definitions(deferred_count: usize) -> Vec<(ProviderToo
         .collect()
 }
 
-fn count_aware_tool_search_description(deferred_count: usize) -> String {
-    format!(
-        "Search {deferred_count} additional tools that are loaded on demand. Returns up to `limit` matches with name and description. Follow with tool_describe to load a tool's full parameter schema, then tool_call to invoke it. Tools already listed are available and do not need to be searched."
-    )
+/// The `tool_search` description doubles as the always-on catalog index.
+///
+/// A bare count ("N more tools available") leaves the model blind to *what*
+/// exists, so on a non-coding task with a coding-heavy core it never reaches for
+/// integrations it can't see — it just uses the advertised builtins and gives up.
+/// Listing every discoverable tool by name gives structural awareness (the model
+/// SEES `google-calendar.list_events` etc.) while the full JSON schemas stay
+/// deferred, preserving the token reduction. The list is the constant discoverable
+/// set, so this string is cache-stable per surface version.
+///
+/// Hard constraint: this string is validated as a capability *safe-description*,
+/// which has a 4096-byte cap and a sensitive-content denylist — exceeding either
+/// fails the whole turn at the prompt stage. So the index carries names ONLY (not
+/// tool descriptions, which both blow the budget and can carry denylisted
+/// substrings), and is byte-budgeted: if the catalog is large enough to overflow,
+/// the tail is summarized as "…and N more" and stays reachable via `query`.
+fn catalog_index_tool_search_description(catalog: &CapabilityCatalog) -> String {
+    let names = catalog.discoverable_tool_names();
+    if names.is_empty() {
+        return "Search additional tools that are loaded on demand. Returns up to `limit` matches with name and description. Follow with tool_describe to load a tool's full parameter schema, then tool_call to invoke it. Tools already listed are available and do not need to be searched."
+            .to_string();
+    }
+    // Stay well under MODEL_SAFE_SUMMARY_MAX_BYTES (4096); the reserve leaves room
+    // for the "…and N more" note plus headroom so we never trip the cap.
+    const BUDGET_BYTES: usize = 3800;
+    const TAIL_NOTE_RESERVE: usize = 96;
+    let total = names.len();
+    let mut description = format!(
+        "These {total} tools are available on demand but are NOT shown with full schemas in your tool list. They are real and callable — never tell the user a capability is unavailable without checking this list first. To use one: call tool_describe(name) to load its parameter schema, then tool_call(name, arguments) to invoke it (once you know a tool's name you may also call it directly). `query` fuzzy-searches this list when you want ranked matches instead of scanning it. On-demand tools:"
+    );
+    let mut shown = 0usize;
+    for name in &names {
+        if description.len() + "\n- ".len() + name.len() + TAIL_NOTE_RESERVE > BUDGET_BYTES {
+            break;
+        }
+        description.push_str("\n- ");
+        description.push_str(name);
+        shown += 1;
+    }
+    if shown < total {
+        description.push_str(&format!(
+            "\n…and {} more — call tool_search(query=\"<service or action>\") to find them.",
+            total - shown
+        ));
+    }
+    description
 }
 
 fn tool_call_safety_description() -> String {
@@ -465,8 +531,7 @@ pub(crate) fn select_active_set(
     let mut advertised_non_bridge_count = core_definitions.len();
 
     loop {
-        let deferred_count = catalog.len().saturating_sub(advertised_non_bridge_count);
-        let bridge_definitions = advertised_bridge_tool_definitions(deferred_count);
+        let bridge_definitions = advertised_bridge_tool_definitions(catalog);
         let bridge_tokens = sum_definition_tokens(&bridge_definitions);
         let promoted_definitions = select_promoted_definitions(
             catalog,
@@ -1144,14 +1209,11 @@ mod tests {
         promoted.push("zzz_promoted");
         promoted.push("aaa_promoted");
         promoted.push("read_file");
-        let advertised_non_bridge_count = 4;
-        let bridge_tokens = advertised_bridge_tool_definitions(
-            catalog.len().saturating_sub(advertised_non_bridge_count),
-        )
-        .iter()
-        .fold(0_u32, |total, (_definition, est_schema_tokens)| {
-            total.saturating_add(*est_schema_tokens)
-        });
+        let bridge_tokens = advertised_bridge_tool_definitions(&catalog)
+            .iter()
+            .fold(0_u32, |total, (_definition, est_schema_tokens)| {
+                total.saturating_add(*est_schema_tokens)
+            });
         let active_budget = ["read_file", "memory_search", "zzz_promoted", "aaa_promoted"]
             .into_iter()
             .filter_map(|name| catalog.entry_by_name(name))
@@ -1233,14 +1295,11 @@ mod tests {
         assert!(by_count_names.contains(&"promoted_00"));
         assert!(!by_count_names.contains(&"promoted_01"));
 
-        let advertised_non_bridge_count = 2;
-        let bridge_tokens = advertised_bridge_tool_definitions(
-            catalog.len().saturating_sub(advertised_non_bridge_count),
-        )
-        .iter()
-        .fold(0_u32, |total, (_definition, est_schema_tokens)| {
-            total.saturating_add(*est_schema_tokens)
-        });
+        let bridge_tokens = advertised_bridge_tool_definitions(&catalog)
+            .iter()
+            .fold(0_u32, |total, (_definition, est_schema_tokens)| {
+                total.saturating_add(*est_schema_tokens)
+            });
         let token_threshold = bridge_tokens
             .saturating_add(
                 catalog
@@ -1308,7 +1367,6 @@ mod tests {
         );
 
         assert!(active.deferred);
-        let deferred_count = catalog.len().saturating_sub(1);
         let tool_search = active
             .definitions
             .iter()
@@ -1316,7 +1374,7 @@ mod tests {
             .expect("tool_search advertised");
         assert_eq!(
             tool_search.description,
-            count_aware_tool_search_description(deferred_count)
+            catalog_index_tool_search_description(&catalog)
         );
         let tool_call = active
             .definitions
@@ -1329,6 +1387,65 @@ mod tests {
             total.saturating_add(estimate_definition_tokens(definition))
         });
         assert_eq!(active.advertised_tokens, actual_tokens);
+    }
+
+    #[test]
+    fn tool_search_description_indexes_discoverable_tools_by_name() {
+        // Structural-awareness regression: a model handed a coding-heavy core on a
+        // non-coding task never reaches for integrations it cannot see. The
+        // tool_search description must enumerate every discoverable tool by exact
+        // name so the model knows they exist and can tool_call them, rather than
+        // defaulting to the advertised builtins and giving up. Names only — the
+        // index is a capability safe-description and arbitrary tool descriptions
+        // both blow its byte budget and can carry denylisted content.
+        let definitions = vec![
+            fixture_tool("read_file", "Read a file from disk.", small_no_arg_schema()),
+            fixture_tool(
+                "google-calendar.list_events",
+                "List events on a Google Calendar within a time window.",
+                small_no_arg_schema(),
+            ),
+        ];
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+        let description = catalog_index_tool_search_description(&catalog);
+
+        assert!(
+            description.contains("google-calendar.list_events"),
+            "discoverable tool must be named in the index, got: {description}"
+        );
+        assert!(
+            !description.contains("read_file"),
+            "core tools ship full schemas already and must not be re-listed: {description}"
+        );
+    }
+
+    #[test]
+    fn index_description_stays_under_the_model_safe_cap_for_a_large_catalog() {
+        // Run-bork regression: the tool_search description is validated as a
+        // capability safe-description (4096-byte hard cap). A large catalog must
+        // NOT exceed it — the listing truncates and points the model at `query`
+        // for the tail, rather than failing the whole turn at the prompt stage.
+        let definitions: Vec<_> = (0..300)
+            .map(|i| {
+                fixture_tool(
+                    format!("integration-{i:03}.do_a_long_named_action"),
+                    "descriptions are not indexed",
+                    small_no_arg_schema(),
+                )
+            })
+            .collect();
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+        let description = catalog_index_tool_search_description(&catalog);
+
+        assert!(
+            description.len() <= 4096,
+            "index must stay under the model-safe cap, got {} bytes",
+            description.len()
+        );
+        assert!(
+            description.contains("more — call tool_search"),
+            "an overflowing catalog must point the model at query for the tail: {description}"
+        );
     }
 
     #[test]

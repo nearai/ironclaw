@@ -1293,6 +1293,20 @@ pub struct VisibleCapabilityRequest;
 pub struct VisibleCapabilitySurface {
     pub version: CapabilitySurfaceVersion,
     pub descriptors: Vec<CapabilityDescriptorView>,
+    /// Capability IDs the model may *invoke* this turn — the reachable authorized
+    /// catalog — as distinct from `descriptors`, which is the *advertised* subset.
+    ///
+    /// Under progressive tool disclosure the advertised set (token economy) is a
+    /// narrowed view, but the model can still reach catalog tools beyond it via
+    /// the tool-call bridge / forgiving-direct path. Call-time authorization (the
+    /// model-visible capability filter) must therefore validate against this
+    /// wider "callable" set, while advertising and prompt rendering stay narrow.
+    ///
+    /// Empty means "same as `descriptors`" — i.e. no disclosure narrowing is in
+    /// effect, so callable == advertised. Producers that don't narrow leave this
+    /// empty and consumers fall back to `descriptors`.
+    #[serde(default)]
+    pub callable_capability_ids: Vec<CapabilityId>,
 }
 
 /// Concurrency hint for a capability surfaced to an agent loop driver.

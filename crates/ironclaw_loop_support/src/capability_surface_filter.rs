@@ -898,6 +898,7 @@ mod tests {
     async fn visible_capabilities_filters_descriptors() {
         let inner = Arc::new(SpyPort::default());
         *inner.surface.lock().expect("surface lock") = Some(VisibleCapabilitySurface {
+            callable_capability_ids: Vec::new(),
             version: surface_version(),
             descriptors: vec![
                 descriptor("demo.a"),
@@ -1000,6 +1001,7 @@ mod tests {
     async fn visible_capabilities_preserve_capability_info_for_filtered_surface() {
         let inner = Arc::new(SpyPort::default());
         *inner.surface.lock().expect("surface lock") = Some(VisibleCapabilitySurface {
+            callable_capability_ids: Vec::new(),
             version: surface_version(),
             descriptors: vec![
                 descriptor(capability_info::CAPABILITY_ID),
@@ -1543,6 +1545,7 @@ mod tests {
     async fn surface_version_preserved() {
         let inner = Arc::new(SpyPort::default());
         *inner.surface.lock().expect("surface lock") = Some(VisibleCapabilitySurface {
+            callable_capability_ids: Vec::new(),
             version: surface_version(),
             descriptors: vec![descriptor("demo.allowed"), descriptor("demo.denied")],
         });
@@ -1702,6 +1705,7 @@ mod tests {
     async fn deny_filter_strips_denied_visible_descriptors() {
         let inner = Arc::new(SpyPort::default());
         *inner.surface.lock().expect("surface lock") = Some(VisibleCapabilitySurface {
+            callable_capability_ids: Vec::new(),
             version: surface_version(),
             descriptors: vec![
                 descriptor("builtin.spawn_subagent"),

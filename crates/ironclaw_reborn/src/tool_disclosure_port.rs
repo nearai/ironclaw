@@ -30,6 +30,16 @@ use crate::tool_disclosure::{
 
 const DISCLOSURE_INPUT_PREFIX: &str = "input:tool-disclosure:";
 
+/// Internal bridge name for an auto-loaded schema (describe-first) response.
+///
+/// NOT a real provider tool name, so it can never collide with a catalog tool or
+/// trip `is_bridge_name`. When the model calls a deferred tool whose schema it
+/// has not loaded this turn with arguments that fail pre-dispatch validation, the
+/// register path routes the call to this synthetic bridge instead of dispatching
+/// blind; `invoke_describe_first` then returns the tool's parameter schema so the
+/// model's retry can carry the required fields. See `register_describe_first`.
+const DESCRIBE_FIRST_BRIDGE_NAME: &str = "tool_disclosure:auto_schema";
+
 pub(crate) struct ToolDisclosureCapabilityDecorator {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
@@ -260,6 +270,35 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
                     capability_id = target.definition.capability_id.as_str(),
                     "reborn tool disclosure registering direct deferred provider tool call"
                 );
+                // Describe-first: the blind-call regression tool disclosure
+                // introduced. Pre-disclosure the full schema was always in
+                // context, so the model filled required fields; now schemas are
+                // deferred and the model calls by name alone, omitting required
+                // arguments and looping on the opaque validation error. If the
+                // tool's schema has NOT been disclosed this turn AND the arguments
+                // fail pre-dispatch validation, return the schema (one-shot per
+                // undisclosed tool) instead of dispatching blind. Well-formed
+                // blind calls fall through and dispatch directly, so this adds no
+                // round-trip on correct calls. Once disclosed, a still-invalid
+                // call dispatches and fails normally, so the no-progress detector
+                // still observes the repeated failure.
+                if !self.is_disclosed(&target.definition.name)?
+                    && self
+                        .inner
+                        .validate_provider_tool_call(&target.target_call)
+                        .is_err()
+                {
+                    debug!(
+                        tool_name = tool_call.name.as_str(),
+                        capability_id = target.definition.capability_id.as_str(),
+                        "deferred direct call failed pre-dispatch validation before its schema was disclosed; returning schema (describe-first)"
+                    );
+                    return self.register_describe_first(
+                        &tool_call,
+                        replay_tool_name,
+                        &target.definition.name,
+                    );
+                }
                 let mut candidate = self
                     .inner
                     .register_provider_tool_call(target.target_call)
@@ -279,6 +318,27 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             // The model invoked the `tool_call` bridge itself (a valid wire
             // name); the replay reflects that actual call, not the target.
             let bridge_provider_tool_name = tool_call.name.clone();
+            // Describe-first (same rationale as the direct-deferred path above):
+            // an undisclosed tool called via the bridge with arguments that fail
+            // pre-dispatch validation gets its schema instead of a blind dispatch,
+            // one-shot per undisclosed tool.
+            if !self.is_disclosed(&target.definition.name)?
+                && self
+                    .inner
+                    .validate_provider_tool_call(&target.target_call)
+                    .is_err()
+            {
+                debug!(
+                    tool_name = tool_call.name.as_str(),
+                    target = target.definition.name.as_str(),
+                    "tool_call to an undisclosed tool failed pre-dispatch validation; returning schema (describe-first)"
+                );
+                return self.register_describe_first(
+                    &tool_call,
+                    bridge_provider_tool_name,
+                    &target.definition.name,
+                );
+            }
             match self
                 .inner
                 .register_provider_tool_call(target.target_call)
@@ -315,8 +375,21 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         let mut surface = self.inner.visible_capabilities(request).await?;
+        // The inner surface is the full reachable authorized catalog *before* we
+        // narrow the advertised `descriptors` below. Capture it as the call-time
+        // "callable" view so the model-visible capability filter authorizes
+        // bridge / forgiving-direct calls to catalog tools the model legitimately
+        // reaches this turn but that aren't advertised. Without this, a resumed
+        // run whose discovered tools dropped off the advertised surface has its
+        // retry hard-rejected as "outside the model-visible capability view".
+        let callable_capability_ids: Vec<CapabilityId> = surface
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.capability_id.clone())
+            .collect();
         let mut state = self.turn_state()?;
         let Some(state) = state.as_mut() else {
+            surface.callable_capability_ids = callable_capability_ids;
             return Ok(surface);
         };
         state.surface_version = Some(surface.version.clone());
@@ -345,6 +418,21 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
                 surface.descriptors.push(descriptor);
             }
         }
+        // Callable = the full reachable catalog (captured above) UNION the tools
+        // actually advertised this turn. The advertised set includes the bridges
+        // (tool_search / tool_describe / tool_call) synthesized just above, which
+        // are NOT catalog entries. Without this union the bridge ids are absent
+        // from `callable`, so the outer model-visible filter strips the bridges
+        // from the advertised tool list and the model loses its discovery entry
+        // point entirely ("tool_search is not available").
+        let mut callable: BTreeSet<CapabilityId> = callable_capability_ids.into_iter().collect();
+        callable.extend(
+            surface
+                .descriptors
+                .iter()
+                .map(|descriptor| descriptor.capability_id.clone()),
+        );
+        surface.callable_capability_ids = callable.into_iter().collect();
         Ok(surface)
     }
 
@@ -482,6 +570,19 @@ impl ToolDisclosureCapabilityPort {
         Ok(())
     }
 
+    /// Whether the model has loaded this tool's schema this turn (via
+    /// `tool_search` / `tool_describe` / a prior describe-first). Gates
+    /// describe-first so it fires at most once per undisclosed tool: once the
+    /// schema is in context, a still-invalid call dispatches and fails through the
+    /// normal path the no-progress detector can count.
+    fn is_disclosed(&self, name: &str) -> Result<bool, AgentLoopHostError> {
+        let guard = self.turn_state()?;
+        Ok(guard
+            .as_ref()
+            .map(|state| state.disclosed_names.contains(name))
+            .unwrap_or(false))
+    }
+
     fn register_bridge_call(
         &self,
         tool_call: ProviderToolCall,
@@ -519,6 +620,65 @@ impl ToolDisclosureCapabilityPort {
         })
     }
 
+    /// Register a deferred call whose arguments failed pre-dispatch validation as
+    /// an auto-schema (describe-first) bridge response rather than a blind
+    /// dispatch. `invoke_describe_first` returns the tool's parameter schema and
+    /// marks it disclosed, so the model's retry carries the required fields.
+    ///
+    /// The candidate borrows the `tool_describe` bridge capability id so
+    /// `invoke_capability` routes it to `invoke_bridge`; the stored
+    /// `BridgeInvocation` name (`DESCRIBE_FIRST_BRIDGE_NAME`) distinguishes it from
+    /// a genuine `tool_describe`. The replay mirrors the model's actual call —
+    /// `replay_tool_name` is the wire-safe name the caller already resolved (the
+    /// bridge name, or the canonical definition name for a dotted direct call).
+    fn register_describe_first(
+        &self,
+        tool_call: &ProviderToolCall,
+        replay_tool_name: String,
+        target_name: &str,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let Some(definition) = bridge_tool_definitions()
+            .into_iter()
+            .find(|definition| definition.name == TOOL_DESCRIBE_NAME)
+        else {
+            return Err(invalid_invocation(
+                "tool_describe bridge definition is unavailable",
+            ));
+        };
+        // Distinct digest input so an auto-schema input never collides with a
+        // genuine bridge input for the same provider call id.
+        let digest_input = provider_call_digest_input(
+            &format!("{}:auto-schema", tool_call.id),
+            target_name,
+            &tool_call.arguments,
+        );
+        let digest = ironclaw_host_api::sha256_digest_token(digest_input.as_bytes());
+        let input_ref = CapabilityInputRef::new(format!("{DISCLOSURE_INPUT_PREFIX}{digest}"))
+            .map_err(|e| {
+                invalid_invocation(format!(
+                    "auto-schema input ref could not be represented: {e}"
+                ))
+            })?;
+        self.bridge_inputs
+            .lock()
+            .map_err(|e| invalid_invocation(format!("bridge input store lock is poisoned: {e}")))?
+            .insert(
+                input_ref.as_str().to_string(),
+                BridgeInvocation {
+                    name: DESCRIBE_FIRST_BRIDGE_NAME.to_string(),
+                    arguments: json!({ "name": target_name }),
+                },
+            );
+        let surface_version = self.current_surface_version()?;
+        Ok(CapabilityCallCandidate {
+            surface_version,
+            capability_id: definition.capability_id,
+            input_ref,
+            effective_capability_ids: Vec::new(),
+            provider_replay: Some(provider_replay_for(tool_call, replay_tool_name)),
+        })
+    }
+
     fn current_surface_version(&self) -> Result<CapabilitySurfaceVersion, AgentLoopHostError> {
         let guard = self.turn_state()?;
         guard
@@ -541,6 +701,7 @@ impl ToolDisclosureCapabilityPort {
         match bridge.name.as_str() {
             TOOL_SEARCH_NAME => self.invoke_tool_search(&request, &bridge).await,
             TOOL_DESCRIBE_NAME => self.invoke_tool_describe(&request, &bridge).await,
+            DESCRIBE_FIRST_BRIDGE_NAME => self.invoke_describe_first(&request, &bridge).await,
             TOOL_CALL_NAME => Ok(failed_invalid_input(
                 "tool_call target is not a known tool; use tool_search to find the correct tool name",
             )),
@@ -625,6 +786,43 @@ impl ToolDisclosureCapabilityPort {
             })
         };
         self.completed_bridge_result(request, output, "tool_describe returned schema")
+            .await
+    }
+
+    /// Invoke an auto-schema (describe-first) bridge: return the target tool's
+    /// parameter schema and mark it disclosed, so the model's retry carries the
+    /// required fields. Mirrors `invoke_tool_describe` but its note tells the
+    /// model the schema was loaded automatically because its call did not match —
+    /// the schema is rendered exactly when the model needs it, restoring the
+    /// pre-disclosure guarantee for the one call that got it wrong.
+    async fn invoke_describe_first(
+        &self,
+        request: &CapabilityInvocation,
+        bridge: &BridgeInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        let Some(name) = bridge.arguments.get("name").and_then(Value::as_str) else {
+            return Ok(failed_invalid_input("auto-schema requires a target name"));
+        };
+        let output = {
+            let mut guard = self.turn_state()?;
+            let Some(state) = guard.as_mut() else {
+                return Ok(failed_invalid_input("tool catalog is unavailable"));
+            };
+            let Some(result) = state.catalog.search_result(name) else {
+                return Ok(failed_invalid_input("auto-schema target is unknown"));
+            };
+            state.disclosed_names.insert(result.name.clone());
+            json!({
+                "status": "schema_loaded",
+                "note": "Your previous arguments did not match this tool's schema (its schema had not been loaded yet). Here is the parameter schema — call the tool again with the required arguments.",
+                "name": result.name,
+                "capability_id": result.capability_id.as_str(),
+                "description": result.description,
+                "required": result.required_params,
+                "parameters": result.parameters,
+            })
+        };
+        self.completed_bridge_result(request, output, "auto-loaded tool schema before invocation")
             .await
     }
 
@@ -933,6 +1131,19 @@ mod tests {
             &self,
             tool_call: &ProviderToolCall,
         ) -> Result<(), AgentLoopHostError> {
+            // Sentinel: lets a test drive the describe-first path by failing
+            // pre-dispatch validation for a resolved target (mirrors the
+            // `register_explodes` register-failure sentinel above).
+            if tool_call
+                .arguments
+                .get("__force_invalid")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                return Err(invalid_invocation(
+                    "spy validation rejects forced-invalid input",
+                ));
+            }
             self.provider_tool_call_capability_ids(tool_call)
                 .map(|_| ())
         }
@@ -970,6 +1181,7 @@ mod tests {
             _request: VisibleCapabilityRequest,
         ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
             Ok(VisibleCapabilitySurface {
+                callable_capability_ids: Vec::new(),
                 version: self.surface_version.clone(),
                 descriptors: self
                     .definitions
@@ -1333,6 +1545,216 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn undisclosed_invalid_deferred_call_returns_schema_instead_of_dispatching() {
+        // The failure tool disclosure introduced: the model calls a deferred tool
+        // whose schema it has not loaded, with arguments that fail validation (a
+        // required field — e.g. an id — it does not have). Pre-disclosure the
+        // schema was always in context; now it is deferred, so the model calls
+        // blind and loops on the opaque schema error. Describe-first returns the
+        // schema as a recoverable completion WITHOUT dispatching the target blind,
+        // so the model's retry can be well-formed.
+        let definitions = vec![
+            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.hidden", "hidden_tool", "Hidden operation"),
+            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
+            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
+            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
+            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
+        ];
+        let inner = Arc::new(SpyPort {
+            definitions,
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface");
+
+        let candidate = port
+            .register_provider_tool_call(provider_call(
+                TOOL_CALL_NAME,
+                json!({"name": "hidden_tool", "arguments": {"__force_invalid": true}}),
+            ))
+            .await
+            .expect("describe-first registers");
+        assert!(
+            is_bridge_capability_id(&candidate.capability_id),
+            "an undisclosed invalid call must route to a schema (bridge) response, not the target"
+        );
+        assert!(
+            inner
+                .registered_calls
+                .lock()
+                .expect("registered calls lock")
+                .is_empty(),
+            "describe-first must NOT register/dispatch the target on the inner port"
+        );
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("describe-first invokes");
+        assert!(
+            matches!(outcome, CapabilityOutcome::Completed(_)),
+            "describe-first returns the schema as a recoverable completion"
+        );
+        assert!(
+            inner
+                .invocations
+                .lock()
+                .expect("invocations lock")
+                .is_empty(),
+            "describe-first must NOT invoke the target on the inner port"
+        );
+    }
+
+    #[tokio::test]
+    async fn well_formed_blind_deferred_call_dispatches_without_describe_first() {
+        // Describe-first must not tax correct calls: a blind call whose arguments
+        // pass validation dispatches straight to the target (no wasted round-trip),
+        // matching the zero-round-trip pre-disclosure behavior.
+        let definitions = vec![
+            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.hidden", "hidden_tool", "Hidden operation"),
+            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
+            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
+            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
+            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
+        ];
+        let inner = Arc::new(SpyPort {
+            definitions,
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface");
+
+        let candidate = port
+            .register_provider_tool_call(provider_call(
+                TOOL_CALL_NAME,
+                json!({"name": "hidden_tool", "arguments": {"path": "demo"}}),
+            ))
+            .await
+            .expect("valid blind call registers");
+        assert_eq!(
+            candidate.capability_id.as_str(),
+            "fixture.hidden",
+            "a well-formed blind call dispatches the target directly, not describe-first"
+        );
+        assert_eq!(
+            inner
+                .registered_calls
+                .lock()
+                .expect("registered calls lock")
+                .last()
+                .expect("target registered")
+                .name,
+            "hidden_tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn describe_first_is_one_shot_so_repeated_failures_still_reach_dispatch() {
+        // Backstop-safety: describe-first fires at most once per undisclosed tool.
+        // After the schema is disclosed, a still-invalid call must dispatch (and
+        // fail) through the normal path rather than returning a schema again —
+        // otherwise a wedged model would receive an endless stream of
+        // "made progress" schema responses and the no-progress detector would
+        // never observe the repeated failure.
+        let definitions = vec![
+            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.hidden", "hidden_tool", "Hidden operation"),
+            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
+            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
+            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
+            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
+        ];
+        let inner = Arc::new(SpyPort {
+            definitions,
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface");
+
+        // First invalid blind call -> describe-first (schema bridge), discloses.
+        let first = port
+            .register_provider_tool_call(provider_call(
+                TOOL_CALL_NAME,
+                json!({"name": "hidden_tool", "arguments": {"__force_invalid": true}}),
+            ))
+            .await
+            .expect("first registers");
+        assert!(
+            is_bridge_capability_id(&first.capability_id),
+            "first undisclosed invalid call is describe-first"
+        );
+        port.invoke_capability(CapabilityInvocation {
+            surface_version: first.surface_version,
+            capability_id: first.capability_id,
+            input_ref: first.input_ref,
+            approval_resume: None,
+            auth_resume: None,
+        })
+        .await
+        .expect("first invokes (discloses schema)");
+
+        // Second still-invalid call -> now disclosed, so it no longer intercepts:
+        // it dispatches, the inner port rejects it, and a recoverable Failed
+        // outcome (countable by the no-progress detector) surfaces — NOT a schema.
+        let second = port
+            .register_provider_tool_call(provider_call(
+                TOOL_CALL_NAME,
+                json!({"name": "hidden_tool", "arguments": {"__force_invalid": true}}),
+            ))
+            .await
+            .expect("second registers via recoverable fallback");
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: second.surface_version,
+                capability_id: second.capability_id,
+                input_ref: second.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("second invokes");
+        assert!(
+            matches!(outcome, CapabilityOutcome::Failed(_)),
+            "after disclosure a still-invalid call surfaces a Failed outcome the no-progress detector can count, not another schema"
+        );
+    }
+
+    #[tokio::test]
     async fn direct_deferred_dotted_capability_id_records_canonical_wire_name_in_replay() {
         // Regression: a weak model frequently calls a deferred provider tool by
         // its dotted catalog capability_id (e.g. `google-calendar.list_events`,
@@ -1483,6 +1905,64 @@ mod tests {
                 .iter()
                 .any(|definition| definition.name == "suspends_tool"),
             "a gate-suspended tool must be promoted so it survives the resume"
+        );
+    }
+
+    #[tokio::test]
+    async fn callable_set_includes_advertised_bridges_so_the_visible_filter_keeps_them() {
+        // Regression: callable_capability_ids was derived only from the inner
+        // catalog, which excludes the synthesized bridges. The outer model-visible
+        // filter is seeded from callable and strips any advertised tool not in it —
+        // so the bridges (tool_search / tool_describe / tool_call) vanished from the
+        // model's tool list and it could no longer discover anything ("tool_search
+        // is not available"). Callable must be a superset of everything advertised
+        // this turn AND still include the deferred long tail.
+        let definitions = vec![
+            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.hidden", "hidden_tool", "Hidden operation"),
+            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
+            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
+            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
+            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
+        ];
+        let inner = Arc::new(SpyPort {
+            definitions,
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface");
+
+        let advertised = port.tool_definitions().expect("tool definitions");
+        assert!(
+            advertised.iter().any(|d| d.name == TOOL_SEARCH_NAME),
+            "fixture must be in deferred mode so the bridges are advertised"
+        );
+        let callable: std::collections::HashSet<_> =
+            surface.callable_capability_ids.iter().cloned().collect();
+        // Every advertised tool — bridges included — must be authorizable, or the
+        // visible-surface filter strips it from the model's tool list.
+        for descriptor in &surface.descriptors {
+            assert!(
+                callable.contains(&descriptor.capability_id),
+                "advertised tool {} missing from callable; the visible filter would strip it",
+                descriptor.capability_id.as_str()
+            );
+        }
+        // The deferred long tail stays callable (the original purpose of callable).
+        assert!(
+            callable.iter().any(|id| id.as_str() == "fixture.hidden"),
+            "deferred catalog tool must remain callable"
         );
     }
 

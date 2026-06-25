@@ -1329,6 +1329,9 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         Ok(VisibleCapabilitySurface {
             version,
             descriptors,
+            // Empty = "callable == advertised". A disclosure decorator that narrows
+            // the advertised set populates this with the wider reachable catalog.
+            callable_capability_ids: Vec::new(),
         })
     }
 
