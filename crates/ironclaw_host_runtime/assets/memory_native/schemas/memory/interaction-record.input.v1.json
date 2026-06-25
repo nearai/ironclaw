@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/memory/interaction-record.input.v1.json",
+  "title": "Memory Interaction Record Input v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "occurred_at"],
+  "properties": {
+    "summary": { "type": "string", "minLength": 1, "maxLength": 8192 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "refs": { "type": "array", "items": { "type": "string", "maxLength": 512 }, "maxItems": 100 }
+  }
+}

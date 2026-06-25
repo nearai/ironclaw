@@ -1,0 +1,67 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "ironclaw.memory.native"
+name = "Reborn Native Memory"
+version = "0.1.0"
+description = "Host-bundled native memory provider implementing the host-defined memory capability profiles (issue #3537). The provider-prefixed capabilities below implement the portable memory profiles; the model-facing memory tools are layered separately as builtin.memory_* capabilities."
+# Requested trust only; the host trust policy computes effective trust. A
+# `first_party` runtime + reserved `ironclaw.*` id are accepted only for the
+# loader-supplied `HostBundled` source, and only when a matching host service
+# (`native_memory_provider`) is registered — the bundled TOML alone is not
+# authority.
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "native_memory_provider"
+
+# memory.context_retrieval.v1 — host-mediated, provider-neutral context retrieval
+# before a model call. host_internal: invoked by the host context pipeline, not
+# exposed to the model as a tool.
+[[capabilities]]
+id = "ironclaw.memory.native.context.retrieve"
+implements = ["memory.context_retrieval.v1"]
+description = "Retrieve bounded provider-neutral memory context snippets for a turn."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "host_internal"
+input_schema_ref = "schemas/memory/context-retrieve.input.v1.json"
+output_schema_ref = "schemas/memory/context-retrieve.output.v1.json"
+required_host_ports = ["host.storage.sql_transaction.first_party", "host.events.audit"]
+
+# memory.interaction_log.v1 — host-recorded sanitized interaction logging.
+[[capabilities]]
+id = "ironclaw.memory.native.interaction.record"
+implements = ["memory.interaction_log.v1"]
+description = "Record a host-sanitized, bounded interaction into durable memory."
+effects = ["write_filesystem"]
+default_permission = "allow"
+visibility = "host_internal"
+input_schema_ref = "schemas/memory/interaction-record.input.v1.json"
+output_schema_ref = "schemas/memory/interaction-record.output.v1.json"
+required_host_ports = ["host.storage.sql_transaction.first_party", "host.events.audit"]
+
+# memory.document_store.v1 — read operation. host_internal: the model-facing
+# read tool is the separate builtin.memory_read capability.
+[[capabilities]]
+id = "ironclaw.memory.native.document.read"
+implements = ["memory.document_store.v1"]
+description = "Read a memory document in the current tenant/user/agent/project scope."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "host_internal"
+input_schema_ref = "schemas/memory/document-read.input.v1.json"
+output_schema_ref = "schemas/memory/document-read.output.v1.json"
+required_host_ports = ["host.storage.sql_transaction.first_party", "host.events.audit"]
+
+# memory.document_store.v1 — write operation. Host prompt-write safety runs
+# before dispatching writes to prompt-injected memory files.
+[[capabilities]]
+id = "ironclaw.memory.native.document.write"
+implements = ["memory.document_store.v1"]
+description = "Write or append a memory document in the current tenant/user/agent/project scope."
+effects = ["write_filesystem"]
+default_permission = "allow"
+visibility = "host_internal"
+input_schema_ref = "schemas/memory/document-write.input.v1.json"
+output_schema_ref = "schemas/memory/document-write.output.v1.json"
+required_host_ports = ["host.storage.sql_transaction.first_party", "host.events.audit"]

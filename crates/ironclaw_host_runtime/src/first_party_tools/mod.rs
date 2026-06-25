@@ -39,6 +39,7 @@ use ironclaw_host_api::{
     RuntimeHttpEgressResponse, TrustClass, VirtualPath,
 };
 
+use crate::memory_binding::MemoryProviderBinding;
 use crate::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
@@ -367,8 +368,53 @@ pub fn builtin_first_party_handlers_with_trigger_clock(
     Ok(registry)
 }
 
+/// Like [`builtin_first_party_handlers_with_trigger_create_hook`] but routes the
+/// memory capabilities through an explicitly resolved provider binding (issue
+/// #3537) instead of hardwiring the native provider. Used by the local-dev
+/// composition path (no process-backend filtering).
+pub fn builtin_first_party_handlers_with_trigger_create_hook_and_memory_binding(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    memory_binding: MemoryProviderBinding,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_base_registry_with_memory_binding(memory_binding)?;
+    trigger_management::insert_handlers_with_create_hook(
+        &mut registry,
+        trigger_repository,
+        trigger_create_hook,
+    )?;
+    Ok(registry)
+}
+
+/// Like
+/// [`builtin_first_party_handlers_with_trigger_create_hook_for_process_backend`]
+/// but routes the memory capabilities through an explicitly resolved provider
+/// binding (issue #3537). Used by the production composition path.
+pub fn builtin_first_party_handlers_with_trigger_create_hook_for_process_backend_and_memory_binding(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    process_backend: ProcessBackendKind,
+    memory_binding: MemoryProviderBinding,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_handlers_with_trigger_create_hook_and_memory_binding(
+        trigger_repository,
+        trigger_create_hook,
+        memory_binding,
+    )?;
+    if !process_port_backed_builtins_enabled(process_backend) {
+        remove_process_port_backed_builtin_handlers(&mut registry)?;
+    }
+    Ok(registry)
+}
+
 fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, HostApiError> {
-    let handler = Arc::new(BuiltinFirstPartyTools::default());
+    builtin_first_party_base_registry_with_memory_binding(MemoryProviderBinding::default())
+}
+
+fn builtin_first_party_base_registry_with_memory_binding(
+    memory_binding: MemoryProviderBinding,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let handler = Arc::new(BuiltinFirstPartyTools::with_memory_binding(memory_binding));
     let mut registry = FirstPartyCapabilityRegistry::new()
         .with_handler(CapabilityId::new(ECHO_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(TIME_CAPABILITY_ID)?, handler.clone())
@@ -456,6 +502,17 @@ fn first_party_capability_manifest(
 pub struct BuiltinFirstPartyTools {
     coding_state: CodingCapabilityState,
     memory_state: memory::MemoryCapabilityState,
+}
+
+impl BuiltinFirstPartyTools {
+    /// Build with a resolved memory provider binding (issue #3537). The default
+    /// (`MemoryProviderBinding::Native`) preserves pre-binding behavior.
+    fn with_memory_binding(memory_binding: MemoryProviderBinding) -> Self {
+        Self {
+            memory_state: memory::MemoryCapabilityState::with_binding(memory_binding),
+            ..Default::default()
+        }
+    }
 }
 
 #[async_trait]

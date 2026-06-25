@@ -44,7 +44,10 @@ mod first_party;
 mod first_party_tools;
 mod http_body;
 mod invocation_services;
+pub mod memory_binding;
 pub mod memory_context;
+pub mod memory_native_extension;
+pub mod memory_profiles;
 mod obligations;
 mod planner;
 mod process_aliases;
@@ -92,7 +95,9 @@ pub use first_party_tools::{
     WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook,
+    builtin_first_party_handlers_with_trigger_create_hook_and_memory_binding,
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
+    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend_and_memory_binding,
     builtin_first_party_package, builtin_first_party_package_for_process_backend,
 };
 #[cfg(any(test, feature = "test-support"))]

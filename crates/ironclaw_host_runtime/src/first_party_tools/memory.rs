@@ -21,6 +21,7 @@ use ironclaw_memory::{
 use ironclaw_memory_native::NativeMemoryService;
 use serde_json::{Value, json};
 
+use crate::memory_binding::MemoryProviderBinding;
 use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest, FirstPartyCapabilityResult};
 
 use super::{first_party_capability_manifest, input_error, operation_error, resource_profile};
@@ -38,6 +39,10 @@ struct MemoryServices {
 
 #[derive(Default)]
 pub(super) struct MemoryCapabilityState {
+    /// Resolved memory provider binding for the document-store profile (issue
+    /// #3537). `Default` is `Native`, preserving pre-binding behavior until
+    /// composition hands down a config-resolved binding.
+    binding: MemoryProviderBinding,
     cached_memory_service: Mutex<Option<CachedMemoryService>>,
     #[cfg(test)]
     memory_service_for_test: Option<Arc<dyn MemoryService>>,
@@ -129,6 +134,14 @@ fn memory_services(
 }
 
 impl MemoryCapabilityState {
+    /// Construct with a resolved memory provider binding (issue #3537).
+    pub(crate) fn with_binding(binding: MemoryProviderBinding) -> Self {
+        Self {
+            binding,
+            ..Default::default()
+        }
+    }
+
     pub(super) fn service_for(
         &self,
         request: &FirstPartyCapabilityRequest,
@@ -136,6 +149,17 @@ impl MemoryCapabilityState {
         #[cfg(test)]
         if let Some(service) = &self.memory_service_for_test {
             return Ok(Arc::clone(service));
+        }
+
+        // Fail closed: the binding decides which provider serves the document
+        // store. Only the host-bundled native provider is constructable here;
+        // a disabled or third-party binding surfaces a model-visible error
+        // rather than silently falling back to native.
+        match &self.binding {
+            MemoryProviderBinding::Native => {}
+            MemoryProviderBinding::Disabled | MemoryProviderBinding::ThirdParty { .. } => {
+                return Err(binding_unavailable_error());
+            }
         }
 
         let mut cached = self
@@ -173,10 +197,23 @@ impl MemoryCapabilityState {
     #[cfg(test)]
     pub(super) fn with_memory_service_for_test(memory_service: Arc<dyn MemoryService>) -> Self {
         Self {
+            binding: MemoryProviderBinding::Native,
             cached_memory_service: Mutex::new(None),
             memory_service_for_test: Some(memory_service),
         }
     }
+}
+
+/// Fail-closed error when the document-store binding is disabled or bound to a
+/// provider that is not constructable here (e.g. an unimplemented third party).
+///
+/// Host-authored fixed text — no binding/extension id is interpolated, so the
+/// safe-summary validator cannot reject it (see `agent-loop-capabilities.md`).
+fn binding_unavailable_error() -> FirstPartyCapabilityError {
+    FirstPartyCapabilityError::with_safe_summary(
+        RuntimeDispatchErrorKind::OperationFailed,
+        "memory is unavailable for the configured provider binding",
+    )
 }
 
 fn audit_sinks_match(
@@ -599,5 +636,45 @@ mod tests {
         assert_eq!(seen[0].0.scope.user_id.as_str(), "user-memory-service");
         assert_eq!(seen[0].1.query, "search marker");
         assert_eq!(seen[0].1.limit, 3);
+    }
+
+    #[tokio::test]
+    async fn disabled_binding_fails_closed_at_dispatch() {
+        // Drive the real caller (dispatch -> service_for) with a Disabled
+        // binding (no test-override service), proving it fails closed instead
+        // of silently building the native provider.
+        let state = MemoryCapabilityState::with_binding(MemoryProviderBinding::Disabled);
+        let request = memory_request(
+            MEMORY_SEARCH_CAPABILITY_ID,
+            json!({"query": "search marker", "limit": 3}),
+        );
+
+        let err = dispatch(&state, &request)
+            .await
+            .expect_err("disabled binding must fail closed");
+        assert_eq!(
+            err.kind(),
+            Some(ironclaw_host_api::RuntimeDispatchErrorKind::OperationFailed)
+        );
+        assert_eq!(
+            err.safe_summary(),
+            Some("memory is unavailable for the configured provider binding")
+        );
+    }
+
+    #[tokio::test]
+    async fn third_party_binding_fails_closed_at_dispatch() {
+        let state = MemoryCapabilityState::with_binding(MemoryProviderBinding::ThirdParty {
+            extension_id: ironclaw_host_api::ExtensionId::new("acme.honcho").unwrap(),
+        });
+        let request = memory_request(MEMORY_READ_CAPABILITY_ID, json!({"path": "notes/alpha.md"}));
+
+        let err = dispatch(&state, &request)
+            .await
+            .expect_err("unimplemented third-party binding must fail closed");
+        assert_eq!(
+            err.kind(),
+            Some(ironclaw_host_api::RuntimeDispatchErrorKind::OperationFailed)
+        );
     }
 }

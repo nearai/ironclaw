@@ -18,6 +18,18 @@ use crate::{
 /// outbound HTTP through host policy, credential, and response-limit services.
 pub const HOST_RUNTIME_HTTP_EGRESS_PORT_ID: &str = "host.runtime.http_egress";
 
+/// First-party SQL/transaction storage port. HostBundled first-party only: it
+/// backs native memory persistence (and other first-party durable storage)
+/// through a host-scoped transaction surface rather than a raw pool handle.
+/// Concrete adapters live in host/runtime service crates; this is the validation
+/// contract name only.
+pub const HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID: &str =
+    "host.storage.sql_transaction.first_party";
+
+/// Host-mediated durable audit event port. Capabilities declare it when they
+/// emit redacted significant events into the host's durable audit log.
+pub const HOST_EVENTS_AUDIT_PORT_ID: &str = "host.events.audit";
+
 fn validate_dotted_host_port_id(value: &str) -> Result<(), HostApiError> {
     validate_dotted_id(
         "host_port",
