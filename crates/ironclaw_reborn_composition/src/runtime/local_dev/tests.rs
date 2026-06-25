@@ -7,8 +7,9 @@ mod tests {
     use super::super::*;
 
     use ironclaw_approvals::{
-        ApprovalResolver, PersistentApprovalAction, PersistentApprovalPolicyInput,
-        PersistentApprovalPolicyStore,
+        ApprovalResolver, CapabilityPermissionOverrideStore, PersistentApprovalAction,
+        PersistentApprovalPolicyInput, PersistentApprovalPolicyStore, ToolPermissionOverride,
+        ToolPermissionOverrideInput,
     };
     use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore};
     use ironclaw_host_api::{
@@ -1769,8 +1770,9 @@ mod tests {
                 action: PersistentApprovalAction::Dispatch,
                 capability_id: set_capability_id.clone(),
                 grantee: Principal::Extension(
-                    ironclaw_loop_support::loop_driver_execution_extension_id(&run_context)
-                        .expect("loop driver extension id"),
+                    crate::outbound_delivery_capability_surface::outbound_delivery_synthetic_provider(
+                    )
+                    .expect("outbound delivery synthetic provider id"),
                 ),
                 approved_by: Principal::User(actor_user_id.clone()),
                 constraints: GrantConstraints {
@@ -1803,6 +1805,39 @@ mod tests {
         match second_set_outcome {
             CapabilityOutcome::Completed(_) => {}
             outcome => panic!("persistent always-allow set should complete, got {outcome:?}"),
+        }
+        local_runtime
+            .tool_permission_overrides
+            .set(ToolPermissionOverrideInput {
+                scope: {
+                    let mut scope = run_context.scope.to_resource_scope();
+                    scope.user_id = owner_user_id.clone();
+                    scope.tenant_user_settings_scope()
+                },
+                capability_id: set_capability_id,
+                state: ToolPermissionOverride::Disabled,
+                updated_by: Principal::User(actor_user_id),
+            })
+            .await
+            .expect("disabled override is stored");
+        let disabled_set_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": slack_target_id.as_str() }),
+                ),
+            ))
+            .await
+            .expect("disabled set call stages");
+        let disabled_set_outcome = port
+            .invoke_capability(invocation_for_candidate(&disabled_set_candidate))
+            .await
+            .expect("disabled set call returns a capability outcome");
+        match disabled_set_outcome {
+            CapabilityOutcome::Failed(failure) => {
+                assert_eq!(failure.error_kind, CapabilityFailureKind::PolicyDenied);
+            }
+            outcome => panic!("disabled set should fail non-terminally, got {outcome:?}"),
         }
         let observed_provider_callers = slack_provider.observed_callers();
         assert!(

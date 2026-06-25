@@ -7855,7 +7855,7 @@ fn services_with_operator_approval_config_parts() -> (
 fn services_with_operator_approval_config_policy_store(
     persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
 ) -> RebornServices {
-    let services = RebornServices::new(
+    RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -7895,8 +7895,7 @@ fn services_with_operator_approval_config_policy_store(
                 },
             ],
         }),
-    );
-    services
+    )
 }
 
 fn operator_config_entry_value<'a>(

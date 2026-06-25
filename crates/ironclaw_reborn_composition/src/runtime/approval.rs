@@ -176,19 +176,24 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
                 kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
             });
         }
-        if action.capability_id().as_str() == OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID
-            && self
-                .policy
-                .lease_approval_for(
-                    action,
-                    &self.workspace_mounts,
-                    &self.skill_mounts,
-                    &self.memory_mounts,
-                    &self.system_extensions_lifecycle_mounts,
-                )
-                .is_ok()
-        {
-            return Ok(());
+        if action.capability_id().as_str() == OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID {
+            match self.policy.lease_approval_for(
+                action,
+                &self.workspace_mounts,
+                &self.skill_mounts,
+                &self.memory_mounts,
+                &self.system_extensions_lifecycle_mounts,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(LocalDevCapabilityPolicyError::MissingGrant { .. }) => {}
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        "local-dev persistent approval terms are unavailable"
+                    );
+                    return Err(lease_terms_unavailable());
+                }
+            }
         }
         if self
             .active_extension_persistent_approval_allowed(action)
