@@ -66,6 +66,8 @@ use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
 
 const SETTINGS_TOOLS_AUTO_APPROVE_KEY: &str = "agent.auto_approve_tools";
 const SETTINGS_TOOL_CONFIG_PREFIX: &str = "tool.";
+const SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES: usize =
+    OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_TOOL_CONFIG_PREFIX.len();
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WebUiV2SessionResponse {
@@ -1329,6 +1331,7 @@ pub async fn run_operator_setup(
 pub async fn list_settings_tools(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
     let mut response = state.services().list_operator_config(caller).await?;
     response.entries.retain(|entry| {
@@ -1347,6 +1350,7 @@ pub struct SettingsToolsAutoApproveRequest {
 pub async fn set_settings_tools_auto_approve(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<SettingsToolsAutoApproveRequest>,
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
     let response = state
@@ -1359,6 +1363,7 @@ pub async fn set_settings_tools_auto_approve(
             },
         )
         .await?;
+    validate_settings_tool_config_response(&response)?;
     Ok(Json(response))
 }
 
@@ -1367,30 +1372,29 @@ pub struct SettingsToolPermissionPath {
     pub capability_id: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct SettingsToolPermissionRequest {
-    pub state: String,
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsToolPermissionState {
+    Default,
+    AlwaysAllow,
+    AskEachTime,
+    Disabled,
 }
 
-fn validate_settings_tool_permission_state(state: &str) -> Result<(), WebUiV2HttpError> {
-    match state {
-        "default" | "always_allow" | "ask_each_time" | "disabled" => Ok(()),
-        _ => Err(RebornServicesError::from(WebUiInboundValidationError::new(
-            "state",
-            WebUiInboundValidationCode::InvalidValue,
-        ))
-        .into()),
-    }
+#[derive(Debug, Deserialize)]
+pub struct SettingsToolPermissionRequest {
+    pub state: SettingsToolPermissionState,
 }
 
 /// `POST /api/webchat/v2/settings/tools/{capability_id}`
 pub async fn set_settings_tool_permission(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
     Path(SettingsToolPermissionPath { capability_id }): Path<SettingsToolPermissionPath>,
     Json(body): Json<SettingsToolPermissionRequest>,
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
-    validate_settings_tool_permission_state(&body.state)?;
+    validate_settings_tool_capability_id(&capability_id)?;
     let key =
         validate_operator_config_key(format!("{SETTINGS_TOOL_CONFIG_PREFIX}{capability_id}"))?;
     let response = state
@@ -1403,7 +1407,35 @@ pub async fn set_settings_tool_permission(
             },
         )
         .await?;
+    validate_settings_tool_config_response(&response)?;
     Ok(Json(response))
+}
+
+fn validate_settings_tool_capability_id(capability_id: &str) -> Result<(), WebUiV2HttpError> {
+    if capability_id.len() > SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES {
+        return Err(RebornServicesError::from(WebUiInboundValidationError::new(
+            "capability_id",
+            WebUiInboundValidationCode::TooLong,
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_settings_tool_config_response(
+    response: &RebornOperatorConfigGetResponse,
+) -> Result<(), WebUiV2HttpError> {
+    if response.entry.key == SETTINGS_TOOLS_AUTO_APPROVE_KEY
+        || response.entry.key.starts_with(SETTINGS_TOOL_CONFIG_PREFIX)
+    {
+        return Ok(());
+    }
+
+    Err(RebornServicesError::from(WebUiInboundValidationError::new(
+        "key",
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+    .into())
 }
 
 /// `GET /api/webchat/v2/operator/config`

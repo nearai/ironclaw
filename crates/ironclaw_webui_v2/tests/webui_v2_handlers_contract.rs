@@ -113,6 +113,14 @@ fn router_with_capabilities(
     router_with_caller(services, capabilities, caller())
 }
 
+fn router_with_caller_only(services: Arc<dyn RebornServicesApi>) -> Router {
+    webui_v2_router(WebUiV2State::new(
+        services,
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(caller()))
+}
+
 fn service_unavailable_error(retryable: bool) -> RebornServicesError {
     RebornServicesError {
         code: RebornServicesErrorCode::Unavailable,
@@ -3042,6 +3050,49 @@ async fn settings_tool_routes_do_not_require_operator_capability() {
 }
 
 #[tokio::test]
+async fn settings_tool_routes_fail_closed_without_capabilities_extension() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_caller_only(services.clone());
+
+    for (method, uri, body) in [
+        (Method::GET, "/api/webchat/v2/settings/tools", ""),
+        (
+            Method::POST,
+            "/api/webchat/v2/settings/tools",
+            r#"{"enabled":true}"#,
+        ),
+        (
+            Method::POST,
+            "/api/webchat/v2/settings/tools/ext.search",
+            r#"{"state":"always_allow"}"#,
+        ),
+    ] {
+        let mut request = Request::builder().method(method).uri(uri);
+        if !body.is_empty() {
+            request = request.header("content-type", "application/json");
+        }
+        let response = router
+            .clone()
+            .oneshot(request.body(Body::from(body)).expect("request"))
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    assert_eq!(
+        *services.list_operator_config_calls.lock().expect("lock"),
+        0
+    );
+    assert!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn settings_tool_routes_expose_only_tool_approval_config() {
     let services = Arc::new(StubServices::default());
     services
@@ -3170,11 +3221,39 @@ async fn settings_tool_permission_rejects_invalid_state_before_dispatch() {
         .await
         .expect("oneshot");
 
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn settings_tool_permission_rejects_overlong_capability_id_before_dispatch() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+    let capability_id = "x".repeat(125);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/webchat/v2/settings/tools/{capability_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"always_allow"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = read_json(response).await;
     assert_eq!(body["error"], "invalid_request");
-    assert_eq!(body["field"], "state");
-    assert_eq!(body["validation_code"], "invalid_value");
+    assert_eq!(body["field"], "capability_id");
+    assert_eq!(body["validation_code"], "too_long");
     assert!(
         services
             .set_operator_config_key_calls
