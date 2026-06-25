@@ -104,6 +104,9 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         trajectory_observer: None,
         outbound_preferences_facade: None,
         outbound_delivery_target_set_requires_approval: false,
+        approval_settings: Arc::new(
+            crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+        ),
         approval_requests: local_runtime.approval_requests.clone(),
         capability_leases: local_runtime.capability_leases.clone(),
     };
