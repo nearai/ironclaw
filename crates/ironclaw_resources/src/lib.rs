@@ -800,10 +800,16 @@ fn current_resource_governor_snapshot_schema_version() -> u32 {
 /// writers over the same account-wide ledger before writing the updated
 /// snapshot back durably.
 pub trait ResourceGovernorStore: Send + Sync + 'static {
+    /// Run a read-modify-write transaction against the governor snapshot.
+    ///
+    /// The closure is `FnMut`, not `FnOnce`: filesystem-backed stores route
+    /// through the shared `cas_update` helper, which re-runs the closure
+    /// against a freshly read snapshot on every CAS retry. Closures must
+    /// therefore be re-runnable (idempotent / no move-out of captures).
     fn update<T, F>(&self, update: F) -> Result<T, ResourceError>
     where
         T: Send + 'static,
-        F: FnOnce(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static;
+        F: FnMut(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static;
 }
 
 /// File-backed resource-governor store using a stable sidecar lock file around
@@ -825,7 +831,7 @@ impl ResourceGovernorStore for JsonFileResourceGovernorStore {
     fn update<T, F>(&self, update: F) -> Result<T, ResourceError>
     where
         T: Send + 'static,
-        F: FnOnce(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+        F: FnMut(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
     {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(storage_error)?;
@@ -1113,8 +1119,10 @@ where
         limits: ResourceLimits,
     ) -> Result<(), ResourceError> {
         let now = self.clock.now();
+        // Clone per invocation: the store may re-run this closure on a CAS
+        // retry, so it must not move `account`/`limits` out of its capture.
         self.store.update(move |snapshot| {
-            set_limit_in_state(&mut snapshot.state, account, limits, now);
+            set_limit_in_state(&mut snapshot.state, account.clone(), limits.clone(), now);
             Ok(())
         })
     }
@@ -1181,8 +1189,15 @@ where
         reservation_id: ResourceReservationId,
     ) -> Result<ReservationOutcome, ResourceError> {
         let now = self.clock.now();
+        // Clone per invocation: this closure may be re-run on a CAS retry.
         let result = self.store.update(move |snapshot| {
-            reserve_with_outcome_in_state(&mut snapshot.state, scope, estimate, reservation_id, now)
+            reserve_with_outcome_in_state(
+                &mut snapshot.state,
+                scope.clone(),
+                estimate.clone(),
+                reservation_id,
+                now,
+            )
         });
         emit_reserve_events(self.event_sink.as_ref(), &result, now);
         result
@@ -1194,8 +1209,9 @@ where
         actual: ResourceUsage,
     ) -> Result<ResourceReceipt, ResourceError> {
         let now = self.clock.now();
+        // Clone per invocation: this closure may be re-run on a CAS retry.
         let result = self.store.update(move |snapshot| {
-            reconcile_in_state(&mut snapshot.state, reservation_id, actual, now)
+            reconcile_in_state(&mut snapshot.state, reservation_id, actual.clone(), now)
         });
         if let Ok(receipt) = &result {
             self.event_sink.emit(BudgetEvent::Reconciled {

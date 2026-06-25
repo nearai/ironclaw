@@ -21,13 +21,11 @@
 //! stores in this crate consume it. Downstream crates use the
 //! per-store public APIs.
 
-use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, OnceLock, Weak, mpsc};
+use std::sync::{Arc, OnceLock, mpsc};
 
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RootFilesystem,
-    ScopedFilesystem,
+    CasApply, CasUpdateError, ContentType, Entry, RootFilesystem, ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{ResourceScope, ScopedPath};
 use serde::{Serialize, de::DeserializeOwned};
@@ -114,18 +112,21 @@ where
     /// Run a read-modify-write transaction against the underlying
     /// snapshot using the store's default scope.
     ///
-    /// Concurrency: same-process writers serialize on a per-path async
-    /// lock for the duration of the closure + write. Cross-process
-    /// contention surfaces as `E::storage(...)` from the CAS-mismatch
-    /// branch. Byte-only backends (`LocalFilesystem`) that don't
-    /// support `CasExpectation::Version` fall back to
-    /// `CasExpectation::Any` under the same in-process lock.
+    /// Concurrency: routed through the shared, lock-free
+    /// [`cas_update`](ironclaw_filesystem::cas_update) helper — an
+    /// optimistic CAS-retry loop with bounded retries, jittered backoff,
+    /// and an overall timeout. No per-record `tokio::sync::Mutex` is held
+    /// across the backend `get`/`put` awaits, so a burst of same-scope
+    /// writers overlaps instead of convoying behind one stalled writer.
+    /// The `update` closure is re-run against a freshly read snapshot on
+    /// every CAS retry, so it must be idempotent / re-runnable (the
+    /// store closures are pure field mutations).
     pub(crate) fn update<S, T, E, U>(&self, update: U) -> Result<T, E>
     where
-        S: Snapshot,
+        S: Snapshot + Clone + PartialEq,
         T: Send + 'static,
         E: StorageError,
-        U: FnOnce(&mut S) -> Result<T, E> + Send + 'static,
+        U: FnMut(&mut S) -> Result<T, E> + Send + 'static,
     {
         self.update_with_scope::<S, T, E, U>(self.scope.clone(), update)
     }
@@ -135,18 +136,19 @@ where
     ///
     /// The `ScopedFilesystem` rewrites the snapshot path under the
     /// supplied scope's tenant/user mount view, so two distinct scopes
-    /// hit separate snapshot files. The same per-path in-process async
-    /// lock + cross-process CAS semantics apply.
+    /// hit separate snapshot files. Cross-process and same-process
+    /// contention are both resolved by the shared `cas_update` helper's
+    /// CAS-retry loop (see [`Self::update`]).
     pub(crate) fn update_with_scope<S, T, E, U>(
         &self,
         scope: ResourceScope,
-        update: U,
+        mut update: U,
     ) -> Result<T, E>
     where
-        S: Snapshot,
+        S: Snapshot + Clone + PartialEq,
         T: Send + 'static,
         E: StorageError,
-        U: FnOnce(&mut S) -> Result<T, E> + Send + 'static,
+        U: FnMut(&mut S) -> Result<T, E> + Send + 'static,
     {
         let filesystem = Arc::clone(&self.filesystem);
         let path_str = self.path_str;
@@ -156,10 +158,58 @@ where
             let path = ScopedPath::new(path_str.to_string()).map_err(|error| {
                 E::storage(format!("invalid snapshot path {path_str}: {error}"))
             })?;
-            let record_lock = filesystem_record_lock(&path);
-            let _guard = record_lock.lock().await;
-            update_snapshot::<F, S, T, E, U>(&filesystem, &scope, &path, update).await
+            let apply = |current: Option<S>| {
+                // `cas_update` re-invokes this per retry against a fresh
+                // snapshot. Build the default-on-absent snapshot, run the
+                // caller's mutation, and hand back the next snapshot + outcome.
+                let outcome = (|| {
+                    let mut snapshot = current.unwrap_or_else(S::fresh);
+                    let value = update(&mut snapshot)?;
+                    Ok::<_, E>(CasApply::new(snapshot, value))
+                })();
+                async move { outcome }
+            };
+            cas_update(
+                filesystem.as_ref(),
+                &scope,
+                &path,
+                |bytes: &[u8]| {
+                    serde_json::from_slice::<S>(bytes)
+                        .map_err(|error| E::storage(format!("decode snapshot: {error}")))
+                },
+                |snapshot: &S| {
+                    let encoded = serde_json::to_vec_pretty(snapshot).map_err(E::storage_from)?;
+                    Ok(Entry::bytes(encoded).with_content_type(ContentType::json()))
+                },
+                apply,
+            )
+            .await
+            .map_err(map_cas_error::<E>)
         })
+    }
+}
+
+/// Map the shared helper's [`CasUpdateError`] into a store error.
+///
+/// `Apply` carries the caller's own error straight through; every other
+/// variant is a storage-layer failure surfaced via [`StorageError::storage`].
+/// `CasUnsupported` is fail-closed: a backend that can't honor versioned CAS
+/// is a misconfiguration, surfaced as a storage error rather than a silent
+/// blind overwrite.
+fn map_cas_error<E>(error: CasUpdateError<E>) -> E
+where
+    E: StorageError,
+{
+    match error {
+        CasUpdateError::Apply(inner) => inner,
+        CasUpdateError::Timeout => E::storage("snapshot CAS update timed out".to_string()),
+        CasUpdateError::RetriesExhausted => {
+            E::storage("snapshot CAS contention: retries exhausted".to_string())
+        }
+        CasUpdateError::CasUnsupported => {
+            E::storage("snapshot backend does not support versioned compare-and-swap".to_string())
+        }
+        CasUpdateError::Backend(inner) => E::storage_from(inner),
     }
 }
 
@@ -172,84 +222,6 @@ pub(crate) trait Snapshot: DeserializeOwned + Serialize + Send + 'static {
     /// Construct the snapshot used when the underlying file does not
     /// yet exist (first write).
     fn fresh() -> Self;
-}
-
-async fn update_snapshot<F, S, T, E, U>(
-    filesystem: &ScopedFilesystem<F>,
-    scope: &ResourceScope,
-    path: &ScopedPath,
-    update: U,
-) -> Result<T, E>
-where
-    F: RootFilesystem,
-    S: Snapshot,
-    E: StorageError,
-    U: FnOnce(&mut S) -> Result<T, E>,
-{
-    let (mut snapshot, expectation) = match filesystem.get(scope, path).await {
-        Ok(Some(versioned)) => {
-            let snapshot: S = serde_json::from_slice(&versioned.entry.body)
-                .map_err(|error| E::storage(format!("decode snapshot: {error}")))?;
-            (snapshot, CasExpectation::Version(versioned.version))
-        }
-        Ok(None) => (S::fresh(), CasExpectation::Absent),
-        Err(error) => return Err(E::storage_from(error)),
-    };
-    let value = update(&mut snapshot)?;
-    let encoded = serde_json::to_vec_pretty(&snapshot).map_err(E::storage_from)?;
-    let entry = Entry::bytes(encoded).with_content_type(ContentType::json());
-    match put_with_cas(filesystem, scope, path, entry, expectation).await {
-        Ok(()) => Ok(value),
-        Err(PutError::VersionMismatch) => Err(E::storage(format!(
-            "cross-process CAS contention on snapshot {}",
-            path.as_str()
-        ))),
-        Err(PutError::Other(err)) => Err(err),
-    }
-}
-
-enum PutError<E> {
-    VersionMismatch,
-    Other(E),
-}
-
-async fn put_with_cas<F, E>(
-    filesystem: &ScopedFilesystem<F>,
-    scope: &ResourceScope,
-    path: &ScopedPath,
-    entry: Entry,
-    cas: CasExpectation,
-) -> Result<(), PutError<E>>
-where
-    F: RootFilesystem,
-    E: StorageError,
-{
-    let fallback_entry = entry.clone();
-    let cas_for_fallback = cas;
-    match filesystem.put(scope, path, entry, cas).await {
-        Ok(_) => Ok(()),
-        Err(FilesystemError::VersionMismatch { .. }) => Err(PutError::VersionMismatch),
-        Err(FilesystemError::Unsupported {
-            operation: FilesystemOperation::WriteFile,
-            ..
-        }) => {
-            if matches!(cas_for_fallback, CasExpectation::Absent) {
-                let existing = filesystem
-                    .get(scope, path)
-                    .await
-                    .map_err(|err| PutError::Other(E::storage_from(err)))?;
-                if existing.is_some() {
-                    return Err(PutError::VersionMismatch);
-                }
-            }
-            filesystem
-                .put(scope, path, fallback_entry, CasExpectation::Any)
-                .await
-                .map(|_| ())
-                .map_err(|err| PutError::Other(E::storage_from(err)))
-        }
-        Err(err) => Err(PutError::Other(E::storage_from(err))),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -341,34 +313,204 @@ where
     }
 }
 
-// ---------------------------------------------------------------------------
-// Per-path async serialization. Same shape as the run-state / processes
-// / outbound / authorization migrations: an `OnceLock`-initialized map
-// of weak Mutex handles, lazily pruned on each acquisition so the map
-// size stays bounded under tenant churn.
-// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    //! Concurrency regression tests for the shared CAS-snapshot store.
+    //!
+    //! `update_with_scope` historically serialized same-process writers on
+    //! a per-path `tokio::sync::Mutex` held across the backend `get`/`put`
+    //! awaits. That mutex was the *only* serializer — `update_snapshot` does
+    //! a single read-modify-write with no CAS-retry loop. The convoy test
+    //! below proves both halves of the bug:
+    //!
+    //! 1. With the per-record lock removed but no retry loop, concurrent
+    //!    same-scope writers race their read-modify-write and **lose
+    //!    updates** (the snapshot ends below the writer count).
+    //! 2. A writer whose backend `get` stalls holds the per-record mutex
+    //!    across the await, so every other same-scope writer is parked
+    //!    behind it — the convoy.
+    //!
+    //! After migration to `ironclaw_filesystem::cas_update` the lock is gone
+    //! and the helper's bounded CAS-retry recovers every racing writer, so
+    //! the same storm lands all updates with no convoy.
 
-type FilesystemRecordLock = Arc<tokio::sync::Mutex<()>>;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
-static FILESYSTEM_RECORD_LOCKS: OnceLock<
-    std::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
-> = OnceLock::new();
+    use async_trait::async_trait;
+    use ironclaw_filesystem::{
+        BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
+        InMemoryBackend, RecordVersion, RootFilesystem, ScopedFilesystem, VersionedEntry,
+    };
+    use ironclaw_host_api::{
+        MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
+    };
+    use serde::{Deserialize, Serialize};
 
-fn filesystem_record_lock(path: &ScopedPath) -> FilesystemRecordLock {
-    let locks = FILESYSTEM_RECORD_LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let mut guard = locks
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    use super::{CasSnapshotStore, Snapshot, StorageError};
 
-    // Drop entries whose owning Arc has been released.
-    guard.retain(|_, weak| weak.strong_count() > 0);
+    const COUNTER_PATH: &str = "/resources/counter.json";
 
-    let key = path.as_str();
-    if let Some(existing) = guard.get(key).and_then(Weak::upgrade) {
-        return existing;
+    #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+    struct Counter {
+        value: u64,
     }
 
-    let fresh: FilesystemRecordLock = Arc::new(tokio::sync::Mutex::new(()));
-    guard.insert(key.to_string(), Arc::downgrade(&fresh));
-    fresh
+    impl Snapshot for Counter {
+        fn fresh() -> Self {
+            Counter { value: 0 }
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TestError(String);
+
+    impl StorageError for TestError {
+        fn storage(reason: String) -> Self {
+            TestError(reason)
+        }
+    }
+
+    /// Wraps any backend and inserts a fixed delay before each `get`, so two
+    /// concurrent read-modify-write transactions are forced to interleave:
+    /// both read the same version, both compute the next value, and (without
+    /// CAS-retry) one of the two writes is silently lost.
+    struct SlowGetBackend {
+        inner: InMemoryBackend,
+        get_delay: Duration,
+        get_calls: AtomicUsize,
+    }
+
+    impl SlowGetBackend {
+        fn new(get_delay: Duration) -> Self {
+            Self {
+                inner: InMemoryBackend::new(),
+                get_delay,
+                get_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RootFilesystem for SlowGetBackend {
+        fn capabilities(&self) -> BackendCapabilities {
+            self.inner.capabilities()
+        }
+
+        async fn put(
+            &self,
+            path: &VirtualPath,
+            entry: Entry,
+            cas: CasExpectation,
+        ) -> Result<RecordVersion, FilesystemError> {
+            self.inner.put(path, entry, cas).await
+        }
+
+        async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+            self.get_calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(self.get_delay).await;
+            self.inner.get(path).await
+        }
+
+        async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            self.inner.delete(path).await
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            self.inner.list_dir(path).await
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            self.inner.stat(path).await
+        }
+    }
+
+    fn scoped(backend: Arc<SlowGetBackend>) -> Arc<ScopedFilesystem<SlowGetBackend>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/resources").expect("alias"),
+            VirtualPath::new("/tenants/t/users/u/resources").expect("target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view");
+        Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+    }
+
+    /// Build a *distinct* store handle (own worker thread) so concurrent
+    /// `update` calls actually run on different runtimes — otherwise the
+    /// shared current-thread worker would serialize them itself and mask the
+    /// race we want to exercise.
+    fn store(
+        filesystem: Arc<ScopedFilesystem<SlowGetBackend>>,
+        worker_name: &'static str,
+    ) -> CasSnapshotStore<SlowGetBackend> {
+        CasSnapshotStore::new(
+            filesystem,
+            COUNTER_PATH,
+            ResourceScope::system(),
+            worker_name,
+        )
+    }
+
+    /// High-contention storm: N concurrent writers each increment the shared
+    /// counter by one. With the shared `cas_update` helper (bounded CAS
+    /// retry, no per-record mutex) every increment must land — the final
+    /// snapshot equals the writer count and no convoy parks a writer behind
+    /// a stalled one.
+    ///
+    /// Before the migration (per-record mutex, single read-modify-write, no
+    /// retry) this test is RED: the `SlowGetBackend` widens the race window
+    /// so two writers read the same version and one increment is lost, so
+    /// the final value is < WRITERS.
+    #[test]
+    fn concurrent_increments_have_no_lost_updates() {
+        const WRITERS: usize = 8;
+        const WORKER_NAMES: [&str; WRITERS] = [
+            "cas-storm-0",
+            "cas-storm-1",
+            "cas-storm-2",
+            "cas-storm-3",
+            "cas-storm-4",
+            "cas-storm-5",
+            "cas-storm-6",
+            "cas-storm-7",
+        ];
+
+        let backend = Arc::new(SlowGetBackend::new(Duration::from_millis(15)));
+        let filesystem = scoped(Arc::clone(&backend));
+
+        let mut handles = Vec::new();
+        for name in WORKER_NAMES {
+            let store = store(Arc::clone(&filesystem), name);
+            handles.push(std::thread::spawn(move || {
+                store.update::<Counter, u64, TestError, _>(|snapshot| {
+                    snapshot.value += 1;
+                    Ok(snapshot.value)
+                })
+            }));
+        }
+
+        let mut outcomes = Vec::new();
+        for handle in handles {
+            outcomes.push(handle.join().expect("writer thread").expect("writer ok"));
+        }
+
+        // Read the final snapshot through a fresh handle.
+        let final_value = store(Arc::clone(&filesystem), "cas-storm-final")
+            .update::<Counter, u64, TestError, _>(|snapshot| Ok(snapshot.value))
+            .expect("read final");
+
+        assert_eq!(
+            final_value, WRITERS as u64,
+            "every concurrent increment must land (no lost update); got {final_value}"
+        );
+
+        // Each writer observed a distinct increment in 1..=WRITERS.
+        outcomes.sort_unstable();
+        let expected: Vec<u64> = (1..=WRITERS as u64).collect();
+        assert_eq!(
+            outcomes, expected,
+            "each writer's returned value must be a unique increment"
+        );
+    }
 }
