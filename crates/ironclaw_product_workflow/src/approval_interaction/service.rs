@@ -3,9 +3,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_approvals::{
     DenyApproval, LeaseApproval, PersistentApprovalAction, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverrideKey,
+    ToolPermissionOverrideStore,
 };
-use ironclaw_host_api::{Action, Principal};
+use ironclaw_host_api::{Action, CapabilityId, Principal, ResourceScope};
 use ironclaw_run_state::ApprovalStatus;
 use ironclaw_turns::{
     GateRef, GateResumeDisposition, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator,
@@ -67,7 +68,13 @@ pub struct DefaultApprovalInteractionService {
     // AlwaysAllowUnsupported path for minimal/test compositions until user-facing
     // revoke controls land, plan #4539
     persistent_policies: Option<Arc<dyn PersistentApprovalPolicyStore>>,
+    persistent_grantee_resolver: Option<Arc<dyn PersistentApprovalGranteeResolver>>,
+    tool_permission_overrides: Option<Arc<dyn ToolPermissionOverrideStore>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+}
+
+pub trait PersistentApprovalGranteeResolver: Send + Sync {
+    fn persistent_approval_grantee(&self, capability_id: &CapabilityId) -> Option<Principal>;
 }
 
 #[derive(Clone, Copy)]
@@ -105,6 +112,8 @@ impl DefaultApprovalInteractionService {
             lease_terms_provider,
             resolver,
             persistent_policies: None,
+            persistent_grantee_resolver: None,
+            tool_permission_overrides: None,
             turn_coordinator,
         }
     }
@@ -114,6 +123,22 @@ impl DefaultApprovalInteractionService {
         persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
     ) -> Self {
         self.persistent_policies = Some(persistent_policies);
+        self
+    }
+
+    pub fn with_persistent_grantee_resolver(
+        mut self,
+        persistent_grantee_resolver: Arc<dyn PersistentApprovalGranteeResolver>,
+    ) -> Self {
+        self.persistent_grantee_resolver = Some(persistent_grantee_resolver);
+        self
+    }
+
+    pub fn with_tool_permission_override_store(
+        mut self,
+        tool_permission_overrides: Arc<dyn ToolPermissionOverrideStore>,
+    ) -> Self {
+        self.tool_permission_overrides = Some(tool_permission_overrides);
         self
     }
 
@@ -155,7 +180,7 @@ impl DefaultApprovalInteractionService {
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
         let action = ApprovalCapabilityAction::from_action(gate.request().action.as_ref())?;
         let status = gate.status();
-        if matches!(status, ApprovalStatus::Denied | ApprovalStatus::Expired) {
+        if matches!(status, ApprovalStatus::Denied | ApprovalStatus::Expired | ApprovalStatus::Discarded) {
             return Err(approval_rejected(
                 ApprovalInteractionRejectionKind::StaleGate,
             ));
@@ -247,11 +272,16 @@ impl DefaultApprovalInteractionService {
                 ApprovalInteractionRejectionKind::UnsupportedAction,
             ));
         };
+        let grantee = self
+            .persistent_grantee_resolver
+            .as_ref()
+            .and_then(|resolver| resolver.persistent_approval_grantee(&capability_id))
+            .unwrap_or_else(|| gate.request().requested_by.clone());
         let input = PersistentApprovalPolicyInput {
-            scope: gate.resource_scope().clone(),
+            scope: persistent_approval_settings_scope(gate.resource_scope()),
             action,
             capability_id,
-            grantee: gate.request().requested_by.clone(),
+            grantee,
             approved_by: Principal::User(request.actor.user_id.clone()),
             constraints: ironclaw_host_api::GrantConstraints {
                 allowed_effects: terms.allowed_effects,
@@ -277,6 +307,8 @@ impl DefaultApprovalInteractionService {
         let Some(persistent_policies) = self.persistent_policies.as_ref() else {
             return;
         };
+        let override_key =
+            ToolPermissionOverrideKey::new(&policy.input.scope, policy.input.capability_id.clone());
         if let Err(error) = persistent_policies.allow(policy.input).await {
             // silent-ok: turn already resumed; next invocation re-prompts if lookup misses.
             tracing::warn!(
@@ -284,6 +316,19 @@ impl DefaultApprovalInteractionService {
                 capability_id = %policy.key.capability_id,
                 action = ?policy.key.action,
                 "persistent approval policy write failed after approval resolution"
+            );
+            return;
+        }
+        let Some(tool_permission_overrides) = self.tool_permission_overrides.as_ref() else {
+            return;
+        };
+        if let Err(error) = tool_permission_overrides.clear(&override_key).await {
+            // silent-ok: the durable allow policy was written; if the old ask/deny
+            // override remains, the next invocation safely prompts again.
+            tracing::warn!(
+                error = %error,
+                capability_id = %override_key.capability_id,
+                "tool permission override clear failed after persistent approval"
             );
         }
     }
@@ -495,6 +540,10 @@ fn map_approval_resume_error(error: TurnError) -> ProductWorkflowError {
         },
         _ => ProductWorkflowError::TurnResumeDenied { error },
     }
+}
+
+fn persistent_approval_settings_scope(scope: &ResourceScope) -> ResourceScope {
+    scope.tenant_user_settings_scope()
 }
 
 #[cfg(test)]

@@ -80,6 +80,16 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
    CAS-capable db/in-memory backends (`LocalFilesystem` is byte-only and is
    structurally unreachable from those mounts), so fail-closed is correct.
    See `docs/plans/2026-06-25-cas-migration.md`.
+
+   **Known scoped exception (tracked):** the `ironclaw_turns` runner-lease
+   sidecar (`filesystem_store/runner_lease.rs`, landed independently in
+   #5232) still drives its per-run lease records through a local
+   `put_with_cas` + `cas_retry_backoff` retry loop rather than
+   `cas_update`. This predates the migration on this branch and is not yet
+   re-homed; the main turn-state snapshot RMW *does* go through
+   `cas_update`. Do not copy the sidecar's loop as a precedent — migrate
+   it onto `cas_update` per follow-up #5274 (runner-lease CAS
+   consolidation). New stores must still use `cas_update` directly.
 3. **Capabilities are declared, not discovered.** A backend that cannot
    serve an `IndexKind::Vector` or a `Filter::Range` declares so up front
    via `BackendCapabilities`; mount-time validation refuses the attachment.

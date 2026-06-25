@@ -10,13 +10,12 @@
 //! ([`crate::commands::user_directory`]) and the startup config
 //! ([`crate::commands::serve_sso`]).
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_reborn_composition::{
-    PublicRouteMount, RebornIdentityResolver, WebuiAuthenticator, open_local_trigger_access_store,
+    LocalTriggerAccessStore, PublicRouteMount, RebornIdentityResolver, WebuiAuthenticator,
 };
 use ironclaw_reborn_webui_ingress::{SignedSessionLoginConfig, build_signed_session_login};
 use secrecy::SecretString;
@@ -34,11 +33,12 @@ pub(crate) struct WebuiAuthSurface {
 
 /// How to seed local-dev trigger-fire access for SSO users on login.
 ///
-/// Carries the substrate path of the local trigger-access store plus the
-/// scope an admitted user's access row is seeded under. The store is opened
-/// here (next to the rest of the auth wiring), not by `serve.rs`.
+/// Carries the already-open local trigger-access store plus the scope an
+/// admitted user's access row is seeded under. `serve.rs` opens the store once
+/// through the active runtime profile so SSO and trigger-poller wiring share
+/// the same backend.
 pub(crate) struct LocalTriggerAccessBootstrapConfig {
-    pub(crate) access_store_path: PathBuf,
+    pub(crate) store: Arc<dyn LocalTriggerAccessStore>,
     pub(crate) tenant_id: TenantId,
     pub(crate) agent_id: AgentId,
     pub(crate) project_id: Option<ProjectId>,
@@ -58,9 +58,9 @@ pub(crate) struct LocalTriggerAccessBootstrapConfig {
 /// this fails closed rather than minting users against a missing store.
 ///
 /// When `local_trigger_access` is present and SSO is configured, admitted
-/// users get a local-dev trigger-access row seeded on each login (via the
-/// admission adapter). There is no startup reconciliation: the bootstrap
-/// only seeds, it does not enumerate or revoke.
+/// users get a local trigger-access row seeded on each login (via the
+/// admission adapter). There is no startup reconciliation in this path: the
+/// bootstrap only seeds, it does not enumerate or revoke.
 pub(crate) async fn build_webui_auth_surface(
     sso_startup: Option<SsoStartupConfig>,
     identity_resolver: Option<Arc<dyn RebornIdentityResolver>>,
@@ -97,7 +97,7 @@ pub(crate) async fn build_webui_auth_surface(
     );
     if let Some(config) = local_trigger_access {
         user_directory =
-            user_directory.with_local_trigger_access(local_trigger_access_bootstrap(config).await?);
+            user_directory.with_local_trigger_access(local_trigger_access_bootstrap(config));
     }
 
     let wiring = build_signed_session_login(SignedSessionLoginConfig {
@@ -120,27 +120,16 @@ pub(crate) async fn build_webui_auth_surface(
     })
 }
 
-/// Open the local trigger-access store and build the per-login bootstrap the
-/// admission adapter seeds through. Opening lives here so `serve.rs` only
-/// carries the substrate path, never a substrate handle.
-async fn local_trigger_access_bootstrap(
+fn local_trigger_access_bootstrap(
     config: LocalTriggerAccessBootstrapConfig,
-) -> anyhow::Result<LocalTriggerAccessBootstrap> {
+) -> LocalTriggerAccessBootstrap {
     let LocalTriggerAccessBootstrapConfig {
-        access_store_path,
+        store,
         tenant_id,
         agent_id,
         project_id,
     } = config;
-    let access_store = open_local_trigger_access_store(&access_store_path)
-        .await
-        .context("failed to initialize local trigger access store for SSO")?;
-    Ok(LocalTriggerAccessBootstrap::new(
-        access_store,
-        tenant_id,
-        agent_id,
-        project_id,
-    ))
+    LocalTriggerAccessBootstrap::new(store, tenant_id, agent_id, project_id)
 }
 
 #[cfg(test)]
@@ -250,11 +239,15 @@ mod tests {
     #[tokio::test]
     async fn sso_with_local_trigger_access_bootstrap_builds_surface() {
         // SSO configured with a local-trigger-access bootstrap: the surface
-        // must open the access store, attach the per-login seeder to the
-        // admission adapter, and mount the public login routes — proving the
-        // bootstrap config is wired through, not silently dropped.
+        // must attach the per-login seeder to the admission adapter and mount
+        // the public login routes — proving the bootstrap config is wired
+        // through, not silently dropped.
         let tmp = tempfile::tempdir().expect("tempdir");
         let access_store_path = tmp.path().join("reborn-local-dev.db");
+        let access_store =
+            ironclaw_reborn_composition::open_local_trigger_access_store(&access_store_path)
+                .await
+                .expect("open local trigger access store");
         let sso = SsoStartupConfig {
             providers: vec![Arc::new(StubProvider(
                 OAuthProviderName::new("google").expect("provider name"),
@@ -272,7 +265,7 @@ mod tests {
             SecretString::from("operator-session-secret".to_string()),
             Arc::new(RejectingAuth),
             Some(LocalTriggerAccessBootstrapConfig {
-                access_store_path,
+                store: access_store,
                 tenant_id: TenantId::new("sso-bootstrap-tenant").expect("tenant"),
                 agent_id: AgentId::new("sso-bootstrap-agent").expect("agent"),
                 project_id: Some(ProjectId::new("sso-bootstrap-project").expect("project")),

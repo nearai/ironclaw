@@ -19,16 +19,18 @@ export function recentRunKey(run) {
 // keeps a hover tooltip describing its status and fire time.
 export function RunDots({ runs = [] }) {
   const t = useT();
-  const visibleRuns = runs.slice(0, MAX_VISIBLE_DOTS);
+  const list = Array.isArray(runs) ? runs : [];
+  const visibleRuns = list.slice(0, MAX_VISIBLE_DOTS);
   if (!visibleRuns.length) {
     return html`<span className="text-xs text-iron-400">${t("automations.table.noRuns")}</span>`;
   }
-  const overflow = runs.length - visibleRuns.length;
+  const overflow = list.length - visibleRuns.length;
+  const overflowLabel = `+${Math.min(overflow, 999)}`;
 
   return html`
     <div
       className="flex items-center gap-1.5"
-      aria-label=${t("automations.runs.showingOf", { shown: visibleRuns.length, total: runs.length })}
+      aria-label=${t("automations.runs.showingOf", { shown: visibleRuns.length, total: list.length })}
     >
       ${visibleRuns.map((run) => html`
         <span
@@ -46,9 +48,9 @@ export function RunDots({ runs = [] }) {
       ${overflow > 0 &&
       html`<span
         className="ml-0.5 font-mono text-[11px] text-iron-400"
-        title=${t("automations.runs.showingOf", { shown: visibleRuns.length, total: runs.length })}
+        title=${t("automations.runs.showingOf", { shown: visibleRuns.length, total: list.length })}
       >
-        +${overflow}
+        ${overflowLabel}
       </span>`}
     </div>
   `;

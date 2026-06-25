@@ -128,7 +128,7 @@ not bypass domain invariants by mutating primitive storage rows directly.
 
 | Virtual area | Source of truth | Access surface | Indexed? | Notes |
 | --- | --- | --- | --- | --- |
-| `/memory` | `ironclaw_memory` DB repositories over `memory_documents`, `memory_chunks`, `memory_document_versions` | file-shaped memory docs + memory service APIs | backend-defined full-text/vector | Memory-specific path grammar lives in `ironclaw_memory`, not filesystem. |
+| `/memory` | `ironclaw_memory_native` provider — currently a `FilesystemMemoryDocumentRepository` over `RootFilesystem` (a dedicated `reborn_memory_*` SQL-table model is the deferred target), behind the `ironclaw_memory` contract | file-shaped memory docs + memory service APIs | backend-defined full-text/vector | Memory-specific path grammar is defined by the `ironclaw_memory` contract, not filesystem. |
 | `/users` | typed user/profile repositories + optional user config projection | user/profile APIs + optional file projection | no, unless projection says otherwise | User-owned durable profile and configuration areas. |
 | `/projects` | local/object/project file backend | filesystem | optional project indexer | Project source files and user-authored project artifacts. |
 | `/system/settings` | typed settings repository | typed API + optional file projection | no, unless projection says otherwise | Settings source of truth is not memory. |
@@ -147,7 +147,7 @@ not bypass domain invariants by mutating primitive storage rows directly.
 | `/approvals` | typed approval-request repository routed through `ironclaw_filesystem` (approval records) | run-state APIs | no | Sibling consumer mount alias for `ironclaw_run_state`; alias-relative under the per-invocation `MountView`. |
 | `/threads` | typed session-thread and transcript repository routed through `ironclaw_filesystem` (thread records, message records, summary artifacts, inbound idempotency) | thread/transcript APIs | no | Consumer mount alias for `ironclaw_threads`; alias-relative under the per-invocation `MountView`. |
 | `/conversations` | typed conversation binding / session-thread state routed through `ironclaw_filesystem` (singleton state record) | conversation services APIs | no | Consumer mount alias for `ironclaw_conversations`; alias-relative under the per-invocation `MountView`. |
-| `/turns` | typed turn-coordination persistence routed through `ironclaw_filesystem` (single snapshot blob of turns, runs, checkpoints, idempotency, events, reservations) | turn coordinator APIs | no | Consumer mount alias for `ironclaw_turns`; alias-relative under the per-invocation `MountView`. |
+| `/turns` | typed turn-coordination persistence routed through `ironclaw_filesystem` (CAS snapshot of turns, runs, checkpoints, idempotency, events, reservations, plus per-run runner lease sidecars) | turn coordinator APIs | no | Consumer mount alias for `ironclaw_turns`; alias-relative under the per-invocation `MountView`. Runner heartbeat writes must stay isolated from lower-churn snapshot rewrites. |
 | `/checkpoint-state` | host-owned loop checkpoint payload repository routed through `ironclaw_filesystem` (opaque resume payload records keyed by checkpoint state refs) | checkpoint state store APIs only | no | Consumer mount alias for `ironclaw_turns`; public turn/checkpoint/event records store only metadata and refs, never raw checkpoint payload bytes. |
 | `/resources` | typed resource-governor snapshot repository routed through `ironclaw_filesystem` (reservation/usage snapshots) | resource governor APIs | no | Consumer mount alias for `ironclaw_resources`; alias-relative under the per-invocation `MountView`. |
 | `/tenant-shared` | per-tenant shared mount; resolves to `/tenants/<tenant_id>/shared/...` under the per-invocation `MountView` | scoped filesystem | no | Data shared between users/agents in the same tenant. |
@@ -187,7 +187,7 @@ Rules:
 
 - source of truth is the memory repository, preserving existing production table family where viable;
 - memory docs are file-shaped, but memory search/chunks/versions are structured derived state;
-- memory path grammar, metadata inheritance, versioning, search, prompt context, and layer rules live in `ironclaw_memory`;
+- memory path grammar, metadata inheritance, versioning, search, prompt context, and layer rules are defined by the provider-neutral `ironclaw_memory` contract and implemented in the `ironclaw_memory_native` provider (#3537 lift);
 - `ironclaw_filesystem` may route/mount memory backends but must not encode memory semantics.
 
 ### 5.3 Structured control-plane state
