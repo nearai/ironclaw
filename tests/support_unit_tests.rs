@@ -1146,6 +1146,7 @@ mod reborn_support_tests {
             .invoke_capability_batch(CapabilityBatchInvocation {
                 invocations: vec![
                     CapabilityInvocation {
+                        activity_id: ironclaw_turns::CapabilityActivityId::new(),
                         surface_version: surface.version.clone(),
                         capability_id: capability_id.clone(),
                         input_ref: CapabilityInputRef::new("input:first").expect("first input"),
@@ -1153,6 +1154,7 @@ mod reborn_support_tests {
                         auth_resume: None,
                     },
                     CapabilityInvocation {
+                        activity_id: ironclaw_turns::CapabilityActivityId::new(),
                         surface_version: surface.version,
                         capability_id,
                         input_ref: CapabilityInputRef::new("input:second").expect("second input"),

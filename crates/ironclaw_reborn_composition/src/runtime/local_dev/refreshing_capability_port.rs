@@ -12,7 +12,8 @@ use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
     CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
     LoopHostMilestoneSink, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
-    ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+    VisibleCapabilitySurface,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -269,11 +270,11 @@ impl LoopCapabilityPort for RefreshingLocalDevCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         self.current_or_refresh()
             .await?
-            .register_provider_tool_call(tool_call)
+            .register_provider_tool_call(request)
             .await
     }
 

@@ -2755,6 +2755,7 @@ async fn empty_capability_port_exposes_empty_surface_and_rejects_invocations() {
 
     let error = port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
             capability_id: CapabilityId::new("demo.echo").unwrap(),
             input_ref: CapabilityInputRef::new("input:opaque").unwrap(),
@@ -2775,6 +2776,7 @@ async fn empty_capability_batch_returns_typed_denial_reason() {
     let outcome = port
         .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
             invocations: vec![CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque").unwrap(),
@@ -2800,6 +2802,7 @@ async fn empty_capability_batch_rejects_stale_surface() {
     let error = port
         .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
             invocations: vec![CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("nonempty:v1").unwrap(),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque").unwrap(),

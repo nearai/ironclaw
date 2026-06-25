@@ -185,6 +185,22 @@ fn extract_url(line: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn custom_tunnel_with_direct_health_check(health_url: String) -> CustomTunnel {
+        let http_client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("test HTTP client");
+        CustomTunnel {
+            start_command: "sleep 1".into(),
+            health_url: Some(health_url),
+            url_pattern: None,
+            proc: new_shared_process(),
+            url: new_shared_url(),
+            http_client,
+        }
+    }
+
     #[tokio::test]
     async fn empty_command_returns_error() {
         let tunnel = CustomTunnel::new("   ".into(), None, None).unwrap();
@@ -257,12 +273,8 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let tunnel = CustomTunnel::new(
-            "sleep 1".into(),
-            Some(format!("http://127.0.0.1:{port}/healthz")),
-            None,
-        )
-        .unwrap();
+        let tunnel =
+            custom_tunnel_with_direct_health_check(format!("http://127.0.0.1:{port}/healthz"));
         assert!(
             !tunnel.health_check().await,
             "Health check should fail for unreachable URL"

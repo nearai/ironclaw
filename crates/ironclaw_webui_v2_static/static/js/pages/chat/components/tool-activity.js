@@ -7,10 +7,11 @@ import { useT } from "../../../lib/i18n.js";
 const DOT_STYLE = {
   running: "bg-[var(--v2-accent)] animate-[v2-breathe_1.6s_ease-in-out_infinite]",
   success: "bg-[var(--v2-positive-text)]",
+  declined: "bg-iron-400",
   error: "bg-[var(--v2-danger-text)]",
 };
 
-const STATUS_WORD = { success: "ok", error: "err", running: "run" };
+const STATUS_WORD = { success: "ok", declined: "declined", error: "err", running: "run" };
 
 /* Runs longer than this collapse into a single summary line. Runs of this
    length or shorter render each call as its own row. */
@@ -52,10 +53,13 @@ function summarizeTools(t, tools) {
 export function ToolRun({ tools }) {
   const t = useT();
   const hasError = tools.some((tool) => tool.toolStatus === "error");
-  const [expanded, setExpanded] = React.useState(hasError);
+  const hasTerminalNotice = tools.some(
+    (tool) => tool.toolStatus === "error" || tool.toolStatus === "declined",
+  );
+  const [expanded, setExpanded] = React.useState(hasTerminalNotice);
   React.useEffect(() => {
-    if (hasError) setExpanded(true);
-  }, [hasError]);
+    if (hasTerminalNotice) setExpanded(true);
+  }, [hasTerminalNotice]);
 
   if (tools.length <= TOOL_RUN_COLLAPSE_AFTER) {
     return html`
@@ -117,9 +121,11 @@ function ToolActivityCard({ activity, nested = false }) {
     toolResultPreview,
   } = activity;
 
-  const [expanded, setExpanded] = React.useState(toolStatus === "error");
+  const [expanded, setExpanded] = React.useState(
+    toolStatus === "error" || toolStatus === "declined",
+  );
   React.useEffect(() => {
-    if (toolStatus === "error") setExpanded(true);
+    if (toolStatus === "error" || toolStatus === "declined") setExpanded(true);
   }, [toolStatus]);
 
   const dotClass = DOT_STYLE[toolStatus] || DOT_STYLE.running;
@@ -198,20 +204,25 @@ function ToolDetailPanel({
   const t = useT();
   const tabs = React.useMemo(() => {
     const next = [];
-    if (toolError) next.push({ id: "error", label: t("tool.tabError") });
+    if (toolError) {
+      next.push({
+        id: toolStatus === "declined" ? "declined" : "error",
+        label: toolStatus === "declined" ? t("tool.tabDeclined") : t("tool.tabError"),
+      });
+    }
     if (toolDetail) next.push({ id: "details", label: t("tool.tabDetails") });
     if (toolParameters) next.push({ id: "params", label: t("tool.tabParameters") });
     if (toolResultPreview) next.push({ id: "result", label: t("tool.tabResult") });
     return next;
-  }, [t, toolError, toolDetail, toolParameters, toolResultPreview]);
+  }, [t, toolError, toolDetail, toolParameters, toolResultPreview, toolStatus]);
 
   const [activeState, setActive] = React.useState(null);
   const active = activeState && tabs.some((tab) => tab.id === activeState)
     ? activeState
     : tabs[0]?.id;
   React.useEffect(() => {
-    if (toolError) setActive("error");
-  }, [toolError]);
+    if (toolError) setActive(toolStatus === "declined" ? "declined" : "error");
+  }, [toolError, toolStatus]);
 
   if (tabs.length === 0) {
     return html`
@@ -250,6 +261,8 @@ function ToolDetailPanel({
         <span className="ml-auto px-1 py-1 font-mono text-[10px] text-iron-500">
           ${toolStatus === "error"
             ? t("tool.exitError")
+            : toolStatus === "declined"
+            ? t("tool.exitDeclined")
             : toolStatus === "running"
             ? t("tool.exitRunning")
             : t("tool.exitOk")}${toolDurationMs !== null ? ` · ${toolDurationMs}ms` : ""}
@@ -261,8 +274,13 @@ function ToolDetailPanel({
         ${active === "params" &&
         html`<pre className="overflow-x-auto rounded bg-iron-900 p-2 font-mono text-iron-100">${toolParameters}</pre>`}
         ${active === "result" && html`<${ToolResult} text=${toolResultPreview} />`}
-        ${active === "error" &&
-        html`<pre className="overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono text-[var(--v2-danger-text)]">${toolError}</pre>`}
+        ${(active === "error" || active === "declined") &&
+        html`<pre
+          className=${[
+            "overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono",
+            active === "declined" ? "text-iron-300" : "text-[var(--v2-danger-text)]",
+          ].join(" ")}
+        >${toolError}</pre>`}
       </div>
     </div>
   `;

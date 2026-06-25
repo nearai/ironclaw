@@ -170,6 +170,7 @@ pub fn capability_call_response(
         safe_reasoning_deltas: Vec::new(),
         usage: None,
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: harness_surface_version(),
             capability_id: harness_capability_id(capability_id.into()),
             input_ref: CapabilityInputRef::new(input_ref.into()).expect("valid harness input ref"),
@@ -578,6 +579,7 @@ impl ScriptedHostRuntimeToolCall {
             safe_reasoning_deltas: Vec::new(),
             usage: None,
             output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version,
                 capability_id: self.capability_id.clone(),
                 input_ref,

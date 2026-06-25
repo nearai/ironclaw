@@ -44,6 +44,10 @@ pub(super) fn classify_failure(error: &TriggerError) -> FailureClassification {
             SubmitFailureKind::Permanent,
             TriggerPollerFailureReason::InvalidMaterialization,
         ),
+        TriggerError::BlockedMaterialization { .. } => (
+            SubmitFailureKind::Retryable,
+            TriggerPollerFailureReason::BlockedMaterialization,
+        ),
         TriggerError::NotFound => (
             SubmitFailureKind::Permanent,
             TriggerPollerFailureReason::NotFound,
