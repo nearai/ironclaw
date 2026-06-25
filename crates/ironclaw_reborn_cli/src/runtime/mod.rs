@@ -665,6 +665,23 @@ pub(crate) fn build_services_input_with_options(
     let agent_id = AgentId::new(identity.agent_id).context("invalid runtime agent identity")?;
     services_input = services_input.with_local_runtime_identity(tenant_id, agent_id);
 
+    // Resolve the memory profile binding from the `[memory]` config section +
+    // deployment profile and attach it (issue #3537). Fail-closed: a production
+    // deployment that binds a required memory profile to `memory.disabled` or an
+    // unverified third-party extension without an admin override fails startup
+    // here, before the runtime is built.
+    let memory_binding_policy = ironclaw_reborn_composition::resolve_memory_binding_policy(
+        config_file.as_ref().and_then(|file| file.memory.as_ref()),
+        composition_profile(profile),
+    )?;
+    for diagnostic in
+        ironclaw_reborn_composition::memory_binding_diagnostics(&memory_binding_policy)
+    {
+        // `debug!` (not `info!`/`warn!`) so the REPL/TUI display is not corrupted.
+        tracing::debug!(target: "ironclaw_reborn", "{diagnostic}");
+    }
+    services_input = services_input.with_memory_binding_policy(memory_binding_policy);
+
     Ok(RuntimeServicesInput {
         services_input,
         config_file,

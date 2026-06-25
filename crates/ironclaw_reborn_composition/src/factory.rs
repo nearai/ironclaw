@@ -60,15 +60,17 @@ use ironclaw_host_api::{
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{HostApiError, MountAlias, MountGrant};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_host_runtime::builtin_first_party_handlers_with_trigger_create_hook_for_process_backend_and_memory_binding;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_host_runtime::builtin_first_party_package_for_process_backend;
+use ironclaw_host_runtime::memory_binding::{MemoryBindingPolicy, MemoryProviderBinding};
+use ironclaw_host_runtime::memory_profiles::MEMORY_DOCUMENT_STORE_PROFILE_ID;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeHttpEgressPort,
     HostRuntimeServices, LocalHostProcessPort, ProductAuthProviderRuntimePorts, TriggerCreateHook,
-    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
-};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_runtime::{
-    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
-    builtin_first_party_package_for_process_backend,
+    builtin_first_party_handlers_with_trigger_create_hook_and_memory_binding,
+    builtin_first_party_package,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_loop_support::FilesystemCheckpointStateStore;
@@ -847,6 +849,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         owner_id,
         local_runtime_identity,
         turn_state_store_limits,
+        memory_binding_policy,
         ..
     } = input;
     let local_runtime_identity_for_nearai_mcp = local_runtime_identity.clone();
@@ -1302,6 +1305,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let mut first_party_registry = builtin_first_party_registry_with_trigger_create_hook(
         Arc::clone(&store_graph.trigger_repository),
         trigger_create_hook,
+        document_store_binding(memory_binding_policy.as_ref()),
     )?;
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
@@ -2903,14 +2907,33 @@ fn production_builtin_extension_registry(
     Ok(registry)
 }
 
+/// Resolve the document-store memory binding from the policy (issue #3537). The
+/// document-store profile backs the model-facing memory tools and `/memory`
+/// routing, so it is the binding the builtin handlers consult. `None` policy →
+/// the default native provider.
+fn document_store_binding(policy: Option<&MemoryBindingPolicy>) -> MemoryProviderBinding {
+    let Some(policy) = policy else {
+        return MemoryProviderBinding::Native;
+    };
+    ironclaw_host_api::CapabilityProfileId::new(MEMORY_DOCUMENT_STORE_PROFILE_ID)
+        .ok()
+        .and_then(|id| policy.binding_for(&id).cloned())
+        .unwrap_or(MemoryProviderBinding::Native)
+}
+
 fn builtin_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    memory_binding: MemoryProviderBinding,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers_with_trigger_create_hook(trigger_repository, trigger_create_hook)
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("built-in first-party handlers are invalid: {error}"),
-        })
+    builtin_first_party_handlers_with_trigger_create_hook_and_memory_binding(
+        trigger_repository,
+        trigger_create_hook,
+        memory_binding,
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("built-in first-party handlers are invalid: {error}"),
+    })
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -2918,11 +2941,13 @@ fn production_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
     process_backend: ProcessBackendKind,
+    memory_binding: MemoryProviderBinding,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
+    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend_and_memory_binding(
         trigger_repository,
         trigger_create_hook,
         process_backend,
+        memory_binding,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("built-in first-party handlers are invalid: {error}"),
@@ -3130,6 +3155,7 @@ async fn build_production_shaped(
         oauth_dcr_provider_configs,
         nearai_mcp_bootstrap_config: _,
         turn_state_store_limits,
+        memory_binding_policy,
     } = input;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let wiring_config = production_config(
@@ -3151,6 +3177,7 @@ async fn build_production_shaped(
         oauth_provider_configs,
         oauth_dcr_provider_configs,
         turn_state_store_limits,
+        memory_binding_policy,
     );
 
     match storage {
@@ -3203,6 +3230,7 @@ async fn build_production_shaped(
                 owner_id,
                 local_runtime_identity,
                 turn_state_store_limits,
+                memory_binding: document_store_binding(memory_binding_policy.as_ref()),
                 scheduler_wake_wiring,
             };
             build_libsql_production(context, db, path_or_url, auth_token, secret_master_key).await
@@ -3239,6 +3267,7 @@ async fn build_production_shaped(
                 owner_id,
                 local_runtime_identity,
                 turn_state_store_limits,
+                memory_binding: document_store_binding(memory_binding_policy.as_ref()),
                 scheduler_wake_wiring,
             };
             build_postgres_production(context, pool, url, tls_options, secret_master_key).await
@@ -3274,6 +3303,8 @@ struct RebornProductionBuildContext {
     owner_id: String,
     local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
+    /// Resolved document-store memory provider binding (issue #3537).
+    memory_binding: MemoryProviderBinding,
     /// The pre-minted scheduler wake wiring to carry to `RebornServices` so
     /// `build_reborn_runtime` can hand it to `build_default_planned_runtime` via
     /// `DefaultPlannedRuntimeParts.scheduler_wake_wiring`.
@@ -3652,6 +3683,7 @@ where
         owner_id,
         local_runtime_identity,
         turn_state_store_limits,
+        memory_binding,
         scheduler_wake_wiring,
     } = context;
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
@@ -3729,6 +3761,7 @@ where
         trigger_repository,
         trigger_create_hook,
         process_backend,
+        memory_binding,
     )?;
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
     let services = HostRuntimeServices::new(

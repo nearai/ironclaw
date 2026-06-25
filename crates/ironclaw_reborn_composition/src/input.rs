@@ -15,6 +15,7 @@ use ironclaw_host_api::{AgentId, TenantId};
 #[cfg(all(test, feature = "slack-v2-host-beta"))]
 use ironclaw_host_runtime::HostRuntimeHttpEgressPort;
 use ironclaw_host_runtime::TenantSandboxProcessPort;
+use ironclaw_host_runtime::memory_binding::MemoryBindingPolicy;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_trust::HostTrustPolicy;
@@ -193,6 +194,11 @@ pub struct RebornBuildInput {
     /// Concurrency limits applied to the in-memory turn-state store.
     /// Defaults to no limits (all caps `None` / unlimited).
     pub(crate) turn_state_store_limits: InMemoryTurnStateStoreLimits,
+    /// Resolved memory profile binding policy (issue #3537). `None` means the
+    /// behavior-preserving default: every required memory profile binds to the
+    /// host-bundled native provider. The CLI resolves this from the `[memory]`
+    /// config section + deployment profile (fail-closed) before building.
+    pub(crate) memory_binding_policy: Option<MemoryBindingPolicy>,
 }
 
 #[derive(Clone, Debug)]
@@ -242,6 +248,16 @@ impl RebornBuildInput {
     /// `UserId` actor for inbound CLI messages.
     pub fn owner_id(&self) -> &str {
         &self.owner_id
+    }
+
+    /// Attach a resolved memory profile binding policy (issue #3537). The CLI
+    /// resolves this from the `[memory]` config section + deployment profile,
+    /// failing closed before composition is built. The factory reads the
+    /// resolved policy via the `memory_binding_policy` field when destructuring
+    /// the build input.
+    pub fn with_memory_binding_policy(mut self, policy: MemoryBindingPolicy) -> Self {
+        self.memory_binding_policy = Some(policy);
+        self
     }
 
     #[cfg(feature = "root-llm-provider")]
@@ -745,6 +761,7 @@ impl RebornBuildInput {
             oauth_dcr_provider_configs: Vec::new(),
             nearai_mcp_bootstrap_config: None,
             turn_state_store_limits: InMemoryTurnStateStoreLimits::default(),
+            memory_binding_policy: None,
         }
     }
 }
