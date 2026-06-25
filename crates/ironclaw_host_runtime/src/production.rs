@@ -1189,12 +1189,14 @@ impl DefaultHostRuntime {
             return;
         }
         let scopes = persistent_approval_lookup_scopes(&context.resource_scope);
+        let grantees = persistent_approval_grantees(context);
         let lookup_results = join_all(
             scopes
                 .into_iter()
                 .flat_map(|scope| {
-                    persistent_approval_grantees(context)
-                        .into_iter()
+                    grantees
+                        .iter()
+                        .cloned()
                         .map(move |grantee| (scope.clone(), grantee))
                 })
                 .map(|(scope, grantee)| {
@@ -1972,6 +1974,8 @@ fn persistent_approval_lookup_scopes(scope: &ResourceScope) -> Vec<PersistentApp
     if legacy_scope == user_scope {
         vec![user_scope]
     } else {
+        // User-scope settings-page policies intentionally win lookup order over
+        // legacy agent/project-scoped prompt policies.
         vec![user_scope, legacy_scope]
     }
 }

@@ -8146,6 +8146,35 @@ async fn operator_config_is_scoped_by_tenant_and_user() {
 }
 
 #[tokio::test]
+async fn operator_config_reports_unknown_keys_distinct_from_invalid_values() {
+    let services = services_with_operator_approval_config();
+
+    let unknown_key = services
+        .get_operator_config_key(caller(), "tool.tool.missing".to_string())
+        .await
+        .expect_err("unknown tool key");
+    assert_eq!(
+        unknown_key.validation_code,
+        Some(WebUiInboundValidationCode::UnknownKey)
+    );
+
+    let invalid_value = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "sometimes" }),
+            },
+        )
+        .await
+        .expect_err("invalid tool state");
+    assert_eq!(
+        invalid_value.validation_code,
+        Some(WebUiInboundValidationCode::InvalidValue)
+    );
+}
+
+#[tokio::test]
 async fn operator_diagnostics_aggregates_status_setup_and_config_reasons() {
     let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
     llm_config.use_active_snapshot("openai", "gpt-5-mini");

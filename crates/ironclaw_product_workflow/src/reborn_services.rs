@@ -12,6 +12,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use futures::future::try_join_all;
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
@@ -936,7 +937,7 @@ fn operator_config_not_wired_response() -> RebornOperatorConfigListResponse {
 fn operator_config_unknown_key_error(field: &'static str) -> RebornServicesError {
     RebornServicesError::validation(WebUiInboundValidationError::new(
         field,
-        WebUiInboundValidationCode::InvalidValue,
+        WebUiInboundValidationCode::UnknownKey,
     ))
 }
 
@@ -948,8 +949,7 @@ fn operator_config_invalid_value(field: &'static str) -> RebornServicesError {
 }
 
 fn operator_config_store_error(error: impl std::fmt::Display) -> RebornServicesError {
-    tracing::warn!(error = %error, "operator approval config store operation failed");
-    RebornServicesError::service_unavailable(false)
+    RebornServicesError::internal_from(error)
 }
 
 async fn auto_approve_config_entry(
@@ -993,7 +993,16 @@ async fn tool_config_entry(
     scope: &ResourceScope,
     tool: &RebornOperatorToolInfo,
 ) -> Result<RebornOperatorConfigEntry, RebornServicesError> {
-    let (state, source) = effective_tool_permission(config, scope, tool).await?;
+    let context = operator_tool_permission_context(config, scope).await?;
+    tool_config_entry_with_context(config, &context, tool).await
+}
+
+async fn tool_config_entry_with_context(
+    config: &RebornOperatorApprovalConfig,
+    context: &OperatorToolPermissionContext,
+    tool: &RebornOperatorToolInfo,
+) -> Result<RebornOperatorConfigEntry, RebornServicesError> {
+    let (state, source) = effective_tool_permission(config, context, tool).await?;
     let default_state = default_tool_permission_state(tool.default_permission);
     let locked = tool_permission_locked(tool);
     let value = serde_json::json!({
@@ -1017,9 +1026,30 @@ async fn tool_config_entry(
     })
 }
 
-async fn effective_tool_permission(
+struct OperatorToolPermissionContext {
+    operator_scope: ResourceScope,
+    global_auto_approve: bool,
+}
+
+async fn operator_tool_permission_context(
     config: &RebornOperatorApprovalConfig,
     scope: &ResourceScope,
+) -> Result<OperatorToolPermissionContext, RebornServicesError> {
+    let operator_scope = operator_tool_permission_scope(scope);
+    let global_auto_approve = config
+        .auto_approve
+        .is_enabled(&operator_scope)
+        .await
+        .map_err(operator_config_store_error)?;
+    Ok(OperatorToolPermissionContext {
+        operator_scope,
+        global_auto_approve,
+    })
+}
+
+async fn effective_tool_permission(
+    config: &RebornOperatorApprovalConfig,
+    context: &OperatorToolPermissionContext,
     tool: &RebornOperatorToolInfo,
 ) -> Result<(ToolPermissionState, &'static str), RebornServicesError> {
     if tool.default_permission == PermissionMode::Deny {
@@ -1029,8 +1059,8 @@ async fn effective_tool_permission(
         return Ok((ToolPermissionState::AskEachTime, "locked"));
     }
 
-    let operator_scope = operator_tool_permission_scope(scope);
-    let override_key = ToolPermissionOverrideKey::new(&operator_scope, tool.capability_id.clone());
+    let override_key =
+        ToolPermissionOverrideKey::new(&context.operator_scope, tool.capability_id.clone());
     if let Some(record) = config
         .overrides
         .get(&override_key)
@@ -1040,17 +1070,12 @@ async fn effective_tool_permission(
         return Ok((record.state.as_state(), "override"));
     }
 
-    if persistent_user_policy_active(config, scope, tool).await? {
+    if persistent_user_policy_active(config, &context.operator_scope, tool).await? {
         return Ok((ToolPermissionState::AlwaysAllow, "override"));
     }
 
     if permission_mode_allows_persistent_approval(tool.default_permission) {
-        let global_auto_approve = config
-            .auto_approve
-            .is_enabled(&operator_scope)
-            .await
-            .map_err(operator_config_store_error)?;
-        if global_auto_approve {
+        if context.global_auto_approve {
             return Ok((ToolPermissionState::AlwaysAllow, "global"));
         }
         return Ok((ToolPermissionState::AskEachTime, "global"));
@@ -1064,10 +1089,10 @@ async fn effective_tool_permission(
 
 async fn persistent_user_policy_active(
     config: &RebornOperatorApprovalConfig,
-    scope: &ResourceScope,
+    operator_scope: &ResourceScope,
     tool: &RebornOperatorToolInfo,
 ) -> Result<bool, RebornServicesError> {
-    let key = persistent_user_policy_key(scope, tool);
+    let key = persistent_user_policy_key(operator_scope, tool);
     Ok(config
         .persistent_policies
         .lookup(&key)
@@ -1147,6 +1172,8 @@ fn parse_tool_permission_state(
         "always_allow" => Ok(ToolPermissionUpdate::State(
             ToolPermissionState::AlwaysAllow,
         )),
+        // Backward-compatible read alias from earlier Tools UI payloads. The
+        // service always writes the canonical `ask_each_time` wire value.
         "ask_each_time" | "ask" => Ok(ToolPermissionUpdate::State(
             ToolPermissionState::AskEachTime,
         )),
@@ -2663,9 +2690,16 @@ impl RebornServicesApi for RebornServices {
         };
         let scope = caller_resource_scope(&caller);
         let mut entries = vec![auto_approve_config_entry(config, &scope).await?];
-        for tool in config.tool_catalog.list_operator_tools() {
-            entries.push(tool_config_entry(config, &scope, &tool).await?);
-        }
+        let tool_context = operator_tool_permission_context(config, &scope).await?;
+        let tools = config.tool_catalog.list_operator_tools();
+        entries.extend(
+            try_join_all(
+                tools
+                    .iter()
+                    .map(|tool| tool_config_entry_with_context(config, &tool_context, tool)),
+            )
+            .await?,
+        );
         Ok(RebornOperatorConfigListResponse {
             entries,
             precedence: vec![
