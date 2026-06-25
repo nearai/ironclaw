@@ -584,6 +584,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: self.gate_ref.lock().expect("lock").clone(),
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(17),

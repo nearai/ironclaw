@@ -586,6 +586,7 @@ mod tests {
             ProductOutboundPayload::AuthPrompt(ironclaw_product_adapters::AuthPromptView {
                 turn_run_id: run_id,
                 auth_request_ref: "auth-1".to_string(),
+                invocation_id: None,
                 headline: "Auth required".to_string(),
                 body: "Open WebUI".to_string(),
                 challenge_kind: None,

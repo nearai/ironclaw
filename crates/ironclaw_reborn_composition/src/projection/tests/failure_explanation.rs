@@ -360,6 +360,7 @@ async fn webui_event_stream_projects_recovery_required_failure_summary() {
         Arc::new(FakeTurnCoordinator {
             state: TurnRunState {
                 status: TurnStatus::RecoveryRequired,
+                blocked_activity_id: None,
                 ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
             },
         }),
@@ -430,6 +431,7 @@ async fn failure_details_returns_fallback_when_model_gateway_times_out() {
         Arc::new(FakeTurnCoordinator {
             state: TurnRunState {
                 status: TurnStatus::Failed,
+                blocked_activity_id: None,
                 ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
             },
         }),

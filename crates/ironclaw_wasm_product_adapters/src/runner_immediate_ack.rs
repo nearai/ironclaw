@@ -96,15 +96,24 @@ impl NativeProductAdapterRunner {
             }
         }
         tasks.spawn(async move {
-            let _permit = permit;
-            // The admission permit bounds the whole tracked post-ACK task, including
-            // observer follow-up. Otherwise quick workflow acks could release permits
-            // while long-running observers accumulate without backpressure.
+            // The admission permit gates only fast intake (auth/parse/stamp/
+            // submit), bounded by `workflow_timeout`. It must NOT be held across
+            // the post-ACK observer delivery poll, which can wait for the run's
+            // final reply for far longer (Slack's observer polls up to ~120s).
+            // Holding admission across that unbounded wait would let
+            // `max_in_flight` slow turns exhaust every intake slot and silently
+            // reject new inbound webhooks under load. The permit is therefore
+            // released the moment the workflow durably accepts the inbound
+            // (`is_durable_outcome`), before observer follow-up runs. On error
+            // or timeout (no durable acceptance) the permit drops at scope end,
+            // which keeps correct backpressure over the bounded intake window.
+            //
             // Timeout drops the in-flight workflow future. That is the intended
             // cancellation boundary for this generic async trait call: the
             // runner does not hold a separate task handle or protocol-specific
             // resource owner to abort. Workflows that open DB/network resources
             // must make their own futures cancellation-safe at await points.
+            let mut permit = Some(permit);
             let workflow_result =
                 tokio::time::timeout(workflow_timeout, workflow.submit_inbound(workflow_envelope))
                     .await;
@@ -115,6 +124,13 @@ impl NativeProductAdapterRunner {
                             target = "ironclaw::product_adapter::runner",
                             "async webhook workflow dispatch requested retry after protocol ack; event was not retried by protocol transport"
                         );
+                    }
+                    // Release admission before the (potentially long) delivery
+                    // poll once the run is durably submitted. A non-durable ack
+                    // (e.g. retryable rejection) keeps the permit until scope
+                    // end so admission still backpressures un-accepted intake.
+                    if ack.is_durable_outcome() {
+                        drop(permit.take());
                     }
                     if let Some(observer) = observer {
                         observer.observe_workflow_ack(envelope, ack).await;
@@ -162,7 +178,7 @@ impl NativeProductAdapterRunner {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use super::ImmediateAckWorkflowObserver;
@@ -314,6 +330,38 @@ mod tests {
         }
     }
 
+    /// Workflow that returns a *non-durable* retryable rejection via the
+    /// `Ok(ack)` arm (distinct from `RejectingWorkflow`, which returns `Err`).
+    /// `ProductInboundAck::Rejected(Retryable)` reports `is_durable_outcome() ==
+    /// false`, so the admission permit must be retained across the observer.
+    struct NonDurableRejectWorkflow;
+
+    #[async_trait]
+    impl ironclaw_product_adapters::ProductWorkflow for NonDurableRejectWorkflow {
+        async fn submit_inbound(
+            &self,
+            _envelope: ProductInboundEnvelope,
+        ) -> Result<ProductInboundAck, ProductAdapterError> {
+            Ok(ProductInboundAck::Rejected(
+                ironclaw_product_adapters::ProductRejection::retryable(
+                    ironclaw_product_adapters::ProductRejectionKind::PolicyDenied,
+                    "policy temporarily unavailable",
+                ),
+            ))
+        }
+
+        async fn resolve_projection_subscription(
+            &self,
+            _envelope: ProductInboundEnvelope,
+        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
+            Err(ProductAdapterError::Internal {
+                detail: ironclaw_product_adapters::redaction::RedactedString::new(
+                    "test stub: resolve_projection_subscription not supported",
+                ),
+            })
+        }
+    }
+
     struct RecordingObserver {
         ack_count: Arc<AtomicUsize>,
         error_count: Arc<AtomicUsize>,
@@ -335,6 +383,34 @@ mod tests {
             _error: ProductAdapterError,
         ) {
             self.error_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Observer that blocks inside `observe_workflow_ack` until released. Models
+    /// the real `SlackFinalReplyDeliveryObserver`, which polls the run for its
+    /// final reply for up to `max_wait` (default 120s) inside this callback.
+    ///
+    /// Release uses a latched `AtomicBool` polled with `yield_now`, not a
+    /// `Notify`: a single shared observer is invoked by two tasks, and the
+    /// second invocation can register *after* the release fires, which
+    /// `Notify::notify_waiters` would not wake. The latch wakes current and
+    /// future waiters deterministically.
+    struct BlockingObserver {
+        entered: Arc<AtomicUsize>,
+        released: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl ImmediateAckWorkflowObserver for BlockingObserver {
+        async fn observe_workflow_ack(
+            &self,
+            _envelope: ProductInboundEnvelope,
+            _ack: ProductInboundAck,
+        ) {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            while !self.released.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
         }
     }
 
@@ -396,6 +472,20 @@ mod tests {
         runner
             .verify_webhook_auth(&headers, b"{}")
             .expect("webhook auth should verify")
+    }
+
+    async fn wait_for_observer_entries(
+        entered: &AtomicUsize,
+        expected: usize,
+        failure_context: &str,
+    ) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while entered.load(Ordering::SeqCst) < expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {failure_context}"));
     }
 
     #[tokio::test]
@@ -508,6 +598,118 @@ mod tests {
         release.notify_waiters();
         drain.await.expect("drain task should finish");
         assert_eq!(parse_count.load(Ordering::SeqCst), 2);
+    }
+
+    /// Regression: the admission permit must be released once the workflow has
+    /// durably accepted the inbound (its `submit_inbound` returned), NOT held
+    /// across the post-ACK observer delivery poll. The real Slack observer polls
+    /// the submitted run for its final reply for up to 120s inside
+    /// `observe_workflow_ack`; if admission stayed pinned for that whole window,
+    /// only `SLACK_MAX_IN_FLIGHT_WEBHOOKS` slow turns would exhaust all admission
+    /// slots and new inbound webhooks would be rejected `TooManyInFlight` for up
+    /// to two minutes — silent backpressure-induced message loss under load.
+    ///
+    /// With `max_in_flight = 1`: webhook #1 durably accepts, then its observer
+    /// blocks (modelling the long delivery poll). Webhook #2 must still be
+    /// admitted because admission is freed after durable acceptance.
+    #[tokio::test]
+    async fn admission_released_after_durable_accept_not_held_across_delivery() {
+        let parse_count = Arc::new(AtomicUsize::new(0));
+        let observer_entered = Arc::new(AtomicUsize::new(0));
+        let observer_released = Arc::new(AtomicBool::new(false));
+        // AckWorkflow returns a durable NoOp ack immediately; the observer then
+        // blocks, standing in for the up-to-120s final-reply delivery poll.
+        let runner = runner_with_workflow(Arc::clone(&parse_count), Arc::new(AckWorkflow), 1);
+        let observer = Arc::new(BlockingObserver {
+            entered: Arc::clone(&observer_entered),
+            released: Arc::clone(&observer_released),
+        });
+        let evidence = verified_evidence(&runner);
+
+        let first = runner
+            .process_verified_webhook_immediate_ack_with_observer(
+                b"{}",
+                &evidence,
+                Some(Arc::clone(&observer) as Arc<dyn ImmediateAckWorkflowObserver>),
+            )
+            .await
+            .expect("first webhook should be accepted for async dispatch");
+        assert_eq!(first, WebhookProcessOutcome::AcceptedForAsyncDispatch);
+
+        // Wait until the observer is actively blocking — i.e. the workflow has
+        // durably accepted and we are now in the delivery phase.
+        wait_for_observer_entries(&observer_entered, 1, "durable observer to enter").await;
+
+        // The second webhook must be admitted: admission only gates intake, not
+        // the unbounded delivery wait the observer is currently sitting in.
+        let second = runner
+            .process_verified_webhook_immediate_ack_with_observer(
+                b"{}",
+                &evidence,
+                Some(Arc::clone(&observer) as Arc<dyn ImmediateAckWorkflowObserver>),
+            )
+            .await
+            .expect("second webhook must be admitted while first is still in delivery");
+        assert_eq!(second, WebhookProcessOutcome::AcceptedForAsyncDispatch);
+
+        observer_released.store(true, Ordering::SeqCst);
+        runner.drain_immediate_ack_tasks().await;
+        assert_eq!(parse_count.load(Ordering::SeqCst), 2);
+    }
+
+    /// Counterpart to the durable-accept test: a *non-durable* ack
+    /// (`Rejected(Retryable)`) must KEEP the admission permit across the observer
+    /// so admission still backpressures un-accepted intake. This pins the
+    /// `is_durable_outcome()` guard so a future edit that drops the permit
+    /// unconditionally would be caught.
+    #[tokio::test]
+    async fn admission_retained_across_observer_for_non_durable_ack() {
+        let parse_count = Arc::new(AtomicUsize::new(0));
+        let observer_entered = Arc::new(AtomicUsize::new(0));
+        let observer_released = Arc::new(AtomicBool::new(false));
+        let runner = runner_with_workflow(
+            Arc::clone(&parse_count),
+            Arc::new(NonDurableRejectWorkflow),
+            1,
+        );
+        let observer = Arc::new(BlockingObserver {
+            entered: Arc::clone(&observer_entered),
+            released: Arc::clone(&observer_released),
+        });
+        let evidence = verified_evidence(&runner);
+
+        let first = runner
+            .process_verified_webhook_immediate_ack_with_observer(
+                b"{}",
+                &evidence,
+                Some(Arc::clone(&observer) as Arc<dyn ImmediateAckWorkflowObserver>),
+            )
+            .await
+            .expect("first webhook should be accepted for async dispatch");
+        assert_eq!(first, WebhookProcessOutcome::AcceptedForAsyncDispatch);
+
+        // Wait until the observer is blocking — the workflow returned a
+        // non-durable ack, so the permit must still be held at this point.
+        wait_for_observer_entries(&observer_entered, 1, "non-durable observer to enter").await;
+
+        // The permit is retained across the observer for a non-durable ack, so a
+        // second intake must be rejected while the first is still in delivery.
+        let err = runner
+            .process_verified_webhook_immediate_ack_with_observer(
+                b"{}",
+                &evidence,
+                Some(Arc::clone(&observer) as Arc<dyn ImmediateAckWorkflowObserver>),
+            )
+            .await
+            .expect_err("second webhook should be rejected while non-durable permit is held");
+        assert!(matches!(
+            err,
+            RunnerError::TooManyInFlight { max_in_flight: 1 }
+        ));
+
+        observer_released.store(true, Ordering::SeqCst);
+        runner.drain_immediate_ack_tasks().await;
+        assert_eq!(parse_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
