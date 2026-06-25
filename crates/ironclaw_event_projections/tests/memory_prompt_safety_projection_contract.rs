@@ -9,7 +9,7 @@ use ironclaw_host_api::{
     AgentId, CorrelationId, InvocationId, MissionId, ProjectId, ResourceScope, TenantId, ThreadId,
     UserId,
 };
-use ironclaw_memory::{
+use ironclaw_memory_native::{
     InMemoryMemoryDocumentRepository, MemoryBackend, MemoryContext, MemoryDocumentPath,
     MemoryDocumentRepository, MemoryDocumentScope, RepositoryMemoryBackend, content_sha256,
 };

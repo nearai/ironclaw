@@ -45,6 +45,7 @@ const FORBIDDEN_DEPENDENCIES: &[&str] = &[
     "ironclaw_gateway",
     "ironclaw_tui",
     "ironclaw_memory",
+    "ironclaw_memory_native",
     "ironclaw_events",
     "ironclaw_reborn_event_store",
     "ironclaw_architecture",
