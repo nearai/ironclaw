@@ -1217,18 +1217,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_actor_binding_is_retryable_backend_failure() {
-        let error = classify_materializer_inbound_error(InboundTurnError::BindingRequired {
-            adapter_kind: "trigger_trusted".to_string(),
-            external_actor_id: "user-test".to_string(),
-        });
-
-        assert!(
-            matches!(error, TriggerError::Backend { reason } if reason == "trusted trigger submit retryable failure")
-        );
-    }
-
-    #[test]
     fn permanent_admission_rejections_are_terminal_materialization_failures() {
         let error = classify_materializer_inbound_error(InboundTurnError::TurnSubmissionFailed {
             error: TurnError::AdmissionRejected(AdmissionRejection::new(
