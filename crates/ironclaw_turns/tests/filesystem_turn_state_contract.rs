@@ -15,9 +15,9 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CasExpectation, CompositeRootFilesystem,
-    ContentKind, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, Filter,
-    InMemoryBackend, IndexPolicy, IndexSpec, LocalFilesystem, MountDescriptor, Page, RecordVersion,
-    RootFilesystem, ScopedFilesystem, StorageClass, VersionedEntry,
+    ContentKind, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend,
+    IndexPolicy, LocalFilesystem, MountDescriptor, RecordVersion, RootFilesystem, ScopedFilesystem,
+    StorageClass, VersionedEntry,
 };
 use ironclaw_host_api::{
     AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, ScopedPath,
@@ -526,31 +526,6 @@ where
         self.inner.list_dir(path).await
     }
 
-    async fn list_dir_bounded(
-        &self,
-        path: &VirtualPath,
-        max_entries: usize,
-    ) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir_bounded(path, max_entries).await
-    }
-
-    async fn query(
-        &self,
-        path: &VirtualPath,
-        filter: &Filter,
-        page: Page,
-    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
-        self.inner.query(path, filter, page).await
-    }
-
-    async fn ensure_index(
-        &self,
-        path: &VirtualPath,
-        spec: &IndexSpec,
-    ) -> Result<(), FilesystemError> {
-        self.inner.ensure_index(path, spec).await
-    }
-
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         self.inner.stat(path).await
     }
@@ -592,31 +567,6 @@ where
         self.inner.list_dir(path).await
     }
 
-    async fn list_dir_bounded(
-        &self,
-        path: &VirtualPath,
-        max_entries: usize,
-    ) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir_bounded(path, max_entries).await
-    }
-
-    async fn query(
-        &self,
-        path: &VirtualPath,
-        filter: &Filter,
-        page: Page,
-    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
-        self.inner.query(path, filter, page).await
-    }
-
-    async fn ensure_index(
-        &self,
-        path: &VirtualPath,
-        spec: &IndexSpec,
-    ) -> Result<(), FilesystemError> {
-        self.inner.ensure_index(path, spec).await
-    }
-
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         self.inner.stat(path).await
     }
@@ -654,31 +604,6 @@ where
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
         self.inner.list_dir(path).await
-    }
-
-    async fn list_dir_bounded(
-        &self,
-        path: &VirtualPath,
-        max_entries: usize,
-    ) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir_bounded(path, max_entries).await
-    }
-
-    async fn query(
-        &self,
-        path: &VirtualPath,
-        filter: &Filter,
-        page: Page,
-    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
-        self.inner.query(path, filter, page).await
-    }
-
-    async fn ensure_index(
-        &self,
-        path: &VirtualPath,
-        spec: &IndexSpec,
-    ) -> Result<(), FilesystemError> {
-        self.inner.ensure_index(path, spec).await
     }
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
@@ -720,31 +645,6 @@ where
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
         self.inner.list_dir(path).await
-    }
-
-    async fn list_dir_bounded(
-        &self,
-        path: &VirtualPath,
-        max_entries: usize,
-    ) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir_bounded(path, max_entries).await
-    }
-
-    async fn query(
-        &self,
-        path: &VirtualPath,
-        filter: &Filter,
-        page: Page,
-    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
-        self.inner.query(path, filter, page).await
-    }
-
-    async fn ensure_index(
-        &self,
-        path: &VirtualPath,
-        spec: &IndexSpec,
-    ) -> Result<(), FilesystemError> {
-        self.inner.ensure_index(path, spec).await
     }
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
@@ -814,31 +714,6 @@ where
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
         self.inner.list_dir(path).await
-    }
-
-    async fn list_dir_bounded(
-        &self,
-        path: &VirtualPath,
-        max_entries: usize,
-    ) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir_bounded(path, max_entries).await
-    }
-
-    async fn query(
-        &self,
-        path: &VirtualPath,
-        filter: &Filter,
-        page: Page,
-    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
-        self.inner.query(path, filter, page).await
-    }
-
-    async fn ensure_index(
-        &self,
-        path: &VirtualPath,
-        spec: &IndexSpec,
-    ) -> Result<(), FilesystemError> {
-        self.inner.ensure_index(path, spec).await
     }
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {

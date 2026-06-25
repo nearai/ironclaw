@@ -33,16 +33,12 @@
 //! path itself.
 
 use std::{
-    future::Future,
     sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
-use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RecordKind,
-    RecordVersion, RootFilesystem, ScopedFilesystem,
-};
+use ironclaw_filesystem::{CasExpectation, RecordVersion, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ResourceScope, ScopedPath, UserId};
 
 use crate::{
@@ -64,21 +60,23 @@ use crate::{
     },
 };
 
+mod io;
+mod profile_resolver;
+mod projection;
 mod runner_lease;
 
-/// Bound on the CAS retry loop. The per-user snapshot is intentionally written
-/// with optimistic CAS instead of an in-process write gate, so bursts of
-/// same-user transitions can overlap without parking unrelated turn-state
-/// callers behind one wedged operation.
-const FILESYSTEM_CAS_RETRIES: usize = 32;
-const FILESYSTEM_APPLY_TIMEOUT: Duration = Duration::from_secs(15);
-const FILESYSTEM_CAS_BACKOFF_BASE: Duration = Duration::from_millis(2);
-const FILESYSTEM_CAS_BACKOFF_MAX: Duration = Duration::from_millis(50);
-const SNAPSHOT_READ_CACHE_TTL: Duration = Duration::from_millis(500);
+use io::{
+    FILESYSTEM_CAS_RETRIES, PutError, cas_retry_backoff, deserialize_snapshot, fs_error,
+    put_with_cas, snapshot_entry, snapshot_path,
+};
+use profile_resolver::PreResolvedRunProfileResolver;
+use runner_lease::{RunnerLeaseOverlay, RunnerLeaseRecord, RunnerLeaseSidecar};
 
-const TURNS_PREFIX: &str = "/turns";
-const TURNS_SNAPSHOT_FILE: &str = "state.json";
-const TURNS_SNAPSHOT_KIND: &str = "turn_state_snapshot";
+#[cfg(test)]
+mod tests;
+
+const FILESYSTEM_APPLY_TIMEOUT: Duration = Duration::from_secs(15);
+const SNAPSHOT_READ_CACHE_TTL: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
 struct CachedSnapshot {
@@ -227,22 +225,7 @@ where
         snapshot: (TurnPersistenceSnapshot, Option<RecordVersion>),
         overlay: RunnerLeaseOverlay,
     ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {
-        match overlay {
-            RunnerLeaseOverlay::None => Ok(snapshot),
-            RunnerLeaseOverlay::Run(run_id) => {
-                let sidecar = self.runner_lease_sidecar();
-                self.sidecar_with_timeout(
-                    sidecar.overlay_run(snapshot, run_id),
-                    "overlay run lease",
-                )
-                .await
-            }
-            RunnerLeaseOverlay::All => {
-                let sidecar = self.runner_lease_sidecar();
-                self.sidecar_with_timeout(sidecar.overlay_snapshot(snapshot), "overlay leases")
-                    .await
-            }
-        }
+        self.runner_lease_sidecar().overlay(snapshot, overlay).await
     }
 
     async fn seed_runner_lease_from_snapshot_inner(
@@ -250,23 +233,17 @@ where
         run_id: TurnRunId,
     ) -> Result<(), TurnError> {
         let (snapshot, _version) = self.read_snapshot_from_filesystem().await?;
-        let sidecar = self.runner_lease_sidecar();
-        self.sidecar_with_timeout(
-            sidecar.seed_from_snapshot(&snapshot, run_id),
-            "seed runner lease",
-        )
-        .await?;
+        self.runner_lease_sidecar()
+            .seed_from_snapshot(&snapshot, run_id)
+            .await?;
         self.clear_snapshot_cache();
         Ok(())
     }
 
     async fn cleanup_runner_lease_after_state(&self, result: &Result<TurnRunState, TurnError>) {
-        let sidecar = self.runner_lease_sidecar();
-        self.sidecar_unit_best_effort_with_timeout(
-            sidecar.cleanup_after_state(result),
-            "cleanup runner lease",
-        )
-        .await;
+        self.runner_lease_sidecar()
+            .cleanup_after_state(result)
+            .await;
         self.clear_snapshot_cache();
     }
 
@@ -275,16 +252,11 @@ where
         request: HeartbeatRequest,
     ) -> Result<EventCursor, TurnError> {
         let sidecar = self.runner_lease_sidecar();
-        let cursor = match self
-            .sidecar_with_timeout(sidecar.heartbeat(request.clone()), "heartbeat runner lease")
-            .await
-        {
+        let cursor = match sidecar.heartbeat(request.clone()).await {
             Err(TurnError::ScopeNotFound) => {
                 self.seed_missing_runner_lease_from_snapshot(request.run_id)
                     .await?;
-                let sidecar = self.runner_lease_sidecar();
-                self.sidecar_with_timeout(sidecar.heartbeat(request), "heartbeat runner lease")
-                    .await?
+                self.runner_lease_sidecar().heartbeat(request).await?
             }
             result => result?,
         };
@@ -297,18 +269,15 @@ where
         run_id: TurnRunId,
     ) -> Result<(), TurnError> {
         let (snapshot, _version) = self.read_snapshot_from_filesystem().await?;
-        let sidecar = self.runner_lease_sidecar();
-        self.sidecar_with_timeout(
-            sidecar.seed_from_snapshot_if_missing(&snapshot, run_id),
-            "seed missing runner lease",
-        )
-        .await
+        self.runner_lease_sidecar()
+            .seed_from_snapshot_if_missing(&snapshot, run_id)
+            .await
     }
 
     async fn prepare_cancel_requested_runner_lease(
         &self,
         request: &CancelRunRequest,
-    ) -> Result<Option<runner_lease::RunnerLeaseRecord>, TurnError> {
+    ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
         let (snapshot, _version) = self.read_snapshot_from_filesystem().await?;
         let Some(run) = snapshot
             .runs
@@ -323,12 +292,9 @@ where
         ) {
             return Ok(None);
         }
-        let sidecar = self.runner_lease_sidecar();
-        self.sidecar_with_timeout(
-            sidecar.mark_cancel_requested_from_snapshot(&snapshot, request.run_id),
-            "mark runner lease cancel requested",
-        )
-        .await
+        self.runner_lease_sidecar()
+            .mark_cancel_requested_from_snapshot(&snapshot, request.run_id)
+            .await
     }
 
     async fn prepare_runner_lease_retirement(
@@ -337,92 +303,38 @@ where
         runner_id: crate::TurnRunnerId,
         lease_token: crate::TurnLeaseToken,
         retired_status: TurnStatus,
-    ) -> Result<Option<runner_lease::RunnerLeaseRecord>, TurnError> {
+    ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
         let (snapshot, _version) = self.read_snapshot_from_filesystem().await?;
-        let sidecar = self.runner_lease_sidecar();
-        self.sidecar_with_timeout(
-            sidecar.retire_runner_lease_from_snapshot(
+        self.runner_lease_sidecar()
+            .retire_runner_lease_from_snapshot(
                 &snapshot,
                 run_id,
                 runner_id,
                 lease_token,
                 retired_status,
-            ),
-            "retire runner lease",
-        )
-        .await
+            )
+            .await
     }
 
     async fn restore_runner_lease_after_failed_transition(
         &self,
-        previous: Option<runner_lease::RunnerLeaseRecord>,
+        previous: Option<RunnerLeaseRecord>,
         current_status: TurnStatus,
     ) {
         let Some(previous) = previous else {
             return;
         };
-        let sidecar = self.runner_lease_sidecar();
-        self.sidecar_best_effort_with_timeout(
-            sidecar.restore_if_current_status(previous, current_status),
-            "restore runner lease",
-        )
-        .await;
+        self.runner_lease_sidecar()
+            .restore_if_current_status(previous, current_status)
+            .await;
         self.clear_snapshot_cache();
     }
 
-    async fn sidecar_with_timeout<T, Fut>(
-        &self,
-        future: Fut,
-        operation: &'static str,
-    ) -> Result<T, TurnError>
-    where
-        Fut: Future<Output = Result<T, TurnError>>,
-    {
-        match tokio::time::timeout(self.apply_timeout, future).await {
-            Ok(result) => result,
-            Err(_) => Err(TurnError::Unavailable {
-                reason: format!("turn runner lease {operation} timed out"),
-            }),
-        }
-    }
-
-    async fn sidecar_best_effort_with_timeout<Fut>(&self, future: Fut, operation: &'static str)
-    where
-        Fut: Future<Output = Result<(), TurnError>>,
-    {
-        match tokio::time::timeout(self.apply_timeout, future).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::debug!(%error, operation, "turn runner lease best-effort operation failed");
-            }
-            Err(_) => {
-                tracing::debug!(
-                    operation,
-                    "turn runner lease best-effort operation timed out"
-                );
-            }
-        }
-    }
-
-    async fn sidecar_unit_best_effort_with_timeout<Fut>(&self, future: Fut, operation: &'static str)
-    where
-        Fut: Future<Output = ()>,
-    {
-        match tokio::time::timeout(self.apply_timeout, future).await {
-            Ok(()) => {}
-            Err(_) => {
-                tracing::debug!(
-                    operation,
-                    "turn runner lease best-effort operation timed out"
-                );
-            }
-        }
-    }
-
-    fn runner_lease_sidecar(&self) -> runner_lease::RunnerLeaseSidecar<F> {
-        runner_lease::RunnerLeaseSidecar::new(
+    fn runner_lease_sidecar(&self) -> RunnerLeaseSidecar<F> {
+        RunnerLeaseSidecar::new(
             Arc::clone(&self.filesystem),
             self.limits.runner_lease_ttl,
+            self.apply_timeout,
         )
     }
 
@@ -598,13 +510,6 @@ where
     }
 }
 
-#[derive(Clone, Copy)]
-enum RunnerLeaseOverlay {
-    None,
-    Run(TurnRunId),
-    All,
-}
-
 #[async_trait]
 impl<F> TurnStateStore for FilesystemTurnStateStore<F>
 where
@@ -677,12 +582,9 @@ where
         let response = result?;
         match response.status {
             status if status.is_terminal() => {
-                let sidecar = self.runner_lease_sidecar();
-                self.sidecar_unit_best_effort_with_timeout(
-                    sidecar.delete_best_effort(response.run_id),
-                    "delete terminal runner lease",
-                )
-                .await;
+                self.runner_lease_sidecar()
+                    .delete_best_effort(response.run_id)
+                    .await;
             }
             _ => {}
         }
@@ -739,7 +641,7 @@ where
         // Walk the snapshot directly instead of rebuilding the in-memory store
         // (which constructs every index for every record) just to answer a
         // single parent→children lookup.
-        Ok(project_children_of(&snapshot, scope, run_id))
+        Ok(projection::children_of(&snapshot, scope, run_id))
     }
 
     async fn get_run_record(
@@ -750,7 +652,7 @@ where
         let (snapshot, _) = self
             .read_snapshot_with_runner_lease_overlay(RunnerLeaseOverlay::Run(run_id))
             .await?;
-        Ok(project_run_record(&snapshot, scope, run_id))
+        Ok(projection::run_record(&snapshot, scope, run_id))
     }
 
     async fn reserve_tree_descendants(
@@ -886,13 +788,10 @@ where
             })
             .await;
         if let Ok(response) = &result {
-            let sidecar = self.runner_lease_sidecar();
             for state in &response.recovered {
-                self.sidecar_unit_best_effort_with_timeout(
-                    sidecar.delete_best_effort(state.run_id),
-                    "delete recovered runner lease",
-                )
-                .await;
+                self.runner_lease_sidecar()
+                    .delete_best_effort(state.run_id)
+                    .await;
             }
             self.clear_snapshot_cache();
         }
@@ -1058,208 +957,5 @@ fn retired_status_for_loop_exit(mapping: &crate::LoopExitMapping) -> TurnStatus 
         }
         crate::LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed { .. })
         | crate::LoopExitMapping::RecoveryRequired { .. } => TurnStatus::Failed,
-    }
-}
-
-/// Pre-resolved run-profile resolver used to thread the resolver result
-/// *into* the apply closure. The resolver future runs once per
-/// `submit_turn` call outside the CAS loop because resolving may issue I/O
-/// the lock-holding closure shouldn't carry; the resolution outcome is then
-/// constant for the retry loop.
-#[derive(Clone)]
-struct PreResolvedRunProfileResolver {
-    result: Result<crate::ResolvedRunProfile, crate::RunProfileResolutionError>,
-}
-
-impl PreResolvedRunProfileResolver {
-    fn new(result: Result<crate::ResolvedRunProfile, crate::RunProfileResolutionError>) -> Self {
-        Self { result }
-    }
-}
-
-#[async_trait]
-impl RunProfileResolver for PreResolvedRunProfileResolver {
-    async fn resolve_run_profile(
-        &self,
-        _request: crate::RunProfileResolutionRequest,
-    ) -> Result<crate::ResolvedRunProfile, crate::RunProfileResolutionError> {
-        self.result.clone()
-    }
-}
-
-fn snapshot_path() -> Result<ScopedPath, TurnError> {
-    ScopedPath::new(format!("{TURNS_PREFIX}/{TURNS_SNAPSHOT_FILE}")).map_err(|error| {
-        TurnError::Unavailable {
-            reason: format!("invalid turn-state snapshot path: {error}"),
-        }
-    })
-}
-
-/// Project the children of a run directly from a snapshot without building
-/// an `InMemoryTurnStateStore`. Mirrors `InMemoryTurnStateStore::children_of`
-/// scope semantics: returns an empty list when the parent is missing or out of
-/// scope, filters children by the parent's scope envelope (tenant/agent/project),
-/// and sorts by `received_at`.
-fn project_children_of(
-    snapshot: &TurnPersistenceSnapshot,
-    scope: &TurnScope,
-    run_id: TurnRunId,
-) -> Vec<TurnRunRecord> {
-    let Some(parent) = snapshot.runs.iter().find(|record| record.run_id == run_id) else {
-        return Vec::new();
-    };
-    if parent.scope != *scope {
-        return Vec::new();
-    }
-    let mut children: Vec<TurnRunRecord> = snapshot
-        .runs
-        .iter()
-        .filter(|record| {
-            record.parent_run_id == Some(run_id)
-                && record.scope.tenant_id == scope.tenant_id
-                && record.scope.agent_id == scope.agent_id
-                && record.scope.project_id == scope.project_id
-        })
-        .cloned()
-        .collect();
-    children.sort_by_key(|record| record.received_at);
-    children
-}
-
-/// Project a run record by id directly from a snapshot, scoped exactly to
-/// `scope`. Mirrors `InMemoryTurnStateStore::get_run_record` semantics.
-fn project_run_record(
-    snapshot: &TurnPersistenceSnapshot,
-    scope: &TurnScope,
-    run_id: TurnRunId,
-) -> Option<TurnRunRecord> {
-    snapshot
-        .runs
-        .iter()
-        .find(|record| record.run_id == run_id && record.scope == *scope)
-        .cloned()
-}
-
-fn snapshot_entry(snapshot: &TurnPersistenceSnapshot) -> Result<Entry, TurnError> {
-    let body = serde_json::to_vec_pretty(snapshot).map_err(|error| TurnError::Unavailable {
-        reason: format!("turn-state snapshot serialization failed: {error}"),
-    })?;
-    let kind = RecordKind::new(TURNS_SNAPSHOT_KIND).map_err(|error| TurnError::Unavailable {
-        reason: format!("invalid turn-state snapshot record kind: {error}"),
-    })?;
-    let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
-    entry.kind = Some(kind);
-    Ok(entry)
-}
-
-fn deserialize_snapshot(bytes: &[u8]) -> Result<TurnPersistenceSnapshot, TurnError> {
-    serde_json::from_slice(bytes).map_err(|error| TurnError::Unavailable {
-        reason: format!("turn-state snapshot deserialization failed: {error}"),
-    })
-}
-
-fn fs_error(error: FilesystemError) -> TurnError {
-    tracing::debug!(%error, "turn state filesystem operation failed");
-    TurnError::Unavailable {
-        reason: "turn state persistence temporarily unavailable".to_string(),
-    }
-}
-
-async fn cas_retry_backoff(attempt: usize) {
-    let shift = attempt.min(8) as u32;
-    let multiplier = 1_u32.checked_shl(shift).unwrap_or(u32::MAX);
-    let base_delay = FILESYSTEM_CAS_BACKOFF_BASE
-        .saturating_mul(multiplier)
-        .min(FILESYSTEM_CAS_BACKOFF_MAX);
-    let jitter = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| {
-            let jitter_ceiling = base_delay.as_millis().max(1);
-            Duration::from_millis((elapsed.as_nanos() % jitter_ceiling) as u64)
-        })
-        .unwrap_or_default();
-    tokio::time::sleep(base_delay.saturating_add(jitter)).await;
-}
-
-/// Local error classification for the CAS-aware put helper.
-enum PutError {
-    /// Backend reported `VersionMismatch` (cross-process raced us). The
-    /// caller retries by re-reading the current snapshot.
-    VersionMismatch,
-    /// Any other backend or serialization failure; surface to caller.
-    Other(TurnError),
-}
-
-/// Issue a `put` honoring the requested CAS expectation.
-///
-/// Turn state is a single per-user snapshot, so this store requires a backend
-/// with real `Absent` / `Version` CAS. Falling back to `Any` would turn a
-/// stale-snapshot race into a blind overwrite.
-async fn put_with_cas<F>(
-    filesystem: &ScopedFilesystem<F>,
-    path: &ScopedPath,
-    entry: Entry,
-    cas: CasExpectation,
-) -> Result<RecordVersion, PutError>
-where
-    F: RootFilesystem,
-{
-    let scope = ResourceScope::system();
-    match filesystem.put(&scope, path, entry, cas).await {
-        Ok(version) => Ok(version),
-        Err(FilesystemError::VersionMismatch { .. }) => Err(PutError::VersionMismatch),
-        Err(FilesystemError::Unsupported {
-            operation: FilesystemOperation::WriteFile,
-            ..
-        }) => Err(PutError::Other(TurnError::Unavailable {
-            reason: "turn state filesystem backend must support versioned CAS".to_string(),
-        })),
-        Err(error) => Err(PutError::Other(fs_error(error))),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cached_snapshot_freshness_is_bounded() {
-        let snapshot = TurnPersistenceSnapshot::default();
-        let fresh = CachedSnapshot::new(snapshot.clone(), None);
-        assert!(fresh.is_fresh());
-
-        let stale = CachedSnapshot {
-            snapshot,
-            version: None,
-            loaded_at: Instant::now() - SNAPSHOT_READ_CACHE_TTL - Duration::from_millis(1),
-        };
-        assert!(!stale.is_fresh());
-    }
-
-    #[tokio::test]
-    async fn no_op_apply_clears_snapshot_cache_before_returning() {
-        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
-            ironclaw_host_api::MountView::new(vec![ironclaw_host_api::MountGrant::new(
-                ironclaw_host_api::MountAlias::new("/turns").unwrap(),
-                ironclaw_host_api::VirtualPath::new("/engine/turns").unwrap(),
-                ironclaw_host_api::MountPermissions::read_write_list_delete(),
-            )])
-            .unwrap(),
-        ));
-        let store = FilesystemTurnStateStore::new(filesystem);
-        store.store_snapshot_cache((
-            TurnPersistenceSnapshot::default(),
-            Some(RecordVersion::from_backend(99)),
-        ));
-
-        store
-            .apply(RunnerLeaseOverlay::None, |store| async move {
-                (Ok::<_, TurnError>(()), store)
-            })
-            .await
-            .unwrap();
-
-        assert!(store.fresh_cached_snapshot().is_none());
     }
 }

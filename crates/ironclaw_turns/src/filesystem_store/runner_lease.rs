@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::Future, sync::Arc, time::Duration};
 
 use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, RecordKind, RecordVersion, RootFilesystem,
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     EventCursor, TurnError, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState,
     TurnStatus,
-    filesystem_store::{
+    filesystem_store::io::{
         FILESYSTEM_CAS_RETRIES, PutError, cas_retry_backoff, fs_error, put_with_cas,
     },
     runner::HeartbeatRequest,
@@ -30,12 +30,20 @@ pub(super) struct RunnerLeaseRecord {
     event_cursor: EventCursor,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum RunnerLeaseOverlay {
+    None,
+    Run(TurnRunId),
+    All,
+}
+
 pub(super) struct RunnerLeaseSidecar<F>
 where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
     runner_lease_ttl: chrono::Duration,
+    apply_timeout: Duration,
 }
 
 impl<F> RunnerLeaseSidecar<F>
@@ -45,14 +53,178 @@ where
     pub(super) fn new(
         filesystem: Arc<ScopedFilesystem<F>>,
         runner_lease_ttl: chrono::Duration,
+        apply_timeout: Duration,
     ) -> Self {
         Self {
             filesystem,
             runner_lease_ttl,
+            apply_timeout,
         }
     }
 
-    pub(super) async fn overlay_snapshot(
+    pub(super) async fn overlay(
+        &self,
+        snapshot: (TurnPersistenceSnapshot, Option<RecordVersion>),
+        overlay: RunnerLeaseOverlay,
+    ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {
+        match overlay {
+            RunnerLeaseOverlay::None => Ok(snapshot),
+            RunnerLeaseOverlay::Run(run_id) => {
+                self.with_timeout(
+                    self.overlay_run_inner(snapshot, run_id),
+                    "overlay run lease",
+                )
+                .await
+            }
+            RunnerLeaseOverlay::All => {
+                self.with_timeout(self.overlay_snapshot_inner(snapshot), "overlay leases")
+                    .await
+            }
+        }
+    }
+
+    pub(super) async fn seed_from_snapshot(
+        &self,
+        snapshot: &TurnPersistenceSnapshot,
+        run_id: TurnRunId,
+    ) -> Result<(), TurnError> {
+        self.with_timeout(
+            self.seed_from_snapshot_inner(snapshot, run_id),
+            "seed runner lease",
+        )
+        .await
+    }
+
+    pub(super) async fn seed_from_snapshot_if_missing(
+        &self,
+        snapshot: &TurnPersistenceSnapshot,
+        run_id: TurnRunId,
+    ) -> Result<(), TurnError> {
+        self.with_timeout(
+            self.seed_from_snapshot_if_missing_inner(snapshot, run_id),
+            "seed missing runner lease",
+        )
+        .await
+    }
+
+    pub(super) async fn heartbeat(
+        &self,
+        request: HeartbeatRequest,
+    ) -> Result<EventCursor, TurnError> {
+        self.with_timeout(self.heartbeat_inner(request), "heartbeat runner lease")
+            .await
+    }
+
+    pub(super) async fn mark_cancel_requested_from_snapshot(
+        &self,
+        snapshot: &TurnPersistenceSnapshot,
+        run_id: TurnRunId,
+    ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
+        self.with_timeout(
+            self.write_status_from_snapshot(snapshot, run_id, None, TurnStatus::CancelRequested),
+            "mark runner lease cancel requested",
+        )
+        .await
+    }
+
+    pub(super) async fn retire_runner_lease_from_snapshot(
+        &self,
+        snapshot: &TurnPersistenceSnapshot,
+        run_id: TurnRunId,
+        runner_id: crate::TurnRunnerId,
+        lease_token: crate::TurnLeaseToken,
+        retired_status: TurnStatus,
+    ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
+        self.with_timeout(
+            self.write_status_from_snapshot(
+                snapshot,
+                run_id,
+                Some((runner_id, lease_token)),
+                retired_status,
+            ),
+            "retire runner lease",
+        )
+        .await
+    }
+
+    pub(super) async fn restore_if_current_status(
+        &self,
+        previous: RunnerLeaseRecord,
+        current_status: TurnStatus,
+    ) {
+        self.best_effort_with_timeout(
+            self.restore_if_current_status_inner(previous, current_status),
+            "restore runner lease",
+        )
+        .await;
+    }
+
+    pub(super) async fn cleanup_after_state(&self, result: &Result<TurnRunState, TurnError>) {
+        self.best_effort_unit_with_timeout(
+            self.cleanup_after_state_inner(result),
+            "cleanup runner lease",
+        )
+        .await;
+    }
+
+    pub(super) async fn delete_best_effort(&self, run_id: TurnRunId) {
+        self.best_effort_unit_with_timeout(
+            self.delete_best_effort_inner(run_id),
+            "delete runner lease",
+        )
+        .await;
+    }
+
+    async fn with_timeout<T, Fut>(
+        &self,
+        future: Fut,
+        operation: &'static str,
+    ) -> Result<T, TurnError>
+    where
+        Fut: Future<Output = Result<T, TurnError>>,
+    {
+        match tokio::time::timeout(self.apply_timeout, future).await {
+            Ok(result) => result,
+            Err(_) => Err(TurnError::Unavailable {
+                reason: format!("turn runner lease {operation} timed out"),
+            }),
+        }
+    }
+
+    async fn best_effort_with_timeout<Fut>(&self, future: Fut, operation: &'static str)
+    where
+        Fut: Future<Output = Result<(), TurnError>>,
+    {
+        match tokio::time::timeout(self.apply_timeout, future).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::debug!(%error, operation, "turn runner lease best-effort operation failed");
+            }
+            Err(_) => {
+                tracing::debug!(
+                    operation,
+                    "turn runner lease best-effort operation timed out"
+                );
+            }
+        }
+    }
+
+    async fn best_effort_unit_with_timeout<Fut>(&self, future: Fut, operation: &'static str)
+    where
+        Fut: Future<Output = ()>,
+    {
+        match tokio::time::timeout(self.apply_timeout, future).await {
+            Ok(()) => {}
+            Err(_) => {
+                tracing::debug!(
+                    operation,
+                    "turn runner lease best-effort operation timed out"
+                );
+            }
+        }
+    }
+
+    async fn overlay_snapshot_inner(
         &self,
         snapshot: (TurnPersistenceSnapshot, Option<RecordVersion>),
     ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {
@@ -70,7 +242,7 @@ where
         Ok((snapshot, version))
     }
 
-    pub(super) async fn overlay_run(
+    async fn overlay_run_inner(
         &self,
         snapshot: (TurnPersistenceSnapshot, Option<RecordVersion>),
         run_id: TurnRunId,
@@ -90,7 +262,7 @@ where
         Ok((snapshot, version))
     }
 
-    pub(super) async fn seed_from_snapshot(
+    async fn seed_from_snapshot_inner(
         &self,
         snapshot: &TurnPersistenceSnapshot,
         run_id: TurnRunId,
@@ -107,7 +279,7 @@ where
         self.upsert(record).await
     }
 
-    pub(super) async fn seed_from_snapshot_if_missing(
+    async fn seed_from_snapshot_if_missing_inner(
         &self,
         snapshot: &TurnPersistenceSnapshot,
         run_id: TurnRunId,
@@ -115,13 +287,10 @@ where
         if self.read(run_id).await?.is_some() {
             return Ok(());
         }
-        self.seed_from_snapshot(snapshot, run_id).await
+        self.seed_from_snapshot_inner(snapshot, run_id).await
     }
 
-    pub(super) async fn heartbeat(
-        &self,
-        request: HeartbeatRequest,
-    ) -> Result<EventCursor, TurnError> {
+    async fn heartbeat_inner(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
         for attempt in 0..FILESYSTEM_CAS_RETRIES {
             let now = chrono::Utc::now();
             let Some((existing, version)) = self.read(request.run_id).await? else {
@@ -148,33 +317,7 @@ where
         })
     }
 
-    pub(super) async fn mark_cancel_requested_from_snapshot(
-        &self,
-        snapshot: &TurnPersistenceSnapshot,
-        run_id: TurnRunId,
-    ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
-        self.write_status_from_snapshot(snapshot, run_id, None, TurnStatus::CancelRequested)
-            .await
-    }
-
-    pub(super) async fn retire_runner_lease_from_snapshot(
-        &self,
-        snapshot: &TurnPersistenceSnapshot,
-        run_id: TurnRunId,
-        runner_id: crate::TurnRunnerId,
-        lease_token: crate::TurnLeaseToken,
-        retired_status: TurnStatus,
-    ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
-        self.write_status_from_snapshot(
-            snapshot,
-            run_id,
-            Some((runner_id, lease_token)),
-            retired_status,
-        )
-        .await
-    }
-
-    pub(super) async fn restore_if_current_status(
+    async fn restore_if_current_status_inner(
         &self,
         previous: RunnerLeaseRecord,
         current_status: TurnStatus,
@@ -203,15 +346,15 @@ where
         })
     }
 
-    pub(super) async fn cleanup_after_state(&self, result: &Result<TurnRunState, TurnError>) {
+    async fn cleanup_after_state_inner(&self, result: &Result<TurnRunState, TurnError>) {
         if let Ok(state) = result
             && state.status.is_terminal()
         {
-            self.delete_best_effort(state.run_id).await;
+            self.delete_best_effort_inner(state.run_id).await;
         }
     }
 
-    pub(super) async fn delete_best_effort(&self, run_id: TurnRunId) {
+    async fn delete_best_effort_inner(&self, run_id: TurnRunId) {
         match self.delete(run_id).await {
             Ok(()) | Err(TurnError::ScopeNotFound) => {}
             Err(error) => {
