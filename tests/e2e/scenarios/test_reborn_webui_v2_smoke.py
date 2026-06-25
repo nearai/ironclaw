@@ -371,7 +371,6 @@ async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v
     await expect(composer).to_have_value("draft while the reply is still running")
 
     await composer.press("Enter")
-    await asyncio.sleep(0.25)
     await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
 
 
