@@ -62,6 +62,40 @@ impl RebornProfile {
             Self::MigrationDryRun => "migration-dry-run",
         }
     }
+
+    pub fn starts_hosted_single_tenant_listener(self) -> bool {
+        matches!(
+            self,
+            Self::HostedSingleTenant | Self::HostedSingleTenantVolume
+        )
+    }
+
+    pub fn uses_standalone_local_runtime_volume(self) -> bool {
+        matches!(
+            self,
+            Self::LocalDev | Self::LocalDevYolo | Self::HostedSingleTenantVolume
+        )
+    }
+
+    pub fn local_runtime_storage_subdir(self) -> &'static str {
+        match self {
+            Self::HostedSingleTenant => "hosted-single-tenant",
+            Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
+            Self::LocalDev | Self::LocalDevYolo | Self::Production | Self::MigrationDryRun => {
+                "local-dev"
+            }
+        }
+    }
+
+    pub fn supports_local_runtime_skill_management(self) -> bool {
+        matches!(
+            self,
+            Self::LocalDev
+                | Self::LocalDevYolo
+                | Self::HostedSingleTenant
+                | Self::HostedSingleTenantVolume
+        )
+    }
 }
 
 impl FromStr for RebornProfile {

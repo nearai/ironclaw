@@ -27,7 +27,8 @@ use ironclaw_product_workflow::{
     CodexLoginStart, FsMount, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectFsFile,
-    ProjectionCursor, RebornAddMemberRequest, RebornAttachmentRequest, RebornCancelRunResponse,
+    ProjectionCursor, RebornAddMemberRequest, RebornAttachmentRequest,
+    RebornAutomationMutationResponse, RebornCancelRunResponse,
     RebornConnectableChannelListResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
     RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
     RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
@@ -35,25 +36,26 @@ use ironclaw_product_workflow::{
     RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
     RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
     RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
-    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
-    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
-    RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
-    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
-    RebornProjectMemberInfo, RebornProjectResponse, RebornRemoveMemberRequest,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAttachmentCapabilities,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
+    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
+    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
+    RebornProjectResponse, RebornRemoveMemberRequest, RebornResolveGateResponse, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, SetActiveLlmRequest,
+    UpsertLlmProviderRequest, WebUiAttachmentCapabilities, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +63,11 @@ use crate::error::WebUiV2HttpError;
 use crate::router::{WebUiV2Capabilities, WebUiV2State};
 use crate::schema::WebChatV2EventFrame;
 use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
+
+const SETTINGS_TOOLS_AUTO_APPROVE_KEY: &str = "agent.auto_approve_tools";
+const SETTINGS_TOOL_CONFIG_PREFIX: &str = "tool.";
+const SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES: usize =
+    OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_TOOL_CONFIG_PREFIX.len();
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WebUiV2SessionResponse {
@@ -935,6 +942,45 @@ pub async fn list_automations(
     Ok(Json(response))
 }
 
+/// `POST /api/webchat/v2/automations/:automation_id/pause`
+pub async fn pause_automation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(automation_id): Path<String>,
+) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .pause_automation(caller, automation_id)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/automations/:automation_id/resume`
+pub async fn resume_automation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(automation_id): Path<String>,
+) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .resume_automation(caller, automation_id)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `DELETE /api/webchat/v2/automations/:automation_id`
+pub async fn delete_automation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(automation_id): Path<String>,
+) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .delete_automation(caller, automation_id)
+        .await?;
+    Ok(Json(response))
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct ListAutomationsQuery {
     /// Optional maximum number of schedule automations to return.
@@ -1281,6 +1327,117 @@ pub async fn run_operator_setup(
     Ok(Json(response))
 }
 
+/// `GET /api/webchat/v2/settings/tools`
+pub async fn list_settings_tools(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
+    let mut response = state.services().list_operator_config(caller).await?;
+    response.entries.retain(|entry| {
+        entry.key == SETTINGS_TOOLS_AUTO_APPROVE_KEY
+            || entry.key.starts_with(SETTINGS_TOOL_CONFIG_PREFIX)
+    });
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsToolsAutoApproveRequest {
+    pub enabled: bool,
+}
+
+/// `POST /api/webchat/v2/settings/tools`
+pub async fn set_settings_tools_auto_approve(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Json(body): Json<SettingsToolsAutoApproveRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_operator_config_key(
+            caller,
+            SETTINGS_TOOLS_AUTO_APPROVE_KEY.to_string(),
+            RebornOperatorConfigSetRequest {
+                value: serde_json::json!(body.enabled),
+            },
+        )
+        .await?;
+    validate_settings_tool_config_response(&response)?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsToolPermissionPath {
+    pub capability_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsToolPermissionState {
+    Default,
+    AlwaysAllow,
+    AskEachTime,
+    Disabled,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsToolPermissionRequest {
+    pub state: SettingsToolPermissionState,
+}
+
+/// `POST /api/webchat/v2/settings/tools/{capability_id}`
+pub async fn set_settings_tool_permission(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Path(SettingsToolPermissionPath { capability_id }): Path<SettingsToolPermissionPath>,
+    Json(body): Json<SettingsToolPermissionRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    validate_settings_tool_capability_id(&capability_id)?;
+    let key =
+        validate_operator_config_key(format!("{SETTINGS_TOOL_CONFIG_PREFIX}{capability_id}"))?;
+    let response = state
+        .services()
+        .set_operator_config_key(
+            caller,
+            key,
+            RebornOperatorConfigSetRequest {
+                value: serde_json::json!({ "state": body.state }),
+            },
+        )
+        .await?;
+    validate_settings_tool_config_response(&response)?;
+    Ok(Json(response))
+}
+
+fn validate_settings_tool_capability_id(capability_id: &str) -> Result<(), WebUiV2HttpError> {
+    if capability_id.len() > SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES {
+        return Err(RebornServicesError::from(WebUiInboundValidationError::new(
+            "capability_id",
+            WebUiInboundValidationCode::TooLong,
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_settings_tool_config_response(
+    response: &RebornOperatorConfigGetResponse,
+) -> Result<(), WebUiV2HttpError> {
+    if response.entry.key == SETTINGS_TOOLS_AUTO_APPROVE_KEY
+        || response.entry.key.starts_with(SETTINGS_TOOL_CONFIG_PREFIX)
+    {
+        return Ok(());
+    }
+
+    Err(RebornServicesError::from(WebUiInboundValidationError::new(
+        "key",
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+    .into())
+}
+
 /// `GET /api/webchat/v2/operator/config`
 pub async fn list_operator_config(
     State(state): State<WebUiV2State>,
@@ -1410,6 +1567,9 @@ pub async fn get_operator_status(
 }
 
 /// `GET /api/webchat/v2/operator/logs`
+///
+/// Operator-gated version of the logs projection. The non-operator
+/// projection lives at `GET /api/webchat/v2/logs`.
 pub async fn query_operator_logs(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
@@ -1418,6 +1578,35 @@ pub async fn query_operator_logs(
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let response = state.services().query_operator_logs(caller, query).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/logs`
+///
+/// Read-only caller-scoped logs projection for non-operator WebUI sessions.
+/// The operator-wide log surface remains `GET /api/webchat/v2/operator/logs`.
+pub async fn query_logs(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<RebornOperatorLogsQuery>,
+) -> Result<Json<RebornLogQueryResponse>, WebUiV2HttpError> {
+    // The public and operator HTTP query strings intentionally share fields;
+    // convert at the handler boundary so the facade can enforce public scope.
+    let request = RebornLogQueryRequest {
+        limit: query.limit,
+        cursor: query.cursor,
+        level: query.level,
+        target: query.target,
+        thread_id: query.thread_id,
+        run_id: query.run_id,
+        turn_id: query.turn_id,
+        tool_call_id: query.tool_call_id,
+        tool_name: query.tool_name,
+        source: query.source,
+        tail: query.tail,
+        follow: query.follow,
+    };
+    let response = state.services().query_logs(caller, request).await?;
     Ok(Json(response))
 }
 

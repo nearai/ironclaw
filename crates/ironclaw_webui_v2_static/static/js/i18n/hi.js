@@ -133,6 +133,7 @@ registerPack("hi", {
   "tool.tabParameters": "पैरामीटर्स",
   "tool.tabResult": "परिणाम",
   "tool.tabError": "Error",
+  "tool.tabDeclined": "अस्वीकृत",
   "tool.noDetail": "कोई अतिरिक्त विवरण नहीं।",
   "tool.runFile": "{n} फ़ाइल का पता लगाया",
   "tool.runFiles": "{n} फ़ाइलों का पता लगाया",
@@ -144,6 +145,7 @@ registerPack("hi", {
   "tool.runOthers": "{n} टूल",
   "tool.exitOk": "सफल हुआ",
   "tool.exitError": "विफल",
+  "tool.exitDeclined": "अस्वीकृत",
   "tool.exitRunning": "चल रहा है…",
   "tool.riskRead": "पढ़ता है",
   "tool.riskWrite": "फ़ाइलें लिखता है",
@@ -366,8 +368,6 @@ registerPack("hi", {
   "settings.field.maxToolIterationsDesc": "प्रति मोड़ टूल कॉल सीमा",
   "settings.field.planning": "योजना",
   "settings.field.planningDesc": "Execution से पहले multi-step planning सक्षम करें",
-  "settings.field.autoApproveTools": "ऑटो-अनुमोदन उपकरण",
-  "settings.field.autoApproveToolsDesc": "सभी tool calls के लिए approval skip करें",
   "settings.field.timezone": "समयक्षेत्र",
   "settings.field.timezoneDesc": "Scheduled work के लिए IANA timezone",
   "settings.field.sessionIdleTimeout": "सत्र निष्क्रिय समयबाह्य",
@@ -472,11 +472,18 @@ registerPack("hi", {
   "channels.slackAccessError": "Slack चैनल अद्यतन विफल रहा।",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "योग्य टूल हमेशा अनुमति दें",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "यह केवल “वैश्विक का पालन करें” पर सेट टूल पर लागू होता है। प्रति-टूल सेटिंग इस स्विच को ओवरराइड करती है; हार्ड-फ्लोर अनुमोदन गेट फिर भी पूछेंगे।",
   "tools.permissions": "टूल अनुमतियाँ",
   "tools.alwaysAllow": "हमेशा अनुमति दें",
   "tools.askEachTime": "हर बार पूछें",
   "tools.disabled": "अक्षम",
   "tools.default": "डिफ़ॉल्ट",
+  "tools.followDefault": "वैश्विक का पालन करें",
+  "tools.sourceDefault": "default permission",
+  "tools.sourceGlobal": "global setting",
+  "tools.sourceOverride": "per-tool override",
   "tools.saved": "सहेजा गया",
   "tools.permissionFor": "{name} के लिए अनुमति",
   "tools.filterPlaceholder": "फ़िल्टर उपकरण...",
@@ -511,6 +518,20 @@ registerPack("hi", {
   "skills.removed": "हटाया गया कौशल \"{name}\"",
   "skills.activatesOn": "सक्रिय होता है",
   "skills.imported": "आयातित",
+  "skills.defaultAutoActivationEnabled": "डिफ़ॉल्ट स्किल ऑटो-एक्टिवेशन चालू है",
+  "skills.defaultAutoActivationDisabled": "डिफ़ॉल्ट स्किल ऑटो-एक्टिवेशन बंद है",
+  "skills.defaultAutoActivationOnDesc":
+    "मिलते-जुलते अनुरोधों पर स्किल कीवर्ड से अपने-आप सक्रिय होती हैं। स्पष्ट /name आवश्यक करने के लिए बंद करें।",
+  "skills.defaultAutoActivationOffDesc":
+    "स्किल केवल तब चलती हैं जब आप /name लिखते हैं। कीवर्ड से ऑटो-एक्टिवेशन के लिए चालू करें।",
+  "skills.defaultAutoActivationOnButton": "डिफ़ॉल्ट: चालू",
+  "skills.defaultAutoActivationOffButton": "डिफ़ॉल्ट: बंद",
+  "skills.autoActivateOnTitle":
+    "ऑटो-एक्टिवेशन चालू — मिलते-जुलते अनुरोधों पर चलेगी। केवल /name करने के लिए क्लिक करें।",
+  "skills.autoActivateOffTitle":
+    "केवल स्पष्ट — सिर्फ़ /name लिखने पर चलेगी। ऑटो-एक्टिवेशन चालू करने के लिए क्लिक करें।",
+  "skills.autoActivateOnLabel": "ऑटो-एक्टिवेट: चालू",
+  "skills.autoActivateOffLabel": "ऑटो-एक्टिवेट: बंद",
 
   // Settings — users tab
   "users.title": "उपयोगकर्ता ({count})",

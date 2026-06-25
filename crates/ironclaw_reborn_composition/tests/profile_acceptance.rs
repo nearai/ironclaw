@@ -83,6 +83,46 @@ fn full_graph_profiles_match_production_strictness() {
 }
 
 #[test]
+fn profile_predicates_capture_hosted_volume_substrate_contract() {
+    assert!(!RebornCompositionProfile::Disabled.uses_local_runtime_substrate());
+    assert!(RebornCompositionProfile::LocalDev.uses_local_runtime_substrate());
+    assert!(RebornCompositionProfile::LocalDevYolo.uses_local_runtime_substrate());
+    assert!(RebornCompositionProfile::HostedSingleTenant.uses_local_runtime_substrate());
+    assert!(RebornCompositionProfile::HostedSingleTenantVolume.uses_local_runtime_substrate());
+    assert!(!RebornCompositionProfile::Production.uses_local_runtime_substrate());
+    assert!(!RebornCompositionProfile::MigrationDryRun.uses_local_runtime_substrate());
+
+    assert!(!RebornCompositionProfile::Disabled.uses_local_dev_storage_input());
+    assert!(RebornCompositionProfile::LocalDev.uses_local_dev_storage_input());
+    assert!(RebornCompositionProfile::LocalDevYolo.uses_local_dev_storage_input());
+    assert!(!RebornCompositionProfile::HostedSingleTenant.uses_local_dev_storage_input());
+    assert!(RebornCompositionProfile::HostedSingleTenantVolume.uses_local_dev_storage_input());
+    assert!(!RebornCompositionProfile::Production.uses_local_dev_storage_input());
+    assert!(!RebornCompositionProfile::MigrationDryRun.uses_local_dev_storage_input());
+
+    assert!(!RebornCompositionProfile::Disabled.uses_hosted_extension_installation_state());
+    assert!(!RebornCompositionProfile::LocalDev.uses_hosted_extension_installation_state());
+    assert!(!RebornCompositionProfile::LocalDevYolo.uses_hosted_extension_installation_state());
+    assert!(
+        RebornCompositionProfile::HostedSingleTenant.uses_hosted_extension_installation_state()
+    );
+    assert!(
+        RebornCompositionProfile::HostedSingleTenantVolume
+            .uses_hosted_extension_installation_state()
+    );
+    assert!(!RebornCompositionProfile::Production.uses_hosted_extension_installation_state());
+    assert!(!RebornCompositionProfile::MigrationDryRun.uses_hosted_extension_installation_state());
+
+    assert!(!RebornCompositionProfile::Disabled.starts_live_runtime());
+    assert!(RebornCompositionProfile::LocalDev.starts_live_runtime());
+    assert!(RebornCompositionProfile::LocalDevYolo.starts_live_runtime());
+    assert!(RebornCompositionProfile::HostedSingleTenant.starts_live_runtime());
+    assert!(RebornCompositionProfile::HostedSingleTenantVolume.starts_live_runtime());
+    assert!(RebornCompositionProfile::Production.starts_live_runtime());
+    assert!(!RebornCompositionProfile::MigrationDryRun.starts_live_runtime());
+}
+
+#[test]
 fn local_dev_yolo_runtime_policy_inherits_host_environment() {
     let policy = local_dev_yolo_runtime_policy(true).expect("policy resolves");
 
@@ -364,10 +404,6 @@ fn dev_only_profiles_are_visible_non_production_in_readiness() {
             RebornCompositionProfile::LocalDevYolo,
             RebornReadinessDiagnostic::local_dev_yolo(),
         ),
-        (
-            RebornCompositionProfile::HostedSingleTenantVolume,
-            RebornReadinessDiagnostic::hosted_single_tenant_volume(),
-        ),
     ] {
         assert_eq!(diagnostic.profile, profile);
         assert_eq!(
@@ -381,6 +417,26 @@ fn dev_only_profiles_are_visible_non_production_in_readiness() {
         assert_eq!(diagnostic.status, RebornReadinessDiagnosticStatus::Blocking);
         assert!(diagnostic.blocks_production);
     }
+}
+
+#[test]
+fn hosted_single_tenant_volume_is_visible_as_preview_readiness() {
+    let diagnostic = RebornReadinessDiagnostic::hosted_single_tenant_volume();
+
+    assert_eq!(
+        diagnostic.profile,
+        RebornCompositionProfile::HostedSingleTenantVolume
+    );
+    assert_eq!(
+        diagnostic.component,
+        RebornReadinessDiagnosticComponent::CompositionProfile
+    );
+    assert_eq!(
+        diagnostic.reason,
+        RebornReadinessDiagnosticReason::HostedSingleTenantVolumePreview
+    );
+    assert_eq!(diagnostic.status, RebornReadinessDiagnosticStatus::Warning);
+    assert!(diagnostic.blocks_production);
 }
 
 #[cfg(feature = "libsql")]
@@ -398,7 +454,10 @@ async fn hosted_single_tenant_volume_factory_readiness_includes_preview_diagnost
         services.readiness.profile,
         RebornCompositionProfile::HostedSingleTenantVolume
     );
-    assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
+    assert_eq!(
+        services.readiness.state,
+        RebornReadinessState::HostedSingleTenantVolumePreviewValidated
+    );
     assert_eq!(
         services.readiness.diagnostics,
         vec![RebornReadinessDiagnostic::hosted_single_tenant_volume()]

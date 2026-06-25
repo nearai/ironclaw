@@ -186,25 +186,28 @@ IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI=https://<railway-domain>/api/reborn/pr
 ## Slack
 
 Slack routes are compiled into the image, but they are disabled by the default
-config. To enable them, edit `$IRONCLAW_REBORN_HOME/config.toml` or mount a
-config file with:
+config. On Railway, prefer the env toggle so the seeded config can stay
+unchanged:
+
+```bash
+IRONCLAW_REBORN_SLACK_ENABLED=true
+```
+
+The env var overrides only the Slack route enablement gate. `true`/`1` enables
+Slack, while `false`/`0` forces Slack off for the deployment.
+
+You can also enable Slack by editing `$IRONCLAW_REBORN_HOME/config.toml` or
+mounting a config file with:
 
 ```toml
 [slack]
 enabled = true
-installation_id = "<installation-id>"
-team_id = "<slack-team-id>"
-api_app_id = "<slack-api-app-id>"
-signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
-bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
 ```
 
-Then set:
+Then configure Slack app ids, the bot token, signing secret, and channel
+mappings from WebUI channel setup after the container starts.
 
-```bash
-IRONCLAW_REBORN_SLACK_SIGNING_SECRET=<slack-signing-secret>
-IRONCLAW_REBORN_SLACK_BOT_TOKEN=<slack-bot-token>
-```
+Set the WebUI identity environment variables as usual.
 
-Do not store OAuth, Slack, or LLM secrets in `config.toml`; the parser treats
-secrets as env-only deployment material.
+Do not store OAuth, Slack, or LLM secrets in `config.toml`. Slack bot tokens
+and signing secrets are stored from WebUI channel setup.

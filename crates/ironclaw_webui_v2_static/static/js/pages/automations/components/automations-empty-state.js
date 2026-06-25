@@ -6,9 +6,9 @@ import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { cn } from "../../../utils/cn.js";
 
-// Example prompts shown in the empty state. The text is localized through
-// `t`, so this list only holds the i18n keys; non-English packs fall back to
-// the en.js copy automatically.
+// Example prompts shown in the empty state. This intentionally stays a tiny,
+// static list; rendering maps the i18n keys directly instead of introducing
+// extra derived data for three onboarding examples.
 const EXAMPLE_PROMPT_KEYS = [
   "automations.empty.example1",
   "automations.empty.example2",
@@ -26,10 +26,14 @@ function ExamplePrompt({ promptKey }) {
   React.useEffect(() => () => clearTimeout(timerRef.current), []);
 
   const onCopy = async () => {
+    const clipboard = typeof navigator === "undefined" ? null : navigator.clipboard;
+    if (!clipboard?.writeText) return;
+
     try {
-      await navigator.clipboard.writeText(text);
+      await clipboard.writeText(text);
       setCopied(true);
       clearTimeout(timerRef.current);
+      // Keep the success affordance visible long enough to notice, then reset.
       timerRef.current = setTimeout(() => setCopied(false), 1500);
     } catch (_) {
       // Clipboard can be blocked (insecure context / denied permission);

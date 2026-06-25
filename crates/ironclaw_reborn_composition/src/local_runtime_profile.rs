@@ -46,6 +46,11 @@ pub fn local_runtime_build_input_with_options(
     root: PathBuf,
     options: RebornLocalRuntimeProfileOptions,
 ) -> Result<RebornBuildInput, RebornLocalRuntimeProfileError> {
+    #[cfg(not(feature = "libsql"))]
+    if profile == RebornCompositionProfile::HostedSingleTenantVolume {
+        return Err(RebornLocalRuntimeProfileError::MissingLibsqlFeature);
+    }
+
     let policy = local_runtime_policy(profile, options)?;
     Ok(
         RebornBuildInput::local_dev_with_profile(profile, owner_id, root)
@@ -81,23 +86,11 @@ pub fn hosted_single_tenant_volume_build_input(
     owner_id: impl Into<String>,
     root: PathBuf,
 ) -> Result<RebornBuildInput, RebornLocalRuntimeProfileError> {
-    #[cfg(not(feature = "libsql"))]
-    {
-        let _ = owner_id;
-        let _ = root;
-        return Err(RebornLocalRuntimeProfileError::MissingLibsqlFeature);
-    }
-
-    #[cfg(feature = "libsql")]
-    {
-        let policy = hosted_single_tenant_volume_runtime_policy()?;
-        Ok(RebornBuildInput::local_dev_with_profile(
-            RebornCompositionProfile::HostedSingleTenantVolume,
-            owner_id,
-            root,
-        )
-        .with_runtime_policy(policy))
-    }
+    local_runtime_build_input(
+        RebornCompositionProfile::HostedSingleTenantVolume,
+        owner_id,
+        root,
+    )
 }
 
 /// Resolved policy for trusted single-user local development with inherited
@@ -129,9 +122,12 @@ fn local_runtime_policy(
     let runtime_profile = match profile {
         RebornCompositionProfile::LocalDev => RuntimeProfile::LocalDev,
         RebornCompositionProfile::LocalDevYolo => RuntimeProfile::LocalYolo,
+        RebornCompositionProfile::HostedSingleTenantVolume => {
+            return hosted_single_tenant_volume_runtime_policy()
+                .map_err(RebornLocalRuntimeProfileError::Policy);
+        }
         RebornCompositionProfile::Disabled
         | RebornCompositionProfile::HostedSingleTenant
-        | RebornCompositionProfile::HostedSingleTenantVolume
         | RebornCompositionProfile::Production
         | RebornCompositionProfile::MigrationDryRun => {
             return Err(RebornLocalRuntimeProfileError::UnsupportedProfile { profile });

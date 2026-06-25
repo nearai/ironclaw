@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, hash_map::Entry},
     fmt,
     str::FromStr,
     sync::{
@@ -16,18 +16,18 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, GateRef, IdempotencyKey, LoopGateRef, LoopResultRef,
-    ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason, SourceBindingRef,
-    SubmitChildRunRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnRunId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore,
+    AcceptedMessageRef, CancelRunRequest, CapabilityActivityId, GateRef, IdempotencyKey,
+    LoopGateRef, LoopResultRef, ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason,
+    SourceBindingRef, SubmitChildRunRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
+    TurnError, TurnErrorCategory, TurnRunId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
         CapabilityInvocation, CapabilityOutcome, ConcurrencyHint, LoopCapabilityPort,
         LoopRunContext, LoopSafeSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, sanitize_model_visible_text,
+        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -388,7 +388,7 @@ pub struct SubagentSpawnCapabilityPort {
     limits: SubagentSpawnLimits,
     deps: Arc<SubagentSpawnDeps>,
     parameters_schema: Arc<serde_json::Value>,
-    auth_input_refs: Mutex<HashSet<CapabilityInputRef>>,
+    spawn_authorizations: Mutex<HashMap<CapabilityInputRef, CapabilityActivityId>>,
     spawned_this_turn: AtomicU32,
 }
 
@@ -500,7 +500,7 @@ impl SubagentSpawnCapabilityPort {
             limits,
             deps,
             parameters_schema,
-            auth_input_refs: Mutex::new(HashSet::new()),
+            spawn_authorizations: Mutex::new(HashMap::new()),
             spawned_this_turn: AtomicU32::new(0),
         }
     }
@@ -526,7 +526,7 @@ impl SubagentSpawnCapabilityPort {
             limits,
             deps,
             parameters_schema,
-            auth_input_refs: Mutex::new(HashSet::new()),
+            spawn_authorizations: Mutex::new(HashMap::new()),
             spawned_this_turn: AtomicU32::new(0),
         }
     }
@@ -573,6 +573,74 @@ impl SubagentSpawnCapabilityPort {
             })?
             .try_into()
             .map(|_: SpawnSubagentArgs| ())
+    }
+
+    async fn register_spawn_provider_tool_call(
+        &self,
+        tool_call: ProviderToolCall,
+        activity_id: Option<CapabilityActivityId>,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let surface = self
+            .inner
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await?;
+        self.validate_spawn_provider_tool_call(&tool_call)?;
+        let provider_turn_id = tool_call.turn_id.clone().ok_or_else(|| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call is missing a provider turn id",
+            )
+        })?;
+        let input_ref = self
+            .deps
+            .spawn_input_codec
+            .register_provider_tool_call_input(&self.run_context, &tool_call)
+            .await?;
+        let activity_id = {
+            let mut spawn_authorizations = self.spawn_authorizations.lock().map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    "subagent spawn authorization store is unavailable",
+                )
+            })?;
+            match spawn_authorizations.entry(input_ref.clone()) {
+                Entry::Occupied(entry) => {
+                    let registered_activity_id = *entry.get();
+                    if let Some(activity_id) = activity_id
+                        && registered_activity_id != activity_id
+                    {
+                        return Err(AgentLoopHostError::new(
+                            AgentLoopHostErrorKind::InvalidInvocation,
+                            "provider tool-call activity identity changed",
+                        ));
+                    }
+                    registered_activity_id
+                }
+                Entry::Vacant(entry) => {
+                    let activity_id = activity_id.unwrap_or_default();
+                    entry.insert(activity_id);
+                    activity_id
+                }
+            }
+        };
+        Ok(CapabilityCallCandidate {
+            activity_id,
+            surface_version: surface.version,
+            capability_id: self.spawn_id.clone(),
+            effective_capability_ids: vec![self.spawn_id.clone()],
+            input_ref,
+            provider_replay: Some(ProviderToolCallReplay {
+                provider_id: tool_call.provider_id,
+                provider_model_id: tool_call.provider_model_id,
+                provider_turn_id,
+                provider_call_id: tool_call.id,
+                provider_tool_name: tool_call.name,
+                arguments: tool_call.arguments,
+                response_reasoning: tool_call.response_reasoning,
+                reasoning: tool_call.reasoning,
+                signature: tool_call.signature,
+            }),
+        })
     }
 
     fn try_reserve_spawn_slot(&self) -> bool {
@@ -719,36 +787,56 @@ impl SubagentSpawnCapabilityPort {
         &self,
         invocation: &CapabilityInvocation,
     ) -> Result<Option<CapabilityOutcome>, AgentLoopHostError> {
-        let is_registered = {
-            let auth_input_refs = self.auth_input_refs.lock().map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    "subagent spawn authorization input store is unavailable",
-                )
-            })?;
-            auth_input_refs.contains(&invocation.input_ref)
-        };
-        if !is_registered {
+        let mut spawn_authorizations = self.spawn_authorizations.lock().map_err(|_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "subagent spawn authorization store is unavailable",
+            )
+        })?;
+        let Some(registered_activity_id) = spawn_authorizations.get(&invocation.input_ref).copied()
+        else {
             return Ok(Some(spawn_rejected("spawn_requires_provider_registration")));
+        };
+        if registered_activity_id != invocation.activity_id {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "registered provider tool-call activity identity does not match the requested activity",
+            ));
         }
-        self.remove_auth_input_ref(&invocation.input_ref)?;
+        spawn_authorizations.remove(&invocation.input_ref);
         Ok(None)
     }
 
-    fn remove_auth_input_ref(
+    #[cfg(test)]
+    fn register_test_spawn_authorization(
+        &self,
+        input_ref: CapabilityInputRef,
+        activity_id: CapabilityActivityId,
+    ) {
+        self.spawn_authorizations
+            .lock()
+            .expect("spawn authorization lock")
+            .insert(input_ref, activity_id);
+    }
+
+    #[cfg(test)]
+    fn test_spawn_authorization(
         &self,
         input_ref: &CapabilityInputRef,
-    ) -> Result<(), AgentLoopHostError> {
-        self.auth_input_refs
+    ) -> Option<CapabilityActivityId> {
+        self.spawn_authorizations
             .lock()
-            .map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    "subagent spawn authorization input store is unavailable",
-                )
-            })?
-            .remove(input_ref);
-        Ok(())
+            .expect("spawn authorization lock")
+            .get(input_ref)
+            .copied()
+    }
+
+    #[cfg(test)]
+    fn test_spawn_authorization_contains(&self, input_ref: &CapabilityInputRef) -> bool {
+        self.spawn_authorizations
+            .lock()
+            .expect("spawn authorization lock")
+            .contains_key(input_ref)
     }
 
     async fn finish_spawn(
@@ -985,54 +1073,23 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let RegisterProviderToolCallRequest {
+            tool_call,
+            activity_id,
+        } = request;
         if self.is_spawn_provider_tool_name(&tool_call.name) {
-            let surface = self
-                .inner
-                .visible_capabilities(VisibleCapabilityRequest)
-                .await?;
-            self.validate_spawn_provider_tool_call(&tool_call)?;
-            let provider_turn_id = tool_call.turn_id.clone().ok_or_else(|| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "provider tool call is missing a provider turn id",
-                )
-            })?;
-            let input_ref = self
-                .deps
-                .spawn_input_codec
-                .register_provider_tool_call_input(&self.run_context, &tool_call)
-                .await?;
-            self.auth_input_refs
-                .lock()
-                .map_err(|_| {
-                    AgentLoopHostError::new(
-                        AgentLoopHostErrorKind::Unavailable,
-                        "subagent spawn authorization input store is unavailable",
-                    )
-                })?
-                .insert(input_ref.clone());
-            return Ok(CapabilityCallCandidate {
-                surface_version: surface.version,
-                capability_id: self.spawn_id.clone(),
-                effective_capability_ids: vec![self.spawn_id.clone()],
-                input_ref,
-                provider_replay: Some(ProviderToolCallReplay {
-                    provider_id: tool_call.provider_id,
-                    provider_model_id: tool_call.provider_model_id,
-                    provider_turn_id,
-                    provider_call_id: tool_call.id,
-                    provider_tool_name: tool_call.name,
-                    arguments: tool_call.arguments,
-                    response_reasoning: tool_call.response_reasoning,
-                    reasoning: tool_call.reasoning,
-                    signature: tool_call.signature,
-                }),
-            });
+            return self
+                .register_spawn_provider_tool_call(tool_call, activity_id)
+                .await;
         }
-        let inner_candidate = self.inner.register_provider_tool_call(tool_call).await?;
-        Ok(inner_candidate)
+        self.inner
+            .register_provider_tool_call(RegisterProviderToolCallRequest {
+                tool_call,
+                activity_id,
+            })
+            .await
     }
 
     async fn visible_capabilities(

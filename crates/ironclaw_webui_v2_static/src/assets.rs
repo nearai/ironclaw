@@ -273,11 +273,15 @@ mod tests {
         assert!(picker.contains("listSlackAllowedChannels"));
         assert!(picker.contains("saveSlackAllowedChannels(channels)"));
 
+        let setup_panel = asset_text("js/components/slack-setup-panel.js");
+        assert!(setup_panel.contains("SlackChannelPicker"));
+        assert!(setup_panel.contains("<${SlackChannelPicker} action=${action} />"));
+
         let channels_tab = asset_text("js/pages/extensions/components/channels-tab.js");
-        assert!(channels_tab.contains("showLegacySlackConnectActions"));
+        assert!(channels_tab.contains("showBuiltinSlackConnectActions"));
         assert!(channels_tab.contains("admin_managed_channels"));
         assert!(channels_tab.contains("inbound_proof_code"));
-        assert!(channels_tab.contains("SlackChannelPicker"));
+        assert!(channels_tab.contains("SlackAdminManagedSection"));
         assert!(channels_tab.contains("SlackPairingSection"));
         assert!(channels_tab.contains("findSlackConnectActions"));
         assert!(channels_tab.contains("slackConnectActions"));
@@ -301,7 +305,13 @@ mod tests {
 
         let api = asset_text("js/lib/api.js");
         assert!(api.contains("listAutomations"));
+        assert!(api.contains("pauseAutomation"));
+        assert!(api.contains("resumeAutomation"));
+        assert!(api.contains("deleteAutomation"));
         assert!(api.contains("/automations"));
+        assert!(api.contains("/pause"));
+        assert!(api.contains("/resume"));
+        assert!(api.contains(r#"method: "DELETE""#));
         assert!(api.contains("getOutboundPreferences"));
         assert!(api.contains("setOutboundPreferences"));
         assert!(api.contains("/outbound/preferences"));
@@ -312,6 +322,52 @@ mod tests {
         assert!(page.contains("AutomationDeliveryDefaultsPanel"));
         assert!(page.contains("useOutboundDeliveryDefaults"));
         assert!(page.contains("AutomationsList"));
+
+        let automations_hook = asset_text("js/pages/automations/hooks/useAutomations.js");
+        assert!(automations_hook.contains("AUTOMATIONS_BASE_REFETCH_MS"));
+        assert!(automations_hook.contains("nextAutomationsRefetchDelay"));
+        assert!(automations_hook.contains("query.refetch()"));
+
+        let list = asset_text("js/pages/automations/components/automations-list.js");
+        assert!(list.contains("primary_status_label"));
+        assert!(list.contains("primary_status_tone"));
+
+        let detail_panel = asset_text("js/pages/automations/components/automation-detail-panel.js");
+        assert!(detail_panel.contains("onPauseAutomation"));
+        assert!(detail_panel.contains("onResumeAutomation"));
+        assert!(detail_panel.contains("onDeleteAutomation"));
+        assert!(detail_panel.contains("automation.state === \"active\""));
+        assert!(detail_panel.contains("automation.state === \"scheduled\""));
+        assert!(detail_panel.contains("primary_status_label"));
+        assert!(detail_panel.contains("primary_status_tone"));
+        assert!(detail_panel.contains("window.confirm"));
+
+        let app_bundle = asset_text("dist/app.js");
+        let app_bundle_contains_encoded_automation_route = |suffix: &str| {
+            app_bundle
+                .split("/automations/${encodeURIComponent(")
+                .any(|tail| tail.contains(&format!(")}}/{suffix}")))
+        };
+        assert!(
+            app_bundle_contains_encoded_automation_route("pause"),
+            "served WebUI bundle must include the automation pause endpoint; run frontend build after editing static/js/**"
+        );
+        assert!(
+            app_bundle_contains_encoded_automation_route("resume"),
+            "served WebUI bundle must include the automation resume endpoint; run frontend build after editing static/js/**"
+        );
+        let app_bundle_contains_encoded_automation_delete = app_bundle
+            .split("/automations/${encodeURIComponent(")
+            .any(|tail| {
+                let near = tail.chars().take(220).collect::<String>();
+                near.contains("method:\"DELETE\"")
+                    && !near.contains("/pause")
+                    && !near.contains("/resume")
+            });
+        assert!(
+            app_bundle_contains_encoded_automation_delete,
+            "served WebUI bundle must include the automation delete endpoint; run frontend build after editing static/js/**"
+        );
 
         let defaults_panel =
             asset_text("js/pages/automations/components/automation-delivery-defaults-panel.js");
@@ -344,6 +400,46 @@ mod tests {
 
         assert!(sidebar_nav.contains("<span className=\"text-[13px] font-medium\""));
         assert!(sidebar_nav.contains("t(\"chat.newThread\")"));
+    }
+
+    #[test]
+    fn desktop_sidebar_toggle_assets_are_wired() {
+        let header = asset_text("js/components/page-header.js");
+        assert!(header.contains("type=\"button\""));
+        assert!(header.contains("aria-label=\"Toggle sidebar\""));
+        assert!(header.contains("aria-controls=\"gateway-sidebar\""));
+        assert!(header.contains("aria-expanded=${sidebarOpen ? \"true\" : \"false\"}"));
+        assert!(!header.contains("md:hidden"));
+
+        let sidebar = asset_text("js/components/sidebar.js");
+        assert!(sidebar.contains("id=${id}"));
+
+        let sidebar_state = asset_text("js/lib/sidebar-state.js");
+        assert!(sidebar_state.contains("ironclaw:v2-sidebar-open"));
+        assert!(sidebar_state.contains("export function readDesktopSidebarOpen"));
+        assert!(sidebar_state.contains("export function writeDesktopSidebarOpen"));
+        assert!(sidebar_state.contains("matchMedia?.(\"(min-width: 768px)\")"));
+        assert!(sidebar_state.contains("export function currentSidebarOpen"));
+
+        let hook = asset_text("js/hooks/useSidebar.js");
+        assert!(hook.contains("from \"../lib/sidebar-state.js\""));
+        assert!(hook.contains("desktopOpen: readDesktopSidebarOpen()"));
+        assert!(hook.contains("React.useState(() =>"));
+        assert!(hook.contains("isDesktopSidebarViewport()"));
+        assert!(hook.contains("setIsDesktopViewport(query.matches)"));
+        assert!(hook.contains("toggleSidebarState(current, isDesktopViewport)"));
+        assert!(hook.contains("currentOpen: currentSidebarOpen(state, isDesktopViewport)"));
+
+        let layout = asset_text("js/layout/gateway-layout.js");
+        assert!(layout.contains("${sidebar.mobileOpen &&"));
+        assert!(layout.contains("sidebar.mobileOpen ? \"flex\" : \"hidden\""));
+        assert!(layout.contains("sidebar.desktopOpen ? \"md:flex\" : \"md:hidden\""));
+        assert!(layout.contains("sidebarOpen=${sidebar.currentOpen}"));
+
+        let bundle = asset_text("dist/app.js");
+        assert!(bundle.contains("ironclaw:v2-sidebar-open"));
+        assert!(bundle.contains("desktopOpen"));
+        assert!(bundle.contains("mobileOpen"));
     }
 
     #[test]

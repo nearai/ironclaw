@@ -3,35 +3,36 @@
 ## Start Here
 
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
-- Read `Cargo.toml` for actual dependencies and feature shape.
-- Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/memory.md`
-- `docs/reborn/contracts/storage-placement.md`
-- `docs/reborn/contracts/kernel-boundary.md`
+- Read `Cargo.toml` for actual dependencies (the only internal IronClaw crate
+  dependency should be `ironclaw_host_api`; neutral third-party crates such as
+  `serde` / `serde_json` / `async-trait` / `chrono_tz` are fine).
 
 ## What This Crate Owns
 
-- The memory-document system over host-resolved scope, currently:
-- Document repositories + backend plugin contracts: `MemoryDocumentRepository` with `FilesystemMemoryDocumentRepository`/`InMemoryMemoryDocumentRepository`, `MemoryBackend`/`RepositoryMemoryBackend`/`MemoryBackendCapabilities` (`repo`, `backend`).
-- `/memory` virtual path grammar and scope: `MemoryDocumentPath`, `MemoryDocumentScope` (`path`); document metadata/options `DocumentMetadata`, `HygieneMetadata`, `MemoryWriteOptions`, `CONFIG_FILE_NAME` (`metadata`) and internal schema validation (`schema`).
-- Chunking + content hashing (`ChunkConfig`, `chunk_document`, `content_sha256`), embedding provider seam (`EmbeddingProvider`), and the indexer hooks `MemoryDocumentIndexer`/`ChunkingMemoryDocumentIndexer`/`MemoryDocumentIndexRepository` (`chunking`, `embedding`, `indexer`).
-- Hybrid search (FTS + vector via RRF fusion): `MemorySearchRequest`, `MemorySearchResult`, `FusionStrategy` (`search`).
-- The memory-document filesystem adapter `MemoryDocumentFilesystem`/`MemoryBackendFilesystemAdapter` (`filesystem`), the significant-event sink (`MemorySignificantEvent*`, `events`), and the prompt-write safety policy `PromptWriteSafetyPolicy` + protected-path/decision/event types (`safety`).
-- Crate-local public API, tests, and fixtures needed to prove that ownership.
+- The provider-neutral `MemoryService` trait and its operation request/response
+  DTOs (`service`).
+- Memory document value types and the `/memory` path grammar: `MemoryDocumentScope`,
+  `MemoryDocumentPath`, `MemoryContext` (`path`, `context`).
+- Document metadata vocabulary (`metadata`) and content hashing helpers (`hash`).
+- Prompt-write-safety contract vocabulary — operation, source, severity, reason
+  codes, policy trait, event sink (`safety`).
+- Memory significant-event / audit contracts (`events`).
 
 ## Do Not Move In Here
 
-- generic filesystem semantics, direct provider HTTP, raw secret handling, and loop prompt strategy.
-- Secrets, raw host paths, backend error details, and unredacted user content in errors, events, snapshots, logs, or docs.
+- Concrete providers, storage backends, filesystem adapters, chunking, search,
+  indexers, or the prompt-safety enforcement engine — those belong in provider
+  crates such as `ironclaw_memory_native`.
+- Any internal IronClaw crate dependency beyond `ironclaw_host_api` (neutral
+  third-party crates are fine).
 
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_memory`
 - Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
-- If production persistence behavior changes, add/maintain PostgreSQL and libSQL parity tests.
 
 ## Agent Notes
 
-- Keep edits inside this crate unless a contract explicitly requires a neighboring crate change.
-- Prefer caller-level tests when a helper gates dispatch, persistence, network, secrets, approvals, resources, events, or process side effects.
-- If the contract and code disagree, stop and treat the task as a contract-change request instead of silently changing ownership.
+- A provider crate depends on this crate, never the reverse.
+- Keep value-type constructors validating at the boundary; do not add unchecked
+  public constructors.

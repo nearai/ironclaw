@@ -133,6 +133,7 @@ registerPack("de", {
   "tool.tabParameters": "Parameter",
   "tool.tabResult": "Ergebnis",
   "tool.tabError": "Error",
+  "tool.tabDeclined": "Abgelehnt",
   "tool.noDetail": "Keine zusätzlichen Details.",
   "tool.runFile": "{n}-Datei durchsucht",
   "tool.runFiles": "{n}-Dateien durchsucht",
@@ -144,6 +145,7 @@ registerPack("de", {
   "tool.runOthers": "{n}-Tools",
   "tool.exitOk": "erfolgreich",
   "tool.exitError": "fehlgeschlagen",
+  "tool.exitDeclined": "abgelehnt",
   "tool.exitRunning": "läuft…",
   "tool.riskRead": "liest",
   "tool.riskWrite": "schreibt Dateien",
@@ -366,8 +368,6 @@ registerPack("de", {
   "settings.field.maxToolIterationsDesc": "Tool‑Call‑Limit pro Turn",
   "settings.field.planning": "Planung",
   "settings.field.planningDesc": "Mehrschritt‑Planung vor Ausführung aktivieren",
-  "settings.field.autoApproveTools": "Tools automatisch freigeben",
-  "settings.field.autoApproveToolsDesc": "Freigabe für alle Tool‑Calls überspringen",
   "settings.field.timezone": "Zeitzone",
   "settings.field.timezoneDesc": "IANA‑Zeitzone für geplante Arbeit",
   "settings.field.sessionIdleTimeout": "Session‑Idle‑Timeout",
@@ -472,11 +472,18 @@ registerPack("de", {
   "channels.slackAccessError": "Slack-Kanalaktualisierung fehlgeschlagen.",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "Geeignete Tools immer erlauben",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "Gilt nur für Tools, die auf „Global folgen“ gesetzt sind. Einstellungen pro Tool überschreiben diesen Schalter; harte Genehmigungsgrenzen fragen weiterhin nach.",
   "tools.permissions": "Tool‑Berechtigungen",
   "tools.alwaysAllow": "Immer erlauben",
   "tools.askEachTime": "Jedes Mal fragen",
   "tools.disabled": "Deaktiviert",
   "tools.default": "Standard",
+  "tools.followDefault": "Global folgen",
+  "tools.sourceDefault": "default permission",
+  "tools.sourceGlobal": "global setting",
+  "tools.sourceOverride": "per-tool override",
   "tools.saved": "gespeichert",
   "tools.permissionFor": "Berechtigung für {name}",
   "tools.filterPlaceholder": "Tools filtern…",
@@ -511,6 +518,20 @@ registerPack("de", {
   "skills.removed": "Skill „{name}“ entfernt",
   "skills.activatesOn": "Aktiviert am",
   "skills.imported": "importiert",
+  "skills.defaultAutoActivationEnabled": "Standardmäßige automatische Skill-Aktivierung aktiviert",
+  "skills.defaultAutoActivationDisabled": "Standardmäßige automatische Skill-Aktivierung deaktiviert",
+  "skills.defaultAutoActivationOnDesc":
+    "Skills werden bei passenden Anfragen per Schlüsselwort automatisch aktiviert. Deaktivieren, um ein explizites /name zu verlangen.",
+  "skills.defaultAutoActivationOffDesc":
+    "Skills laufen nur, wenn du /name eingibst. Aktivieren, um automatische Aktivierung per Schlüsselwort zu erlauben.",
+  "skills.defaultAutoActivationOnButton": "Standard: Ein",
+  "skills.defaultAutoActivationOffButton": "Standard: Aus",
+  "skills.autoActivateOnTitle":
+    "Automatische Aktivierung ein — läuft bei passenden Anfragen. Klicken, um nur explizites /name zu erlauben.",
+  "skills.autoActivateOffTitle":
+    "Nur explizit — läuft nur, wenn du /name eingibst. Klicken, um automatische Aktivierung zu aktivieren.",
+  "skills.autoActivateOnLabel": "Auto-Aktivierung: Ein",
+  "skills.autoActivateOffLabel": "Auto-Aktivierung: Aus",
 
   // Settings — users tab
   "users.title": "Benutzer ({count})",

@@ -5,11 +5,13 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::CapabilityId;
+use ironclaw_turns::CapabilityActivityId;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
     CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation,
     CapabilityOutcome, LoopCapabilityPort, ProviderToolCall, ProviderToolCallCapabilityIds,
-    ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+    VisibleCapabilitySurface,
 };
 
 use crate::{CapabilityAllowSet, capability_info};
@@ -32,6 +34,7 @@ pub struct CapabilitySurfaceVisibleFilter {
 struct StagedInvocationKey {
     surface_version: String,
     capability_id: String,
+    activity_id: CapabilityActivityId,
     input_ref: String,
 }
 
@@ -88,14 +91,15 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         validate_provider_tool_call_capability_scope(
-            self.inner.provider_tool_call_capability_ids(&tool_call)?,
+            self.inner
+                .provider_tool_call_capability_ids(&request.tool_call)?,
             |capability_id| self.permits(capability_id),
             "provider tool call is outside the model-visible capability view",
         )?;
-        let candidate = self.inner.register_provider_tool_call(tool_call).await?;
+        let candidate = self.inner.register_provider_tool_call(request).await?;
         validate_provider_tool_call_capability_scope(
             candidate_capability_ids(&candidate),
             |capability_id| self.permits(capability_id),
@@ -111,6 +115,127 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         let mut surface = self.inner.visible_capabilities(request).await?;
         apply_visible_filter_to_surface(&mut surface, &self.visible_capability_ids);
+        Ok(surface)
+    }
+
+    async fn invoke_capability(
+        &self,
+        request: CapabilityInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        if !invocation_capability_permitted(&self.staged_invocations, &request, |capability_id| {
+            self.permits(capability_id)
+        })? {
+            return Ok(model_view_denied_outcome());
+        }
+        self.inner.invoke_capability(request).await
+    }
+
+    async fn invoke_capability_batch(
+        &self,
+        request: CapabilityBatchInvocation,
+    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        invoke_filtered_batch(
+            &*self.inner,
+            request,
+            |invocation| {
+                invocation_capability_permitted(
+                    &self.staged_invocations,
+                    invocation,
+                    |capability_id| self.permits(capability_id),
+                )
+            },
+            model_view_denied_outcome,
+        )
+        .await
+    }
+}
+
+/// Removes a fixed set of capability ids from the model-facing surface and
+/// rejects any attempt to invoke them.
+///
+/// Unlike [`CapabilitySurfaceProfileFilter`] (which narrows to a profile
+/// allow-set and is a no-op for [`CapabilityAllowSet::All`]), this is an
+/// explicit deny list that takes effect regardless of the resolved allow-set.
+/// It is the canonical way to disable an individual capability as an explicit
+/// composition decision rather than a profile-scoped narrowing.
+#[derive(Clone)]
+pub struct CapabilitySurfaceDenyFilter {
+    inner: Arc<dyn LoopCapabilityPort>,
+    denied_capability_ids: Arc<HashSet<CapabilityId>>,
+    staged_invocations: Arc<Mutex<HashMap<StagedInvocationKey, Vec<CapabilityId>>>>,
+}
+
+impl CapabilitySurfaceDenyFilter {
+    pub fn new(
+        inner: Arc<dyn LoopCapabilityPort>,
+        denied_capability_ids: impl IntoIterator<Item = CapabilityId>,
+    ) -> Self {
+        Self {
+            inner,
+            denied_capability_ids: Arc::new(denied_capability_ids.into_iter().collect()),
+            staged_invocations: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn permits(&self, capability_id: &CapabilityId) -> bool {
+        !self.denied_capability_ids.contains(capability_id)
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPort for CapabilitySurfaceDenyFilter {
+    fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        let mut definitions = self.inner.tool_definitions()?;
+        definitions.retain(|definition| {
+            provider_capability_permitted(&definition.capability_id, |capability_id| {
+                self.permits(capability_id)
+            })
+        });
+        Ok(definitions)
+    }
+
+    fn validate_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        validate_provider_tool_call_capability_scope(
+            self.inner.provider_tool_call_capability_ids(tool_call)?,
+            |capability_id| self.permits(capability_id),
+            "provider tool call targets a disabled capability",
+        )?;
+        self.inner.validate_provider_tool_call(tool_call)
+    }
+
+    async fn register_provider_tool_call(
+        &self,
+        request: RegisterProviderToolCallRequest,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        validate_provider_tool_call_capability_scope(
+            self.inner
+                .provider_tool_call_capability_ids(&request.tool_call)?,
+            |capability_id| self.permits(capability_id),
+            "provider tool call targets a disabled capability",
+        )?;
+        let candidate = self.inner.register_provider_tool_call(request).await?;
+        validate_provider_tool_call_capability_scope(
+            candidate_capability_ids(&candidate),
+            |capability_id| self.permits(capability_id),
+            "provider tool call targets a disabled capability",
+        )?;
+        record_staged_invocation(&self.staged_invocations, &candidate)?;
+        Ok(candidate)
+    }
+
+    async fn visible_capabilities(
+        &self,
+        request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        let mut surface = self.inner.visible_capabilities(request).await?;
+        surface.descriptors.retain(|descriptor| {
+            provider_capability_permitted(&descriptor.capability_id, |capability_id| {
+                self.permits(capability_id)
+            })
+        });
         Ok(surface)
     }
 
@@ -177,16 +302,17 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         if !matches!(self.allow_set.as_ref(), CapabilityAllowSet::All) {
             validate_provider_tool_call_capability_scope(
-                self.inner.provider_tool_call_capability_ids(&tool_call)?,
+                self.inner
+                    .provider_tool_call_capability_ids(&request.tool_call)?,
                 |capability_id| self.allow_set.permits(capability_id),
                 "provider tool call is outside the run-profile surface",
             )?;
         }
-        let candidate = self.inner.register_provider_tool_call(tool_call).await?;
+        let candidate = self.inner.register_provider_tool_call(request).await?;
         validate_provider_tool_call_capability_scope(
             candidate_capability_ids(&candidate),
             |capability_id| self.allow_set.permits(capability_id),
@@ -415,6 +541,7 @@ impl StagedInvocationKey {
         Self {
             surface_version: candidate.surface_version.as_str().to_string(),
             capability_id: candidate.capability_id.as_str().to_string(),
+            activity_id: candidate.activity_id,
             input_ref: candidate.input_ref.as_str().to_string(),
         }
     }
@@ -423,6 +550,7 @@ impl StagedInvocationKey {
         Self {
             surface_version: invocation.surface_version.as_str().to_string(),
             capability_id: invocation.capability_id.as_str().to_string(),
+            activity_id: invocation.activity_id,
             input_ref: invocation.input_ref.as_str().to_string(),
         }
     }
@@ -555,13 +683,17 @@ mod tests {
 
         async fn register_provider_tool_call(
             &self,
-            request: ProviderToolCall,
+            request: RegisterProviderToolCallRequest,
         ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError>
         {
+            let RegisterProviderToolCallRequest {
+                tool_call,
+                activity_id,
+            } = request;
             self.provider_calls
                 .lock()
                 .expect("provider call lock")
-                .push(request);
+                .push(tool_call);
             let capability_ids = self
                 .registered_candidate_capability_ids
                 .lock()
@@ -569,6 +701,7 @@ mod tests {
                 .clone()
                 .unwrap_or_else(|| provider_call_capability_ids(&["demo.allowed"]));
             Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
+                activity_id: activity_id.unwrap_or_default(),
                 surface_version: surface_version(),
                 capability_id: capability_ids.provider_capability_id,
                 input_ref: input_ref("input:provider"),
@@ -632,6 +765,7 @@ mod tests {
 
     fn invocation(capability: &str, input: &str) -> CapabilityInvocation {
         CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: capability_id(capability),
             input_ref: input_ref(input),
@@ -896,7 +1030,9 @@ mod tests {
         );
 
         let error = filter
-            .register_provider_tool_call(provider_call("demo__denied"))
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
+                "demo__denied",
+            )))
             .await
             .expect_err("denied provider call should fail before staging");
 
@@ -937,7 +1073,9 @@ mod tests {
         );
 
         let error = filter
-            .register_provider_tool_call(capability_info_call("demo__denied"))
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                capability_info_call("demo__denied"),
+            ))
             .await
             .expect_err("denied capability_info target should fail before staging");
 
@@ -986,7 +1124,9 @@ mod tests {
         );
 
         let error = filter
-            .register_provider_tool_call(capability_info_call("demo__allowed"))
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                capability_info_call("demo__allowed"),
+            ))
             .await
             .expect_err("changed capability_info target should fail after staging");
 
@@ -1059,12 +1199,15 @@ mod tests {
             )])),
         );
         let candidate = filter
-            .register_provider_tool_call(capability_info_call("demo__allowed"))
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                capability_info_call("demo__allowed"),
+            ))
             .await
             .expect("allowed capability_info target should stage");
 
         filter
             .invoke_capability(CapabilityInvocation {
+                activity_id: candidate.activity_id,
                 surface_version: candidate.surface_version,
                 capability_id: candidate.capability_id,
                 input_ref: candidate.input_ref,
@@ -1075,6 +1218,67 @@ mod tests {
             .expect("staged capability_info invocation should pass");
 
         assert_eq!(inner.invocations.lock().expect("invocation lock").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn capability_info_invocation_rejects_mismatched_activity_id() {
+        let inner = Arc::new(SpyPort::default());
+        *inner
+            .tool_definitions
+            .lock()
+            .expect("tool definitions lock") = vec![
+            provider_definition(capability_info::CAPABILITY_ID, capability_info::TOOL_NAME),
+            provider_definition("demo.allowed", "demo__allowed"),
+        ];
+        inner
+            .provider_call_capability_ids
+            .lock()
+            .expect("provider call capability ids lock")
+            .insert(
+                capability_info::TOOL_NAME.to_string(),
+                provider_call_capability_ids(&[capability_info::CAPABILITY_ID, "demo.allowed"]),
+            );
+        *inner
+            .registered_candidate_capability_ids
+            .lock()
+            .expect("registered candidate capability ids lock") =
+            Some(provider_call_capability_ids(&[
+                capability_info::CAPABILITY_ID,
+                "demo.allowed",
+            ]));
+        let filter = CapabilitySurfaceProfileFilter::new(
+            inner.clone(),
+            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+                "demo.allowed",
+            )])),
+        );
+        let candidate = filter
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                capability_info_call("demo__allowed"),
+            ))
+            .await
+            .expect("allowed capability_info target should stage");
+
+        let outcome = filter
+            .invoke_capability(CapabilityInvocation {
+                activity_id: CapabilityActivityId::new(),
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("mismatched staged capability_info invocation should be denied");
+
+        assert_eq!(denied_reason(&outcome), Some("surface_profile_denied"));
+        assert!(
+            inner
+                .invocations
+                .lock()
+                .expect("invocation lock")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1110,13 +1314,16 @@ mod tests {
         let filter =
             CapabilitySurfaceVisibleFilter::new(inner.clone(), [capability_id("demo.allowed")]);
         let candidate = filter
-            .register_provider_tool_call(capability_info_call("demo__allowed"))
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                capability_info_call("demo__allowed"),
+            ))
             .await
             .expect("allowed capability_info target should stage");
 
         filter
             .invoke_capability_batch(CapabilityBatchInvocation {
                 invocations: vec![CapabilityInvocation {
+                    activity_id: candidate.activity_id,
                     surface_version: candidate.surface_version,
                     capability_id: candidate.capability_id,
                     input_ref: candidate.input_ref,
@@ -1196,7 +1403,7 @@ mod tests {
         let mut call = capability_info_call("demo.denied");
         call.arguments["detail"] = serde_json::json!("schema");
         let error = filter
-            .register_provider_tool_call(call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
             .await
             .expect_err("denied capability_info target should fail before staging");
 
@@ -1383,5 +1590,143 @@ mod tests {
             .expect("surface");
 
         assert_eq!(surface.version.as_str(), "surface-v1");
+    }
+
+    // ── CapabilitySurfaceDenyFilter tests ────────────────────────────────────
+
+    #[test]
+    fn deny_filter_strips_denied_tool_definitions() {
+        let inner = Arc::new(SpyPort::default());
+        *inner
+            .tool_definitions
+            .lock()
+            .expect("tool definitions lock") = vec![
+            provider_definition("builtin.spawn_subagent", "builtin__spawn_subagent"),
+            provider_definition("builtin.echo", "builtin__echo"),
+        ];
+        let filter =
+            CapabilitySurfaceDenyFilter::new(inner, [capability_id("builtin.spawn_subagent")]);
+
+        let definitions = filter.tool_definitions().expect("tool definitions");
+
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|definition| (definition.capability_id.as_str(), definition.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("builtin.echo", "builtin__echo")]
+        );
+    }
+
+    #[tokio::test]
+    async fn deny_filter_strips_denied_visible_descriptors() {
+        let inner = Arc::new(SpyPort::default());
+        *inner.surface.lock().expect("surface lock") = Some(VisibleCapabilitySurface {
+            version: surface_version(),
+            descriptors: vec![
+                descriptor("builtin.spawn_subagent"),
+                descriptor("builtin.echo"),
+            ],
+        });
+        let filter =
+            CapabilitySurfaceDenyFilter::new(inner, [capability_id("builtin.spawn_subagent")]);
+
+        let surface = filter
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("surface");
+
+        assert_eq!(surface.version, surface_version());
+        assert_eq!(
+            surface
+                .descriptors
+                .iter()
+                .map(|descriptor| descriptor.capability_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["builtin.echo"]
+        );
+    }
+
+    #[tokio::test]
+    async fn deny_filter_rejects_provider_tool_call_for_denied_capability() {
+        let inner = Arc::new(SpyPort::default());
+        *inner
+            .tool_definitions
+            .lock()
+            .expect("tool definitions lock") = vec![
+            provider_definition("builtin.spawn_subagent", "builtin__spawn_subagent"),
+            provider_definition("builtin.echo", "builtin__echo"),
+        ];
+        let filter = CapabilitySurfaceDenyFilter::new(
+            inner.clone(),
+            [capability_id("builtin.spawn_subagent")],
+        );
+
+        let error = filter
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
+                "builtin__spawn_subagent",
+            )))
+            .await
+            .expect_err("denied provider call should fail before staging");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(
+            inner
+                .provider_calls
+                .lock()
+                .expect("provider calls lock")
+                .is_empty()
+        );
+
+        // Allowed call succeeds and reaches the inner port.
+        filter
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
+                "builtin__echo",
+            )))
+            .await
+            .expect("allowed provider call should succeed");
+        assert_eq!(
+            inner
+                .provider_calls
+                .lock()
+                .expect("provider calls lock")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn deny_filter_denies_invoke_of_denied_capability() {
+        let inner = Arc::new(SpyPort::default());
+        let filter = CapabilitySurfaceDenyFilter::new(
+            inner.clone(),
+            [capability_id("builtin.spawn_subagent")],
+        );
+
+        let outcome = filter
+            .invoke_capability(invocation("builtin.spawn_subagent", "input:denied"))
+            .await
+            .expect("outcome");
+
+        assert_eq!(denied_reason(&outcome), Some("model_view_denied"));
+        assert!(
+            inner
+                .invocations
+                .lock()
+                .expect("invocation lock")
+                .is_empty()
+        );
+
+        // Allowed id passes through to inner.
+        let allowed_outcome = filter
+            .invoke_capability(invocation("builtin.echo", "input:allowed"))
+            .await
+            .expect("outcome");
+
+        assert!(
+            matches!(allowed_outcome, CapabilityOutcome::Completed(_)),
+            "allowed capability should complete"
+        );
+        assert_eq!(inner.invocations.lock().expect("invocation lock").len(), 1);
     }
 }

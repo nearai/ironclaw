@@ -35,6 +35,11 @@
       "maxLength": 65536,
       "description": "Issue body."
     },
+    "milestone": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional milestone number to associate with the issue."
+    },
     "labels": {
       "type": "array",
       "maxItems": 100,
@@ -43,6 +48,16 @@
         "minLength": 1,
         "maxLength": 100
       }
+    },
+    "assignees": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      },
+      "description": "GitHub logins to assign to the new issue."
     }
   },
   "required": [

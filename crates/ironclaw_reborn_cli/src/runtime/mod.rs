@@ -1,5 +1,7 @@
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+#[cfg(feature = "webui-v2-beta")]
+use std::sync::Arc;
 use std::time::Duration;
 use std::{future::Future, thread};
 
@@ -13,13 +15,13 @@ use ironclaw_reborn_composition::{
     CredentialRefreshSettings, DEFAULT_TURN_RUNNER_WORKER_COUNT, OAuthClientConfig,
     OperatorLogLayer, PollSettings, RebornBuildInput, RebornCompositionProfile,
     RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
-    TurnRunnerSettings, build_reborn_runtime, hosted_single_tenant_volume_build_input,
-    local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
+    TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
+    nearai_mcp_bootstrap_config_from_env,
 };
 #[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
-    open_local_trigger_access_store,
+    LocalTriggerAccessStore, local_trigger_access_fire_checker, open_local_trigger_access_store,
 };
 use ironclaw_reborn_config::{
     REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,
@@ -240,9 +242,9 @@ async fn with_run_local_trigger_fire_access_checker(
         let profile = effective_profile(config, config_file.as_ref())?;
         let user_store_path =
             local_runtime_storage_root(config, profile).join("reborn-local-dev.db");
-        let access_store = open_local_trigger_access_store(&user_store_path)
-            .await
-            .context("failed to initialize local trigger-fire access store for `run`")?;
+        let access_store =
+            open_trigger_access_store_for_profile(&runtime_input, profile, &user_store_path)
+                .await?;
         let user_ids = [user_id];
         access_store
             .reconcile_local_access(LocalTriggerAccessReconciliation {
@@ -256,7 +258,47 @@ async fn with_run_local_trigger_fire_access_checker(
             .await
             .context("failed to reconcile local trigger-fire access for `run`")?;
 
-        Ok(runtime_input.with_trigger_fire_access_checker(access_store))
+        Ok(runtime_input
+            .with_trigger_fire_access_checker(local_trigger_access_fire_checker(access_store)))
+    }
+}
+
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) async fn open_trigger_access_store_for_profile(
+    runtime_input: &RebornRuntimeInput,
+    profile: RebornProfile,
+    local_store_path: &Path,
+) -> anyhow::Result<Arc<dyn LocalTriggerAccessStore>> {
+    match profile {
+        RebornProfile::HostedSingleTenant => {
+            #[cfg(feature = "postgres")]
+            {
+                let services = runtime_input.services.as_ref().context(
+                    "profile=hosted-single-tenant requires runtime services before trigger-fire access can be wired",
+                )?;
+                let store = services
+                    .open_hosted_single_tenant_trigger_access_store()
+                    .await
+                    .context("failed to initialize hosted trigger-fire access store")?;
+                let store: Arc<dyn LocalTriggerAccessStore> = store;
+                Ok(store)
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                let _ = runtime_input;
+                let _ = local_store_path;
+                anyhow::bail!(
+                    "profile=hosted-single-tenant requires the `postgres` feature for trigger-fire access"
+                );
+            }
+        }
+        _ => {
+            let store = open_local_trigger_access_store(local_store_path)
+                .await
+                .context("failed to initialize local trigger-fire access store")?;
+            let store: Arc<dyn LocalTriggerAccessStore> = store;
+            Ok(store)
+        }
     }
 }
 
@@ -568,35 +610,10 @@ pub(crate) fn build_services_input_with_options(
     let profile = effective_profile(config, config_file.as_ref())?;
     reject_unsupported_runtime_sections(config_file.as_ref(), caller, profile)?;
     let mut services_input = match profile {
-        RebornProfile::LocalDev | RebornProfile::LocalDevYolo => {
-            let local_dev_root = local_runtime_storage_root(config, profile);
-            let workspace_root = std::env::current_dir()
-                .context("failed to resolve current directory for local-dev workspace")?;
-            let mut services_input = local_runtime_build_input_with_options(
-                composition_profile(profile),
-                owner_id,
-                local_dev_root,
-                RebornLocalRuntimeProfileOptions {
-                    confirm_host_access: options.confirm_host_access,
-                },
-            )
-            .with_context(|| {
-                format!(
-                    "ironclaw-reborn run currently supports profile=local-dev or profile=local-dev-yolo; \
-                     got profile={profile}."
-                )
-            })?
-            .with_local_runtime_workspace_root(workspace_root);
-            if services_input.requires_local_runtime_confirmed_host_home_root() {
-                let host_home_root =
-                    confirmed_host_home_root(options).context("local-dev-yolo host access")?;
-                services_input =
-                    services_input.with_local_runtime_confirmed_host_home_root(host_home_root);
-            }
-            services_input = services_input.with_optional_nearai_mcp_bootstrap_config(
-                nearai_mcp_bootstrap_config_from_env().context("NEAR AI MCP bootstrap config")?,
-            );
-            services_input
+        RebornProfile::LocalDev
+        | RebornProfile::LocalDevYolo
+        | RebornProfile::HostedSingleTenantVolume => {
+            build_standalone_local_runtime_services_input(profile, owner_id, config, options)?
         }
         RebornProfile::HostedSingleTenant => build_hosted_single_tenant_services_input(
             profile,
@@ -604,9 +621,6 @@ pub(crate) fn build_services_input_with_options(
             config,
             config_file.as_ref(),
         )?,
-        RebornProfile::HostedSingleTenantVolume => {
-            build_hosted_single_tenant_volume_services_input(profile, owner_id, config)?
-        }
         RebornProfile::Production | RebornProfile::MigrationDryRun => {
             // MigrationDryRun needs production storage handles so follow-up migration
             // code can inspect durable schema state; this branch only constructs
@@ -630,6 +644,36 @@ pub(crate) fn build_services_input_with_options(
         services_input,
         config_file,
     })
+}
+
+fn build_standalone_local_runtime_services_input(
+    profile: RebornProfile,
+    owner_id: &str,
+    config: &RebornBootConfig,
+    options: RuntimeInputOptions,
+) -> anyhow::Result<RebornBuildInput> {
+    let local_runtime_root = local_runtime_storage_root(config, profile);
+    let workspace_root = std::env::current_dir()
+        .with_context(|| format!("failed to resolve current directory for {profile} workspace"))?;
+    let mut services_input = local_runtime_build_input_with_options(
+        composition_profile(profile),
+        owner_id,
+        local_runtime_root,
+        RebornLocalRuntimeProfileOptions {
+            confirm_host_access: options.confirm_host_access,
+        },
+    )
+    .with_context(|| format!("failed to build local-runtime services for profile={profile}"))?
+    .with_local_runtime_workspace_root(workspace_root);
+    if services_input.requires_local_runtime_confirmed_host_home_root() {
+        let host_home_root =
+            confirmed_host_home_root(options).context("local-dev-yolo host access")?;
+        services_input = services_input.with_local_runtime_confirmed_host_home_root(host_home_root);
+    }
+    services_input = services_input.with_optional_nearai_mcp_bootstrap_config(
+        nearai_mcp_bootstrap_config_from_env().context("NEAR AI MCP bootstrap config")?,
+    );
+    Ok(services_input)
 }
 
 #[cfg(feature = "postgres")]
@@ -669,37 +713,6 @@ fn build_hosted_single_tenant_services_input(
     anyhow::bail!(
         "profile={profile} requires a binary built with the `postgres` feature for hosted \
          single-tenant storage; the default PostgreSQL URL env var is IRONCLAW_REBORN_POSTGRES_URL"
-    )
-}
-
-#[cfg(feature = "libsql")]
-fn build_hosted_single_tenant_volume_services_input(
-    profile: RebornProfile,
-    owner_id: &str,
-    config: &RebornBootConfig,
-) -> anyhow::Result<RebornBuildInput> {
-    let workspace_root = std::env::current_dir()
-        .context("failed to resolve current directory for hosted single-tenant volume workspace")?;
-    Ok(hosted_single_tenant_volume_build_input(
-        owner_id,
-        local_runtime_storage_root(config, profile),
-    )
-    .map_err(anyhow::Error::from)?
-    .with_local_runtime_workspace_root(workspace_root)
-    .with_optional_nearai_mcp_bootstrap_config(
-        nearai_mcp_bootstrap_config_from_env().context("NEAR AI MCP bootstrap config")?,
-    ))
-}
-
-#[cfg(not(feature = "libsql"))]
-fn build_hosted_single_tenant_volume_services_input(
-    profile: RebornProfile,
-    _owner_id: &str,
-    _config: &RebornBootConfig,
-) -> anyhow::Result<RebornBuildInput> {
-    anyhow::bail!(
-        "profile={profile} requires a binary built with the `libsql` feature for hosted \
-         single-tenant volume storage"
     )
 }
 
@@ -826,16 +839,10 @@ pub(crate) fn local_runtime_storage_root(
     config: &RebornBootConfig,
     profile: RebornProfile,
 ) -> PathBuf {
-    match profile {
-        RebornProfile::LocalDev
-        | RebornProfile::LocalDevYolo
-        | RebornProfile::Production
-        | RebornProfile::MigrationDryRun => config.home().path().join("local-dev"),
-        RebornProfile::HostedSingleTenant => config.home().path().join("hosted-single-tenant"),
-        RebornProfile::HostedSingleTenantVolume => {
-            config.home().path().join("hosted-single-tenant-volume")
-        }
-    }
+    config
+        .home()
+        .path()
+        .join(profile.local_runtime_storage_subdir())
 }
 
 fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
@@ -1307,7 +1314,10 @@ mod tests {
 
     #[test]
     fn no_assistant_text_message_formats_failed_reply_with_category() {
-        let reply = assistant_reply_without_text_for_test(TurnStatus::Failed, Some("driver_panic"));
+        let reply = assistant_reply_without_text_for_test(
+            TurnStatus::Failed,
+            Some("scheduler_executor_panic"),
+        );
 
         let message = no_assistant_text_message(&reply);
 
@@ -1316,7 +1326,7 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("failure_category=driver_panic"),
+            message.contains("failure_category=scheduler_executor_panic"),
             "{message}"
         );
         assert!(message.contains("status=Failed"), "{message}");

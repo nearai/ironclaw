@@ -64,6 +64,55 @@ fn profile_parsing_accepts_expected_values() {
 }
 
 #[test]
+fn profile_predicates_capture_hosted_volume_local_runtime_contract() {
+    assert!(!RebornProfile::LocalDev.starts_hosted_single_tenant_listener());
+    assert!(!RebornProfile::LocalDevYolo.starts_hosted_single_tenant_listener());
+    assert!(RebornProfile::HostedSingleTenant.starts_hosted_single_tenant_listener());
+    assert!(RebornProfile::HostedSingleTenantVolume.starts_hosted_single_tenant_listener());
+    assert!(!RebornProfile::Production.starts_hosted_single_tenant_listener());
+    assert!(!RebornProfile::MigrationDryRun.starts_hosted_single_tenant_listener());
+
+    assert!(RebornProfile::LocalDev.uses_standalone_local_runtime_volume());
+    assert!(RebornProfile::LocalDevYolo.uses_standalone_local_runtime_volume());
+    assert!(!RebornProfile::HostedSingleTenant.uses_standalone_local_runtime_volume());
+    assert!(RebornProfile::HostedSingleTenantVolume.uses_standalone_local_runtime_volume());
+    assert!(!RebornProfile::Production.uses_standalone_local_runtime_volume());
+    assert!(!RebornProfile::MigrationDryRun.uses_standalone_local_runtime_volume());
+
+    assert_eq!(
+        RebornProfile::LocalDev.local_runtime_storage_subdir(),
+        "local-dev"
+    );
+    assert_eq!(
+        RebornProfile::LocalDevYolo.local_runtime_storage_subdir(),
+        "local-dev"
+    );
+    assert_eq!(
+        RebornProfile::HostedSingleTenant.local_runtime_storage_subdir(),
+        "hosted-single-tenant"
+    );
+    assert_eq!(
+        RebornProfile::HostedSingleTenantVolume.local_runtime_storage_subdir(),
+        "hosted-single-tenant-volume"
+    );
+    assert_eq!(
+        RebornProfile::Production.local_runtime_storage_subdir(),
+        "local-dev"
+    );
+    assert_eq!(
+        RebornProfile::MigrationDryRun.local_runtime_storage_subdir(),
+        "local-dev"
+    );
+
+    assert!(RebornProfile::LocalDev.supports_local_runtime_skill_management());
+    assert!(RebornProfile::LocalDevYolo.supports_local_runtime_skill_management());
+    assert!(RebornProfile::HostedSingleTenant.supports_local_runtime_skill_management());
+    assert!(RebornProfile::HostedSingleTenantVolume.supports_local_runtime_skill_management());
+    assert!(!RebornProfile::Production.supports_local_runtime_skill_management());
+    assert!(!RebornProfile::MigrationDryRun.supports_local_runtime_skill_management());
+}
+
+#[test]
 fn profile_default_is_local_dev_for_explicit_binary_invocations() {
     assert_eq!(RebornProfile::default(), RebornProfile::LocalDev);
 }

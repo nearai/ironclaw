@@ -43,6 +43,7 @@ use ironclaw_turns::{
         LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelRequest,
         LoopModelResponse, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
         LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall, ProviderToolDefinition,
+        RegisterProviderToolCallRequest,
     },
 };
 use tracing::debug;
@@ -1048,7 +1049,7 @@ async fn tool_response_to_host(
         }
         for provider_call in provider_calls {
             let candidate = capabilities
-                .register_provider_tool_call(provider_call)
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call))
                 .await
                 .map_err(map_provider_tool_output_error)?;
             candidates.push(candidate);

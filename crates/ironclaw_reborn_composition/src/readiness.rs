@@ -13,6 +13,7 @@ pub enum RebornReadinessState {
     Disabled,
     DevOnly,
     HostedSingleTenantValidated,
+    HostedSingleTenantVolumePreviewValidated,
     ProductionValidated,
     MigrationDryRunValidated,
 }
@@ -77,6 +78,7 @@ impl<'de> Deserialize<'de> for RebornReadinessDiagnosticStatus {
 pub enum RebornReadinessDiagnosticReason {
     Disabled,
     DevOnlyProfile,
+    HostedSingleTenantVolumePreview,
     Missing,
     LocalOnly,
     Unverified,
@@ -89,6 +91,7 @@ impl RebornReadinessDiagnosticReason {
         match self {
             Self::Disabled => "disabled",
             Self::DevOnlyProfile => "dev-only-profile",
+            Self::HostedSingleTenantVolumePreview => "hosted-single-tenant-volume-preview",
             Self::Missing => "missing",
             Self::LocalOnly => "local-only",
             Self::Unverified => "unverified",
@@ -116,6 +119,7 @@ impl<'de> Deserialize<'de> for RebornReadinessDiagnosticReason {
         Ok(match value.as_str() {
             "disabled" => Self::Disabled,
             "dev-only-profile" => Self::DevOnlyProfile,
+            "hosted-single-tenant-volume-preview" => Self::HostedSingleTenantVolumePreview,
             "missing" => Self::Missing,
             "local-only" => Self::LocalOnly,
             "unverified" => Self::Unverified,
@@ -259,6 +263,39 @@ pub struct RebornReadinessDiagnostic {
     pub blocks_production: bool,
 }
 
+pub(crate) fn readiness_contract_for_profile(
+    profile: RebornCompositionProfile,
+) -> (RebornReadinessState, Vec<RebornReadinessDiagnostic>) {
+    match profile {
+        RebornCompositionProfile::Disabled => (
+            RebornReadinessState::Disabled,
+            vec![RebornReadinessDiagnostic::disabled()],
+        ),
+        RebornCompositionProfile::LocalDev => (
+            RebornReadinessState::DevOnly,
+            vec![RebornReadinessDiagnostic::local_dev()],
+        ),
+        RebornCompositionProfile::LocalDevYolo => (
+            RebornReadinessState::DevOnly,
+            vec![RebornReadinessDiagnostic::local_dev_yolo()],
+        ),
+        RebornCompositionProfile::HostedSingleTenant => (
+            RebornReadinessState::HostedSingleTenantValidated,
+            vec![RebornReadinessDiagnostic::hosted_single_tenant()],
+        ),
+        RebornCompositionProfile::HostedSingleTenantVolume => (
+            RebornReadinessState::HostedSingleTenantVolumePreviewValidated,
+            vec![RebornReadinessDiagnostic::hosted_single_tenant_volume()],
+        ),
+        RebornCompositionProfile::Production => {
+            (RebornReadinessState::ProductionValidated, Vec::new())
+        }
+        RebornCompositionProfile::MigrationDryRun => {
+            (RebornReadinessState::MigrationDryRunValidated, Vec::new())
+        }
+    }
+}
+
 impl RebornReadinessDiagnostic {
     pub fn disabled() -> Self {
         Self {
@@ -279,7 +316,13 @@ impl RebornReadinessDiagnostic {
     }
 
     pub fn hosted_single_tenant_volume() -> Self {
-        Self::dev_only_profile(RebornCompositionProfile::HostedSingleTenantVolume)
+        Self {
+            profile: RebornCompositionProfile::HostedSingleTenantVolume,
+            component: RebornReadinessDiagnosticComponent::CompositionProfile,
+            reason: RebornReadinessDiagnosticReason::HostedSingleTenantVolumePreview,
+            status: RebornReadinessDiagnosticStatus::Warning,
+            blocks_production: true,
+        }
     }
 
     pub fn hosted_single_tenant() -> Self {

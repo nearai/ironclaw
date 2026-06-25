@@ -5,9 +5,11 @@ Function-scoped: fresh browser context and page per test.
 """
 
 import asyncio
+from collections.abc import AsyncIterator
 import json
 import os
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -20,6 +22,9 @@ import pytest
 
 from helpers import (
     AUTH_TOKEN,
+    EMULATE_GITHUB_BEARER,
+    EMULATE_GOOGLE_BEARER,
+    EMULATE_SLACK_BEARER,
     HTTP_WEBHOOK_SECRET,
     OWNER_SCOPE_ID,
     wait_for_port_line,
@@ -56,6 +61,16 @@ _HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-home-")
 # artifacts into them.
 _WASM_TOOLS_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-wasm-tools-")
 _WASM_CHANNELS_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-wasm-channels-")
+
+EMULATE_NPM_PACKAGE = "emulate@0.7.0"
+EMULATE_GOOGLE_SEED = ROOT / "tests/e2e/fixtures/emulate/google_gmail.yaml"
+EMULATE_SLACK_SEED = ROOT / "tests/e2e/fixtures/emulate/slack.yaml"
+EMULATE_GITHUB_SEED = ROOT / "tests/e2e/fixtures/emulate/github.yaml"
+EMULATE_GOOGLE_READY_TOKEN = EMULATE_GOOGLE_BEARER
+EMULATE_SLACK_READY_TOKEN = EMULATE_SLACK_BEARER
+EMULATE_GITHUB_READY_TOKEN = EMULATE_GITHUB_BEARER
+EMULATE_STARTUP_ATTEMPTS = 120
+EMULATE_STARTUP_POLL_SECONDS = 0.5
 
 
 def _latest_mtime(path: Path) -> float:
@@ -177,6 +192,12 @@ async def _stop_process(
     except asyncio.TimeoutError:
         pass
     await _drain_pipes()
+
+
+def _emulate_unavailable(reason: str) -> None:
+    if os.environ.get("CI") == "true":
+        pytest.fail(reason)
+    pytest.skip(reason)
 
 
 def _forward_coverage_env(env: dict[str, str]) -> None:
@@ -397,6 +418,129 @@ async def mock_llm_server():
             proc.kill()
 
 
+async def _run_emulate_server(
+    *,
+    service: str,
+    seed_path: Path,
+    ready_method: str,
+    ready_path: str,
+    ready_headers: dict[str, str],
+    ready_json: dict[str, Any] | None = None,
+) -> AsyncIterator[dict[str, str]]:
+    """Start a pinned Emulate service and wait for a seeded endpoint."""
+    if shutil.which("npx") is None:
+        _emulate_unavailable(
+            f"npx is required to run the Emulate {service} E2E fixture"
+        )
+
+    port = _find_free_port()
+    url = f"http://127.0.0.1:{port}"
+    env = {
+        **os.environ,
+        "NO_COLOR": "1",
+        "EMULATE_PORT": str(port),
+    }
+    proc = await asyncio.create_subprocess_exec(
+        "npx",
+        "--yes",
+        EMULATE_NPM_PACKAGE,
+        "--service",
+        service,
+        "--port",
+        str(port),
+        "--seed",
+        str(seed_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+
+    try:
+        async with httpx.AsyncClient() as client:
+            last_error = ""
+            for _ in range(EMULATE_STARTUP_ATTEMPTS):
+                if proc.returncode is not None:
+                    break
+                try:
+                    response = await client.request(
+                        ready_method,
+                        f"{url}{ready_path}",
+                        headers=ready_headers,
+                        json=ready_json,
+                        timeout=2,
+                    )
+                    if response.status_code == 200:
+                        yield {"url": url}
+                        return
+                    last_error = f"HTTP {response.status_code}: {response.text[:400]}"
+                except httpx.HTTPError as exc:
+                    last_error = str(exc)
+                await asyncio.sleep(EMULATE_STARTUP_POLL_SECONDS)
+
+        stdout = b""
+        stderr = b""
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=2)
+        except asyncio.TimeoutError:
+            pass
+        _emulate_unavailable(
+            f"Emulate {service} failed to start. "
+            f"Last probe error: {last_error}\n"
+            f"stdout:\n{stdout.decode('utf-8', errors='replace')[:2000]}\n"
+            f"stderr:\n{stderr.decode('utf-8', errors='replace')[:2000]}"
+        )
+    finally:
+        if proc.returncode is None:
+            await _stop_process(proc, sig=signal.SIGINT, timeout=5)
+            if proc.returncode is None:
+                await _stop_process(proc, timeout=2)
+
+
+@pytest.fixture(scope="session")
+async def emulate_google_server():
+    """Start Emulate Google with seeded Gmail, Calendar, and Drive data."""
+    async for server in _run_emulate_server(
+        service="google",
+        seed_path=EMULATE_GOOGLE_SEED,
+        ready_method="GET",
+        ready_path="/gmail/v1/users/me/messages",
+        ready_headers={
+            "Authorization": f"Bearer {EMULATE_GOOGLE_READY_TOKEN}",
+        },
+    ):
+        yield server
+
+
+@pytest.fixture(scope="session")
+async def emulate_slack_server():
+    """Start Emulate Slack with a seeded workspace and bot token."""
+    async for server in _run_emulate_server(
+        service="slack",
+        seed_path=EMULATE_SLACK_SEED,
+        ready_method="POST",
+        ready_path="/api/auth.test",
+        ready_headers={
+            "Authorization": f"Bearer {EMULATE_SLACK_READY_TOKEN}",
+        },
+    ):
+        yield server
+
+
+@pytest.fixture(scope="session")
+async def emulate_github_server():
+    """Start Emulate GitHub with a seeded user, org, and repository."""
+    async for server in _run_emulate_server(
+        service="github",
+        seed_path=EMULATE_GITHUB_SEED,
+        ready_method="GET",
+        ready_path="/user",
+        ready_headers={
+            "Authorization": f"Bearer {EMULATE_GITHUB_READY_TOKEN}",
+        },
+    ):
+        yield server
+
+
 @pytest.fixture(autouse=True)
 async def reset_mock_llm_state(mock_llm_server):
     """Reset mutable mock LLM state between tests.
@@ -581,11 +725,13 @@ async def ironclaw_server(
                     await _stop_process(proc, timeout=2)
 
 
-@pytest.fixture(scope="session")
-async def hosted_oauth_refresh_server(
+async def _run_hosted_oauth_refresh_server(
     ironclaw_binary,
     mock_llm_server,
     wasm_tools_dir,
+    *,
+    extra_env: dict[str, str] | None = None,
+    extra_result: dict[str, str] | None = None,
 ):
     """Start a hosted-mode ironclaw instance for OAuth refresh regression tests."""
     reserved = _reserve_loopback_sockets(2)
@@ -637,6 +783,8 @@ async def hosted_oauth_refresh_server(
             "IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK": "1",
             "GOOGLE_OAUTH_CLIENT_ID": "hosted-google-client-id",
         }
+        if extra_env:
+            env.update(extra_env)
         _forward_coverage_env(env)
 
         proc = await asyncio.create_subprocess_exec(
@@ -654,6 +802,8 @@ async def hosted_oauth_refresh_server(
                 "base_url": base_url,
                 "db_path": db_path,
                 "mock_llm_url": mock_llm_server,
+                "wasm_tools_dir": wasm_tools_dir,
+                **(extra_result or {}),
             }
         except TimeoutError:
             if proc.returncode is None:
@@ -685,6 +835,72 @@ async def hosted_oauth_refresh_server(
                 sock.close()
         db_tmpdir.cleanup()
         home_tmpdir.cleanup()
+
+
+@pytest.fixture(scope="session")
+async def hosted_oauth_refresh_server(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+):
+    """Start hosted mode for OAuth refresh tests that do not need provider APIs."""
+    async for server in _run_hosted_oauth_refresh_server(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+    ):
+        yield server
+
+
+@pytest.fixture(scope="session")
+async def hosted_google_emulate_server(
+    ironclaw_binary,
+    mock_llm_server,
+    emulate_google_server,
+    wasm_tools_dir,
+):
+    """Start hosted mode with Google provider API traffic rewritten to Emulate."""
+    rewrite_map = {
+        "gmail.googleapis.com": emulate_google_server["url"],
+        "www.googleapis.com": emulate_google_server["url"],
+    }
+    async for server in _run_hosted_oauth_refresh_server(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+        extra_env={"IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(rewrite_map)},
+        extra_result={"emulate_google_url": emulate_google_server["url"]},
+    ):
+        yield server
+
+
+@pytest.fixture(scope="session")
+async def hosted_github_emulate_server(
+    ironclaw_binary,
+    mock_llm_server,
+    emulate_github_server,
+    wasm_tools_dir,
+):
+    """Start hosted mode with GitHub provider API traffic rewritten to Emulate."""
+    rewrite_map = {"api.github.com": emulate_github_server["url"]}
+    async for server in _run_hosted_oauth_refresh_server(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+        extra_env={
+            "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(rewrite_map),
+            "GITHUB_OAUTH_CLIENT_ID": "hosted-github-client-id",
+            "GITHUB_OAUTH_CLIENT_SECRET": "hosted-github-client-secret",
+        },
+        extra_result={"emulate_github_url": emulate_github_server["url"]},
+    ):
+        yield server
+
+
+@pytest.fixture(scope="session")
+async def hosted_google_oauth_refresh_server(hosted_google_emulate_server):
+    """Compatibility fixture for hosted Gmail OAuth refresh regression tests."""
+    yield hosted_google_emulate_server
 
 
 @pytest.fixture(scope="session")
@@ -1284,14 +1500,15 @@ async def fake_slack_server():
         proc.kill()
 
 
-@pytest.fixture(scope="session")
-async def slack_e2e_server(
+async def _run_slack_provider_e2e_server(
     ironclaw_binary,
     mock_llm_server,
     wasm_tools_dir,
-    fake_slack_server,
+    slack_api_url,
+    *,
+    result_url_key: str,
 ):
-    """IronClaw instance wired to the fake Slack API for E2E Slack tests."""
+    """IronClaw instance wired to a Slack-compatible provider API."""
     reserved = _reserve_loopback_sockets(2)
     try:
         db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-slack-db-")
@@ -1323,8 +1540,8 @@ async def slack_e2e_server(
                 "WASM_CHANNELS_DIR": channels_tmpdir.name,
                 "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(
                     {
-                        "slack.com": fake_slack_server,
-                        "files.slack.com": fake_slack_server,
+                        "slack.com": slack_api_url,
+                        "files.slack.com": slack_api_url,
                     }
                 ),
             },
@@ -1346,7 +1563,7 @@ async def slack_e2e_server(
             yield {
                 "base_url": base_url,
                 "http_url": http_url,
-                "fake_slack_url": fake_slack_server,
+                result_url_key: slack_api_url,
                 "channels_dir": channels_tmpdir.name,
             }
         except TimeoutError:
@@ -1383,6 +1600,42 @@ async def slack_e2e_server(
         for sock in reserved:
             if sock.fileno() != -1:
                 sock.close()
+
+
+@pytest.fixture(scope="session")
+async def slack_e2e_server(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+    fake_slack_server,
+):
+    """IronClaw instance wired to the fake Slack API for E2E Slack tests."""
+    async for server in _run_slack_provider_e2e_server(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+        fake_slack_server,
+        result_url_key="fake_slack_url",
+    ):
+        yield server
+
+
+@pytest.fixture(scope="session")
+async def slack_emulate_e2e_server(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+    emulate_slack_server,
+):
+    """IronClaw instance wired to Emulate Slack for channel E2E tests."""
+    async for server in _run_slack_provider_e2e_server(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+        emulate_slack_server["url"],
+        result_url_key="emulate_slack_url",
+    ):
+        yield server
 
 # ── Telegram E2E fixtures ────────────────────────────────────────────────
 

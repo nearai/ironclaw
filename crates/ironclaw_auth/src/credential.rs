@@ -1068,3 +1068,156 @@ fn recovery_kind_and_reason_for_status(
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        AuthProviderId, AuthSessionId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
+        CredentialAccountStatus, ProviderScope, scope::AuthProductScope,
+    };
+    use chrono::Utc;
+    use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+
+    /// Build a minimal CredentialAccount using the same idiom as domain.rs tests.
+    fn make_account(scope: AuthProductScope) -> CredentialAccount {
+        CredentialAccount {
+            id: CredentialAccountId::new(),
+            scope,
+            provider: AuthProviderId::new("github").unwrap(),
+            label: CredentialAccountLabel::new("github-account").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: None,
+            refresh_secret: None,
+            scopes: vec![ProviderScope::new("read").unwrap()],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    /// Build a base ResourceScope for a known owner with a given invocation_id.
+    fn owner_resource(invocation_id: InvocationId) -> ResourceScope {
+        ResourceScope::local_default(UserId::new("alice").unwrap(), invocation_id).unwrap()
+    }
+
+    // Case 1: all axes match, including surface and session. invocation_id differs
+    // between the flow scope and the account scope to prove invocation_id is ignored
+    // (the exact-match invariant applies only to session_id and surface).
+    #[test]
+    fn binding_scope_owns_account_returns_true_when_all_axes_match() {
+        let session = AuthSessionId::new("ses-abc").unwrap();
+
+        // Account was created in an earlier flow with invocation_id A.
+        let account_scope =
+            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Web)
+                .with_session_id(session.clone());
+        let account = make_account(account_scope);
+
+        // Current reconnect flow has a fresh invocation_id B — should still own.
+        let flow_scope =
+            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Web)
+                .with_session_id(session);
+
+        assert!(
+            binding_scope_owns_account(&flow_scope, &account),
+            "same owner/surface/session with differing invocation_id must return true"
+        );
+    }
+
+    // Case 2: owner matches and surface matches, but session_id differs.
+    // Exact-match invariant on session_id must reject the binding.
+    #[test]
+    fn binding_scope_owns_account_returns_false_when_session_differs() {
+        let account_scope =
+            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Web)
+                .with_session_id(AuthSessionId::new("session-s1").unwrap());
+        let account = make_account(account_scope);
+
+        let flow_scope =
+            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Web)
+                .with_session_id(AuthSessionId::new("session-s2").unwrap());
+
+        assert!(
+            !binding_scope_owns_account(&flow_scope, &account),
+            "mismatched session_id must return false"
+        );
+    }
+
+    // Case 3: owner matches and session matches, but surface differs.
+    // Exact-match invariant on surface must reject the binding.
+    #[test]
+    fn binding_scope_owns_account_returns_false_when_surface_differs() {
+        let session = AuthSessionId::new("ses-xyz").unwrap();
+
+        let account_scope =
+            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Web)
+                .with_session_id(session.clone());
+        let account = make_account(account_scope);
+
+        // Same owner and session, but the flow comes from the Chat surface.
+        let flow_scope =
+            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Chat)
+                .with_session_id(session);
+
+        assert!(
+            !binding_scope_owns_account(&flow_scope, &account),
+            "mismatched surface must return false"
+        );
+    }
+
+    // Case 4a: account has Some session, flow scope has None.
+    // session_id is compared with as_ref() equality, so Some(..) != None => false.
+    #[test]
+    fn binding_scope_owns_account_returns_false_when_account_has_session_but_scope_does_not() {
+        let account_scope =
+            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Api)
+                .with_session_id(AuthSessionId::new("ses-present").unwrap());
+        let account = make_account(account_scope);
+
+        // Flow scope carries no session_id.
+        let flow_scope =
+            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Api);
+
+        assert!(
+            !binding_scope_owns_account(&flow_scope, &account),
+            "account Some(session) vs scope None must return false"
+        );
+    }
+
+    // Case 4b: flow scope has Some session, account has None.
+    // same as_ref() equality: Some(..) != None => false.
+    #[test]
+    fn binding_scope_owns_account_returns_false_when_scope_has_session_but_account_does_not() {
+        let account_scope =
+            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Api);
+        let account = make_account(account_scope);
+
+        let flow_scope =
+            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Api)
+                .with_session_id(AuthSessionId::new("ses-present").unwrap());
+
+        assert!(
+            !binding_scope_owns_account(&flow_scope, &account),
+            "scope Some(session) vs account None must return false"
+        );
+    }
+
+    // Case 4c: both scope and account have None session — None == None => true.
+    #[test]
+    fn binding_scope_owns_account_returns_true_when_both_sessions_are_none() {
+        let account_scope =
+            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Api);
+        let account = make_account(account_scope);
+
+        let flow_scope =
+            AuthProductScope::new(owner_resource(InvocationId::new()), AuthSurface::Api);
+
+        assert!(
+            binding_scope_owns_account(&flow_scope, &account),
+            "None session on both sides must return true (None == None)"
+        );
+    }
+}

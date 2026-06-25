@@ -788,6 +788,7 @@ impl HostFixture {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),

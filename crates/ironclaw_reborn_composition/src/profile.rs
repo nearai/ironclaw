@@ -37,6 +37,41 @@ impl RebornCompositionProfile {
         matches!(self, Self::Production | Self::MigrationDryRun)
     }
 
+    pub fn uses_local_runtime_substrate(self) -> bool {
+        matches!(
+            self,
+            Self::LocalDev
+                | Self::LocalDevYolo
+                | Self::HostedSingleTenant
+                | Self::HostedSingleTenantVolume
+        )
+    }
+
+    pub fn uses_local_dev_storage_input(self) -> bool {
+        matches!(
+            self,
+            Self::LocalDev | Self::LocalDevYolo | Self::HostedSingleTenantVolume
+        )
+    }
+
+    pub fn starts_live_runtime(self) -> bool {
+        matches!(
+            self,
+            Self::LocalDev
+                | Self::LocalDevYolo
+                | Self::HostedSingleTenant
+                | Self::HostedSingleTenantVolume
+                | Self::Production
+        )
+    }
+
+    pub fn uses_hosted_extension_installation_state(self) -> bool {
+        matches!(
+            self,
+            Self::HostedSingleTenant | Self::HostedSingleTenantVolume
+        )
+    }
+
     pub fn to_event_store_profile(self) -> ironclaw_reborn_event_store::RebornProfile {
         match self {
             Self::Disabled

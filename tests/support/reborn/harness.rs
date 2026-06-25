@@ -25,7 +25,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_approvals::{ApprovalResolver, LeaseApproval};
+use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, LeaseApproval};
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
     CredentialOwnership, NewCredentialAccount, ProviderScope,
@@ -63,7 +63,8 @@ use ironclaw_host_runtime::{
     TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
+    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
     VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface, WRITE_FILE_CAPABILITY_ID,
     builtin_first_party_handlers, builtin_first_party_package,
 };
@@ -1230,6 +1231,19 @@ impl RebornBinaryE2EHarness {
             if state.status == expected {
                 return Ok(state);
             }
+            // A terminal status (Completed/Failed/Cancelled/RecoveryRequired) is
+            // never left, so once we observe one that is not the target the run
+            // can never reach `expected`. Fail fast instead of polling to the
+            // deadline — otherwise a run that fails early (e.g. a spawn capability
+            // returning a terminal `driver_unavailable`) burns the whole timeout
+            // and buries the real failure category.
+            if state.status.is_terminal() {
+                return Err(format!(
+                    "expected {expected:?} but run reached terminal status {:?}; failure={:?}",
+                    state.status, state.failure
+                )
+                .into());
+            }
             if tokio::time::Instant::now() >= deadline {
                 return Err(format!(
                     "timed out waiting for {expected:?}; last status={:?} failure={:?}",
@@ -1481,6 +1495,7 @@ impl HarnessCapabilityMode {
 struct HostRuntimeCapabilityHarness {
     runtime: Arc<dyn HostRuntime>,
     approval_parts: Option<RebornLocalDevApprovalTestParts>,
+    auto_approve_settings: Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>>,
     pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
     io: Arc<ProductLiveCapabilityIo>,
     root: Arc<tempfile::TempDir>,
@@ -1527,10 +1542,14 @@ impl HostRuntimeHarnessOptions {
 
 impl HostRuntimeCapabilityHarness {
     async fn file_tools() -> HarnessResult<Self> {
-        Self::file_tools_with_runtime_policy(Some(
+        let harness = Self::file_tools_with_runtime_policy(Some(
             ironclaw_reborn_composition::local_dev_yolo_runtime_policy(true)?,
         ))
-        .await
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
     }
 
     async fn file_tools_requiring_approval() -> HarnessResult<Self> {
@@ -1569,7 +1588,7 @@ impl HostRuntimeCapabilityHarness {
     }
 
     async fn coding_read_tools() -> HarnessResult<Self> {
-        Self::new(
+        let harness = Self::new(
             "reborn-e2e-coding-read-tools",
             vec![
                 CapabilityId::new(LIST_DIR_CAPABILITY_ID)?,
@@ -1582,11 +1601,15 @@ impl HostRuntimeCapabilityHarness {
             UserId::new("reborn-e2e-coding-read-user")?,
             None,
         )
-        .await
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
     }
 
     async fn process_tools() -> HarnessResult<Self> {
-        Self::new_with_options(
+        let harness = Self::new_with_options(
             "reborn-e2e-process-tools",
             vec![
                 CapabilityId::new(ECHO_CAPABILITY_ID)?,
@@ -1606,7 +1629,11 @@ impl HostRuntimeCapabilityHarness {
             UserId::new("reborn-e2e-process-user")?,
             HostRuntimeHarnessOptions::new(MountView::default(), None),
         )
-        .await
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
     }
 
     async fn qa_smoke_tools() -> HarnessResult<Self> {
@@ -1630,6 +1657,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(Self {
             runtime,
             approval_parts: None,
+            auto_approve_settings: None,
             pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
@@ -1663,6 +1691,8 @@ impl HostRuntimeCapabilityHarness {
                 CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_PAUSE_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
             ],
             runtime_kind: RuntimeKind::FirstParty,
@@ -1709,6 +1739,9 @@ impl HostRuntimeCapabilityHarness {
         .await?;
         harness.network_policy = wildcard_test_policy();
         harness.additional_provider_trust = bundled_extension_provider_trust()?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
         Ok(harness)
     }
 
@@ -1739,15 +1772,20 @@ impl HostRuntimeCapabilityHarness {
         )
         .await?;
         harness.network_policy = http_test_policy();
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
         Ok(harness)
     }
 
     async fn trigger_management_tools() -> HarnessResult<Self> {
-        Self::new_with_options(
+        let harness = Self::new_with_options(
             "reborn-e2e-trigger-management-tools",
             vec![
                 CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_PAUSE_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?,
                 CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
             ],
             vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
@@ -1761,7 +1799,36 @@ impl HostRuntimeCapabilityHarness {
                 )?),
             ),
         )
-        .await
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
+    }
+
+    async fn enable_global_auto_approve_for_product_and_harness_users(&self) -> HarnessResult<()> {
+        let product_scope = product_scope();
+        self.enable_global_auto_approve(product_scope.clone())
+            .await?;
+        let mut harness_user_scope = product_scope;
+        harness_user_scope.user_id = self.user_id.clone();
+        self.enable_global_auto_approve(harness_user_scope).await?;
+        Ok(())
+    }
+
+    async fn enable_global_auto_approve(&self, scope: ResourceScope) -> HarnessResult<()> {
+        let store = self
+            .auto_approve_settings
+            .as_ref()
+            .ok_or("host runtime harness missing local-dev auto-approve settings")?;
+        store
+            .set(AutoApproveSettingInput {
+                updated_by: Principal::User(scope.user_id.clone()),
+                scope,
+                enabled: true,
+            })
+            .await?;
+        Ok(())
     }
 
     async fn trace_commons_tools() -> HarnessResult<Self> {
@@ -1790,8 +1857,8 @@ impl HostRuntimeCapabilityHarness {
             UserId::new("reborn-e2e-trace-commons-user")?,
             // The Trace Commons write/network capabilities are
             // PermissionMode::Ask (onboard, profile_token, profile_set) — like
-            // the skill/trigger harnesses, the yolo runtime policy
-            // auto-approves them so the scripted run is not gated.
+            // the skill/trigger harnesses, the scripted run enables global
+            // auto-approve so it is not gated.
             HostRuntimeHarnessOptions::new(
                 MountView::default(),
                 Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
@@ -1804,6 +1871,9 @@ impl HostRuntimeCapabilityHarness {
         // non-empty network policy or the obligation check rejects dispatch
         // before the consent gate runs.
         harness.network_policy = http_test_policy();
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
         Ok(harness)
     }
 
@@ -1874,6 +1944,7 @@ impl HostRuntimeCapabilityHarness {
             seed_extension_lifecycle_credentials(&services, &user_id).await?;
         }
         let approval_parts = services.local_dev_approval_test_parts();
+        let auto_approve_settings = services.local_dev_auto_approve_settings_for_test();
         let pending_approval_scopes = Arc::new(Mutex::new(HashMap::new()));
         let runtime = services
             .host_runtime
@@ -1885,6 +1956,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(Self {
             runtime,
             approval_parts,
+            auto_approve_settings,
             pending_approval_scopes,
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
@@ -1968,6 +2040,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(Self {
             runtime,
             approval_parts: None,
+            auto_approve_settings: None,
             pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
@@ -2033,6 +2106,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(Self {
             runtime,
             approval_parts: None,
+            auto_approve_settings: None,
             pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
@@ -2440,9 +2514,9 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: ironclaw_turns::run_profile::RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(tool_call).await
+        self.inner.register_provider_tool_call(request).await
     }
 
     async fn visible_capabilities(
@@ -3328,10 +3402,12 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        call: ProviderToolCall,
+        request: ironclaw_turns::run_profile::RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let call = request.tool_call;
         let capability_id = self.primary_capability_id();
         Ok(CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
             capability_id: capability_id.clone(),
@@ -3631,6 +3707,7 @@ pub fn trace_tool_call_response() -> ironclaw_loop_support::HostManagedModelResp
         safe_reasoning_deltas: Vec::new(),
         usage: None,
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
             capability_id: CapabilityId::new(TEST_CAPABILITY_ID).expect("valid capability id"),

@@ -209,6 +209,41 @@ fn reborn_hosted_single_tenant_volume_seed_config_uses_volume_storage() {
 }
 
 #[test]
+fn reborn_hosted_single_tenant_seed_config_keeps_disabled_slack_legacy_free() {
+    let config = read_repo_file("docker/reborn/config.hosted-single-tenant.toml");
+    let parsed = config
+        .parse::<toml::Value>()
+        .expect("hosted seed config should be valid TOML");
+    let slack = parsed
+        .get("slack")
+        .and_then(toml::Value::as_table)
+        .expect("hosted seed config should include [slack]");
+
+    assert_eq!(
+        slack.get("enabled").and_then(toml::Value::as_bool),
+        Some(false),
+        "hosted seed config should keep Slack disabled until WebUI setup enables it",
+    );
+
+    for legacy_field in [
+        "installation_id",
+        "team_id",
+        "api_app_id",
+        "slack_user_id",
+        "user_id",
+        "shared_subject_user_id",
+        "channel_routes",
+        "signing_secret_env",
+        "bot_token_env",
+    ] {
+        assert!(
+            !slack.contains_key(legacy_field),
+            "disabled hosted seed config must not include legacy Slack field `{legacy_field}`"
+        );
+    }
+}
+
+#[test]
 fn reborn_dockerfile_build_is_covered_by_ci() {
     // The Reborn Dockerfile build can live in any CI workflow — it moved from
     // test.yml to platform-and-compat.yml when the cross-cutting jobs were
