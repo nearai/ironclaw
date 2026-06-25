@@ -57,6 +57,15 @@ openai-compat-beta = [
 postgres = [
     "ironclaw_reborn_composition/postgres",
 ]
+# Compile in the AWS Bedrock LLM provider for `ironclaw-reborn`. Forwards
+# to the composition crate's `bedrock` feature, which implies
+# `root-llm-provider` and links the AWS SDK in `ironclaw_llm`. Select the
+# backend at runtime with `LLM_BACKEND=bedrock` (or `ironclaw-reborn models
+# set-provider bedrock`); auth resolves from the standard AWS credential
+# chain (`AWS_PROFILE`, IAM env vars, SSO, instance roles).
+bedrock = [
+    "ironclaw_reborn_composition/bedrock",
+]
 [dependencies]
 anyhow = "1"
 async-trait = { version = "0.1", optional = true }

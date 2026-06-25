@@ -567,10 +567,21 @@ fn build_tool_config(
     let bedrock_tools: Vec<Tool> = tools
         .iter()
         .map(|td| {
-            let input_schema = ToolInputSchema::Json(json_to_document(&td.parameters));
+            // Bedrock's Converse API rejects top-level `oneOf`/`allOf`/`anyOf`
+            // in a tool's input_schema (same constraint as Anthropic's native
+            // API). Flatten those combinators before sending, reusing the
+            // shared `FlattenOnly` policy NEAR AI applies — it does not impose
+            // OpenAI strict-mode nullable rewrites, which Bedrock does not need.
+            let mut description = td.description.clone();
+            let parameters = crate::tool_schema::shape_tool_schema(
+                crate::tool_schema::ToolSchemaPolicy::FlattenOnly,
+                &td.parameters,
+                &mut description,
+            );
+            let input_schema = ToolInputSchema::Json(json_to_document(&parameters));
             let spec = ToolSpecification::builder()
                 .name(&td.name)
-                .description(&td.description)
+                .description(description)
                 .input_schema(input_schema)
                 .build()
                 .map_err(|e| LlmError::RequestFailed {
@@ -1048,6 +1059,42 @@ mod tests {
 
         let result = build_tool_config(&tools, Some("auto")).unwrap();
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_build_tool_config_flattens_top_level_combinators() {
+        // Regression: Bedrock's Converse API rejects a tool input_schema with a
+        // top-level `oneOf`/`allOf`/`anyOf` ("input_schema does not support
+        // oneOf, allOf, or anyOf at the top level"). `build_tool_config` must
+        // flatten those combinators (via the shared `FlattenOnly` policy)
+        // before sending, or every tool-enabled Bedrock turn fails.
+        let tools = vec![ToolDefinition {
+            name: "pick".to_string(),
+            description: "Choose a shape".to_string(),
+            parameters: serde_json::json!({
+                "oneOf": [
+                    {"type": "object", "properties": {"a": {"type": "string"}}},
+                    {"type": "object", "properties": {"b": {"type": "number"}}}
+                ]
+            }),
+        }];
+
+        let config = build_tool_config(&tools, Some("auto"))
+            .unwrap()
+            .expect("tool config present");
+        let tool = config.tools().first().expect("one tool");
+        let spec = tool.as_tool_spec().expect("tool spec");
+        let ToolInputSchema::Json(doc) = spec.input_schema().expect("input schema") else {
+            panic!("expected JSON input schema");
+        };
+        let schema = document_to_json(doc);
+        let obj = schema.as_object().expect("schema is an object");
+        assert!(
+            !obj.contains_key("oneOf") && !obj.contains_key("allOf") && !obj.contains_key("anyOf"),
+            "top-level combinators must be flattened before reaching Bedrock, got: {schema}"
+        );
+        // The flattened shape is a plain object the Converse API accepts.
+        assert_eq!(obj.get("type").and_then(|t| t.as_str()), Some("object"));
     }
 
     #[test]
