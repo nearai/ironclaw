@@ -171,7 +171,16 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
         call(
             "github.list_issues",
             "list-issues",
-            json!({"owner": "nearai", "repo": "ironclaw", "state": "closed", "limit": 7, "page": 2}),
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "state": "closed",
+                "labels": ["qa", "reborn"],
+                "assignee": "henry",
+                "milestone": "12",
+                "limit": 7,
+                "page": 2
+            }),
         ),
         call(
             "github.create_issue",
@@ -181,8 +190,43 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
                 "repo": "ironclaw",
                 "title": "matrix issue",
                 "body": "body",
-                "labels": ["qa", "reborn"]
+                "milestone": 7,
+                "labels": ["qa", "reborn"],
+                "assignees": ["henry"]
             }),
+        ),
+        call(
+            "github.update_issue",
+            "update-issue",
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "issue_number": 42,
+                "state": "closed",
+                "labels": ["qa"],
+                "assignees": ["henry"],
+                "milestone": 7
+            }),
+        ),
+        call(
+            "github.add_issue_labels",
+            "add-issue-labels",
+            json!({"owner": "nearai", "repo": "ironclaw", "issue_number": 42, "labels": ["api", "reborn"]}),
+        ),
+        call(
+            "github.remove_issue_label",
+            "remove-issue-label",
+            json!({"owner": "nearai", "repo": "ironclaw", "issue_number": 42, "name": "needs review"}),
+        ),
+        call(
+            "github.add_issue_assignees",
+            "add-issue-assignees",
+            json!({"owner": "nearai", "repo": "ironclaw", "issue_number": 42, "assignees": ["henry"]}),
+        ),
+        call(
+            "github.remove_issue_assignees",
+            "remove-issue-assignees",
+            json!({"owner": "nearai", "repo": "ironclaw", "issue_number": 42, "assignees": ["henry"]}),
         ),
         call(
             "github.get_issue",
@@ -209,7 +253,17 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
         call(
             "github.list_pull_requests",
             "list-prs",
-            json!({"owner": "nearai", "repo": "ironclaw", "state": "all", "limit": 9, "page": 4}),
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "state": "all",
+                "head": "henry:fix/github-tool-api-correctness",
+                "base": "main",
+                "sort": "updated",
+                "direction": "asc",
+                "limit": 9,
+                "page": 4
+            }),
         ),
         call(
             "github.create_pull_request",
@@ -221,7 +275,21 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
                 "head": "feature/matrix",
                 "base": "main",
                 "body": "body",
+                "head_repo": "ironclaw-fork",
+                "maintainer_can_modify": true,
                 "draft": true
+            }),
+        ),
+        call(
+            "github.update_pull_request",
+            "update-pr",
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "pr_number": 4280,
+                "state": "closed",
+                "base": "release",
+                "maintainer_can_modify": false
             }),
         ),
         call(
@@ -232,7 +300,7 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
         call(
             "github.get_pull_request_files",
             "get-pr-files",
-            json!({"owner": "nearai", "repo": "ironclaw", "pr_number": 4280}),
+            json!({"owner": "nearai", "repo": "ironclaw", "pr_number": 4280, "limit": 10, "page": 2}),
         ),
         call(
             "github.create_pr_review",
@@ -242,13 +310,26 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
                 "repo": "ironclaw",
                 "pr_number": 4280,
                 "body": "review body",
-                "event": "COMMENT"
+                "event": "COMMENT",
+                "commit_id": "abc123def4567890abc123def4567890abc123de",
+                "comments": [
+                    {"path": "src/lib.rs", "body": "inline", "line": 10, "side": "RIGHT"}
+                ]
             }),
         ),
         call(
             "github.list_pull_request_comments",
             "list-pr-comments",
-            json!({"owner": "nearai", "repo": "ironclaw", "pr_number": 4280, "limit": 6, "page": 2}),
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "pr_number": 4280,
+                "sort": "updated",
+                "direction": "desc",
+                "since": "2026-06-23T00:00:00Z",
+                "limit": 6,
+                "page": 2
+            }),
         ),
         call(
             "github.reply_pull_request_comment",
@@ -267,6 +348,27 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
             json!({"owner": "nearai", "repo": "ironclaw", "pr_number": 4280, "limit": 8, "page": 3}),
         ),
         call(
+            "github.list_pull_request_review_threads",
+            "list-pr-review-threads",
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "pr_number": 4280,
+                "first": 12,
+                "after": "cursor-1"
+            }),
+        ),
+        call(
+            "github.resolve_review_thread",
+            "resolve-review-thread",
+            json!({"thread_id": "PRRT_kwDOExample"}),
+        ),
+        call(
+            "github.unresolve_review_thread",
+            "unresolve-review-thread",
+            json!({"thread_id": "PRRT_kwDOExample"}),
+        ),
+        call(
             "github.get_combined_status",
             "get-status",
             json!({"owner": "nearai", "repo": "ironclaw", "ref": "feature/matrix"}),
@@ -280,7 +382,8 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
                 "pr_number": 4280,
                 "commit_title": "merge title",
                 "commit_message": "merge body",
-                "merge_method": "squash"
+                "merge_method": "squash",
+                "sha": "abc123def4567890abc123def4567890abc123de"
             }),
         ),
         call(
@@ -291,7 +394,7 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
         call(
             "github.list_repos",
             "list-repos",
-            json!({"username": "nearai", "limit": 11, "page": 2}),
+            json!({"type": "member", "limit": 11, "page": 2}),
         ),
         call(
             "github.search_repositories",
@@ -313,7 +416,7 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
         call(
             "github.search_issues_pull_requests",
             "search-issues-prs",
-            json!({"query": "repo:nearai/ironclaw is:pr", "limit": 12, "page": 3, "sort": "updated", "order": "desc"}),
+            json!({"query": "repo:nearai/ironclaw is:pr", "limit": 12, "page": 3, "sort": "reactions-heart", "order": "desc"}),
         ),
         call(
             "github.list_branches",
@@ -370,7 +473,36 @@ fn github_capability_calls() -> Vec<RebornScriptedProviderToolCall> {
         call(
             "github.get_workflow_runs",
             "get-workflow-runs",
-            json!({"owner": "nearai", "repo": "ironclaw", "workflow_id": "ci.yml", "limit": 15, "page": 2}),
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "workflow_id": "ci.yml",
+                "event": "pull_request",
+                "status": "failure",
+                "head_sha": "abc123def4567890abc123def4567890abc123de",
+                "limit": 15,
+                "page": 2
+            }),
+        ),
+        call(
+            "github.get_workflow_run_jobs",
+            "get-workflow-run-jobs",
+            json!({"owner": "nearai", "repo": "ironclaw", "run_id": 12345, "filter": "all", "limit": 16, "page": 2}),
+        ),
+        call(
+            "github.get_workflow_run_artifacts",
+            "get-workflow-run-artifacts",
+            json!({"owner": "nearai", "repo": "ironclaw", "run_id": 12345, "name": "coverage", "direction": "asc", "limit": 17, "page": 3}),
+        ),
+        call(
+            "github.rerun_failed_workflow_run_jobs",
+            "rerun-failed-workflow-run-jobs",
+            json!({"owner": "nearai", "repo": "ironclaw", "run_id": 12345, "enable_debug_logging": true}),
+        ),
+        call(
+            "github.rerun_workflow_job",
+            "rerun-workflow-job",
+            json!({"owner": "nearai", "repo": "ironclaw", "job_id": 67890, "enable_debugger": true}),
         ),
         call(
             "github.fork_repo",
@@ -423,12 +555,33 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
             }),
         ),
         get(
-            "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20state%3Aclosed%20is%3Aissue&per_page=7&page=2&sort=created&order=desc",
+            "https://api.github.com/repos/nearai/ironclaw/issues?state=closed&per_page=7&page=1&labels=qa%2Creborn&assignee=henry&milestone=12",
         ),
         request(
             "POST",
             "https://api.github.com/repos/nearai/ironclaw/issues",
-            json!({"title": "matrix issue", "body": "body", "labels": ["qa", "reborn"]}),
+            json!({"title": "matrix issue", "body": "body", "milestone": 7, "labels": ["qa", "reborn"], "assignees": ["henry"]}),
+        ),
+        request(
+            "PATCH",
+            "https://api.github.com/repos/nearai/ironclaw/issues/42",
+            json!({"state": "closed", "labels": ["qa"], "assignees": ["henry"], "milestone": 7}),
+        ),
+        request(
+            "POST",
+            "https://api.github.com/repos/nearai/ironclaw/issues/42/labels",
+            json!({"labels": ["api", "reborn"]}),
+        ),
+        delete("https://api.github.com/repos/nearai/ironclaw/issues/42/labels/needs%20review"),
+        request(
+            "POST",
+            "https://api.github.com/repos/nearai/ironclaw/issues/42/assignees",
+            json!({"assignees": ["henry"]}),
+        ),
+        request(
+            "DELETE",
+            "https://api.github.com/repos/nearai/ironclaw/issues/42/assignees",
+            json!({"assignees": ["henry"]}),
         ),
         get("https://api.github.com/repos/nearai/ironclaw/issues/42"),
         get("https://api.github.com/repos/nearai/ironclaw/issues/42/comments?per_page=5&page=3"),
@@ -443,7 +596,9 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
             "https://api.github.com/repos/nearai/ironclaw/issues/77/comments",
             json!({"body": "alias comment"}),
         ),
-        get("https://api.github.com/repos/nearai/ironclaw/pulls?state=all&per_page=9&page=4"),
+        get(
+            "https://api.github.com/repos/nearai/ironclaw/pulls?state=all&per_page=9&head=henry%3Afix%2Fgithub-tool-api-correctness&base=main&sort=updated&direction=asc&page=4",
+        ),
         request(
             "POST",
             "https://api.github.com/repos/nearai/ironclaw/pulls",
@@ -452,23 +607,54 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
                 "head": "feature/matrix",
                 "base": "main",
                 "body": "body",
+                "head_repo": "ironclaw-fork",
+                "maintainer_can_modify": true,
                 "draft": true
             }),
         ),
+        request(
+            "PATCH",
+            "https://api.github.com/repos/nearai/ironclaw/pulls/4280",
+            json!({"state": "closed", "base": "release", "maintainer_can_modify": false}),
+        ),
         get("https://api.github.com/repos/nearai/ironclaw/pulls/4280"),
-        get("https://api.github.com/repos/nearai/ironclaw/pulls/4280/files"),
+        get("https://api.github.com/repos/nearai/ironclaw/pulls/4280/files?per_page=10&page=2"),
         request(
             "POST",
             "https://api.github.com/repos/nearai/ironclaw/pulls/4280/reviews",
-            json!({"body": "review body", "event": "COMMENT"}),
+            json!({
+                "body": "review body",
+                "event": "COMMENT",
+                "commit_id": "abc123def4567890abc123def4567890abc123de",
+                "comments": [
+                    {"path": "src/lib.rs", "body": "inline", "line": 10, "side": "RIGHT"}
+                ]
+            }),
         ),
-        get("https://api.github.com/repos/nearai/ironclaw/pulls/4280/comments?per_page=6&page=2"),
+        get(
+            "https://api.github.com/repos/nearai/ironclaw/pulls/4280/comments?per_page=6&sort=updated&direction=desc&since=2026-06-23T00%3A00%3A00Z&page=2",
+        ),
         request(
             "POST",
             "https://api.github.com/repos/nearai/ironclaw/pulls/4280/comments/123456789/replies",
             json!({"body": "reply"}),
         ),
         get("https://api.github.com/repos/nearai/ironclaw/pulls/4280/reviews?per_page=8&page=3"),
+        request(
+            "POST",
+            "https://api.github.com/graphql",
+            review_threads_query_body(),
+        ),
+        request(
+            "POST",
+            "https://api.github.com/graphql",
+            resolve_review_thread_body(),
+        ),
+        request(
+            "POST",
+            "https://api.github.com/graphql",
+            unresolve_review_thread_body(),
+        ),
         get("https://api.github.com/repos/nearai/ironclaw/commits/feature%2Fmatrix/status"),
         request(
             "PUT",
@@ -476,11 +662,12 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
             json!({
                 "merge_method": "squash",
                 "commit_title": "merge title",
-                "commit_message": "merge body"
+                "commit_message": "merge body",
+                "sha": "abc123def4567890abc123def4567890abc123de"
             }),
         ),
         get("https://api.github.com/user"),
-        get("https://api.github.com/users/nearai/repos?per_page=11&page=2"),
+        get("https://api.github.com/user/repos?per_page=11&type=member&page=2"),
         get(
             "https://api.github.com/search/repositories?q=org%3Anearai%20ironclaw&per_page=12&page=3&sort=updated&order=desc",
         ),
@@ -492,7 +679,7 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
             "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Aissue&per_page=12&page=3&sort=updated&order=desc",
         ),
         get(
-            "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Apr&per_page=12&page=3&sort=updated&order=desc",
+            "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Apr&per_page=12&page=3&sort=reactions-heart&order=desc",
         ),
         get(
             "https://api.github.com/repos/nearai/ironclaw/branches?per_page=13&protected=true&page=2",
@@ -549,7 +736,23 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
             json!({"ref": "main", "inputs": {"suite": "smoke"}}),
         ),
         get(
-            "https://api.github.com/repos/nearai/ironclaw/actions/workflows/ci.yml/runs?per_page=15&page=2",
+            "https://api.github.com/repos/nearai/ironclaw/actions/workflows/ci.yml/runs?per_page=15&event=pull_request&status=failure&head_sha=abc123def4567890abc123def4567890abc123de&page=2",
+        ),
+        get(
+            "https://api.github.com/repos/nearai/ironclaw/actions/runs/12345/jobs?per_page=16&filter=all&page=2",
+        ),
+        get(
+            "https://api.github.com/repos/nearai/ironclaw/actions/runs/12345/artifacts?per_page=17&name=coverage&direction=asc&page=3",
+        ),
+        request(
+            "POST",
+            "https://api.github.com/repos/nearai/ironclaw/actions/runs/12345/rerun-failed-jobs",
+            json!({"enable_debug_logging": true}),
+        ),
+        request(
+            "POST",
+            "https://api.github.com/repos/nearai/ironclaw/actions/jobs/67890/rerun",
+            json!({"enable_debugger": true}),
         ),
         request(
             "POST",
@@ -564,9 +767,13 @@ fn expected_github_http_requests() -> Vec<ExpectedGithubHttpRequest> {
 }
 
 fn assert_requests_match(actual: &[NetworkHttpRequest], expected: Vec<ExpectedGithubHttpRequest>) {
+    let mut matched = vec![false; actual.len()];
     for expected_request in expected {
-        let Some((index, request)) = actual.iter().enumerate().find(|(_, request)| {
-            request.method == expected_request.method && request.url == expected_request.url
+        let Some((index, request)) = actual.iter().enumerate().find(|(index, request)| {
+            !matched[*index]
+                && request.method == expected_request.method
+                && request.url == expected_request.url
+                && request_body_matches(request, expected_request.body.as_ref())
         }) else {
             panic!(
                 "missing GitHub HTTP request {}; actual requests: {:#?}",
@@ -577,6 +784,7 @@ fn assert_requests_match(actual: &[NetworkHttpRequest], expected: Vec<ExpectedGi
                     .collect::<Vec<_>>()
             );
         };
+        matched[index] = true;
         if let Some(expected_body) = expected_request.body {
             assert_eq!(
                 serde_json::from_slice::<serde_json::Value>(&request.body).unwrap(),
@@ -605,6 +813,18 @@ fn assert_requests_match(actual: &[NetworkHttpRequest], expected: Vec<ExpectedGi
     }
 }
 
+fn request_body_matches(
+    request: &NetworkHttpRequest,
+    expected_body: Option<&serde_json::Value>,
+) -> bool {
+    match expected_body {
+        Some(expected_body) => serde_json::from_slice::<serde_json::Value>(&request.body)
+            .map(|actual_body| actual_body == *expected_body)
+            .unwrap_or(false),
+        None => request.body.is_empty(),
+    }
+}
+
 fn call(
     capability_id: &str,
     call_id: &'static str,
@@ -625,6 +845,14 @@ fn get(url: &'static str) -> ExpectedGithubHttpRequest {
     }
 }
 
+fn delete(url: &'static str) -> ExpectedGithubHttpRequest {
+    ExpectedGithubHttpRequest {
+        method: NetworkMethod::Delete,
+        url,
+        body: None,
+    }
+}
+
 fn request(
     method: &'static str,
     url: &'static str,
@@ -633,6 +861,7 @@ fn request(
     let method = match method {
         "POST" => NetworkMethod::Post,
         "PUT" => NetworkMethod::Put,
+        "PATCH" => NetworkMethod::Patch,
         "DELETE" => NetworkMethod::Delete,
         _ => unreachable!("unsupported test method"),
     };
@@ -641,6 +870,68 @@ fn request(
         url,
         body: Some(body),
     }
+}
+
+fn review_threads_query_body() -> serde_json::Value {
+    json!({
+        "query": r#"
+query($owner: String!, $repo: String!, $number: Int!, $first: Int!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: $first, after: $after) {
+        nodes {
+          id
+          isResolved
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}
+"#,
+        "variables": {
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "number": 4280,
+            "first": 12,
+            "after": "cursor-1"
+        }
+    })
+}
+
+fn resolve_review_thread_body() -> serde_json::Value {
+    json!({
+        "query": r#"
+mutation($threadId: ID!) {
+  resolveReviewThread(input: { threadId: $threadId }) {
+    thread {
+      id
+      isResolved
+    }
+  }
+}
+"#,
+        "variables": {"threadId": "PRRT_kwDOExample"}
+    })
+}
+
+fn unresolve_review_thread_body() -> serde_json::Value {
+    json!({
+        "query": r#"
+mutation($threadId: ID!) {
+  unresolveReviewThread(input: { threadId: $threadId }) {
+    thread {
+      id
+      isResolved
+    }
+  }
+}
+"#,
+        "variables": {"threadId": "PRRT_kwDOExample"}
+    })
 }
 
 fn issue_comment_input() -> serde_json::Value {

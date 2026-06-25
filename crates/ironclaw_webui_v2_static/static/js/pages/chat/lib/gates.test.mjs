@@ -5,10 +5,13 @@ import vm from "node:vm";
 
 function loadGates() {
   const source = readFileSync(new URL("./gates.js", import.meta.url), "utf8")
-    .replace("export function gateFromEvent", "function gateFromEvent");
+    .replace(
+      /export function (gateFromEvent|gateFromProjectionGate)/g,
+      "function $1",
+    );
   const context = { globalThis: {} };
   vm.runInNewContext(
-    `${source}\nglobalThis.__testExports = { gateFromEvent };`,
+    `${source}\nglobalThis.__testExports = { gateFromEvent, gateFromProjectionGate };`,
     context,
   );
   return context.globalThis.__testExports;
@@ -31,6 +34,7 @@ test("gateFromEvent maps approval always-allow affordance", () => {
     })),
     {
       kind: "gate",
+      gateKind: "approval",
       runId: "run-1",
       gateRef: "gate:approval",
       invocationId: null,
@@ -53,6 +57,7 @@ test("gateFromEvent defaults missing always-allow affordance to false", () => {
     })),
     {
       kind: "gate",
+      gateKind: "approval",
       runId: "run-1",
       gateRef: "gate:resource",
       invocationId: null,
@@ -106,6 +111,36 @@ test("gateFromEvent maps approval context into readable approval card props", ()
   assert.match(gate.parameters, /Estimated network egress: 4096 bytes/);
 });
 
+test("gateFromProjectionGate ignores approval context from durable projection", () => {
+  const { gateFromProjectionGate } = loadGates();
+
+  const gate = plain(gateFromProjectionGate({
+    run_id: "run-1",
+    gate_kind: "approval",
+    gate_ref: "gate:approval-1",
+    invocation_id: "invocation-1",
+    headline: "Approval required",
+    body: "capability requires approval",
+    allow_always: true,
+    approval_context: {
+      tool_name: "builtin.http",
+      reason: "raw path /Users/test/.ssh/id_rsa and token sk-secret",
+      details: [{ label: "Secret", value: "sk-secret" }],
+    },
+  }));
+
+  assert.deepEqual(gate, {
+    kind: "gate",
+    gateKind: "approval",
+    runId: "run-1",
+    gateRef: "gate:approval-1",
+    invocationId: "invocation-1",
+    headline: "Approval required",
+    body: "capability requires approval",
+    allowAlways: true,
+  });
+});
+
 test("gateFromEvent keeps modern auth prompts without challenge kind off token card", () => {
   const { gateFromEvent } = loadGates();
 
@@ -119,9 +154,11 @@ test("gateFromEvent keeps modern auth prompts without challenge kind off token c
     })),
     {
       kind: "auth_required",
+      gateKind: "auth",
       challengeKind: "other",
       runId: "run-auth",
       gateRef: "gate:auth",
+      invocationId: null,
       provider: "google",
       accountLabel: "",
       authorizationUrl: null,
@@ -146,9 +183,11 @@ test("gateFromEvent preserves explicit oauth prompts without authorization URL",
     })),
     {
       kind: "auth_required",
+      gateKind: "auth",
       challengeKind: "oauth_url",
       runId: "run-auth",
       gateRef: "gate:auth",
+      invocationId: null,
       provider: "google",
       accountLabel: "",
       authorizationUrl: null,

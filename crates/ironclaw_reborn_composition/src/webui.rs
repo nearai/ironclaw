@@ -1,27 +1,32 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Utc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{InvocationId, ResourceScope};
+use ironclaw_extensions::SharedExtensionRegistry;
+use ironclaw_host_api::{EffectKind, InvocationId, ResourceScope};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ConnectableChannelsProductFacade, OperatorStatusService, RebornOperatorStatusCheck,
     RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornServices as ProductRebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductFacade,
-    WebUiAuthenticatedCaller,
+    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices as ProductRebornServices,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, SkillsProductFacade, WebUiAuthenticatedCaller,
 };
 
 use ironclaw_triggers::TriggerRepository;
 
 use crate::{
     RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
-    RebornRuntime,
+    RebornReadinessDiagnostic, RebornReadinessDiagnosticStatus, RebornRuntime,
     lifecycle::{
         RebornLocalLifecycleFacade, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
+    },
+    outbound_delivery_capability_surface::{
+        outbound_delivery_synthetic_provider, outbound_delivery_target_set_operator_tool_info,
     },
     outbound_preferences::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
@@ -32,6 +37,43 @@ use crate::{
 
 static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
     std::sync::LazyLock::new(ironclaw_safety::Sanitizer::new);
+
+#[derive(Clone)]
+struct ActiveRegistryOperatorToolCatalog {
+    registry: Arc<SharedExtensionRegistry>,
+    synthetic_tools: Arc<[RebornOperatorToolInfo]>,
+}
+
+impl ActiveRegistryOperatorToolCatalog {
+    fn new(
+        registry: Arc<SharedExtensionRegistry>,
+        synthetic_tools: Vec<RebornOperatorToolInfo>,
+    ) -> Self {
+        Self {
+            registry,
+            synthetic_tools: Arc::from(synthetic_tools),
+        }
+    }
+}
+
+impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
+    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo> {
+        let mut tools = self
+            .registry
+            .snapshot()
+            .capabilities()
+            .map(|descriptor| RebornOperatorToolInfo {
+                capability_id: descriptor.id.clone(),
+                provider: descriptor.provider.clone(),
+                description: Arc::<str>::from(descriptor.description.as_str()),
+                default_permission: descriptor.default_permission,
+                effects: Arc::<[EffectKind]>::from(descriptor.effects.clone()),
+            })
+            .collect::<Vec<_>>();
+        tools.extend(self.synthetic_tools.iter().cloned());
+        tools
+    }
+}
 
 /// WebUI-facing Reborn service bundle for host composition.
 ///
@@ -150,6 +192,46 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         );
     }
     if let Some(local_runtime) = &services.local_runtime {
+        let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+            local_runtime.tool_permission_overrides.clone();
+        let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+            local_runtime.auto_approve_settings.clone();
+        let persistent_approval_policies: Arc<
+            dyn ironclaw_approvals::PersistentApprovalPolicyStore,
+        > = local_runtime.persistent_approval_policies.clone();
+        let tool_registry = local_runtime
+            .shared_extension_registry
+            .clone()
+            .unwrap_or_else(|| {
+                Arc::new(SharedExtensionRegistry::new(
+                    local_runtime.extension_registry.as_ref().clone(),
+                ))
+            });
+        let synthetic_operator_tools = if outbound_delivery_target_providers.is_empty() {
+            Vec::new()
+        } else {
+            let provider = outbound_delivery_synthetic_provider().map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("outbound delivery synthetic provider id is invalid: {error}"),
+                }
+            })?;
+            vec![
+                outbound_delivery_target_set_operator_tool_info(provider).map_err(|error| {
+                    RebornBuildError::InvalidConfig {
+                        reason: format!("outbound delivery operator tool is invalid: {error}"),
+                    }
+                })?,
+            ]
+        };
+        api = api.with_operator_approval_config(
+            tool_permission_overrides,
+            auto_approve_settings,
+            persistent_approval_policies,
+            Arc::new(ActiveRegistryOperatorToolCatalog::new(
+                tool_registry,
+                synthetic_operator_tools,
+            )),
+        );
         let mut lifecycle_facade =
             RebornLocalLifecycleFacade::new(local_runtime.skill_management.clone());
         if let Some(extension_management) = &local_runtime.extension_management {
@@ -168,9 +250,21 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
     }
     if let Some(skill_management) = &services.skill_management {
-        api = api.with_skills_product_facade(Arc::new(LocalSkillsProductFacade::new(Arc::clone(
-            skill_management,
-        ))));
+        // Share the activation selector's live master switch so a Settings
+        // toggle here changes the next turn's selection. Only the local-dev
+        // runtime builds a selector that reads this flag, so it is wired only
+        // when `local_runtime` is present. When absent (e.g. the production
+        // assembly, which has no flag-reading selector), the facade gets `None`
+        // and the toggle reports unavailable rather than silently writing to an
+        // orphan flag that controls nothing.
+        let auto_activate_flag = services
+            .local_runtime
+            .as_ref()
+            .map(|local_runtime| Arc::clone(&local_runtime.skill_auto_activate_learned));
+        api = api.with_skills_product_facade(Arc::new(LocalSkillsProductFacade::new(
+            Arc::clone(skill_management),
+            auto_activate_flag,
+        )));
     }
     if let Some(product_auth) = &services.product_auth {
         api = api.with_extension_credentials(Arc::new(ProductAuthExtensionCredentialSetup::new(
@@ -224,6 +318,19 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         services.readiness.clone(),
     )));
     api = api.with_operator_logs_service(crate::operator_log_buffer());
+    if let Some(local_runtime) = &services.local_runtime {
+        #[cfg(feature = "root-llm-provider")]
+        let webui_boot_config = runtime.webui_boot_config();
+        #[cfg(not(feature = "root-llm-provider"))]
+        let webui_boot_config = None;
+        api = api.with_operator_service_lifecycle_service(Arc::new(
+            crate::operator_service_lifecycle::RebornLocalServiceLifecycle::new_for_operator_with_boot_config(
+                runtime.webui_tenant_id().clone(),
+                local_runtime.owner_user_id.clone(),
+                webui_boot_config,
+            ),
+        ));
+    }
 
     // Compose the operator LLM-config settings service when the runtime was
     // assembled with a boot config. The secret store stays private to this
@@ -287,11 +394,27 @@ impl OperatorStatusService for ReadinessOperatorStatusService {
 
 struct LocalSkillsProductFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
+    // The skill activation selector's live master switch (see
+    // `RebornLocalRuntimeServices::skill_auto_activate_learned`); writing it here
+    // changes the next turn's selection without a runtime rebuild. `None` when no
+    // flag-reading selector is wired (the production assembly) — the toggle then
+    // reports unavailable instead of writing to a flag nothing reads.
+    //
+    // Process-global by design: this is a single-operator local-dev switch, so it
+    // is intentionally not scoped per caller. A future multi-user surface would
+    // need a per-tenant flag.
+    auto_activate_learned: Option<Arc<AtomicBool>>,
 }
 
 impl LocalSkillsProductFacade {
-    fn new(skill_management: Arc<RebornLocalSkillManagementPort>) -> Self {
-        Self { skill_management }
+    fn new(
+        skill_management: Arc<RebornLocalSkillManagementPort>,
+        auto_activate_learned: Option<Arc<AtomicBool>>,
+    ) -> Self {
+        Self {
+            skill_management,
+            auto_activate_learned,
+        }
     }
 }
 
@@ -307,7 +430,13 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
             .list_for_scope(scope)
             .await
             .map_err(map_skill_management_error)?;
-        Ok(skill_list_response(skills))
+        Ok(skill_list_response(
+            skills,
+            self.auto_activate_learned
+                .as_ref()
+                .map(|flag| flag.load(Ordering::Relaxed))
+                .unwrap_or(true),
+        ))
     }
 
     async fn search_skills(
@@ -401,6 +530,69 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
             message: format!("Skill '{}' removed", removed.name),
         })
     }
+
+    async fn set_skill_auto_activate(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        name: String,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let scope = caller_skill_scope(caller);
+        let current = self
+            .skill_management
+            .read_content_for_scope(scope.clone(), &name)
+            .await
+            .map_err(map_skill_management_error)?;
+        let updated = ironclaw_skills::set_skill_auto_activate(&current.content, enabled);
+        // The toggled document is trusted prompt text loaded into the next run,
+        // so re-scan it before persisting (parity with install/update).
+        validate_skill_content_safety(&updated)?;
+        // dispatch-exempt: caller-scoped operator skill metadata write,
+        // not an in-turn tool call.
+        let result = self
+            .skill_management
+            .update_for_scope(scope, &name, &updated)
+            .await
+            .map_err(map_skill_management_error)?;
+        Ok(RebornSkillActionResponse {
+            success: true,
+            message: format!(
+                "Skill '{}' auto-activation {}",
+                result.name,
+                if enabled { "enabled" } else { "disabled" }
+            ),
+        })
+    }
+
+    async fn set_auto_activate_learned(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        // Fail closed when no flag-reading selector is wired (production
+        // assembly): better to tell the operator the control is unavailable than
+        // to silently accept a write that changes nothing. When a selector is
+        // wired (local-dev), it reads this flag every turn, so the store alone
+        // makes the change take effect on the next message — no runtime rebuild.
+        let Some(flag) = self.auto_activate_learned.as_ref() else {
+            return Err(RebornServicesError {
+                code: RebornServicesErrorCode::Unavailable,
+                kind: RebornServicesErrorKind::ServiceUnavailable,
+                status_code: 503,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            });
+        };
+        flag.store(enabled, Ordering::Relaxed);
+        Ok(RebornSkillActionResponse {
+            success: true,
+            message: format!(
+                "Default skill auto-activation {}",
+                if enabled { "enabled" } else { "disabled" }
+            ),
+        })
+    }
 }
 
 fn caller_skill_scope(caller: WebUiAuthenticatedCaller) -> ResourceScope {
@@ -415,11 +607,15 @@ fn caller_skill_scope(caller: WebUiAuthenticatedCaller) -> ResourceScope {
     }
 }
 
-fn skill_list_response(skills: Vec<ironclaw_skills::SkillSummary>) -> RebornSkillListResponse {
+fn skill_list_response(
+    skills: Vec<ironclaw_skills::SkillSummary>,
+    auto_activate_learned: bool,
+) -> RebornSkillListResponse {
     let skills: Vec<_> = skills.into_iter().map(skill_info).collect();
     RebornSkillListResponse {
         count: skills.len(),
         skills,
+        auto_activate_learned,
     }
 }
 
@@ -456,6 +652,7 @@ fn skill_info(skill: ironclaw_skills::SkillSummary) -> RebornSkillInfo {
         has_scripts: false,
         can_edit: can_manage,
         can_delete: can_manage,
+        auto_activate: skill.auto_activate,
     }
 }
 
@@ -548,6 +745,11 @@ fn status_response_from_readiness(readiness: &RebornReadiness) -> RebornOperator
             RebornOperatorStatusSeverity::Warning,
             Some("finish Reborn runtime setup before production use".to_string()),
         ),
+        crate::RebornReadinessState::HostedSingleTenantValidated => (
+            RebornOperatorStatusState::Ready,
+            RebornOperatorStatusSeverity::Info,
+            None,
+        ),
         crate::RebornReadinessState::ProductionValidated => (
             RebornOperatorStatusState::Ready,
             RebornOperatorStatusSeverity::Info,
@@ -614,6 +816,12 @@ fn status_response_from_readiness(readiness: &RebornReadiness) -> RebornOperator
         "extension readiness probes are not wired yet".to_string(),
         Some("use extension inventory and setup endpoints for per-extension status".to_string()),
     ));
+    checks.extend(
+        readiness
+            .diagnostics
+            .iter()
+            .map(status_check_from_readiness_diagnostic),
+    );
     let overall = if checks
         .iter()
         .any(|check| check.status == RebornOperatorStatusState::Blocked)
@@ -664,6 +872,59 @@ fn bool_check(
     )
 }
 
+fn status_check_from_readiness_diagnostic(
+    diagnostic: &RebornReadinessDiagnostic,
+) -> RebornOperatorStatusCheck {
+    let component = readiness_diagnostic_component(diagnostic);
+    let reason = readiness_diagnostic_reason(diagnostic);
+    let id = format!("readiness_{component}");
+    let status = match diagnostic.status {
+        RebornReadinessDiagnosticStatus::Blocking => RebornOperatorStatusState::Blocked,
+        RebornReadinessDiagnosticStatus::Warning | RebornReadinessDiagnosticStatus::Unknown(_) => {
+            RebornOperatorStatusState::Degraded
+        }
+        RebornReadinessDiagnosticStatus::Info => RebornOperatorStatusState::Ready,
+    };
+    let severity = match diagnostic.status {
+        RebornReadinessDiagnosticStatus::Blocking => RebornOperatorStatusSeverity::Critical,
+        RebornReadinessDiagnosticStatus::Warning | RebornReadinessDiagnosticStatus::Unknown(_) => {
+            RebornOperatorStatusSeverity::Warning
+        }
+        RebornReadinessDiagnosticStatus::Info => RebornOperatorStatusSeverity::Info,
+    };
+    let remediation = if diagnostic.blocks_production {
+        "wire the required Reborn production component before exposing live traffic"
+    } else {
+        "review the Reborn readiness report for the component owner"
+    };
+    status_check(
+        &id,
+        status,
+        severity,
+        format!(
+            "readiness diagnostic: component={component}, reason={reason}, profile={:?}",
+            diagnostic.profile
+        ),
+        Some(remediation.to_string()),
+    )
+}
+
+fn readiness_diagnostic_component(diagnostic: &RebornReadinessDiagnostic) -> String {
+    readiness_diagnostic_wire_string(&diagnostic.component)
+        .unwrap_or_else(|| "unknown_component".to_string())
+}
+
+fn readiness_diagnostic_reason(diagnostic: &RebornReadinessDiagnostic) -> String {
+    readiness_diagnostic_wire_string(&diagnostic.reason)
+        .unwrap_or_else(|| "unknown_reason".to_string())
+}
+
+fn readiness_diagnostic_wire_string(value: &impl serde::Serialize) -> Option<String> {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+}
+
 fn status_check(
     id: &str,
     status: RebornOperatorStatusState,
@@ -683,12 +944,86 @@ fn status_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_extensions::{
+        ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    };
     use ironclaw_filesystem::LocalFilesystem;
     use ironclaw_host_api::{
-        HostPath, MountAlias, MountGrant, MountPermissions, MountView, TenantId, UserId,
-        VirtualPath,
+        HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView, TenantId,
+        UserId, VirtualPath,
     };
     use std::{path::Path, time::Duration};
+
+    #[test]
+    fn operator_tool_catalog_reads_shared_registry_updates() {
+        let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let synthetic_provider =
+            outbound_delivery_synthetic_provider().expect("synthetic provider id");
+        let catalog = ActiveRegistryOperatorToolCatalog::new(
+            Arc::clone(&registry),
+            vec![
+                outbound_delivery_target_set_operator_tool_info(synthetic_provider.clone())
+                    .expect("synthetic tool info"),
+            ],
+        );
+
+        assert!(
+            catalog.list_operator_tools().iter().any(|tool| {
+                tool.capability_id.as_str()
+                    == crate::outbound_delivery_capability_surface::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID
+                    && tool.provider == synthetic_provider
+            }),
+            "synthetic outbound delivery capability must use the Settings > Tools provider key"
+        );
+
+        registry
+            .insert(test_extension_package("dynamic-tools", "echo"))
+            .expect("insert dynamic extension");
+
+        let tools = catalog.list_operator_tools();
+
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.capability_id.as_str() == "dynamic-tools.echo"),
+            "catalog must read the shared registry at list time so lifecycle updates are visible"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_webui_services_wires_lifecycle_owner_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = crate::RebornRuntimeInput::from_services(
+            crate::RebornBuildInput::local_dev("runtime-owner", dir.path().join("local-dev"))
+                .with_runtime_policy(
+                    crate::local_dev_runtime_policy().expect("local-dev policy resolves"),
+                ),
+        )
+        .with_identity(crate::RebornRuntimeIdentity {
+            tenant_id: "tenant-alpha".to_string(),
+            agent_id: "agent-alpha".to_string(),
+            source_binding_id: "webui-test-source".to_string(),
+            reply_target_binding_id: "webui-test-reply".to_string(),
+        });
+        let runtime = crate::build_reborn_runtime(input)
+            .await
+            .expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui services build");
+
+        let error = bundle
+            .api
+            .run_operator_service_lifecycle(
+                caller("bob"),
+                ironclaw_product_workflow::RebornOperatorServiceLifecycleRequest {
+                    action: ironclaw_product_workflow::RebornOperatorServiceLifecycleAction::Status,
+                },
+            )
+            .await
+            .expect_err("non-owner caller is rejected before lifecycle dispatch");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Forbidden);
+        assert_eq!(error.status_code, 403);
+    }
 
     #[tokio::test]
     async fn readiness_operator_status_service_generates_timestamp_per_call() {
@@ -707,6 +1042,177 @@ mod tests {
         assert_ne!(
             first.generated_at, second.generated_at,
             "status generated_at must be refreshed for each operator status request"
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_operator_status_includes_stable_readiness_diagnostics() {
+        let service = ReadinessOperatorStatusService::new(RebornReadiness::disabled());
+
+        let response = service
+            .status(caller("runtime-owner"))
+            .await
+            .expect("status response");
+
+        assert_eq!(response.overall, RebornOperatorStatusState::Blocked);
+        let readiness_check = response
+            .checks
+            .iter()
+            .find(|check| check.id == "readiness_composition_profile")
+            .expect("readiness diagnostic check");
+        assert_eq!(readiness_check.status, RebornOperatorStatusState::Blocked);
+        assert_eq!(
+            readiness_check.severity,
+            RebornOperatorStatusSeverity::Critical
+        );
+        assert!(
+            readiness_check.summary.contains("reason=disabled"),
+            "summary should use stable redacted readiness vocabulary: {}",
+            readiness_check.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_operator_status_keeps_info_diagnostics_ready() {
+        let service = ReadinessOperatorStatusService::new(RebornReadiness {
+            profile: crate::RebornCompositionProfile::Production,
+            state: crate::RebornReadinessState::ProductionValidated,
+            facades: crate::RebornFacadeReadiness {
+                host_runtime: true,
+                turn_coordinator: true,
+                product_auth: true,
+            },
+            workers: crate::RebornWorkerReadiness {
+                turn_runner: true,
+                trigger_poller: true,
+            },
+            diagnostics: vec![RebornReadinessDiagnostic {
+                profile: crate::RebornCompositionProfile::Production,
+                component: crate::RebornReadinessDiagnosticComponent::RuntimeHttpEgress,
+                reason: crate::RebornReadinessDiagnosticReason::Unverified,
+                status: RebornReadinessDiagnosticStatus::Info,
+                blocks_production: false,
+            }],
+        });
+
+        let response = service
+            .status(caller("runtime-owner"))
+            .await
+            .expect("status response");
+
+        assert_eq!(response.overall, RebornOperatorStatusState::Ready);
+        let readiness_check = response
+            .checks
+            .iter()
+            .find(|check| check.id == "readiness_runtime_http_egress")
+            .expect("readiness info diagnostic check");
+        assert_eq!(readiness_check.status, RebornOperatorStatusState::Ready);
+        assert_eq!(readiness_check.severity, RebornOperatorStatusSeverity::Info);
+    }
+
+    #[tokio::test]
+    async fn set_auto_activate_learned_flips_shared_flag_and_surfaces_in_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(&storage_root).expect("storage root");
+
+        let mut filesystem = LocalFilesystem::new();
+        filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.clone()),
+            )
+            .expect("mount storage root");
+        let filesystem: Arc<dyn ironclaw_filesystem::RootFilesystem> = Arc::new(filesystem);
+        let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
+            UserId::new("runtime-owner").expect("user"),
+            filesystem,
+            Arc::new(scoped_skill_mounts),
+        ));
+        // Share the flag the way production composition does: the activation
+        // selector holds the same `Arc`, so a toggle here must be observable on
+        // that handle (that is the whole point of the live master switch).
+        let flag = Arc::new(AtomicBool::new(true));
+        let facade = LocalSkillsProductFacade::new(skill_management, Some(Arc::clone(&flag)));
+        let owner = caller("runtime-owner");
+
+        let listed = facade.list_skills(owner.clone()).await.expect("list");
+        assert!(
+            listed.auto_activate_learned,
+            "default master switch must report on"
+        );
+
+        let response = facade
+            .set_auto_activate_learned(owner.clone(), false)
+            .await
+            .expect("disable");
+        assert!(response.success);
+        assert!(
+            !flag.load(Ordering::Relaxed),
+            "disabling must flip the shared selector flag to false"
+        );
+        let listed = facade.list_skills(owner.clone()).await.expect("list");
+        assert!(
+            !listed.auto_activate_learned,
+            "list must report the master switch as off after disabling"
+        );
+
+        facade
+            .set_auto_activate_learned(owner.clone(), true)
+            .await
+            .expect("enable");
+        assert!(
+            flag.load(Ordering::Relaxed),
+            "re-enabling must flip the shared selector flag back to true"
+        );
+        let listed = facade.list_skills(owner).await.expect("list");
+        assert!(
+            listed.auto_activate_learned,
+            "list must report the master switch as on after re-enabling"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_auto_activate_learned_fails_closed_when_no_selector_is_wired() {
+        // Production assembly mounts the skills facade but wires no flag-reading
+        // selector, so the facade receives `None`. The toggle must fail closed
+        // (telling the operator it is unavailable) instead of silently accepting
+        // a write to a flag nothing reads, and the list must still render with a
+        // sane default rather than erroring.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(&storage_root).expect("storage root");
+
+        let mut filesystem = LocalFilesystem::new();
+        filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.clone()),
+            )
+            .expect("mount storage root");
+        let filesystem: Arc<dyn ironclaw_filesystem::RootFilesystem> = Arc::new(filesystem);
+        let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
+            UserId::new("runtime-owner").expect("user"),
+            filesystem,
+            Arc::new(scoped_skill_mounts),
+        ));
+        let facade = LocalSkillsProductFacade::new(skill_management, None);
+        let owner = caller("runtime-owner");
+
+        let error = facade
+            .set_auto_activate_learned(owner.clone(), false)
+            .await
+            .expect_err("toggle must fail closed without a selector");
+        assert_eq!(
+            error.status_code, 503,
+            "no-selector toggle must surface as service-unavailable, not silent success"
+        );
+
+        // List still works and renders the documented default rather than erroring.
+        let listed = facade.list_skills(owner).await.expect("list");
+        assert!(
+            listed.auto_activate_learned,
+            "list defaults to on when no selector flag is wired"
         );
     }
 
@@ -736,7 +1242,8 @@ mod tests {
             filesystem,
             Arc::new(scoped_skill_mounts),
         ));
-        let facade = LocalSkillsProductFacade::new(skill_management);
+        let facade =
+            LocalSkillsProductFacade::new(skill_management, Some(Arc::new(AtomicBool::new(true))));
         let owner = caller("runtime-owner");
         let bob = caller("bob");
         let other_tenant_owner = caller_in_tenant("tenant-beta", "runtime-owner");
@@ -924,6 +1431,43 @@ mod tests {
         caller_in_tenant("tenant-alpha", user_id)
     }
 
+    fn test_extension_package(extension_id: &str, capability_name: &str) -> ExtensionPackage {
+        let manifest_toml = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{extension_id}"
+name = "{extension_id}"
+version = "0.1.0"
+description = "test extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/{extension_id}.wasm"
+
+[[capabilities]]
+id = "{extension_id}.{capability_name}"
+description = "{capability_name}"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/{capability_name}.input.json"
+output_schema_ref = "schemas/{capability_name}.output.json"
+"#
+        );
+        let manifest = ExtensionManifest::parse(
+            &manifest_toml,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+        )
+        .expect("manifest parses");
+        ExtensionPackage::from_manifest(
+            manifest,
+            VirtualPath::new(format!("/system/extensions/{extension_id}")).expect("root"),
+        )
+        .expect("package builds")
+    }
+
     fn caller_in_tenant(tenant_id: &str, user_id: &str) -> WebUiAuthenticatedCaller {
         WebUiAuthenticatedCaller::new(
             TenantId::new(tenant_id).expect("tenant"),
@@ -969,7 +1513,7 @@ mod tests {
             filesystem,
             Arc::new(scoped_skill_mounts),
         ));
-        LocalSkillsProductFacade::new(skill_management)
+        LocalSkillsProductFacade::new(skill_management, Some(Arc::new(AtomicBool::new(true))))
     }
 
     fn skill_content(name: &str, description: &str) -> String {

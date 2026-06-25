@@ -1,5 +1,3 @@
-use ironclaw_host_api::Timestamp;
-
 use crate::TriggerError;
 
 use super::TriggerPollerFailureReason;
@@ -8,12 +6,6 @@ use super::TriggerPollerFailureReason;
 pub(super) enum SubmitFailureKind {
     Retryable,
     Permanent,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FireFailureDisposition {
-    Retryable,
-    PermanentReschedule(Timestamp),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,10 +44,22 @@ pub(super) fn classify_failure(error: &TriggerError) -> FailureClassification {
             SubmitFailureKind::Permanent,
             TriggerPollerFailureReason::InvalidMaterialization,
         ),
+        TriggerError::BlockedMaterialization { .. } => (
+            SubmitFailureKind::Retryable,
+            TriggerPollerFailureReason::BlockedMaterialization,
+        ),
         TriggerError::NotFound => (
             SubmitFailureKind::Permanent,
             TriggerPollerFailureReason::NotFound,
         ),
     };
     FailureClassification { kind, reason }
+}
+
+pub(super) fn classify_submit_failure(error: &TriggerError) -> FailureClassification {
+    let mut classification = classify_failure(error);
+    if matches!(error, TriggerError::NotFound) {
+        classification.kind = SubmitFailureKind::Retryable;
+    }
+    classification
 }

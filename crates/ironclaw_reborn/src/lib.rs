@@ -20,7 +20,10 @@ pub mod app_loop_family;
 pub mod driver_registry;
 pub mod failure_categories;
 pub mod hook_gate_refs;
-#[cfg(feature = "webui-user-store")]
+#[cfg(any(
+    feature = "webui-user-store",
+    feature = "filesystem-local-trigger-access"
+))]
 pub mod local_trigger_access;
 pub mod loop_driver_host;
 pub mod loop_exit_applier;
@@ -34,6 +37,7 @@ pub mod runtime;
 pub mod subagent;
 pub mod text_loop_driver;
 pub mod thread_scope;
+pub mod turn_run_executor;
 pub mod turn_runner;
 
 #[cfg(feature = "root-llm-provider")]

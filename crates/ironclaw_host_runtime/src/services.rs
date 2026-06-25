@@ -72,7 +72,7 @@ use ironclaw_turns::{
 use ironclaw_wasm::{
     DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError,
     WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder,
-    WasmStagedRuntimeCredentials, WitToolHost, WitToolRequest, WitToolRuntime,
+    WasmStagedRuntimeCredentials, WitToolExecution, WitToolHost, WitToolRequest, WitToolRuntime,
     WitToolRuntimeConfig,
 };
 
@@ -99,6 +99,7 @@ mod production_services;
 mod production_wiring;
 mod runtime_adapters;
 mod wasm_diagnostics;
+mod wasm_execution;
 
 use production_wiring::{
     ProductionComponentType, ProductionComponentTypes, ProductionImplementationReadiness,

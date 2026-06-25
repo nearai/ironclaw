@@ -25,6 +25,9 @@ pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
 pub const WEBUI_V2_ROUTE_CANCEL_RUN: &str = "webui.v2.cancel_run";
 pub const WEBUI_V2_ROUTE_RESOLVE_GATE: &str = "webui.v2.resolve_gate";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
+pub const WEBUI_V2_ROUTE_PAUSE_AUTOMATION: &str = "webui.v2.pause_automation";
+pub const WEBUI_V2_ROUTE_RESUME_AUTOMATION: &str = "webui.v2.resume_automation";
+pub const WEBUI_V2_ROUTE_DELETE_AUTOMATION: &str = "webui.v2.delete_automation";
 pub const WEBUI_V2_ROUTE_TRACE_CREDITS: &str = "webui.v2.trace_credits";
 pub const WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE: &str = "webui.v2.authorize_trace_hold";
 pub const WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES: &str = "webui.v2.get_outbound_preferences";
@@ -45,6 +48,13 @@ pub const WEBUI_V2_ROUTE_INSTALL_SKILL: &str = "webui.v2.install_skill";
 pub const WEBUI_V2_ROUTE_GET_SKILL: &str = "webui.v2.get_skill";
 pub const WEBUI_V2_ROUTE_UPDATE_SKILL: &str = "webui.v2.update_skill";
 pub const WEBUI_V2_ROUTE_REMOVE_SKILL: &str = "webui.v2.remove_skill";
+pub const WEBUI_V2_ROUTE_SET_SKILL_AUTO_ACTIVATE: &str = "webui.v2.set_skill_auto_activate";
+pub const WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED: &str = "webui.v2.set_auto_activate_learned";
+pub const WEBUI_V2_ROUTE_LIST_SETTINGS_TOOLS: &str = "webui.v2.settings.list_tools";
+pub const WEBUI_V2_ROUTE_SET_SETTINGS_TOOLS_AUTO_APPROVE: &str =
+    "webui.v2.settings.set_tools_auto_approve";
+pub const WEBUI_V2_ROUTE_SET_SETTINGS_TOOL_PERMISSION: &str =
+    "webui.v2.settings.set_tool_permission";
 pub const WEBUI_V2_ROUTE_GET_LLM_CONFIG: &str = "webui.v2.get_llm_config";
 pub const WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER: &str = "webui.v2.upsert_llm_provider";
 pub const WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER: &str = "webui.v2.delete_llm_provider";
@@ -65,6 +75,7 @@ pub const WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS: &str = "webui.v2.operator.diagnos
 pub const WEBUI_V2_ROUTE_OPERATOR_STATUS: &str = "webui.v2.operator.status";
 pub const WEBUI_V2_ROUTE_OPERATOR_LOGS: &str = "webui.v2.operator.logs";
 pub const WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE: &str = "webui.v2.operator.service_lifecycle";
+pub const WEBUI_V2_ROUTE_LOGS: &str = "webui.v2.logs";
 pub const WEBUI_V2_ROUTE_LIST_PROJECT_FILES: &str = "webui.v2.list_project_files";
 pub const WEBUI_V2_ROUTE_STAT_PROJECT_FILE: &str = "webui.v2.stat_project_file";
 pub const WEBUI_V2_ROUTE_READ_PROJECT_FILE: &str = "webui.v2.read_project_file";
@@ -88,6 +99,7 @@ pub const WEBUI_V2_PATTERN_DELETE_THREAD: &str = "/api/webchat/v2/threads/{threa
 pub const WEBUI_V2_PATTERN_GET_SESSION: &str = "/api/webchat/v2/session";
 pub const WEBUI_V2_PATTERN_SEND_MESSAGE: &str = "/api/webchat/v2/threads/{thread_id}/messages";
 pub const WEBUI_V2_PATTERN_GET_TIMELINE: &str = "/api/webchat/v2/threads/{thread_id}/timeline";
+pub const WEBUI_V2_PATTERN_LOGS: &str = "/api/webchat/v2/logs";
 pub const WEBUI_V2_PATTERN_GET_ATTACHMENT: &str =
     "/api/webchat/v2/threads/{thread_id}/messages/{message_id}/attachments/{attachment_id}";
 pub const WEBUI_V2_PATTERN_STREAM_EVENTS: &str = "/api/webchat/v2/threads/{thread_id}/events";
@@ -97,6 +109,11 @@ pub const WEBUI_V2_PATTERN_CANCEL_RUN: &str =
 pub const WEBUI_V2_PATTERN_RESOLVE_GATE: &str =
     "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve";
 pub const WEBUI_V2_PATTERN_LIST_AUTOMATIONS: &str = "/api/webchat/v2/automations";
+pub const WEBUI_V2_PATTERN_PAUSE_AUTOMATION: &str =
+    "/api/webchat/v2/automations/{automation_id}/pause";
+pub const WEBUI_V2_PATTERN_RESUME_AUTOMATION: &str =
+    "/api/webchat/v2/automations/{automation_id}/resume";
+pub const WEBUI_V2_PATTERN_DELETE_AUTOMATION: &str = "/api/webchat/v2/automations/{automation_id}";
 pub const WEBUI_V2_PATTERN_TRACE_CREDITS: &str = "/api/webchat/v2/traces/credit";
 pub const WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE: &str =
     "/api/webchat/v2/traces/holds/{submission_id}/authorize";
@@ -115,6 +132,13 @@ pub const WEBUI_V2_PATTERN_LIST_SKILLS: &str = "/api/webchat/v2/skills";
 pub const WEBUI_V2_PATTERN_SEARCH_SKILLS: &str = "/api/webchat/v2/skills/search";
 pub const WEBUI_V2_PATTERN_INSTALL_SKILL: &str = "/api/webchat/v2/skills/install";
 pub const WEBUI_V2_PATTERN_SKILL_DETAIL: &str = "/api/webchat/v2/skills/{name}";
+pub const WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE: &str =
+    "/api/webchat/v2/skills/{name}/auto-activate";
+pub const WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED: &str =
+    "/api/webchat/v2/skills/auto-activate-learned";
+pub const WEBUI_V2_PATTERN_SETTINGS_TOOLS: &str = "/api/webchat/v2/settings/tools";
+pub const WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION: &str =
+    "/api/webchat/v2/settings/tools/{capability_id}";
 pub const WEBUI_V2_PATTERN_GET_LLM_CONFIG: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER: &str =
@@ -164,12 +188,16 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         send_message_descriptor(),
         list_threads_descriptor(),
         get_timeline_descriptor(),
+        logs_descriptor(),
         get_attachment_descriptor(),
         stream_events_descriptor(),
         stream_events_ws_descriptor(),
         cancel_run_descriptor(),
         resolve_gate_descriptor(),
         list_automations_descriptor(),
+        pause_automation_descriptor(),
+        resume_automation_descriptor(),
+        delete_automation_descriptor(),
         trace_credits_descriptor(),
         authorize_trace_hold_descriptor(),
         get_outbound_preferences_descriptor(),
@@ -189,6 +217,11 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         get_skill_descriptor(),
         update_skill_descriptor(),
         remove_skill_descriptor(),
+        set_skill_auto_activate_descriptor(),
+        set_auto_activate_learned_descriptor(),
+        list_settings_tools_descriptor(),
+        set_settings_tools_auto_approve_descriptor(),
+        set_settings_tool_permission_descriptor(),
         get_llm_config_descriptor(),
         upsert_llm_provider_descriptor(),
         delete_llm_provider_descriptor(),
@@ -666,6 +699,48 @@ fn list_automations_descriptor() -> IngressRouteDescriptor {
     )
 }
 
+fn pause_automation_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_PAUSE_AUTOMATION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_PAUSE_AUTOMATION,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn resume_automation_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_RESUME_AUTOMATION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_RESUME_AUTOMATION,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn delete_automation_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_DELETE_AUTOMATION,
+        NetworkMethod::Delete,
+        WEBUI_V2_PATTERN_DELETE_AUTOMATION,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
 fn trace_credits_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_TRACE_CREDITS,
@@ -933,6 +1008,76 @@ fn remove_skill_descriptor() -> IngressRouteDescriptor {
     )
 }
 
+fn set_skill_auto_activate_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_SKILL_AUTO_ACTIVATE,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn set_auto_activate_learned_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn list_settings_tools_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_SETTINGS_TOOLS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_SETTINGS_TOOLS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn set_settings_tools_auto_approve_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_SETTINGS_TOOLS_AUTO_APPROVE,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_TOOLS,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn set_settings_tool_permission_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_SETTINGS_TOOL_PERMISSION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
 fn get_llm_config_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_GET_LLM_CONFIG,
@@ -1176,6 +1321,20 @@ fn operator_logs_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_OPERATOR_LOGS,
         NetworkMethod::Get,
         WEBUI_V2_PATTERN_OPERATOR_LOGS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn logs_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LOGS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_LOGS,
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,

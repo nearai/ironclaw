@@ -1,3 +1,4 @@
+import { useOutletContext } from "react-router";
 import { React, html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
 import { useLogs } from "./hooks/useLogs.js";
@@ -113,6 +114,7 @@ function ScopeChip({ label, value, scopeKey }) {
 
 export function LogsPage() {
   const t = useT();
+  const { isAdmin = false, threadsState } = useOutletContext() || {};
   const {
     entries,
     totalCount,
@@ -130,7 +132,11 @@ export function LogsPage() {
     scope,
     isLoading,
     error,
-  } = useLogs();
+    needsThreadScope,
+  } = useLogs({
+    isAdmin,
+    defaultThreadId: isAdmin ? null : threadsState?.activeThreadId || null,
+  });
 
   const outputRef = React.useRef(null);
   const followLatestRef = React.useRef(true);
@@ -269,7 +275,16 @@ export function LogsPage() {
               </div>
             `
           : null}
-        ${error && !hasEntries
+        ${needsThreadScope
+          ? html`
+              <div
+                data-testid="logs-select-thread-state"
+                className="flex h-full items-center justify-center text-sm text-[var(--v2-text-muted)]"
+              >
+                ${t("chat.selectConversation")}
+              </div>
+            `
+          : error && !hasEntries
           ? html`
               <div
                 className="flex h-full items-center justify-center px-6 text-center text-sm text-red-300"

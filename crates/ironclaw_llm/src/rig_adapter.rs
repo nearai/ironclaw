@@ -110,9 +110,9 @@ impl ModelsEndpoint {
         // request to a blocked target (e.g. the cloud-metadata IP) — a 3xx is
         // surfaced as a non-success status below instead of being chased. The
         // shared builder also bypasses the proxy for loopback providers.
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none());
+        let mut builder =
+            crate::config::hardened_client_builder(crate::config::AUXILIARY_REQUEST_TIMEOUT_SECS)
+                .redirect(reqwest::redirect::Policy::none());
         // Pin the client to the addresses the guard validated, so the
         // connect-time resolver can't rebind the hostname to a blocked IP after
         // the check passed (DNS TOCTOU). `None` for literal-IP / proxy-resolved
@@ -952,9 +952,12 @@ where
         // Strict-mode tool schemas advertise every optional as required+nullable,
         // so the model fills unset optionals with `null`. Strip those placeholders
         // against each tool's original schema so only provided values reach the
-        // tool. `false`: rig providers send `null`, not `""`, so a deliberately
-        // empty string from the model is preserved.
-        crate::tool_schema::strip_unset_optional_fields(&mut tool_calls, &request.tools, false);
+        // tool.
+        crate::tool_schema::strip_unset_optional_fields(
+            &mut tool_calls,
+            &request.tools,
+            crate::tool_schema::PlaceholderStrippingMode::NullOnly,
+        );
 
         let resp = ToolCompletionResponse {
             content: text,

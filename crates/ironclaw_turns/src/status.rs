@@ -4,10 +4,10 @@ use thiserror::Error;
 use ironclaw_host_api::RuntimeCredentialAuthRequirement;
 
 use crate::{
-    AcceptedMessageRef, GateRef, ProductTurnContext, ReplyTargetBindingRef, ResolvedRunProfile,
-    RunProfileId, RunProfileVersion, SourceBindingRef, TurnActor, TurnAdmissionClass,
-    TurnCheckpointId, TurnId, TurnRunId, TurnScope, events::EventCursor, request::TurnTimestamp,
-    run_profile::LoopModelRouteSnapshot,
+    AcceptedMessageRef, CapabilityActivityId, GateRef, ProductTurnContext, ReplyTargetBindingRef,
+    ResolvedRunProfile, RunProfileId, RunProfileVersion, SourceBindingRef, TurnActor,
+    TurnAdmissionClass, TurnCheckpointId, TurnId, TurnRunId, TurnScope, events::EventCursor,
+    request::TurnTimestamp, run_profile::LoopModelRouteSnapshot,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,6 +326,8 @@ pub struct TurnRunState {
     pub received_at: TurnTimestamp,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_activity_id: Option<CapabilityActivityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     pub failure: Option<SanitizedFailure>,

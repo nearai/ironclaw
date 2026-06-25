@@ -17,6 +17,7 @@ import {
   addPending,
   recordAcceptedMessageRef,
   removePending,
+  timelineMessageIdFromAcceptedRef,
 } from "../lib/pending-messages.js";
 import {
   createToolActivityState,
@@ -30,6 +31,7 @@ import { useSSE } from "./useSSE.js";
 const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
 const AUTH_GATE_CREDENTIAL_STORED_ERROR =
   "credential_stored_gate_resolution_failed";
+const APPROVAL_GATE_PENDING_SEND_ERROR = "approval_gate_pending_send_blocked";
 const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
 const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
 const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
@@ -51,12 +53,25 @@ function credentialStoredGateResolutionError(cause) {
   return error;
 }
 
+function approvalGatePendingSendError() {
+  const error = new Error(
+    "Resolve the approval request before sending another message.",
+  );
+  error.safeErrorCode = APPROVAL_GATE_PENDING_SEND_ERROR;
+  return error;
+}
+
 function threadNeedsSidebarRefresh(threadId) {
   const cached = queryClient.getQueryData?.(["threads"]);
   const threads = cached?.threads;
   if (!Array.isArray(threads)) return true;
   const thread = threads.find((item) => item.thread_id === threadId || item.id === threadId);
   return !thread?.title;
+}
+
+function busyNoticeKey(threadId, gate) {
+  if (!threadId || !gate?.runId || !gate?.gateRef) return null;
+  return `${threadId}\n${gate.runId}\n${gate.gateRef}`;
 }
 
 function submitResponseResumedTurnGate(response) {
@@ -124,6 +139,7 @@ async function resolveConnectAction(content) {
 //   a v1-style `requestId`.
 // - cancelRun is a first-class action and posts to the v2 cancel route.
 export function useChat(threadId) {
+  const threadIdRef = React.useRef(threadId);
   const pendingMessagesRef = React.useRef(new Map());
   const pendingSeqRef = React.useRef(1);
   const [cooldownUntil, setCooldownUntil] = React.useState(0);
@@ -169,11 +185,29 @@ export function useChat(threadId) {
     isLoading: historyLoading,
     loadError: historyLoadError,
     loadHistory,
+    seedThreadMessages,
     setMessages,
   } = useHistory(threadId, { getPendingMessages, setPendingMessages });
 
-  const [isProcessing, setIsProcessing] = React.useState(false);
-  const [pendingGate, setPendingGate] = React.useState(null);
+  const [isProcessing, setIsProcessingState] = React.useState(false);
+  const isProcessingRef = React.useRef(isProcessing);
+  const setIsProcessing = React.useCallback((next) => {
+    const value =
+      typeof next === "function" ? next(isProcessingRef.current) : next;
+    isProcessingRef.current = value;
+    setIsProcessingState(value);
+  }, []);
+  const [pendingGate, setPendingGateState] = React.useState(null);
+  const pendingGateRef = React.useRef(pendingGate);
+  const [busyGateNotice, setBusyGateNotice] = React.useState(null);
+  const setPendingGate = React.useCallback((next) => {
+    const current = pendingGateRef.current;
+    const value =
+      typeof next === "function" ? next(current) : next;
+    if (Object.is(value, current)) return;
+    pendingGateRef.current = value;
+    setPendingGateState(value);
+  }, []);
   const [stateThreadId, setStateThreadId] = React.useState(threadId);
   const toolActivityStateRef = React.useRef(createToolActivityState());
   const locallyResolvedGatesRef = React.useRef(new Map());
@@ -182,6 +216,7 @@ export function useChat(threadId) {
     credentialRef: null,
     inFlight: false,
   });
+  const submitBusyRef = React.useRef(false);
 
   // Per-thread transient state must not leak across thread switches.
   // Without this reset, clicking "+ New" while the previous thread is
@@ -212,11 +247,30 @@ export function useChat(threadId) {
   // raw setActiveRunState rather than the activeRunRef-mutating wrapper.
   if (stateThreadId !== threadId) {
     setStateThreadId(threadId);
-    setIsProcessing(false);
-    setPendingGate(null);
+    setIsProcessingState(false);
+    setPendingGateState(null);
+    setBusyGateNotice(null);
     setActiveRunState(null);
     setChannelConnectAction(null);
   }
+
+  React.useEffect(() => {
+    threadIdRef.current = threadId;
+  }, [threadId]);
+
+  React.useEffect(() => {
+    pendingGateRef.current = pendingGate;
+  }, [pendingGate]);
+  React.useEffect(() => {
+    isProcessingRef.current = isProcessing;
+  }, [isProcessing]);
+
+  React.useEffect(() => {
+    const currentKey = busyNoticeKey(threadId, pendingGate);
+    setBusyGateNotice((current) =>
+      current && current.gateKey !== currentKey ? null : current,
+    );
+  }, [pendingGate, threadId]);
 
   React.useEffect(() => {
     resetToolActivityState(toolActivityStateRef);
@@ -307,8 +361,13 @@ export function useChat(threadId) {
     // user message from the server doesn't render alongside its
     // pre-submit optimistic twin.
     onRunSettled: (_runId, { success }) => {
+      submitBusyRef.current = false;
       if (success) setPendingMessages([]);
-      loadHistory(undefined, { preserveClientOnly: true });
+      loadHistory(undefined, {
+        preserveClientOnly: true,
+        finalReplyTimestampByRun:
+          _runId && success ? { [_runId]: new Date().toISOString() } : null,
+      });
     },
   });
 
@@ -337,6 +396,23 @@ export function useChat(threadId) {
         opts;
       const wireAttachments = stagedAttachments.map(toWireAttachment);
       const renderAttachments = stagedAttachments.map(toRenderAttachment);
+
+      if (pendingGate || pendingGateRef.current) {
+        throw approvalGatePendingSendError();
+      }
+      const activeRunForSend = activeRunRef.current;
+      const activeRunBlocksSend =
+        activeRunForSend &&
+        (!targetThreadId ||
+          activeRunForSend.threadId === targetThreadId ||
+          activeRunForSend.threadId === threadId);
+      if (
+        submitBusyRef.current ||
+        isProcessingRef.current ||
+        activeRunBlocksSend
+      ) {
+        return null;
+      }
 
       // Channel-connect slash commands ("/connect telegram") never carry
       // attachments; skip that detection when files are staged so an
@@ -370,23 +446,38 @@ export function useChat(threadId) {
         timestamp: new Date().toISOString(),
         isOptimistic: true,
       };
+      const pendingRenderMessage = {
+        id: pendingRecord.id,
+        role: "user",
+        content,
+        attachments: renderAttachments,
+        timestamp: pendingRecord.timestamp,
+        isOptimistic: true,
+      };
       addPending(pendingMessagesRef.current, pendingKey, pendingRecord);
 
       const optimisticId = pendingRecord.id;
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: optimisticId,
-          role: "user",
-          content,
-          attachments: renderAttachments,
-          timestamp: pendingRecord.timestamp,
-          isOptimistic: true,
-        },
-      ]);
+      const shouldRenderInCurrentThread = !threadId || sendThreadId === threadId;
+      const updateCurrentThread = (updater) => {
+        if (shouldRenderInCurrentThread) setMessages(updater);
+      };
+      const updateSeededTarget = (updater) => {
+        if (sendThreadId !== threadId) seedThreadMessages(sendThreadId, updater);
+      };
+      const updateCurrentRunState = (updater) => {
+        if (shouldRenderInCurrentThread) updater();
+      };
 
-      setIsProcessing(true);
-      setPendingGate(null);
+      submitBusyRef.current = true;
+      updateCurrentThread((prev) => [...prev, pendingRenderMessage]);
+      updateSeededTarget((prev) => [...prev, pendingRenderMessage]);
+
+      updateCurrentRunState(() => {
+        setIsProcessing(true);
+        if (!pendingGateRef.current) {
+          setPendingGate(null);
+        }
+      });
 
       try {
         const response = await sendMessage({
@@ -400,7 +491,7 @@ export function useChat(threadId) {
         if (threadNeedsSidebarRefresh(sendThreadId)) {
           queryClient.invalidateQueries({ queryKey: ["threads"] });
         }
-        if (response?.run_id) {
+        if (response?.run_id && shouldRenderInCurrentThread) {
           setActiveRun({
             runId: response.run_id,
             threadId: response.thread_id || sendThreadId,
@@ -408,51 +499,79 @@ export function useChat(threadId) {
             source: "local",
           });
         }
-        const timelineMessageId = recordAcceptedMessageRef(
-          pendingMessagesRef.current,
-          pendingKey,
-          optimisticId,
-          response?.accepted_message_ref,
-        );
+        const timelineMessageId =
+          recordAcceptedMessageRef(
+            pendingMessagesRef.current,
+            pendingKey,
+            optimisticId,
+            response?.accepted_message_ref,
+          ) || timelineMessageIdFromAcceptedRef(response?.accepted_message_ref);
         if (timelineMessageId) {
-          setMessages((prev) =>
+          const markAccepted = (prev) =>
             prev.map((m) =>
               m.id === optimisticId ? { ...m, timelineMessageId } : m,
-            ),
-          );
+            );
+          updateCurrentThread(markAccepted);
+          updateSeededTarget(markAccepted);
         }
         // When the thread was busy, the message is rejected (not deferred).
         // Mark the optimistic user message as failed and display the
         // server's notice (if present) as a system message so the user
         // knows to resend.
         if (response?.outcome === "rejected_busy") {
-          setMessages((prev) =>
+          const markRejected = (prev) =>
             prev.map((m) =>
               m.id === optimisticId
                 ? { ...m, isOptimistic: false, status: "error" }
                 : m,
-            ),
-          );
+            );
+          updateCurrentThread(markRejected);
+          updateSeededTarget(markRejected);
           if (response?.notice) {
-            setMessages((prev) => [
-              ...prev,
-              {
+            const appendSystemNotice = (renderCurrent = shouldRenderInCurrentThread) => {
+              const noticeMessage = {
                 id: `system-rejected-${pendingSeqRef.current++}`,
                 role: "system",
                 content: response.notice,
                 timestamp: new Date().toISOString(),
                 isOptimistic: false,
-              },
-            ]);
+              };
+              const appendNotice = (prev) => [
+                ...prev,
+                noticeMessage,
+              ];
+              if (renderCurrent) setMessages(appendNotice);
+              if (!renderCurrent || sendThreadId !== threadId) {
+                seedThreadMessages(sendThreadId, appendNotice);
+              }
+            };
+            const liveShouldRenderInCurrentThread =
+              !threadIdRef.current || threadIdRef.current === sendThreadId;
+            if (liveShouldRenderInCurrentThread) {
+              const currentNoticeKey = busyNoticeKey(sendThreadId, pendingGateRef.current);
+              if (currentNoticeKey) {
+                setBusyGateNotice({
+                  gateKey: currentNoticeKey,
+                  content: response.notice,
+                });
+              } else {
+                appendSystemNotice();
+              }
+            } else {
+              appendSystemNotice(false);
+            }
           }
-          setIsProcessing(false);
+          updateCurrentRunState(() => setIsProcessing(false));
+          submitBusyRef.current = false;
+        } else if (!response?.run_id) {
+          submitBusyRef.current = false;
         }
         return response;
       } catch (err) {
         if (err.status === 429) {
           setCooldownUntil(Date.now() + retryAfterMs(err));
         }
-        setMessages((prev) =>
+        const markFailed = (prev) =>
           prev.map((m) =>
             m.id === optimisticId
               ? {
@@ -462,9 +581,11 @@ export function useChat(threadId) {
                   error: err.message,
                 }
               : m,
-          ),
-        );
-        setIsProcessing(false);
+          );
+        updateCurrentThread(markFailed);
+        updateSeededTarget(markFailed);
+        updateCurrentRunState(() => setIsProcessing(false));
+        submitBusyRef.current = false;
         throw err;
       } finally {
         // Drop the optimistic from the pending ref unconditionally:
@@ -478,7 +599,15 @@ export function useChat(threadId) {
         removePending(pendingMessagesRef.current, pendingKey, optimisticId);
       }
     },
-    [threadId, setMessages],
+    [
+      threadId,
+      pendingGate,
+      setMessages,
+      seedThreadMessages,
+      setIsProcessing,
+      setPendingGate,
+      setActiveRun,
+    ],
   );
 
   // v2 resolveGate signature: `(resolution, { always?, credentialRef? })`.
@@ -505,7 +634,7 @@ export function useChat(threadId) {
         resolution,
         outcome,
       });
-      if (resolution === "denied" && outcome === "resumed") {
+      if (isDeclinedGateResolution(resolution) && outcome === "resumed") {
         failGateToolActivity(setMessages, pendingGate, toolActivityStateRef);
       }
       setPendingGate(null);
@@ -613,6 +742,7 @@ export function useChat(threadId) {
       setPendingGate(null);
       setIsProcessing(false);
       setActiveRun(null);
+      submitBusyRef.current = false;
       await cancelRunRequest({ threadId, runId, reason });
     },
     [activeRun, threadId],
@@ -653,6 +783,7 @@ export function useChat(threadId) {
     messages,
     isProcessing,
     pendingGate,
+    busyGateNotice,
     channelConnectAction,
     activeRun,
     sseStatus,
@@ -674,6 +805,10 @@ export function useChat(threadId) {
     recoverHistory: noop,
     recoveryNotice: null,
   };
+}
+
+function isDeclinedGateResolution(resolution) {
+  return resolution === "denied" || resolution === "cancelled";
 }
 
 function retryAfterMs(err) {

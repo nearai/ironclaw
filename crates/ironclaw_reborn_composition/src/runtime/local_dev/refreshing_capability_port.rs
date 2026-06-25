@@ -13,11 +13,13 @@ use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
     CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
     LoopHostMilestoneSink, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
-    ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+    VisibleCapabilitySurface,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
+use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::LocalDevSelectableSkillContextSource;
 use crate::runtime::local_dev::extension_surface::LocalDevExtensionSurfaceSource;
 use crate::runtime::local_dev::external_tool_capability::wrap_local_dev_external_tools;
@@ -27,7 +29,10 @@ use crate::runtime::local_dev::skill_activation::skill_activation_capability;
 use crate::runtime::local_dev::surface_disclosure::wrap_local_dev_surface_disclosure;
 use crate::runtime::local_dev::synthetic_capability::wrap_local_dev_synthetic_capabilities;
 
-use super::{capability_io_error, host_api_agent_loop_error, local_dev_visible_capability_request};
+use super::{
+    LocalDevVisibleCapabilityInputs, capability_io_error, host_api_agent_loop_error,
+    local_dev_visible_capability_request,
+};
 
 pub(super) struct RefreshingLocalDevCapabilityPortConfig {
     pub(super) runtime: Arc<dyn HostRuntime>,
@@ -37,6 +42,7 @@ pub(super) struct RefreshingLocalDevCapabilityPortConfig {
     pub(super) workspace_mounts: MountView,
     pub(super) skill_mounts: MountView,
     pub(super) memory_mounts: MountView,
+    pub(super) system_extensions_lifecycle_mounts: MountView,
     pub(super) extension_surface_source: LocalDevExtensionSurfaceSource,
     pub(super) input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     pub(super) result_writer: Arc<dyn LoopCapabilityResultWriter>,
@@ -46,6 +52,7 @@ pub(super) struct RefreshingLocalDevCapabilityPortConfig {
     pub(super) trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     pub(super) outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     pub(super) outbound_delivery_target_set_requires_approval: bool,
+    pub(super) approval_settings: Arc<dyn ApprovalSettingsProvider>,
     pub(super) approval_requests: Arc<dyn ApprovalRequestStore>,
     pub(super) capability_leases: Arc<dyn CapabilityLeaseStore>,
     pub(super) external_tool_catalog: Arc<dyn ExternalToolCatalog>,
@@ -62,6 +69,7 @@ pub(super) async fn create_refreshing_local_dev_capability_port(
         workspace_mounts: config.workspace_mounts,
         skill_mounts: config.skill_mounts,
         memory_mounts: config.memory_mounts,
+        system_extensions_lifecycle_mounts: config.system_extensions_lifecycle_mounts,
         extension_surface_source: config.extension_surface_source,
         input_resolver: config.input_resolver,
         result_writer: config.result_writer,
@@ -72,6 +80,7 @@ pub(super) async fn create_refreshing_local_dev_capability_port(
         outbound_preferences_facade: config.outbound_preferences_facade,
         outbound_delivery_target_set_requires_approval: config
             .outbound_delivery_target_set_requires_approval,
+        approval_settings: config.approval_settings,
         approval_requests: config.approval_requests,
         capability_leases: config.capability_leases,
         external_tool_catalog: config.external_tool_catalog,
@@ -93,6 +102,7 @@ struct RefreshingLocalDevCapabilityPort {
     workspace_mounts: MountView,
     skill_mounts: MountView,
     memory_mounts: MountView,
+    system_extensions_lifecycle_mounts: MountView,
     extension_surface_source: LocalDevExtensionSurfaceSource,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
@@ -102,6 +112,7 @@ struct RefreshingLocalDevCapabilityPort {
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     outbound_delivery_target_set_requires_approval: bool,
+    approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
     external_tool_catalog: Arc<dyn ExternalToolCatalog>,
@@ -119,11 +130,14 @@ impl RefreshingLocalDevCapabilityPort {
         let visible_request = local_dev_visible_capability_request(
             &self.run_context,
             &self.fallback_user_id,
-            self.workspace_mounts.clone(),
-            self.skill_mounts.clone(),
-            self.memory_mounts.clone(),
-            &self.policy,
-            &extension_surface,
+            LocalDevVisibleCapabilityInputs {
+                workspace_mounts: &self.workspace_mounts,
+                skill_mounts: &self.skill_mounts,
+                memory_mounts: &self.memory_mounts,
+                system_extensions_lifecycle_mounts: &self.system_extensions_lifecycle_mounts,
+                policy: &self.policy,
+                extension_surface: &extension_surface,
+            },
         )?;
         let mut factory = HostRuntimeLoopCapabilityPortFactory::new(
             Arc::clone(&self.runtime),
@@ -149,6 +163,12 @@ impl RefreshingLocalDevCapabilityPort {
             factory = factory
                 .with_capability_execution_mount(capability_id.clone(), self.memory_mounts.clone());
         }
+        for capability_id in self.policy.system_extensions_lifecycle_capability_ids() {
+            factory = factory.with_capability_execution_mount(
+                capability_id.clone(),
+                self.system_extensions_lifecycle_mounts.clone(),
+            );
+        }
         let port = factory.for_run_context(self.run_context.clone());
         let mut synthetic_capabilities = match &self.skill_activation_source {
             Some(skill_activation_source) => {
@@ -169,6 +189,7 @@ impl RefreshingLocalDevCapabilityPort {
                 Arc::clone(&self.approval_requests),
                 Arc::clone(&self.capability_leases),
                 self.outbound_delivery_target_set_requires_approval,
+                Arc::clone(&self.approval_settings),
             )?);
         }
         let port = wrap_local_dev_synthetic_capabilities(
@@ -265,11 +286,11 @@ impl LoopCapabilityPort for RefreshingLocalDevCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         self.current_or_refresh()
             .await?
-            .register_provider_tool_call(tool_call)
+            .register_provider_tool_call(request)
             .await
     }
 

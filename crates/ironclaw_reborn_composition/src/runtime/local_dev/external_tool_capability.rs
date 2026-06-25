@@ -33,7 +33,8 @@ use ironclaw_turns::run_profile::{
     CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome, CapabilityProgress,
     CapabilityResultMessage, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
     LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
-    ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+    VisibleCapabilitySurface,
 };
 use ironclaw_turns::{LoopGateRef, TurnRunId};
 
@@ -268,10 +269,20 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let RegisterProviderToolCallRequest {
+            tool_call,
+            activity_id,
+        } = request;
         let Some(capability_id) = self.capability_id_for_tool_name(&tool_call.name) else {
-            return self.inner.register_provider_tool_call(tool_call).await;
+            return self
+                .inner
+                .register_provider_tool_call(RegisterProviderToolCallRequest {
+                    tool_call,
+                    activity_id,
+                })
+                .await;
         };
         self.validate_provider_tool_call(&tool_call)?;
         let provider_turn_id = tool_call.turn_id.clone().ok_or_else(|| {
@@ -296,6 +307,7 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
             .await
             .map_err(catalog_error)?;
         Ok(CapabilityCallCandidate {
+            activity_id: activity_id.unwrap_or_default(),
             surface_version: self.surface_version()?,
             capability_id: capability_id.clone(),
             input_ref,

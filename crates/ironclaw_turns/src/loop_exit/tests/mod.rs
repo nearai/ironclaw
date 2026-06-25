@@ -339,6 +339,7 @@ fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref(
     let decision = LoopExit::Blocked(LoopBlocked {
         kind: LoopBlockedKind::Approval,
         gate_ref: loop_gate_ref,
+        blocked_activity_id: None,
         credential_requirements: Vec::new(),
         checkpoint_id,
         state_ref: state_ref.clone(),
@@ -361,6 +362,7 @@ fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref(
             checkpoint_id,
             state_ref,
             reason: BlockedReason::Approval { gate_ref },
+            blocked_activity_id: None,
         }
         .into()
     );
@@ -371,6 +373,7 @@ fn blocked_exit_requires_host_verified_gate_and_checkpoint_before_trusted_mappin
     let decision = LoopExit::Blocked(LoopBlocked {
         kind: LoopBlockedKind::Approval,
         gate_ref: loop_gate_ref("gate:approval-gate"),
+        blocked_activity_id: None,
         credential_requirements: Vec::new(),
         checkpoint_id: TurnCheckpointId::new(),
         state_ref: checkpoint_state_ref(),
@@ -747,6 +750,7 @@ fn blocked_variants_map_to_correct_blocked_reason() {
         let decision = LoopExit::Blocked(LoopBlocked {
             kind,
             gate_ref: lg,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             checkpoint_id,
             state_ref: state_ref.clone(),
@@ -775,6 +779,7 @@ fn blocked_variants_map_to_correct_blocked_reason() {
                 checkpoint_id,
                 state_ref,
                 reason: expected_reason,
+                blocked_activity_id: None,
             }
             .into()
         );

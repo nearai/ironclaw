@@ -27,7 +27,8 @@ use ironclaw_product_workflow::{
     CodexLoginStart, FsMount, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectFsFile,
-    ProjectionCursor, RebornAddMemberRequest, RebornAttachmentRequest, RebornCancelRunResponse,
+    ProjectionCursor, RebornAddMemberRequest, RebornAttachmentRequest,
+    RebornAutomationMutationResponse, RebornCancelRunResponse,
     RebornConnectableChannelListResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
     RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
     RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
@@ -35,25 +36,26 @@ use ironclaw_product_workflow::{
     RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
     RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
     RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
-    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
-    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
-    RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
-    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
-    RebornProjectMemberInfo, RebornProjectResponse, RebornRemoveMemberRequest,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAttachmentCapabilities,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
+    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
+    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
+    RebornProjectResponse, RebornRemoveMemberRequest, RebornResolveGateResponse, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, SetActiveLlmRequest,
+    UpsertLlmProviderRequest, WebUiAttachmentCapabilities, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +63,11 @@ use crate::error::WebUiV2HttpError;
 use crate::router::{WebUiV2Capabilities, WebUiV2State};
 use crate::schema::WebChatV2EventFrame;
 use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
+
+const SETTINGS_TOOLS_AUTO_APPROVE_KEY: &str = "agent.auto_approve_tools";
+const SETTINGS_TOOL_CONFIG_PREFIX: &str = "tool.";
+const SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES: usize =
+    OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_TOOL_CONFIG_PREFIX.len();
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WebUiV2SessionResponse {
@@ -603,6 +610,12 @@ pub async fn get_attachment(
 /// long before checking for newly arrived events.
 const SSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Upper bound for idle `stream_events` polling. A browser tab with no
+/// pending projection events should not keep revalidating/draining through
+/// remote durable storage every second forever, especially on high-RTT
+/// hosted Postgres.
+const SSE_IDLE_POLL_MAX_INTERVAL: Duration = Duration::from_secs(3);
+
 /// SSE keep-alive cadence. axum emits an SSE comment line every interval
 /// to keep proxies from closing the idle connection.
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -612,6 +625,14 @@ const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 /// delivered event; for this surface the handler sets that to the JSON-
 /// serialized projection cursor.
 const LAST_EVENT_ID_HEADER: &str = "last-event-id";
+
+fn sse_poll_interval_for_idle_polls(idle_polls: u32) -> Duration {
+    match idle_polls {
+        0 | 1 => SSE_POLL_INTERVAL,
+        2 => Duration::from_secs(2),
+        _ => SSE_IDLE_POLL_MAX_INTERVAL,
+    }
+}
 
 /// `GET /api/webchat/v2/threads/{thread_id}/events`
 ///
@@ -710,6 +731,7 @@ fn build_sse_stream(
         let _slot_guard = slot;
         let started_at = tokio::time::Instant::now();
         let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
+        let mut idle_polls = 0_u32;
         loop {
             // Force a clean close once the budget is exhausted so the
             // browser can reconnect with Last-Event-ID; this caps single-
@@ -744,6 +766,7 @@ fn build_sse_stream(
                     return;
                 }
                 Ok(Ok(response)) => {
+                    let had_events = !response.events.is_empty();
                     if let Some(latest) = response.events.last() {
                         after_cursor = Some(latest.projection_cursor.clone());
                     }
@@ -771,9 +794,14 @@ fn build_sse_stream(
                             }
                         }
                     }
+                    idle_polls = if had_events {
+                        0
+                    } else {
+                        idle_polls.saturating_add(1)
+                    };
                     // Bound the poll sleep too so we never oversleep past the
                     // lifetime budget; the top-of-loop check then fires.
-                    let sleep_for = SSE_POLL_INTERVAL
+                    let sleep_for = sse_poll_interval_for_idle_polls(idle_polls)
                         .min(SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed()));
                     if sleep_for.is_zero() {
                         return;
@@ -911,6 +939,45 @@ pub async fn list_automations(
         include_completed: query.include_completed,
     };
     let response = state.services().list_automations(caller, request).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/automations/:automation_id/pause`
+pub async fn pause_automation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(automation_id): Path<String>,
+) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .pause_automation(caller, automation_id)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/automations/:automation_id/resume`
+pub async fn resume_automation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(automation_id): Path<String>,
+) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .resume_automation(caller, automation_id)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `DELETE /api/webchat/v2/automations/:automation_id`
+pub async fn delete_automation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(automation_id): Path<String>,
+) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .delete_automation(caller, automation_id)
+        .await?;
     Ok(Json(response))
 }
 
@@ -1092,6 +1159,33 @@ pub async fn remove_skill(
     Ok(Json(response))
 }
 
+/// `POST /api/webchat/v2/skills/{name}/auto-activate`
+pub async fn set_skill_auto_activate(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(SkillPath { name }): Path<SkillPath>,
+    Json(body): Json<SetSkillAutoActivateBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_skill_auto_activate(caller, name, body.enabled)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/skills/auto-activate-learned`
+pub async fn set_auto_activate_learned(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<SetSkillAutoActivateBody>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_auto_activate_learned(caller, body.enabled)
+        .await?;
+    Ok(Json(response))
+}
+
 /// `GET /api/webchat/v2/extensions/registry`
 pub async fn list_extension_registry(
     State(state): State<WebUiV2State>,
@@ -1233,6 +1327,117 @@ pub async fn run_operator_setup(
     Ok(Json(response))
 }
 
+/// `GET /api/webchat/v2/settings/tools`
+pub async fn list_settings_tools(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
+    let mut response = state.services().list_operator_config(caller).await?;
+    response.entries.retain(|entry| {
+        entry.key == SETTINGS_TOOLS_AUTO_APPROVE_KEY
+            || entry.key.starts_with(SETTINGS_TOOL_CONFIG_PREFIX)
+    });
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsToolsAutoApproveRequest {
+    pub enabled: bool,
+}
+
+/// `POST /api/webchat/v2/settings/tools`
+pub async fn set_settings_tools_auto_approve(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Json(body): Json<SettingsToolsAutoApproveRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .set_operator_config_key(
+            caller,
+            SETTINGS_TOOLS_AUTO_APPROVE_KEY.to_string(),
+            RebornOperatorConfigSetRequest {
+                value: serde_json::json!(body.enabled),
+            },
+        )
+        .await?;
+    validate_settings_tool_config_response(&response)?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsToolPermissionPath {
+    pub capability_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsToolPermissionState {
+    Default,
+    AlwaysAllow,
+    AskEachTime,
+    Disabled,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsToolPermissionRequest {
+    pub state: SettingsToolPermissionState,
+}
+
+/// `POST /api/webchat/v2/settings/tools/{capability_id}`
+pub async fn set_settings_tool_permission(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Path(SettingsToolPermissionPath { capability_id }): Path<SettingsToolPermissionPath>,
+    Json(body): Json<SettingsToolPermissionRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    validate_settings_tool_capability_id(&capability_id)?;
+    let key =
+        validate_operator_config_key(format!("{SETTINGS_TOOL_CONFIG_PREFIX}{capability_id}"))?;
+    let response = state
+        .services()
+        .set_operator_config_key(
+            caller,
+            key,
+            RebornOperatorConfigSetRequest {
+                value: serde_json::json!({ "state": body.state }),
+            },
+        )
+        .await?;
+    validate_settings_tool_config_response(&response)?;
+    Ok(Json(response))
+}
+
+fn validate_settings_tool_capability_id(capability_id: &str) -> Result<(), WebUiV2HttpError> {
+    if capability_id.len() > SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES {
+        return Err(RebornServicesError::from(WebUiInboundValidationError::new(
+            "capability_id",
+            WebUiInboundValidationCode::TooLong,
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_settings_tool_config_response(
+    response: &RebornOperatorConfigGetResponse,
+) -> Result<(), WebUiV2HttpError> {
+    if response.entry.key == SETTINGS_TOOLS_AUTO_APPROVE_KEY
+        || response.entry.key.starts_with(SETTINGS_TOOL_CONFIG_PREFIX)
+    {
+        return Ok(());
+    }
+
+    Err(RebornServicesError::from(WebUiInboundValidationError::new(
+        "key",
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+    .into())
+}
+
 /// `GET /api/webchat/v2/operator/config`
 pub async fn list_operator_config(
     State(state): State<WebUiV2State>,
@@ -1362,6 +1567,9 @@ pub async fn get_operator_status(
 }
 
 /// `GET /api/webchat/v2/operator/logs`
+///
+/// Operator-gated version of the logs projection. The non-operator
+/// projection lives at `GET /api/webchat/v2/logs`.
 pub async fn query_operator_logs(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
@@ -1370,6 +1578,35 @@ pub async fn query_operator_logs(
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let response = state.services().query_operator_logs(caller, query).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/logs`
+///
+/// Read-only caller-scoped logs projection for non-operator WebUI sessions.
+/// The operator-wide log surface remains `GET /api/webchat/v2/operator/logs`.
+pub async fn query_logs(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<RebornOperatorLogsQuery>,
+) -> Result<Json<RebornLogQueryResponse>, WebUiV2HttpError> {
+    // The public and operator HTTP query strings intentionally share fields;
+    // convert at the handler boundary so the facade can enforce public scope.
+    let request = RebornLogQueryRequest {
+        limit: query.limit,
+        cursor: query.cursor,
+        level: query.level,
+        target: query.target,
+        thread_id: query.thread_id,
+        run_id: query.run_id,
+        turn_id: query.turn_id,
+        tool_call_id: query.tool_call_id,
+        tool_name: query.tool_name,
+        source: query.source,
+        tail: query.tail,
+        follow: query.follow,
+    };
+    let response = state.services().query_logs(caller, request).await?;
     Ok(Json(response))
 }
 
@@ -1557,6 +1794,11 @@ pub struct UpdateSkillBody {
     pub content: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SetSkillAutoActivateBody {
+    pub enabled: bool,
+}
+
 fn extension_package_ref_for_request(
     package_ref: Result<LifecyclePackageRef, ProductWorkflowError>,
     field: &'static str,
@@ -1635,6 +1877,7 @@ async fn ws_drain_loop(
     let _slot_guard = slot;
     let started_at = tokio::time::Instant::now();
     let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
+    let mut idle_polls = 0_u32;
     loop {
         let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
         if remaining.is_zero() {
@@ -1671,6 +1914,7 @@ async fn ws_drain_loop(
                 return;
             }
             Ok(Ok(response)) => {
+                let had_events = !response.events.is_empty();
                 if let Some(latest) = response.events.last() {
                     after_cursor = Some(latest.projection_cursor.clone());
                 }
@@ -1706,8 +1950,13 @@ async fn ws_drain_loop(
                         }
                     }
                 }
-                let sleep_for =
-                    SSE_POLL_INTERVAL.min(SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed()));
+                idle_polls = if had_events {
+                    0
+                } else {
+                    idle_polls.saturating_add(1)
+                };
+                let sleep_for = sse_poll_interval_for_idle_polls(idle_polls)
+                    .min(SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed()));
                 if sleep_for.is_zero() {
                     let _ = socket.close().await;
                     return;
@@ -1788,6 +2037,21 @@ async fn ws_send_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sse_poll_interval_backs_off_only_after_repeated_idle_drains() {
+        assert_eq!(sse_poll_interval_for_idle_polls(0), SSE_POLL_INTERVAL);
+        assert_eq!(sse_poll_interval_for_idle_polls(1), SSE_POLL_INTERVAL);
+        assert_eq!(sse_poll_interval_for_idle_polls(2), Duration::from_secs(2));
+        assert_eq!(
+            sse_poll_interval_for_idle_polls(3),
+            SSE_IDLE_POLL_MAX_INTERVAL
+        );
+        assert_eq!(
+            sse_poll_interval_for_idle_polls(u32::MAX),
+            SSE_IDLE_POLL_MAX_INTERVAL
+        );
+    }
 
     #[test]
     fn sanitized_filename_neutralizes_header_injection() {

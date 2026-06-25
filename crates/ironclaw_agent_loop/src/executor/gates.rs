@@ -10,7 +10,7 @@ use ironclaw_turns::{
 use crate::{
     state::{
         CheckpointKind, LoopExecutionState, PendingApprovalResume, PendingAuthResume,
-        PendingExternalToolResume, capability_activity_id_from_resume_token,
+        PendingExternalToolResume,
     },
     strategies::{GateKind, GateOutcome},
 };
@@ -68,22 +68,17 @@ impl ExecutorStage<GateInput> for GateStage {
                 state.last_gate = Some(gate_ref.clone());
                 let auth_resume = input.auth_resume.as_ref();
                 let auth_resume_token = auth_resume.map(|r| r.resume_token.clone());
-                let auth_activity_id = auth_resume_token
-                    .as_ref()
-                    .and_then(capability_activity_id_from_resume_token);
                 let auth_replay = auth_resume.and_then(|r| r.replay.clone());
                 let auth_prior_approval = auth_resume.and_then(|r| r.prior_approval.clone());
                 if matches!(kind, GateKind::Approval) {
                     let approval_resume = input.approval_resume;
                     state.pending_approval_resume = approval_resume.map(|resume| {
-                        let activity_id =
-                            capability_activity_id_from_resume_token(&resume.resume_token);
                         PendingApprovalResume {
                             gate_ref: gate_ref.clone(),
                             capability_id: call.capability_id.clone(),
                             approval_request_id: resume.approval_request_id,
                             resume_token: resume.resume_token,
-                            activity_id,
+                            activity_id: call.activity_id,
                             correlation_id: resume.correlation_id,
                             surface_version: call.surface_version.clone(),
                             input_ref: resume.input_ref,
@@ -116,7 +111,7 @@ impl ExecutorStage<GateInput> for GateStage {
                         effective_capability_ids: call.effective_capability_ids.clone(),
                         provider_replay: call.provider_replay.clone(),
                         resume_token: auth_resume_token,
-                        activity_id: auth_activity_id,
+                        activity_id: call.activity_id,
                         prior_approval: auth_prior_approval,
                         replay: auth_replay,
                         disposition: None,
@@ -129,6 +124,7 @@ impl ExecutorStage<GateInput> for GateStage {
                     state.pending_external_tool_resume = Some(PendingExternalToolResume {
                         gate_ref: gate_ref.clone(),
                         capability_id: call.capability_id.clone(),
+                        activity_id: call.activity_id,
                         surface_version: call.surface_version.clone(),
                         input_ref: call.input_ref.clone(),
                         effective_capability_ids: call.effective_capability_ids.clone(),
@@ -159,6 +155,7 @@ impl ExecutorStage<GateInput> for GateStage {
                 Ok(BatchStep::Exit(LoopExit::Blocked(LoopBlocked {
                     kind: blocked_kind(kind),
                     gate_ref,
+                    blocked_activity_id: Some(call.activity_id),
                     credential_requirements: input.credential_requirements,
                     checkpoint_id: checked.checkpoint_id,
                     state_ref: checked.state_ref,
@@ -257,6 +254,7 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
                 Ok(BatchStep::Exit(LoopExit::Blocked(LoopBlocked {
                     kind: blocked_kind(GateKind::AwaitDependentRun),
                     gate_ref,
+                    blocked_activity_id: Some(call.activity_id),
                     credential_requirements: Vec::new(),
                     checkpoint_id: checked.checkpoint_id,
                     state_ref: checked.state_ref,

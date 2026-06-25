@@ -133,6 +133,7 @@ registerPack("pt-BR", {
   "tool.tabParameters": "Parâmetros",
   "tool.tabResult": "Resultado",
   "tool.tabError": "Error",
+  "tool.tabDeclined": "Recusado",
   "tool.noDetail": "Sem detalhes adicionais.",
   "tool.runFile": "arquivo {n} explorado",
   "tool.runFiles": "arquivos {n} explorados",
@@ -144,6 +145,7 @@ registerPack("pt-BR", {
   "tool.runOthers": "ferramentas {n}",
   "tool.exitOk": "teve sucesso",
   "tool.exitError": "falhou",
+  "tool.exitDeclined": "recusado",
   "tool.exitRunning": "executando…",
   "tool.riskRead": "lê",
   "tool.riskWrite": "grava arquivos",
@@ -366,8 +368,6 @@ registerPack("pt-BR", {
   "settings.field.maxToolIterationsDesc": "Limite de chamadas de ferramenta por turno",
   "settings.field.planning": "Planejamento",
   "settings.field.planningDesc": "Ativar planejamento multi-etapas antes da execução",
-  "settings.field.autoApproveTools": "Autoaprovar ferramentas",
-  "settings.field.autoApproveToolsDesc": "Pular aprovação para todas as chamadas",
   "settings.field.timezone": "Fuso horário",
   "settings.field.timezoneDesc": "Fuso horário IANA para trabalhos agendados",
   "settings.field.sessionIdleTimeout": "Timeout de inatividade",
@@ -472,11 +472,18 @@ registerPack("pt-BR", {
   "channels.slackAccessError": "Falha na atualização do canal Slack.",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "Sempre permitir ferramentas qualificadas",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "Aplica-se apenas a ferramentas definidas como “Seguir global”. Configurações por ferramenta substituem este controle; aprovações de piso rígido ainda serão solicitadas.",
   "tools.permissions": "Permissões de ferramentas",
   "tools.alwaysAllow": "Permitir sempre",
   "tools.askEachTime": "Perguntar sempre",
   "tools.disabled": "Desativado",
   "tools.default": "padrão",
+  "tools.followDefault": "Seguir global",
+  "tools.sourceDefault": "default permission",
+  "tools.sourceGlobal": "global setting",
+  "tools.sourceOverride": "per-tool override",
   "tools.saved": "salvo",
   "tools.permissionFor": "Permissão para {name}",
   "tools.filterPlaceholder": "Filtrar ferramentas…",
@@ -511,6 +518,20 @@ registerPack("pt-BR", {
   "skills.removed": "Habilidade \"{name}\" removida",
   "skills.activatesOn": "Ativa em",
   "skills.imported": "importado",
+  "skills.defaultAutoActivationEnabled": "Ativação automática padrão de habilidades ativada",
+  "skills.defaultAutoActivationDisabled": "Ativação automática padrão de habilidades desativada",
+  "skills.defaultAutoActivationOnDesc":
+    "As habilidades se autoativam por palavra-chave em solicitações correspondentes. Desative para exigir um /name explícito.",
+  "skills.defaultAutoActivationOffDesc":
+    "As habilidades só rodam quando você digita /name. Ative para permitir autoativação por palavra-chave.",
+  "skills.defaultAutoActivationOnButton": "Padrão: Ligado",
+  "skills.defaultAutoActivationOffButton": "Padrão: Desligado",
+  "skills.autoActivateOnTitle":
+    "Autoativação ligada — roda em solicitações correspondentes. Clique para exigir /name.",
+  "skills.autoActivateOffTitle":
+    "Somente explícito — roda apenas quando você digita /name. Clique para ativar a autoativação.",
+  "skills.autoActivateOnLabel": "Autoativar: Ligado",
+  "skills.autoActivateOffLabel": "Autoativar: Desligado",
 
   // Settings — users tab
   "users.title": "Usuários ({count})",

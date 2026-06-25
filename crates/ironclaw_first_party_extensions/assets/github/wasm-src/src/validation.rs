@@ -289,19 +289,46 @@ pub(crate) fn validate_search_type(issue_type: &str) -> Result<(), String> {
 
 pub(crate) fn validate_search_sort(sort: Option<&str>) -> Result<(), String> {
     match sort {
-        None | Some("comments" | "created" | "updated") => Ok(()),
+        None
+        | Some(
+            "comments"
+            | "created"
+            | "updated"
+            | "reactions"
+            | "reactions-+1"
+            | "reactions--1"
+            | "reactions-smile"
+            | "reactions-thinking_face"
+            | "reactions-heart"
+            | "reactions-tada"
+            | "interactions",
+        ) => Ok(()),
         Some(_) => Err("invalid_sort".to_string()),
     }
 }
 
-pub(crate) fn validate_search_page(page: Option<u32>) -> Result<(), String> {
-    match page {
-        None | Some(1..=100) => Ok(()),
-        Some(_) => Err("invalid_page".to_string()),
+pub(crate) fn validate_pull_request_sort(sort: Option<&str>) -> Result<(), String> {
+    match sort {
+        None | Some("created" | "updated" | "popularity" | "long-running") => Ok(()),
+        Some(_) => Err("invalid_sort".to_string()),
     }
 }
 
-pub(crate) fn validate_search_limit(limit: Option<u32>) -> Result<(), String> {
+pub(crate) fn validate_direction(direction: Option<&str>) -> Result<(), String> {
+    match direction {
+        None | Some("asc" | "desc") => Ok(()),
+        Some(_) => Err("invalid_direction".to_string()),
+    }
+}
+
+pub(crate) fn validate_page(page: Option<u32>) -> Result<(), String> {
+    match page {
+        Some(0) => Err("invalid_page".to_string()),
+        _ => Ok(()),
+    }
+}
+
+pub(crate) fn validate_limit(limit: Option<u32>) -> Result<(), String> {
     match limit {
         None | Some(1..=100) => Ok(()),
         Some(_) => Err("invalid_limit".to_string()),

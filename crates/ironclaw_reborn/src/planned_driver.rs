@@ -1092,6 +1092,7 @@ mod tests {
         use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
 
         let gate_ref = LoopGateRef::new("gate:test-auth-deny").expect("valid gate ref");
+        let activity_id = ironclaw_turns::CapabilityActivityId::new();
         let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
         state.last_gate = Some(gate_ref.clone());
         state.pending_auth_resume = Some(PendingAuthResume {
@@ -1103,7 +1104,7 @@ mod tests {
             effective_capability_ids: Vec::new(),
             provider_replay: None,
             resume_token: None,
-            activity_id: None,
+            activity_id,
             prior_approval: None,
             replay: None,
             disposition: None,
@@ -1265,15 +1266,16 @@ mod tests {
         };
 
         let gate_ref = LoopGateRef::new("gate:test-approval-deny").expect("valid gate ref");
+        let activity_id = ironclaw_turns::CapabilityActivityId::new();
         let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
         state.last_gate = Some(gate_ref.clone());
         state.pending_approval_resume = Some(PendingApprovalResume {
             gate_ref,
             capability_id: CapabilityId::new("test.capability").expect("valid capability id"),
             approval_request_id: ApprovalRequestId::new(),
-            resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000001")
+            resume_token: CapabilityResumeToken::new(activity_id.to_string())
                 .expect("valid resume token"),
-            activity_id: None,
+            activity_id,
             correlation_id: CorrelationId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface:v1")
                 .expect("valid surface version"),
@@ -1370,6 +1372,7 @@ mod tests {
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::PendingExternalToolResume;
         use ironclaw_host_api::CapabilityId;
+        use ironclaw_turns::CapabilityActivityId;
         use ironclaw_turns::LoopGateRef;
         use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
 
@@ -1379,6 +1382,7 @@ mod tests {
         state.pending_external_tool_resume = Some(PendingExternalToolResume {
             gate_ref,
             capability_id: CapabilityId::new("test.external_tool").expect("valid capability id"),
+            activity_id: CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface:v1")
                 .expect("valid surface version"),
             input_ref: CapabilityInputRef::new("input:test-external-tool-deny")
@@ -1453,6 +1457,8 @@ mod tests {
 
         let auth_gate_ref = LoopGateRef::new("gate:dual-auth").expect("valid gate ref");
         let approval_gate_ref = LoopGateRef::new("gate:dual-approval").expect("valid gate ref");
+        let auth_activity_id = ironclaw_turns::CapabilityActivityId::new();
+        let approval_activity_id = ironclaw_turns::CapabilityActivityId::new();
 
         let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
         // last_gate = approval — the run is currently blocked on this gate.
@@ -1466,7 +1472,7 @@ mod tests {
             effective_capability_ids: Vec::new(),
             provider_replay: None,
             resume_token: None,
-            activity_id: None,
+            activity_id: auth_activity_id,
             prior_approval: None,
             replay: None,
             disposition: None,
@@ -1476,9 +1482,9 @@ mod tests {
             capability_id: CapabilityId::new("test.capability.approval")
                 .expect("valid capability id"),
             approval_request_id: ApprovalRequestId::new(),
-            resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000002")
+            resume_token: CapabilityResumeToken::new(approval_activity_id.to_string())
                 .expect("valid resume token"),
-            activity_id: None,
+            activity_id: approval_activity_id,
             correlation_id: CorrelationId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface:v1")
                 .expect("valid surface version"),
@@ -1640,6 +1646,8 @@ mod tests {
         };
 
         let gate_ref = LoopGateRef::new("gate:ambiguous-shared").expect("valid gate ref");
+        let auth_activity_id = ironclaw_turns::CapabilityActivityId::new();
+        let approval_activity_id = ironclaw_turns::CapabilityActivityId::new();
         let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
         state.last_gate = Some(gate_ref.clone());
         state.pending_auth_resume = Some(PendingAuthResume {
@@ -1651,7 +1659,7 @@ mod tests {
             effective_capability_ids: Vec::new(),
             provider_replay: None,
             resume_token: None,
-            activity_id: None,
+            activity_id: auth_activity_id,
             prior_approval: None,
             replay: None,
             disposition: None,
@@ -1661,9 +1669,9 @@ mod tests {
             capability_id: CapabilityId::new("test.capability.approval")
                 .expect("valid capability id"),
             approval_request_id: ApprovalRequestId::new(),
-            resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000003")
+            resume_token: CapabilityResumeToken::new(approval_activity_id.to_string())
                 .expect("valid resume token"),
-            activity_id: None,
+            activity_id: approval_activity_id,
             correlation_id: CorrelationId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface:v1")
                 .expect("valid surface version"),

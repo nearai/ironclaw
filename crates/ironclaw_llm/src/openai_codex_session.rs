@@ -182,14 +182,14 @@ impl OpenAiCodexSessionManager {
             USER_AGENT,
             HeaderValue::from_static(concat!("ironclaw/", env!("CARGO_PKG_VERSION"))),
         );
-        let client = Client::builder()
-            .default_headers(headers)
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "openai_codex".into(),
-                reason: format!("HTTP client build failed: {e}"),
-            })?;
+        let client =
+            crate::config::hardened_client_builder(crate::config::AUXILIARY_REQUEST_TIMEOUT_SECS)
+                .default_headers(headers)
+                .build()
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: "openai_codex".into(),
+                    reason: format!("HTTP client build failed: {e}"),
+                })?;
 
         let mgr = Self {
             config,

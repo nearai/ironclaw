@@ -15,7 +15,7 @@ mod filesystem_store;
 mod ids;
 mod lifecycle;
 pub mod loop_exit;
-mod memory;
+pub(crate) mod memory;
 mod origin;
 mod request;
 mod response;
@@ -49,7 +49,8 @@ pub use events::{
     TurnBlockedGateMetadata, TurnCommittedEventObserver, TurnEventKind, TurnEventPage,
     TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionService, TurnEventProjectionSnapshot, TurnEventProjectionSource,
-    TurnEventSink, TurnLifecycleEvent,
+    TurnEventReducerService, TurnEventReducerSnapshot, TurnEventSink, TurnLifecycleEvent,
+    TurnLifecycleProjectionEntry,
 };
 pub use external_tool_catalog::{
     ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, ExternalToolSpecError,

@@ -54,6 +54,49 @@ pub fn parse_skill_md(content: &str) -> Result<ParsedSkill, SkillParseError> {
     parse_skill_md_impl(content, true)
 }
 
+/// Return `content` with the top-level `auto_activate:` frontmatter flag set to
+/// `auto_activate`, replacing the line when present and inserting it just before
+/// the closing `---` when absent. The prompt body and other frontmatter fields
+/// are preserved semantically, while line endings are normalized to LF and a
+/// trailing newline is ensured as the document is reconstructed. The result
+/// re-parses through [`parse_skill_md`] with the same `name`, so it is safe to
+/// feed to the skill-update path.
+pub fn set_skill_auto_activate(content: &str, auto_activate: bool) -> String {
+    let new_line = format!("auto_activate: {auto_activate}");
+    let mut out = String::with_capacity(content.len() + new_line.len() + 2);
+    let mut seen_open = false;
+    let mut in_frontmatter = false;
+    let mut wrote_flag = false;
+    for line in content.lines() {
+        if line.trim() == "---" {
+            if !seen_open {
+                seen_open = true;
+                in_frontmatter = true;
+            } else if in_frontmatter {
+                // Closing the frontmatter — make sure the flag landed first.
+                if !wrote_flag {
+                    out.push_str(&new_line);
+                    out.push('\n');
+                    wrote_flag = true;
+                }
+                in_frontmatter = false;
+            }
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if in_frontmatter && !wrote_flag && line.starts_with("auto_activate:") {
+            out.push_str(&new_line);
+            out.push('\n');
+            wrote_flag = true;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 pub(crate) fn starts_with_frontmatter_delimiter(content: &str) -> bool {
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     let stripped = normalized.strip_prefix('\u{feff}').unwrap_or(&normalized);
@@ -433,5 +476,37 @@ metadata:
   author: alice
 "#;
         assert!(!has_legacy_metadata_openclaw_requires(unrelated_metadata));
+    }
+
+    const TOGGLE_SKILL: &str = "---\nname: my-skill\nversion: 1\ndescription: does a thing\nactivation:\n  keywords: [a, b]\n---\n\n# My Skill\n\nBody.\n";
+
+    #[test]
+    fn auto_activate_defaults_to_true_when_absent() {
+        let parsed = parse_skill_md(TOGGLE_SKILL).expect("parses");
+        assert!(parsed.manifest.auto_activate);
+    }
+
+    #[test]
+    fn set_skill_auto_activate_inserts_then_replaces_the_flag() {
+        // Inserted when absent; document still parses, name + body preserved.
+        let off = set_skill_auto_activate(TOGGLE_SKILL, false);
+        let parsed = parse_skill_md(&off).expect("re-parses after toggle off");
+        assert!(!parsed.manifest.auto_activate);
+        assert_eq!(parsed.manifest.name, "my-skill");
+        assert!(parsed.prompt_content.contains("Body."));
+        assert_eq!(
+            off.matches("auto_activate:").count(),
+            1,
+            "exactly one flag line"
+        );
+        // Replaced (not duplicated) when already present.
+        let on = set_skill_auto_activate(&off, true);
+        let reparsed = parse_skill_md(&on).expect("re-parses after toggle on");
+        assert!(reparsed.manifest.auto_activate);
+        assert_eq!(
+            on.matches("auto_activate:").count(),
+            1,
+            "flag replaced, not duplicated"
+        );
     }
 }
