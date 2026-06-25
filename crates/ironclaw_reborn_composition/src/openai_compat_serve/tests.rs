@@ -271,6 +271,57 @@ async fn openai_responses_wait_returns_incomplete_when_run_status_precedes_gate_
     );
 }
 
+/// Supersede branch: a stale `GatePrompt` followed by a later `running`
+/// `RunStatus` for the same run in a single drain batch must keep the caller
+/// polling — it must NOT surface `Incomplete`.
+///
+/// When the gate prompt arrives first (index 0) and the running `RunStatus`
+/// arrives after it (index 1) in the same drain window,
+/// `run_parked_on_gate_in_events` returns `false` because the status at index 1
+/// is positioned after the prompt at index 0, meaning the run already resumed
+/// past the gate. The wait loop therefore does NOT short-circuit to `Incomplete`;
+/// it continues polling.
+///
+/// A `StaticProjectionStream` that always returns the same batch never reaches a
+/// terminal state, so the loop spins indefinitely. This test wraps the call in a
+/// short `tokio::time::timeout` and asserts it TIMES OUT (i.e. the result is
+/// `Err(Elapsed)`), proving the wait did NOT return `Incomplete` for the resumed
+/// run.
+#[tokio::test]
+async fn openai_responses_wait_ignores_stale_gate_prompt_after_run_resumes() {
+    let fixture = ResponseReaderFixture::new("wait-gate-supersede").await;
+    let run_id = TurnRunId::new();
+    // Envelopes in emission order: gate prompt first (run was parked at the time
+    // of that event), then a later running RunStatus (the run has since resumed
+    // past the gate). Both arrive in a single drain batch so run_parked_on_gate_in_events
+    // must compare their positions: status at index 1 supersedes the prompt at index 0,
+    // so the function returns false and the loop keeps polling rather than surfacing Incomplete.
+    let mut reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![
+            gate_prompt_envelope(run_id),
+            run_status_envelope(fixture.thread_id.as_str(), run_id, "running"),
+        ])),
+    );
+    reader.poll_interval = Duration::from_millis(1);
+
+    // The superseded prompt must NOT cause the wait to surface Incomplete.
+    // With parked_on_gate=false and status=InProgress, the loop keeps polling.
+    // The static stream never delivers a terminal status, so the timeout fires —
+    // proving the wait did not return Incomplete for a run that already resumed.
+    let result = tokio::time::timeout(
+        Duration::from_millis(300),
+        reader.wait_for_response_completion(fixture.wait_request(run_id)),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a stale gate prompt superseded by a later running status must not surface Incomplete; \
+         the wait must keep polling (and time out on a static stream) rather than return early"
+    );
+}
+
 /// Auth gates (`TurnStatus::BlockedAuth`) surface as `AuthPrompt`, not
 /// `GatePrompt`. Without treating `AuthPrompt` as a parked signal the wait loop
 /// would spin forever on an auth-parked run — the same hang as the gate case.
