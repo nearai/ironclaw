@@ -33,9 +33,10 @@ pub(crate) struct WebuiAuthSurface {
 
 /// How to seed local-dev trigger-fire access for SSO users on login.
 ///
-/// Carries the substrate path of the local trigger-access store plus the
-/// scope an admitted user's access row is seeded under. The store is opened
-/// here (next to the rest of the auth wiring), not by `serve.rs`.
+/// Carries the already-open local trigger-access store plus the scope an
+/// admitted user's access row is seeded under. `serve.rs` opens the store once
+/// through the active runtime profile so SSO and trigger-poller wiring share
+/// the same backend.
 pub(crate) struct LocalTriggerAccessBootstrapConfig {
     pub(crate) store: Arc<dyn LocalTriggerAccessStore>,
     pub(crate) tenant_id: TenantId,

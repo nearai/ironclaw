@@ -7,6 +7,8 @@ use chrono::Utc;
 use deadpool_postgres::tokio_postgres;
 #[cfg(feature = "libsql")]
 use ironclaw_auth::{OAuthClientId, OAuthRedirectUri};
+#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+use ironclaw_host_api::{AgentId, ProjectId, TenantId};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
     AuditMode, DeploymentMode, EffectKind, FilesystemBackendKind, NetworkMode, PackageId,
@@ -31,6 +33,10 @@ use ironclaw_host_runtime::{
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
+#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+use ironclaw_reborn_composition::{
+    LocalTriggerAccessRole, LocalTriggerAccessSeed, LocalTriggerAccessSource,
+};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile, RebornServices};
 use ironclaw_reborn_composition::{
@@ -42,6 +48,8 @@ use ironclaw_reborn_composition::{
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus,
 };
+#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+use ironclaw_reborn_config::{RebornConfigFile, StorageBackend, StorageSection};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::SecretMaterial;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -63,6 +71,9 @@ use tokio::sync::Mutex;
 
 #[cfg(feature = "libsql")]
 static SECRETS_MASTER_KEY_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+static HOSTED_TRIGGER_ACCESS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(feature = "libsql")]
 struct EnvVarGuard {
@@ -88,6 +99,49 @@ impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         // SAFETY: EnvVarGuard is only constructed while
         // SECRETS_MASTER_KEY_ENV_LOCK is held by this test module.
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+struct PostgresEnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+impl PostgresEnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        // SAFETY: tests serialize process-env mutation with
+        // HOSTED_TRIGGER_ACCESS_ENV_LOCK and restore the prior value on drop.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+
+    fn clear(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        // SAFETY: tests serialize process-env mutation with
+        // HOSTED_TRIGGER_ACCESS_ENV_LOCK and restore the prior value on drop.
+        unsafe {
+            std::env::remove_var(key);
+        }
+        Self { key, previous }
+    }
+}
+
+#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+impl Drop for PostgresEnvVarGuard {
+    fn drop(&mut self) {
+        // SAFETY: PostgresEnvVarGuard is only constructed while
+        // HOSTED_TRIGGER_ACCESS_ENV_LOCK is held by this test module.
         unsafe {
             match &self.previous {
                 Some(value) => std::env::set_var(self.key, value),
@@ -1377,6 +1431,81 @@ async fn production_postgres_services_migrate_trigger_repository_before_runtime_
         .expect("trigger table exists after production build");
     let count: i64 = row.get(0);
     assert_eq!(count, 0);
+}
+
+#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[tokio::test]
+async fn hosted_single_tenant_trigger_access_store_persists_across_reopen() {
+    let Some((_container, _pool, database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let _env_lock = HOSTED_TRIGGER_ACCESS_ENV_LOCK.lock().await;
+    let _database_url = PostgresEnvVarGuard::set("IRONCLAW_REBORN_POSTGRES_URL", &database_url);
+    let _secret_master_key = PostgresEnvVarGuard::set(
+        "IRONCLAW_REBORN_SECRET_MASTER_KEY",
+        "01234567890123456789012345678901",
+    );
+    let _pool_max_size = PostgresEnvVarGuard::set("IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE", "1");
+    let _allow_cleartext =
+        PostgresEnvVarGuard::set("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT", "true");
+    let _ssl_mode = PostgresEnvVarGuard::clear("DATABASE_SSLMODE");
+    let root = tempfile::tempdir().expect("runtime root");
+    let config = RebornConfigFile {
+        storage: Some(StorageSection {
+            backend: Some(StorageBackend::Postgres),
+            pool_max_size: Some(1),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let tenant_id = TenantId::new("hosted-trigger-tenant").expect("tenant id");
+    let user_id = UserId::new("hosted-trigger-user").expect("user id");
+    let agent_id = AgentId::new("hosted-trigger-agent").expect("agent id");
+    let project_id = ProjectId::new("hosted-trigger-project").expect("project id");
+
+    let input = RebornBuildInput::hosted_single_tenant_postgres_from_config_and_env(
+        RebornCompositionProfile::HostedSingleTenant,
+        "hosted-trigger-owner",
+        root.path().to_path_buf(),
+        Some(&config),
+    )
+    .expect("hosted postgres build input resolves from env");
+    let store = input
+        .open_hosted_single_tenant_trigger_access_store()
+        .await
+        .expect("open hosted trigger access store");
+    store
+        .seed_local_access(LocalTriggerAccessSeed {
+            tenant_id: &tenant_id,
+            user_id: &user_id,
+            agent_id: Some(&agent_id),
+            project_id: Some(&project_id),
+            role: LocalTriggerAccessRole::Owner,
+            source: LocalTriggerAccessSource::LocalDevEnvBootstrap,
+        })
+        .await
+        .expect("seed hosted trigger access");
+    drop(store);
+
+    let reopened_input = RebornBuildInput::hosted_single_tenant_postgres_from_config_and_env(
+        RebornCompositionProfile::HostedSingleTenant,
+        "hosted-trigger-owner",
+        root.path().to_path_buf(),
+        Some(&config),
+    )
+    .expect("reopened hosted postgres build input resolves from env");
+    let reopened_store = reopened_input
+        .open_hosted_single_tenant_trigger_access_store()
+        .await
+        .expect("reopen hosted trigger access store");
+
+    assert!(
+        reopened_store
+            .has_active_local_access(&tenant_id, &user_id, Some(&agent_id), Some(&project_id))
+            .await
+            .expect("check reopened hosted trigger access"),
+        "hosted-single-tenant trigger access must persist through the filesystem-backed Postgres store"
+    );
 }
 
 #[cfg(feature = "postgres")]

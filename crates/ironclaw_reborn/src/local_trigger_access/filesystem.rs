@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use chrono::{SecondsFormat, Utc};
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FileType, FilesystemError, RootFilesystem, ScopedFilesystem,
+    CasExpectation, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName, IndexSpec,
+    IndexValue, Page, RecordKind, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, ScopedPath, TenantId, UserId,
@@ -11,8 +12,9 @@ use ironclaw_host_api::{
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    LocalTriggerAccessReconciliation, LocalTriggerAccessSeed, LocalTriggerAccessSource,
-    LocalTriggerAccessStatus, LocalTriggerAccessStore, RebornLocalTriggerAccessStoreError, backend,
+    LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSeed,
+    LocalTriggerAccessSource, LocalTriggerAccessStatus, LocalTriggerAccessStore,
+    RebornLocalTriggerAccessStoreError, backend, optional_scope_key,
 };
 
 /// Filesystem-backed local trigger access repository.
@@ -29,11 +31,19 @@ struct FilesystemLocalTriggerAccessRecord {
     user_id: String,
     agent_id: Option<String>,
     project_id: Option<String>,
-    role: String,
-    status: String,
-    source: String,
+    role: LocalTriggerAccessRole,
+    status: LocalTriggerAccessStatus,
+    source: LocalTriggerAccessSource,
     created_at: String,
     updated_at: String,
+}
+
+struct FilesystemReconciliationContext<'a> {
+    tenant_id: &'a TenantId,
+    agent_id: Option<&'a AgentId>,
+    project_id: Option<&'a ProjectId>,
+    source: LocalTriggerAccessSource,
+    allowed: &'a BTreeSet<String>,
 }
 
 impl<F> RebornFilesystemLocalTriggerAccessStore<F>
@@ -50,8 +60,38 @@ where
     fn record_entry(
         record: &FilesystemLocalTriggerAccessRecord,
     ) -> Result<Entry, RebornLocalTriggerAccessStoreError> {
-        let body = serde_json::to_vec_pretty(record).map_err(backend)?;
-        Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+        let body = serde_json::to_value(record).map_err(backend)?;
+        let entry = Entry::record(trigger_access_record_kind()?, &body)
+            .map_err(backend)?
+            .with_indexed(
+                index_key_tenant_id()?,
+                IndexValue::Text(record.tenant_id.clone()),
+            )
+            .with_indexed(
+                index_key_user_id()?,
+                IndexValue::Text(record.user_id.clone()),
+            )
+            .with_indexed(
+                index_key_agent_id()?,
+                IndexValue::Text(optional_scope_key(record.agent_id.as_deref()).to_string()),
+            )
+            .with_indexed(
+                index_key_project_id()?,
+                IndexValue::Text(optional_scope_key(record.project_id.as_deref()).to_string()),
+            )
+            .with_indexed(
+                index_key_role()?,
+                IndexValue::Text(record.role.as_str().to_string()),
+            )
+            .with_indexed(
+                index_key_status()?,
+                IndexValue::Text(record.status.as_str().to_string()),
+            )
+            .with_indexed(
+                index_key_source()?,
+                IndexValue::Text(record.source.as_str().to_string()),
+            );
+        Ok(entry)
     }
 
     async fn read_record(
@@ -91,27 +131,33 @@ where
 
     async fn deactivate_stale_record(
         &self,
-        tenant_id: &TenantId,
+        context: &FilesystemReconciliationContext<'_>,
         path: &ScopedPath,
         user_id: &UserId,
-        agent_id: Option<&AgentId>,
-        project_id: Option<&ProjectId>,
-        source: LocalTriggerAccessSource,
-        allowed: &BTreeSet<&str>,
     ) -> Result<(), RebornLocalTriggerAccessStoreError> {
-        let scope = tenant_shared_scope(tenant_id, user_id, agent_id, project_id);
+        let scope = tenant_shared_scope(
+            context.tenant_id,
+            user_id,
+            context.agent_id,
+            context.project_id,
+        );
         for _ in 0..FILESYSTEM_CAS_RETRIES {
             let Some((mut record, version)) = self.read_record(&scope, path).await? else {
                 return Ok(());
             };
-            if !record_matches_scope(&record, tenant_id, user_id, agent_id, project_id)
-                || record.source != source.as_str()
-                || record.status != LocalTriggerAccessStatus::Active.as_str()
-                || allowed.contains(record.user_id.as_str())
+            if !record_matches_scope(
+                &record,
+                context.tenant_id,
+                user_id,
+                context.agent_id,
+                context.project_id,
+            ) || record.source != context.source
+                || record.status != LocalTriggerAccessStatus::Active
+                || context.allowed.contains(record.user_id.as_str())
             {
                 return Ok(());
             }
-            record.status = LocalTriggerAccessStatus::Inactive.as_str().to_string();
+            record.status = LocalTriggerAccessStatus::Inactive;
             record.updated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
             match self
                 .put_record(&scope, path, &record, CasExpectation::Version(version))
@@ -126,6 +172,67 @@ where
             "filesystem CAS retries exhausted for path {}",
             path.as_str()
         )))
+    }
+
+    async fn ensure_reconciliation_indexes(
+        &self,
+        scope: &ResourceScope,
+        users_root: &ScopedPath,
+    ) -> Result<(), RebornLocalTriggerAccessStoreError> {
+        self.ensure_exact_index(scope, users_root, index_name_source()?, index_key_source()?)
+            .await?;
+        self.ensure_exact_index(scope, users_root, index_name_status()?, index_key_status()?)
+            .await?;
+        Ok(())
+    }
+
+    async fn ensure_exact_index(
+        &self,
+        scope: &ResourceScope,
+        prefix: &ScopedPath,
+        name: IndexName,
+        key: IndexKey,
+    ) -> Result<(), RebornLocalTriggerAccessStoreError> {
+        let spec = IndexSpec::new(name, vec![key], IndexKind::Exact);
+        match self.filesystem.ensure_index(scope, prefix, &spec).await {
+            Ok(()) => Ok(()),
+            Err(FilesystemError::Unsupported { .. }) => Ok(()),
+            Err(error) => Err(backend(error)),
+        }
+    }
+
+    async fn query_active_reconciliation_records(
+        &self,
+        scope: &ResourceScope,
+        users_root: &ScopedPath,
+        source: LocalTriggerAccessSource,
+    ) -> Result<Vec<FilesystemLocalTriggerAccessRecord>, RebornLocalTriggerAccessStoreError> {
+        self.ensure_reconciliation_indexes(scope, users_root)
+            .await?;
+        let filter = active_reconciliation_filter(source)?;
+        let mut records = Vec::new();
+        let mut offset = 0;
+        loop {
+            let page = Page::new(offset, Page::MAX_LIMIT);
+            let entries = match self
+                .filesystem
+                .query(scope, users_root, &filter, page)
+                .await
+            {
+                Ok(entries) => entries,
+                Err(error) if is_not_found(&error) => return Ok(records),
+                Err(error) => return Err(backend(error)),
+            };
+            let received = entries.len();
+            for entry in entries {
+                records.push(deserialize_query_record(entry)?);
+            }
+            if received < Page::MAX_LIMIT as usize {
+                break;
+            }
+            offset = offset.saturating_add(received as u64);
+        }
+        Ok(records)
     }
 
     /// Seed the local trigger access row used by Reborn-owned fire-time trigger
@@ -147,9 +254,9 @@ where
             project_id: seed
                 .project_id
                 .map(|project_id| project_id.as_str().to_string()),
-            role: seed.role.as_str().to_string(),
-            status: LocalTriggerAccessStatus::Active.as_str().to_string(),
-            source: seed.source.as_str().to_string(),
+            role: seed.role,
+            status: LocalTriggerAccessStatus::Active,
+            source: seed.source,
             created_at: now.clone(),
             updated_at: now,
         };
@@ -168,7 +275,11 @@ where
         &self,
         reconciliation: LocalTriggerAccessReconciliation<'_>,
     ) -> Result<(), RebornLocalTriggerAccessStoreError> {
-        let allowed: BTreeSet<&str> = reconciliation.user_ids.iter().map(UserId::as_str).collect();
+        let allowed: BTreeSet<String> = reconciliation
+            .user_ids
+            .iter()
+            .map(|user_id| user_id.as_str().to_string())
+            .collect();
         let bootstrap_user = match reconciliation.user_ids.first() {
             Some(user_id) => user_id.clone(),
             None => trigger_access_bootstrap_user_id()?,
@@ -181,29 +292,24 @@ where
         );
         let users_root =
             access_scope_users_root(reconciliation.agent_id, reconciliation.project_id)?;
-        let entries = match self.filesystem.list_dir(&scope, &users_root).await {
-            Ok(entries) => entries,
-            Err(error) if is_not_found(&error) => Vec::new(),
-            Err(error) => return Err(backend(error)),
+        let context = FilesystemReconciliationContext {
+            tenant_id: reconciliation.tenant_id,
+            agent_id: reconciliation.agent_id,
+            project_id: reconciliation.project_id,
+            source: reconciliation.source,
+            allowed: &allowed,
         };
-        for entry in entries {
-            if entry.file_type != FileType::File || !entry.name.ends_with(".json") {
+        let records = self
+            .query_active_reconciliation_records(&scope, &users_root, reconciliation.source)
+            .await?;
+        for record in records {
+            let Ok(user_id) = UserId::new(record.user_id.clone()) else {
                 continue;
-            }
-            let user_key = entry.name.trim_end_matches(".json");
-            let user_id = UserId::new(user_key.to_string()).map_err(backend)?;
+            };
             let path =
                 access_record_path(reconciliation.agent_id, reconciliation.project_id, &user_id)?;
-            self.deactivate_stale_record(
-                reconciliation.tenant_id,
-                &path,
-                &user_id,
-                reconciliation.agent_id,
-                reconciliation.project_id,
-                reconciliation.source,
-                &allowed,
-            )
-            .await?;
+            self.deactivate_stale_record(&context, &path, &user_id)
+                .await?;
         }
 
         for user_id in reconciliation.user_ids {
@@ -236,11 +342,12 @@ where
         };
         Ok(
             record_matches_scope(&record, tenant_id, user_id, agent_id, project_id)
-                && record.status == LocalTriggerAccessStatus::Active.as_str(),
+                && record.status == LocalTriggerAccessStatus::Active,
         )
     }
 }
 
+#[derive(Debug)]
 enum FilesystemAccessPutError {
     VersionMismatch,
     Other(RebornLocalTriggerAccessStoreError),
@@ -248,6 +355,16 @@ enum FilesystemAccessPutError {
 
 const FILESYSTEM_CAS_RETRIES: usize = 8;
 const TRIGGER_ACCESS_ROOT: &str = "/tenant-shared/reborn-trigger-access";
+const TRIGGER_ACCESS_RECORD_KIND: &str = "reborn_trigger_access";
+const TRIGGER_ACCESS_SOURCE_INDEX_NAME: &str = "reborn_trigger_access_source";
+const TRIGGER_ACCESS_STATUS_INDEX_NAME: &str = "reborn_trigger_access_status";
+const TENANT_ID_INDEX_KEY: &str = "tenant_id";
+const USER_ID_INDEX_KEY: &str = "user_id";
+const AGENT_ID_INDEX_KEY: &str = "agent_id";
+const PROJECT_ID_INDEX_KEY: &str = "project_id";
+const ROLE_INDEX_KEY: &str = "role";
+const STATUS_INDEX_KEY: &str = "status";
+const SOURCE_INDEX_KEY: &str = "source";
 
 fn tenant_shared_scope(
     tenant_id: &TenantId,
@@ -316,6 +433,75 @@ fn record_matches_scope(
         && record.project_id.as_deref() == project_id.map(ProjectId::as_str)
 }
 
+fn deserialize_query_record(
+    entry: VersionedEntry,
+) -> Result<FilesystemLocalTriggerAccessRecord, RebornLocalTriggerAccessStoreError> {
+    serde_json::from_slice(&entry.entry.body).map_err(backend)
+}
+
+fn active_reconciliation_filter(
+    source: LocalTriggerAccessSource,
+) -> Result<Filter, RebornLocalTriggerAccessStoreError> {
+    Ok(Filter::And(vec![
+        Filter::Eq {
+            key: index_key_source()?,
+            value: IndexValue::Text(source.as_str().to_string()),
+        },
+        Filter::Eq {
+            key: index_key_status()?,
+            value: IndexValue::Text(LocalTriggerAccessStatus::Active.as_str().to_string()),
+        },
+    ]))
+}
+
+fn trigger_access_record_kind() -> Result<RecordKind, RebornLocalTriggerAccessStoreError> {
+    RecordKind::new(TRIGGER_ACCESS_RECORD_KIND).map_err(backend)
+}
+
+fn index_name(value: &'static str) -> Result<IndexName, RebornLocalTriggerAccessStoreError> {
+    IndexName::new(value).map_err(backend)
+}
+
+fn index_key(value: &'static str) -> Result<IndexKey, RebornLocalTriggerAccessStoreError> {
+    IndexKey::new(value).map_err(backend)
+}
+
+fn index_name_source() -> Result<IndexName, RebornLocalTriggerAccessStoreError> {
+    index_name(TRIGGER_ACCESS_SOURCE_INDEX_NAME)
+}
+
+fn index_name_status() -> Result<IndexName, RebornLocalTriggerAccessStoreError> {
+    index_name(TRIGGER_ACCESS_STATUS_INDEX_NAME)
+}
+
+fn index_key_tenant_id() -> Result<IndexKey, RebornLocalTriggerAccessStoreError> {
+    index_key(TENANT_ID_INDEX_KEY)
+}
+
+fn index_key_user_id() -> Result<IndexKey, RebornLocalTriggerAccessStoreError> {
+    index_key(USER_ID_INDEX_KEY)
+}
+
+fn index_key_agent_id() -> Result<IndexKey, RebornLocalTriggerAccessStoreError> {
+    index_key(AGENT_ID_INDEX_KEY)
+}
+
+fn index_key_project_id() -> Result<IndexKey, RebornLocalTriggerAccessStoreError> {
+    index_key(PROJECT_ID_INDEX_KEY)
+}
+
+fn index_key_role() -> Result<IndexKey, RebornLocalTriggerAccessStoreError> {
+    index_key(ROLE_INDEX_KEY)
+}
+
+fn index_key_status() -> Result<IndexKey, RebornLocalTriggerAccessStoreError> {
+    index_key(STATUS_INDEX_KEY)
+}
+
+fn index_key_source() -> Result<IndexKey, RebornLocalTriggerAccessStoreError> {
+    index_key(SOURCE_INDEX_KEY)
+}
+
 fn is_not_found(error: &FilesystemError) -> bool {
     matches!(error, FilesystemError::NotFound { .. })
 }
@@ -377,7 +563,7 @@ mod tests {
         let store = store();
         let tenant_id = TenantId::new("fs-trigger-tenant").expect("tenant id");
         let user_id = UserId::new("fs-trigger-user").expect("user id");
-        let stale_user_id = UserId::new("fs-trigger-stale").expect("stale user id");
+        let stale_user_id = UserId::new("fs-trigger-stale.json").expect("stale user id");
         let agent_id = AgentId::new("fs-trigger-agent").expect("agent id");
         let project_id = ProjectId::new("fs-trigger-project").expect("project id");
         let other_project_id = ProjectId::new("fs-trigger-other-project").expect("project id");
@@ -436,6 +622,72 @@ mod tests {
                 .await
                 .expect("check stale local access"),
             "reconciliation deactivates stale filesystem records for the same source"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_store_reconcile_skips_invalid_indexed_user_id() {
+        let store = store();
+        let tenant_id = TenantId::new("fs-trigger-tenant").expect("tenant id");
+        let valid_user_id = UserId::new("fs-trigger-user").expect("user id");
+        let agent_id = AgentId::new("fs-trigger-agent").expect("agent id");
+        let project_id = ProjectId::new("fs-trigger-project").expect("project id");
+        let scope = tenant_shared_scope(
+            &tenant_id,
+            &valid_user_id,
+            Some(&agent_id),
+            Some(&project_id),
+        );
+        let users_root =
+            access_scope_users_root(Some(&agent_id), Some(&project_id)).expect("access users root");
+        let malformed_path = ScopedPath::new(format!("{}/malformed.json", users_root.as_str()))
+            .expect("malformed record path");
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        let malformed_record = FilesystemLocalTriggerAccessRecord {
+            tenant_id: tenant_id.as_str().to_string(),
+            user_id: "bad/user".to_string(),
+            agent_id: Some(agent_id.as_str().to_string()),
+            project_id: Some(project_id.as_str().to_string()),
+            role: LocalTriggerAccessRole::Owner,
+            status: LocalTriggerAccessStatus::Active,
+            source: LocalTriggerAccessSource::LocalDevEnvBootstrap,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+
+        store
+            .put_record(
+                &scope,
+                &malformed_path,
+                &malformed_record,
+                CasExpectation::Absent,
+            )
+            .await
+            .expect("seed malformed indexed access record");
+
+        store
+            .reconcile_local_access(LocalTriggerAccessReconciliation {
+                tenant_id: &tenant_id,
+                user_ids: std::slice::from_ref(&valid_user_id),
+                agent_id: Some(&agent_id),
+                project_id: Some(&project_id),
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevEnvBootstrap,
+            })
+            .await
+            .expect("invalid indexed user id should not abort reconciliation");
+
+        assert!(
+            store
+                .has_active_local_access(
+                    &tenant_id,
+                    &valid_user_id,
+                    Some(&agent_id),
+                    Some(&project_id),
+                )
+                .await
+                .expect("check valid local access"),
+            "reconciliation still seeds valid users when one indexed record is malformed"
         );
     }
 }

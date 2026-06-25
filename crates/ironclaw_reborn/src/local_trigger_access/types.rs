@@ -1,8 +1,10 @@
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Fixed local-dev access role persisted on trigger-fire access rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LocalTriggerAccessRole {
     /// Owner-level local trigger-fire access.
     Owner,
@@ -17,7 +19,8 @@ impl LocalTriggerAccessRole {
 }
 
 /// Local-dev bootstrap path that owns a trigger-fire access row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LocalTriggerAccessSource {
     /// Environment-token `serve` bootstrap path.
     LocalDevEnvBootstrap,
@@ -38,7 +41,8 @@ impl LocalTriggerAccessSource {
 }
 
 /// Fixed lifecycle state persisted on local-dev access rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum LocalTriggerAccessStatus {
     Active,
     Inactive,

@@ -511,9 +511,7 @@ pub async fn open_local_trigger_access_store(
 #[cfg(all(test, feature = "webui-v2-beta"))]
 mod webui_user_access_checker_tests {
     use super::*;
-    use crate::runtime_input::{
-        TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
-    };
+    use crate::runtime_input::{TriggerFireAccessCheck, TriggerFireAccessDecision};
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 
     #[tokio::test]
@@ -540,7 +538,9 @@ mod webui_user_access_checker_tests {
             .await
             .expect("seed local access");
 
-        let allowed = store
+        let checker = local_trigger_access_fire_checker(store);
+
+        let allowed = checker
             .check_trigger_fire_access(TriggerFireAccessCheck {
                 tenant_id: tenant_id.clone(),
                 creator_user_id: user_id,
@@ -553,7 +553,7 @@ mod webui_user_access_checker_tests {
             .expect("check access");
         assert_eq!(allowed, TriggerFireAccessDecision::Allowed);
 
-        let denied = store
+        let denied = checker
             .check_trigger_fire_access(TriggerFireAccessCheck {
                 tenant_id,
                 creator_user_id: other_user_id,

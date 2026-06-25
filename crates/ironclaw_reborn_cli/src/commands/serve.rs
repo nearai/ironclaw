@@ -349,6 +349,12 @@ impl ServeCommand {
         rt.block_on(async move {
             let trigger_poller_enabled = runtime_input.trigger_poller.enabled;
             let sso_enabled = sso_startup.is_some();
+            let startup_serve = if profile == RebornProfile::HostedSingleTenant {
+                Some(start_hosted_single_tenant_startup_listener(listen_addr).await?)
+            } else {
+                None
+            };
+
             let trigger_access_store = if trigger_poller_enabled || sso_enabled {
                 Some(
                     open_trigger_access_store_for_profile(&runtime_input, profile, &user_store_path)
@@ -360,7 +366,7 @@ impl ServeCommand {
             if trigger_poller_enabled {
                 let access_store = trigger_access_store
                     .as_ref()
-                    .expect("trigger access store is opened when trigger poller is enabled");
+                    .ok_or_else(|| anyhow!("trigger access store was not opened"))?;
                 runtime_input = with_local_trigger_fire_access_checker(
                     runtime_input,
                     Arc::clone(access_store),
@@ -371,12 +377,6 @@ impl ServeCommand {
                 )
                 .await?;
             }
-
-            let startup_serve = if profile == RebornProfile::HostedSingleTenant {
-                Some(start_hosted_single_tenant_startup_listener(listen_addr).await?)
-            } else {
-                None
-            };
 
             let runtime = build_reborn_runtime(runtime_input)
                 .await
