@@ -1513,6 +1513,7 @@ mod tests {
         runtime.shutdown().await.expect("runtime shuts down");
     }
 
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[tokio::test]
     async fn build_slack_events_route_mount_reuses_conversation_binding_after_runtime_reopen() {
         let root = tempfile::tempdir().expect("tempdir");
