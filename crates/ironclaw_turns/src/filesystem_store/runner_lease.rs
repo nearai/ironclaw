@@ -20,7 +20,7 @@ const TURNS_RUNNER_LEASE_PREFIX: &str = "/turns/runner-leases";
 const TURNS_RUNNER_LEASE_KIND: &str = "turn_runner_lease";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct RunnerLeaseRecord {
+pub(super) struct RunnerLeaseRecord {
     run_id: TurnRunId,
     runner_id: crate::TurnRunnerId,
     lease_token: crate::TurnLeaseToken,
@@ -70,6 +70,26 @@ where
         Ok((snapshot, version))
     }
 
+    pub(super) async fn overlay_run(
+        &self,
+        snapshot: (TurnPersistenceSnapshot, Option<RecordVersion>),
+        run_id: TurnRunId,
+    ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {
+        let (mut snapshot, version) = snapshot;
+        let Some(run) = snapshot
+            .runs
+            .iter_mut()
+            .find(|record| record.run_id == run_id && run_can_use_external_lease(record))
+        else {
+            return Ok((snapshot, version));
+        };
+        let Some((lease, _version)) = self.read(run.run_id).await? else {
+            return Ok((snapshot, version));
+        };
+        apply_runner_lease_overlay(run, &lease);
+        Ok((snapshot, version))
+    }
+
     pub(super) async fn seed_from_snapshot(
         &self,
         snapshot: &TurnPersistenceSnapshot,
@@ -85,6 +105,17 @@ where
             });
         };
         self.upsert(record).await
+    }
+
+    pub(super) async fn seed_from_snapshot_if_missing(
+        &self,
+        snapshot: &TurnPersistenceSnapshot,
+        run_id: TurnRunId,
+    ) -> Result<(), TurnError> {
+        if self.read(run_id).await?.is_some() {
+            return Ok(());
+        }
+        self.seed_from_snapshot(snapshot, run_id).await
     }
 
     pub(super) async fn heartbeat(
@@ -117,20 +148,49 @@ where
         })
     }
 
-    pub(super) async fn mark_cancel_requested(&self, run_id: TurnRunId) -> Result<(), TurnError> {
+    pub(super) async fn mark_cancel_requested_from_snapshot(
+        &self,
+        snapshot: &TurnPersistenceSnapshot,
+        run_id: TurnRunId,
+    ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
+        self.write_status_from_snapshot(snapshot, run_id, None, TurnStatus::CancelRequested)
+            .await
+    }
+
+    pub(super) async fn retire_runner_lease_from_snapshot(
+        &self,
+        snapshot: &TurnPersistenceSnapshot,
+        run_id: TurnRunId,
+        runner_id: crate::TurnRunnerId,
+        lease_token: crate::TurnLeaseToken,
+        retired_status: TurnStatus,
+    ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
+        self.write_status_from_snapshot(
+            snapshot,
+            run_id,
+            Some((runner_id, lease_token)),
+            retired_status,
+        )
+        .await
+    }
+
+    pub(super) async fn restore_if_current_status(
+        &self,
+        previous: RunnerLeaseRecord,
+        current_status: TurnStatus,
+    ) -> Result<(), TurnError> {
         for attempt in 0..FILESYSTEM_CAS_RETRIES {
-            let Some((mut existing, version)) = self.read(run_id).await? else {
+            let Some((current, version)) = self.read(previous.run_id).await? else {
                 return Ok(());
             };
-            if existing.status == TurnStatus::CancelRequested {
+            if current.runner_id != previous.runner_id
+                || current.lease_token != previous.lease_token
+                || current.status != current_status
+            {
                 return Ok(());
             }
-            if existing.status != TurnStatus::Running {
-                return self.delete(run_id).await;
-            }
-            existing.status = TurnStatus::CancelRequested;
             match self
-                .write(&existing, CasExpectation::Version(version))
+                .write(&previous, CasExpectation::Version(version))
                 .await
             {
                 Ok(_) => return Ok(()),
@@ -145,10 +205,7 @@ where
 
     pub(super) async fn cleanup_after_state(&self, result: &Result<TurnRunState, TurnError>) {
         if let Ok(state) = result
-            && !matches!(
-                state.status,
-                TurnStatus::Running | TurnStatus::CancelRequested
-            )
+            && state.status.is_terminal()
         {
             self.delete_best_effort(state.run_id).await;
         }
@@ -175,6 +232,47 @@ where
             };
             match self.write(&record, cas).await {
                 Ok(_) => return Ok(()),
+                Err(PutError::VersionMismatch) => cas_retry_backoff(attempt).await,
+                Err(PutError::Other(error)) => return Err(error),
+            }
+        }
+        Err(TurnError::Unavailable {
+            reason: "turn runner lease CAS retries exhausted".to_string(),
+        })
+    }
+
+    async fn write_status_from_snapshot(
+        &self,
+        snapshot: &TurnPersistenceSnapshot,
+        run_id: TurnRunId,
+        expected_runner: Option<(crate::TurnRunnerId, crate::TurnLeaseToken)>,
+        status: TurnStatus,
+    ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
+        let fallback = runner_lease_from_snapshot(snapshot, run_id)?;
+        for attempt in 0..FILESYSTEM_CAS_RETRIES {
+            let (existing, cas) = match self.read(run_id).await? {
+                Some((existing, version)) => (existing, CasExpectation::Version(version)),
+                None => (fallback.clone(), CasExpectation::Absent),
+            };
+            if let Some((runner_id, lease_token)) = expected_runner {
+                ensure_active_runner_lease(&existing, runner_id, lease_token, chrono::Utc::now())?;
+            }
+            if existing.status == status {
+                return Ok(None);
+            }
+            if !matches!(
+                existing.status,
+                TurnStatus::Running | TurnStatus::CancelRequested
+            ) {
+                return Err(TurnError::InvalidTransition {
+                    from: existing.status,
+                    to: status,
+                });
+            }
+            let mut next = existing.clone();
+            next.status = status;
+            match self.write(&next, cas).await {
+                Ok(_) => return Ok(Some(existing)),
                 Err(PutError::VersionMismatch) => cas_retry_backoff(attempt).await,
                 Err(PutError::Other(error)) => return Err(error),
             }
@@ -265,9 +363,21 @@ fn runner_lease_from_run(record: &TurnRunRecord) -> Option<RunnerLeaseRecord> {
     })
 }
 
+fn runner_lease_from_snapshot(
+    snapshot: &TurnPersistenceSnapshot,
+    run_id: TurnRunId,
+) -> Result<RunnerLeaseRecord, TurnError> {
+    let Some(run) = snapshot.runs.iter().find(|record| record.run_id == run_id) else {
+        return Err(TurnError::ScopeNotFound);
+    };
+    runner_lease_from_run(run).ok_or(TurnError::InvalidTransition {
+        from: run.status,
+        to: TurnStatus::Running,
+    })
+}
+
 fn apply_runner_lease_overlay(record: &mut TurnRunRecord, lease: &RunnerLeaseRecord) {
     if record.run_id != lease.run_id
-        || record.status != lease.status
         || record.runner_id != Some(lease.runner_id)
         || record.lease_token != Some(lease.lease_token)
         || !run_can_use_external_lease(record)
