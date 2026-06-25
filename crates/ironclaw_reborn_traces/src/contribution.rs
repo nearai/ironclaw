@@ -12766,6 +12766,64 @@ mod tests {
         assert_eq!(claim.access_token, token);
     }
 
+    #[tokio::test]
+    async fn fetch_claim_sends_subject_when_present() {
+        use std::sync::{Arc, Mutex};
+        let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let token = test_jwt_with_header(serde_json::json!({"alg":"EdDSA","kid":"dev-key-1"}));
+        let claim_token = token.clone();
+        let app = axum::Router::new().route(
+            "/v1/trace-upload-claim",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let cap = cap.clone();
+                let token = claim_token.clone();
+                async move {
+                    cap.lock().unwrap().push(body);
+                    axum::Json(serde_json::json!({
+                        "access_token": token, "token_type": "Bearer", "expires_in": 300
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { let _ = axum::serve(listener, app).await; });
+
+        let scope_dir = tempfile::tempdir().unwrap();
+        crate::onboarding::DeviceKeypair::load_or_generate_pending(scope_dir.path(), "h")
+            .unwrap()
+            .promote(scope_dir.path(), "tenant-dev")
+            .unwrap();
+
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            auth_mode: TraceUploadAuthMode::DeviceKey,
+            upload_token_issuer_url: Some(format!("http://{addr}/v1/trace-upload-claim")),
+            upload_token_issuer_allowed_hosts: std::collections::BTreeSet::from([
+                "127.0.0.1".to_string(),
+            ]),
+            upload_token_tenant_id: Some("tenant-dev".to_string()),
+            upload_token_audience: Some("trace-commons".to_string()),
+            ..Default::default()
+        };
+        let context = TraceUploadClaimContext {
+            trace_id: None,
+            submission_id: None,
+            consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+            allowed_uses: Vec::new(),
+            scope_dir: Some(scope_dir.path().to_path_buf()),
+            subject: Some("sha256:alice".to_string()),
+        };
+        let _ = fetch_trace_upload_claim_from_issuer(&policy, &context, None)
+            .await
+            .unwrap();
+
+        let bodies = captured.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["subject"], "sha256:alice");
+    }
+
     #[test]
     fn upload_claim_response_requires_eddsa_jwt_with_kid() {
         let token = test_jwt_with_header(serde_json::json!({
