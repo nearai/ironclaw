@@ -3988,12 +3988,18 @@ fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
-pub fn trace_contribution_dir_for_scope(scope: Option<&str>) -> PathBuf {
-    let base = ironclaw_common::paths::ironclaw_base_dir().join("trace_contributions");
+fn trace_contribution_dir_for_scope_at(base: &std::path::Path, scope: Option<&str>) -> PathBuf {
+    let contributions = base.join("trace_contributions");
     match scope {
-        Some(scope) if !scope.trim().is_empty() => base.join("users").join(scope_hash(scope)),
-        _ => base,
+        Some(scope) if !scope.trim().is_empty() => {
+            contributions.join("users").join(scope_hash(scope))
+        }
+        _ => contributions,
     }
+}
+
+pub fn trace_contribution_dir_for_scope(scope: Option<&str>) -> PathBuf {
+    trace_contribution_dir_for_scope_at(&ironclaw_common::paths::ironclaw_base_dir(), scope)
 }
 
 /// Canonical per-scope key for Trace Commons local state (policy, device keys,
@@ -4055,10 +4061,11 @@ fn lock_trace_scope_for_mutation_blocking(scope: Option<&str>) -> OwnedMutexGuar
     }
 }
 
-pub fn read_trace_policy_for_scope(
+fn read_trace_policy_for_scope_at(
+    base: &std::path::Path,
     scope: Option<&str>,
 ) -> anyhow::Result<StandingTraceContributionPolicy> {
-    let path = trace_policy_path(scope);
+    let path = trace_policy_path_at(base, scope);
     if !path.exists() {
         return Ok(StandingTraceContributionPolicy::default());
     }
@@ -4068,11 +4075,25 @@ pub fn read_trace_policy_for_scope(
         .map_err(|e| anyhow::anyhow!("failed to parse trace policy {}: {}", path.display(), e))
 }
 
+pub fn read_trace_policy_for_scope(
+    scope: Option<&str>,
+) -> anyhow::Result<StandingTraceContributionPolicy> {
+    read_trace_policy_for_scope_at(&ironclaw_common::paths::ironclaw_base_dir(), scope)
+}
+
+fn write_trace_policy_for_scope_at(
+    base: &std::path::Path,
+    scope: Option<&str>,
+    policy: &StandingTraceContributionPolicy,
+) -> anyhow::Result<()> {
+    write_json_file(&trace_policy_path_at(base, scope), policy, "trace policy")
+}
+
 pub fn write_trace_policy_for_scope(
     scope: Option<&str>,
     policy: &StandingTraceContributionPolicy,
 ) -> anyhow::Result<()> {
-    write_json_file(&trace_policy_path(scope), policy, "trace policy")
+    write_trace_policy_for_scope_at(&ironclaw_common::paths::ironclaw_base_dir(), scope, policy)
 }
 
 /// Resolved Trace Commons credentials for a (tenant, user): which local-state
@@ -4097,28 +4118,8 @@ fn resolve_trace_credentials_at(
     user_id: &str,
 ) -> anyhow::Result<Option<TraceCredentialResolution>> {
     let scope = trace_scope_key(tenant_id, user_id);
-    let contributions_base = base_dir.join("trace_contributions");
 
-    let read_policy = |scope_opt: Option<&str>| -> anyhow::Result<StandingTraceContributionPolicy> {
-        let path = match scope_opt {
-            Some(s) if !s.trim().is_empty() => contributions_base
-                .join("users")
-                .join(scope_hash(s))
-                .join("policy.json"),
-            _ => contributions_base.join("policy.json"),
-        };
-        if !path.exists() {
-            return Ok(StandingTraceContributionPolicy::default());
-        }
-        let body = std::fs::read_to_string(&path).map_err(|e| {
-            anyhow::anyhow!("failed to read trace policy {}: {}", path.display(), e)
-        })?;
-        serde_json::from_str(&body).map_err(|e| {
-            anyhow::anyhow!("failed to parse trace policy {}: {}", path.display(), e)
-        })
-    };
-
-    let personal = read_policy(Some(scope.as_str()))
+    let personal = read_trace_policy_for_scope_at(base_dir, Some(scope.as_str()))
         .map_err(|e| anyhow::anyhow!("failed to read personal trace policy: {e}"))?;
     if personal.enabled {
         return Ok(Some(TraceCredentialResolution {
@@ -4128,7 +4129,7 @@ fn resolve_trace_credentials_at(
         }));
     }
 
-    let instance = read_policy(None)
+    let instance = read_trace_policy_for_scope_at(base_dir, None)
         .map_err(|e| anyhow::anyhow!("failed to read instance trace policy: {e}"))?;
     if instance.enabled {
         return Ok(Some(TraceCredentialResolution {
@@ -8606,8 +8607,8 @@ fn safe_trace_queue_hold_reason(reason: &str) -> String {
     redacted.chars().take(240).collect()
 }
 
-fn trace_policy_path(scope: Option<&str>) -> PathBuf {
-    trace_contribution_dir_for_scope(scope).join("policy.json")
+fn trace_policy_path_at(base: &std::path::Path, scope: Option<&str>) -> PathBuf {
+    trace_contribution_dir_for_scope_at(base, scope).join("policy.json")
 }
 
 fn trace_queue_dir(scope: Option<&str>) -> PathBuf {
@@ -14548,16 +14549,7 @@ mod tests {
         scope: Option<&str>,
         policy: &StandingTraceContributionPolicy,
     ) {
-        let contributions = base.join("trace_contributions");
-        let path = match scope {
-            Some(s) if !s.trim().is_empty() => contributions
-                .join("users")
-                .join(super::scope_hash(s))
-                .join("policy.json"),
-            _ => contributions.join("policy.json"),
-        };
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, serde_json::to_string(policy).unwrap()).unwrap();
+        write_trace_policy_for_scope_at(base, scope, policy).expect("write_policy_at");
     }
 
     #[test]
