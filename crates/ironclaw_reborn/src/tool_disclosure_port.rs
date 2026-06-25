@@ -217,7 +217,22 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
         if tool_call.name == TOOL_CALL_NAME
             && let Some(target) = self.allowed_tool_call_target(tool_call)?
         {
-            return self.inner.validate_provider_tool_call(&target.target_call);
+            // A resolved target that fails inner validation must NOT abort the
+            // whole provider response — the gateway discards the entire response
+            // on a validation error, which turns a recoverable bad-arguments
+            // `tool_call` into a run-borking failure. Probe validation for an
+            // early diagnostic, but always return Ok: registration falls back to
+            // the bridge path on failure, surfacing a recoverable invalid_input
+            // at invoke time that the model can correct and retry.
+            if let Err(error) = self.inner.validate_provider_tool_call(&target.target_call) {
+                debug!(
+                    tool_name = tool_call.name.as_str(),
+                    target = target.definition.name.as_str(),
+                    error_kind = ?error.kind,
+                    "tool_call target failed inner validation; deferring to recoverable bridge failure"
+                );
+            }
+            return Ok(());
         }
         Ok(())
     }
@@ -264,17 +279,33 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             // The model invoked the `tool_call` bridge itself (a valid wire
             // name); the replay reflects that actual call, not the target.
             let bridge_provider_tool_name = tool_call.name.clone();
-            let mut candidate = self
+            match self
                 .inner
                 .register_provider_tool_call(target.target_call)
-                .await?;
-            candidate.provider_replay =
-                Some(provider_replay_for(&tool_call, bridge_provider_tool_name));
-            self.record_promotable_input(
-                candidate.input_ref.as_str(),
-                candidate.capability_id.clone(),
-            )?;
-            return Ok(candidate);
+                .await
+            {
+                Ok(mut candidate) => {
+                    candidate.provider_replay =
+                        Some(provider_replay_for(&tool_call, bridge_provider_tool_name));
+                    self.record_promotable_input(
+                        candidate.input_ref.as_str(),
+                        candidate.capability_id.clone(),
+                    )?;
+                    return Ok(candidate);
+                }
+                Err(error) => {
+                    // The resolved target could not be registered (e.g. malformed
+                    // arguments for a deferred tool). Fall back to the bridge path
+                    // so the model receives a recoverable invalid_input failure at
+                    // invoke time instead of the whole run aborting.
+                    debug!(
+                        tool_name = tool_call.name.as_str(),
+                        error_kind = ?error.kind,
+                        "tool_call target registration failed; falling back to recoverable bridge failure"
+                    );
+                    return self.register_bridge_call(tool_call);
+                }
+            }
         }
         self.register_bridge_call(tool_call)
     }
@@ -900,6 +931,10 @@ mod tests {
             &self,
             tool_call: ProviderToolCall,
         ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+            // Sentinel: lets tests drive the gateway's "register failed" arm.
+            if tool_call.name == "register_explodes" {
+                return Err(invalid_invocation("spy register explodes"));
+            }
             self.validate_provider_tool_call(&tool_call)?;
             self.registered_calls
                 .lock()
@@ -1688,6 +1723,77 @@ mod tests {
                 .capability_id
                 .as_str(),
             "fixture.hidden"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_target_registration_failure_falls_back_to_recoverable_bridge_failure() {
+        // Regression: the forgiving tool_call path resolves a deferred target, but
+        // if the inner port then rejects it (e.g. malformed arguments), that must
+        // surface as a RECOVERABLE invalid_input the model can retry — NOT a hard
+        // error, which the gateway turns into a run-borking discard of the whole
+        // provider response. (Observed live with gpt-5.5: repeated tool_call
+        // validation rejections, run ending Failed / driver_protocol_violation.)
+        let definitions = vec![
+            provider_definition("fixture.read_file", "read_file", "Read a file"),
+            provider_definition("fixture.explodes", "register_explodes", "Register fails"),
+            provider_definition("fixture.extra_1", "extra_tool_1", "Extra operation"),
+            provider_definition("fixture.extra_2", "extra_tool_2", "Extra operation"),
+            provider_definition("fixture.extra_3", "extra_tool_3", "Extra operation"),
+            provider_definition("fixture.extra_4", "extra_tool_4", "Extra operation"),
+        ];
+        let inner = Arc::new(SpyPort {
+            definitions,
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface");
+
+        let bridge_call = provider_call(
+            TOOL_CALL_NAME,
+            json!({"name": "register_explodes", "arguments": {"path": "demo"}}),
+        );
+        // Validation must NOT hard-fail — that would abort the whole response.
+        port.validate_provider_tool_call(&bridge_call)
+            .expect("bridge validate downgrades a target failure to recoverable");
+
+        let candidate = port
+            .register_provider_tool_call(bridge_call)
+            .await
+            .expect("bridge register falls back instead of erroring");
+        assert!(
+            is_bridge_capability_id(&candidate.capability_id),
+            "a target that cannot register must fall back to the bridge path"
+        );
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("bridge handles the fallback");
+        assert!(
+            matches!(
+                outcome,
+                CapabilityOutcome::Failed(CapabilityFailure {
+                    error_kind: CapabilityFailureKind::InvalidInput,
+                    ..
+                })
+            ),
+            "fallback must be a recoverable InvalidInput failure, not run death"
         );
     }
 
