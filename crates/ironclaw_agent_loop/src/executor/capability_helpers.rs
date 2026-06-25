@@ -521,7 +521,9 @@ pub(super) async fn pending_external_tool_resume_candidate(
             })
             .await
             .map_err(capability_host_error)?;
-        if candidate.capability_id != resume.capability_id {
+        if candidate.capability_id != resume.capability_id
+            || candidate.effective_capability_ids != resume.effective_capability_ids
+        {
             return Err(AgentLoopExecutorError::PlannerContract {
                 detail: "external tool resume provider replay no longer matches blocked capability",
             });

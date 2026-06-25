@@ -98,7 +98,8 @@ impl GateOutcome {
     pub(crate) fn validate_for_gate_kind(&self, kind: GateKind) -> Result<(), LoopFailureKind> {
         match (kind, self) {
             (GateKind::Approval, GateOutcome::SkipAndContinue { .. })
-            | (GateKind::AwaitDependentRun, GateOutcome::SkipAndContinue { .. }) => {
+            | (GateKind::AwaitDependentRun, GateOutcome::SkipAndContinue { .. })
+            | (GateKind::ExternalTool, GateOutcome::SkipAndContinue { .. }) => {
                 Err(LoopFailureKind::DriverBug)
             }
             _ => Ok(()),
@@ -207,6 +208,7 @@ mod tests {
             (GateKind::Auth, "auth"),
             (GateKind::Resource, "resource"),
             (GateKind::AwaitDependentRun, "await_dependent_run"),
+            (GateKind::ExternalTool, "external_tool"),
         ] {
             let value = serde_json::to_value(variant).expect("serialize");
             assert_eq!(value, serde_json::json!(wire));
@@ -222,6 +224,7 @@ mod tests {
             GateKind::Auth,
             GateKind::Resource,
             GateKind::AwaitDependentRun,
+            GateKind::ExternalTool,
         ] {
             let summary = GateSummary {
                 kind,
@@ -325,6 +328,7 @@ mod tests {
             GateKind::Auth,
             GateKind::Resource,
             GateKind::AwaitDependentRun,
+            GateKind::ExternalTool,
         ] {
             let summary = GateSummary {
                 kind,
@@ -335,5 +339,16 @@ mod tests {
                 other => panic!("expected Block for {kind:?}, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn external_tool_gate_rejects_skip_and_continue_outcome() {
+        let outcome = GateOutcome::SkipAndContinue {
+            gate: sample_gate(),
+        };
+        assert_eq!(
+            outcome.validate_for_gate_kind(GateKind::ExternalTool),
+            Err(LoopFailureKind::DriverBug)
+        );
     }
 }

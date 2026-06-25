@@ -803,34 +803,39 @@ async fn responses_rejects_invalid_model_before_product_workflow() {
         "gpt-reborn ",
     ];
     for model in cases {
-        let workflow = Arc::new(FakeProductWorkflow::new());
-        let router = test_router(
-            workflow.clone(),
-            Arc::new(StaticResponsesReader::completed("unused")),
-        );
+        for path in ["/api/v1/responses", "/v1/responses"] {
+            let workflow = Arc::new(FakeProductWorkflow::new());
+            let router = test_router(
+                workflow.clone(),
+                Arc::new(StaticResponsesReader::completed("unused")),
+            );
 
-        let response = router
-            .oneshot(response_create_request(
-                "/api/v1/responses",
-                json!({"model": model, "input": "hello"}),
-                None,
-            ))
-            .await
-            .expect("response");
+            let response = router
+                .oneshot(response_create_request(
+                    path,
+                    json!({"model": model, "input": "hello"}),
+                    None,
+                ))
+                .await
+                .expect("response");
 
-        assert_eq!(
-            response.status(),
-            http::StatusCode::BAD_REQUEST,
-            "model {model:?} must reject"
-        );
-        let body = json_body(response).await;
-        assert_eq!(body["error"]["param"], "model", "model {model:?}");
-        assert_eq!(body["error"]["code"], "invalid_request", "model {model:?}");
-        assert_eq!(
-            workflow.accepted_count(),
-            0,
-            "invalid model {model:?} must not reach the product workflow"
-        );
+            assert_eq!(
+                response.status(),
+                http::StatusCode::BAD_REQUEST,
+                "model {model:?} on {path} must reject"
+            );
+            let body = json_body(response).await;
+            assert_eq!(body["error"]["param"], "model", "model {model:?} on {path}");
+            assert_eq!(
+                body["error"]["code"], "invalid_request",
+                "model {model:?} on {path}"
+            );
+            assert_eq!(
+                workflow.accepted_count(),
+                0,
+                "invalid model {model:?} on {path} must not reach the product workflow"
+            );
+        }
     }
 }
 

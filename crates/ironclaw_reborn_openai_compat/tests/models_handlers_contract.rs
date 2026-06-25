@@ -64,36 +64,37 @@ async fn models_endpoint_returns_openai_list_for_authenticated_caller() {
 
 #[tokio::test]
 async fn models_endpoint_without_caller_returns_401_before_catalog() {
-    // No caller extension layer: the route must fail closed with 401 before
-    // consulting the catalog (a panicking catalog would surface as 500).
     let catalog = Arc::new(StaticModelCatalog {
         entries: vec![OpenAiCompatModelEntry::new("gpt-reborn")],
     });
-    let router = openai_compat_router_with_state(OpenAiCompatRouterState::with_models(catalog));
 
-    let response = router
-        .oneshot(get_request("/v1/models"))
-        .await
-        .expect("response");
+    for path in ["/v1/models", "/api/v1/models"] {
+        let router =
+            openai_compat_router_with_state(OpenAiCompatRouterState::with_models(catalog.clone()));
 
-    assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
-    let body = json_body(response).await;
-    assert_eq!(body["error"]["code"], "authentication_required");
+        let response = router.oneshot(get_request(path)).await.expect("response");
+
+        assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED, "{path}");
+        let body = json_body(response).await;
+        assert_eq!(body["error"]["code"], "authentication_required", "{path}");
+    }
 }
 
 #[tokio::test]
 async fn models_endpoint_without_catalog_fails_closed_501() {
-    // Caller present but no catalog wired: fail closed with 501 not-implemented.
-    let router = openai_compat_router().layer(axum::Extension(caller()));
+    for path in ["/v1/models", "/api/v1/models"] {
+        let router = openai_compat_router().layer(axum::Extension(caller()));
 
-    let response = router
-        .oneshot(get_request("/v1/models"))
-        .await
-        .expect("response");
+        let response = router.oneshot(get_request(path)).await.expect("response");
 
-    assert_eq!(response.status(), http::StatusCode::NOT_IMPLEMENTED);
-    let body = json_body(response).await;
-    assert_eq!(body["error"]["code"], "unsupported");
+        assert_eq!(
+            response.status(),
+            http::StatusCode::NOT_IMPLEMENTED,
+            "{path}"
+        );
+        let body = json_body(response).await;
+        assert_eq!(body["error"]["code"], "unsupported", "{path}");
+    }
 }
 
 fn get_request(path: &str) -> Request<Body> {

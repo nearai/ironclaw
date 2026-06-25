@@ -345,15 +345,14 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
                 .descriptors
                 .iter()
                 .any(|descriptor| descriptor.capability_id == capability_id)
-                || capability_ids_by_tool_name
-                    .insert(spec.name().to_string(), capability_id.clone())
-                    .is_some()
+                || specs_by_capability_id.contains_key(&capability_id)
             {
                 return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::InvalidInvocation,
                     "external tool conflicts with another capability id",
                 ));
             }
+            capability_ids_by_tool_name.insert(spec.name().to_string(), capability_id.clone());
             let tool_spec = ToolSpec {
                 tool_name: spec.name().to_string(),
                 description: spec.description().to_string(),

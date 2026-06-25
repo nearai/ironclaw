@@ -1001,8 +1001,11 @@ pub(crate) fn parse_response_create_request(
             "body".to_string(),
         )));
     }
-    let request: OpenAiResponsesCreateRequest = serde_json::from_slice(raw_body)
-        .map_err(|_| OpenAiCompatHttpError::invalid_request(Some("body".to_string())))?;
+    let request: OpenAiResponsesCreateRequest =
+        serde_json::from_slice(raw_body).map_err(|error| {
+            tracing::debug!(?error, "invalid OpenAI Responses create request body");
+            OpenAiCompatHttpError::invalid_request(Some("body".to_string()))
+        })?;
     crate::model_validation::validate_model_name(&request.model)?;
     Ok(request)
 }
