@@ -4316,6 +4316,7 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_memory",
+ "ironclaw_memory_native",
  "ironclaw_reborn_event_store",
  "ironclaw_turns",
  "serde",
@@ -4581,6 +4582,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_mcp",
  "ironclaw_memory",
+ "ironclaw_memory_native",
  "ironclaw_network",
  "ironclaw_process_sandbox",
  "ironclaw_processes",
@@ -4607,6 +4609,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "static_assertions",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -4717,9 +4720,26 @@ name = "ironclaw_memory"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono-tz",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tracing",
+]
+
+[[package]]
+name = "ironclaw_memory_native"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "chrono-tz",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_memory",
+ "ironclaw_memory_native",
+ "ironclaw_prompt_envelope",
  "ironclaw_safety",
  "jsonschema",
  "serde",
@@ -5081,8 +5101,10 @@ dependencies = [
  "ironclaw_wasm_product_adapters",
  "ironclaw_webui_v2",
  "ironclaw_webui_v2_static",
+ "libc",
  "libsql",
  "lru 0.16.4",
+ "nix 0.29.0",
  "rand 0.8.6",
  "rust_decimal",
  "rust_decimal_macros",

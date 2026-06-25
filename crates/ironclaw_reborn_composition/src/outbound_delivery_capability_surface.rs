@@ -1,9 +1,14 @@
+use std::sync::Arc;
+
+use ironclaw_host_api::{EffectKind, ExtensionId, HostApiError, PermissionMode};
 use ironclaw_product_workflow::{
-    OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetId,
+    OutboundPreferencesProductFacade, RebornOperatorToolInfo, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
     RebornServicesError, RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
 };
 use thiserror::Error;
+
+pub(crate) const OUTBOUND_DELIVERY_SYNTHETIC_PROVIDER_ID: &str = "builtin";
 
 pub(crate) const OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID: &str =
     "builtin.outbound_delivery_targets_list";
@@ -16,6 +21,24 @@ pub(crate) const OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID: &str =
 pub(crate) const OUTBOUND_DELIVERY_TARGET_SET_PROVIDER_TOOL_NAME: &str =
     "builtin__outbound_delivery_target_set";
 pub(crate) const OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION: &str = "Set the current user's final-reply outbound delivery target, such as a Slack DM or Slack channel, to an id returned by builtin__outbound_delivery_targets_list. Use after the user asks to send replies or routine/trigger results through that product or channel, and before creating the routine or trigger. Approval may be required before the preference is changed.";
+
+pub(crate) fn outbound_delivery_synthetic_provider() -> Result<ExtensionId, HostApiError> {
+    ExtensionId::new(OUTBOUND_DELIVERY_SYNTHETIC_PROVIDER_ID)
+}
+
+pub(crate) fn outbound_delivery_target_set_operator_tool_info(
+    provider: ExtensionId,
+) -> Result<RebornOperatorToolInfo, HostApiError> {
+    Ok(RebornOperatorToolInfo {
+        capability_id: ironclaw_host_api::CapabilityId::new(
+            OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
+        )?,
+        provider,
+        description: Arc::from(OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION),
+        default_permission: PermissionMode::Ask,
+        effects: Arc::from([EffectKind::DispatchCapability, EffectKind::ExternalWrite]),
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OutboundDeliveryTargetsListInput {

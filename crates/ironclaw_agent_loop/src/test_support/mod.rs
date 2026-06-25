@@ -1048,6 +1048,7 @@ fn scripted_model_response(
 
 fn scripted_capability_call(call: ScriptedCapabilityCall) -> CapabilityCallCandidate {
     CapabilityCallCandidate {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface_version(),
         capability_id: capability_id(&call.name),
         input_ref: CapabilityInputRef::new(call.input_ref)
@@ -1142,6 +1143,7 @@ fn scripted_failure_kind(kind: &str) -> CapabilityFailureKind {
         "backend" => CapabilityFailureKind::Backend,
         "cancelled" => CapabilityFailureKind::Cancelled,
         "dispatcher" => CapabilityFailureKind::Dispatcher,
+        "gate_declined" => CapabilityFailureKind::GateDeclined,
         "input_invalid" | "invalid_input" => CapabilityFailureKind::InvalidInput,
         "invalid_output" => CapabilityFailureKind::InvalidOutput,
         "missing_runtime" => CapabilityFailureKind::MissingRuntime,

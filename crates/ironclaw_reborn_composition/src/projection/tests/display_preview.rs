@@ -1079,6 +1079,7 @@ async fn capability_display_preview_falls_back_for_failed_tool_without_result() 
         .unwrap();
 
     assert_eq!(preview.title, "fail");
+    assert_eq!(preview.error_kind.as_deref(), Some("operation_failed"));
     assert_eq!(preview.output_kind.as_deref(), Some("text"));
     assert_eq!(preview.result_ref, None);
     assert!(

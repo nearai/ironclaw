@@ -44,7 +44,27 @@ const fn sensitive_term(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PromptTextPolicy {
-    reject_security_vocabulary: bool,
+    /// Whether host-assembled content is denylisted for security vocabulary,
+    /// host paths, and credential-shaped values. Structural and framing checks
+    /// (empty/oversize content and control characters) are enforced separately
+    /// on every surface and are NOT governed by this flag.
+    ///
+    /// Disabled only for [`PromptTextSurface::TrustedSkillInstruction`] —
+    /// trusted skill instruction bodies. "Trusted" is exactly two provenances:
+    /// first-party skills shipped in the repo `skills/` directory (installed
+    /// into the trusted system-skill root) and user-placed local skills (the
+    /// user `skills/` root). Registry/marketplace/URL skills are `Installed`,
+    /// not trusted: they keep the full checks here and their body is withheld
+    /// from the prompt entirely. This denylist false-positived constantly on
+    /// legitimate skill docs describing OAuth headers, API keys, and host paths
+    /// — failing the whole turn (#5169).
+    ///
+    /// Untrusted surfaces (memory snippets, runtime-context labels, generic
+    /// model content, safe summaries) keep the full checks; those surfaces also
+    /// have independent guards (`validate_loop_safe_summary`,
+    /// `sanitize_prompt_string`, the skill-context validators, egress credential
+    /// blocking), so this remains defense in depth rather than the sole control.
+    enforce_content_checks: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +86,7 @@ impl PromptTextSurface {
 
     const fn policy(self) -> PromptTextPolicy {
         PromptTextPolicy {
-            reject_security_vocabulary: !matches!(self, Self::TrustedSkillInstruction),
+            enforce_content_checks: !matches!(self, Self::TrustedSkillInstruction),
         }
     }
 }
@@ -83,6 +103,10 @@ pub(super) fn validate_prompt_text(
     label: &'static str,
     surface: PromptTextSurface,
 ) -> Result<String, AgentLoopHostError> {
+    // Structural and framing limits apply on every surface, even trusted skill
+    // content: empty/oversize content and control characters (NUL/ESC/BEL,
+    // which can corrupt prompt/log/terminal framing) are not the false-positive
+    // class #5169 relaxes, so they are always rejected.
     if value.is_empty() || value.len() > surface.max_bytes() {
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::PolicyDenied,
@@ -98,17 +122,17 @@ pub(super) fn validate_prompt_text(
             format!("{label} contains control characters"),
         ));
     }
-    reject_sensitive_text(&value, label, surface)?;
+    // The content denylist (host paths, security vocabulary, credential-shaped
+    // values) is skipped for trusted skill instructions; see PromptTextPolicy.
+    if !surface.policy().enforce_content_checks {
+        return Ok(value);
+    }
+    reject_sensitive_text(&value, label)?;
     Ok(value)
 }
 
-fn reject_sensitive_text(
-    value: &str,
-    label: &'static str,
-    surface: PromptTextSurface,
-) -> Result<(), AgentLoopHostError> {
+fn reject_sensitive_text(value: &str, label: &'static str) -> Result<(), AgentLoopHostError> {
     let lower = value.to_ascii_lowercase();
-    let policy = surface.policy();
     for forbidden_path in [
         "/users/",
         "/home/",
@@ -122,10 +146,7 @@ fn reject_sensitive_text(
         }
     }
     for term in SENSITIVE_TERMS {
-        if policy.reject_security_vocabulary
-            && term.reject_as_phrase
-            && contains_token_phrase(&lower, term.phrase)
-        {
+        if term.reject_as_phrase && contains_token_phrase(&lower, term.phrase) {
             return non_model_safe(label);
         }
         if term.reject_value_after_label
@@ -286,5 +307,90 @@ fn is_token_boundary(character: Option<char>) -> bool {
     match character {
         Some(character) => !character.is_ascii_alphanumeric() && character != '_',
         None => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SENSITIVE_SAMPLES: &[&str] = &[
+        "Use the Authorization: Bearer ghp_secretvalue123 header.", // vocab + credential value
+        "Read /Users/alice/.config/token first.",                   // host path
+        "here is my key sk-abc123def456ghi789",                     // sk- token
+    ];
+
+    /// #5169: trusted/certified skill instruction content bypasses content
+    /// denylisting (security vocabulary, host paths, credential-shaped values).
+    #[test]
+    fn trusted_skill_instruction_bypasses_content_denylist() {
+        for sample in SENSITIVE_SAMPLES {
+            validate_prompt_text(
+                sample.to_string(),
+                "skill content",
+                PromptTextSurface::TrustedSkillInstruction,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "trusted skill content must bypass content checks; got {error:?}: {sample:?}"
+                )
+            });
+        }
+    }
+
+    /// Untrusted surfaces keep the full content denylist — the trust gate is the
+    /// only thing that relaxes it, so a non-skill surface still rejects the same
+    /// samples a trusted skill is allowed to carry.
+    #[test]
+    fn untrusted_surfaces_still_reject_content_denylist() {
+        for surface in [
+            PromptTextSurface::GenericModelContent,
+            PromptTextSurface::SafeSummary,
+        ] {
+            for sample in SENSITIVE_SAMPLES {
+                let error = validate_prompt_text(sample.to_string(), "context content", surface)
+                    .expect_err(&format!("untrusted surface must reject {sample:?}"));
+                assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+            }
+        }
+    }
+
+    /// Control characters corrupt prompt/log/terminal framing, so they are
+    /// rejected on every surface — including trusted skill content. The trust
+    /// gate relaxes only the vocabulary/path/credential content denylist.
+    #[test]
+    fn control_characters_are_rejected_on_all_surfaces() {
+        for surface in [
+            PromptTextSurface::TrustedSkillInstruction,
+            PromptTextSurface::GenericModelContent,
+            PromptTextSurface::SafeSummary,
+        ] {
+            let error =
+                validate_prompt_text("bell\u{0007}inside content".to_string(), "content", surface)
+                    .expect_err("control characters must be rejected on all surfaces");
+            assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+        }
+    }
+
+    /// Structural limits (empty, byte budget) apply to every surface, including
+    /// trusted skill content.
+    #[test]
+    fn structural_limits_apply_even_to_trusted_skill_instruction() {
+        let empty = validate_prompt_text(
+            String::new(),
+            "skill content",
+            PromptTextSurface::TrustedSkillInstruction,
+        )
+        .expect_err("empty content is rejected on every surface");
+        assert_eq!(empty.kind, AgentLoopHostErrorKind::PolicyDenied);
+
+        let oversized = "x".repeat(LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES + 1);
+        let too_big = validate_prompt_text(
+            oversized,
+            "skill content",
+            PromptTextSurface::TrustedSkillInstruction,
+        )
+        .expect_err("oversized content is rejected on every surface");
+        assert_eq!(too_big.kind, AgentLoopHostErrorKind::PolicyDenied);
     }
 }

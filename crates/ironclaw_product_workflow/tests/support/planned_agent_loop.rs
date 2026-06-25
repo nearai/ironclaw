@@ -5,10 +5,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_approvals::AutoApproveSettingInput;
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExtensionId, GrantConstraints, NetworkPolicy, Principal, RuntimeKind, TenantId, ThreadId,
-    TrustClass, UserId,
+    ExtensionId, GrantConstraints, InvocationId, NetworkPolicy, Principal, ResourceScope,
+    RuntimeKind, TenantId, ThreadId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
 use ironclaw_loop_support::{
@@ -131,6 +132,35 @@ pub struct HostRuntimeCapabilityConfig {
     pub input: serde_json::Value,
 }
 
+async fn enable_host_runtime_auto_approve_for_harness_user(
+    services: &RebornServices,
+    binding: &ResolvedBinding,
+) {
+    let auto_approve = services
+        .local_dev_auto_approve_settings_for_test()
+        .expect("local-dev host runtime auto-approve settings");
+    let scope = ResourceScope {
+        tenant_id: binding.tenant_id.clone(),
+        user_id: binding
+            .subject_user_id
+            .clone()
+            .expect("harness subject user id"),
+        agent_id: binding.agent_id.clone(),
+        project_id: binding.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
+    auto_approve
+        .set(AutoApproveSettingInput {
+            updated_by: Principal::User(scope.user_id.clone()),
+            scope,
+            enabled: true,
+        })
+        .await
+        .expect("enable host runtime auto-approve for harness user");
+}
+
 pub fn capability_call_response(
     capability_id: impl Into<String>,
     input_ref: impl Into<String>,
@@ -140,6 +170,7 @@ pub fn capability_call_response(
         safe_reasoning_deltas: Vec::new(),
         usage: None,
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: harness_surface_version(),
             capability_id: harness_capability_id(capability_id.into()),
             input_ref: CapabilityInputRef::new(input_ref.into()).expect("valid harness input ref"),
@@ -181,14 +212,14 @@ impl ProductLiveAgentLoopHarness {
             .as_ref()
             .map(|_| tempfile::tempdir().expect("host runtime harness tempdir"));
         let host_runtime_services = if let Some(root) = &host_runtime_root {
-            Some(Arc::new(
-                build_reborn_services(RebornBuildInput::local_dev(
-                    "planned-harness-host-runtime",
-                    root.path().join("local-dev"),
-                ))
-                .await
-                .expect("host runtime harness services"),
+            let services = build_reborn_services(RebornBuildInput::local_dev(
+                "planned-harness-host-runtime",
+                root.path().join("local-dev"),
             ))
+            .await
+            .expect("host runtime harness services");
+            enable_host_runtime_auto_approve_for_harness_user(&services, &binding).await;
+            Some(Arc::new(services))
         } else {
             None
         };
@@ -548,6 +579,7 @@ impl ScriptedHostRuntimeToolCall {
             safe_reasoning_deltas: Vec::new(),
             usage: None,
             output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version,
                 capability_id: self.capability_id.clone(),
                 input_ref,

@@ -14,7 +14,7 @@ use ironclaw_product_workflow::{
 use ironclaw_threads::{LoadContextMessagesRequest, MessageKind, ThreadHistoryRequest};
 use ironclaw_turns::{
     ReplyTargetBindingRef, TurnStatus,
-    run_profile::{LoopCapabilityPort, ProviderToolCall},
+    run_profile::{LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest},
 };
 
 use crate::RebornCompositionProfile;
@@ -130,7 +130,7 @@ impl HostManagedModelGateway for OutboundDeliveryTriggerGateway {
             _ => unreachable!("handled above"),
         };
         let candidate = capabilities
-            .register_provider_tool_call(call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
             .await
             .map_err(model_capability_error)?;
         Ok(HostManagedModelResponse::capability_calls(

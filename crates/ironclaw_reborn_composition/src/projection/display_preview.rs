@@ -365,6 +365,7 @@ fn capability_display_preview_resolution_from_store(
         thread_id: activity.thread_id.clone(),
         capability_id: activity.capability_id.clone(),
         status: capability_activity_status_wire(activity.status),
+        error_kind: activity.error_kind.clone(),
         title: record.title,
         subtitle: record.subtitle,
         input_summary: record.input_summary,
@@ -401,6 +402,7 @@ fn failed_capability_display_preview(
         thread_id: activity.thread_id.clone(),
         capability_id: activity.capability_id.clone(),
         status: capability_activity_status_wire(activity.status),
+        error_kind: activity.error_kind.clone(),
         title: bounded_display_text(
             safe_capability_title(activity.capability_id.as_str()),
             CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,

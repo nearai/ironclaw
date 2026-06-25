@@ -7,6 +7,7 @@ export function EmptyState({
   onSuggestion,
   onSend,
   disabled,
+  sendDisabled,
   initialText,
   resetKey,
   draftKey,
@@ -55,6 +56,7 @@ export function EmptyState({
         <${ChatInput}
           onSend=${onSend}
           disabled=${disabled}
+          sendDisabled=${sendDisabled}
           initialText=${initialText}
           resetKey=${resetKey}
           draftKey=${draftKey}
