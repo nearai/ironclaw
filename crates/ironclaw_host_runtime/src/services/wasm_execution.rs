@@ -110,10 +110,12 @@ impl<'g, G: ResourceGovernor + ?Sized> ReservationGuard<'g, G> {
         self.id
     }
 
-    /// Happy path: reconcile actual usage, consuming the guard. Mirrors the
-    /// previous inline reconcile: on reconcile error, release the reservation
-    /// (release error ignored, as the previous `release_*_reservation` helpers
-    /// did) and return the caller-supplied dispatch error.
+    /// Happy path: reconcile actual usage, consuming the guard. On reconcile
+    /// error, release the reservation and return the caller-supplied dispatch
+    /// error. Settlement failures (reconcile or the fallback release) come from
+    /// durable storage; we cannot surface their cause through the sanitized
+    /// dispatch error, so they are logged as warnings keyed by `reservation_id`
+    /// instead of being silently discarded.
     pub(super) fn reconcile(
         mut self,
         usage: ResourceUsage,
@@ -122,8 +124,13 @@ impl<'g, G: ResourceGovernor + ?Sized> ReservationGuard<'g, G> {
         self.armed = false;
         match self.governor.reconcile(self.id, usage) {
             Ok(receipt) => Ok(receipt),
-            Err(_) => {
-                let _ = self.governor.release(self.id);
+            Err(error) => {
+                tracing::warn!(
+                    reservation_id = %self.id,
+                    error = %error,
+                    "failed to reconcile resource reservation; releasing instead"
+                );
+                self.release_on_settlement_failure();
                 Err(on_reconcile_error())
             }
         }
@@ -133,7 +140,8 @@ impl<'g, G: ResourceGovernor + ?Sized> ReservationGuard<'g, G> {
     /// otherwise release. Mirrors `account_or_release_failed_*`: no usage or
     /// non-accountable usage releases (returning `Ok`); accountable usage
     /// reconciles, and a reconcile failure releases and returns the
-    /// caller-supplied dispatch error.
+    /// caller-supplied dispatch error. Settlement failures are logged (keyed by
+    /// `reservation_id`) rather than silently dropped.
     pub(super) fn account_failed(
         mut self,
         usage: Option<&ResourceUsage>,
@@ -142,16 +150,35 @@ impl<'g, G: ResourceGovernor + ?Sized> ReservationGuard<'g, G> {
         self.armed = false;
         match usage {
             Some(usage) if has_accountable_effects(usage) => {
-                if self.governor.reconcile(self.id, usage.clone()).is_err() {
-                    let _ = self.governor.release(self.id);
+                if let Err(error) = self.governor.reconcile(self.id, usage.clone()) {
+                    tracing::warn!(
+                        reservation_id = %self.id,
+                        error = %error,
+                        "failed to reconcile resource reservation for failed execution; releasing instead"
+                    );
+                    self.release_on_settlement_failure();
                     return Err(on_reconcile_error());
                 }
                 Ok(())
             }
             _ => {
-                let _ = self.governor.release(self.id);
+                self.release_on_settlement_failure();
                 Ok(())
             }
+        }
+    }
+
+    /// Release the reservation, logging (rather than discarding) a durable-storage
+    /// release failure keyed by `reservation_id`. Used by the explicit settlement
+    /// paths; the `Drop` safety net logs separately so its message names the
+    /// unsettled-on-drop case.
+    fn release_on_settlement_failure(&self) {
+        if let Err(error) = self.governor.release(self.id) {
+            tracing::warn!(
+                reservation_id = %self.id,
+                error = %error,
+                "failed to release resource reservation after settlement failure"
+            );
         }
     }
 }
@@ -161,7 +188,16 @@ impl<'g, G: ResourceGovernor + ?Sized> Drop for ReservationGuard<'g, G> {
         if self.armed {
             // Cancellation / unexpected-return safety net: the reservation was
             // never settled, so release it to avoid a permanent budget leak.
-            let _ = self.governor.release(self.id);
+            // `Drop` cannot return an error, so a durable-storage release failure
+            // is surfaced as a sanitized warning keyed by `reservation_id` rather
+            // than being silently discarded.
+            if let Err(error) = self.governor.release(self.id) {
+                tracing::warn!(
+                    reservation_id = %self.id,
+                    error = %error,
+                    "failed to release unsettled resource reservation on drop"
+                );
+            }
         }
     }
 }

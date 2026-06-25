@@ -610,7 +610,13 @@ fn release_first_party_reservation<G>(governor: &G, reservation_id: ResourceRese
 where
     G: ResourceGovernor + ?Sized,
 {
-    let _ = governor.release(reservation_id);
+    if let Err(error) = governor.release(reservation_id) {
+        tracing::warn!(
+            reservation_id = %reservation_id,
+            error = %error,
+            "failed to release prepared first-party reservation"
+        );
+    }
 }
 
 fn release_adapter_reservation<G>(governor: &G, reservation_id: Option<ResourceReservationId>)
