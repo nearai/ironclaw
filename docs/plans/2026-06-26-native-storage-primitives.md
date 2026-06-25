@@ -396,7 +396,7 @@ reserve(scope, estimate, reservation_id):
      admission_protocol(loaded, requested, reservation_id)   // see 7.4
 ```
 
-**The win:** two reserves in different tenants now CAS **disjoint** account paths (`sha256(tenant-A…)` vs `sha256(tenant-B…)`) and **never contend**. The `filesystem_record_lock` is taken per-account-path, not globally. Same-tenant reserves serialize only on the *shared* shallow ledgers (tenant + user) — the correct, minimal contention surface, because they genuinely share that budget. `cascade`'s shallow→deep order doubles as **deadlock-free lock ordering** for the Postgres `put_batch` (row locks taken in a consistent order). `evaluate_cascade_for_account` is **untouched** (Rule 3).
+**The win:** two reserves in different tenants now CAS **disjoint** account paths (`sha256(tenant-A…)` vs `sha256(tenant-B…)`) and **never contend**. The `filesystem_record_lock` is taken per-account-path, not globally. Same-tenant reserves serialize only on the *shared* shallow ledgers — the correct, minimal contention surface, because they genuinely share that budget. **(Under this deployment's per-user limits with no tenant-wide cap, the limitless tenant ledger leaves the hot path entirely — see §7.8 — so the broadest *hot* ledger is the `user`, and reserves from *different* users contend on nothing.)** `cascade`'s shallow→deep order doubles as **deadlock-free lock ordering** for the Postgres `put_batch` (row locks taken in a consistent order). `evaluate_cascade_for_account` is **untouched** (Rule 3).
 
 `reconcile`/`release` are the symmetric inverse keyed off `record.accounts`: decrement `reserved`, accrue `usage` (reconcile), via the same `put_batch` (MultiKey) or admission protocol (CAS-only), and flip the reservation status.
 
@@ -408,7 +408,7 @@ reserve(scope, estimate, reservation_id):
 
 - **Postgres (`MultiKey`):** the `put_batch` in §7.3 *is* the atomic gate. All account-delta `Version` CAS-puts + the reservation `Absent` insert commit in one transaction. Because Phase-1 read each ledger's `version` and Phase-2 CAS-bumps each against that exact version, any concurrent reserve that touched a shared (tenant/user) ledger first will have bumped its version, failing this batch's `Version` CAS on that leg → whole batch rolls back → retry. Two reserves sharing the tenant row are therefore **serialized by the shared ledger's version**, and the all-or-nothing check holds. Correct, no extra machinery.
 
-- **libSQL (CAS-only floor):** there is no multi-key transaction, so we introduce a **narrow atomic admission record per cascade root** — the **broadest shared account in the cascade** (the tenant ledger, always present, `lib.rs:222` min). The reserve does its Phase-1 check, then performs the **commit as a single `adjust_indexed` on the tenant ledger's `reserved_*` counter with `AtMost(limit)` guard** — this one conditional `UPDATE` takes the libSQL write lock and is the linearization point. If it `applied=false` (guard violation under concurrency), the reserve is denied — **correctly, atomically, no overshoot**. Only after the tenant-leg admission succeeds does the reserve apply the narrower-account deltas (user/project/agent/…) and write the reservation record, each idempotent (see below). The deeper accounts are *subordinate* to the tenant admission; they can be applied with ordinary CAS retries because a breach of a deeper, narrower limit is caught by *its own* `adjust_indexed` `AtMost` guard in the same way — the key property is that **each account's own limit is enforced by its own atomic guarded adjust**, and the *broadest* account (tenant) is the single serialization point that all reserves in that tenant funnel through.
+- **libSQL (CAS-only floor):** there is no multi-key transaction, so we introduce a **narrow atomic admission record at the broadest cascade account that carries a limit**. Under this deployment's **per-user limits with no tenant cap, that is the `user` ledger** (§7.8); it would be the tenant ledger only if a tenant-wide cap existed. The reserve does its Phase-1 check, then performs the **commit as a single `adjust_indexed` on the admission ledger's `reserved_*` counter with `AtMost(limit)` guard** — this one conditional `UPDATE` takes the libSQL write lock and is the linearization point. If it `applied=false` (guard violation under concurrency), the reserve is denied — **correctly, atomically, no overshoot**. Only after the admission leg succeeds does the reserve apply the narrower-account deltas (project/agent/…) and write the reservation record, each idempotent (see below). The deeper accounts are *subordinate* to the admission; they apply with ordinary CAS retries because a breach of a deeper, narrower limit is caught by *its own* `adjust_indexed` `AtMost` guard in the same way — the key property is that **each account's own limit is enforced by its own atomic guarded adjust**, and the broadest *limited* account is the single serialization point that all reserves **sharing that budget** funnel through. Because limits are per-user, reserves from *different* users funnel through *different* admission ledgers and never contend.
 
   This re-introduces a contention point, but a **per-tenant** one (the tenant ledger), not a **global** one. That is the correct and minimal surface: reserves in *different* tenants still never contend; reserves in the *same* tenant serialize on the tenant admission, which they must, because they share the tenant budget. This is strictly better than today's global, no-retry blob.
 
@@ -446,6 +446,29 @@ migrate_resources_to_native():
      put(/resources/reservations/{id}, rec.into_entry(), Absent)
 ```
 The legacy blob stays (never-delete). Sequence: flip `DualWrite` → backfill `Absent` → `verify_parity` until clean → flip `Native`.
+
+### 7.8 Single-tenant / per-user limits: limitless ledgers leave the hot path
+
+**General principle:** maintain a hot per-account `reserved`/`usage` counter **only where there is a limit to enforce against it.** A cascade account with no limit needs no hot counter — its only purpose would be aggregate reporting, which is a *derived read*, not a hot write.
+
+**This deployment.** The hosted profile is `RebornProfile::HostedSingleTenant` — a **single tenant** (`reborn-cli`) with **many users** — and resource **limits are per-user, with no tenant-wide cap.** Therefore:
+
+- The **tenant** and `system()` levels are **limitless** → no `AtMost` guard, no hot counter needed → they are **dropped from the reserve/reconcile/release write path** (Phase 2 writes/guards only ledgers whose `limits` is non-empty).
+- The **broadest account that carries a limit is the `user`** → the per-user ledger becomes the broadest *hot* record and the libSQL admission gate (§7.4).
+
+**Consequence — full per-user isolation:**
+
+| | tenant ledger on hot path (generic design) | per-user limits, tenant dropped (this deployment) |
+|---|---|---|
+| two **different** users reserving | serialize on the shared tenant ledger | **disjoint ledger paths → zero contention** |
+| same user, concurrent reserves | serialize on tenant + user | serialize on **their own** user ledger (correct — shared budget) |
+| libSQL admission gate | tenant ledger | **user** ledger |
+
+So the governor goes from one process-global hot row all the way to **fully per-user, zero cross-user contention** — the strict best case, and it matches the actual budget model. The multi-tenant headline *"different **tenants** never contend"* gives **nothing** on a single-tenant instance; dropping the limitless tenant ledger is what makes the fix actually land for **one tenant, many users.**
+
+**Tenant/global totals, if ever needed for reporting/billing,** are computed as a **derived aggregate** — `query`-sum the per-user ledgers on demand, or a periodic rollup — **never a hot counter.** Eventual consistency on the aggregate is fine for reporting and keeps the write path per-user.
+
+**Implementation:** make the cascade-write **limit-aware**: in Phase 2 (and reconcile/release), iterate the cascade but `put_batch`/`adjust_indexed` only the accounts with a non-empty `limits` (here: the `user` level and below). `evaluate_cascade_for_account` already passes trivially for limitless accounts, so the business logic is **untouched** (Rule 3) — we simply stop *writing* a ledger that has nothing to enforce. This also preserves per-user independence as the precondition for a future per-user shard/cell split (the single-node-libSQL scale-out path).
 
 ---
 
@@ -668,7 +691,7 @@ Each PR green under `cargo clippy --all --tests --all-features` + `cargo test --
 
 ## 12. Open questions
 
-1. **Tenant-ledger admission hot-row on libSQL:** under extreme same-tenant fan-out, the tenant ledger becomes the serialization point. Acceptable (it's the shared budget), but do we want a future sharded-counter scheme for very-high-QPS tenants, or is per-tenant serialization sufficient indefinitely? (Defer; measure first.)
+1. **Admission hot-row on libSQL:** the admission gate is the broadest *limited* account. Under this deployment's **per-user limits (§7.8) that is the `user` ledger**, so different users never contend and a single user's own fan-out serializes on their own ledger (correct, it's their shared budget). The generic tenant-ledger hot-row only arises **if a tenant-wide cap is introduced**; if it ever is, a future sharded-counter scheme for very-high-QPS tenants is the mitigation. (Resolved for the per-user-limit model; revisit only if a tenant cap is added.)
 2. **Event recovery scan window:** what is the right `RECOVERY_SCAN_WINDOW` bound vs duplicate-tolerance trade for non-terminal events? Pick empirically from event volume per scope.
 3. **Turns `turns.json` (TurnRecord list) split:** keep as one phase-1 record or split per-thread? It is read-mostly and not a contention point; defer the split unless a query pattern demands it.
 4. **Should `put_batch` ever raise libSQL to `TxnCapability::MultiKey`?** Its native override uses real `BEGIN IMMEDIATE` multi-statement atomicity, so libSQL *could* implement `begin`/`StorageTxn` too. Out of scope here (`BatchPut` is advertised independently of the txn tier), but it's a natural follow-up that would let the governor use the PG `put_batch` commit path on libSQL as well, retiring the admission-gate special case.
