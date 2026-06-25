@@ -501,12 +501,7 @@ export function useChat(threadId) {
           updateCurrentThread(markRejected);
           updateSeededTarget(markRejected);
           if (response?.notice) {
-            const noticeKey = busyNoticeKey(sendThreadId, gateBeforeSend);
-            if (noticeKey && shouldRenderInCurrentThread) {
-              if (pendingGateRef.current === gateBeforeSend) {
-                setBusyGateNotice({ gateKey: noticeKey, content: response.notice });
-              }
-            } else {
+            const appendSystemNotice = () => {
               const noticeMessage = {
                 id: `system-rejected-${pendingSeqRef.current++}`,
                 role: "system",
@@ -520,6 +515,20 @@ export function useChat(threadId) {
               ];
               updateCurrentThread(appendNotice);
               updateSeededTarget(appendNotice);
+            };
+            const noticeKey = busyNoticeKey(sendThreadId, gateBeforeSend);
+            if (noticeKey && shouldRenderInCurrentThread) {
+              const currentNoticeKey = busyNoticeKey(sendThreadId, pendingGateRef.current);
+              if (currentNoticeKey) {
+                setBusyGateNotice({
+                  gateKey: currentNoticeKey,
+                  content: response.notice,
+                });
+              } else {
+                appendSystemNotice();
+              }
+            } else {
+              appendSystemNotice();
             }
           }
           updateCurrentRunState(() => setIsProcessing(false));

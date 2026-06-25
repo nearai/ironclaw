@@ -743,7 +743,7 @@ test("useChat.send: accepted send does not clear a gate received while in flight
   assert.equal(stateSlots.get(5).value, replacementGate);
 });
 
-test("useChat.send: rejected busy does not clear a gate received while in flight", async () => {
+test("useChat.send: rejected busy attaches notice to a gate replaced while in flight", async () => {
   const threadId = "thread-1";
   const replacementGate = {
     runId: "run-replacement",
@@ -836,21 +836,16 @@ test("useChat.send: rejected busy does not clear a gate received while in flight
     "busy rejection must leave a concurrently replaced gate untouched",
   );
   assert.equal(stateSlots.get(5).value, replacementGate);
-  assert.deepEqual(
-    stateUpdates.filter((call) => call.index === 6).map((call) => call.value),
-    [],
-    "busy rejection must not attach a notice to a stale gate snapshot",
-  );
+  const busyNoticeUpdates = stateUpdates
+    .filter((call) => call.index === 6)
+    .map((call) => call.value);
+  assert.equal(busyNoticeUpdates.length, 1);
+  assert.equal(busyNoticeUpdates[0].content, "Thread is busy, please try again.");
+  assert.match(busyNoticeUpdates[0].gateKey, /run-replacement\ngate-replacement$/);
 });
 
-test("useChat.send: rejected busy does not strand notice after gate resolves in flight", async () => {
+test("useChat.send: rejected busy appends system notice after gate resolves in flight", async () => {
   const threadId = "thread-1";
-  const pendingGate = {
-    runId: "run-gated",
-    gateRef: "gate-shell",
-    kind: "gate",
-    toolName: "builtin.shell",
-  };
   const stateUpdates = [];
   const stateSlots = new Map();
   let renderedMessages = [];
@@ -865,7 +860,7 @@ test("useChat.send: rejected busy does not strand notice after gate resolves in 
     React: createReactStub({
       initialByIndex: new Map([
         [4, false],
-        [5, pendingGate],
+        [5, null],
       ]),
       setCalls: stateUpdates,
       stateSlots,
@@ -931,16 +926,18 @@ test("useChat.send: rejected busy does not strand notice after gate resolves in 
   await chat.send("busy after gate resolved");
 
   assert.equal(stateSlots.get(5).value, null);
-  assert.equal(renderedMessages.length, 1);
+  assert.equal(renderedMessages.length, 2);
   assert.equal(renderedMessages[0].status, "error");
+  assert.equal(renderedMessages[1].role, "system");
+  assert.equal(renderedMessages[1].content, "Thread is busy, please try again.");
   assert.deepEqual(
     stateUpdates.filter((call) => call.index === 6).map((call) => call.value),
     [],
-    "a resolved gate should not get a lingering busy notice",
+    "a resolved gate should not get a lingering card-level busy notice",
   );
 });
 
-test("useChat.send: rejected busy keeps a gate received after callback creation", async () => {
+test("useChat.send: gate received after callback creation blocks before send", async () => {
   const threadId = "thread-1";
   const pendingGate = {
     runId: "run-gated",
@@ -991,12 +988,9 @@ test("useChat.send: rejected busy keeps a gate received after callback creation"
     timelineMessageIdFromAcceptedRef,
     resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
-    sendMessage: async () => ({
-      outcome: "rejected_busy",
-      accepted_message_ref: "msg:busy-message-1",
-      notice: "Thread is busy, please try again.",
-      thread_id: threadId,
-    }),
+    sendMessage: async () => {
+      throw new Error("sendMessage should not run");
+    },
     setInterval,
     setTimeout,
     submitManualToken: async () => {},
@@ -1023,7 +1017,12 @@ test("useChat.send: rejected busy keeps a gate received after callback creation"
 
   const chat = context.globalThis.__testExports.useChat(threadId);
   setPendingGateFromEvents(pendingGate);
-  await chat.send("busy after gate arrived");
+  await assert.rejects(
+    chat.send("busy after gate arrived"),
+    (error) =>
+      error?.safeErrorCode === "approval_gate_pending_send_blocked" &&
+      /Resolve the approval request/.test(error.message),
+  );
 
   assert.deepEqual(
     stateUpdates.filter((call) => call.index === 5).map((call) => call.value),
@@ -1031,14 +1030,14 @@ test("useChat.send: rejected busy keeps a gate received after callback creation"
     "send must read the latest gate from SSE instead of a stale null callback closure",
   );
   assert.equal(stateSlots.get(5).value, pendingGate);
-  assert.equal(renderedMessages[0].status, "error");
+  assert.equal(renderedMessages.length, 0);
   assert.deepEqual(
     stateUpdates.filter((call) => call.index === 6).map((call) => call.value?.content),
-    ["Thread is busy, please try again."],
+    [],
   );
 });
 
-test("useChat.send: repeated busy rejection under the same gate dedupes notice", async () => {
+test("useChat.send: repeated sends under the same pending gate stay blocked locally", async () => {
   const threadId = "thread-1";
   const pendingGate = {
     runId: "run-gated",
@@ -1083,16 +1082,11 @@ test("useChat.send: repeated busy rejection under the same gate dedupes notice",
     },
     recordAcceptedMessageRef,
     removePending,
-    timelineMessageIdFromAcceptedRef,
     resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
-    sendMessage: async () => ({
-      outcome: "rejected_busy",
-      accepted_message_ref: "msg:busy-message-1",
-      notice:
-        "An approval gate is open on this thread -- resolve it before continuing.",
-      thread_id: threadId,
-    }),
+    sendMessage: async () => {
+      throw new Error("sendMessage should not run");
+    },
     setInterval,
     setTimeout,
     submitManualToken: async () => {},
@@ -1115,19 +1109,17 @@ test("useChat.send: repeated busy rejection under the same gate dedupes notice",
   runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
-  await chat.send("first blocked send");
-  await chat.send("second blocked send");
-
-  const userMessages = renderedMessages.filter((m) => m.role === "user");
-  const systemMessages = renderedMessages.filter((m) => m.role === "system");
-  assert.equal(userMessages.length, 2);
-  assert.equal(userMessages[0].status, "error");
-  assert.equal(userMessages[1].status, "error");
-  assert.equal(systemMessages.length, 0);
-  assert.equal(
-    stateUpdates.filter((call) => call.index === 6).at(-1)?.value?.content,
-    "An approval gate is open on this thread -- resolve it before continuing.",
+  await assert.rejects(
+    chat.send("first blocked send"),
+    /Resolve the approval request/,
   );
+  await assert.rejects(
+    chat.send("second blocked send"),
+    /Resolve the approval request/,
+  );
+
+  assert.equal(renderedMessages.length, 0);
+  assert.deepEqual(stateUpdates, []);
 });
 
 test("useChat.cancelRun clears local state before cancel request resolves", async () => {
