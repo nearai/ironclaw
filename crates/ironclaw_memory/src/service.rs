@@ -71,16 +71,18 @@ pub struct MemoryServiceWriteRequest {
 
 impl MemoryServiceWriteRequest {
     pub fn from_tool_input(input: &Value) -> Result<Self, MemoryServiceError> {
-        // Lenient parsing matching the pre-lift host `parse_write_command`:
-        // a present-but-wrong-typed `target` is rejected, but every other
-        // present-but-wrong-typed optional field coerces to its default rather
-        // than failing (exact original behavior). `new_string`/`timezone` are
-        // only consulted by the native write path when relevant (patch /
-        // daily_log), preserving origin semantics.
+        // Lenient parsing matching the pre-lift host `parse_write_command`: an
+        // explicit JSON `null` target is treated as omitted (defaults to the
+        // daily log), but any other present-but-wrong-typed `target` (number,
+        // bool, object, array) is rejected. Every other present-but-wrong-typed
+        // optional field coerces to its default rather than failing (exact
+        // original behavior). `new_string`/`timezone` are only consulted by the
+        // native write path when relevant (patch / daily_log), preserving origin
+        // semantics.
         let target = match input.get("target") {
             Some(Value::String(target)) => target.to_string(),
+            Some(Value::Null) | None => "daily_log".to_string(),
             Some(_) => return Err(MemoryServiceError::input()),
-            None => "daily_log".to_string(),
         };
         let content = input
             .get("content")

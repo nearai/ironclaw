@@ -25,6 +25,11 @@
       "description": "Maximum number of memory results to return"
     }
   },
-  "required": ["query"],
+  "anyOf": [
+    { "required": ["query"] },
+    { "required": ["q"] },
+    { "required": ["text"] },
+    { "required": ["pattern"] }
+  ],
   "additionalProperties": false
 }

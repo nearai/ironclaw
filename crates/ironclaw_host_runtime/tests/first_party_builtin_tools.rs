@@ -29,11 +29,12 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
     HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError,
-    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
-    TIME_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
+    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort, SHELL_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
@@ -41,7 +42,7 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
-    builtin_first_party_package_for_process_backend,
+    builtin_first_party_package_for_process_backend, native_memory_first_party_package,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_runtime::{
@@ -152,7 +153,10 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         "builtin.http.save should steer GitHub repository API tasks toward the GitHub extension"
     );
 
-    let memory_write = package
+    // Memory tools now live in the always-on `ironclaw.memory.native` package,
+    // not the generic builtin package; assert their effects there.
+    let native_package = native_memory_first_party_package().unwrap();
+    let memory_write = native_package
         .capabilities
         .iter()
         .find(|descriptor| descriptor.id.as_str() == MEMORY_WRITE_CAPABILITY_ID)
@@ -166,7 +170,7 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         MEMORY_READ_CAPABILITY_ID,
         MEMORY_TREE_CAPABILITY_ID,
     ] {
-        let descriptor = package
+        let descriptor = native_package
             .capabilities
             .iter()
             .find(|descriptor| descriptor.id.as_str() == capability_id)
@@ -2273,7 +2277,12 @@ async fn builtin_rejects_oversized_outputs_before_return() {
 async fn memory_capabilities_write_read_tree_and_search_native_reborn_memory() {
     let runtime = runtime_with_filesystem(InMemoryBackend::new());
     let context = execution_context_with_mounts(
-        all_builtin_capability_ids(),
+        [
+            MEMORY_WRITE_CAPABILITY_ID,
+            MEMORY_READ_CAPABILITY_ID,
+            MEMORY_TREE_CAPABILITY_ID,
+            MEMORY_SEARCH_CAPABILITY_ID,
+        ],
         memory_mounts(MountPermissions::read_write_list_delete()),
     );
 
@@ -8600,6 +8609,12 @@ fn registry() -> ExtensionRegistry {
     registry
         .insert(builtin_first_party_package().unwrap())
         .unwrap();
+    // Native memory rides the always-on lane alongside builtin; register its
+    // package so the `ironclaw.memory.native.*` capabilities are declared for
+    // dispatch + surface in these host-runtime tests (mirrors composition).
+    registry
+        .insert(native_memory_first_party_package().unwrap())
+        .unwrap();
     registry
 }
 
@@ -8626,10 +8641,6 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
         TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
         PROFILE_SET_CAPABILITY_ID,
-        MEMORY_SEARCH_CAPABILITY_ID,
-        MEMORY_WRITE_CAPABILITY_ID,
-        MEMORY_READ_CAPABILITY_ID,
-        MEMORY_TREE_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
         LIST_DIR_CAPABILITY_ID,
@@ -9264,6 +9275,16 @@ fn trust_policy() -> HostTrustPolicy {
         AdminEntry::for_local_manifest(
             PackageId::new("builtin").unwrap(),
             "/system/extensions/builtin/manifest.toml".to_string(),
+            None,
+            HostTrustAssignment::first_party(),
+            builtin_effects(),
+            None,
+        ),
+        // Native memory rides the always-on lane alongside builtin and carries
+        // its own first-party trust entry (mirrors the composition trust policy).
+        AdminEntry::for_local_manifest(
+            PackageId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER).unwrap(),
+            "/system/extensions/ironclaw.memory.native/manifest.toml".to_string(),
             None,
             HostTrustAssignment::first_party(),
             builtin_effects(),
