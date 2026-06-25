@@ -1689,4 +1689,108 @@ mod tests {
         );
         assert_eq!(result.unwrap().model_name(), "test-model-ollama");
     }
+
+    /// Behavioral regression: `create_registry_provider_inner` must forward
+    /// `request_timeout_secs` all the way to the HTTP client built for the
+    /// matched protocol arm. A future arm that re-hardcodes
+    /// `DEFAULT_REQUEST_TIMEOUT_SECS` (instead of passing the caller's value)
+    /// would still compile and would leave the existing structural test green —
+    /// but THIS test would fail: the outer `tokio::time::timeout` guard would
+    /// fire (the provider would block for the full 60 s default instead of the
+    /// 2 s SHORT_TIMEOUT_SECS) or the elapsed-time assertion would trip.
+    ///
+    /// Design:
+    ///   1. Bind a local TCP listener that accepts but never writes — the
+    ///      TCP handshake completes so the 10 s connect_timeout is not in play;
+    ///      the HTTP response never arrives so only the request timeout fires.
+    ///   2. Build an OpenAI-compat provider through the real dispatch seam
+    ///      (`create_registry_provider_inner`) with SHORT_TIMEOUT_SECS = 2.
+    ///   3. Issue a minimal chat completion and assert it errors well under the
+    ///      60 s DEFAULT_REQUEST_TIMEOUT_SECS.
+    #[tokio::test]
+    async fn create_registry_provider_inner_timeout_is_behaviorally_observed() {
+        use std::time::Instant;
+        use tokio::net::TcpListener;
+
+        use crate::config::RegistryProviderConfig;
+        use crate::provider::{ChatMessage, CompletionRequest};
+        use crate::registry::ProviderProtocol;
+
+        // 2 s timeout — short enough to make the test fast, long enough to be
+        // above Linux scheduler jitter.
+        const SHORT_TIMEOUT_SECS: u64 = 2;
+
+        // Bind a loopback listener so the TCP handshake succeeds but no HTTP
+        // response bytes are ever written.
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+
+        // Spawn: accept one connection and hold it open silently.
+        tokio::spawn(async move {
+            if let Ok((_socket, _peer)) = listener.accept().await {
+                // Hold the socket alive until this task is dropped; the reqwest
+                // client blocks waiting for HTTP response headers.
+                tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+            }
+        });
+
+        // Build an OpenAI-compat provider via the real dispatch seam.
+        let config = RegistryProviderConfig::generic(
+            ProviderProtocol::OpenAiCompletions,
+            "regression-timeout-provider",
+            Some(secrecy::SecretString::from("dummy-api-key".to_string())),
+            format!("http://127.0.0.1:{}", addr.port()),
+            "regression-timeout-model",
+        );
+
+        let provider = create_registry_provider_inner(&config, SHORT_TIMEOUT_SECS)
+            .expect("provider construction must succeed");
+
+        let request = CompletionRequest::new(vec![ChatMessage::user("ping")]);
+
+        let start = Instant::now();
+
+        // Outer guard: if the future hasn't resolved within 10 s, the timeout
+        // was not forwarded and the provider is using the full 60 s
+        // DEFAULT_REQUEST_TIMEOUT_SECS — surface that as a clear failure
+        // rather than an infinite hang.
+        let outcome = tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            provider.complete(request),
+        )
+        .await;
+
+        let elapsed = start.elapsed();
+
+        // The outer guard must not have fired — the provider's own short
+        // timeout must have resolved the future well before our 10 s limit.
+        assert!(
+            outcome.is_ok(),
+            "Provider still waiting after >10 s — SHORT_TIMEOUT_SECS \
+             ({SHORT_TIMEOUT_SECS} s) was not forwarded to the HTTP client \
+             through `create_registry_provider_inner`. Elapsed: {elapsed:?}. \
+             Check that every `match config.protocol` arm passes \
+             `request_timeout_secs` down to `provider_http_client`.",
+        );
+
+        // The provider call must have returned an error (the hung server never
+        // sends bytes, so a successful response is impossible).
+        let call_result = outcome.unwrap();
+        assert!(
+            call_result.is_err(),
+            "Expected an error from the hung server, got a successful response",
+        );
+
+        // Elapsed should be close to SHORT_TIMEOUT_SECS, not 60 s.
+        // 5 s of headroom for CI scheduler variance; well below DEFAULT (60 s).
+        assert!(
+            elapsed.as_secs() < 5,
+            "Request resolved after {elapsed:?} — expected under 5 s for a \
+             {SHORT_TIMEOUT_SECS} s timeout. If DEFAULT_REQUEST_TIMEOUT_SECS \
+             (60 s) is being used, `create_registry_provider_inner` is not \
+             forwarding `request_timeout_secs` to `provider_http_client`.",
+        );
+    }
 }
