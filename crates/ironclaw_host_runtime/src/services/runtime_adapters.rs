@@ -29,11 +29,34 @@ const MAX_CONCURRENT_WASM_EXEC: usize = 64;
 // can never monopolize the pool and starve other `spawn_blocking` users.
 const _: () = assert!(MAX_CONCURRENT_WASM_EXEC > 0 && MAX_CONCURRENT_WASM_EXEC < 512);
 
+/// Upper bound on WASM component compilations running concurrently inside
+/// `spawn_blocking`.
+///
+/// Preparation (wasmtime `Component::new`) is capped at one quarter of the
+/// execution bound so that a cold-compile storm cannot starve already-prepared
+/// hot executions waiting on [`WASM_EXEC_SEMAPHORE`]. The two gates are
+/// independent, so total blocking-pool usage is bounded by their sum
+/// (16 + 64 = 80) — still far below tokio's default blocking-pool ceiling (512).
+const MAX_CONCURRENT_WASM_PREPARE: usize = 16;
+
+// Enforce the prepare bound at compile time: positive, smaller than the exec
+// bound (so compiles cannot crowd out hot executions), and far below the pool
+// ceiling.
+const _: () = assert!(
+    MAX_CONCURRENT_WASM_PREPARE > 0 && MAX_CONCURRENT_WASM_PREPARE < MAX_CONCURRENT_WASM_EXEC
+);
+
 /// Process-wide gate over concurrent native WASM execution. Shared across all
 /// `WasmRuntimeAdapter` instances because they all draw from the same blocking
 /// thread pool.
 static WASM_EXEC_SEMAPHORE: std::sync::LazyLock<Arc<Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(Semaphore::new(MAX_CONCURRENT_WASM_EXEC)));
+
+/// Process-wide gate over concurrent WASM component compilations. Independent
+/// of [`WASM_EXEC_SEMAPHORE`] so a cold-compile storm cannot consume all
+/// execution permits and starve already-prepared hot executions.
+static WASM_PREPARE_SEMAPHORE: std::sync::LazyLock<Arc<Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(Semaphore::new(MAX_CONCURRENT_WASM_PREPARE)));
 
 use super::wasm_diagnostics::{log_wasm_guest_error, log_wasm_runtime_error};
 use super::{
@@ -876,19 +899,21 @@ async fn run_wasm_execution_blocking(
 /// Running it inline on the async worker would park that worker for the full
 /// compile; a burst of cold-cache misses (cold start or cache eviction) could then
 /// pin every async worker and re-create the runtime wedge that offloading
-/// execution fixes. So `prepare` is offloaded to the blocking pool behind the same
-/// process-wide [`WASM_EXEC_SEMAPHORE`], so a cold-miss storm queues instead of
-/// exhausting the pool. The owned `runtime` is a cheap `Clone` (shared `Engine`)
-/// and `wasm_bytes` is moved in, so the closure is `Send + 'static`. The semaphore
-/// permit is moved into the `spawn_blocking` closure so its lifetime is tied to the
-/// blocking thread, not the outer async future. A `JoinError` (panic or
-/// cancellation of the blocking task) is surfaced as an execution failure.
+/// execution fixes. So `prepare` is offloaded to the blocking pool behind the
+/// dedicated, smaller [`WASM_PREPARE_SEMAPHORE`] — separate from
+/// [`WASM_EXEC_SEMAPHORE`] — so a cold-compile storm cannot starve
+/// already-prepared hot executions that are waiting on their own gate. The owned
+/// `runtime` is a cheap `Clone` (shared `Engine`) and `wasm_bytes` is moved in,
+/// so the closure is `Send + 'static`. The semaphore permit is moved into the
+/// `spawn_blocking` closure so its lifetime is tied to the blocking thread, not
+/// the outer async future. A `JoinError` (panic or cancellation of the blocking
+/// task) is surfaced as an execution failure.
 async fn run_wasm_prepare_blocking(
     runtime: WitToolRuntime,
     package_id: String,
     wasm_bytes: Vec<u8>,
 ) -> Result<PreparedWitTool, WasmError> {
-    let permit = WASM_EXEC_SEMAPHORE
+    let permit = WASM_PREPARE_SEMAPHORE
         .clone()
         .acquire_owned()
         .await
@@ -1541,9 +1566,9 @@ mod tests {
         }
     }
 
-    // Serializes the two semaphore-draining tests so they cannot interfere with
-    // each other. Both tests acquire permits from the process-wide
-    // `WASM_EXEC_SEMAPHORE`, and concurrent execution would deadlock them.
+    // Serializes the semaphore-draining tests so they cannot interfere with
+    // each other. Tests that drain `WASM_EXEC_SEMAPHORE` or `WASM_PREPARE_SEMAPHORE`
+    // must hold this lock for the duration; concurrent execution would deadlock them.
     static SEMAPHORE_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
         std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
@@ -1724,27 +1749,27 @@ mod tests {
         );
     }
 
-    // 3c — The real `run_wasm_prepare_blocking` path is gated by the shared semaphore.
+    // 3c — The real `run_wasm_prepare_blocking` path is gated by its own prepare semaphore.
     //
     // Mirrors `run_wasm_execution_blocking_is_gated_by_shared_semaphore` for the
-    // compile/prepare offload: drains `WASM_EXEC_SEMAPHORE` to 0, confirms the
+    // compile/prepare offload: drains `WASM_PREPARE_SEMAPHORE` to 0, confirms the
     // prepare call cannot proceed within a short deadline (it is blocked on the
     // semaphore acquire, which happens before any compilation), then releases all
     // permits and verifies the call completes successfully. Uses a deterministic
     // barrier (a `tokio::spawn` task + `is_finished` poll within a `time::timeout`)
     // so there are no arbitrary sleeps.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn run_wasm_prepare_blocking_is_gated_by_shared_semaphore() {
+    async fn run_wasm_prepare_blocking_is_gated_by_prepare_semaphore() {
         let _lock = SEMAPHORE_TEST_LOCK.lock().await;
 
         let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
         let wasm_bytes = tool_component(SIMPLE_TOOL_WAT);
 
-        // Drain all permits. Collect them so they stay alive until we choose to
-        // drop them.
-        let mut held_permits = Vec::with_capacity(MAX_CONCURRENT_WASM_EXEC);
-        for _ in 0..MAX_CONCURRENT_WASM_EXEC {
-            let permit = WASM_EXEC_SEMAPHORE
+        // Drain all prepare permits. Collect them so they stay alive until we
+        // choose to drop them.
+        let mut held_permits = Vec::with_capacity(MAX_CONCURRENT_WASM_PREPARE);
+        for _ in 0..MAX_CONCURRENT_WASM_PREPARE {
+            let permit = WASM_PREPARE_SEMAPHORE
                 .clone()
                 .acquire_owned()
                 .await
@@ -1752,13 +1777,13 @@ mod tests {
             held_permits.push(permit);
         }
         assert_eq!(
-            WASM_EXEC_SEMAPHORE.available_permits(),
+            WASM_PREPARE_SEMAPHORE.available_permits(),
             0,
-            "all permits must be drained before the backpressure assertion"
+            "all prepare permits must be drained before the backpressure assertion"
         );
 
         // Kick off the prepare — it should block inside `run_wasm_prepare_blocking`
-        // waiting to acquire the semaphore permit (before any compilation).
+        // waiting to acquire the prepare semaphore permit (before any compilation).
         let runtime_clone = runtime.clone();
         let bytes_clone = wasm_bytes.clone();
         let call = tokio::spawn(async move {
@@ -1777,11 +1802,13 @@ mod tests {
             }
         })
         .await
-        .expect_err("the prepare call must not complete while all semaphore permits are held");
+        .expect_err(
+            "the prepare call must not complete while all prepare semaphore permits are held",
+        );
 
         assert!(
             !call.is_finished(),
-            "the prepare call must still be queued while the semaphore is exhausted"
+            "the prepare call must still be queued while the prepare semaphore is exhausted"
         );
 
         // Release all permits — the call should now be able to proceed.
@@ -1794,8 +1821,58 @@ mod tests {
 
         assert!(
             result.is_ok(),
-            "prepare must succeed after the semaphore is released: {result:?}"
+            "prepare must succeed after the prepare semaphore is released: {result:?}"
         );
+    }
+
+    // 3c2 — Decoupling guarantee: a full `WASM_EXEC_SEMAPHORE` does NOT block prepare.
+    //
+    // Drains all `WASM_EXEC_SEMAPHORE` permits, then asserts that
+    // `run_wasm_prepare_blocking` still completes promptly because it uses the
+    // independent `WASM_PREPARE_SEMAPHORE`. This is the key invariant that prevents
+    // a cold-compile storm from starving already-prepared hot executions: execution
+    // and preparation compete on separate gates.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wasm_prepare_is_not_blocked_by_full_execution_semaphore() {
+        let _lock = SEMAPHORE_TEST_LOCK.lock().await;
+
+        let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+        let wasm_bytes = tool_component(SIMPLE_TOOL_WAT);
+
+        // Drain ALL execution permits — simulates a burst that has saturated the
+        // execution gate while a new cold-cache compile arrives.
+        let mut held_permits = Vec::with_capacity(MAX_CONCURRENT_WASM_EXEC);
+        for _ in 0..MAX_CONCURRENT_WASM_EXEC {
+            let permit = WASM_EXEC_SEMAPHORE
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("semaphore must not be closed");
+            held_permits.push(permit);
+        }
+        assert_eq!(
+            WASM_EXEC_SEMAPHORE.available_permits(),
+            0,
+            "all execution permits must be drained before testing prepare independence"
+        );
+
+        // Prepare must complete promptly — it uses WASM_PREPARE_SEMAPHORE, not
+        // WASM_EXEC_SEMAPHORE, so the exhausted exec gate must not block it.
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_wasm_prepare_blocking(runtime, "decoupled-gate".to_string(), wasm_bytes),
+        )
+        .await
+        .expect(
+            "prepare must not block when the execution semaphore is full — gates are independent",
+        );
+
+        assert!(
+            result.is_ok(),
+            "prepare must succeed even with execution semaphore fully drained: {result:?}"
+        );
+
+        drop(held_permits);
     }
 
     // 3d — Invalid wasm bytes surface as a `WasmError` through the offloaded helper.
