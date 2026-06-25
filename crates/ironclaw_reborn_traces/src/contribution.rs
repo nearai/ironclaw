@@ -4603,6 +4603,14 @@ impl TraceUploadClaimContext {
         self.scope_dir = Some(dir);
         self
     }
+
+    /// Attach the per-user pseudonymous subject from `resolve_trace_credentials`.
+    /// For instance-enrolled users this is `local_pseudonymous_contributor_id(scope)`;
+    /// for personal-invite enrollment and paths with no user context it is `None`.
+    fn with_subject(mut self, subject: Option<String>) -> Self {
+        self.subject = subject;
+        self
+    }
 }
 
 #[async_trait]
@@ -6045,6 +6053,38 @@ fn trace_remote_http_client() -> Result<reqwest::Client, TraceRemoteRequestFailu
         })
 }
 
+/// Derive the per-user pseudonymous subject from a trace scope string.
+///
+/// Returns `Some(local_pseudonymous_contributor_id(scope))` when the user is enrolled
+/// via the shared instance policy (scope-level personal policy absent/disabled), so the
+/// issuer can attribute this user under the shared tenant device key.
+///
+/// Returns `None` when:
+/// - `scope` is `None` (CLI / no-user-context paths) — preserves today's behavior.
+/// - The user's personal-invite policy is enabled — the device key is already 1:1 with
+///   the user, so no explicit subject is required.
+/// - Neither policy is enabled — no contribution is happening.
+fn subject_for_scope(scope: Option<&str>) -> Option<String> {
+    let s = scope?;
+    // Personal-invite enrollment: scope-level policy is enabled, device key already 1:1.
+    let personal_enabled = read_trace_policy_for_scope(Some(s))
+        .ok()
+        .map(|p| p.enabled)
+        .unwrap_or(false);
+    if personal_enabled {
+        return None;
+    }
+    // Instance enrollment: no scope-level policy but the global instance policy is enabled.
+    let instance_enabled = read_trace_policy_for_scope(None)
+        .ok()
+        .map(|p| p.enabled)
+        .unwrap_or(false);
+    if instance_enabled {
+        return Some(local_pseudonymous_contributor_id(s));
+    }
+    None
+}
+
 pub async fn submit_trace_envelope_to_endpoint(
     envelope: &TraceContributionEnvelope,
     endpoint: &str,
@@ -6056,7 +6096,7 @@ pub async fn submit_trace_envelope_to_endpoint(
         ..Default::default()
     };
     submit_trace_envelope_to_endpoint_with_credential_provider(
-        envelope, endpoint, &policy, &provider, None,
+        envelope, endpoint, &policy, &provider, None, None,
     )
     .await
 }
@@ -6072,6 +6112,7 @@ pub async fn submit_trace_envelope_to_endpoint_with_policy(
         policy,
         &DefaultTraceUploadCredentialProvider,
         None,
+        None,
     )
     .await
 }
@@ -6082,14 +6123,16 @@ async fn submit_trace_envelope_to_endpoint_with_credential_provider(
     policy: &StandingTraceContributionPolicy,
     provider: &dyn TraceUploadCredentialProvider,
     scope_dir: Option<&Path>,
+    subject: Option<String>,
 ) -> anyhow::Result<TraceSubmissionReceipt> {
     let context = {
         let ctx = TraceUploadClaimContext::for_envelope(envelope);
-        if let Some(dir) = scope_dir {
+        let ctx = if let Some(dir) = scope_dir {
             ctx.with_scope_dir(dir.to_path_buf())
         } else {
             ctx
-        }
+        };
+        ctx.with_subject(subject)
     };
     let token = provider.bearer_token(policy, &context, false).await?;
     match submit_trace_envelope_to_endpoint_with_token(envelope, endpoint, &token).await {
@@ -6241,6 +6284,11 @@ async fn flush_trace_contribution_queue_for_scope_with_credential_provider(
         return Err(error);
     };
 
+    // Derive the per-user pseudonymous subject so instance-enrolled users are attributed
+    // individually under the shared tenant device key. Personal-invite enrollments and
+    // paths with no scope resolve to `None`, preserving today's behavior.
+    let subject = subject_for_scope(scope);
+
     let compaction = match compact_trace_queue_for_scope_unlocked(scope) {
         Ok(report) => report,
         Err(error) => {
@@ -6274,6 +6322,7 @@ async fn flush_trace_contribution_queue_for_scope_with_credential_provider(
                     &policy,
                     provider,
                     Some(&scope_dir),
+                    subject.clone(),
                 )
                 .await
                 {
@@ -14642,6 +14691,20 @@ mod tests {
         let req = build_trace_upload_claim_issuer_request(&policy, &ctx);
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["subject"], "sha256:deadbeef");
+    }
+
+    #[test]
+    fn context_with_subject_sets_field() {
+        let ctx = TraceUploadClaimContext {
+            trace_id: None,
+            submission_id: None,
+            consent_scopes: Vec::new(),
+            allowed_uses: Vec::new(),
+            scope_dir: None,
+            subject: None,
+        }
+        .with_subject(Some("sha256:abc".to_string()));
+        assert_eq!(ctx.subject.as_deref(), Some("sha256:abc"));
     }
 
     #[test]
