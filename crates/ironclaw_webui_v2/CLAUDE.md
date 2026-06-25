@@ -77,6 +77,9 @@ browser-reachable.
 | `webui.v2.set_active_llm` | POST | `/api/webchat/v2/llm/active` | None | `ProductWorkflow` |
 | `webui.v2.test_llm_connection` | POST | `/api/webchat/v2/llm/test-connection` | None | `ProductWorkflow` |
 | `webui.v2.list_llm_models` | POST | `/api/webchat/v2/llm/list-models` | None | `ProductWorkflow` |
+| `webui.v2.settings.list_tools` | GET | `/api/webchat/v2/settings/tools` | None | `ProjectionOnly` |
+| `webui.v2.settings.set_tools_auto_approve` | POST | `/api/webchat/v2/settings/tools` | None | `ProductWorkflow` |
+| `webui.v2.settings.set_tool_permission` | POST | `/api/webchat/v2/settings/tools/{capability_id}` | None | `ProductWorkflow` |
 | `webui.v2.operator.get_setup` | GET | `/api/webchat/v2/operator/setup` | None | `ProjectionOnly` |
 | `webui.v2.operator.run_setup` | POST | `/api/webchat/v2/operator/setup` | None | `ProductWorkflow` |
 | `webui.v2.operator.list_config` | GET | `/api/webchat/v2/operator/config` | None | `ProjectionOnly` |
@@ -102,6 +105,12 @@ scope source. The host's bearer middleware is responsible for
 constructing the `WebUiAuthenticatedCaller`, carrying the matched
 token's `WebUiV2Capabilities`, and injecting both as axum
 `Extension`s before the handler runs.
+
+The `/api/webchat/v2/settings/tools` routes are authenticated caller routes,
+not operator routes. They expose the caller's tenant/user-scoped tool approval
+settings so regular multi-user sessions can read and update global
+auto-approve plus per-tool overrides without access to the operator command
+plane.
 
 The LLM configuration and operator setup/config/service-control routes are
 operator-wide. Host composition mounts them only when the authenticator says

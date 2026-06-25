@@ -41,6 +41,9 @@ export function ChatInput({
   const [dragOver, setDragOver] = React.useState(false);
   const textareaRef = React.useRef(null);
   const fileInputRef = React.useRef(null);
+  const sendBlockedRef = React.useRef(false);
+  const sendBlocked = disabled || sendDisabled || isSending;
+  sendBlockedRef.current = sendBlocked;
   // Mirror of `attachments` plus a serial promise, so overlapping addFiles()
   // calls validate against the latest staged set rather than a stale snapshot
   // (each stageFiles is async; without this two fast drops could both admit
@@ -202,10 +205,12 @@ export function ChatInput({
   const handleSend = React.useCallback(async () => {
     // The v2 send contract requires non-empty content, so attachments
     // ride along with text rather than sending on their own.
-    if (!text.trim() || disabled || sendDisabled || isSending) return;
+    if (!text.trim() || sendBlockedRef.current) return;
+    sendBlockedRef.current = true;
     setIsSending(true);
     try {
-      await onSend(text.trim(), { attachments });
+      const response = await onSend(text.trim(), { attachments });
+      if (response === null) return;
       setText("");
       setAttachments([]);
       attachmentsRef.current = [];
@@ -217,18 +222,10 @@ export function ChatInput({
     } catch {
       // The failed optimistic message renders retry details in the thread.
     } finally {
+      sendBlockedRef.current = disabled || sendDisabled;
       setIsSending(false);
     }
-  }, [
-    text,
-    attachments,
-    disabled,
-    sendDisabled,
-    isSending,
-    onSend,
-    draftKey,
-    cancelPendingDraft,
-  ]);
+  }, [text, attachments, onSend, draftKey, cancelPendingDraft, disabled, sendDisabled]);
 
   const handleChange = React.useCallback(
     (e) => {
@@ -257,6 +254,9 @@ export function ChatInput({
     (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
+        const domSendDisabled =
+          textareaRef.current?.dataset?.sendDisabled === "true";
+        if (domSendDisabled || sendBlockedRef.current) return;
         handleSend();
       }
     },
@@ -406,6 +406,7 @@ export function ChatInput({
           onChange=${handleChange}
           onKeyDown=${onKeyDown}
           onPaste=${onPaste}
+          data-send-disabled=${isSubmitDisabled ? "true" : "false"}
           placeholder=${placeholder}
           rows=${1}
           disabled=${disabled}

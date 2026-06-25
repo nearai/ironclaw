@@ -374,6 +374,158 @@ async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v
     await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
 
 
+async def test_reborn_v2_approval_gate_blocks_composer_send(
+    reborn_v2_server, reborn_v2_browser
+):
+    """An open approval gate shows the warning and blocks new sends locally."""
+    thread_id = "thread-approval-blocked"
+    send_requests: list[dict] = []
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    await page.add_init_script(
+        """
+        (() => {
+          const streams = [];
+          class FakeEventSource extends EventTarget {
+            constructor(url) {
+              super();
+              this.url = url;
+              this.readyState = 0;
+              streams.push(this);
+              setTimeout(() => {
+                this.readyState = 1;
+                if (typeof this.onopen === "function") this.onopen(new Event("open"));
+              }, 0);
+            }
+            close() {
+              this.readyState = 2;
+            }
+          }
+          window.EventSource = FakeEventSource;
+          window.__emitV2Sse = (type, frame, id = "cursor-1") => {
+            const stream = streams[streams.length - 1];
+            if (!stream) throw new Error("no EventSource stream is open");
+            const event = new MessageEvent(type, {
+              data: JSON.stringify({ type, ...frame }),
+              lastEventId: id,
+            });
+            stream.dispatchEvent(event);
+          };
+        })();
+        """
+    )
+
+    async def fulfill_json(route, body, status=200):
+        await route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route):
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route):
+        await fulfill_json(
+            route,
+            {
+                "threads": [
+                    {
+                        "thread_id": thread_id,
+                        "title": "Approval blocked regression",
+                        "created_at": "2026-06-25T00:00:00Z",
+                        "updated_at": "2026-06-25T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_timeline(route):
+        await fulfill_json(
+            route,
+            {
+                "messages": [
+                    {
+                        "message_id": "seed-user",
+                        "kind": "user",
+                        "content": "trigger approval",
+                        "sequence": 1,
+                        "status": "accepted",
+                        "created_at": "2026-06-25T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_send(route):
+        send_requests.append(json.loads(route.request.post_data or "{}"))
+        await fulfill_json(route, {"thread_id": thread_id}, status=202)
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads", handle_threads)
+    await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
+    await page.route(f"**/api/webchat/v2/threads/{thread_id}/messages", handle_send)
+
+    try:
+        await page.goto(f"{reborn_v2_server}/v2/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
+        await expect(page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+            "trigger approval", timeout=15000
+        )
+
+        await page.evaluate(
+            """
+            () => window.__emitV2Sse("gate", {
+              prompt: {
+                turn_run_id: "run-gated",
+                gate_ref: "gate-shell",
+                invocation_id: "invoke-shell",
+                headline: "Approval required",
+                body: "Allow shell to inspect the workspace?",
+                allow_always: false,
+                approval_context: {
+                  tool_name: "builtin.shell",
+                  reason: "Allow shell to inspect the workspace?",
+                  action: { label: "Run command" },
+                  destination: { label: "Local workspace" },
+                  details: [{ label: "Command", value: "pwd" }]
+                }
+              }
+            })
+            """
+        )
+
+        await expect(page.locator(SEL_V2["approval_card"]).first).to_be_visible(timeout=5000)
+        await expect(
+            page.get_by_text("Resolve the approval request before sending another message.")
+        ).to_be_visible(timeout=5000)
+
+        composer = page.locator(SEL_V2["chat_composer"])
+        await composer.fill("new message while approval is open")
+        await composer.press("Enter")
+        await expect(page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
+        assert send_requests == []
+    finally:
+        await context.close()
+
+
 async def test_reborn_v2_desktop_sidebar_can_collapse_and_persist(reborn_v2_page):
     """Desktop users can collapse the sidebar, and the preference survives reload."""
     sidebar = reborn_v2_page.locator(SEL_V2["sidebar"])
