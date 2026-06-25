@@ -97,8 +97,23 @@ test("buildScopedLogsPath encodes structured log filters", () => {
     }),
     "/logs?thread_id=thread+a&run_id=run-a&tool_call_id=tool%2Fa&source=slack",
   );
-  assert.equal(
-    buildScopedLogsPath({ threadId: "thread-a" }, { absolute: true }),
-    "/v2/logs?thread_id=thread-a",
-  );
+});
+
+test("buildScopedLogsPath returns a basename-relative path", () => {
+  // The result is handed to a react-router <Link to>/navigate(), which prepends
+  // the router basename ("/v2"). A "/v2"-prefixed return value would resolve to
+  // the doubled "/v2/v2/logs"; guard that it never happens for any input.
+  for (const args of [
+    {},
+    { threadId: "t" },
+    { threadId: "t", runId: "r" },
+    { toolName: "shell", source: "slack" },
+  ]) {
+    const path = buildScopedLogsPath(args);
+    assert.ok(
+      path.startsWith("/logs"),
+      `expected basename-relative /logs path, got ${path}`,
+    );
+    assert.ok(!path.startsWith("/v2"), `must not include basename, got ${path}`);
+  }
 });

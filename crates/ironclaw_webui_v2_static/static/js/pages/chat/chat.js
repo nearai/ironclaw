@@ -110,10 +110,7 @@ export function Chat({
     activeThreadId &&
     activeRun?.runId &&
     activeRun.threadId === activeThreadId
-      ? buildScopedLogsPath(
-          { threadId: activeThreadId, runId: activeRun.runId },
-          { absolute: true },
-        )
+      ? buildScopedLogsPath({ threadId: activeThreadId, runId: activeRun.runId })
       : null;
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [] } = {}) => {

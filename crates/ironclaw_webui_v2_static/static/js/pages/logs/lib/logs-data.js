@@ -14,9 +14,12 @@ export function normalizeLogEntry(entry) {
   };
 }
 
+// Builds a basename-RELATIVE logs path (e.g. "/logs?thread_id=..."). Callers
+// pass the result to a react-router `<Link to>` / `navigate()`, which prepends
+// the router basename ("/v2") on its own — so this must never include "/v2",
+// otherwise the resolved href doubles to "/v2/v2/logs".
 export function buildScopedLogsPath(
   { threadId, runId, turnId, toolCallId, toolName, source } = {},
-  { absolute = false } = {},
 ) {
   const params = new URLSearchParams();
   if (threadId) params.set("thread_id", threadId);
@@ -26,8 +29,7 @@ export function buildScopedLogsPath(
   if (toolName) params.set("tool_name", toolName);
   if (source) params.set("source", source);
   const suffix = params.toString();
-  const path = `/logs${suffix ? `?${suffix}` : ""}`;
-  return absolute ? `/v2${path}` : path;
+  return `/logs${suffix ? `?${suffix}` : ""}`;
 }
 
 export function normalizeOperatorLogsResponse(response) {

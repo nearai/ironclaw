@@ -2,6 +2,24 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+import { ROUTER_BASENAME } from "../../../app/router-href.js";
+import { buildScopedLogsPath } from "../../logs/lib/logs-data.js";
+
+// Faithful replica of react-router v7's basename join, so this test asserts the
+// href the browser actually produces rather than the raw `to` prop (asserting
+// the prop alone is what let the doubled-"/v2" bug ship). react-router prepends
+// the basename to the PATHNAME only via
+//   joinPaths([basename, pathname]) => paths.join("/").replace(/\/\/+/g, "/")
+// (node_modules/react-router/dist/development/chunk-PW3F6ATG.js:884), then
+// reattaches the query string. We split on "?" before joining to stay correct
+// even when a query value contains "//".
+function resolveBasenameHref(to, basename = ROUTER_BASENAME) {
+  const queryIndex = to.indexOf("?");
+  const pathname = queryIndex === -1 ? to : to.slice(0, queryIndex);
+  const suffix = queryIndex === -1 ? "" : to.slice(queryIndex);
+  const joined = [basename, pathname].join("/").replace(/\/\/+/g, "/");
+  return `${joined}${suffix}`;
+}
 
 function chatSourceForTest() {
   const source = readFileSync(new URL("../chat.js", import.meta.url), "utf8");
@@ -82,16 +100,9 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
       useState: (initial) => [initial, () => {}],
     },
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention", RUNNING: "running" },
-    buildScopedLogsPath: (
-      { threadId, runId } = {},
-      { absolute = false } = {},
-    ) => {
-      const params = [];
-      if (threadId) params.push(`thread_id=${encodeURIComponent(threadId)}`);
-      if (runId) params.push(`run_id=${encodeURIComponent(runId)}`);
-      const query = params.length > 0 ? `?${params.join("&")}` : "";
-      return `${absolute ? "/v2" : ""}/logs${query}`;
-    },
+    // Use the REAL path builder (not a re-implementation) so this test exercises
+    // the actual chat.js -> buildScopedLogsPath -> <Link to> pipeline end to end.
+    buildScopedLogsPath,
     buildRuntimeContext: () => ({}),
     clearThreadState: () => {},
     globalThis: {},
@@ -357,8 +368,15 @@ test("Chat links to scoped logs for the active thread run", () => {
 
   const logsLink = findComponent(tree, components.Link);
   assert.ok(logsLink, "active chat should render a scoped logs link");
+  const logsTo = componentProps(logsLink, components.Link).to;
+  // The `to` must be basename-relative; react-router prepends ROUTER_BASENAME.
+  assert.ok(
+    !logsTo.startsWith(ROUTER_BASENAME),
+    `<Link to> must be basename-relative, got ${logsTo}`,
+  );
+  // Resolve through the real basename and assert exactly one "/v2".
   assert.equal(
-    componentProps(logsLink, components.Link).to,
+    resolveBasenameHref(logsTo),
     "/v2/logs?thread_id=thread-1&run_id=run-1",
   );
   assert.ok(logsLink.values.includes("nav.logs"));
