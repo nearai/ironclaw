@@ -188,9 +188,20 @@ export function useHistory(threadId, options = {}) {
   const seedThreadMessages = React.useCallback((targetThreadId, updater) => {
     if (!targetThreadId) return;
     const key = cacheKey(targetThreadId);
+    const apply = (messages) =>
+      typeof updater === "function" ? updater(messages || []) : updater;
+
+    if (threadIdRef.current === targetThreadId) {
+      setState((s) => {
+        const messages = apply(s.messages || []);
+        putCache(key, { messages, nextCursor: s.nextCursor || null });
+        return { ...s, messages };
+      });
+      return;
+    }
+
     const entry = historyCache.get(key) || { messages: [], nextCursor: null };
-    const messages =
-      typeof updater === "function" ? updater(entry.messages || []) : updater;
+    const messages = apply(entry.messages || []);
     putCache(key, { messages, nextCursor: entry.nextCursor || null });
   }, []);
 

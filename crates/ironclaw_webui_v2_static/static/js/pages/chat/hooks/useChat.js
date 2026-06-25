@@ -17,6 +17,7 @@ import {
   addPending,
   recordAcceptedMessageRef,
   removePending,
+  timelineMessageIdFromAcceptedRef,
 } from "../lib/pending-messages.js";
 import {
   createToolActivityState,
@@ -427,12 +428,13 @@ export function useChat(threadId) {
             source: "local",
           });
         }
-        const timelineMessageId = recordAcceptedMessageRef(
-          pendingMessagesRef.current,
-          pendingKey,
-          optimisticId,
-          response?.accepted_message_ref,
-        );
+        const timelineMessageId =
+          recordAcceptedMessageRef(
+            pendingMessagesRef.current,
+            pendingKey,
+            optimisticId,
+            response?.accepted_message_ref,
+          ) || timelineMessageIdFromAcceptedRef(response?.accepted_message_ref);
         if (timelineMessageId) {
           const markAccepted = (prev) =>
             prev.map((m) =>

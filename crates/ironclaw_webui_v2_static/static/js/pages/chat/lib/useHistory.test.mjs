@@ -223,6 +223,42 @@ test("useHistory seedThreadMessages updates an accepted first message by timelin
   assert.equal(threadHistory.messages[0].timelineMessageId, "message-1");
 });
 
+test("useHistory seedThreadMessages updates the mounted target thread", async () => {
+  const setCalls = [];
+  const context = {
+    console,
+    fetchTimeline: async () => new Promise(() => {}),
+    globalThis: {},
+    messagesFromTimeline: () => [],
+    React: createReactStub({ setCalls }),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+
+  const threadHistory = context.globalThis.__testExports.useHistory("thread-visible", {});
+  threadHistory.seedThreadMessages("thread-visible", [
+    {
+      id: "pending-1",
+      role: "user",
+      content: "visible update",
+      timestamp: "2026-06-25T07:17:00.000Z",
+      isOptimistic: true,
+    },
+  ]);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(setCalls.at(-1).messages)), [
+    {
+      id: "pending-1",
+      role: "user",
+      content: "visible update",
+      timestamp: "2026-06-25T07:17:00.000Z",
+      isOptimistic: true,
+    },
+  ]);
+});
+
 test("useHistory full refresh preserves unnumbered live gate activity after timeline tools", async () => {
   const threadId = "thread-activity-order";
   const runId = "run-activity-order";

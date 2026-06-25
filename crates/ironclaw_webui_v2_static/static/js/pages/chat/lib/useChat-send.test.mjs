@@ -13,6 +13,7 @@ import {
   addPending,
   recordAcceptedMessageRef,
   removePending,
+  timelineMessageIdFromAcceptedRef,
 } from "./pending-messages.js";
 import {
   createToolActivityState,
@@ -46,6 +47,7 @@ function runUseChatSource(context) {
     createToolActivityState,
     failGateToolActivity,
     resetToolActivityState,
+    timelineMessageIdFromAcceptedRef,
   });
   vm.runInNewContext(useChatSourceForTest(), context);
 }
@@ -107,6 +109,7 @@ test("useChat.send: accepted ref reconciles pending message on timeline reload",
     },
     recordAcceptedMessageRef,
     removePending,
+    timelineMessageIdFromAcceptedRef,
     resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
     sendMessage: async () => ({
@@ -201,8 +204,9 @@ function createSendCaptureContext() {
       },
       invalidateQueries: () => {},
     },
-    recordAcceptedMessageRef,
+    recordAcceptedMessageRef: () => null,
     removePending,
+    timelineMessageIdFromAcceptedRef,
     resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
     sendMessage: async (body) => {
@@ -425,6 +429,7 @@ test("useChat.send: target-thread rejected_busy updates seeded cache", async () 
     },
     recordAcceptedMessageRef,
     removePending,
+    timelineMessageIdFromAcceptedRef,
     resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
     sendMessage: async () => ({
@@ -506,6 +511,7 @@ test("useChat.send: target-thread thrown errors update seeded cache", async () =
     },
     recordAcceptedMessageRef,
     removePending,
+    timelineMessageIdFromAcceptedRef,
     resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
     sendMessage: async () => {
