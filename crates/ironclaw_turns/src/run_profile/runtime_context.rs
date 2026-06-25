@@ -348,9 +348,9 @@ fn sanitize_prompt_string(s: &str) -> String {
 /// Render an external label (channel name, delivery target, adapter) for the
 /// model-visible slice. Sanitizes control/format characters, then verifies the
 /// result against the same model-safe-text policy the prompt bundle enforces.
-/// A label that would still trip that policy (e.g. a channel literally named
-/// `#secret-alerts`) degrades to `placeholder` so it can never fail prompt
-/// construction — the slice degrades instead of the whole bundle.
+/// A label that would still trip that policy (e.g. one exceeding the byte
+/// budget) degrades to `placeholder` so it can never fail prompt construction —
+/// the slice degrades instead of the whole bundle.
 fn model_safe_label(value: &str, placeholder: &str) -> String {
     let sanitized = sanitize_prompt_string(value);
     match super::prompt_text::validate_model_safe_text(sanitized.clone(), "runtime context label") {
@@ -841,10 +841,44 @@ mod tests {
     }
 
     #[test]
-    fn delivery_target_label_tripping_model_safe_policy_degrades_to_placeholder() {
-        // A legitimate label can contain a word the model-safe-text policy rejects
-        // (e.g. "authorization"). It must degrade to a placeholder rather than
+    fn delivery_target_label_tripping_structural_policy_degrades_to_placeholder() {
+        // A label that trips the (structural) model-safe policy — here one that
+        // exceeds the byte budget — must degrade to a placeholder rather than
         // surviving into the slice and later failing prompt-bundle construction.
+        let oversized = "x".repeat(8192);
+        let ctx = LoopRuntimeContext {
+            loop_started_at_utc: stamp(),
+            communication: Some(CommunicationRuntimeContext {
+                connected_channels: ConnectedChannelsState::Unknown,
+                delivery_target: DeliveryTargetState::Set(DeliveryTargetSummary {
+                    display_name: oversized.clone(),
+                    channel: "slack".to_string(),
+                }),
+                delivery_tools_visible: false,
+            }),
+            product_context: None,
+            user_profile: None,
+        };
+        let text = ctx.render_model_content();
+        assert!(
+            !text.contains(&oversized),
+            "label tripping the policy must not survive into the slice"
+        );
+        assert!(
+            text.contains("Outbound delivery target: a configured target (slack)"),
+            "label degrades to placeholder, safe channel preserved: {text}"
+        );
+        // The rendered slice must itself pass the model-safe-text policy.
+        assert!(
+            super::super::prompt_text::validate_model_safe_text(text.clone(), "test").is_ok(),
+            "degraded slice must be model-safe: {text}"
+        );
+    }
+
+    #[test]
+    fn delivery_target_label_with_benign_security_word_survives() {
+        // #5169: a benign security *word* (e.g. "authorization") no longer trips the
+        // model-safe policy, so a legitimate label containing it survives intact.
         let ctx = LoopRuntimeContext {
             loop_started_at_utc: stamp(),
             communication: Some(CommunicationRuntimeContext {
@@ -860,17 +894,12 @@ mod tests {
         };
         let text = ctx.render_model_content();
         assert!(
-            !text.contains("authorization"),
-            "denylisted label word must not survive into the slice: {text}"
+            text.contains("Outbound delivery target: authorization (slack)"),
+            "benign security word must survive into the slice after #5169: {text}"
         );
-        assert!(
-            text.contains("Outbound delivery target: a configured target (slack)"),
-            "label degrades to placeholder, safe channel preserved: {text}"
-        );
-        // The rendered slice must itself pass the model-safe-text policy.
         assert!(
             super::super::prompt_text::validate_model_safe_text(text.clone(), "test").is_ok(),
-            "degraded slice must be model-safe: {text}"
+            "slice must be model-safe: {text}"
         );
     }
 

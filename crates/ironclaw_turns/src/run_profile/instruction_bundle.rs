@@ -916,4 +916,34 @@ mod tests {
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
     }
+
+    /// #5169 regression at the real call site: a (non-trusted) context snippet whose
+    /// body merely mentions security vocabulary / host paths must no longer be
+    /// rejected during prompt assembly.
+    #[test]
+    fn push_snippet_message_allows_benign_security_vocabulary() {
+        let mut messages: Vec<LoopModelMessage> = Vec::new();
+        let mut materialized: Vec<InstructionBundleMaterializedMessage> = Vec::new();
+        let mut fingerprint = Sha256::new();
+        let content_ref = LoopMessageRef::new("msg:instruction.source.0.deadbeefdeadbeef").unwrap();
+        let snippet = LoopContextSnippet {
+            snippet_ref: "memory:thread-history".to_string(),
+            model_content: "Never construct Authorization headers manually; the system \
+                            injects the bearer token. Logs go to /tmp/app."
+                .to_string(),
+            safe_summary: "github usage note".to_string(),
+            metadata: None,
+        };
+
+        push_snippet_message(
+            &mut messages,
+            &mut materialized,
+            &mut fingerprint,
+            "instruction",
+            0,
+            content_ref,
+            &snippet,
+        )
+        .expect("benign security vocabulary in a snippet must be allowed after #5169");
+    }
 }

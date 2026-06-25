@@ -3,49 +3,6 @@ use super::{
 };
 
 const MODEL_SAFE_SUMMARY_MAX_BYTES: usize = 4096;
-const SENSITIVE_TERMS: &[SensitiveTerm] = &[
-    sensitive_term("access token", true, true),
-    sensitive_term("api key", true, true),
-    sensitive_term("api_key", true, true),
-    sensitive_term("api secret", true, true),
-    sensitive_term("authorization", true, true),
-    sensitive_term("bearer", true, true),
-    sensitive_term("client secret", true, true),
-    sensitive_term("invalid api key", true, false),
-    sensitive_term("password", true, true),
-    sensitive_term("passwd", true, true),
-    sensitive_term("secret key", true, true),
-    sensitive_term("secret-key", true, true),
-    sensitive_term("secret token", true, true),
-    sensitive_term("secret_token", true, true),
-    sensitive_term("shared secret", true, true),
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SensitiveTerm {
-    /// Some terms, such as "invalid api key", are phrase-only so ordinary
-    /// diagnostic prose after the phrase is not parsed as a credential value.
-    phrase: &'static str,
-    reject_as_phrase: bool,
-    reject_value_after_label: bool,
-}
-
-const fn sensitive_term(
-    phrase: &'static str,
-    reject_as_phrase: bool,
-    reject_value_after_label: bool,
-) -> SensitiveTerm {
-    SensitiveTerm {
-        phrase,
-        reject_as_phrase,
-        reject_value_after_label,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PromptTextPolicy {
-    reject_security_vocabulary: bool,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PromptTextSurface {
@@ -63,12 +20,6 @@ impl PromptTextSurface {
             }
         }
     }
-
-    const fn policy(self) -> PromptTextPolicy {
-        PromptTextPolicy {
-            reject_security_vocabulary: !matches!(self, Self::TrustedSkillInstruction),
-        }
-    }
 }
 
 pub(super) fn validate_model_safe_text(
@@ -78,6 +29,14 @@ pub(super) fn validate_model_safe_text(
     validate_prompt_text(value, label, PromptTextSurface::SafeSummary)
 }
 
+/// Validates host-assembled text bound for the model prompt.
+///
+/// This enforces only *structural* safety: non-empty, within the surface byte
+/// budget, and free of control characters. Content-based secret/vocabulary
+/// denylisting was removed — it false-positived constantly on ordinary skill
+/// and tool docs (which mention "authorization", "api key", host paths, etc.)
+/// and protected nothing that credential injection and egress credential
+/// blocking don't already cover. See #5169.
 pub(super) fn validate_prompt_text(
     value: String,
     label: &'static str,
@@ -98,193 +57,60 @@ pub(super) fn validate_prompt_text(
             format!("{label} contains control characters"),
         ));
     }
-    reject_sensitive_text(&value, label, surface)?;
     Ok(value)
 }
 
-fn reject_sensitive_text(
-    value: &str,
-    label: &'static str,
-    surface: PromptTextSurface,
-) -> Result<(), AgentLoopHostError> {
-    let lower = value.to_ascii_lowercase();
-    let policy = surface.policy();
-    for forbidden_path in [
-        "/users/",
-        "/home/",
-        "/private/",
-        "/tmp/", // safety: model-safety denylist literal, not a filesystem temp path.
-        "/var/",
-        "/etc/",
-    ] {
-        if lower.contains(forbidden_path) {
-            return non_model_safe(label);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #5169: host-assembled content (skill docs, instructions, memory) may freely
+    /// contain security vocabulary, host paths, and even credential-shaped values.
+    /// The prompt validator no longer denylists content — secrets are guarded by
+    /// credential injection + egress blocking, not here.
+    #[test]
+    fn content_is_not_denylisted_only_structurally_validated() {
+        for content in [
+            "Never construct Authorization headers manually; the system injects them.",
+            "Provide your api key in settings, then we use the bearer token for you.",
+            "Reset your password from the account page.",
+            "Build artifacts go to /tmp/build and config lives in /etc/myapp.",
+            "authorization: Bearer ey9aZ1c2d3e4f5g6h7",
+            "api key: AKIA1234567890ABCD",
+            "here is my key sk-abc123def456ghi789",
+        ] {
+            validate_prompt_text(
+                content.to_string(),
+                "context snippet content",
+                PromptTextSurface::GenericModelContent,
+            )
+            .unwrap_or_else(|error| {
+                panic!("content must pass structural validation; got {error:?}: {content:?}")
+            });
         }
     }
-    for term in SENSITIVE_TERMS {
-        if policy.reject_security_vocabulary
-            && term.reject_as_phrase
-            && contains_token_phrase(&lower, term.phrase)
-        {
-            return non_model_safe(label);
-        }
-        if term.reject_value_after_label
-            && contains_credential_value_after_label(&lower, term.phrase)
-        {
-            return non_model_safe(label);
-        }
+
+    /// Structural limits still apply: control characters are rejected.
+    #[test]
+    fn control_characters_are_still_rejected() {
+        let error = validate_prompt_text(
+            "bad\u{0007}content".to_string(),
+            "context snippet content",
+            PromptTextSurface::GenericModelContent,
+        )
+        .expect_err("control characters must be rejected");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
     }
-    if lower
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-        .any(|token| token.starts_with("sk-"))
-    {
-        return non_model_safe(label);
-    }
-    Ok(())
-}
 
-fn contains_credential_value_after_label(value: &str, label: &str) -> bool {
-    value.match_indices(label).any(|(start, matched)| {
-        let end = start + matched.len();
-        if !is_token_boundary(char_before(value, start)) || !is_token_boundary(char_at(value, end))
-        {
-            return false;
-        }
-        let suffix = &value[end..];
-        credential_value_candidate(suffix).is_some_and(is_secret_like_token)
-            || (label == "authorization"
-                && authorization_scheme_value_candidate(suffix).is_some_and(is_secret_like_token))
-    })
-}
-
-fn credential_value_candidate(suffix: &str) -> Option<&str> {
-    credential_value_candidates(suffix).next()
-}
-
-fn authorization_scheme_value_candidate(suffix: &str) -> Option<&str> {
-    let mut candidates = credential_value_candidates(suffix);
-    let scheme = candidates.next()?;
-    is_authorization_scheme(scheme)
-        .then(|| candidates.next())
-        .flatten()
-}
-
-fn credential_value_candidates(suffix: &str) -> impl Iterator<Item = &str> {
-    suffix
-        .trim_start_matches(|character: char| {
-            character.is_ascii_whitespace() || matches!(character, ':' | '=' | '\'' | '"' | '`')
-        })
-        .split(|character: char| character.is_ascii_whitespace() || matches!(character, ',' | ';'))
-        .map(|candidate| {
-            candidate.trim_matches(|character| {
-                matches!(
-                    character,
-                    '\'' | '"'
-                        | '`'
-                        | '.'
-                        | ','
-                        | ';'
-                        | ':'
-                        | '('
-                        | ')'
-                        | '['
-                        | ']'
-                        | '{'
-                        | '}'
-                        | '<'
-                        | '>'
-                )
-            })
-        })
-        .filter(|candidate| !candidate.is_empty())
-}
-
-fn is_authorization_scheme(candidate: &str) -> bool {
-    ["basic", "bearer", "digest", "negotiate", "oauth", "token"].contains(&candidate)
-}
-
-fn is_secret_like_token(candidate: &str) -> bool {
-    if candidate.starts_with('$') {
-        return false;
-    }
-    if [
-        "token",
-        "secret",
-        "password",
-        "key",
-        "value",
-        "example",
-        "placeholder",
-        "redacted",
-        "your-token",
-        "your_token",
-        "api-key",
-        "api_key",
-        "bearer",
-    ]
-    .contains(&candidate)
-        || candidate.contains("redacted")
-        || candidate.contains("placeholder")
-        || candidate.contains("example")
-        || candidate.contains("...")
-    {
-        return false;
-    }
-    if [
-        "ghp_",
-        "github_pat_",
-        "glpat-",
-        "xoxb-",
-        "xoxp-",
-        "akia",
-        "asiai",
-        "sk-",
-        "pk_",
-    ]
-    .iter()
-    .any(|prefix| candidate.starts_with(prefix))
-    {
-        return true;
-    }
-    let contains_alpha = candidate
-        .chars()
-        .any(|character| character.is_ascii_alphabetic());
-    let contains_digit = candidate
-        .chars()
-        .any(|character| character.is_ascii_digit());
-    if candidate.len() >= 6 && contains_alpha && contains_digit {
-        return true;
-    }
-    candidate.len() >= 16
-        && candidate.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
-        })
-}
-fn non_model_safe<T>(label: &'static str) -> Result<T, AgentLoopHostError> {
-    Err(AgentLoopHostError::new(
-        AgentLoopHostErrorKind::PolicyDenied,
-        format!("{label} contains non-model-safe content"),
-    ))
-}
-
-fn contains_token_phrase(value: &str, phrase: &str) -> bool {
-    value.match_indices(phrase).any(|(start, matched)| {
-        let end = start + matched.len();
-        is_token_boundary(char_before(value, start)) && is_token_boundary(char_at(value, end))
-    })
-}
-
-fn char_before(value: &str, byte_index: usize) -> Option<char> {
-    value.get(..byte_index)?.chars().next_back()
-}
-
-fn char_at(value: &str, byte_index: usize) -> Option<char> {
-    value.get(byte_index..)?.chars().next()
-}
-
-fn is_token_boundary(character: Option<char>) -> bool {
-    match character {
-        Some(character) => !character.is_ascii_alphanumeric() && character != '_',
-        None => true,
+    /// Structural limits still apply: empty content is rejected.
+    #[test]
+    fn empty_content_is_rejected() {
+        let error = validate_prompt_text(
+            String::new(),
+            "context snippet content",
+            PromptTextSurface::GenericModelContent,
+        )
+        .expect_err("empty content must be rejected");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
     }
 }

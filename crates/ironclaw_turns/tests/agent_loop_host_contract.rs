@@ -873,11 +873,12 @@ async fn instruction_bundle_builder_allows_terms_inside_larger_words() {
 }
 
 #[tokio::test]
-async fn instruction_bundle_builder_rejects_secret_credential_phrases() {
+async fn instruction_bundle_builder_allows_security_vocabulary_without_a_value() {
+    // #5169: a bare credential *label* with no secret value after it is allowed.
     let context = claimed_run_context().await;
     let builder = InstructionBundleBuilder::new(context);
 
-    let error = builder
+    builder
         .build(InstructionBundleRequest {
             context_bundle: LoopContextBundle {
                 identity_messages: Vec::new(),
@@ -896,9 +897,7 @@ async fn instruction_bundle_builder_rejects_secret_credential_phrases() {
             inline_messages: Vec::new(),
             runtime_context: None,
         })
-        .unwrap_err();
-
-    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+        .expect("a bare credential label without a value must be allowed after #5169");
 }
 
 #[tokio::test]
@@ -1135,65 +1134,63 @@ async fn instruction_bundle_allows_security_vocabulary_in_model_content() {
 }
 
 #[tokio::test]
-async fn instruction_bundle_rejects_trusted_skill_actual_secret_value() {
+async fn instruction_bundle_allows_trusted_skill_credential_value() {
+    // #5169: content denylisting removed — even a credential-shaped value passes the
+    // prompt validator now (secrets are guarded by injection + egress, not here).
     let context = claimed_run_context().await;
-    let error = InstructionBundleBuilder::new(context)
+    InstructionBundleBuilder::new(context)
         .build(skill_instruction_request(
             "Use Authorization: Bearer ghp_secretvalue123",
             "GitHub skill",
             "trusted",
         ))
-        .unwrap_err();
-
-    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+        .expect("credential-shaped content must pass the validator after #5169");
 }
 
 #[tokio::test]
-async fn instruction_bundle_rejects_trusted_skill_authorization_scheme_secret_value() {
+async fn instruction_bundle_allows_trusted_skill_authorization_scheme_value() {
+    // #5169: an Authorization scheme + value in skill content passes the validator now.
     let context = claimed_run_context().await;
-    let error = InstructionBundleBuilder::new(context)
+    InstructionBundleBuilder::new(context)
         .build(skill_instruction_request(
             "Use Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZTEyMzQ",
             "GitHub skill",
             "trusted",
         ))
-        .unwrap_err();
-
-    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+        .expect("credential-shaped content must pass the validator after #5169");
 }
 
 #[tokio::test]
-async fn instruction_bundle_rejects_trusted_skill_security_vocabulary_in_summary() {
+async fn instruction_bundle_allows_trusted_skill_security_vocabulary_in_summary() {
+    // #5169: security vocabulary in a skill summary with no secret value is allowed.
     let context = claimed_run_context().await;
-    let error = InstructionBundleBuilder::new(context)
+    InstructionBundleBuilder::new(context)
         .build(skill_instruction_request(
             "Use the GitHub API with an Authorization header.",
             "Use Authorization: Bearer",
             "trusted",
         ))
-        .unwrap_err();
-
-    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+        .expect("security vocabulary without a value must be allowed after #5169");
 }
 
 #[tokio::test]
-async fn instruction_bundle_rejects_untrusted_skill_security_vocabulary() {
+async fn instruction_bundle_allows_untrusted_skill_security_vocabulary() {
+    // #5169: an untrusted skill mentioning security vocabulary (no value) is allowed.
     let context = claimed_run_context().await;
-    let error = InstructionBundleBuilder::new(context)
+    InstructionBundleBuilder::new(context)
         .build(skill_instruction_request(
             "Use the GitHub API with an Authorization: Bearer header.",
             "GitHub skill",
             "installed",
         ))
-        .unwrap_err();
-
-    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+        .expect("security vocabulary without a value must be allowed after #5169");
 }
 
 #[tokio::test]
-async fn instruction_bundle_rejects_generic_model_content_security_vocabulary() {
+async fn instruction_bundle_allows_generic_model_content_security_vocabulary() {
+    // #5169: generic (non-skill) instruction content may mention security vocabulary.
     let context = claimed_run_context().await;
-    let error = InstructionBundleBuilder::new(context)
+    InstructionBundleBuilder::new(context)
         .build(InstructionBundleRequest {
             context_bundle: LoopContextBundle {
                 identity_messages: Vec::new(),
@@ -1212,23 +1209,20 @@ async fn instruction_bundle_rejects_generic_model_content_security_vocabulary() 
             inline_messages: Vec::new(),
             runtime_context: None,
         })
-        .unwrap_err();
-
-    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+        .expect("security vocabulary in generic content must be allowed after #5169");
 }
 
 #[tokio::test]
-async fn instruction_bundle_rejects_trusted_skill_host_path() {
+async fn instruction_bundle_allows_trusted_skill_host_path() {
+    // #5169: host paths in skill content are allowed — a path is not a leak.
     let context = claimed_run_context().await;
-    let error = InstructionBundleBuilder::new(context)
+    InstructionBundleBuilder::new(context)
         .build(skill_instruction_request(
             "Read /Users/alice/.config/token before calling GitHub",
             "GitHub skill",
             "trusted",
         ))
-        .unwrap_err();
-
-    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+        .expect("a host path in skill content must be allowed after #5169");
 }
 
 #[tokio::test]
@@ -1276,11 +1270,13 @@ async fn instruction_bundle_orders_snippets_by_model_content_when_summary_matche
 }
 
 #[tokio::test]
-async fn instruction_bundle_builder_rejects_unsafe_instruction_context() {
+async fn instruction_bundle_builder_allows_credential_shaped_content() {
+    // #5169: content denylisting removed — credential-shaped content in generic
+    // instruction context passes the validator (guarded by injection + egress).
     let context = claimed_run_context().await;
     let builder = InstructionBundleBuilder::new(context);
 
-    let error = builder
+    builder
         .build(InstructionBundleRequest {
             context_bundle: LoopContextBundle {
                 identity_messages: Vec::new(),
@@ -1288,8 +1284,8 @@ async fn instruction_bundle_builder_rejects_unsafe_instruction_context() {
                 compaction_message_index: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
-                    model_content: "leaks /Users/alice/.ssh/id_rsa path".to_string(),
-                    safe_summary: "leaks /Users/alice/.ssh/id_rsa path".to_string(),
+                    model_content: "api key: ghp_realsecretvalue123abc".to_string(),
+                    safe_summary: "release review instruction".to_string(),
                     metadata: None,
                 }],
                 memory_snippets: Vec::new(),
@@ -1299,9 +1295,7 @@ async fn instruction_bundle_builder_rejects_unsafe_instruction_context() {
             inline_messages: Vec::new(),
             runtime_context: None,
         })
-        .unwrap_err();
-
-    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+        .expect("credential-shaped content must pass the validator after #5169");
 }
 
 #[tokio::test]
