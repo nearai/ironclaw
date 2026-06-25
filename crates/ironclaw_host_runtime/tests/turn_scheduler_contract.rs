@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -127,6 +128,12 @@ struct DurableTurnStoreStub;
 struct HangingExecutor {
     started: AtomicUsize,
     notify_started: Notify,
+}
+
+struct CompleteThenParkExecutor {
+    completed: AtomicUsize,
+    notify_completed: Notify,
+    release: Arc<Notify>,
 }
 
 impl FailingExecutor {
@@ -540,11 +547,57 @@ impl HangingExecutor {
     }
 }
 
+impl CompleteThenParkExecutor {
+    fn new(release: Arc<Notify>) -> Self {
+        Self {
+            completed: AtomicUsize::new(0),
+            notify_completed: Notify::new(),
+            release,
+        }
+    }
+
+    async fn wait_for_completed(&self) {
+        timeout(Duration::from_secs(2), async {
+            while self.completed.load(Ordering::SeqCst) == 0 {
+                self.notify_completed.notified().await;
+            }
+        })
+        .await
+        .expect("executor did not complete run before parking");
+    }
+}
+
+#[async_trait]
+impl TurnRunExecutor for CompleteThenParkExecutor {
+    async fn execute_claimed_run(
+        &self,
+        claimed: ClaimedTurnRun,
+        transitions: Arc<dyn TurnRunTransitionPort>,
+    ) -> Result<(), TurnRunExecutorError> {
+        transitions
+            .complete_run(CompleteRunRequest {
+                run_id: claimed.state.run_id,
+                runner_id: claimed.runner_id,
+                lease_token: claimed.lease_token,
+            })
+            .await
+            .unwrap();
+        self.completed.fetch_add(1, Ordering::SeqCst);
+        self.notify_completed.notify_waiters();
+        self.release.notified().await;
+        Ok(())
+    }
+}
+
 struct HeartbeatTrackingTransitions {
     store: Arc<InMemoryTurnStateStore>,
     heartbeats: AtomicUsize,
     notify_heartbeat: Notify,
     heartbeat_delay: Mutex<Option<Duration>>,
+    terminal_heartbeat_invalid_transition: bool,
+    claimed_scopes: Mutex<HashMap<TurnRunId, TurnScope>>,
+    runner_failures: AtomicUsize,
+    notify_runner_failure: Notify,
 }
 
 struct ClaimRecordingTransitions {
@@ -559,11 +612,20 @@ impl HeartbeatTrackingTransitions {
             heartbeats: AtomicUsize::new(0),
             notify_heartbeat: Notify::new(),
             heartbeat_delay: Mutex::new(None),
+            terminal_heartbeat_invalid_transition: false,
+            claimed_scopes: Mutex::new(HashMap::new()),
+            runner_failures: AtomicUsize::new(0),
+            notify_runner_failure: Notify::new(),
         }
     }
 
     fn with_heartbeat_delay(self, delay: Duration) -> Self {
         *self.heartbeat_delay.lock().unwrap() = Some(delay);
+        self
+    }
+
+    fn with_terminal_heartbeat_invalid_transition(mut self) -> Self {
+        self.terminal_heartbeat_invalid_transition = true;
         self
     }
 
@@ -575,6 +637,20 @@ impl HeartbeatTrackingTransitions {
         })
         .await
         .expect("scheduler did not heartbeat claimed run");
+    }
+
+    async fn wait_for_runner_failure_attempt(&self, duration: Duration) -> bool {
+        timeout(duration, async {
+            while self.runner_failures.load(Ordering::SeqCst) == 0 {
+                self.notify_runner_failure.notified().await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    fn runner_failure_attempts(&self) -> usize {
+        self.runner_failures.load(Ordering::SeqCst)
     }
 }
 
@@ -597,7 +673,14 @@ impl TurnRunTransitionPort for HeartbeatTrackingTransitions {
         &self,
         request: ClaimRunRequest,
     ) -> Result<Option<ClaimedTurnRun>, TurnError> {
-        self.store.claim_next_run(request).await
+        let claimed = self.store.claim_next_run(request).await?;
+        if let Some(claimed) = &claimed {
+            self.claimed_scopes
+                .lock()
+                .unwrap()
+                .insert(claimed.state.run_id, claimed.state.scope.clone());
+        }
+        Ok(claimed)
     }
 
     async fn heartbeat(
@@ -607,6 +690,29 @@ impl TurnRunTransitionPort for HeartbeatTrackingTransitions {
         let delay = *self.heartbeat_delay.lock().unwrap();
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
+        }
+        if self.terminal_heartbeat_invalid_transition {
+            let scope = self
+                .claimed_scopes
+                .lock()
+                .unwrap()
+                .get(&request.run_id)
+                .cloned();
+            if let Some(scope) = scope {
+                let state = self
+                    .store
+                    .get_run_state(GetRunStateRequest {
+                        scope,
+                        run_id: request.run_id,
+                    })
+                    .await?;
+                if state.status.is_terminal() {
+                    return Err(TurnError::InvalidTransition {
+                        from: state.status,
+                        to: TurnStatus::Running,
+                    });
+                }
+            }
         }
         let result = self.store.heartbeat(request).await;
         if result.is_ok() {
@@ -653,6 +759,8 @@ impl TurnRunTransitionPort for HeartbeatTrackingTransitions {
         &self,
         request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
+        self.runner_failures.fetch_add(1, Ordering::SeqCst);
+        self.notify_runner_failure.notify_waiters();
         self.store.record_runner_failure(request).await
     }
 
@@ -1475,6 +1583,49 @@ async fn scheduler_heartbeats_long_running_executor_until_completion() {
     gate.notify_waiters();
     wait_for_status(&*store, scope, run_id, TurnStatus::Completed).await;
     handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn scheduler_does_not_fail_completed_run_for_stale_terminal_heartbeat() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            runner_lease_ttl: ChronoDuration::milliseconds(500),
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let transitions = Arc::new(
+        HeartbeatTrackingTransitions::new(Arc::clone(&store))
+            .with_terminal_heartbeat_invalid_transition(),
+    );
+    let transition_port: Arc<dyn TurnRunTransitionPort> = transitions.clone();
+    let release_executor = Arc::new(Notify::new());
+    let executor = Arc::new(CompleteThenParkExecutor::new(Arc::clone(&release_executor)));
+    let scheduler = TurnRunScheduler::new(
+        transition_port,
+        executor.clone(),
+        fast_config()
+            .with_poll_interval(Duration::from_secs(60))
+            .with_runner_heartbeat_interval(Duration::from_millis(5)),
+    );
+    let handle = scheduler.start();
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
+
+    let request = submit_turn_request("thread-stale-terminal-heartbeat", "idem-stale-heartbeat");
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+
+    executor.wait_for_completed().await;
+    assert!(
+        !transitions
+            .wait_for_runner_failure_attempt(Duration::from_millis(75))
+            .await,
+        "stale heartbeat after Completed must not be recorded as scheduler_heartbeat_failed"
+    );
+    release_executor.notify_waiters();
+    wait_for_status(&*store, scope, run_id, TurnStatus::Completed).await;
+    handle.shutdown().await;
+    assert_eq!(transitions.runner_failure_attempts(), 0);
 }
 
 #[tokio::test]
