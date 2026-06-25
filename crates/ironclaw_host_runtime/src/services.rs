@@ -397,7 +397,8 @@ where
             Arc::clone(&self.process_port),
             self.secret_store.clone(),
         )
-        .with_tool_call_http_egress(tool_call_http_egress(&self.tool_call_http_egress));
+        .with_tool_call_http_egress(tool_call_http_egress(&self.tool_call_http_egress))
+        .with_runtime_secret_material_stager(Some(self.runtime_secret_material_stager()));
         if let Some(audit_sink) = &self.audit_sink {
             invocation_services_resolver =
                 invocation_services_resolver.with_audit_sink(Arc::clone(audit_sink));

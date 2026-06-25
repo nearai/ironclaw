@@ -423,9 +423,10 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID => {
                 (trace_commons::dispatch_profile_set(&request).await?, None)
             }
-            TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID => {
-                (trace_commons::dispatch_account_login_link(&request).await?, None)
-            }
+            TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID => (
+                trace_commons::dispatch_account_login_link(&request).await?,
+                None,
+            ),
             capability_id => {
                 let Some(metadata) = coding_capability_metadata(capability_id) else {
                     return Err(FirstPartyCapabilityError::new(

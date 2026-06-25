@@ -669,8 +669,8 @@ async fn account_login_link_requires_consent() {
 /// in this codebase only inspects the header fields (alg, kid) and the
 /// presence of a non-empty access_token, so this is sufficient for tests.
 fn test_jwt_eddsa(kid: &str) -> String {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let header = serde_json::json!({"alg": "EdDSA", "kid": kid});
     format!(
         "{}.{}.signature",

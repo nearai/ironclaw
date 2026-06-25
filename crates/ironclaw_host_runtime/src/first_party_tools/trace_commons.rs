@@ -17,8 +17,9 @@ use futures_util::FutureExt as _;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     CapabilityId, EffectKind, NetworkMethod, NetworkPolicy, PermissionMode, ResourceEstimate,
-    ResourceProfile, ResourceScope, RuntimeDispatchErrorKind, RuntimeHttpEgress,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeKind,
+    ResourceProfile, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
+    RuntimeCredentialTarget, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle,
 };
 use ironclaw_reborn_traces::contribution::{
     COMMUNITY_PROFILE_BIO_MAX_BYTES, COMMUNITY_PROFILE_HANDLE_MAX_CHARS,
@@ -26,18 +27,26 @@ use ironclaw_reborn_traces::contribution::{
     ContributionHttpRequest, ContributionHttpResponse, ContributionHttpSink,
     ProfileAttributionToken, StandingTraceContributionPolicy, TraceCreditReport,
     TraceUploadAuthMode, mint_account_login_link_via_sink,
-    mint_profile_attribution_token_for_scope_via_sink,
-    read_trace_policy_for_scope, set_community_profile_for_scope_via_sink,
-    trace_contribution_dir_for_scope, trace_scope_key,
+    mint_profile_attribution_token_for_scope_via_sink, read_trace_policy_for_scope,
+    set_community_profile_for_scope_via_sink, trace_contribution_dir_for_scope, trace_scope_key,
 };
 use ironclaw_reborn_traces::onboarding::{
     OnboardConsents, OnboardError, OnboardHttpResponse, OnboardOutcome, OnboardingHttpSink,
     protocol::OnboardErrorCode,
 };
+use ironclaw_secrets::SecretMaterial;
 use serde_json::{Value, json};
 
 use crate::FirstPartyCapabilityError;
 use crate::FirstPartyCapabilityRequest;
+use crate::RuntimeSecretMaterialStager;
+
+/// Secret handle under which the host-minted Trace Commons bearer token is
+/// staged for one-shot credential injection into the outbound Authorization
+/// header. The token is delivered through the staged credential-injection path
+/// (stager + `apply_credential_injections`), never as a raw request header, so
+/// the egress sensitive-header guard still applies to model-supplied headers.
+const TRACE_COMMONS_BEARER_HANDLE: &str = "trace_commons_bearer";
 
 /// Maximum onboarding response body accepted (64 KiB), mirroring the cap the
 /// onboarding module enforces for its default sink.
@@ -368,6 +377,10 @@ struct HostEgressContributionSink {
     egress: Arc<dyn RuntimeHttpEgress>,
     scope: ResourceScope,
     capability_id: CapabilityId,
+    /// One-shot stager used to deliver the host-minted Trace Commons bearer
+    /// through the egress credential-injection path. `None` only on
+    /// non-network-egress invocations, where a bearer would never be present.
+    secret_stager: Option<RuntimeSecretMaterialStager>,
 }
 
 #[async_trait]
@@ -381,14 +394,47 @@ impl ContributionHttpSink for HostEgressContributionSink {
             ContributionHttpMethod::Put => NetworkMethod::Put,
             ContributionHttpMethod::Delete => NetworkMethod::Delete,
         };
-        let mut headers = vec![
+        let headers = vec![
             ("accept".to_string(), "application/json".to_string()),
             ("content-type".to_string(), "application/json".to_string()),
         ];
-        // Only attach the bearer header when a token is present; the raw token
-        // never appears in any error path below.
+        // The host-minted bearer is a credential: it MUST flow through the
+        // staged credential-injection path, never as a raw Authorization
+        // header. Writing it into `headers` here would (a) be denied by the
+        // egress sensitive-header guard and (b) bypass the leased-secret
+        // redaction the injection path provides. Stage the token one-shot,
+        // then declare a `StagedObligation` injection targeting the
+        // Authorization header; `apply_credential_injections` consumes it
+        // after the guard runs.
+        let mut credential_injections = Vec::new();
         if let Some(token) = req.bearer_token {
-            headers.push(("authorization".to_string(), format!("Bearer {token}")));
+            let Some(secret_stager) = self.secret_stager.as_ref() else {
+                return Err(ContributionHttpError::new(
+                    "trace bearer staging is unavailable",
+                ));
+            };
+            let handle = SecretHandle::new(TRACE_COMMONS_BEARER_HANDLE)
+                .map_err(|_| ContributionHttpError::new("invalid trace bearer handle"))?;
+            secret_stager
+                .stage_secret_material_once(
+                    &self.scope,
+                    &self.capability_id,
+                    &handle,
+                    SecretMaterial::from(token),
+                )
+                .await
+                .map_err(|_| ContributionHttpError::new("trace bearer could not be staged"))?;
+            credential_injections.push(RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: self.capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            });
         }
         let request = RuntimeHttpEgressRequest {
             runtime: RuntimeKind::FirstParty,
@@ -402,7 +448,7 @@ impl ContributionHttpSink for HostEgressContributionSink {
             // the grant obligation for this scope/capability; this request field
             // is the ignored fallback on that path (matches http::dispatch).
             network_policy: NetworkPolicy::default(),
-            credential_injections: Vec::new(),
+            credential_injections,
             response_body_limit: Some(req.response_body_limit),
             // The response is parsed inline, never persisted to a mount.
             save_body_to: None,
@@ -729,6 +775,7 @@ pub(super) async fn dispatch_profile_token(
         egress,
         scope: request.scope.clone(),
         capability_id: request.capability_id.clone(),
+        secret_stager: request.services.runtime_secret_material_stager.clone(),
     };
     match mint_profile_attribution_token_for_scope_via_sink(Some(scope.as_str()), &sink).await {
         Ok(token) => match persist_profile_token(&scope, &token) {
@@ -911,6 +958,7 @@ pub(super) async fn dispatch_profile_set(
         egress,
         scope: request.scope.clone(),
         capability_id: request.capability_id.clone(),
+        secret_stager: request.services.runtime_secret_material_stager.clone(),
     };
     match set_community_profile_for_scope_via_sink(
         Some(scope.as_str()),
@@ -1040,6 +1088,7 @@ pub(super) async fn dispatch_account_login_link(
         egress,
         scope: request.scope.clone(),
         capability_id: request.capability_id.clone(),
+        secret_stager: request.services.runtime_secret_material_stager.clone(),
     };
     match mint_account_login_link_via_sink(
         request.scope.tenant_id.as_str(),
@@ -1147,6 +1196,7 @@ mod tests {
                 filesystem: Arc::new(LocalFilesystem::new()),
                 runtime_http_egress: None,
                 tool_call_http_egress: None,
+                runtime_secret_material_stager: None,
                 process: Arc::new(NoopProcessPort),
                 secret_store: None,
                 audit_sink: None,
