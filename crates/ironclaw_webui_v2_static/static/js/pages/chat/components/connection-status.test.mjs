@@ -26,5 +26,7 @@ test("ConnectionStatus suppresses transient initial connecting state", () => {
   const ConnectionStatus = loadConnectionStatusForTest();
 
   assert.equal(ConnectionStatus({ status: "connecting" }), null);
-  assert.notEqual(ConnectionStatus({ status: "reconnecting" }), null);
+  const reconnecting = ConnectionStatus({ status: "reconnecting" });
+  assert.notEqual(reconnecting, null);
+  assert.equal(typeof reconnecting, "object");
 });
