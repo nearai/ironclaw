@@ -156,9 +156,9 @@ const TOOL_CONFIG_PREFIX: &str = "tool.";
 pub struct RebornOperatorToolInfo {
     pub capability_id: CapabilityId,
     pub provider: ExtensionId,
-    pub description: String,
+    pub description: Arc<str>,
     pub default_permission: PermissionMode,
-    pub effects: Vec<EffectKind>,
+    pub effects: Arc<[EffectKind]>,
 }
 
 pub trait RebornOperatorToolCatalog: Send + Sync {
@@ -994,21 +994,21 @@ async fn tool_config_entry(
     scope: &ResourceScope,
     tool: &RebornOperatorToolInfo,
 ) -> Result<RebornOperatorConfigEntry, RebornServicesError> {
-    let context = operator_tool_permission_context(config, scope).await?;
-    tool_config_entry_with_context(config, &context, tool).await
+    let context =
+        operator_tool_permission_context(config, scope, std::slice::from_ref(tool)).await?;
+    tool_config_entry_with_context(&context, tool).await
 }
 
 async fn tool_config_entry_with_context(
-    config: &RebornOperatorApprovalConfig,
     context: &OperatorToolPermissionContext,
     tool: &RebornOperatorToolInfo,
 ) -> Result<RebornOperatorConfigEntry, RebornServicesError> {
-    let (state, source) = effective_tool_permission(config, context, tool).await?;
+    let (state, source) = effective_tool_permission(context, tool).await?;
     let default_state = default_tool_permission_state(tool.default_permission);
     let locked = tool_permission_locked(tool);
     let value = serde_json::json!({
         "name": tool.capability_id.as_str(),
-        "description": tool.description,
+        "description": tool.description.as_ref(),
         "state": tool_permission_state_wire(state),
         "default_state": tool_permission_state_wire(if locked && hard_floor_tool(tool) {
             ToolPermissionState::AskEachTime
@@ -1028,13 +1028,15 @@ async fn tool_config_entry_with_context(
 }
 
 struct OperatorToolPermissionContext {
-    operator_scope: ResourceScope,
     global_auto_approve: bool,
+    overrides: HashMap<CapabilityId, ToolPermissionOverride>,
+    persistent_active: HashSet<CapabilityId>,
 }
 
 async fn operator_tool_permission_context(
     config: &RebornOperatorApprovalConfig,
     scope: &ResourceScope,
+    tools: &[RebornOperatorToolInfo],
 ) -> Result<OperatorToolPermissionContext, RebornServicesError> {
     let operator_scope = operator_tool_permission_scope(scope);
     let global_auto_approve = config
@@ -1042,14 +1044,56 @@ async fn operator_tool_permission_context(
         .is_enabled(&operator_scope)
         .await
         .map_err(operator_config_store_error)?;
+    let override_records = try_join_all(
+        tools
+            .iter()
+            .filter(|tool| !tool_permission_locked(tool))
+            .map(|tool| {
+                let key =
+                    ToolPermissionOverrideKey::new(&operator_scope, tool.capability_id.clone());
+                async move {
+                    config
+                        .overrides
+                        .get(&key)
+                        .await
+                        .map(|record| (tool.capability_id.clone(), record))
+                        .map_err(operator_config_store_error)
+                }
+            }),
+    )
+    .await?;
+    let overrides = override_records
+        .into_iter()
+        .filter_map(|(capability_id, record)| record.map(|record| (capability_id, record.state)))
+        .collect::<HashMap<_, _>>();
+    let persistent_records = try_join_all(
+        tools
+            .iter()
+            .filter(|tool| {
+                !tool_permission_locked(tool) && !overrides.contains_key(&tool.capability_id)
+            })
+            .map(|tool| {
+                let operator_scope = operator_scope.clone();
+                async move {
+                    persistent_user_policy_active(config, &operator_scope, tool)
+                        .await
+                        .map(|active| (tool.capability_id.clone(), active))
+                }
+            }),
+    )
+    .await?;
+    let persistent_active = persistent_records
+        .into_iter()
+        .filter_map(|(capability_id, active)| active.then_some(capability_id))
+        .collect();
     Ok(OperatorToolPermissionContext {
-        operator_scope,
         global_auto_approve,
+        overrides,
+        persistent_active,
     })
 }
 
 async fn effective_tool_permission(
-    config: &RebornOperatorApprovalConfig,
     context: &OperatorToolPermissionContext,
     tool: &RebornOperatorToolInfo,
 ) -> Result<(ToolPermissionState, &'static str), RebornServicesError> {
@@ -1060,18 +1104,11 @@ async fn effective_tool_permission(
         return Ok((ToolPermissionState::AskEachTime, "locked"));
     }
 
-    let override_key =
-        ToolPermissionOverrideKey::new(&context.operator_scope, tool.capability_id.clone());
-    if let Some(record) = config
-        .overrides
-        .get(&override_key)
-        .await
-        .map_err(operator_config_store_error)?
-    {
-        return Ok((record.state.as_state(), "override"));
+    if let Some(state) = context.overrides.get(&tool.capability_id) {
+        return Ok((state.as_state(), "override"));
     }
 
-    if persistent_user_policy_active(config, &context.operator_scope, tool).await? {
+    if context.persistent_active.contains(&tool.capability_id) {
         return Ok((ToolPermissionState::AlwaysAllow, "override"));
     }
 
@@ -1229,7 +1266,7 @@ async fn apply_tool_permission_state(
                     grantee: Principal::Extension(tool.provider.clone()),
                     approved_by: Principal::User(actor.user_id.clone()),
                     constraints: GrantConstraints {
-                        allowed_effects: tool.effects.clone(),
+                        allowed_effects: tool.effects.as_ref().to_vec(),
                         mounts: Default::default(),
                         network: Default::default(),
                         secrets: Vec::new(),
@@ -2691,13 +2728,13 @@ impl RebornServicesApi for RebornServices {
         };
         let scope = caller_resource_scope(&caller);
         let mut entries = vec![auto_approve_config_entry(config, &scope).await?];
-        let tool_context = operator_tool_permission_context(config, &scope).await?;
         let tools = config.tool_catalog.list_operator_tools();
+        let tool_context = operator_tool_permission_context(config, &scope, &tools).await?;
         entries.extend(
             try_join_all(
                 tools
                     .iter()
-                    .map(|tool| tool_config_entry_with_context(config, &tool_context, tool)),
+                    .map(|tool| tool_config_entry_with_context(&tool_context, tool)),
             )
             .await?,
         );

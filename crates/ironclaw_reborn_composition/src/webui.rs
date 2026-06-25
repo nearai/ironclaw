@@ -5,7 +5,7 @@ use chrono::Utc;
 
 use async_trait::async_trait;
 use ironclaw_extensions::ExtensionRegistry;
-use ironclaw_host_api::{InvocationId, ResourceScope};
+use ironclaw_host_api::{EffectKind, InvocationId, ResourceScope};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ConnectableChannelsProductFacade, OperatorStatusService, RebornOperatorStatusCheck,
@@ -37,27 +37,28 @@ static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
 
 #[derive(Clone)]
 struct ActiveRegistryOperatorToolCatalog {
-    registry: Arc<ExtensionRegistry>,
+    tools: Vec<RebornOperatorToolInfo>,
 }
 
 impl ActiveRegistryOperatorToolCatalog {
     fn new(registry: Arc<ExtensionRegistry>) -> Self {
-        Self { registry }
+        let tools = registry
+            .capabilities()
+            .map(|descriptor| RebornOperatorToolInfo {
+                capability_id: descriptor.id.clone(),
+                provider: descriptor.provider.clone(),
+                description: Arc::<str>::from(descriptor.description.as_str()),
+                default_permission: descriptor.default_permission,
+                effects: Arc::<[EffectKind]>::from(descriptor.effects.clone()),
+            })
+            .collect();
+        Self { tools }
     }
 }
 
 impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
     fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo> {
-        self.registry
-            .capabilities()
-            .map(|descriptor| RebornOperatorToolInfo {
-                capability_id: descriptor.id.clone(),
-                provider: descriptor.provider.clone(),
-                description: descriptor.description.clone(),
-                default_permission: descriptor.default_permission,
-                effects: descriptor.effects.clone(),
-            })
-            .collect()
+        self.tools.clone()
     }
 }
 
