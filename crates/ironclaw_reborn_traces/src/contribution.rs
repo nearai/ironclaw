@@ -6020,11 +6020,15 @@ fn account_login_links_url(policy: &StandingTraceContributionPolicy) -> anyhow::
         .ok_or_else(|| {
             anyhow::anyhow!("Trace Commons upload token issuer URL is not configured")
         })?;
-    let stripped = issuer_url
+    let base = issuer_url
         .trim_end_matches('/')
         .strip_suffix("/v1/trace-upload-claim")
-        .unwrap_or_else(|| issuer_url.trim_end_matches('/'));
-    Ok(format!("{stripped}/v1/account/login-links"))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "upload_token_issuer_url does not end in /v1/trace-upload-claim: {issuer_url}"
+            )
+        })?;
+    Ok(format!("{base}/v1/account/login-links"))
 }
 
 /// Mint a one-time account login link for the given `(tenant_id, user_id)`.
@@ -15081,5 +15085,34 @@ mod tests {
             err.to_string().contains("not enrolled"),
             "error must mention enrollment: {err}"
         );
+    }
+
+    #[test]
+    fn account_login_links_url_errors_on_wrong_suffix() {
+        // URL that does NOT end in /v1/trace-upload-claim — must error, not silently misroute.
+        let policy = StandingTraceContributionPolicy {
+            upload_token_issuer_url: Some(
+                "https://api.example.com/v2/trace-upload-claim".to_string(),
+            ),
+            ..Default::default()
+        };
+        let err = account_login_links_url(&policy).expect_err("wrong suffix must be an error");
+        assert!(
+            err.to_string()
+                .contains("does not end in /v1/trace-upload-claim"),
+            "error must name the expected suffix: {err}"
+        );
+    }
+
+    #[test]
+    fn account_login_links_url_correct_on_valid_issuer() {
+        let policy = StandingTraceContributionPolicy {
+            upload_token_issuer_url: Some(
+                "https://api.example.com/v1/trace-upload-claim".to_string(),
+            ),
+            ..Default::default()
+        };
+        let url = account_login_links_url(&policy).expect("valid issuer must succeed");
+        assert_eq!(url, "https://api.example.com/v1/account/login-links");
     }
 }
