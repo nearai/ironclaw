@@ -1,0 +1,98 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+    paths-ignore:
+      - ".railway-trigger"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: railway-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/ironclaw
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,prefix=
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=Ironclaw container image
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
+
+      - name: Make GHCR package public
+        shell: bash
+        run: |
+          OWNER_TYPE="$(gh api "/repos/${GITHUB_REPOSITORY}" --jq '.owner.type')"
+          OWNER_LOGIN="$(gh api "/repos/${GITHUB_REPOSITORY}" --jq '.owner.login')"
+
+          if [ "$OWNER_TYPE" = "User" ]; then
+            gh api -X PUT \
+              -H "Accept: application/vnd.github+json" \
+              "/user/packages/container/ironclaw/visibility" \
+              -f visibility=public
+          else
+            gh api -X PUT \
+              -H "Accept: application/vnd.github+json" \
+              "/orgs/${OWNER_LOGIN}/packages/container/ironclaw/visibility" \
+              -f visibility=public
+          fi
+
+      - name: Trigger Railway deploy from main
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          printf '%s\n' "${GITHUB_SHA}" > .railway-trigger
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .railway-trigger
+          git commit -m "chore: trigger railway deploy for ${GITHUB_SHA}" || exit 0
+          git push
