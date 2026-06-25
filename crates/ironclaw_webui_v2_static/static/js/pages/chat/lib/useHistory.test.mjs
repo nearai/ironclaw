@@ -142,12 +142,13 @@ test("useHistory full refresh preserves SSE-only activity messages", async () =>
 });
 
 test("useHistory can seed a newly-created thread before navigation", async () => {
+  const setCalls = [];
   const context = {
     console,
-    fetchTimeline: async () => new Promise(() => {}),
+    fetchTimeline: async () => ({ messages: [], next_cursor: null }),
     globalThis: {},
     messagesFromTimeline: () => [],
-    React: createReactStub(),
+    React: createReactStub({ setCalls }),
     authScope: () => "test-user",
   };
 
@@ -161,16 +162,29 @@ test("useHistory can seed a newly-created thread before navigation", async () =>
       role: "user",
       content: "tell me a joke",
       timestamp: "2026-06-25T07:17:00.000Z",
+      isOptimistic: true,
     },
   ]);
 
   const threadHistory = context.globalThis.__testExports.useHistory("thread-new", {});
+  await flushMicrotasks();
+
   assert.deepEqual(JSON.parse(JSON.stringify(threadHistory.messages)), [
     {
       id: "pending-1",
       role: "user",
       content: "tell me a joke",
       timestamp: "2026-06-25T07:17:00.000Z",
+      isOptimistic: true,
+    },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(setCalls.at(-1).messages)), [
+    {
+      id: "pending-1",
+      role: "user",
+      content: "tell me a joke",
+      timestamp: "2026-06-25T07:17:00.000Z",
+      isOptimistic: true,
     },
   ]);
 });

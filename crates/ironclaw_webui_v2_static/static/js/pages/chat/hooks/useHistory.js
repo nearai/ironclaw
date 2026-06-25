@@ -185,6 +185,15 @@ export function useHistory(threadId, options = {}) {
     if (threadId) loadHistory();
   }, [threadId, loadHistory]);
 
+  const seedThreadMessages = React.useCallback((targetThreadId, updater) => {
+    if (!targetThreadId) return;
+    const key = cacheKey(targetThreadId);
+    const entry = historyCache.get(key) || { messages: [], nextCursor: null };
+    const messages =
+      typeof updater === "function" ? updater(entry.messages || []) : updater;
+    putCache(key, { messages, nextCursor: entry.nextCursor || null });
+  }, []);
+
   return {
     messages: state.messages,
     hasMore: Boolean(state.nextCursor),
@@ -192,14 +201,7 @@ export function useHistory(threadId, options = {}) {
     isLoading: state.isLoading,
     loadError: state.loadError,
     loadHistory,
-    seedThreadMessages: (targetThreadId, updater) => {
-      if (!targetThreadId) return;
-      const key = cacheKey(targetThreadId);
-      const entry = historyCache.get(key) || { messages: [], nextCursor: null };
-      const messages =
-        typeof updater === "function" ? updater(entry.messages || []) : updater;
-      putCache(key, { messages, nextCursor: entry.nextCursor || null });
-    },
+    seedThreadMessages,
     setMessages: (updater) =>
       setState((s) => {
         const messages =
@@ -230,9 +232,19 @@ function mergeFullRefresh(fresh, current, options = {}) {
       return false;
     }
     if (isRuntimeActivityMessage(message)) return true;
+    if (isSeededOptimisticMessage(message)) return true;
     return preserveClientOnly && message.id.startsWith("err-");
   });
   return preserved.length > 0 ? [...hydratedFresh, ...preserved] : hydratedFresh;
+}
+
+function isSeededOptimisticMessage(message) {
+  return (
+    message?.isOptimistic === true &&
+    typeof message.id === "string" &&
+    message.id.startsWith("pending-") &&
+    (message.role === "user" || message.role === "assistant")
+  );
 }
 
 function hydrateFreshMessages(fresh, current, options = {}) {

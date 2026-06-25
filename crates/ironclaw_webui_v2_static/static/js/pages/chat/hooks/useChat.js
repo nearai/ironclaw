@@ -386,7 +386,15 @@ export function useChat(threadId) {
       addPending(pendingMessagesRef.current, pendingKey, pendingRecord);
 
       const optimisticId = pendingRecord.id;
-      setMessages((prev) => [...prev, pendingRenderMessage]);
+      const shouldRenderInCurrentThread = !threadId || sendThreadId === threadId;
+      const updateCurrentThread = (updater) => {
+        if (shouldRenderInCurrentThread) setMessages(updater);
+      };
+      const updateSeededTarget = (updater) => {
+        if (sendThreadId !== threadId) seedThreadMessages(sendThreadId, updater);
+      };
+
+      updateCurrentThread((prev) => [...prev, pendingRenderMessage]);
       if (sendThreadId !== threadId) {
         seedThreadMessages(sendThreadId, (prev) => [...prev, pendingRenderMessage]);
       }
@@ -421,42 +429,40 @@ export function useChat(threadId) {
           response?.accepted_message_ref,
         );
         if (timelineMessageId) {
-          setMessages((prev) =>
+          const markAccepted = (prev) =>
             prev.map((m) =>
               m.id === optimisticId ? { ...m, timelineMessageId } : m,
-            ),
-          );
-          if (sendThreadId !== threadId) {
-            seedThreadMessages(sendThreadId, (prev) =>
-              prev.map((m) =>
-                m.id === optimisticId ? { ...m, timelineMessageId } : m,
-              ),
             );
-          }
+          updateCurrentThread(markAccepted);
+          updateSeededTarget(markAccepted);
         }
         // When the thread was busy, the message is rejected (not deferred).
         // Mark the optimistic user message as failed and display the
         // server's notice (if present) as a system message so the user
         // knows to resend.
         if (response?.outcome === "rejected_busy") {
-          setMessages((prev) =>
+          const markRejected = (prev) =>
             prev.map((m) =>
               m.id === optimisticId
                 ? { ...m, isOptimistic: false, status: "error" }
                 : m,
-            ),
-          );
+            );
+          updateCurrentThread(markRejected);
+          updateSeededTarget(markRejected);
           if (response?.notice) {
-            setMessages((prev) => [
+            const noticeMessage = {
+              id: `system-rejected-${pendingSeqRef.current++}`,
+              role: "system",
+              content: response.notice,
+              timestamp: new Date().toISOString(),
+              isOptimistic: false,
+            };
+            const appendNotice = (prev) => [
               ...prev,
-              {
-                id: `system-rejected-${pendingSeqRef.current++}`,
-                role: "system",
-                content: response.notice,
-                timestamp: new Date().toISOString(),
-                isOptimistic: false,
-              },
-            ]);
+              noticeMessage,
+            ];
+            updateCurrentThread(appendNotice);
+            updateSeededTarget(appendNotice);
           }
           setIsProcessing(false);
         }
@@ -465,7 +471,7 @@ export function useChat(threadId) {
         if (err.status === 429) {
           setCooldownUntil(Date.now() + retryAfterMs(err));
         }
-        setMessages((prev) =>
+        const markFailed = (prev) =>
           prev.map((m) =>
             m.id === optimisticId
               ? {
@@ -475,8 +481,9 @@ export function useChat(threadId) {
                   error: err.message,
                 }
               : m,
-          ),
-        );
+          );
+        updateCurrentThread(markFailed);
+        updateSeededTarget(markFailed);
         setIsProcessing(false);
         throw err;
       } finally {
