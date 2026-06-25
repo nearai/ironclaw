@@ -1,4 +1,5 @@
 import { React, html } from "../../lib/html.js";
+import { useT } from "../../lib/i18n.js";
 import {
   THREAD_STATE,
   clearThreadState,
@@ -20,6 +21,7 @@ import { TypingIndicator } from "./components/typing-indicator.js";
 import { useChat } from "./hooks/useChat.js";
 import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
+import { buildScopedLogsPath } from "../logs/lib/logs-data.js";
 
 /* Grace window before an active thread's sidebar state is cleared to idle.
  * Long enough for SSE to rehydrate a gate/run after a thread switch (so a
@@ -43,6 +45,7 @@ export function Chat({
   composerResetKey = "",
   gatewayStatus,
 }) {
+  const t = useT();
   const {
     messages,
     isProcessing,
@@ -95,6 +98,15 @@ export function Chat({
       isProcessing &&
       !pendingGate
   );
+  const activeRunLogsPath =
+    activeThreadId &&
+    activeRun?.runId &&
+    activeRun.threadId === activeThreadId
+      ? buildScopedLogsPath(
+          { threadId: activeThreadId, runId: activeRun.runId },
+          { absolute: true },
+        )
+      : null;
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [] } = {}) => {
       const response = await send(content, {
@@ -238,7 +250,19 @@ export function Chat({
                 onRecover=${recoverHistory}
               />
             `}
-            ${isProcessing && !pendingGate && html`<${TypingIndicator} />`}
+            ${isProcessing && !pendingGate && html`
+              <div className="flex flex-wrap items-center gap-3">
+                <${TypingIndicator} />
+                ${activeRunLogsPath && html`
+                  <a
+                    href=${activeRunLogsPath}
+                    className="text-xs font-medium text-signal hover:underline"
+                  >
+                    ${t("nav.logs")}
+                  </a>
+                `}
+              </div>
+            `}
             ${channelConnectAction &&
             html`
               <${ChannelConnectCard}
