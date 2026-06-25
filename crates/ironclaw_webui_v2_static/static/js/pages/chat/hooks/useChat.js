@@ -503,7 +503,9 @@ export function useChat(threadId) {
           if (response?.notice) {
             const noticeKey = busyNoticeKey(sendThreadId, gateBeforeSend);
             if (noticeKey && shouldRenderInCurrentThread) {
-              setBusyGateNotice({ gateKey: noticeKey, content: response.notice });
+              if (pendingGateRef.current === gateBeforeSend) {
+                setBusyGateNotice({ gateKey: noticeKey, content: response.notice });
+              }
             } else {
               const noticeMessage = {
                 id: `system-rejected-${pendingSeqRef.current++}`,

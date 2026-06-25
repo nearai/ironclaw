@@ -836,6 +836,108 @@ test("useChat.send: rejected busy does not clear a gate received while in flight
     "busy rejection must leave a concurrently replaced gate untouched",
   );
   assert.equal(stateSlots.get(5).value, replacementGate);
+  assert.deepEqual(
+    stateUpdates.filter((call) => call.index === 6).map((call) => call.value),
+    [],
+    "busy rejection must not attach a notice to a stale gate snapshot",
+  );
+});
+
+test("useChat.send: rejected busy does not strand notice after gate resolves in flight", async () => {
+  const threadId = "thread-1";
+  const pendingGate = {
+    runId: "run-gated",
+    gateRef: "gate-shell",
+    kind: "gate",
+    toolName: "builtin.shell",
+  };
+  const stateUpdates = [];
+  const stateSlots = new Map();
+  let renderedMessages = [];
+  let setPendingGateFromEvents = null;
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [4, false],
+        [5, pendingGate],
+      ]),
+      setCalls: stateUpdates,
+      stateSlots,
+    }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      setPendingGateFromEvents(null);
+      return {
+        outcome: "rejected_busy",
+        accepted_message_ref: "msg:busy-message-1",
+        notice: "Thread is busy, please try again.",
+        thread_id: threadId,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: ({ setPendingGate }) => {
+      setPendingGateFromEvents = setPendingGate;
+      return () => {};
+    },
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.send("busy after gate resolved");
+
+  assert.equal(stateSlots.get(5).value, null);
+  assert.equal(renderedMessages.length, 1);
+  assert.equal(renderedMessages[0].status, "error");
+  assert.deepEqual(
+    stateUpdates.filter((call) => call.index === 6).map((call) => call.value),
+    [],
+    "a resolved gate should not get a lingering busy notice",
+  );
 });
 
 test("useChat.send: rejected busy keeps a gate received after callback creation", async () => {
