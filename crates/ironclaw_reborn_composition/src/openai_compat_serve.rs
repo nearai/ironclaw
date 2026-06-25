@@ -787,26 +787,56 @@ fn response_status_from_projection_events(
 }
 
 /// Detect whether the run parked on a user-resolvable gate. A `GatePrompt`
-/// payload carries the parked run's `turn_run_id`, so it correlates directly to
-/// the run we are waiting on. A later terminal `RunStatus` for the same run
-/// (failed/cancelled) wins — the terminal check in the wait loop runs first — so
-/// this only fires while the run is genuinely parked.
+/// (approval/resource) and an `AuthPrompt` (auth) each carry the parked run's
+/// `turn_run_id`, so they correlate directly to the run we are waiting on — the
+/// three `Blocked*` user-resolvable states map onto these two payloads (see
+/// `TurnStatus::wait_class`'s `ParkedAwaitingUser`).
+///
+/// A gate that is later resolved is treated as superseded: if a non-parked
+/// `RunStatus` for the same run appears anywhere in the drained window, the run
+/// has resumed and any earlier prompt is stale, so this returns `false` (the
+/// caller keeps polling rather than reporting a spurious `Incomplete`). The
+/// terminal-status check in the wait loop runs before this, so a failed/
+/// cancelled run is already returned by then.
 fn run_parked_on_gate_in_events(
     events: &[ProductOutboundEnvelope],
     submitted_run_id: &str,
 ) -> bool {
-    events.iter().any(|event| match event.payload() {
+    let prompted = events.iter().any(|event| match event.payload() {
         ProductOutboundPayload::GatePrompt(prompt) => {
             prompt.turn_run_id.to_string() == submitted_run_id
         }
-        ProductOutboundPayload::ProjectionSnapshot { .. }
-        | ProductOutboundPayload::ProjectionUpdate { .. }
-        | ProductOutboundPayload::FinalReply(_)
-        | ProductOutboundPayload::Progress(_)
-        | ProductOutboundPayload::CapabilityActivity(_)
-        | ProductOutboundPayload::CapabilityDisplayPreview(_)
-        | ProductOutboundPayload::AuthPrompt(_)
-        | ProductOutboundPayload::KeepAlive => false,
+        ProductOutboundPayload::AuthPrompt(prompt) => {
+            prompt.turn_run_id.to_string() == submitted_run_id
+        }
+        _ => false,
+    });
+    if !prompted {
+        return false;
+    }
+    // A non-parked RunStatus (the only kinds the wire emits are running/
+    // completed/failed/cancelled/killed) anywhere in this drain window means
+    // the run has resumed past the gate, so the earlier prompt is stale.
+    let superseded = events.iter().any(|event| match event.payload() {
+        ProductOutboundPayload::ProjectionSnapshot { state }
+        | ProductOutboundPayload::ProjectionUpdate { state } => {
+            run_status_present_in_state(state, submitted_run_id)
+        }
+        _ => false,
+    });
+    !superseded
+}
+
+/// True when the run emitted any `RunStatus` projection item in this state. The
+/// wire only emits non-parked statuses (running/completed/failed/cancelled/
+/// killed), so the presence of one means the run is no longer parked.
+fn run_status_present_in_state(state: &ProductProjectionState, submitted_run_id: &str) -> bool {
+    state.items.iter().any(|item| {
+        matches!(
+            item,
+            ProductProjectionItem::RunStatus { run_id, .. }
+                if run_id.to_string() == submitted_run_id
+        )
     })
 }
 

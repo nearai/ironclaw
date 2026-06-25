@@ -494,6 +494,11 @@ impl TurnError {
 mod wait_class_tests {
     use super::{RunWaitClass, TurnStatus};
 
+    // MUST contain every TurnStatus variant. `wait_class()` is exhaustive (no
+    // `_` arm) so a new variant fails to compile there — but this array is
+    // hand-maintained, so update it at the same time or the new variant goes
+    // untested. The fixed length `[…; 11]` will also fail to compile if the
+    // element count drifts.
     const ALL_STATUSES: [TurnStatus; 11] = [
         TurnStatus::Queued,
         TurnStatus::Running,

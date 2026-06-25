@@ -227,6 +227,36 @@ async fn openai_responses_wait_returns_incomplete_when_run_parks_on_gate() {
     );
 }
 
+/// Auth gates (`TurnStatus::BlockedAuth`) surface as `AuthPrompt`, not
+/// `GatePrompt`. Without treating `AuthPrompt` as a parked signal the wait loop
+/// would spin forever on an auth-parked run — the same hang as the gate case.
+#[tokio::test]
+async fn openai_responses_wait_returns_incomplete_when_run_parks_on_auth_gate() {
+    let fixture = ResponseReaderFixture::new("wait-auth-gate").await;
+    let run_id = TurnRunId::new();
+    let mut reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![auth_prompt_envelope(
+            run_id,
+        )])),
+    );
+    reader.poll_interval = Duration::from_millis(1);
+
+    let projection = tokio::time::timeout(
+        Duration::from_secs(2),
+        reader.wait_for_response_completion(fixture.wait_request(run_id)),
+    )
+    .await
+    .expect("wait must return promptly when the run parks on an auth gate, not spin forever")
+    .expect("auth-parked run must surface as a projection, not an error");
+
+    assert_eq!(
+        projection.response.status,
+        OpenAiResponseStatus::Incomplete,
+        "a run parked on an auth gate must surface as Incomplete; the wait must not hang"
+    );
+}
+
 struct ResponseReaderFixture {
     threads: Arc<InMemorySessionThreadService>,
     actor_scope: OpenAiCompatActorScope,
@@ -446,6 +476,34 @@ fn gate_prompt_envelope(run_id: TurnRunId) -> ProductOutboundEnvelope {
             body: "The agent wants to run a shell command.".to_string(),
             allow_always: false,
             approval_context: None,
+        }),
+    )
+}
+
+/// An auth-prompt envelope for `run_id`: the projection signal a run emits when
+/// it parks on an auth gate (`TurnStatus::BlockedAuth`). Auth gates surface as
+/// `AuthPrompt`, not `GatePrompt`, so the wait loop must treat both as parked.
+fn auth_prompt_envelope(run_id: TurnRunId) -> ProductOutboundEnvelope {
+    ProductOutboundEnvelope::new(
+        ProductAdapterId::new(OPENAI_COMPAT_ADAPTER_ID).expect("adapter id"),
+        AdapterInstallationId::new(OPENAI_COMPAT_INSTALLATION_ID).expect("installation id"),
+        ProductOutboundTarget::new(
+            ReplyTargetBindingRef::new("reply:test").expect("reply target"),
+            ExternalConversationRef::new(None, "conversation:test", None, None)
+                .expect("conversation ref"),
+            None,
+        ),
+        ProjectionCursor::new(format!("auth-cursor:{}", run_id.as_uuid())).expect("cursor"),
+        ProductOutboundPayload::AuthPrompt(ironclaw_product_adapters::AuthPromptView {
+            turn_run_id: run_id,
+            auth_request_ref: "auth:test".to_string(),
+            headline: "Connect your account".to_string(),
+            body: "The agent needs access to your Gmail.".to_string(),
+            challenge_kind: None,
+            provider: None,
+            account_label: None,
+            authorization_url: None,
+            expires_at: None,
         }),
     )
 }

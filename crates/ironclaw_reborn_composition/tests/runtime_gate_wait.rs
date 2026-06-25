@@ -32,7 +32,8 @@ use ironclaw_loop_support::{
     HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
-    PollSettings, RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
+    PollSettings, RebornBuildInput, RebornRuntimeError, RebornRuntimeIdentity, RebornRuntimeInput,
+    build_reborn_runtime,
 };
 use ironclaw_turns::{
     TurnStatus,
@@ -205,6 +206,101 @@ async fn gate_parked_run_is_surfaced_not_killed_on_send() {
         "a run parked on a capability approval gate must surface as BlockedApproval; \
          got {:?} — if this is RunTimeout the old wait_for_terminal bug is active",
         reply.status,
+    );
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+/// A model gateway that never returns — it awaits a oneshot receiver that is
+/// never signaled, so the run stays `Running` indefinitely.
+#[derive(Debug)]
+struct HangingModelGateway {
+    rx: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+impl HangingModelGateway {
+    fn new() -> Self {
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        // Drop the sender immediately is NOT what we want (that resolves the
+        // receiver with an error). Leak the sender so the receiver never
+        // resolves, keeping the model call pending for the test's lifetime.
+        std::mem::forget(_tx);
+        Self {
+            rx: tokio::sync::Mutex::new(Some(rx)),
+        }
+    }
+}
+
+#[async_trait]
+impl HostManagedModelGateway for HangingModelGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        if let Some(rx) = self.rx.lock().await.take() {
+            let _ = rx.await;
+        }
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::Unavailable,
+            "hanging gateway never resolves",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        _request: HostManagedModelRequest,
+        _capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        if let Some(rx) = self.rx.lock().await.take() {
+            let _ = rx.await;
+        }
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::Unavailable,
+            "hanging gateway never resolves",
+        ))
+    }
+}
+
+/// Guards the safety timeout: a genuinely `Running` run that never reaches a
+/// terminal or parked state MUST still be cancelled at `poll_settings.max_total`
+/// and surface `Err(RebornRuntimeError::RunTimeout)`. This pins that the
+/// `wait_class()` fix did NOT disable the timeout for non-parked runs — a
+/// regression where `Running` was misclassified as parked would make this hang.
+#[tokio::test]
+async fn genuinely_running_run_still_times_out_and_cancels() {
+    let root = tempfile::tempdir().unwrap();
+    let gateway: Arc<dyn HostManagedModelGateway> = Arc::new(HangingModelGateway::new());
+
+    let input = RebornRuntimeInput::from_services(
+        RebornBuildInput::local_dev("timeout-owner", root.path().to_path_buf())
+            .with_runtime_policy(local_dev_runtime_policy()),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "timeout-tenant".to_string(),
+        agent_id: "timeout-agent".to_string(),
+        source_binding_id: "timeout-source".to_string(),
+        reply_target_binding_id: "timeout-reply".to_string(),
+    })
+    // Short max_total so the timeout fires quickly; the run never advances.
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: Duration::from_millis(300),
+    })
+    .with_model_gateway_override(gateway);
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let conversation = runtime.new_conversation().await.expect("conversation");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        runtime.send_user_message(&conversation, "hang forever"),
+    )
+    .await
+    .expect("send must return after the poll budget, not hang past the outer guard");
+
+    assert!(
+        matches!(result, Err(RebornRuntimeError::RunTimeout { .. })),
+        "a genuinely running run must still time out and cancel; got {result:?}"
     );
 
     runtime.shutdown().await.expect("shutdown");

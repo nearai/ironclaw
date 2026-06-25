@@ -17,7 +17,9 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest,
     RunWaitClass, TurnActor, TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnEventKind,
-    TurnLifecycleEvent, TurnRunRecord, TurnRunState, TurnSpawnTreeStateStore, TurnStatus,
+    TurnLifecycleEvent, TurnRunId, TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore,
+    TurnStatus, TurnTimestamp,
+    events::EventCursor,
     run_profile::{AgentLoopHostError, LoopRunContext, sanitize_model_visible_text},
 };
 
@@ -681,7 +683,7 @@ where
 
     async fn observe_committed_event(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
         if is_subagent_parked_on_user_gate(event.status) {
-            let event = blocked_child_as_failed_event(&event);
+            let event = blocked_child_as_failed_event_from_event(&event);
             return self.handle_terminal(&event).await;
         }
         self.handle_terminal(&event).await
@@ -731,47 +733,84 @@ fn is_subagent_observable_status(status: TurnStatus) -> bool {
 /// The sanitized failure summary surfaced to the parent when a child parks on a
 /// gate it cannot resolve. Phrased so the parent model treats it as a child
 /// outcome, not an instruction.
+///
+/// Only ever called for a [`RunWaitClass::ParkedAwaitingUser`] status (guarded
+/// by [`is_subagent_parked_on_user_gate`]). The match is **fully exhaustive on
+/// purpose** — no `_` arm — so a new `TurnStatus` variant forces a compile error
+/// here rather than silently emitting the wrong label. The non-parked arms are
+/// unreachable at runtime; they exist only to keep the compiler enforcing
+/// coverage in lockstep with [`TurnStatus::wait_class`].
 fn blocked_child_failure_reason(status: TurnStatus) -> String {
     let gate = match status {
         TurnStatus::BlockedApproval => "approval",
         TurnStatus::BlockedAuth => "auth",
         TurnStatus::BlockedResource => "resource",
-        _ => "unknown",
+        TurnStatus::Queued
+        | TurnStatus::Running
+        | TurnStatus::CancelRequested
+        | TurnStatus::BlockedDependentRun
+        | TurnStatus::Cancelled
+        | TurnStatus::Completed
+        | TurnStatus::Failed
+        | TurnStatus::RecoveryRequired => unreachable!(
+            "blocked_child_failure_reason called with non-ParkedAwaitingUser status {status:?}"
+        ),
     };
     format!("subagent stopped: parked on a {gate} gate it cannot resolve from the subagent context")
 }
 
 /// Synthesize a `Failed` terminal lifecycle event for a child that parked on a
-/// user gate, reusing the blocked event's run/scope/owner/cursor. Routing this
+/// user gate, reusing the parked run's identity (run/scope/owner/cursor) but
+/// rewriting the status to `Failed` with an explanatory reason. Routing this
 /// through the existing `handle_terminal` machinery preserves the terminal-only
 /// invariant of the gate store (`record_child_terminal`) while still unblocking
 /// the parent.
-fn blocked_child_as_failed_event(event: &TurnLifecycleEvent) -> TurnLifecycleEvent {
+///
+/// `parked_status` is the ORIGINAL `Blocked*` status (used only to build the
+/// failure reason); the emitted event always carries `Failed`.
+fn blocked_child_as_failed_event(
+    cursor: EventCursor,
+    scope: TurnScope,
+    occurred_at: Option<TurnTimestamp>,
+    owner_user_id: Option<UserId>,
+    run_id: TurnRunId,
+    parked_status: TurnStatus,
+) -> TurnLifecycleEvent {
     TurnLifecycleEvent {
-        cursor: event.cursor,
-        scope: event.scope.clone(),
-        occurred_at: event.occurred_at,
-        owner_user_id: event.owner_user_id.clone(),
-        run_id: event.run_id,
+        cursor,
+        scope,
+        occurred_at,
+        owner_user_id,
+        run_id,
         status: TurnStatus::Failed,
         kind: TurnEventKind::Failed,
         blocked_gate: None,
-        sanitized_reason: Some(blocked_child_failure_reason(event.status)),
+        sanitized_reason: Some(blocked_child_failure_reason(parked_status)),
     }
 }
 
+fn blocked_child_as_failed_event_from_event(event: &TurnLifecycleEvent) -> TurnLifecycleEvent {
+    blocked_child_as_failed_event(
+        event.cursor,
+        event.scope.clone(),
+        event.occurred_at,
+        event.owner_user_id.clone(),
+        event.run_id,
+        event.status,
+    )
+}
+
 fn blocked_child_as_failed_event_from_state(state: &TurnRunState) -> TurnLifecycleEvent {
-    TurnLifecycleEvent {
-        cursor: state.event_cursor,
-        scope: state.scope.clone(),
-        occurred_at: None,
-        owner_user_id: state.actor.clone().map(|actor| actor.user_id),
-        run_id: state.run_id,
-        status: TurnStatus::Failed,
-        kind: TurnEventKind::Failed,
-        blocked_gate: None,
-        sanitized_reason: Some(blocked_child_failure_reason(state.status)),
-    }
+    blocked_child_as_failed_event(
+        state.event_cursor,
+        state.scope.clone(),
+        // TurnRunState is an aggregate snapshot, not a raw event, so it carries
+        // no wall-clock timestamp — matches terminal_event_from_state.
+        None,
+        state.actor.clone().map(|actor| actor.user_id),
+        state.run_id,
+        state.status,
+    )
 }
 
 fn background_completion_payload(
@@ -2886,6 +2925,75 @@ mod tests {
             goal_store.get(&child_scope, child_run_id),
             Err(SubagentGoalStoreError::NotFound { .. })
         ));
+    }
+
+    #[test]
+    fn parked_on_user_gate_classification_covers_all_three_user_gates() {
+        // The observer must react to every ParkedAwaitingUser status, and must
+        // NOT treat BlockedDependentRun (a child waiting on its own grandchild)
+        // as a user gate — that one resolves on its own.
+        assert!(is_subagent_parked_on_user_gate(TurnStatus::BlockedApproval));
+        assert!(is_subagent_parked_on_user_gate(TurnStatus::BlockedAuth));
+        assert!(is_subagent_parked_on_user_gate(TurnStatus::BlockedResource));
+        assert!(!is_subagent_parked_on_user_gate(
+            TurnStatus::BlockedDependentRun
+        ));
+        assert!(!is_subagent_parked_on_user_gate(TurnStatus::Running));
+        assert!(!is_subagent_parked_on_user_gate(TurnStatus::Completed));
+    }
+
+    #[test]
+    fn blocked_child_failure_reason_labels_each_user_gate() {
+        // Synthesized child-failure reasons must name the correct gate type so
+        // the parent model sees an accurate explanation. Guards against the
+        // exhaustiveness regression where a new variant silently labels wrong.
+        assert!(
+            blocked_child_failure_reason(TurnStatus::BlockedApproval).contains("approval"),
+            "approval gate reason must name 'approval'"
+        );
+        assert!(
+            blocked_child_failure_reason(TurnStatus::BlockedAuth).contains("auth"),
+            "auth gate reason must name 'auth'"
+        );
+        assert!(
+            blocked_child_failure_reason(TurnStatus::BlockedResource).contains("resource"),
+            "resource gate reason must name 'resource'"
+        );
+    }
+
+    #[test]
+    fn blocked_child_as_failed_event_rewrites_status_and_preserves_identity() {
+        // The synthetic event must carry Failed (so record_child_terminal's
+        // terminal-only guard accepts it) while preserving run/scope/owner/
+        // cursor from the parked event for correct parent correlation.
+        let scope = TurnScope::new(
+            TenantId::new("t").unwrap(),
+            Some(AgentId::new("a").unwrap()),
+            None,
+            ThreadId::new("child").unwrap(),
+        );
+        let owner = UserId::new("owner").unwrap();
+        let run_id = TurnRunId::new();
+        let parked = TurnLifecycleEvent {
+            cursor: EventCursor(42),
+            scope: scope.clone(),
+            occurred_at: None,
+            owner_user_id: Some(owner.clone()),
+            run_id,
+            status: TurnStatus::BlockedAuth,
+            kind: TurnEventKind::Blocked,
+            blocked_gate: None,
+            sanitized_reason: None,
+        };
+
+        let synthetic = blocked_child_as_failed_event_from_event(&parked);
+
+        assert_eq!(synthetic.status, TurnStatus::Failed);
+        assert_eq!(synthetic.kind, TurnEventKind::Failed);
+        assert_eq!(synthetic.run_id, run_id);
+        assert_eq!(synthetic.cursor, EventCursor(42));
+        assert_eq!(synthetic.owner_user_id, Some(owner));
+        assert!(synthetic.sanitized_reason.unwrap().contains("auth"));
     }
 
     #[tokio::test]

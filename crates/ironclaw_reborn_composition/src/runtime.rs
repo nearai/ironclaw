@@ -1911,26 +1911,42 @@ impl RebornRuntime {
                 RunWaitClass::Running | RunWaitClass::ParkedAwaitingRun => {}
             }
             if start.elapsed() > self.poll_settings.max_total {
-                self.cancel_run(
-                    scope,
-                    run_id,
-                    SanitizedCancelReason::Timeout,
-                    "timeout-cancel",
-                )
-                .await?;
+                // Surface the primary `RunTimeout`; a failure of the secondary
+                // cancel is logged with a sanitized id only and must not mask
+                // it (see error-handling.md). `debug!` not `warn!` per the
+                // logging rule — this runtime is REPL/TUI-reachable.
+                if self
+                    .cancel_run(
+                        scope,
+                        run_id,
+                        SanitizedCancelReason::Timeout,
+                        "timeout-cancel",
+                    )
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!(run_id = %run_id, "failed to cancel run after timeout");
+                }
                 return Err(RebornRuntimeError::RunTimeout {
                     timeout: self.poll_settings.max_total,
                 });
             }
             tokio::select! {
                 _ = cancellation.cancelled() => {
-                    self.cancel_run(
-                        scope,
-                        run_id,
-                        SanitizedCancelReason::UserRequested,
-                        "caller-cancel",
-                    )
-                    .await?;
+                    // Same primary/secondary split: surface `OperationCancelled`
+                    // even if the secondary cancel call fails.
+                    if self
+                        .cancel_run(
+                            scope,
+                            run_id,
+                            SanitizedCancelReason::UserRequested,
+                            "caller-cancel",
+                        )
+                        .await
+                        .is_err()
+                    {
+                        tracing::debug!(run_id = %run_id, "failed to cancel run after caller cancellation");
+                    }
                     return Err(RebornRuntimeError::OperationCancelled);
                 }
                 _ = tokio::time::sleep(self.poll_settings.interval) => {}
