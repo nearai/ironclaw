@@ -31,6 +31,81 @@ const BUNDLED_INSTALL_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const BUNDLED_INSTALL_LOCK_RETRY: Duration = Duration::from_millis(25);
 const SYSTEM_SKILLS_ROOT: &str = "/projects/system/skills";
 
+/// First-party skills certified to ship with IronClaw.
+///
+/// Every skill bundled under the repo `skills/` directory and installed into
+/// the trusted system skill root (`/system/skills`) must appear in this list.
+/// Bundled skills are installed into that root, which
+/// [`FilesystemSkillBundleRoot::system`] marks `SkillTrust::Trusted`; trusted
+/// skill instructions are exempt from the prompt-text security-vocabulary gate
+/// (see #5169), so certification is a deliberate, reviewed grant rather than an
+/// automatic side effect of dropping a directory under `skills/`.
+///
+/// [`certify_bundled_skill_names`] fails closed when an embedded skill is not
+/// listed here, so adding a new shipped skill is a hard build/startup error
+/// until its name is added to this list. Keep the list sorted; the
+/// `bundled_reborn_skills_match_certified_list` test enforces that it stays in
+/// exact sync with the embedded set.
+///
+/// [`FilesystemSkillBundleRoot::system`]: ironclaw_loop_support::FilesystemSkillBundleRoot::system
+const CERTIFIED_SKILLS: &[&str] = &[
+    "ceo-setup",
+    "code-review",
+    "coding",
+    "commit",
+    "commitment-digest",
+    "commitment-setup",
+    "commitment-triage",
+    "content-creator-setup",
+    "decision-capture",
+    "delegation",
+    "delegation-tracker",
+    "developer-setup",
+    "github",
+    "github-workflow",
+    "idea-parking",
+    "linear",
+    "llm-council",
+    "local-test",
+    "new-project",
+    "plan-mode",
+    "portfolio",
+    "product-prioritization",
+    "project-setup",
+    "qa-review",
+    "review-checklist",
+    "review-readiness",
+    "routine-advisor",
+    "security-review",
+    "tech-debt-tracker",
+    "trader-setup",
+    "web-ui-test",
+];
+
+fn is_certified_skill(name: &str) -> bool {
+    CERTIFIED_SKILLS.contains(&name)
+}
+
+/// Fails closed if any shipped skill is not on the [`CERTIFIED_SKILLS`] list.
+///
+/// This is the certification gate: only listed skills are allowed to land in
+/// the trusted system skill root. A skill directory added under `skills/`
+/// without a matching certified-list entry is a hard error, so first-party
+/// skills are trusted only after an explicit, reviewed addition here.
+fn certify_bundled_skill_names<'a>(
+    names: impl Iterator<Item = &'a str>,
+) -> Result<(), RebornBuildError> {
+    for name in names {
+        if !is_certified_skill(name) {
+            return Err(invalid_config(format!(
+                "bundled skill `{name}` is shipped under `skills/` but is not certified; \
+                 add it to CERTIFIED_SKILLS in crates/ironclaw_reborn_composition/src/bundled_skills.rs"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 struct EmbeddedRebornSkillSummary {
     name: String,
@@ -64,6 +139,7 @@ pub(crate) async fn ensure_bundled_reborn_skills_installed(
     local_dev_storage_root: &Path,
 ) -> Result<(), RebornBuildError> {
     let bundled_skills = embedded_reborn_skill_bundles()?;
+    certify_bundled_skill_names(bundled_skills.iter().map(|skill| skill.name.as_str()))?;
     let filesystem = local_dev_storage_filesystem(local_dev_storage_root)?;
     let system_skills_root = system_skills_root_path()?;
     create_dir_all(&filesystem, &system_skills_root).await?;
@@ -92,7 +168,9 @@ pub(crate) async fn ensure_bundled_reborn_skills_installed(
 }
 
 pub(crate) fn bundled_reborn_skill_summaries() -> Result<Vec<SkillSummary>, RebornBuildError> {
-    Ok(embedded_reborn_skill_summaries()?
+    let summaries = embedded_reborn_skill_summaries()?;
+    certify_bundled_skill_names(summaries.iter().map(|skill| skill.name.as_str()))?;
+    Ok(summaries
         .into_iter()
         .map(|skill| SkillSummary {
             name: skill.name,
@@ -450,6 +528,66 @@ fn invalid_config(reason: impl std::fmt::Display) -> RebornBuildError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn certified_skills_list_is_sorted_and_unique() {
+        let mut sorted = CERTIFIED_SKILLS.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted, CERTIFIED_SKILLS,
+            "CERTIFIED_SKILLS must stay sorted for reviewable diffs"
+        );
+        let unique = CERTIFIED_SKILLS.iter().collect::<HashSet<_>>();
+        assert_eq!(
+            unique.len(),
+            CERTIFIED_SKILLS.len(),
+            "CERTIFIED_SKILLS must not contain duplicates"
+        );
+    }
+
+    #[test]
+    fn bundled_reborn_skills_match_certified_list() {
+        let embedded_bundles = embedded_reborn_skill_bundles()
+            .expect("embedded skill bundles")
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect::<HashSet<_>>();
+        let embedded_summaries = embedded_reborn_skill_summaries()
+            .expect("embedded skill summaries")
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect::<HashSet<_>>();
+        let certified = CERTIFIED_SKILLS
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<HashSet<_>>();
+
+        // Every shipped skill must be certified, and the list must not carry
+        // names that are no longer shipped — so `CERTIFIED_SKILLS` is an exact
+        // mirror of the embedded set, not a stale allowlist.
+        assert_eq!(
+            embedded_bundles, certified,
+            "CERTIFIED_SKILLS is out of sync with embedded skill bundles; \
+             add new skills to CERTIFIED_SKILLS and remove deleted ones"
+        );
+        assert_eq!(
+            embedded_summaries, certified,
+            "CERTIFIED_SKILLS is out of sync with embedded skill summaries"
+        );
+    }
+
+    #[test]
+    fn certify_bundled_skill_names_rejects_uncertified_skill() {
+        let error = certify_bundled_skill_names(["code-review", "totally-new-skill"].into_iter())
+            .expect_err("uncertified skill must fail closed");
+        let RebornBuildError::InvalidConfig { reason } = error else {
+            panic!("expected InvalidConfig, got {error:?}");
+        };
+        assert!(
+            reason.contains("totally-new-skill") && reason.contains("not certified"),
+            "error must name the uncertified skill: {reason}"
+        );
+    }
 
     #[tokio::test]
     async fn bundled_reborn_skills_include_current_repo_bundles_and_assets() {
