@@ -1163,6 +1163,76 @@ async fn libsql_append_and_tail_assigns_monotonic_seqno() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_append_batch_is_one_statement_with_contiguous_ordered_seqs() {
+    let filesystem = libsql_root().await;
+    let log = VirtualPath::new("/events/engine").unwrap();
+
+    // Seed a single append so the batch must continue the sequence.
+    let s0 = filesystem.append(&log, b"seed".to_vec()).await.unwrap();
+
+    let payloads: Vec<Vec<u8>> = (0..21u8).map(|n| vec![n]).collect();
+    let seqs = filesystem
+        .append_batch(&log, payloads.clone())
+        .await
+        .unwrap();
+    assert_eq!(seqs.len(), 21);
+    assert!(seqs[0] > s0, "batch seqs continue past the seeded append");
+    // Contiguous + monotonic in payload order.
+    for window in seqs.windows(2) {
+        assert!(window[0] < window[1]);
+    }
+
+    // Order + content preserved through the single multi-row INSERT.
+    let all = filesystem.tail(&log, SeqNo::ZERO).await.unwrap();
+    assert_eq!(all.len(), 22);
+    assert_eq!(all[0].payload, b"seed".to_vec());
+    for (offset, payload) in payloads.iter().enumerate() {
+        assert_eq!(&all[offset + 1].payload, payload);
+        assert_eq!(all[offset + 1].seq, seqs[offset]);
+    }
+
+    // Empty batch is a no-op.
+    assert!(
+        filesystem
+            .append_batch(&log, Vec::new())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_append_batch_spanning_multiple_statements_commits_atomically_in_order() {
+    // 600 > the 256-row chunk size, so this exercises the multi-statement
+    // transactional path: every chunk must commit and the seqs stay contiguous
+    // and ordered across chunk boundaries.
+    let filesystem = libsql_root().await;
+    let log = VirtualPath::new("/events/multichunk").unwrap();
+
+    let payloads: Vec<Vec<u8>> = (0..600u32).map(|n| n.to_le_bytes().to_vec()).collect();
+    let seqs = filesystem
+        .append_batch(&log, payloads.clone())
+        .await
+        .unwrap();
+    assert_eq!(seqs.len(), 600);
+    for window in seqs.windows(2) {
+        assert!(window[0] < window[1], "seqs are ordered across chunks");
+    }
+
+    let all = filesystem.tail(&log, SeqNo::ZERO).await.unwrap();
+    assert_eq!(all.len(), 600);
+    for (offset, payload) in payloads.iter().enumerate() {
+        assert_eq!(
+            &all[offset].payload, payload,
+            "order preserved across chunks"
+        );
+        assert_eq!(all[offset].seq, seqs[offset]);
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_tail_bounded_limits_records_before_materialization() {
     let filesystem = libsql_root().await;
     let log = VirtualPath::new("/events/bounded").unwrap();
@@ -1330,6 +1400,36 @@ mod postgres_tests {
 
     fn vpath(prefix: &str, leaf: &str) -> VirtualPath {
         VirtualPath::new(format!("{prefix}/{leaf}")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn postgres_append_batch_is_one_statement_with_contiguous_ordered_seqs() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        // Event-plane writes go under a per-test prefix; the events table keys
+        // on the full path, so isolation holds against a shared DB.
+        let log = VirtualPath::new(format!("{prefix}/events")).unwrap();
+
+        let s0 = fs.append(&log, b"seed".to_vec()).await.unwrap();
+
+        let payloads: Vec<Vec<u8>> = (0..21u8).map(|n| vec![n]).collect();
+        let seqs = fs.append_batch(&log, payloads.clone()).await.unwrap();
+        assert_eq!(seqs.len(), 21);
+        assert!(seqs[0] > s0);
+        for window in seqs.windows(2) {
+            assert!(window[0] < window[1]);
+        }
+
+        let all = fs.tail(&log, SeqNo::ZERO).await.unwrap();
+        assert_eq!(all.len(), 22);
+        assert_eq!(all[0].payload, b"seed".to_vec());
+        for (offset, payload) in payloads.iter().enumerate() {
+            assert_eq!(&all[offset + 1].payload, payload);
+            assert_eq!(all[offset + 1].seq, seqs[offset]);
+        }
+
+        assert!(fs.append_batch(&log, Vec::new()).await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -374,6 +374,30 @@ impl RootFilesystem for InMemoryBackend {
         Ok(next)
     }
 
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        // Single lock acquisition for the whole batch — the in-memory analogue
+        // of one round-trip — preserving append order.
+        let mut state = self.state.lock().await;
+        let log = state
+            .event_logs
+            .entry(path.as_str().to_string())
+            .or_default();
+        let mut seqs = Vec::with_capacity(payloads.len());
+        for payload in payloads {
+            let next = log
+                .last()
+                .map(|rec| rec.seq.next())
+                .unwrap_or_else(|| SeqNo::ZERO.next());
+            log.push(EventRecord { seq: next, payload });
+            seqs.push(next);
+        }
+        Ok(seqs)
+    }
+
     async fn tail(
         &self,
         path: &VirtualPath,
@@ -610,6 +634,37 @@ mod tests {
         assert_eq!(got.entry.body, body);
         assert!(got.entry.is_opaque_file());
         assert_eq!(got.version, version);
+    }
+
+    #[tokio::test]
+    async fn append_batch_assigns_contiguous_ordered_seqs_matching_single_append() {
+        let fs = InMemoryBackend::new();
+        let log = vpath("/events/runtime/t/u/a");
+
+        // Seed one single append so the batch must continue the sequence.
+        let s0 = fs.append(&log, b"e0".to_vec()).await.unwrap();
+
+        let seqs = fs
+            .append_batch(&log, vec![b"e1".to_vec(), b"e2".to_vec(), b"e3".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(seqs.len(), 3);
+        // Monotonic, contiguous, and continuing past the seeded append.
+        assert!(seqs[0] > s0);
+        assert!(seqs[0] < seqs[1] && seqs[1] < seqs[2]);
+
+        // Order + content preserved on read-back.
+        let records = fs.tail(&log, SeqNo::ZERO).await.unwrap();
+        let payloads: Vec<&[u8]> = records
+            .iter()
+            .map(|record| record.payload.as_slice())
+            .collect();
+        assert_eq!(payloads, vec![b"e0", b"e1", b"e2", b"e3"]);
+        assert_eq!(records[1].seq, seqs[0]);
+        assert_eq!(records[3].seq, seqs[2]);
+
+        // Empty batch is a no-op that returns no seqs.
+        assert!(fs.append_batch(&log, Vec::new()).await.unwrap().is_empty());
     }
 
     #[tokio::test]

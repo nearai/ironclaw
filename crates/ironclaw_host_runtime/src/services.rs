@@ -47,8 +47,8 @@ use ironclaw_processes::{
     ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
 };
 use ironclaw_reborn_event_store::{
-    RebornEventStoreConfig, RebornEventStoreError, RebornEventStores, RebornProfile,
-    build_reborn_event_stores,
+    CoalescingEventSink, EventBatchConfig, RebornEventStoreConfig, RebornEventStoreError,
+    RebornEventStores, RebornProfile, build_reborn_event_stores,
 };
 use ironclaw_resources::{
     FilesystemResourceGovernorStore, InMemoryResourceGovernor, PersistentResourceGovernor,

@@ -63,6 +63,27 @@ pub trait AuditSink: Send + Sync {
 pub trait DurableEventLog: Send + Sync {
     async fn append(&self, event: RuntimeEvent) -> Result<EventLogEntry<RuntimeEvent>, EventError>;
 
+    /// Append a batch of events, returning one result per event in input
+    /// order. Implementations that can coalesce same-stream appends into a
+    /// single backend round-trip should override this; the default impl is a
+    /// correctness-preserving fallback that appends one at a time so a
+    /// non-overriding log still works (it just pays one round-trip per event).
+    ///
+    /// Per-event `Result`s are returned (rather than a single `Result<Vec<_>>`)
+    /// so a partial failure surfaces precisely without discarding the
+    /// successfully-appended prefix. Ordering of the returned vec matches the
+    /// input.
+    async fn append_batch(
+        &self,
+        events: Vec<RuntimeEvent>,
+    ) -> Vec<Result<EventLogEntry<RuntimeEvent>, EventError>> {
+        let mut out = Vec::with_capacity(events.len());
+        for event in events {
+            out.push(self.append(event).await);
+        }
+        out
+    }
+
     async fn read_after_cursor(
         &self,
         stream: &EventStreamKey,

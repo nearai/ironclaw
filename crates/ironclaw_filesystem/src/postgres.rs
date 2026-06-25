@@ -622,6 +622,39 @@ impl RootFilesystem for PostgresRootFilesystem {
         seq_no_from_i64(path, id, FilesystemOperation::Append)
     }
 
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        if payloads.is_empty() {
+            return Ok(Vec::new());
+        }
+        let client = self.client().await?;
+        // One multi-row INSERT via `unnest` so the SQL text is FIXED regardless
+        // of batch size (keeps `prepare_cached` to a single statement) while
+        // still collapsing N appends into one round-trip. `unnest` preserves
+        // array order, so BIGSERIAL ids are assigned in payload order; we sort
+        // the RETURNING rows by id ASC to recover that order deterministically
+        // (Postgres does not guarantee RETURNING row order).
+        let rows = cached_query(
+            &client,
+            r#"
+                INSERT INTO root_filesystem_events (path, payload)
+                SELECT $1, payload FROM unnest($2::bytea[]) AS t(payload)
+                RETURNING id
+                "#,
+            &[&path.as_str(), &payloads],
+        )
+        .await
+        .map_err(|error| db_error(path.clone(), FilesystemOperation::Append, error))?;
+        let mut ids: Vec<i64> = rows.iter().map(|row| row.get("id")).collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .map(|id| seq_no_from_i64(path, id, FilesystemOperation::Append))
+            .collect()
+    }
+
     async fn tail(
         &self,
         path: &VirtualPath,

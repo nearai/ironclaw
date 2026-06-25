@@ -185,6 +185,28 @@ pub trait RootFilesystem: Send + Sync {
         unsupported(path, FilesystemOperation::Append)
     }
 
+    /// Append multiple `payloads` to the event log at `path` in one backend
+    /// round-trip, returning the assigned monotonic [`SeqNo`]s in payload
+    /// order. All payloads target the **same** `path`.
+    ///
+    /// The default impl is a correctness-preserving fallback that loops
+    /// [`append`](Self::append), so a backend without a native batch path still
+    /// works (it just pays one round-trip per payload). SQL-backed mounts
+    /// (Postgres, libSQL) override this with a single multi-row INSERT so a
+    /// per-turn burst of event appends collapses from N round-trips to one.
+    /// Ordering is preserved: the assigned seqs are monotonic in payload order.
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        let mut seqs = Vec::with_capacity(payloads.len());
+        for payload in payloads {
+            seqs.push(self.append(path, payload).await?);
+        }
+        Ok(seqs)
+    }
+
     /// Read events at `path` starting at `from` (exclusive). Returns at most
     /// one page of records; consumers loop with the latest seq to drain the
     /// log. Streaming support will replace this Vec return shape in a later

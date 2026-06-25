@@ -928,6 +928,80 @@ impl RootFilesystem for LibSqlRootFilesystem {
         seq_no_from_i64(path, seq_raw, FilesystemOperation::Append)
     }
 
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        if payloads.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.connect().await?;
+        // One multi-row INSERT collapses N appends into one round-trip.
+        // `seq` is INTEGER PRIMARY KEY AUTOINCREMENT, assigned in VALUES order;
+        // `RETURNING seq` then sorted ASC recovers payload order
+        // deterministically. Chunk the batch so the bound parameter count
+        // (2 per row) stays well under SQLite's default 999-parameter limit.
+        const ROWS_PER_STATEMENT: usize = 256;
+        // When the batch spans more than one chunk, wrap the chunk statements in
+        // a transaction so the whole `append_batch` commits atomically. Without
+        // it, each chunk auto-commits independently, so a failure on chunk k+1
+        // would leave chunk k's rows durably written while the caller is told
+        // the whole batch failed — orphaned, mis-reported records.
+        let transactional = payloads.len() > ROWS_PER_STATEMENT;
+        if transactional {
+            conn.execute("BEGIN", ()).await.map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::Append, error)
+            })?;
+        }
+        let mut seqs: Vec<i64> = Vec::with_capacity(payloads.len());
+        for chunk in payloads.chunks(ROWS_PER_STATEMENT) {
+            let mut sql =
+                String::from("INSERT INTO root_filesystem_events (path, payload) VALUES ");
+            let mut params: Vec<libsql::Value> = Vec::with_capacity(chunk.len() * 2);
+            for (row_idx, payload) in chunk.iter().enumerate() {
+                if row_idx > 0 {
+                    sql.push(',');
+                }
+                sql.push_str("(?, ?)");
+                params.push(libsql::Value::Text(path.as_str().to_string()));
+                params.push(libsql::Value::Blob(payload.clone()));
+            }
+            sql.push_str(" RETURNING seq");
+            let chunk_result: Result<(), FilesystemError> = async {
+                let mut rows = conn.query(&sql, params).await.map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::Append, error)
+                })?;
+                while let Some(row) = rows.next().await.map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::Append, error)
+                })? {
+                    let seq_raw: i64 = row.get(0).map_err(|error| {
+                        libsql_db_error(path.clone(), FilesystemOperation::Append, error)
+                    })?;
+                    seqs.push(seq_raw);
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(error) = chunk_result {
+                if transactional {
+                    // Best-effort rollback; surface the original write error.
+                    let _ = conn.execute("ROLLBACK", ()).await;
+                }
+                return Err(error);
+            }
+        }
+        if transactional {
+            conn.execute("COMMIT", ()).await.map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::Append, error)
+            })?;
+        }
+        seqs.sort_unstable();
+        seqs.into_iter()
+            .map(|seq_raw| seq_no_from_i64(path, seq_raw, FilesystemOperation::Append))
+            .collect()
+    }
+
     async fn tail(
         &self,
         path: &VirtualPath,

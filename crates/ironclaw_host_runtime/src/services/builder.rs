@@ -7,17 +7,18 @@ use super::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
 use super::PostgresRootFilesystem;
 use super::{
-    ApprovalRequestStore, AuditSink, CapabilityLeaseStore, DurableAuditLog, DurableAuditSink,
-    DurableEventLog, DurableEventSink, EffectiveRuntimePolicy, EventSink,
-    FilesystemApprovalRequestStore, FilesystemResourceGovernorStore, FilesystemRunStateStore,
-    FilesystemTurnStateStore, FirstPartyCapabilityRegistry, HostRuntimeServices, McpExecutor,
-    NetworkHttpEgress, PersistentResourceGovernor, ProcessBackendKind, ProcessExecutor,
-    ProcessObligationLifecycleStore, ProcessResultStore, ProcessStore, ProductionComponentType,
-    ProductionImplementationReadiness, ProductionWiringComponent, ProductionWiringIssueKind,
-    ProductionWiringReport, RebornEventStoreConfig, RebornEventStoreError, RebornEventStores,
-    RebornProfile, ResourceGovernor, RootFilesystem, RunProfileResolver, RunStateApprovalStore,
-    RunStateStore, RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress,
-    RuntimeKind, RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStore,
+    ApprovalRequestStore, AuditSink, CapabilityLeaseStore, CoalescingEventSink, DurableAuditLog,
+    DurableAuditSink, DurableEventLog, DurableEventSink, EffectiveRuntimePolicy, EventBatchConfig,
+    EventSink, FilesystemApprovalRequestStore, FilesystemResourceGovernorStore,
+    FilesystemRunStateStore, FilesystemTurnStateStore, FirstPartyCapabilityRegistry,
+    HostRuntimeServices, McpExecutor, NetworkHttpEgress, PersistentResourceGovernor,
+    ProcessBackendKind, ProcessExecutor, ProcessObligationLifecycleStore, ProcessResultStore,
+    ProcessStore, ProductionComponentType, ProductionImplementationReadiness,
+    ProductionWiringComponent, ProductionWiringIssueKind, ProductionWiringReport,
+    RebornEventStoreConfig, RebornEventStoreError, RebornEventStores, RebornProfile,
+    ResourceGovernor, RootFilesystem, RunProfileResolver, RunStateApprovalStore, RunStateStore,
+    RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress, RuntimeKind,
+    RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStore,
     SecurityAuditSink, SharedSecretStore, TenantSandboxProcessPort, TrustPolicy,
     TurnRunTransitionPort, TurnRunWakeNotifier, TurnStateStore, WasmError, WasmRuntimeAdapter,
     WasmRuntimeCredentialProvider, WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
@@ -600,7 +601,15 @@ where
             self.component_types.audit_sink =
                 Some(ProductionComponentType::of::<DurableAuditSink>());
         }
-        self.event_sink = Some(Arc::new(DurableEventSink::new(stores.events)));
+        // Runtime events are best-effort observability whose append cursor is
+        // discarded at the sink, so route them through the write-behind
+        // coalescing sink: a per-turn burst of single-row INSERTs collapses to
+        // one multi-row INSERT per stream per drain window. The compliance
+        // audit log stays synchronous.
+        self.event_sink = Some(Arc::new(CoalescingEventSink::new(
+            stores.events,
+            EventBatchConfig::default(),
+        )));
         self.audit_sink = Some(Arc::new(DurableAuditSink::new(stores.audit)));
         self
     }

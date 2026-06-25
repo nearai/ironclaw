@@ -100,6 +100,96 @@ where
         })
     }
 
+    async fn append_batch(
+        &self,
+        events: Vec<RuntimeEvent>,
+    ) -> Vec<Result<EventLogEntry<RuntimeEvent>, EventError>> {
+        // Group events by stream path (one path per `(tenant, user, agent)`),
+        // preserving input order within each group, then issue one multi-row
+        // INSERT per path via the filesystem `append_batch` primitive. A
+        // per-turn burst shares one stream, so it collapses to a single
+        // round-trip. Results are stitched back into input order.
+        let mut order: Vec<ScopedPath> = Vec::new();
+        let mut groups: Vec<(ScopedPath, Vec<usize>, Vec<RuntimeEvent>)> = Vec::new();
+        let mut results: Vec<Option<Result<EventLogEntry<RuntimeEvent>, EventError>>> =
+            (0..events.len()).map(|_| None).collect();
+
+        for (index, event) in events.into_iter().enumerate() {
+            let stream = EventStreamKey::from_scope(&event.scope);
+            match stream_path(StreamKind::Runtime, &stream) {
+                Ok(path) => {
+                    let slot = match order.iter().position(|existing| existing == &path) {
+                        Some(pos) => pos,
+                        None => {
+                            order.push(path.clone());
+                            groups.push((path, Vec::new(), Vec::new()));
+                            groups.len() - 1
+                        }
+                    };
+                    groups[slot].1.push(index);
+                    groups[slot].2.push(event);
+                }
+                Err(error) => results[index] = Some(Err(error)),
+            }
+        }
+
+        for (path, indices, group_events) in groups {
+            let mut payloads = Vec::with_capacity(group_events.len());
+            let mut serialize_failures: Vec<(usize, EventError)> = Vec::new();
+            let mut kept: Vec<(usize, RuntimeEvent)> = Vec::new();
+            for (slot, event) in indices.into_iter().zip(group_events) {
+                match serde_json::to_vec(&event) {
+                    Ok(payload) => {
+                        payloads.push(payload);
+                        kept.push((slot, event));
+                    }
+                    Err(error) => serialize_failures.push((
+                        slot,
+                        EventError::Serialize {
+                            reason: error.to_string(),
+                        },
+                    )),
+                }
+            }
+            for (slot, error) in serialize_failures {
+                results[slot] = Some(Err(error));
+            }
+            match self
+                .fs
+                .append_batch(&ResourceScope::system(), &path, payloads)
+                .await
+            {
+                Ok(seqs) => {
+                    for ((slot, event), seq) in kept.into_iter().zip(seqs) {
+                        results[slot] = Some(Ok(EventLogEntry {
+                            cursor: EventCursor::new(seq.get()),
+                            record: event,
+                        }));
+                    }
+                }
+                Err(error) => {
+                    // `EventError` is not `Clone`, so capture the categorized,
+                    // redaction-safe message once and re-wrap it per slot.
+                    let message = map_filesystem_append_error(error).to_string();
+                    for (slot, _event) in kept {
+                        results[slot] = Some(Err(durable_error(message.clone())));
+                    }
+                }
+            }
+        }
+
+        results
+            .into_iter()
+            .map(|slot| {
+                slot.unwrap_or_else(|| {
+                    Err(durable_error(
+                        "filesystem event store batch produced no result",
+                    ))
+                })
+            })
+            .collect()
+    }
+
     async fn read_after_cursor(
         &self,
         stream: &EventStreamKey,

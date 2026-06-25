@@ -47,8 +47,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+mod coalescing_sink;
 mod filesystem_store;
 
+pub use coalescing_sink::{CoalescingEventSink, EventBatchConfig};
 pub use filesystem_store::{FilesystemDurableAuditLog, FilesystemDurableEventLog};
 
 #[cfg(feature = "postgres")]

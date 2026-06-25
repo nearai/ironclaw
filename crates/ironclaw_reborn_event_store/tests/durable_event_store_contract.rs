@@ -122,6 +122,65 @@ async fn libsql_replay_advances_next_cursor_past_trailing_filtered_records() {
     );
 }
 
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_append_batch_groups_by_stream_and_preserves_order() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    // Two distinct streams (different users → different stream paths), so the
+    // batch must split into one multi-row INSERT per stream while preserving
+    // per-stream order and returning a result for every input event.
+    let scope_alice = scope_for("alice", "project-a");
+    let scope_bob = scope_for("bob", "project-a");
+    let stream_alice = EventStreamKey::from_scope(&scope_alice);
+    let stream_bob = EventStreamKey::from_scope(&scope_bob);
+
+    let stores = build_reborn_event_stores(
+        RebornProfile::LocalDev,
+        RebornEventStoreConfig::Libsql {
+            path_or_url: temp.path().join("events.db").to_string_lossy().to_string(),
+            auth_token: None,
+        },
+    )
+    .await
+    .expect("libsql stores");
+
+    // Interleave two streams: a, b, a, b, a.
+    let events = vec![
+        RuntimeEvent::dispatch_requested(scope_alice.clone(), capability_id()),
+        RuntimeEvent::dispatch_requested(scope_bob.clone(), capability_id()),
+        RuntimeEvent::dispatch_requested(scope_alice.clone(), capability_id()),
+        RuntimeEvent::dispatch_requested(scope_bob.clone(), capability_id()),
+        RuntimeEvent::dispatch_requested(scope_alice.clone(), capability_id()),
+    ];
+
+    let results = stores.events.append_batch(events).await;
+    assert_eq!(results.len(), 5);
+    for result in &results {
+        assert!(result.is_ok(), "every batched event gets a result");
+    }
+
+    // Alice's stream replays her three events in emit order with monotonic
+    // cursors; Bob's stream replays his two — no cross-stream leakage or
+    // reordering.
+    let alice = stores
+        .events
+        .read_after_cursor(&stream_alice, &ReadScope::default(), None, 100)
+        .await
+        .expect("replay alice");
+    assert_eq!(alice.entries.len(), 3);
+    for window in alice.entries.windows(2) {
+        assert!(window[0].cursor.as_u64() < window[1].cursor.as_u64());
+    }
+
+    let bob = stores
+        .events
+        .read_after_cursor(&stream_bob, &ReadScope::default(), None, 100)
+        .await
+        .expect("replay bob");
+    assert_eq!(bob.entries.len(), 2);
+    assert!(bob.entries[0].cursor.as_u64() < bob.entries[1].cursor.as_u64());
+}
+
 #[tokio::test]
 async fn jsonl_runtime_log_survives_rebuild_and_preserves_filtered_cursor_semantics() {
     let temp = tempfile::tempdir().expect("tempdir");
