@@ -25,6 +25,9 @@ use crate::{
     lifecycle::{
         RebornLocalLifecycleFacade, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
     },
+    outbound_delivery_capability_surface::{
+        outbound_delivery_synthetic_provider, outbound_delivery_target_set_operator_tool_info,
+    },
     outbound_preferences::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
         RebornOutboundPreferencesFacade,
@@ -38,17 +41,25 @@ static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
 #[derive(Clone)]
 struct ActiveRegistryOperatorToolCatalog {
     registry: Arc<SharedExtensionRegistry>,
+    synthetic_tools: Arc<[RebornOperatorToolInfo]>,
 }
 
 impl ActiveRegistryOperatorToolCatalog {
-    fn new(registry: Arc<SharedExtensionRegistry>) -> Self {
-        Self { registry }
+    fn new(
+        registry: Arc<SharedExtensionRegistry>,
+        synthetic_tools: Vec<RebornOperatorToolInfo>,
+    ) -> Self {
+        Self {
+            registry,
+            synthetic_tools: Arc::from(synthetic_tools),
+        }
     }
 }
 
 impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
     fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo> {
-        self.registry
+        let mut tools = self
+            .registry
             .snapshot()
             .capabilities()
             .map(|descriptor| RebornOperatorToolInfo {
@@ -58,7 +69,9 @@ impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
                 default_permission: descriptor.default_permission,
                 effects: Arc::<[EffectKind]>::from(descriptor.effects.clone()),
             })
-            .collect()
+            .collect::<Vec<_>>();
+        tools.extend(self.synthetic_tools.iter().cloned());
+        tools
     }
 }
 
@@ -194,11 +207,30 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                     local_runtime.extension_registry.as_ref().clone(),
                 ))
             });
+        let synthetic_operator_tools = if outbound_delivery_target_providers.is_empty() {
+            Vec::new()
+        } else {
+            let provider = outbound_delivery_synthetic_provider().map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("outbound delivery synthetic provider id is invalid: {error}"),
+                }
+            })?;
+            vec![
+                outbound_delivery_target_set_operator_tool_info(provider).map_err(|error| {
+                    RebornBuildError::InvalidConfig {
+                        reason: format!("outbound delivery operator tool is invalid: {error}"),
+                    }
+                })?,
+            ]
+        };
         api = api.with_operator_approval_config(
             tool_permission_overrides,
             auto_approve_settings,
             persistent_approval_policies,
-            Arc::new(ActiveRegistryOperatorToolCatalog::new(tool_registry)),
+            Arc::new(ActiveRegistryOperatorToolCatalog::new(
+                tool_registry,
+                synthetic_operator_tools,
+            )),
         );
         let mut lifecycle_facade =
             RebornLocalLifecycleFacade::new(local_runtime.skill_management.clone());
@@ -911,11 +943,23 @@ mod tests {
     #[test]
     fn operator_tool_catalog_reads_shared_registry_updates() {
         let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
-        let catalog = ActiveRegistryOperatorToolCatalog::new(Arc::clone(&registry));
+        let synthetic_provider =
+            outbound_delivery_synthetic_provider().expect("synthetic provider id");
+        let catalog = ActiveRegistryOperatorToolCatalog::new(
+            Arc::clone(&registry),
+            vec![
+                outbound_delivery_target_set_operator_tool_info(synthetic_provider.clone())
+                    .expect("synthetic tool info"),
+            ],
+        );
 
         assert!(
-            catalog.list_operator_tools().is_empty(),
-            "empty active registry should render no operator tools"
+            catalog.list_operator_tools().iter().any(|tool| {
+                tool.capability_id.as_str()
+                    == crate::outbound_delivery_capability_surface::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID
+                    && tool.provider == synthetic_provider
+            }),
+            "synthetic outbound delivery capability must use the Settings > Tools provider key"
         );
 
         registry

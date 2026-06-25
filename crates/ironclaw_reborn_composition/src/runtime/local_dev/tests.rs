@@ -6,11 +6,15 @@ mod tests {
 
     use super::super::*;
 
-    use ironclaw_approvals::ApprovalResolver;
+    use ironclaw_approvals::{
+        ApprovalResolver, CapabilityPermissionOverrideStore, PersistentApprovalAction,
+        PersistentApprovalPolicyInput, PersistentApprovalPolicyStore, ToolPermissionOverride,
+        ToolPermissionOverrideInput,
+    };
     use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore};
     use ironclaw_host_api::{
-        AgentId, CapabilityId, EffectKind, InvocationId, MountPermissions, NetworkPolicy,
-        ProjectId, TenantId, ThreadId, UserId,
+        AgentId, CapabilityId, EffectKind, GrantConstraints, InvocationId, MountPermissions,
+        NetworkPolicy, Principal, ProjectId, TenantId, ThreadId, UserId,
     };
     use ironclaw_host_runtime::{
         APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
@@ -1219,6 +1223,9 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
@@ -1386,6 +1393,9 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
         };
@@ -1540,6 +1550,17 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let fallback_user_id = UserId::new("outbound-delivery-fallback-user").expect("user id");
+        let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+            local_runtime.tool_permission_overrides.clone();
+        let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+            local_runtime.auto_approve_settings.clone();
+        let approval_settings = Arc::new(
+            crate::local_dev_authorization::StoreApprovalSettingsProvider::new(
+                tool_permission_overrides,
+                auto_approve_settings,
+                local_runtime.persistent_approval_policies.clone(),
+            ),
+        );
         let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
@@ -1557,6 +1578,7 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: Some(outbound_preferences_facade),
             outbound_delivery_target_set_requires_approval: true,
+            approval_settings,
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
@@ -1713,6 +1735,7 @@ mod tests {
             }
             outcome => panic!("set should require approval, got {outcome:?}"),
         };
+        let approval_request_id = approval_resume.approval_request_id;
         assert!(
             local_runtime
                 .outbound_preferences
@@ -1749,6 +1772,7 @@ mod tests {
                 &local_runtime.system_extensions_lifecycle_mounts,
             )
             .expect("outbound delivery approval lease terms");
+        let persistent_terms = approval.clone();
         ApprovalResolver::new(
             local_runtime.approval_requests.as_ref(),
             local_runtime.capability_leases.as_ref(),
@@ -1815,6 +1839,88 @@ mod tests {
             lease.status == CapabilityLeaseStatus::Consumed
                 && lease.grant.capability == set_capability_id
         }));
+
+        let mut persistent_scope = approval_scope.clone();
+        persistent_scope.agent_id = None;
+        persistent_scope.project_id = None;
+        persistent_scope.mission_id = None;
+        persistent_scope.thread_id = None;
+        local_runtime
+            .persistent_approval_policies
+            .allow(PersistentApprovalPolicyInput {
+                scope: persistent_scope,
+                action: PersistentApprovalAction::Dispatch,
+                capability_id: set_capability_id.clone(),
+                grantee: Principal::Extension(
+                    crate::outbound_delivery_capability_surface::outbound_delivery_synthetic_provider(
+                    )
+                    .expect("outbound delivery synthetic provider id"),
+                ),
+                approved_by: Principal::User(actor_user_id.clone()),
+                constraints: GrantConstraints {
+                    allowed_effects: persistent_terms.allowed_effects,
+                    mounts: persistent_terms.mounts,
+                    network: persistent_terms.network,
+                    secrets: persistent_terms.secrets,
+                    resource_ceiling: persistent_terms.resource_ceiling,
+                    expires_at: persistent_terms.expires_at,
+                    max_invocations: None,
+                },
+                source_approval_request_id: Some(approval_request_id),
+            })
+            .await
+            .expect("persistent outbound delivery approval is stored");
+
+        let second_set_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": slack_target_id.as_str() }),
+                ),
+            ))
+            .await
+            .expect("second set call stages");
+        let second_set_outcome = port
+            .invoke_capability(invocation_for_candidate(&second_set_candidate))
+            .await
+            .expect("persistent always-allow set call invokes");
+        match second_set_outcome {
+            CapabilityOutcome::Completed(_) => {}
+            outcome => panic!("persistent always-allow set should complete, got {outcome:?}"),
+        }
+        local_runtime
+            .tool_permission_overrides
+            .set(ToolPermissionOverrideInput {
+                scope: {
+                    let mut scope = run_context.scope.to_resource_scope();
+                    scope.user_id = owner_user_id.clone();
+                    scope.tenant_user_settings_scope()
+                },
+                capability_id: set_capability_id,
+                state: ToolPermissionOverride::Disabled,
+                updated_by: Principal::User(actor_user_id),
+            })
+            .await
+            .expect("disabled override is stored");
+        let disabled_set_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": slack_target_id.as_str() }),
+                ),
+            ))
+            .await
+            .expect("disabled set call stages");
+        let disabled_set_outcome = port
+            .invoke_capability(invocation_for_candidate(&disabled_set_candidate))
+            .await
+            .expect("disabled set call returns a capability outcome");
+        match disabled_set_outcome {
+            CapabilityOutcome::Failed(failure) => {
+                assert_eq!(failure.error_kind, CapabilityFailureKind::PolicyDenied);
+            }
+            outcome => panic!("disabled set should fail non-terminally, got {outcome:?}"),
+        }
         let observed_provider_callers = slack_provider.observed_callers();
         assert!(
             observed_provider_callers
@@ -2015,6 +2121,9 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
@@ -2116,6 +2225,9 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
@@ -2355,6 +2467,9 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
@@ -2463,6 +2578,9 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),

@@ -12,7 +12,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::{
-    PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    PersistentApprovalAction, PersistentApprovalPolicy, PersistentApprovalPolicyError,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
 };
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
@@ -7960,6 +7961,42 @@ impl RebornOperatorToolCatalog for StaticOperatorToolCatalogForTest {
     }
 }
 
+struct FailingAllowPersistentApprovalPolicyStore;
+
+#[async_trait]
+impl PersistentApprovalPolicyStore for FailingAllowPersistentApprovalPolicyStore {
+    async fn allow(
+        &self,
+        _input: PersistentApprovalPolicyInput,
+    ) -> Result<PersistentApprovalPolicy, PersistentApprovalPolicyError> {
+        Err(PersistentApprovalPolicyError::Filesystem(
+            "persistent policy store unavailable".to_string(),
+        ))
+    }
+
+    async fn lookup(
+        &self,
+        _key: &PersistentApprovalPolicyKey,
+    ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
+        Ok(None)
+    }
+
+    async fn revoke(
+        &self,
+        _key: &PersistentApprovalPolicyKey,
+    ) -> Result<PersistentApprovalPolicy, PersistentApprovalPolicyError> {
+        Err(PersistentApprovalPolicyError::UnknownPolicy)
+    }
+
+    async fn revoke_if_source_approval_request(
+        &self,
+        _key: &PersistentApprovalPolicyKey,
+        _source_approval_request_id: ApprovalRequestId,
+    ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
+        Ok(None)
+    }
+}
+
 fn services_with_operator_approval_config() -> RebornServices {
     services_with_operator_approval_config_parts().0
 }
@@ -7970,7 +8007,15 @@ fn services_with_operator_approval_config_parts() -> (
 ) {
     let persistent_policies =
         Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new());
-    let services = RebornServices::new(
+    let policy_store: Arc<dyn PersistentApprovalPolicyStore> = persistent_policies.clone();
+    let services = services_with_operator_approval_config_policy_store(policy_store);
+    (services, persistent_policies)
+}
+
+fn services_with_operator_approval_config_policy_store(
+    persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+) -> RebornServices {
+    RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
@@ -8010,8 +8055,7 @@ fn services_with_operator_approval_config_parts() -> (
                 },
             ],
         }),
-    );
-    (services, persistent_policies)
+    )
 }
 
 fn operator_config_entry_value<'a>(
@@ -8330,6 +8374,48 @@ async fn operator_config_is_scoped_by_tenant_and_user() {
             "global"
         );
     }
+}
+
+#[tokio::test]
+async fn operator_config_preserves_override_when_always_allow_policy_write_fails() {
+    let services = services_with_operator_approval_config_policy_store(Arc::new(
+        FailingAllowPersistentApprovalPolicyStore,
+    ));
+
+    let ask_override = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "ask_each_time" }),
+            },
+        )
+        .await
+        .expect("ask each time override");
+    assert_eq!(ask_override.entry.value["state"], "ask_each_time");
+    assert_eq!(ask_override.entry.value["effective_source"], "override");
+
+    let error = services
+        .set_operator_config_key(
+            caller(),
+            "tool.tool.alpha".to_string(),
+            RebornOperatorConfigSetRequest {
+                value: json!({ "state": "always_allow" }),
+            },
+        )
+        .await
+        .expect_err("persistent policy write failure");
+    assert_eq!(error.code, RebornServicesErrorCode::Internal);
+
+    let preserved = services
+        .get_operator_config_key(caller(), "tool.tool.alpha".to_string())
+        .await
+        .expect("tool config after failed always_allow");
+    assert_eq!(preserved.entry.value["state"], "ask_each_time");
+    assert_eq!(
+        preserved.entry.value["effective_source"], "override",
+        "failed policy writes must not clear the existing per-tool override"
+    );
 }
 
 #[tokio::test]
