@@ -393,14 +393,19 @@ export function useChat(threadId) {
       const updateSeededTarget = (updater) => {
         if (sendThreadId !== threadId) seedThreadMessages(sendThreadId, updater);
       };
+      const updateCurrentRunState = (updater) => {
+        if (shouldRenderInCurrentThread) updater();
+      };
 
       updateCurrentThread((prev) => [...prev, pendingRenderMessage]);
       if (sendThreadId !== threadId) {
         seedThreadMessages(sendThreadId, (prev) => [...prev, pendingRenderMessage]);
       }
 
-      setIsProcessing(true);
-      setPendingGate(null);
+      updateCurrentRunState(() => {
+        setIsProcessing(true);
+        setPendingGate(null);
+      });
 
       try {
         const response = await sendMessage({
@@ -414,7 +419,7 @@ export function useChat(threadId) {
         if (threadNeedsSidebarRefresh(sendThreadId)) {
           queryClient.invalidateQueries({ queryKey: ["threads"] });
         }
-        if (response?.run_id) {
+        if (response?.run_id && shouldRenderInCurrentThread) {
           setActiveRun({
             runId: response.run_id,
             threadId: response.thread_id || sendThreadId,
@@ -464,7 +469,7 @@ export function useChat(threadId) {
             updateCurrentThread(appendNotice);
             updateSeededTarget(appendNotice);
           }
-          setIsProcessing(false);
+          updateCurrentRunState(() => setIsProcessing(false));
         }
         return response;
       } catch (err) {
@@ -484,7 +489,7 @@ export function useChat(threadId) {
           );
         updateCurrentThread(markFailed);
         updateSeededTarget(markFailed);
-        setIsProcessing(false);
+        updateCurrentRunState(() => setIsProcessing(false));
         throw err;
       } finally {
         // Drop the optimistic from the pending ref unconditionally:

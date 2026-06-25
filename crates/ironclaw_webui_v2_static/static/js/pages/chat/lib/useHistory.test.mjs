@@ -342,6 +342,7 @@ test("mergeFullRefresh carries optimistic timestamps onto confirmed messages", (
         content: "tell me a joke",
         timestamp: "2026-06-25T07:17:00.000Z",
         timelineMessageId: "message-1",
+        isOptimistic: true,
       },
     ],
   );

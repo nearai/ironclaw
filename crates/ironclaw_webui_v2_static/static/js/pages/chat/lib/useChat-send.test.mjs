@@ -313,6 +313,7 @@ test("useChat.send: target-thread send does not append into active thread", asyn
   const targetThreadId = "thread-target";
   let currentMessages = [];
   const seededByThread = new Map();
+  const stateUpdates = [];
 
   const context = {
     AbortController,
@@ -320,7 +321,7 @@ test("useChat.send: target-thread send does not append into active thread", asyn
     Error,
     Map,
     Math,
-    React: createReactStub(),
+    React: createReactStub({ setCalls: stateUpdates }),
     addPending,
     toRenderAttachment,
     toWireAttachment,
@@ -385,6 +386,8 @@ test("useChat.send: target-thread send does not append into active thread", asyn
     seededByThread.get(targetThreadId)[0].timelineMessageId,
     "target-message-1",
   );
+  assert.deepEqual(stateUpdates.filter((update) => update.index === 2), []);
+  assert.deepEqual(stateUpdates.filter((update) => update.index === 4), []);
 });
 
 test("useChat.send: target-thread rejected_busy updates seeded cache", async () => {
@@ -392,6 +395,7 @@ test("useChat.send: target-thread rejected_busy updates seeded cache", async () 
   const targetThreadId = "thread-target";
   let currentMessages = [];
   const seededByThread = new Map();
+  const stateUpdates = [];
 
   const context = {
     AbortController,
@@ -399,7 +403,7 @@ test("useChat.send: target-thread rejected_busy updates seeded cache", async () 
     Error,
     Map,
     Math,
-    React: createReactStub(),
+    React: createReactStub({ setCalls: stateUpdates }),
     addPending,
     toRenderAttachment,
     toWireAttachment,
@@ -463,6 +467,8 @@ test("useChat.send: target-thread rejected_busy updates seeded cache", async () 
   assert.equal(targetMessages[0].status, "error");
   assert.equal(targetMessages[1].role, "system");
   assert.equal(targetMessages[1].content, "Thread is busy, please try again.");
+  assert.deepEqual(stateUpdates.filter((update) => update.index === 2), []);
+  assert.deepEqual(stateUpdates.filter((update) => update.index === 4), []);
 });
 
 test("useChat.send: target-thread thrown errors update seeded cache", async () => {
@@ -470,6 +476,7 @@ test("useChat.send: target-thread thrown errors update seeded cache", async () =
   const targetThreadId = "thread-target";
   let currentMessages = [];
   const seededByThread = new Map();
+  const stateUpdates = [];
 
   const context = {
     AbortController,
@@ -477,7 +484,7 @@ test("useChat.send: target-thread thrown errors update seeded cache", async () =
     Error,
     Map,
     Math,
-    React: createReactStub(),
+    React: createReactStub({ setCalls: stateUpdates }),
     addPending,
     toRenderAttachment,
     toWireAttachment,
@@ -542,6 +549,8 @@ test("useChat.send: target-thread thrown errors update seeded cache", async () =
   assert.equal(targetMessages[0].isOptimistic, false);
   assert.equal(targetMessages[0].status, "error");
   assert.equal(targetMessages[0].error, "network unavailable");
+  assert.deepEqual(stateUpdates.filter((update) => update.index === 2), []);
+  assert.deepEqual(stateUpdates.filter((update) => update.index === 4), []);
 });
 
 test("useChat.cancelRun clears local state before cancel request resolves", async () => {

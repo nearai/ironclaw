@@ -232,6 +232,12 @@ function mergeFullRefresh(fresh, current, options = {}) {
       return false;
     }
     if (isRuntimeActivityMessage(message)) return true;
+    if (
+      typeof message.timelineMessageId === "string" &&
+      ids.has(`msg-${message.timelineMessageId}`)
+    ) {
+      return false;
+    }
     if (isSeededOptimisticMessage(message)) return true;
     return preserveClientOnly && message.id.startsWith("err-");
   });
