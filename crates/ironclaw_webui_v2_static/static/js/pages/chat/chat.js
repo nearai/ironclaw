@@ -85,8 +85,18 @@ export function Chat({
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
   const showLanding = !historyLoading && !hasMessages && !historyLoadError;
+  const activeRunBlocksSubmit = Boolean(
+    activeThreadId &&
+      activeRun?.runId &&
+      activeRun.threadId === activeThreadId &&
+      !pendingGate &&
+      (!activeRun.status ||
+        activeRun.status === "queued" ||
+        activeRun.status === "running")
+  );
   const composerSendDisabled =
-    (isProcessing && !pendingGate) || cooldownSeconds > 0;
+    ((isProcessing || activeRunBlocksSubmit) && !pendingGate) ||
+    cooldownSeconds > 0;
   const composerStatusText =
     cooldownSeconds > 0 ? `Retry in ${cooldownSeconds}s` : undefined;
   // Scope the persisted composer draft to the open thread (or the
