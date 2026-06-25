@@ -682,6 +682,24 @@ pub(crate) fn build_services_input_with_options(
     }
     services_input = services_input.with_memory_binding_policy(memory_binding_policy);
 
+    // Connection settings for a third-party memory provider (issue #5264), read
+    // the same way the embedding providers read theirs: base URL from the
+    // `[memory]` config section or the `MEMORY_MEM0_BASE_URL` env override, and
+    // the API key as a secret from `MEMORY_MEM0_API_KEY`. Inert unless a binding
+    // selects a provider that needs them — the binding policy owns selection.
+    let mem0_base_url = optional_nonempty_env("MEMORY_MEM0_BASE_URL").or_else(|| {
+        config_file
+            .as_ref()
+            .and_then(|file| file.memory.as_ref())
+            .and_then(|memory| memory.mem0_base_url.clone())
+    });
+    let memory_provider_connection = ironclaw_reborn_composition::Mem0ConnectionConfig {
+        base_url: mem0_base_url,
+        api_key: optional_nonempty_env("MEMORY_MEM0_API_KEY").map(SecretString::from),
+        app_id: optional_nonempty_env("MEMORY_MEM0_APP_ID"),
+    };
+    services_input = services_input.with_memory_provider_connection(memory_provider_connection);
+
     Ok(RuntimeServicesInput {
         services_input,
         config_file,

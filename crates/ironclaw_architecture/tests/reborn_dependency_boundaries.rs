@@ -1597,6 +1597,19 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // mem0 memory provider (a second `MemoryService` implementation, the
+            // third-party provider lane for issue #3537 / #5264): like the native
+            // provider it may depend ONLY on the contract crate + the host-api
+            // id/scope substrate. It is REST-backed via an injected transport
+            // trait (its own `reqwest` client, an external dep the boundary check
+            // does not police), so — unlike native — it needs no
+            // filesystem/safety/prompt-envelope deps. `ironclaw_host_runtime`
+            // stays provider-agnostic and must NOT name this crate; only the
+            // composition layer (no boundary rule) may depend on it.
+            crate_name: "ironclaw_memory_mem0",
+            allowed: vec!["ironclaw_host_api", "ironclaw_memory"],
+        },
+        BoundaryRule {
             crate_name: "ironclaw_product_workflow",
             allowed: vec![
                 "ironclaw_approvals",

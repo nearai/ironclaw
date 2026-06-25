@@ -119,6 +119,13 @@ pub struct MemorySection {
     /// composition still applies the resolver's fail-closed policy.
     #[serde(default)]
     pub admin_overrides: Vec<MemoryAdminOverride>,
+    /// Connection base URL for a third-party memory provider that needs one
+    /// (e.g. mem0's `https://api.mem0.ai`), used only when a binding selects that
+    /// provider (issue #5264). The `MEMORY_MEM0_BASE_URL` env var overrides this,
+    /// and the matching API key is supplied via `MEMORY_MEM0_API_KEY` (a secret —
+    /// never the config file). Inert when no third-party binding needs it.
+    #[serde(default)]
+    pub mem0_base_url: Option<String>,
 }
 
 /// One `profile_id -> extension_id` memory binding.

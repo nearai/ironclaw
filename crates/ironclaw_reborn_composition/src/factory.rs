@@ -858,13 +858,18 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         local_runtime_identity,
         turn_state_store_limits,
         memory_binding_policy,
+        memory_provider_connection,
         ..
     } = input;
     // One memory provider resolver for this runtime (issue #3537): the memory
     // tools and the local-dev profile source both build their `MemoryService`
     // through it, so there is a single place that maps the binding to a provider.
-    let memory_service_resolver =
-        MemoryServiceResolver::from_optional_policy(memory_binding_policy);
+    // For a third-party document-store binding (e.g. mem0, issue #5264) the
+    // factory builds and registers that provider here; native stays per-invocation.
+    let memory_service_resolver = crate::build_memory_service_resolver(
+        memory_binding_policy,
+        &crate::MemoryProviderDeps::for_third_party(memory_provider_connection),
+    );
     let local_runtime_identity_for_nearai_mcp = local_runtime_identity.clone();
     let (root, workspace_root, host_home_root, storage_backend_input, secret_master_key) =
         match storage {
@@ -3200,6 +3205,7 @@ async fn build_production_shaped(
         nearai_mcp_bootstrap_config: _,
         turn_state_store_limits,
         memory_binding_policy,
+        memory_provider_connection,
     } = input;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let wiring_config = production_config(
@@ -3222,6 +3228,7 @@ async fn build_production_shaped(
         oauth_dcr_provider_configs,
         turn_state_store_limits,
         memory_binding_policy,
+        memory_provider_connection,
     );
 
     match storage {
@@ -3274,8 +3281,9 @@ async fn build_production_shaped(
                 owner_id,
                 local_runtime_identity,
                 turn_state_store_limits,
-                memory_resolver: MemoryServiceResolver::from_optional_policy(
+                memory_resolver: crate::build_memory_service_resolver(
                     memory_binding_policy.clone(),
+                    &crate::MemoryProviderDeps::for_third_party(memory_provider_connection.clone()),
                 ),
                 scheduler_wake_wiring,
             };
@@ -3313,8 +3321,9 @@ async fn build_production_shaped(
                 owner_id,
                 local_runtime_identity,
                 turn_state_store_limits,
-                memory_resolver: MemoryServiceResolver::from_optional_policy(
+                memory_resolver: crate::build_memory_service_resolver(
                     memory_binding_policy.clone(),
+                    &crate::MemoryProviderDeps::for_third_party(memory_provider_connection.clone()),
                 ),
                 scheduler_wake_wiring,
             };

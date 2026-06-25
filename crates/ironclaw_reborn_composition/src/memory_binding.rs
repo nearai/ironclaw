@@ -103,6 +103,7 @@ mod tests {
         MemorySection {
             profile_bindings,
             admin_overrides,
+            ..Default::default()
         }
     }
 

@@ -27,6 +27,7 @@ use ironclaw_reborn_config::StorageBackend;
 #[cfg(feature = "postgres")]
 use ironclaw_reborn_event_store::{PostgresPoolTlsOptions, RebornPostgresSslMode};
 
+use crate::Mem0ConnectionConfig;
 #[cfg(feature = "postgres")]
 use crate::RebornBuildError;
 use crate::google_oauth::google_provider_spec;
@@ -199,6 +200,12 @@ pub struct RebornBuildInput {
     /// host-bundled native provider. The CLI resolves this from the `[memory]`
     /// config section + deployment profile (fail-closed) before building.
     pub(crate) memory_binding_policy: Option<MemoryBindingPolicy>,
+    /// Connection settings for the configured third-party memory provider
+    /// (issue #5264). Empty unless `memory_binding_policy` binds a third-party
+    /// provider (e.g. mem0); carries that provider's base URL + API key so the
+    /// build-time wiring can construct and register it. Selection stays in the
+    /// binding policy; this only carries the chosen provider's connection.
+    pub(crate) memory_provider_connection: Mem0ConnectionConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -257,6 +264,15 @@ impl RebornBuildInput {
     /// the build input.
     pub fn with_memory_binding_policy(mut self, policy: MemoryBindingPolicy) -> Self {
         self.memory_binding_policy = Some(policy);
+        self
+    }
+
+    /// Attach connection settings for the configured third-party memory provider
+    /// (issue #5264). The CLI resolves these from the `[memory]` config section +
+    /// env (e.g. `MEMORY_MEM0_BASE_URL` / `MEMORY_MEM0_API_KEY`). Only consulted
+    /// when the binding policy binds a third-party provider; otherwise inert.
+    pub fn with_memory_provider_connection(mut self, connection: Mem0ConnectionConfig) -> Self {
+        self.memory_provider_connection = connection;
         self
     }
 
@@ -762,6 +778,7 @@ impl RebornBuildInput {
             nearai_mcp_bootstrap_config: None,
             turn_state_store_limits: InMemoryTurnStateStoreLimits::default(),
             memory_binding_policy: None,
+            memory_provider_connection: Mem0ConnectionConfig::default(),
         }
     }
 }

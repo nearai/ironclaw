@@ -642,6 +642,43 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn third_party_binding_dispatches_to_registered_provider() {
+        // The third-party binding is permitted, and a provider instance is
+        // registered for its id, so the *model-facing memory tool* dispatches
+        // through to that provider rather than failing closed — proving a mem0
+        // (or any third-party) binding transparently swaps the service behind the
+        // same `ironclaw.memory.native.*` tools, through the real resolver path.
+        let provider = Arc::new(RecordingMemoryService::default());
+        let resolver = document_store_resolver("acme.honcho")
+            .with_third_party_document_store_provider(
+                "acme.honcho",
+                provider.clone() as Arc<dyn MemoryService>,
+            );
+        let state = MemoryCapabilityState::with_resolver(resolver);
+        let request = memory_request(
+            MEMORY_SEARCH_CAPABILITY_ID,
+            json!({"query": "search marker", "limit": 3}),
+        );
+
+        let result = dispatch(&state, &request)
+            .await
+            .expect("registered third-party provider must dispatch");
+        assert_eq!(
+            result.output["results"][0]["content"],
+            "captured through IronClaw memory"
+        );
+        // The dispatch actually reached the registered third-party provider.
+        assert_eq!(
+            provider
+                .seen
+                .lock()
+                .expect("recording memory service lock should not be poisoned")
+                .len(),
+            1
+        );
+    }
+
     /// A resolver whose document-store profile is bound to `extension_id`
     /// (e.g. `memory.disabled` or a third party), for driving fail-closed
     /// dispatch through the real resolver path.
