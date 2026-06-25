@@ -40,7 +40,8 @@ use ironclaw_product_workflow::{
     RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
     RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
@@ -61,8 +62,9 @@ use ironclaw_product_workflow::{
     RebornTimelineRequest, RebornTimelineResponse, RebornUpdateMemberRoleRequest,
     RebornUpdateProjectRequest, SetActiveLlmRequest, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
+    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -85,12 +87,13 @@ fn caller() -> WebUiAuthenticatedCaller {
 }
 
 fn router_with(services: Arc<dyn RebornServicesApi>) -> Router {
-    router_with_capabilities(services, WebUiV2Capabilities::default())
+    router_with_caller(services, WebUiV2Capabilities::default(), caller())
 }
 
-fn router_with_capabilities(
+fn router_with_caller(
     services: Arc<dyn RebornServicesApi>,
     capabilities: WebUiV2Capabilities,
+    caller: WebUiAuthenticatedCaller,
 ) -> Router {
     webui_v2_router(WebUiV2State::new(
         services,
@@ -99,8 +102,15 @@ fn router_with_capabilities(
     // Production composition runs the bearer-token middleware that
     // constructs this `Extension`; tests bypass auth and inject the
     // caller directly so the regression target is the handler itself.
-    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(caller))
     .layer(axum::Extension(capabilities))
+}
+
+fn router_with_capabilities(
+    services: Arc<dyn RebornServicesApi>,
+    capabilities: WebUiV2Capabilities,
+) -> Router {
+    router_with_caller(services, capabilities, caller())
 }
 
 fn service_unavailable_error(retryable: bool) -> RebornServicesError {
@@ -116,6 +126,7 @@ fn service_unavailable_error(retryable: bool) -> RebornServicesError {
 
 type OperatorSetupCall = (Option<String>, Option<String>, bool, bool);
 type OperatorConfigSetCall = (String, Value);
+type LogsCall = RebornLogQueryRequest;
 type OperatorLogsCall = RebornOperatorLogsQuery;
 
 fn operator_config_surface_not_wired_diagnostic() -> RebornOperatorConfigDiagnostic {
@@ -246,6 +257,7 @@ struct StubServices {
     validate_operator_config_calls: Mutex<Vec<Vec<String>>>,
     get_operator_diagnostics_calls: Mutex<usize>,
     get_operator_status_calls: Mutex<usize>,
+    query_logs_calls: Mutex<Vec<LogsCall>>,
     query_operator_logs_calls: Mutex<Vec<OperatorLogsCall>>,
     run_operator_service_lifecycle_calls: Mutex<Vec<RebornOperatorServiceLifecycleAction>>,
     list_extensions_calls: Mutex<usize>,
@@ -1017,6 +1029,32 @@ impl RebornServicesApi for StubServices {
         Ok(operator_config_diagnostic_command_plane_response(
             RebornOperatorArea::Status,
         ))
+    }
+
+    async fn query_logs(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornLogQueryRequest,
+    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+        if request.tail && request.follow {
+            return Err(RebornServicesError {
+                code: RebornServicesErrorCode::InvalidRequest,
+                kind: RebornServicesErrorKind::Validation,
+                status_code: 400,
+                retryable: false,
+                field: Some("follow".to_string()),
+                validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+            });
+        }
+
+        self.query_logs_calls.lock().expect("lock").push(request);
+        Ok(RebornLogQueryResponse {
+            source: "test".to_string(),
+            entries: Vec::new(),
+            next_cursor: None,
+            tail_supported: true,
+            follow_supported: true,
+        })
     }
 
     async fn query_operator_logs(
@@ -2894,7 +2932,7 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
 }
 
 #[tokio::test]
-async fn operator_routes_require_operator_capability() {
+async fn operator_config_routes_require_operator_capability() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
 
@@ -2932,6 +2970,86 @@ async fn operator_routes_require_operator_capability() {
             .expect("lock")
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn operator_logs_require_operator_capability() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack&follow=true")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(
+        services
+            .query_operator_logs_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn logs_are_available_without_operator_capability() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/logs?limit=25&cursor=after-1&thread_id=thread-a&run_id=run-a&turn_id=turn-a&tool_call_id=tool-a&tool_name=shell&source=slack&follow=true")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let log_calls = services.query_logs_calls.lock().expect("lock");
+    assert_eq!(log_calls.len(), 1);
+    assert_eq!(log_calls[0].limit, Some(25));
+    assert_eq!(log_calls[0].cursor.as_deref(), Some("after-1"));
+    assert_eq!(log_calls[0].thread_id.as_deref(), Some("thread-a"));
+    assert_eq!(log_calls[0].run_id.as_deref(), Some("run-a"));
+    assert_eq!(log_calls[0].turn_id.as_deref(), Some("turn-a"));
+    assert_eq!(log_calls[0].tool_call_id.as_deref(), Some("tool-a"));
+    assert_eq!(log_calls[0].tool_name.as_deref(), Some("shell"));
+    assert_eq!(log_calls[0].source.as_deref(), Some("slack"));
+    assert!(log_calls[0].follow);
+    assert!(!log_calls[0].tail);
+}
+
+#[tokio::test]
+async fn logs_reject_ambiguous_tail_follow_modes() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/logs?tail=true&follow=true")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["field"], "follow");
+    assert_eq!(body["validation_code"], "invalid_value");
+    assert!(services.query_logs_calls.lock().expect("lock").is_empty());
 }
 
 #[tokio::test]
