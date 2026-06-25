@@ -81,10 +81,10 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
     InMemoryTurnStateStoreLimits, LoopGateRef, ReplyTargetBindingRef, RunProfileResolutionRequest,
-    SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot,
-    TurnRunId, TurnRunRecord, TurnRunState, TurnRunWake, TurnScope, TurnSpawnTreeStateStore,
-    TurnStatus,
+    RunWaitClass, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    TurnActor, TurnCoordinator, TurnError, TurnEventProjectionSource, TurnId,
+    TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState, TurnRunWake, TurnScope,
+    TurnSpawnTreeStateStore, TurnStatus,
     events::EventCursor,
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
@@ -1868,6 +1868,21 @@ impl RebornRuntime {
         )
     }
 
+    /// Wait until the run reaches a terminal status *or* parks on a
+    /// user-resolvable gate (auth/approval/resource).
+    ///
+    /// Waiting is classified through the canonical [`TurnStatus::wait_class`]
+    /// rather than a hand-rolled `is_terminal()` predicate: the four `Blocked*`
+    /// states never self-advance, so a waiter that only checks `is_terminal()`
+    /// would poll a gate-parked run until `poll_settings.max_total` and then
+    /// **kill** it with a `Timeout` cancel — destroying a run that was
+    /// correctly waiting on the user. A [`RunWaitClass::ParkedAwaitingUser`]
+    /// run is returned to the caller (its status carries the `Blocked*` state
+    /// and `gate_ref`) so the caller can surface the gate instead of cancelling
+    /// it. [`RunWaitClass::ParkedAwaitingRun`] (`BlockedDependentRun`) is an
+    /// internal wait on a child run, not resolvable through a user gate facade,
+    /// so it keeps polling like `Running` until the dependent run completes or
+    /// the poll budget expires.
     async fn wait_for_terminal(
         &self,
         scope: &TurnScope,
@@ -1886,11 +1901,15 @@ impl RebornRuntime {
                     run_id,
                 })
                 .await?;
-            if state.status.is_terminal() {
-                return Ok(state);
+            // `TurnStatus::RecoveryRequired` classifies as a terminal-failure
+            // wait class, so it is returned here too — no special
+            // cancel-to-release-lock is needed.
+            match state.status.wait_class() {
+                RunWaitClass::TerminalSuccess
+                | RunWaitClass::TerminalFailure
+                | RunWaitClass::ParkedAwaitingUser => return Ok(state),
+                RunWaitClass::Running | RunWaitClass::ParkedAwaitingRun => {}
             }
-            // TurnStatus::RecoveryRequired is now terminal (is_terminal() returns true)
-            // so the branch above handles it; no special cancel-to-release-lock is needed.
             if start.elapsed() > self.poll_settings.max_total {
                 self.cancel_run(
                     scope,
@@ -1919,14 +1938,16 @@ impl RebornRuntime {
         }
     }
 
-    /// Like [`Self::wait_for_terminal`], but also returns when the run parks on
-    /// a user-resolvable gate (auth/approval/resource) instead of polling until
-    /// those non-terminal states either resolve or hit `RunTimeout`.
-    /// `BlockedDependentRun` is deliberately excluded — it is an internal wait
-    /// on a child run, not facade-resolvable, so it keeps polling. The returned
-    /// state carries the `Blocked*` status and
-    /// `gate_ref`; the caller decides whether to resolve (through the WebUI
-    /// facade) or stop. Test/recording-support only.
+    /// Test/recording-support alias of [`Self::wait_for_terminal`], kept for the
+    /// QA-trace recorder's intent-revealing call site.
+    ///
+    /// Since [`Self::wait_for_terminal`] now classifies waits through
+    /// [`TurnStatus::wait_class`] and returns a [`RunWaitClass::ParkedAwaitingUser`]
+    /// run instead of killing it, this is behaviorally identical and simply
+    /// delegates — the gate-aware behavior is no longer test-only. The returned
+    /// state carries the `Blocked*` status and `gate_ref`; the caller decides
+    /// whether to resolve (through the WebUI facade) or stop. `BlockedDependentRun`
+    /// is not user-resolvable, so (like `Running`) it keeps polling.
     #[cfg(any(test, feature = "test-support"))]
     async fn wait_for_terminal_or_gate(
         &self,
@@ -1934,82 +1955,7 @@ impl RebornRuntime {
         run_id: TurnRunId,
         cancellation: &CancellationToken,
     ) -> Result<TurnRunState, RebornRuntimeError> {
-        let start = std::time::Instant::now();
-        loop {
-            if self.turn_scheduler.is_stopped() {
-                return Err(RebornRuntimeError::WorkerStopped);
-            }
-            let state = self
-                .turn_coordinator
-                .get_run_state(GetRunStateRequest {
-                    scope: scope.clone(),
-                    run_id,
-                })
-                .await?;
-            // Exhaustive on purpose: a new `TurnStatus` variant must force a
-            // compile error here rather than silently defaulting to "not a
-            // gate". Only the user-resolvable gates short-circuit recording.
-            // `BlockedDependentRun` is an internal wait on a child run (the
-            // upstream contract names it `AwaitDependentRun`) — it is not
-            // resolvable through the gate facade, so it keeps polling like
-            // `Queued`/`Running` until the dependent run completes or the poll
-            // budget expires.
-            let blocked_on_gate = match state.status {
-                TurnStatus::BlockedApproval
-                | TurnStatus::BlockedAuth
-                | TurnStatus::BlockedResource => true,
-                TurnStatus::BlockedDependentRun
-                | TurnStatus::Queued
-                | TurnStatus::Running
-                | TurnStatus::CancelRequested
-                | TurnStatus::Cancelled
-                | TurnStatus::Completed
-                | TurnStatus::Failed
-                | TurnStatus::RecoveryRequired => false,
-            };
-            if state.status.is_terminal() || blocked_on_gate {
-                return Ok(state);
-            }
-            if start.elapsed() > self.poll_settings.max_total {
-                // Surface the primary `RunTimeout`; a failure of the secondary
-                // cancel is logged with a sanitized id only and must not mask
-                // it (see error-handling.md). `debug!` not `warn!` per the
-                // logging rule — this runtime is REPL/TUI-reachable.
-                if self
-                    .cancel_run(
-                        scope,
-                        run_id,
-                        SanitizedCancelReason::Timeout,
-                        "timeout-cancel",
-                    )
-                    .await
-                    .is_err()
-                {
-                    tracing::debug!(run_id = %run_id, "failed to cancel run after recorder timeout");
-                }
-                return Err(RebornRuntimeError::RunTimeout {
-                    timeout: self.poll_settings.max_total,
-                });
-            }
-            tokio::select! {
-                _ = cancellation.cancelled() => {
-                    if self
-                        .cancel_run(
-                            scope,
-                            run_id,
-                            SanitizedCancelReason::UserRequested,
-                            "caller-cancel",
-                        )
-                        .await
-                        .is_err()
-                    {
-                        tracing::debug!(run_id = %run_id, "failed to cancel run after caller cancellation");
-                    }
-                    return Err(RebornRuntimeError::OperationCancelled);
-                }
-                _ = tokio::time::sleep(self.poll_settings.interval) => {}
-            }
-        }
+        self.wait_for_terminal(scope, run_id, cancellation).await
     }
 
     /// Test/recording-support sibling of [`Self::send_user_message`] that

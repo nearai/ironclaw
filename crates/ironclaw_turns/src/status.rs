@@ -25,6 +25,35 @@ pub enum TurnStatus {
     RecoveryRequired,
 }
 
+/// How a wait/poll loop should treat a run in a given [`TurnStatus`].
+///
+/// This is the single canonical classifier for "what should a waiter do with
+/// this run state?". Any wait/poll loop that decides whether to keep waiting,
+/// surface a parked run, or treat the run as finished MUST go through
+/// [`TurnStatus::wait_class`] rather than hand-rolling a partial predicate on
+/// top of [`TurnStatus::is_terminal`] — the four `Blocked*` "parked" states
+/// never self-advance, so a waiter that only checks `is_terminal()` will either
+/// hang forever or destroy a run that is legitimately waiting on a gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunWaitClass {
+    /// The run is still making progress on its own; a waiter should keep
+    /// waiting. Includes `CancelRequested`: cancellation is in flight and the
+    /// run will reach a terminal state on its own.
+    Running,
+    /// Parked awaiting a USER-resolvable gate (approval / auth / resource).
+    /// Never self-advances — only the user resolving the gate moves it. A
+    /// waiter MUST surface this (return it / propagate it), never kill it.
+    ParkedAwaitingUser,
+    /// Parked awaiting a dependent (child) run. Never self-advances on its own,
+    /// but resolves when the dependent run completes — it is not resolvable
+    /// through a user gate facade, so a waiter may keep polling for it.
+    ParkedAwaitingRun,
+    /// Reached a terminal success.
+    TerminalSuccess,
+    /// Reached a terminal failure, cancellation, or recovery-required state.
+    TerminalFailure,
+}
+
 impl TurnStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
@@ -35,6 +64,24 @@ impl TurnStatus {
 
     pub fn keeps_active_lock(self) -> bool {
         !self.is_terminal()
+    }
+
+    /// Classify this status for a wait/poll loop. Exhaustive on purpose: a new
+    /// [`TurnStatus`] variant must force a compile error here so every waiter is
+    /// forced to classify it, rather than silently treating it as "still
+    /// running" or "terminal". See [`RunWaitClass`].
+    pub fn wait_class(self) -> RunWaitClass {
+        match self {
+            Self::Queued | Self::Running | Self::CancelRequested => RunWaitClass::Running,
+            Self::BlockedApproval | Self::BlockedAuth | Self::BlockedResource => {
+                RunWaitClass::ParkedAwaitingUser
+            }
+            Self::BlockedDependentRun => RunWaitClass::ParkedAwaitingRun,
+            Self::Completed => RunWaitClass::TerminalSuccess,
+            Self::Cancelled | Self::Failed | Self::RecoveryRequired => {
+                RunWaitClass::TerminalFailure
+            }
+        }
     }
 }
 
@@ -439,6 +486,77 @@ impl TurnError {
             TurnErrorCategory::Unauthorized => 403,
             TurnErrorCategory::InvalidRequest => 400,
             TurnErrorCategory::Unavailable => 503,
+        }
+    }
+}
+
+#[cfg(test)]
+mod wait_class_tests {
+    use super::{RunWaitClass, TurnStatus};
+
+    const ALL_STATUSES: [TurnStatus; 11] = [
+        TurnStatus::Queued,
+        TurnStatus::Running,
+        TurnStatus::BlockedApproval,
+        TurnStatus::BlockedAuth,
+        TurnStatus::BlockedResource,
+        TurnStatus::BlockedDependentRun,
+        TurnStatus::CancelRequested,
+        TurnStatus::Cancelled,
+        TurnStatus::Completed,
+        TurnStatus::Failed,
+        TurnStatus::RecoveryRequired,
+    ];
+
+    #[test]
+    fn wait_class_matches_expected_classification() {
+        for status in ALL_STATUSES {
+            let expected = match status {
+                TurnStatus::Queued | TurnStatus::Running | TurnStatus::CancelRequested => {
+                    RunWaitClass::Running
+                }
+                TurnStatus::BlockedApproval
+                | TurnStatus::BlockedAuth
+                | TurnStatus::BlockedResource => RunWaitClass::ParkedAwaitingUser,
+                TurnStatus::BlockedDependentRun => RunWaitClass::ParkedAwaitingRun,
+                TurnStatus::Completed => RunWaitClass::TerminalSuccess,
+                TurnStatus::Cancelled | TurnStatus::Failed | TurnStatus::RecoveryRequired => {
+                    RunWaitClass::TerminalFailure
+                }
+            };
+            assert_eq!(status.wait_class(), expected, "wait_class for {status:?}");
+        }
+    }
+
+    #[test]
+    fn is_terminal_equals_terminal_wait_classes() {
+        // `is_terminal()` must stay equivalent to the terminal wait classes so
+        // the two classifiers never drift.
+        for status in ALL_STATUSES {
+            let terminal_via_class = matches!(
+                status.wait_class(),
+                RunWaitClass::TerminalSuccess | RunWaitClass::TerminalFailure
+            );
+            assert_eq!(
+                status.is_terminal(),
+                terminal_via_class,
+                "is_terminal vs wait_class for {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parked_states_are_never_terminal() {
+        for status in ALL_STATUSES {
+            if matches!(
+                status.wait_class(),
+                RunWaitClass::ParkedAwaitingUser | RunWaitClass::ParkedAwaitingRun
+            ) {
+                assert!(
+                    !status.is_terminal(),
+                    "parked status {status:?} must not be terminal"
+                );
+            }
         }
     }
 }

@@ -517,6 +517,7 @@ impl OpenAiResponsesThreadProjectionReader {
         let next_cursor = events.last().map(|event| event.projection_cursor().clone());
         Ok(ProjectedResponseStatusRead {
             status: response_status_from_projection_events(&events, submitted_run_id),
+            parked_on_gate: run_parked_on_gate_in_events(&events, submitted_run_id),
             next_cursor,
         })
     }
@@ -677,6 +678,22 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
                     Vec::new(),
                 )));
             }
+            // A run parked on a user-resolvable gate (approval/auth/resource)
+            // never produces a finalized message and never emits a terminal
+            // `RunStatus` projection — so without this check the loop would spin
+            // until the outer HTTP timeout, turning a permanent "needs user
+            // action" state into a misleading retryable 503. Surface it promptly
+            // as `Incomplete` (the OpenAI Responses status for a run that
+            // stopped before finishing) so the caller stops polling.
+            if projected.parked_on_gate {
+                return Ok(OpenAiResponseProjection::new(response_object(
+                    request.public_id,
+                    request.mapping.created_at,
+                    request.requested_model,
+                    OpenAiResponseStatus::Incomplete,
+                    Vec::new(),
+                )));
+            }
             tokio::time::sleep(self.poll_interval).await;
         }
     }
@@ -726,6 +743,11 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
 
 struct ProjectedResponseStatusRead {
     status: Option<OpenAiResponseStatus>,
+    /// True when the run emitted a gate prompt (it parked on a user-resolvable
+    /// approval/auth/resource gate) and has not since produced a terminal
+    /// status. Parked runs never self-advance, so a poll loop must surface this
+    /// rather than wait for a status/message that will never arrive.
+    parked_on_gate: bool,
     next_cursor: Option<ProjectionCursor>,
 }
 
@@ -761,6 +783,30 @@ fn response_status_from_projection_events(
         | ProductOutboundPayload::GatePrompt(_)
         | ProductOutboundPayload::AuthPrompt(_)
         | ProductOutboundPayload::KeepAlive => None,
+    })
+}
+
+/// Detect whether the run parked on a user-resolvable gate. A `GatePrompt`
+/// payload carries the parked run's `turn_run_id`, so it correlates directly to
+/// the run we are waiting on. A later terminal `RunStatus` for the same run
+/// (failed/cancelled) wins — the terminal check in the wait loop runs first — so
+/// this only fires while the run is genuinely parked.
+fn run_parked_on_gate_in_events(
+    events: &[ProductOutboundEnvelope],
+    submitted_run_id: &str,
+) -> bool {
+    events.iter().any(|event| match event.payload() {
+        ProductOutboundPayload::GatePrompt(prompt) => {
+            prompt.turn_run_id.to_string() == submitted_run_id
+        }
+        ProductOutboundPayload::ProjectionSnapshot { .. }
+        | ProductOutboundPayload::ProjectionUpdate { .. }
+        | ProductOutboundPayload::FinalReply(_)
+        | ProductOutboundPayload::Progress(_)
+        | ProductOutboundPayload::CapabilityActivity(_)
+        | ProductOutboundPayload::CapabilityDisplayPreview(_)
+        | ProductOutboundPayload::AuthPrompt(_)
+        | ProductOutboundPayload::KeepAlive => false,
     })
 }
 

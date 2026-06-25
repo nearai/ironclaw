@@ -188,6 +188,45 @@ async fn openai_responses_wait_advances_projection_cursor_between_polls() {
     assert_eq!(stream.after_cursors(), vec![None, Some(first_cursor)]);
 }
 
+/// RED regression for the unbounded `wait_for_response_completion` loop.
+///
+/// A run that parks on a user-resolvable gate emits a `GatePrompt` projection
+/// but never a finalized assistant message and never a terminal `RunStatus`
+/// update. The old loop only returned on a finalized message or a
+/// `Failed`/`Cancelled` projection status, so a parked run spun forever (the
+/// outer HTTP timeout would turn it into a permanent retryable 503 with no gate
+/// info). After the fix, the loop detects the run-matched `GatePrompt` and
+/// returns promptly with `OpenAiResponseStatus::Incomplete`.
+///
+/// On OLD code this test TIMES OUT (the loop never returns); on FIXED code it
+/// returns `Incomplete` within milliseconds.
+#[tokio::test]
+async fn openai_responses_wait_returns_incomplete_when_run_parks_on_gate() {
+    let fixture = ResponseReaderFixture::new("wait-gate").await;
+    let run_id = TurnRunId::new();
+    let mut reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![gate_prompt_envelope(
+            run_id,
+        )])),
+    );
+    reader.poll_interval = Duration::from_millis(1);
+
+    let projection = tokio::time::timeout(
+        Duration::from_secs(2),
+        reader.wait_for_response_completion(fixture.wait_request(run_id)),
+    )
+    .await
+    .expect("wait must return promptly when the run parks on a gate, not spin forever")
+    .expect("parked run must surface as a projection, not an error");
+
+    assert_eq!(
+        projection.response.status,
+        OpenAiResponseStatus::Incomplete,
+        "a run parked on a gate must surface as Incomplete; the wait must not hang"
+    );
+}
+
 struct ResponseReaderFixture {
     threads: Arc<InMemorySessionThreadService>,
     actor_scope: OpenAiCompatActorScope,
@@ -382,6 +421,33 @@ impl ProjectionStream for SequencedProjectionStream {
             .pop_front()
             .unwrap_or_default())
     }
+}
+
+/// A gate-prompt envelope for `run_id`: the projection signal a run emits when
+/// it parks on a user-resolvable gate (approval/auth/resource). No `RunStatus`
+/// update is emitted for parked runs, so this is the only signal the wait loop
+/// can observe to detect a parked run.
+fn gate_prompt_envelope(run_id: TurnRunId) -> ProductOutboundEnvelope {
+    ProductOutboundEnvelope::new(
+        ProductAdapterId::new(OPENAI_COMPAT_ADAPTER_ID).expect("adapter id"),
+        AdapterInstallationId::new(OPENAI_COMPAT_INSTALLATION_ID).expect("installation id"),
+        ProductOutboundTarget::new(
+            ReplyTargetBindingRef::new("reply:test").expect("reply target"),
+            ExternalConversationRef::new(None, "conversation:test", None, None)
+                .expect("conversation ref"),
+            None,
+        ),
+        ProjectionCursor::new(format!("gate-cursor:{}", run_id.as_uuid())).expect("cursor"),
+        ProductOutboundPayload::GatePrompt(ironclaw_product_adapters::GatePromptView {
+            turn_run_id: run_id,
+            gate_ref: "gate:test".to_string(),
+            invocation_id: None,
+            headline: "Approval required".to_string(),
+            body: "The agent wants to run a shell command.".to_string(),
+            allow_always: false,
+            approval_context: None,
+        }),
+    )
 }
 
 fn run_status_envelope(
