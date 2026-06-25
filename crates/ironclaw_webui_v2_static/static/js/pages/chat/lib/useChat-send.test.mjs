@@ -52,7 +52,11 @@ function runUseChatSource(context) {
   vm.runInNewContext(useChatSourceForTest(), context);
 }
 
-function createReactStub({ initialByIndex = new Map(), setCalls = [] } = {}) {
+function createReactStub({
+  initialByIndex = new Map(),
+  setCalls = [],
+  stateSlots = new Map(),
+} = {}) {
   let stateIndex = 0;
   return {
     useCallback: (fn) => fn,
@@ -60,16 +64,19 @@ function createReactStub({ initialByIndex = new Map(), setCalls = [] } = {}) {
     useRef: (value) => ({ current: value }),
     useState: (initial) => {
       const index = stateIndex++;
-      let value = initialByIndex.has(index)
-        ? initialByIndex.get(index)
-        : typeof initial === "function"
-          ? initial()
-          : initial;
+      const slot = stateSlots.get(index) || {
+        value: initialByIndex.has(index)
+          ? initialByIndex.get(index)
+          : typeof initial === "function"
+            ? initial()
+            : initial,
+      };
+      stateSlots.set(index, slot);
       return [
-        value,
+        slot.value,
         (next) => {
-          value = typeof next === "function" ? next(value) : next;
-          setCalls.push({ index, value });
+          slot.value = typeof next === "function" ? next(slot.value) : next;
+          setCalls.push({ index, value: slot.value });
         },
       ];
     },
@@ -560,7 +567,7 @@ test("useChat.send: target-thread thrown errors update seeded cache", async () =
 });
 
 test("useChat.send: pending approval blocks before sendMessage", async () => {
-  const threadId = "thread-approval";
+  const threadId = "thread-1";
   const pendingGate = {
     runId: "run-gated",
     gateRef: "gate-shell",
@@ -568,7 +575,6 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
     toolName: "builtin.shell",
   };
   const stateUpdates = [];
-  let sendCalls = 0;
   let renderedMessages = [];
 
   const context = {
@@ -594,12 +600,12 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
     },
     globalThis: {},
     listConnectableChannels: async () => {
-      throw new Error("approval-gated sends should not fetch connectable channels");
+      throw new Error("ordinary prompts should not fetch connectable channels");
     },
     looksLikeChannelConnectCommand,
     queryClient: {
       fetchQuery: async () => {
-        throw new Error("approval-gated sends should not fetch connectable channels");
+        throw new Error("ordinary prompts should not fetch connectable channels");
       },
       invalidateQueries: () => {},
     },
@@ -608,7 +614,6 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
     resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
     sendMessage: async () => {
-      sendCalls += 1;
       throw new Error("sendMessage should not be called");
     },
     setInterval,
@@ -634,15 +639,203 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
 
   const chat = context.globalThis.__testExports.useChat(threadId);
   await assert.rejects(
-    chat.send("new request while approval is open"),
+    chat.send("another request"),
     (error) =>
       error?.safeErrorCode === "approval_gate_pending_send_blocked" &&
       /Resolve the approval request/.test(error.message),
   );
 
-  assert.equal(sendCalls, 0);
-  assert.deepEqual(renderedMessages, []);
   assert.deepEqual(stateUpdates, []);
+  assert.equal(renderedMessages.length, 0);
+});
+
+test("useChat.send: accepted send does not clear a gate received while in flight", async () => {
+  const threadId = "thread-1";
+  const replacementGate = {
+    runId: "run-replacement",
+    gateRef: "gate-replacement",
+    kind: "gate",
+    toolName: "nearai.web_search",
+  };
+  const stateUpdates = [];
+  const stateSlots = new Map();
+  let renderedMessages = [];
+  let setPendingGateFromEvents = null;
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [4, false],
+        [5, null],
+      ]),
+      setCalls: stateUpdates,
+      stateSlots,
+    }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      setPendingGateFromEvents(replacementGate);
+      return {
+        accepted_message_ref: "msg:message-accepted",
+        run_id: "run-accepted",
+        status: "queued",
+        thread_id: threadId,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: ({ setPendingGate }) => {
+      setPendingGateFromEvents = setPendingGate;
+      return () => {};
+    },
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.send("accepted after gate changed");
+
+  assert.deepEqual(
+    stateUpdates.filter((call) => call.index === 5).map((call) => call.value),
+    [replacementGate],
+    "non-busy success must not clear a gate that changed while send was in flight",
+  );
+  assert.equal(stateSlots.get(5).value, replacementGate);
+});
+
+test("useChat.send: rejected busy does not clear a gate received while in flight", async () => {
+  const threadId = "thread-1";
+  const replacementGate = {
+    runId: "run-replacement",
+    gateRef: "gate-replacement",
+    kind: "gate",
+    toolName: "nearai.web_search",
+  };
+  const stateUpdates = [];
+  const stateSlots = new Map();
+  let renderedMessages = [];
+  let setPendingGateFromEvents = null;
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [4, false],
+        [5, null],
+      ]),
+      setCalls: stateUpdates,
+      stateSlots,
+    }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      setPendingGateFromEvents(replacementGate);
+      return {
+        outcome: "rejected_busy",
+        accepted_message_ref: "msg:busy-message-1",
+        notice: "Thread is busy, please try again.",
+        thread_id: threadId,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: ({ setPendingGate }) => {
+      setPendingGateFromEvents = setPendingGate;
+      return () => {};
+    },
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.send("busy after gate changed");
+
+  assert.deepEqual(
+    stateUpdates.filter((call) => call.index === 5).map((call) => call.value),
+    [replacementGate],
+    "busy rejection must leave a concurrently replaced gate untouched",
+  );
+  assert.equal(stateSlots.get(5).value, replacementGate);
 });
 
 test("useChat.cancelRun clears local state before cancel request resolves", async () => {

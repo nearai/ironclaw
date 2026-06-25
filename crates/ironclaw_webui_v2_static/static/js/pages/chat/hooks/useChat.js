@@ -184,7 +184,16 @@ export function useChat(threadId) {
   } = useHistory(threadId, { getPendingMessages, setPendingMessages });
 
   const [isProcessing, setIsProcessing] = React.useState(false);
-  const [pendingGate, setPendingGate] = React.useState(null);
+  const [pendingGate, setPendingGateState] = React.useState(null);
+  const pendingGateRef = React.useRef(pendingGate);
+  const setPendingGate = React.useCallback((next) => {
+    const current = pendingGateRef.current;
+    const value =
+      typeof next === "function" ? next(current) : next;
+    if (Object.is(value, current)) return;
+    pendingGateRef.current = value;
+    setPendingGateState(value);
+  }, []);
   const [stateThreadId, setStateThreadId] = React.useState(threadId);
   const toolActivityStateRef = React.useRef(createToolActivityState());
   const locallyResolvedGatesRef = React.useRef(new Map());
@@ -224,10 +233,14 @@ export function useChat(threadId) {
   if (stateThreadId !== threadId) {
     setStateThreadId(threadId);
     setIsProcessing(false);
-    setPendingGate(null);
+    setPendingGateState(null);
     setActiveRunState(null);
     setChannelConnectAction(null);
   }
+
+  React.useEffect(() => {
+    pendingGateRef.current = pendingGate;
+  }, [pendingGate]);
 
   React.useEffect(() => {
     resetToolActivityState(toolActivityStateRef);
@@ -353,7 +366,7 @@ export function useChat(threadId) {
       const wireAttachments = stagedAttachments.map(toWireAttachment);
       const renderAttachments = stagedAttachments.map(toRenderAttachment);
 
-      if (pendingGate) {
+      if (pendingGateRef.current) {
         throw approvalGatePendingSendError();
       }
 
@@ -378,6 +391,10 @@ export function useChat(threadId) {
         if (!sendThreadId) {
           throw new Error("createThread returned no thread_id");
         }
+      }
+
+      if (pendingGateRef.current) {
+        throw approvalGatePendingSendError();
       }
 
       const pendingKey = sendThreadId;
@@ -416,7 +433,9 @@ export function useChat(threadId) {
 
       updateCurrentRunState(() => {
         setIsProcessing(true);
-        setPendingGate(null);
+        if (!pendingGateRef.current) {
+          setPendingGate(null);
+        }
       });
 
       try {
@@ -516,7 +535,7 @@ export function useChat(threadId) {
         removePending(pendingMessagesRef.current, pendingKey, optimisticId);
       }
     },
-    [threadId, pendingGate, setMessages, seedThreadMessages],
+    [threadId, setMessages, seedThreadMessages],
   );
 
   // v2 resolveGate signature: `(resolution, { always?, credentialRef? })`.
