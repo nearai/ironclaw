@@ -1444,6 +1444,21 @@ mod postgres_tests {
         assert_eq!(got.entry.body, vec![2]);
     }
 
+    #[tokio::test]
+    async fn postgres_put_cas_any_inserts_missing_path_and_returns_version() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let missing = vpath(&prefix, "cas_any_insert_missing");
+        let v1 = fs
+            .put(&missing, Entry::bytes(vec![7]), CasExpectation::Any)
+            .await
+            .expect("Any insert on a missing path must succeed");
+        assert_eq!(v1, ironclaw_filesystem::RecordVersion::from_backend(1));
+        let got = fs.get(&missing).await.unwrap().unwrap();
+        assert_eq!(got.entry.body, vec![7]);
+    }
+
     // CAS-put directory invariant (folded into the single write statement by
     // the round-trip fix). Mirrors the libsql `write_file` rejection tests but
     // drives `put` directly, which is the primitive the SQL fold changed.
