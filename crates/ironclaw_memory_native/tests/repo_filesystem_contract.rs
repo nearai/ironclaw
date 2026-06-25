@@ -2,7 +2,7 @@
 //! [`RootFilesystem`]) to the shared [`MemoryDocumentRepository`]
 //! contract suite.
 //!
-//! See `crates/ironclaw_memory/src/contract_tests.rs` for the suite
+//! See `crates/ironclaw_memory_native/src/contract_tests.rs` for the suite
 //! itself and the rationale (#3890 / .claude/rules/testing.md).
 //!
 //! Each contract gets its own `InMemoryBackend` — the factory closure
@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_memory::{FilesystemMemoryDocumentRepository, contract_test_indexed};
+use ironclaw_memory_native::{FilesystemMemoryDocumentRepository, contract_test_indexed};
 
 // FilesystemMemoryDocumentRepository implements MemoryDocumentIndexRepository
 // and serves FTS search, so it gets the chunk-seeded search-isolation

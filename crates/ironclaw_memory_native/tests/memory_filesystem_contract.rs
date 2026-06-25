@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::VirtualPath;
-use ironclaw_memory::*;
+use ironclaw_memory_native::*;
 
 #[test]
 fn memory_scope_rejects_segments_that_cannot_round_trip_or_collide_in_owner_keys() {
