@@ -69,6 +69,11 @@ function threadNeedsSidebarRefresh(threadId) {
   return !thread?.title;
 }
 
+function busyNoticeKey(threadId, gate) {
+  if (!threadId || !gate?.runId || !gate?.gateRef) return null;
+  return `${threadId}\n${gate.runId}\n${gate.gateRef}`;
+}
+
 function submitResponseResumedTurnGate(response) {
   return response?.continuation?.type === "turn_gate_resume";
 }
@@ -487,17 +492,19 @@ export function useChat(threadId) {
           updateCurrentThread(markRejected);
           updateSeededTarget(markRejected);
           if (response?.notice) {
+            const noticeKey = busyNoticeKey(sendThreadId, gateBeforeSend);
             const noticeMessage = {
               id: `system-rejected-${pendingSeqRef.current++}`,
               role: "system",
               content: response.notice,
               timestamp: new Date().toISOString(),
               isOptimistic: false,
+              busyGateKey: noticeKey,
             };
-            const appendNotice = (prev) => [
-              ...prev,
-              noticeMessage,
-            ];
+            const appendNotice = (prev) =>
+              noticeKey && prev.some((m) => m.busyGateKey === noticeKey)
+                ? prev
+                : [...prev, noticeMessage];
             updateCurrentThread(appendNotice);
             updateSeededTarget(appendNotice);
           }
