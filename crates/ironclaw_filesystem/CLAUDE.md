@@ -62,6 +62,24 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
    retry on `FilesystemError::VersionMismatch`. Consumers must never assume
    `begin`/`StorageTxn` is available; backends that don't expose it return
    `Unsupported` and that must be a working path.
+
+   **Use the shared `cas_update` helper — never a per-record mutex.** Every
+   filesystem read-modify-write MUST go through
+   [`ironclaw_filesystem::cas_update`](src/cas.rs) (bounded CAS-retry +
+   jittered backoff + overall timeout + fail-closed capability gate). Do NOT
+   wrap a filesystem RMW in a per-record `tokio::sync::Mutex`
+   (`FILESYSTEM_RECORD_LOCKS`-style) held across the backend `get`/`put`
+   `.await`: it is a redundant in-process serializer over a backend that
+   already does versioned CAS, and under burst it convoys every same-scope
+   writer behind one stalled writer (the 2026-06-24 runtime wedge). It also
+   tends to leak (a strong-`Arc` map that is never pruned). There is exactly
+   ONE CAS implementation — `cas_update`; do not re-copy the retry/backoff
+   loop into a store. `cas_update` fails **closed** on a non-CAS backend
+   (`CasUpdateError::CasUnsupported`) rather than falling back to a blind
+   `CasExpectation::Any` overwrite; all production store mounts resolve to
+   CAS-capable db/in-memory backends (`LocalFilesystem` is byte-only and is
+   structurally unreachable from those mounts), so fail-closed is correct.
+   See `docs/plans/2026-06-25-cas-migration.md`.
 3. **Capabilities are declared, not discovered.** A backend that cannot
    serve an `IndexKind::Vector` or a `Filter::Range` declares so up front
    via `BackendCapabilities`; mount-time validation refuses the attachment.
