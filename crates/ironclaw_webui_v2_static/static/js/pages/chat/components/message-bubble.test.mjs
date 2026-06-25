@@ -36,3 +36,26 @@ test("markdown body and code blocks inherit readable message sizing", () => {
     "fenced code should stay close to body size instead of shrinking below readability",
   );
 });
+
+test("message timestamp and actions share a hover-only meta row", () => {
+  assert.match(
+    messageBubbleSource,
+    /<time dateTime=\$\{timestamp\} className="font-mono text-\[11px\] text-iron-500">\$\{timeLabel\}<\/time>/,
+    "timestamp should render in the hover meta row",
+  );
+  assert.match(
+    messageBubbleSource,
+    /flex min-h-7 items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100/,
+    "timestamp and controls should stay hidden until message hover or focus",
+  );
+
+  const actionRow = messageBubbleSource.slice(
+    messageBubbleSource.indexOf('"flex min-h-7 items-center'),
+    messageBubbleSource.indexOf("</div>", messageBubbleSource.indexOf('"flex min-h-7 items-center')),
+  );
+  assert.doesNotMatch(
+    actionRow,
+    /\$\{copied \? "Copied" : "Copy"\}|>Retry</,
+    "hover controls should use fixed-size icons instead of text that competes with the timestamp",
+  );
+});

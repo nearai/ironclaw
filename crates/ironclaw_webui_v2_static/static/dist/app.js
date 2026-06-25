@@ -1741,33 +1741,33 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
           />`}
         </div>
 
-        ${(w||c==="error"||x)&&l`
+        ${(w||c==="error"&&t||x)&&l`
           <div
-            className=${["flex items-center gap-1.5 px-1 text-iron-400 opacity-0 group-hover:opacity-100 focus-within:opacity-100",p?"justify-end":"justify-start"].join(" ")}
+            className=${["flex min-h-7 items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100",p?"justify-end":"justify-start"].join(" ")}
           >
+            ${x&&l`<time dateTime=${m} className="font-mono text-[11px] text-iron-500">${x}</time>`}
             ${w&&l`
               <button
                 type="button"
                 onClick=${v}
+                title=${b?"Copied":"Copy message"}
                 aria-label="Copy message"
-                className="v2-button inline-flex items-center gap-1 rounded-md border-0 bg-transparent px-1.5 py-1 text-[11px] hover:text-iron-100"
+                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100"
               >
                 <${D} name=${b?"check":"copy"} className="h-3.5 w-3.5" />
-                ${b?"Copied":"Copy"}
               </button>
             `}
             ${c==="error"&&t&&l`
               <button
                 type="button"
                 onClick=${()=>t(e)}
+                title="Retry message"
                 aria-label="Retry message"
-                className="v2-button inline-flex items-center gap-1 rounded-md border-0 bg-transparent px-1.5 py-1 text-[11px] text-red-300 hover:text-red-200"
+                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 text-red-300 hover:text-red-200"
               >
                 <${D} name="retry" className="h-3.5 w-3.5" />
-                Retry
               </button>
             `}
-            ${x&&l`<span className="font-mono text-[10px] text-iron-500">${x}</span>`}
           </div>
         `}
       </div>
