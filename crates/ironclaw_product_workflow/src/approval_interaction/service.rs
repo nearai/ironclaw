@@ -543,15 +543,7 @@ fn map_approval_resume_error(error: TurnError) -> ProductWorkflowError {
 }
 
 fn persistent_approval_settings_scope(scope: &ResourceScope) -> ResourceScope {
-    ResourceScope {
-        tenant_id: scope.tenant_id.clone(),
-        user_id: scope.user_id.clone(),
-        agent_id: None,
-        project_id: None,
-        mission_id: None,
-        thread_id: None,
-        invocation_id: scope.invocation_id,
-    }
+    scope.tenant_user_settings_scope()
 }
 
 #[cfg(test)]

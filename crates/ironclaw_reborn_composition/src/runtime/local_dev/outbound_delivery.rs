@@ -476,9 +476,15 @@ fn settings_scope_for_run(
     run_context: &LoopRunContext,
     fallback_user_id: &UserId,
 ) -> ResourceScope {
-    let mut scope = run_context.scope.to_resource_scope();
-    scope.user_id = effective_user_id(run_context, fallback_user_id);
-    scope
+    ResourceScope {
+        tenant_id: run_context.scope.tenant_id.clone(),
+        user_id: effective_user_id(run_context, fallback_user_id),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
 }
 
 fn effective_user_id(run_context: &LoopRunContext, fallback_user_id: &UserId) -> UserId {

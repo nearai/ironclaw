@@ -1154,15 +1154,7 @@ fn persistent_user_policy_key(
 }
 
 fn operator_tool_permission_scope(scope: &ResourceScope) -> ResourceScope {
-    ResourceScope {
-        tenant_id: scope.tenant_id.clone(),
-        user_id: scope.user_id.clone(),
-        agent_id: None,
-        project_id: None,
-        mission_id: None,
-        thread_id: None,
-        invocation_id: scope.invocation_id,
-    }
+    scope.tenant_user_settings_scope()
 }
 
 fn tool_permission_locked(tool: &RebornOperatorToolInfo) -> bool {
@@ -1230,14 +1222,6 @@ async fn apply_tool_permission_state(
     match update {
         ToolPermissionUpdate::Default => {
             let operator_scope = operator_tool_permission_scope(scope);
-            config
-                .overrides
-                .clear(&ToolPermissionOverrideKey::new(
-                    &operator_scope,
-                    tool.capability_id.clone(),
-                ))
-                .await
-                .map_err(operator_config_store_error)?;
             match config
                 .persistent_policies
                 .revoke(&persistent_user_policy_key(&operator_scope, tool))
@@ -1246,9 +1230,6 @@ async fn apply_tool_permission_state(
                 Ok(_) | Err(PersistentApprovalPolicyError::UnknownPolicy) => {}
                 Err(error) => return Err(operator_config_store_error(error)),
             }
-        }
-        ToolPermissionUpdate::State(ToolPermissionState::AlwaysAllow) => {
-            let operator_scope = operator_tool_permission_scope(scope);
             config
                 .overrides
                 .clear(&ToolPermissionOverrideKey::new(
@@ -1257,10 +1238,13 @@ async fn apply_tool_permission_state(
                 ))
                 .await
                 .map_err(operator_config_store_error)?;
+        }
+        ToolPermissionUpdate::State(ToolPermissionState::AlwaysAllow) => {
+            let operator_scope = operator_tool_permission_scope(scope);
             config
                 .persistent_policies
                 .allow(PersistentApprovalPolicyInput {
-                    scope: operator_scope,
+                    scope: operator_scope.clone(),
                     action: PersistentApprovalAction::Dispatch,
                     capability_id: tool.capability_id.clone(),
                     grantee: Principal::Extension(tool.provider.clone()),
@@ -1278,6 +1262,14 @@ async fn apply_tool_permission_state(
                 })
                 .await
                 .map_err(operator_config_store_error)?;
+            config
+                .overrides
+                .clear(&ToolPermissionOverrideKey::new(
+                    &operator_scope,
+                    tool.capability_id.clone(),
+                ))
+                .await
+                .map_err(operator_config_store_error)?;
         }
         ToolPermissionUpdate::State(state @ ToolPermissionState::AskEachTime)
         | ToolPermissionUpdate::State(state @ ToolPermissionState::Disabled) => {
@@ -1287,6 +1279,14 @@ async fn apply_tool_permission_state(
                 ToolPermissionState::Disabled => ToolPermissionOverride::Disabled,
                 ToolPermissionState::AlwaysAllow => unreachable!(),
             };
+            match config
+                .persistent_policies
+                .revoke(&persistent_user_policy_key(&operator_scope, tool))
+                .await
+            {
+                Ok(_) | Err(PersistentApprovalPolicyError::UnknownPolicy) => {}
+                Err(error) => return Err(operator_config_store_error(error)),
+            }
             config
                 .overrides
                 .set(ToolPermissionOverrideInput {
@@ -1297,14 +1297,6 @@ async fn apply_tool_permission_state(
                 })
                 .await
                 .map_err(operator_config_store_error)?;
-            match config
-                .persistent_policies
-                .revoke(&persistent_user_policy_key(&operator_scope, tool))
-                .await
-            {
-                Ok(_) | Err(PersistentApprovalPolicyError::UnknownPolicy) => {}
-                Err(error) => return Err(operator_config_store_error(error)),
-            }
         }
     }
     Ok(())
