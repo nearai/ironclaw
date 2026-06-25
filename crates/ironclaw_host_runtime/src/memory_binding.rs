@@ -137,8 +137,12 @@ impl MemoryActiveOverride {
     /// third-party id cannot leak in full through operator-facing output.
     pub fn redacted_summary(&self) -> String {
         let ext = self.extension_id.as_str();
-        let redacted_ext = if ext.len() > 12 {
-            format!("{}…", &ext[..12])
+        // Truncate by characters, not bytes: `ExtensionId` is ASCII today so a
+        // byte slice cannot split a char, but a char-based cut stays correct if
+        // the id grammar ever widens, and matches the repo's no-byte-slice rule.
+        let redacted_ext = if ext.chars().count() > 12 {
+            let head: String = ext.chars().take(12).collect();
+            format!("{head}…")
         } else {
             ext.to_string()
         };

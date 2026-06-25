@@ -59,6 +59,10 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
             return Ok(Vec::new());
         }
         let invocation = invocation_for_context_request(&request);
+        // Capture the request scope up front (before `request.query` is moved
+        // below) so admission can reject any snippet a provider returns outside
+        // the requested tenant/user/agent/project.
+        let expected_scope = ExpectedSnippetScope::from_request(&request);
         // The host-resolved `ContextProfileId` is already validated, so this
         // construction won't fail in practice — but propagate rather than unwrap.
         let context_profile_id = MemoryContextProfileId::new(request.context_profile_id.as_str())
@@ -89,7 +93,7 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
             if admitted.len() >= request.max_snippets {
                 break;
             }
-            let Some(snippet) = admit_memory_context_snippet(snippet) else {
+            let Some(snippet) = admit_memory_context_snippet(&expected_scope, snippet) else {
                 continue;
             };
             let snippet_bytes = snippet.safe_summary.len();
@@ -103,19 +107,66 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
     }
 }
 
+/// The tenant/user/agent/project the request was scoped to. Admission drops any
+/// provider snippet whose scope does not match, so a buggy or hostile
+/// (e.g. future third-party) provider cannot inject content from another
+/// tenant/user/agent/project — the native provider filters earlier, but this is
+/// the provider-neutral host gate.
+struct ExpectedSnippetScope {
+    tenant_id: String,
+    user_id: String,
+    agent_id: Option<String>,
+    project_id: Option<String>,
+}
+
+impl ExpectedSnippetScope {
+    fn from_request(request: &MemoryPromptContextRequest) -> Self {
+        Self {
+            tenant_id: request.scope.tenant_id.as_str().to_string(),
+            user_id: request.actor.user_id.as_str().to_string(),
+            agent_id: request
+                .scope
+                .agent_id
+                .as_ref()
+                .map(|id| id.as_str().to_string()),
+            project_id: request
+                .scope
+                .project_id
+                .as_ref()
+                .map(|id| id.as_str().to_string()),
+        }
+    }
+
+    fn matches(&self, snippet: &MemoryServiceContextSnippet) -> bool {
+        // Absent agent/project is the empty-string sentinel; treat `None` and
+        // `Some("")` as equivalent so the comparison is sentinel-robust.
+        self.tenant_id == snippet.tenant_id
+            && self.user_id == snippet.user_id
+            && self.agent_id.as_deref().unwrap_or("") == snippet.agent_id.as_deref().unwrap_or("")
+            && self.project_id.as_deref().unwrap_or("")
+                == snippet.project_id.as_deref().unwrap_or("")
+    }
+}
+
 /// Build an admitted [`LoopContextSnippet`] from a raw provider candidate, or
 /// drop it.
 ///
-/// The host is the sole constructor of model-visible memory context. It hashes
-/// the `memory-snippet:*` reference from the provider's scope/path components,
-/// then sanitizes and wraps the *raw* text in the untrusted-memory envelope. A
-/// provider therefore cannot bypass prompt safety by pre-wrapping, pre-attaching
-/// the untrusted prefix, or forging a reference: `sanitize_snippet_text` always
-/// re-wraps and re-validates whatever text it is handed, and the reference is
-/// always a deterministic hex hash.
+/// The host is the sole constructor of model-visible memory context. It first
+/// rejects any snippet outside the request scope (defense in depth for the
+/// provider-neutral path), then hashes the `memory-snippet:*` reference from the
+/// provider's scope/path components, and sanitizes and wraps the *raw* text in
+/// the untrusted-memory envelope. A provider therefore cannot bypass prompt
+/// safety by pre-wrapping, pre-attaching the untrusted prefix, or forging a
+/// reference: `sanitize_snippet_text` always re-wraps and re-validates whatever
+/// text it is handed, and the reference is always a deterministic hex hash.
 fn admit_memory_context_snippet(
+    expected_scope: &ExpectedSnippetScope,
     snippet: MemoryServiceContextSnippet,
 ) -> Option<LoopContextSnippet> {
+    if !expected_scope.matches(&snippet) {
+        tracing::debug!("dropping memory context snippet with mismatched scope");
+        return None;
+    }
     let snippet_ref = memory_snippet_display_ref([
         snippet.tenant_id.as_str(),
         snippet.user_id.as_str(),
@@ -339,5 +390,76 @@ mod tests {
                 "Untrusted memory content: Untrusted memory content: actually attacker controlled"
             )
         );
+    }
+
+    fn scope(
+        tenant: &str,
+        user: &str,
+        agent: Option<&str>,
+        project: Option<&str>,
+    ) -> ExpectedSnippetScope {
+        ExpectedSnippetScope {
+            tenant_id: tenant.to_string(),
+            user_id: user.to_string(),
+            agent_id: agent.map(str::to_string),
+            project_id: project.map(str::to_string),
+        }
+    }
+
+    fn snippet_scoped(tenant: &str, user: &str, text: &str) -> MemoryServiceContextSnippet {
+        MemoryServiceContextSnippet {
+            tenant_id: tenant.to_string(),
+            user_id: user.to_string(),
+            agent_id: None,
+            project_id: None,
+            relative_path: "notes/alpha.md".to_string(),
+            text: text.to_string(),
+        }
+    }
+
+    /// A snippet whose scope matches the request is admitted. Drives the
+    /// scope-equality guard in `admit_memory_context_snippet`.
+    #[test]
+    fn admit_keeps_snippet_in_request_scope() {
+        let expected = scope("tenant-a", "user-x", None, None);
+        let admitted = admit_memory_context_snippet(
+            &expected,
+            snippet_scoped("tenant-a", "user-x", "ordinary planning note"),
+        );
+        assert!(admitted.is_some());
+    }
+
+    /// A snippet from a different tenant must be dropped before it reaches the
+    /// model — defense in depth for the provider-neutral path (#3537).
+    #[test]
+    fn admit_drops_cross_tenant_snippet() {
+        let expected = scope("tenant-a", "user-x", None, None);
+        let admitted = admit_memory_context_snippet(
+            &expected,
+            snippet_scoped("tenant-b", "user-x", "cross-tenant leak"),
+        );
+        assert!(admitted.is_none());
+    }
+
+    /// A snippet from a different user (same tenant) must also be dropped.
+    #[test]
+    fn admit_drops_cross_user_snippet() {
+        let expected = scope("tenant-a", "user-x", None, None);
+        let admitted = admit_memory_context_snippet(
+            &expected,
+            snippet_scoped("tenant-a", "user-y", "cross-user leak"),
+        );
+        assert!(admitted.is_none());
+    }
+
+    /// Absent agent/project is the empty-string sentinel: a request with no
+    /// agent/project matches a snippet whose agent/project are `None`.
+    #[test]
+    fn admit_treats_absent_agent_project_as_matching() {
+        let expected = scope("tenant-a", "user-x", None, None);
+        let mut snippet = snippet_scoped("tenant-a", "user-x", "note");
+        snippet.agent_id = Some(String::new());
+        snippet.project_id = Some(String::new());
+        assert!(admit_memory_context_snippet(&expected, snippet).is_some());
     }
 }

@@ -3071,14 +3071,22 @@ pub async fn build_reborn_runtime(
         // Wiring the production-graph composition for these optional context sources is a
         // single deferred follow-up (identity + profile together, to keep them paired);
         // do not wire only one of them here, or they will diverge. See issue #5013.
+        //
+        // Profile reads honor the resolved document-store binding (issue #3537):
+        // build the native-backed profile source only when the document-store
+        // profile is bound to native. A disabled/third-party binding degrades to
+        // `Empty` (profile unknown) rather than silently reading the native
+        // provider, keeping profile reads consistent with the memory tools.
         user_profile_source: match local_runtime {
-            Some(local_runtime) => Arc::new(MemoryBackedUserProfileSourceAdapter(
-                MemoryBackedUserProfileSource::from_filesystem(Arc::clone(
-                    &local_runtime.extension_filesystem,
-                )
-                    as Arc<dyn ironclaw_filesystem::RootFilesystem>),
-            )) as Arc<dyn HostUserProfileSource>,
-            None => Arc::new(EmptyUserProfileSource) as Arc<dyn HostUserProfileSource>,
+            Some(local_runtime) if local_runtime.memory_document_store_binding.is_native() => {
+                Arc::new(MemoryBackedUserProfileSourceAdapter(
+                    MemoryBackedUserProfileSource::from_filesystem(Arc::clone(
+                        &local_runtime.extension_filesystem,
+                    )
+                        as Arc<dyn ironclaw_filesystem::RootFilesystem>),
+                )) as Arc<dyn HostUserProfileSource>
+            }
+            _ => Arc::new(EmptyUserProfileSource) as Arc<dyn HostUserProfileSource>,
         },
         model_policy_guard: None,
         model_budget_accountant,

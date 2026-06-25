@@ -66,3 +66,71 @@ fn context_retrieve_input_schema_accepts_valid_and_rejects_invalid() {
     // Invalid: unexpected property (schema is additionalProperties: false).
     assert!(!validator.is_valid(&json!({"query": "x", "limit": 5, "rogue": true})));
 }
+
+#[test]
+fn document_read_input_schema_accepts_valid_and_rejects_invalid() {
+    let schema = load_schema("schemas/memory/document-read.input.v1.json");
+    let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+
+    assert!(validator.is_valid(&json!({"path": "notes/alpha.md"})));
+    assert!(validator.is_valid(&json!({"path": "notes/alpha.md", "version": "v3"})));
+
+    assert!(!validator.is_valid(&json!({})), "missing required path");
+    assert!(
+        !validator.is_valid(&json!({"path": ""})),
+        "path minLength is 1"
+    );
+    assert!(
+        !validator.is_valid(&json!({"path": "notes/alpha.md", "rogue": 1})),
+        "additionalProperties is false"
+    );
+}
+
+#[test]
+fn document_write_input_schema_accepts_valid_and_rejects_invalid() {
+    let schema = load_schema("schemas/memory/document-write.input.v1.json");
+    let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+
+    assert!(validator.is_valid(&json!({"path": "notes/alpha.md", "content": "hello"})));
+    assert!(
+        validator
+            .is_valid(&json!({"path": "notes/alpha.md", "content": "hello", "mode": "append"}))
+    );
+
+    assert!(
+        !validator.is_valid(&json!({"path": "notes/alpha.md"})),
+        "missing required content"
+    );
+    assert!(
+        !validator.is_valid(&json!({"path": "x", "content": "y", "mode": "delete"})),
+        "mode must be one of create/replace/append"
+    );
+    assert!(
+        !validator.is_valid(&json!({"path": "x", "content": "y", "rogue": true})),
+        "additionalProperties is false"
+    );
+}
+
+#[test]
+fn interaction_record_input_schema_accepts_valid_and_rejects_invalid() {
+    let schema = load_schema("schemas/memory/interaction-record.input.v1.json");
+    let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+
+    assert!(validator.is_valid(&json!({
+        "summary": "user asked about budgets",
+        "occurred_at": "2026-06-25T12:00:00Z"
+    })));
+
+    assert!(
+        !validator.is_valid(&json!({"summary": "x"})),
+        "missing required occurred_at"
+    );
+    assert!(
+        !validator.is_valid(&json!({"occurred_at": "2026-06-25T12:00:00Z"})),
+        "missing required summary"
+    );
+    assert!(
+        !validator.is_valid(&json!({"summary": "", "occurred_at": "2026-06-25T12:00:00Z"})),
+        "summary minLength is 1"
+    );
+}
