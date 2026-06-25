@@ -22,6 +22,10 @@ postgres = [
     "ironclaw_filesystem/postgres",
 ]
 libsql = ["dep:libsql", "ironclaw_filesystem/libsql"]
+# Opt-in gate for integration tests that require a live external service
+# (PostgreSQL). Only tests gated on this feature connect to the database;
+# they still skip gracefully at runtime if the env var is unset.
+integration = []
 
 [dependencies]
 async-trait = "0.1"
@@ -30,6 +34,7 @@ hex = "0.4"
 ironclaw_events = { path = "../ironclaw_events", version = "0.1.0" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring"] }
 rustls-native-certs = { version = "0.8", optional = true }

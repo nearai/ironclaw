@@ -48,8 +48,24 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 mod filesystem_store;
+pub mod gate_resolution;
 
 pub use filesystem_store::{FilesystemDurableAuditLog, FilesystemDurableEventLog};
+pub use gate_resolution::{
+    AwaitedChildRecord, AwaitedChildRow, CAPACITY_COUNTER_BUCKETS, CAPACITY_COUNTER_BUCKETS_ENV,
+    DurableSubagentGateResolutionStore, DurableTerminalEvent, GateResolutionStoreError,
+    MAX_GATE_RECORDS, child_bucket, effective_capacity_counter_buckets,
+};
+
+#[cfg(feature = "libsql")]
+pub mod libsql;
+#[cfg(feature = "libsql")]
+pub use libsql::{LibSqlGateResolutionStore, run_libsql_gate_migrations};
+
+#[cfg(feature = "postgres")]
+pub mod postgres;
+#[cfg(feature = "postgres")]
+pub use postgres::{PostgresGateResolutionStore, run_postgres_gate_migrations};
 
 #[cfg(feature = "postgres")]
 pub const DEFAULT_POSTGRES_POOL_MAX_SIZE: usize = 2;

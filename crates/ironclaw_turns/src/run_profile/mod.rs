@@ -52,7 +52,7 @@ pub use host::{
     CapabilityDeniedReasonKindValue, CapabilityDescriptorView, CapabilityFailure,
     CapabilityFailureKind, CapabilityFailureKindValue, CapabilityInputRef, CapabilityInvocation,
     CapabilityOutcome, CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken,
-    CapabilitySurfaceVersion, ConcurrencyHint, FinalizeAssistantMessage,
+    CapabilitySurfaceVersion, ConcurrencyHint, CredentialFree, FinalizeAssistantMessage,
     LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES,
     LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancelReasonKind,
     LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointKind,

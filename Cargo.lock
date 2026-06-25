@@ -5151,6 +5151,7 @@ dependencies = [
  "ironclaw_events",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_turns",
  "libsql",
  "rustls 0.23.40",
  "rustls-native-certs 0.8.3",
