@@ -1542,10 +1542,14 @@ impl HostRuntimeHarnessOptions {
 
 impl HostRuntimeCapabilityHarness {
     async fn file_tools() -> HarnessResult<Self> {
-        Self::file_tools_with_runtime_policy(Some(
+        let harness = Self::file_tools_with_runtime_policy(Some(
             ironclaw_reborn_composition::local_dev_yolo_runtime_policy(true)?,
         ))
-        .await
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
     }
 
     async fn file_tools_requiring_approval() -> HarnessResult<Self> {

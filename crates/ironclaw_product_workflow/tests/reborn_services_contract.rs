@@ -8090,6 +8090,12 @@ async fn operator_config_is_scoped_by_tenant_and_user() {
         Some(AgentId::new("agent-alpha").expect("agent")),
         Some(ProjectId::new("project-alpha").expect("project")),
     );
+    let alice_tenant_a_other_project = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("alice").expect("user"),
+        Some(AgentId::new("agent-beta").expect("agent")),
+        Some(ProjectId::new("project-beta").expect("project")),
+    );
     let alice_tenant_b = WebUiAuthenticatedCaller::new(
         TenantId::new("tenant-beta").expect("tenant"),
         UserId::new("alice").expect("user"),
@@ -8122,6 +8128,25 @@ async fn operator_config_is_scoped_by_tenant_and_user() {
         .expect("alice alpha tool config");
     assert_eq!(alice_alpha.entry.value["state"], "disabled");
     assert_eq!(alice_alpha.entry.value["effective_source"], "override");
+
+    let alice_alpha_other_project = services
+        .list_operator_config(alice_tenant_a_other_project)
+        .await
+        .expect("same tenant/user operator config");
+    assert_eq!(
+        operator_config_entry_value(&alice_alpha_other_project, "agent.auto_approve_tools"),
+        &json!(true),
+        "auto-approve settings are scoped by tenant/user, not agent/project"
+    );
+    assert_eq!(
+        operator_config_entry_value(&alice_alpha_other_project, "tool.tool.alpha")["state"],
+        "disabled",
+        "tool overrides are scoped by tenant/user, not agent/project"
+    );
+    assert_eq!(
+        operator_config_entry_value(&alice_alpha_other_project, "tool.tool.alpha")["effective_source"],
+        "override"
+    );
 
     for caller in [bob_tenant_a, alice_tenant_b] {
         let config = services

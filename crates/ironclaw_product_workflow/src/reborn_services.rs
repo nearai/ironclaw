@@ -956,7 +956,8 @@ async fn auto_approve_config_entry(
     config: &RebornOperatorApprovalConfig,
     scope: &ResourceScope,
 ) -> Result<RebornOperatorConfigEntry, RebornServicesError> {
-    let key = AutoApproveSettingKey::from_resource_scope(scope);
+    let operator_scope = operator_tool_permission_scope(scope);
+    let key = AutoApproveSettingKey::from_resource_scope(&operator_scope);
     let record = config
         .auto_approve
         .get(&key)
@@ -2750,10 +2751,11 @@ impl RebornServicesApi for RebornServices {
                 .value
                 .as_bool()
                 .ok_or_else(|| operator_config_invalid_value("value"))?;
+            let operator_scope = operator_tool_permission_scope(&scope);
             config
                 .auto_approve
                 .set(AutoApproveSettingInput {
-                    scope: scope.clone(),
+                    scope: operator_scope,
                     enabled,
                     updated_by: Principal::User(actor.user_id.clone()),
                 })
