@@ -390,6 +390,13 @@ impl LoopSafeSummary {
         Self("model gateway failed".to_string())
     }
 
+    /// Sanitized summary for a primary model call that exceeded its timeout.
+    /// Infallible because the literal is known to satisfy
+    /// [`validate_loop_safe_summary`].
+    pub fn model_gateway_timed_out() -> Self {
+        Self("model gateway timed out".to_string())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

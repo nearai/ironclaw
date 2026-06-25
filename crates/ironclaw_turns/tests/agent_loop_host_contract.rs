@@ -2674,6 +2674,65 @@ impl LoopModelGateway for RecordingLoopModelGateway {
     }
 }
 
+/// Gateway that never returns within the primary model-call timeout: it sleeps
+/// for `delay` before yielding. Under `tokio::time::pause`, the runtime
+/// auto-advances the clock so the wrapper timeout fires deterministically with
+/// no real wall-clock wait.
+struct HangingLoopModelGateway {
+    delay: std::time::Duration,
+}
+
+#[async_trait]
+impl LoopModelGateway for HangingLoopModelGateway {
+    async fn stream_model(
+        &self,
+        _request: LoopModelGatewayRequest,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        tokio::time::sleep(self.delay).await;
+        Err(LoopModelGatewayError::new(
+            AgentLoopHostErrorKind::Internal,
+            "should never be reached: timeout fires first",
+        )
+        .unwrap())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn host_managed_model_port_times_out_a_hung_gateway() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    // Sleep well past the primary model-call timeout (75s).
+    let gateway = Arc::new(HangingLoopModelGateway {
+        delay: std::time::Duration::from_secs(600),
+    });
+    let port = HostManagedLoopModelPort::new(context.clone(), gateway, milestone_sink.clone());
+
+    let error = port
+        .stream_model(LoopModelRequest {
+            messages: vec![LoopModelMessage {
+                role: "user".to_string(),
+                content_ref: LoopMessageRef::new("msg:user-message").unwrap(),
+            }],
+            surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
+            model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+            capability_view: None,
+        })
+        .await
+        .expect_err("a hung gateway must surface a timeout error");
+
+    // Timeout maps to the retryable `Unavailable` kind, not a bespoke variant.
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    assert_eq!(error.safe_summary, "model gateway timed out");
+    // The failure milestone must still fire so the run records the failure.
+    assert!(
+        milestone_sink
+            .milestones()
+            .iter()
+            .any(|milestone| milestone.kind.kind_name() == "model_failed"),
+        "a timed-out model call must emit a model_failed milestone"
+    );
+}
+
 struct RecordingAgentLoopHost {
     context: LoopRunContext,
     effects: Mutex<Vec<String>>,

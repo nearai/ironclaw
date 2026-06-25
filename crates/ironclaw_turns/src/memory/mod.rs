@@ -83,7 +83,13 @@ fn holds_running_slot(status: TurnStatus) -> bool {
 const MAX_EVENTS: usize = 10_000;
 const MAX_TERMINAL_RECORDS: usize = 10_000;
 const MAX_IDEMPOTENCY_RECORDS: usize = 10_000;
-const DEFAULT_RUNNER_LEASE_TTL_SECONDS: i64 = 90;
+/// Default runner-lease TTL in seconds. A claimed turn's lease expires this
+/// many seconds after it is taken or last renewed; an unrenewed lease is
+/// reclaimed by `recover_expired_leases`. Primary model-call timeouts must stay
+/// below this value (enforced by an invariant test in `run_profile::model`) so
+/// a hung provider surfaces as a retryable error before the lease reclaims the
+/// runner mid-flight.
+pub(crate) const DEFAULT_RUNNER_LEASE_TTL_SECONDS: i64 = 90;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InMemoryTurnStateStoreLimits {
