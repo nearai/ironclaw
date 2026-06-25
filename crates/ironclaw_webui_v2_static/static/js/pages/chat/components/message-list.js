@@ -6,6 +6,7 @@ import { Icon } from "../../../design-system/icons.js";
 import { groupMessages } from "../lib/message-groups.js";
 
 export const BOTTOM_FOLLOW_THRESHOLD_PX = 100;
+const TOP_LOAD_THRESHOLD_PX = 100;
 
 export function distanceFromBottom(el) {
   if (!el) return Number.POSITIVE_INFINITY;
@@ -133,7 +134,7 @@ export function MessageList({
 
     if (
       hasMore &&
-      el.scrollTop < BOTTOM_FOLLOW_THRESHOLD_PX &&
+      el.scrollTop < TOP_LOAD_THRESHOLD_PX &&
       onLoadMore &&
       !isLoading
     ) {
