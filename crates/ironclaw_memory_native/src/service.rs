@@ -27,11 +27,11 @@ use serde_json::{Map, Value, json};
 pub use ironclaw_memory::{
     MemoryContextProfileId, MemoryInvocation, MemoryProfileSetStatus, MemoryService,
     MemoryServiceContextRequest, MemoryServiceContextSnippet, MemoryServiceError,
-    MemoryServiceErrorKind, MemoryServiceProfileSetRequest, MemoryServiceProfileSetResponse,
-    MemoryServiceReadRequest, MemoryServiceReadResponse, MemoryServiceSearchRequest,
-    MemoryServiceSearchResponse, MemoryServiceSearchResult, MemoryServiceTreeRequest,
-    MemoryServiceTreeResponse, MemoryServiceWriteRequest, MemoryServiceWriteResponse,
-    MemoryWriteStatus, memory_context_disabled,
+    MemoryServiceErrorKind, MemoryServiceProfileReadResponse, MemoryServiceProfileSetRequest,
+    MemoryServiceProfileSetResponse, MemoryServiceReadRequest, MemoryServiceReadResponse,
+    MemoryServiceSearchRequest, MemoryServiceSearchResponse, MemoryServiceSearchResult,
+    MemoryServiceTreeRequest, MemoryServiceTreeResponse, MemoryServiceWriteRequest,
+    MemoryServiceWriteResponse, MemoryWriteStatus, memory_context_disabled,
 };
 
 const MEMORY_PATH: &str = "MEMORY.md";
@@ -311,6 +311,25 @@ impl MemoryService for NativeMemoryService {
             }
         }
         Err(MemoryServiceError::operation())
+    }
+
+    async fn profile_read(
+        &self,
+        invocation: MemoryInvocation,
+    ) -> Result<MemoryServiceProfileReadResponse, MemoryServiceError> {
+        // Single home for the profile scope/path decision, shared with
+        // `profile_set`: keyed to the human user at `agent=None, project=None`.
+        let (scope, path) = profile_scope_and_path(
+            invocation.scope.tenant_id.as_str(),
+            invocation.scope.user_id.as_str(),
+        )?;
+        let context = MemoryContext::new(scope);
+        let document = self
+            .backend
+            .read_document(&context, &path)
+            .await
+            .map_err(MemoryServiceError::operation_from)?;
+        Ok(MemoryServiceProfileReadResponse { document })
     }
 
     async fn retrieve_context(

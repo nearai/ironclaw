@@ -233,6 +233,18 @@ pub struct MemoryServiceProfileSetResponse {
     pub status: MemoryProfileSetStatus,
 }
 
+/// Response for a provider-neutral profile-document read.
+///
+/// The provider resolves the profile document's scope/path (keyed to the human
+/// user at `agent=None, project=None`) and reads its raw bytes. The host parses,
+/// size-caps, and validates them; the provider does not interpret the document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryServiceProfileReadResponse {
+    /// Raw profile-document bytes for the run owner, or `None` if no profile
+    /// document exists.
+    pub document: Option<Vec<u8>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryServiceContextRequest {
     pub query: String,
@@ -477,6 +489,18 @@ pub trait MemoryService: Send + Sync {
         request: MemoryServiceProfileSetRequest,
     ) -> Result<MemoryServiceProfileSetResponse, MemoryServiceError> {
         let _ = (invocation, request);
+        Err(MemoryServiceError::unavailable())
+    }
+
+    /// Read the run owner's profile document. Provider-neutral counterpart of
+    /// [`profile_set`](MemoryService::profile_set): the provider owns the
+    /// scope/path resolution (single home shared with the write path) and returns
+    /// raw bytes; the host parses + size-caps them.
+    async fn profile_read(
+        &self,
+        invocation: MemoryInvocation,
+    ) -> Result<MemoryServiceProfileReadResponse, MemoryServiceError> {
+        let _ = invocation;
         Err(MemoryServiceError::unavailable())
     }
 

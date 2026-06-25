@@ -58,7 +58,7 @@ mod turn_scheduler;
 mod user_profile_source;
 mod wasm_credentials;
 
-pub use user_profile_source::{MemoryBackedUserProfileSource, PROFILE_DOCUMENT_PATH};
+pub use user_profile_source::MemoryBackedUserProfileSource;
 
 pub use capability_catalog::{
     HotCapabilityCatalog, HotCapabilityRecord, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES,
