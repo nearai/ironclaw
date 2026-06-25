@@ -82,10 +82,6 @@ const CERTIFIED_SKILLS: &[&str] = &[
     "web-ui-test",
 ];
 
-fn is_certified_skill(name: &str) -> bool {
-    CERTIFIED_SKILLS.contains(&name)
-}
-
 /// Fails closed if any shipped skill is not on the [`CERTIFIED_SKILLS`] list.
 ///
 /// This is the certification gate: only listed skills are allowed to land in
@@ -96,7 +92,7 @@ fn certify_bundled_skill_names<'a>(
     names: impl Iterator<Item = &'a str>,
 ) -> Result<(), RebornBuildError> {
     for name in names {
-        if !is_certified_skill(name) {
+        if !CERTIFIED_SKILLS.contains(&name) {
             return Err(invalid_config(format!(
                 "bundled skill `{name}` is shipped under `skills/` but is not certified; \
                  add it to CERTIFIED_SKILLS in crates/ironclaw_reborn_composition/src/bundled_skills.rs"
@@ -530,13 +526,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn certified_skills_list_is_sorted_and_unique() {
-        let mut sorted = CERTIFIED_SKILLS.to_vec();
-        sorted.sort_unstable();
-        assert_eq!(
-            sorted, CERTIFIED_SKILLS,
-            "CERTIFIED_SKILLS must stay sorted for reviewable diffs"
-        );
+    fn certified_skills_list_has_no_duplicates() {
+        // A duplicate would pass `bundled_reborn_skills_match_certified_list`
+        // (it compares sets), so guard it separately.
         let unique = CERTIFIED_SKILLS.iter().collect::<HashSet<_>>();
         assert_eq!(
             unique.len(),

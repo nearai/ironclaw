@@ -104,9 +104,7 @@ pub(super) fn validate_prompt_text(
             format!("{label} is not model-safe"),
         ));
     }
-    // Content denylisting (control characters, host paths, security vocabulary,
-    // credential-shaped values) is skipped for trusted/certified skill
-    // instructions; see PromptTextPolicy. All other surfaces keep it.
+    // Trusted skill instructions skip content denylisting; see PromptTextPolicy.
     if !surface.policy().enforce_content_checks {
         return Ok(value);
     }
