@@ -1279,6 +1279,11 @@ async fn postgres_put_with_client(
 /// deliberately do not wrap the write + diagnosis in a transaction or higher
 /// isolation: that would add a serialization-retry error mode (and cost) to a
 /// rare path for no correctness gain.
+///
+/// This is benign *only because* the directory guard is atomic with the write.
+/// That atomicity is pinned by `put_statements_are_single_round_trip` +
+/// `put_statements_fold_in_directory_guard`; if either ever fails, the race
+/// below is no longer cosmetic and this best-effort diagnosis must be revisited.
 #[cfg(feature = "postgres")]
 async fn diagnose_put_failure(
     client: &deadpool_postgres::Object,
@@ -1699,6 +1704,24 @@ mod tests {
     /// directory invariant is now folded into the single write statement, so a
     /// successful put costs one round-trip. This guards against a regression
     /// re-splitting the pre-check back out into separate queries.
+    ///
+    /// **This is a correctness canary, not just a perf check.** Together with
+    /// `put_statements_fold_in_directory_guard` it pins the *atomicity* of the
+    /// directory invariant: the guard predicates (`NOT EXISTS` descendant scan,
+    /// `ON CONFLICT` / `is_dir = FALSE`) are evaluated in the *same* statement
+    /// that performs the write, against one consistent snapshot. That atomicity
+    /// is what makes the best-effort classification in `diagnose_put_failure`
+    /// safe (see its doc): the follow-up reads can race a concurrent writer, but
+    /// because no bad write can commit, the race only mislabels an
+    /// already-failed write's error variant — it never corrupts data.
+    ///
+    /// If a future change moves a guard back out into a separate pre-check
+    /// `SELECT`, this test (or its sibling) fails — and that failure is the
+    /// signal that the TOCTOU window has stopped being benign: a concurrent
+    /// `create_dir_all(path)` landing between the pre-check and the write would
+    /// let a file be written *over* a directory, committing a state the
+    /// invariant exists to forbid. Keep the guard in the write; do not "optimize"
+    /// it into a prior read.
     #[test]
     fn put_statements_are_single_round_trip() {
         for (name, sql) in [
@@ -1709,7 +1732,10 @@ mod tests {
             assert_eq!(
                 top_level_statement_count(sql),
                 1,
-                "{name} put must be a single statement (one round-trip), got: {sql}"
+                "{name} put must be a single statement (one round-trip). A split \
+                 here breaks directory-guard atomicity: a concurrent \
+                 create_dir_all() between a separate pre-check and the write \
+                 could let a file commit over a directory. Got: {sql}"
             );
         }
     }
