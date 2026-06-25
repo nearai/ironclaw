@@ -17,8 +17,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::{DashMap, DashSet};
 use ironclaw_host_api::{
-    InvocationId, ResourceEstimate, ResourceReservationId, ResourceScope, ResourceUsage,
-    SYSTEM_RESERVED_ID, UserId,
+    InvocationId, ResourceEstimate, ResourceReservationId, ResourceScope, ResourceUsage, UserId,
 };
 use ironclaw_resources::{
     BudgetApprovalGate, BudgetEvent, BudgetEventSink, BudgetGateId, BudgetGateStatus,
@@ -397,7 +396,7 @@ impl GovernorBackedAccountant {
             .actor
             .as_ref()
             .map(|actor| actor.user_id.clone())
-            .unwrap_or_else(|| UserId::from_trusted(SYSTEM_RESERVED_ID.to_string()));
+            .unwrap_or_else(UserId::system_sentinel);
         ResourceScope {
             tenant_id: context.scope.tenant_id.clone(),
             user_id,
@@ -680,6 +679,10 @@ mod tests {
     use rust_decimal_macros::dec;
 
     fn run_context() -> LoopRunContext {
+        run_context_without_actor().with_actor(TurnActor::new(UserId::new("acct-user").unwrap()))
+    }
+
+    fn run_context_without_actor() -> LoopRunContext {
         let scope = TurnScope::new(
             TenantId::new("tenant-acct").unwrap(),
             None,
@@ -739,7 +742,6 @@ mod tests {
             },
         };
         LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), profile)
-            .with_actor(TurnActor::new(UserId::new("acct-user").unwrap()))
     }
 
     fn sample_request() -> LoopModelRequest {
@@ -781,6 +783,38 @@ mod tests {
         // accountant in-flight map instead.
         assert!(accountant.in_flight.contains_key(&context.run_id));
         let _ = snapshot;
+    }
+
+    #[test]
+    fn resource_scope_falls_back_to_system_sentinel_user_without_actor() {
+        // PR review finding #5: exercise the no-actor branch of
+        // `resource_scope`. With no actor, `user_id` resolves to the system
+        // sentinel; the real tenant keeps the scope from classifying as system.
+        let accountant = GovernorBackedAccountant::new(
+            Arc::new(InMemoryResourceGovernor::new()),
+            Arc::new(ZeroCostTable),
+        );
+        let context = run_context_without_actor();
+        assert!(context.actor.is_none());
+
+        let scope = accountant.resource_scope(&context);
+        assert_eq!(
+            scope.user_id.as_str(),
+            ironclaw_host_api::SYSTEM_RESERVED_ID
+        );
+        assert_eq!(scope.tenant_id.as_str(), "tenant-acct");
+        assert!(!scope.is_system());
+    }
+
+    #[test]
+    fn resource_scope_uses_actor_user_when_present() {
+        let accountant = GovernorBackedAccountant::new(
+            Arc::new(InMemoryResourceGovernor::new()),
+            Arc::new(ZeroCostTable),
+        );
+        let scope = accountant.resource_scope(&run_context());
+        assert_eq!(scope.user_id.as_str(), "acct-user");
+        assert!(!scope.is_system());
     }
 
     #[tokio::test]

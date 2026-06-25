@@ -99,6 +99,20 @@ fn validate_name_segment(kind: &'static str, value: &str) -> Result<(), HostApiE
 
 macro_rules! string_id {
     ($name:ident, $kind:literal, $validator:ident) => {
+        string_id!(@build $name, $kind, $validator);
+        string_id!(@deserialize_strict $name);
+    };
+    ($name:ident, $kind:literal, $validator:ident, accepts_system_sentinel) => {
+        string_id!(@build $name, $kind, $validator);
+        string_id!(@sentinel_constructor $name);
+        // Wire deserialize stays STRICT even for sentinel-aware id kinds: a
+        // bare `TenantId`/`UserId` decoded from untrusted JSON must reject the
+        // sentinel. Sentinel admission is scoped to `ResourceScope`'s own
+        // field-level `deserialize_with` (a TRUSTED-PERSISTENCE shape), never
+        // to the id type itself. See `ResourceScope` docs in resource.rs.
+        string_id!(@deserialize_strict $name);
+    };
+    (@build $name:ident, $kind:literal, $validator:ident) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub struct $name(String);
 
@@ -109,10 +123,11 @@ macro_rules! string_id {
                 Ok(Self(value))
             }
 
-            /// Construct without validation. Reserved for sentinel values
-            /// that intentionally contain bytes the validator rejects (e.g.
-            /// [`crate::SYSTEM_RESERVED_ID`]), so no caller-supplied
-            /// identifier can collide with them.
+            /// Construct without validation. For non-sentinel trusted string
+            /// rehydration (e.g. DB row values handed over from a typed
+            /// upstream). To mint the system sentinel
+            /// ([`crate::SYSTEM_RESERVED_ID`]), use `system_sentinel()` instead
+            /// — it is the single `git grep`-able authority-elevating path.
             pub fn from_trusted(value: String) -> Self {
                 Self(value)
             }
@@ -140,7 +155,8 @@ macro_rules! string_id {
                 serializer.serialize_str(&self.0)
             }
         }
-
+    };
+    (@deserialize_strict $name:ident) => {
         impl<'de> Deserialize<'de> for $name {
             fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
             where
@@ -148,6 +164,26 @@ macro_rules! string_id {
             {
                 let value = String::deserialize(deserializer)?;
                 Self::new(value).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+    (@sentinel_constructor $name:ident) => {
+        impl $name {
+            /// Construct the [`crate::SYSTEM_RESERVED_ID`] sentinel value of
+            /// this id type.
+            ///
+            /// SECURITY-CRITICAL: this is the blessed path for minting a
+            /// sentinel-valued id. It exists so every authority-elevating
+            /// constructor is `git grep`-able as `system_sentinel`, rather
+            /// than hidden behind the more general `from_trusted` escape
+            /// hatch. New code that needs the sentinel must call this
+            /// method — never `from_trusted(SYSTEM_RESERVED_ID.to_string())`.
+            ///
+            /// `ResourceScope::is_system` returns `true` only when BOTH the
+            /// tenant and user ids of a scope come from this constructor;
+            /// no authority decision may key on a single field.
+            pub fn system_sentinel() -> Self {
+                Self::from_trusted(crate::SYSTEM_RESERVED_ID.to_string())
             }
         }
     };
@@ -191,8 +227,20 @@ macro_rules! uuid_id {
     };
 }
 
-string_id!(TenantId, "tenant", validate_scope_id);
-string_id!(UserId, "user", validate_scope_id);
+// SECURITY-CRITICAL: `accepts_system_sentinel` opts these id types into
+// admitting [`crate::SYSTEM_RESERVED_ID`] during JSON deserialization and
+// exposes the `system_sentinel()` constructor — the only blessed path that
+// can mint a sentinel-valued id. Every other id kind stays strict and
+// rejects the sentinel on the wire. Adding this flag to any new id type
+// requires security review: any HTTP/RPC endpoint that deserializes such an
+// id from an untrusted request body becomes an authority-elevation vector.
+string_id!(
+    TenantId,
+    "tenant",
+    validate_scope_id,
+    accepts_system_sentinel
+);
+string_id!(UserId, "user", validate_scope_id, accepts_system_sentinel);
 string_id!(AgentId, "agent", validate_scope_id);
 string_id!(ProjectId, "project", validate_scope_id);
 string_id!(MissionId, "mission", validate_scope_id);

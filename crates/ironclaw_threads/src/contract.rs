@@ -30,11 +30,10 @@ impl ThreadScope {
     pub fn to_resource_scope(&self) -> ironclaw_host_api::ResourceScope {
         ironclaw_host_api::ResourceScope {
             tenant_id: self.tenant_id.clone(),
-            user_id: self.owner_user_id.clone().unwrap_or_else(|| {
-                ironclaw_host_api::UserId::from_trusted(
-                    ironclaw_host_api::SYSTEM_RESERVED_ID.to_string(),
-                )
-            }),
+            user_id: self
+                .owner_user_id
+                .clone()
+                .unwrap_or_else(ironclaw_host_api::UserId::system_sentinel),
             agent_id: Some(self.agent_id.clone()),
             project_id: self.project_id.clone(),
             mission_id: self.mission_id.clone(),
@@ -561,6 +560,14 @@ pub struct UpdateThreadGoalRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scope(owner: Option<UserId>) -> ThreadScope {
+        ThreadScope {
+            tenant_id: TenantId::new("acme").unwrap(),
+            agent_id: AgentId::new("agent-1").unwrap(),
+            project_id: None,
+            owner_user_id: owner,
+            mission_id: None,
     use ironclaw_common::AttachmentKind;
 
     fn sample_ref() -> AttachmentRef {
@@ -576,6 +583,24 @@ mod tests {
     }
 
     #[test]
+    fn to_resource_scope_falls_back_to_system_sentinel_user_without_owner() {
+        // PR review finding #4: drive the real caller. An ownerless thread
+        // scope must resolve `user_id` to the system sentinel, while the real
+        // tenant keeps the scope from classifying as fully system.
+        let resource = scope(None).to_resource_scope();
+        assert_eq!(
+            resource.user_id.as_str(),
+            ironclaw_host_api::SYSTEM_RESERVED_ID
+        );
+        assert_eq!(resource.tenant_id.as_str(), "acme");
+        assert!(!resource.is_system());
+    }
+
+    #[test]
+    fn to_resource_scope_uses_explicit_owner_when_present() {
+        let resource = scope(Some(UserId::new("alice").unwrap())).to_resource_scope();
+        assert_eq!(resource.user_id.as_str(), "alice");
+        assert!(!resource.is_system());
     fn text_constructor_carries_no_attachments() {
         let content = MessageContent::text("hello");
         assert_eq!(content.as_text(), "hello");
