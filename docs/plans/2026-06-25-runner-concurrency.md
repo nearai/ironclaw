@@ -1,6 +1,6 @@
 # Runner concurrency investigation — 2026-06-25
 
-Track: `fix/reborn-runner-concurrency` (off main `4f28febbe`).
+Track: `fix/reborn-runner-concurrency` (off main `3cbde9b21`).
 
 ## TL;DR — root cause determination
 
@@ -8,7 +8,7 @@ Track: `fix/reborn-runner-concurrency` (off main `4f28febbe`).
 single `TurnRunnerId` serving serially → effective concurrency ≈ 1") is NOT a
 runner-scheduler regression, and NOT a `worker_count=1` config foot-gun.**
 
-Hard log evidence (`/Users/henry/Downloads/logs.1782348290172.log`, ANSI-stripped)
+Hard log evidence (operator-provided `logs.1782348290172.log`, ANSI-stripped)
 shows the scheduler running **multiple runs concurrently**:
 
 - 23:30 window — three runs overlap:
