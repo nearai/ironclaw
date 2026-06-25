@@ -424,6 +424,8 @@ mod tests {
         let hook = asset_text("js/hooks/useSidebar.js");
         assert!(hook.contains("from \"../lib/sidebar-state.js\""));
         assert!(hook.contains("desktopOpen: readDesktopSidebarOpen()"));
+        assert!(hook.contains("React.useState(() =>"));
+        assert!(hook.contains("isDesktopSidebarViewport()"));
         assert!(hook.contains("setIsDesktopViewport(query.matches)"));
         assert!(hook.contains("toggleSidebarState(current, isDesktopViewport)"));
         assert!(hook.contains("currentOpen: currentSidebarOpen(state, isDesktopViewport)"));

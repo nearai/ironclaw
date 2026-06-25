@@ -14,8 +14,8 @@ export function useSidebar({ onNewChat } = {}) {
     mobileOpen: false,
     desktopOpen: readDesktopSidebarOpen(),
   }));
-  const [isDesktopViewport, setIsDesktopViewport] = React.useState(
-    isDesktopSidebarViewport
+  const [isDesktopViewport, setIsDesktopViewport] = React.useState(() =>
+    isDesktopSidebarViewport()
   );
 
   React.useEffect(() => {
