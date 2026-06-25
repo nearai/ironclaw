@@ -18,7 +18,7 @@ impl Default for TriggerPollerWorkerConfig {
             poll_interval: Duration::from_secs(30),
             fires_per_tick: 32,
             max_concurrent_fires_per_trigger: 1,
-            claim_only_recovery_grace: Duration::from_secs(120),
+            claim_only_recovery_grace: Duration::from_secs(60),
         }
     }
 }

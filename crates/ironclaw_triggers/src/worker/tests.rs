@@ -1487,7 +1487,7 @@ async fn tick_recovers_stale_claim_only_active_fire_by_replaying_submit() {
     let submitter = Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
         TrustedTriggerFireSubmitOutcome::Replayed {
             original_run_id: replayed_run_id,
-            replayed_at: fire_slot + chrono::Duration::seconds(121),
+            replayed_at: fire_slot + chrono::Duration::seconds(61),
             thread_id: Some(thread_id.clone()),
         },
     )]));
@@ -1499,13 +1499,13 @@ async fn tick_recovers_stale_claim_only_active_fire_by_replaying_submit() {
         submitter.clone(),
         active_lookup.clone(),
         TriggerPollerWorkerConfig {
-            claim_only_recovery_grace: Duration::from_secs(120),
+            claim_only_recovery_grace: Duration::from_secs(60),
             ..TriggerPollerWorkerConfig::default()
         },
     );
 
     let report = worker
-        .tick_once(fire_slot + chrono::Duration::seconds(121))
+        .tick_once(fire_slot + chrono::Duration::seconds(61))
         .await
         .expect("tick succeeds");
 
