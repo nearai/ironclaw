@@ -18,6 +18,21 @@ use crate::error::{LlmConfigError, LlmError};
 use crate::registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 use crate::session::SessionConfig;
 
+/// Default circuit-breaker failure threshold applied when no env override is set.
+///
+/// Enables the breaker by default so an unreachable/degraded provider trips the
+/// circuit and fast-fails instead of wedging every concurrent run on
+/// retries+timeouts. Override with `LLM_CIRCUIT_BREAKER_THRESHOLD`; set it to `0`
+/// to disable the breaker entirely.
+const DEFAULT_CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
+
+/// Default circuit-breaker recovery window (seconds) before a probe is allowed.
+///
+/// Kept short so a false trip on an otherwise-healthy provider self-heals
+/// quickly instead of locking out every user for a long window. Override with
+/// `LLM_CIRCUIT_BREAKER_RECOVERY_SECS`.
+const DEFAULT_CIRCUIT_BREAKER_RECOVERY_SECS: u64 = 10;
+
 /// Already-resolved provider input from env or a catalog selection.
 #[derive(Debug, Clone)]
 pub enum ResolvedProviderConfig {
@@ -542,8 +557,14 @@ impl Default for ChainSettings {
             cheap_model: None,
             smart_routing_cascade: true,
             max_retries: 3,
-            circuit_breaker_threshold: None,
-            circuit_breaker_recovery_secs: 30,
+            // Trip the breaker after this many consecutive transient provider
+            // failures so a dead upstream fast-fails every run instead of each
+            // one independently exhausting retries/timeouts.
+            circuit_breaker_threshold: Some(DEFAULT_CIRCUIT_BREAKER_THRESHOLD),
+            // Short recovery window so a false trip (e.g. a brief burst of
+            // timeouts on an otherwise-healthy provider) is a ~10s blip rather
+            // than a long instance-wide outage; the breaker probes again sooner.
+            circuit_breaker_recovery_secs: DEFAULT_CIRCUIT_BREAKER_RECOVERY_SECS,
             response_cache_enabled: false,
             response_cache_ttl_secs: 3600,
             response_cache_max_entries: 1000,
@@ -569,11 +590,16 @@ impl ChainSettings {
                 "llm_config",
             )?
             .unwrap_or(defaults.max_retries),
+            // Kill switch: `*_THRESHOLD=0` disables the breaker entirely (maps to
+            // None → no CircuitBreakerProvider in the chain), so a misbehaving
+            // breaker can be turned off via env with no redeploy.
             circuit_breaker_threshold: parse_option_env_with_fallback::<u32>(
                 "LLM_CIRCUIT_BREAKER_THRESHOLD",
                 "CIRCUIT_BREAKER_THRESHOLD",
                 "llm_config",
-            )?,
+            )?
+            .or(defaults.circuit_breaker_threshold)
+            .filter(|&threshold| threshold != 0),
             circuit_breaker_recovery_secs: parse_option_env_with_fallback::<u64>(
                 "LLM_CIRCUIT_BREAKER_RECOVERY_SECS",
                 "CIRCUIT_BREAKER_RECOVERY_SECS",
@@ -845,6 +871,43 @@ mod tests {
         assert!(config.response_cache_enabled);
         assert_eq!(config.response_cache_ttl_secs, 23);
         assert_eq!(config.response_cache_max_entries, 29);
+    }
+
+    #[test]
+    fn circuit_breaker_enabled_by_default_without_env_override() {
+        // Regression: a dead/degraded provider must fast-fail rather than wedge
+        // every concurrent run on retries+timeouts. With no env override the
+        // breaker is on at the default threshold so the chain wraps a
+        // CircuitBreakerProvider.
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        let _env = EnvGuard::clear(CHAIN_ENV_VARS);
+
+        let config = build_llm_config_from_resolved_provider(registry_resolved_provider())
+            .expect("default chain resolution should succeed");
+
+        assert_eq!(
+            config.circuit_breaker_threshold,
+            Some(DEFAULT_CIRCUIT_BREAKER_THRESHOLD)
+        );
+        assert_eq!(
+            config.circuit_breaker_recovery_secs,
+            DEFAULT_CIRCUIT_BREAKER_RECOVERY_SECS
+        );
+    }
+
+    #[test]
+    fn circuit_breaker_threshold_zero_disables_breaker() {
+        // Kill switch: operators must be able to disable the instance-wide
+        // breaker via env (no redeploy) if it ever fast-fails healthy traffic.
+        // `THRESHOLD=0` must resolve to None so no CircuitBreakerProvider is built.
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        let env = EnvGuard::clear(CHAIN_ENV_VARS);
+        env.set("LLM_CIRCUIT_BREAKER_THRESHOLD", "0");
+
+        let config = build_llm_config_from_resolved_provider(registry_resolved_provider())
+            .expect("threshold=0 should resolve");
+
+        assert_eq!(config.circuit_breaker_threshold, None);
     }
 
     #[test]

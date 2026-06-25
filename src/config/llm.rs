@@ -16,6 +16,15 @@ use ironclaw_llm::session::SessionConfig;
 
 static LOG_LLM_BACKEND_RESOLUTION: Once = Once::new();
 
+/// Default circuit-breaker failure threshold when no env override is set.
+/// Enables the breaker by default for fast-fail on a degraded provider.
+/// Set the env override to `0` to disable the breaker entirely.
+const DEFAULT_CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
+
+/// Default circuit-breaker recovery window (seconds). Kept short so a false trip
+/// self-heals quickly instead of locking out every user for a long window.
+const DEFAULT_CIRCUIT_BREAKER_RECOVERY_SECS: u64 = 10;
+
 fn selected_model_override(settings: &Settings) -> Option<String> {
     ironclaw_llm::normalized_model_override(settings.selected_model.as_deref()).map(str::to_string)
 }
@@ -357,7 +366,10 @@ pub fn resolve(settings: &Settings) -> Result<LlmConfig, ConfigError> {
                 key: "CIRCUIT_BREAKER_THRESHOLD".to_string(),
                 message: format!("must be a positive integer: {e}"),
             })?,
-        circuit_breaker_recovery_secs: parse_optional_env("CIRCUIT_BREAKER_RECOVERY_SECS", 30)?,
+        circuit_breaker_recovery_secs: parse_optional_env(
+            "CIRCUIT_BREAKER_RECOVERY_SECS",
+            DEFAULT_CIRCUIT_BREAKER_RECOVERY_SECS,
+        )?,
         response_cache_enabled: parse_optional_env("RESPONSE_CACHE_ENABLED", false)?,
         response_cache_ttl_secs: parse_optional_env("RESPONSE_CACHE_TTL_SECS", 3600)?,
         response_cache_max_entries: parse_optional_env("RESPONSE_CACHE_MAX_ENTRIES", 1000)?,
@@ -471,7 +483,13 @@ pub fn resolve(settings: &Settings) -> Result<LlmConfig, ConfigError> {
             key: "LLM_CIRCUIT_BREAKER_THRESHOLD".to_string(),
             message: format!("must be a positive integer: {e}"),
         })?
-        .or(nearai.circuit_breaker_threshold);
+        .or(nearai.circuit_breaker_threshold)
+        // Enable the circuit breaker by default so an unreachable/degraded
+        // provider fast-fails instead of wedging every run on retries+timeouts.
+        // Override with LLM_CIRCUIT_BREAKER_THRESHOLD / CIRCUIT_BREAKER_THRESHOLD;
+        // set it to 0 to disable the breaker entirely (kill switch, no redeploy).
+        .or(Some(DEFAULT_CIRCUIT_BREAKER_THRESHOLD))
+        .filter(|&threshold| threshold != 0);
 
     let circuit_breaker_recovery_secs = optional_env("LLM_CIRCUIT_BREAKER_RECOVERY_SECS")?
         .map(|s| s.parse::<u64>())
