@@ -2531,6 +2531,28 @@ Issue found and fixed:
   code. The component now clears the input only on successful redemption,
   matching the generic Reborn pairing section and the legacy retry behavior.
 
+### Step 84: Legacy Approval Denied Status Port
+
+Extended `test_reborn_webui_v2_legacy_approval.py`.
+
+Ported the visible denied-state behavior from legacy
+`test_approval_deny_shows_denied` to Reborn's approval gate flow:
+
+- opened a browser-stubbed approval gate for `builtin.shell`;
+- denied the gate through the Reborn approval card;
+- mocked the resolve response as a resumed run, matching the Reborn path that
+  continues after a denied gate;
+- asserted the approval card hides and the corresponding tool activity card is
+  visible with `data-tool-status="declined"` and the `gate_declined` detail.
+
+Behavior mapping:
+
+- Legacy v1 kept the old approval-card DOM around with resolved text such as
+  `Denied`. Reborn removes the pending approval card after resolution and
+  projects the denied outcome into the live activity timeline. The port checks
+  that Reborn-native visible state instead of the removed v1 resolved-copy
+  element.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -2549,9 +2571,10 @@ Not yet ported:
   activity stores beyond the current timeline paging, near-cap response
   projection, and SSE reconnect-timeout cleanup coverage;
 - deeper tool approval scenarios that need real Reborn runtime/tool execution,
-  persistence, or recovery beyond the browser approval-card, local send-blocking,
-  and persisted activity-card contracts; legacy text-alias interception is v1
-  behavior superseded by Reborn's disabled-composer gate flow;
+  persistence, or recovery beyond the browser approval-card, denied activity,
+  local send-blocking, and persisted activity-card contracts; legacy text-alias
+  interception is v1 behavior superseded by Reborn's disabled-composer gate
+  flow;
 - remaining settings/extension lifecycle scenarios beyond Settings search,
   Skills, tool permissions, channel label regressions, extension revisit
   refetch, and the top-level extension install/manage/configure surface,

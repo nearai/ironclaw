@@ -24,6 +24,7 @@ async def _open_stubbed_approval_thread(
     reborn_v2_browser,
     *,
     resolve_release: asyncio.Event | None = None,
+    resolve_response: dict | None = None,
 ):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
@@ -131,7 +132,8 @@ async def _open_stubbed_approval_thread(
             await resolve_release.wait()
         await fulfill_json(
             route,
-            {
+            resolve_response
+            or {
                 "thread_id": THREAD_ID,
                 "run_id": RUN_ID,
                 "status": "completed",
@@ -261,6 +263,43 @@ async def test_reborn_legacy_approval_buttons_resolve_gate(
         )
         assert resolve_requests[2]["body"]["resolution"] == "denied"
         assert resolve_requests[2]["body"]["always"] is False
+    finally:
+        await context.close()
+
+
+async def test_reborn_legacy_approval_deny_shows_declined_activity(
+    reborn_v2_server, reborn_v2_browser
+):
+    context, page, resolve_requests = await _open_stubbed_approval_thread(
+        reborn_v2_server,
+        reborn_v2_browser,
+        resolve_response={
+            "thread_id": THREAD_ID,
+            "run_id": RUN_ID,
+            "status": "queued",
+            "outcome": "resumed",
+        },
+    )
+    try:
+        await _emit_approval_gate(page, allow_always=False, gate_ref="gate-denied-visible")
+
+        card = page.locator(SEL_V2["approval_card"]).first
+        await card.get_by_role("button", name="Deny").click()
+        await expect(card).to_be_hidden(timeout=5000)
+
+        declined_activity = page.locator(
+            SEL_V2["tool_activity_card_for"].format(name="shell")
+        ).filter(has_text="declined")
+        await expect(declined_activity).to_be_visible(timeout=5000)
+        await expect(declined_activity).to_have_attribute("data-tool-status", "declined")
+        await expect(declined_activity).to_contain_text("gate_declined")
+
+        assert len(resolve_requests) == 1
+        assert f"/threads/{THREAD_ID}/runs/{RUN_ID}/gates/gate-denied-visible/resolve" in (
+            resolve_requests[0]["url"]
+        )
+        assert resolve_requests[0]["body"]["resolution"] == "denied"
+        assert resolve_requests[0]["body"]["always"] is False
     finally:
         await context.close()
 
