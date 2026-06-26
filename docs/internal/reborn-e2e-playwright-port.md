@@ -1976,6 +1976,32 @@ Behavior adjustment:
   or retarget the composer when the active thread is absent from the summary
   response.
 
+### Step 60: Legacy Connection and Ownership API Port
+
+Extended `test_reborn_webui_v2_legacy_core.py`.
+
+Ported the API-level health/auth/ownership intent from legacy
+`test_connection.py` and `test_ownership_model.py` to Reborn's public WebUI v2
+endpoints:
+
+- `/api/health` returns the healthy startup response from the real
+  `ironclaw-reborn serve` process;
+- unauthenticated and invalid bearer requests to `/api/webchat/v2/session` are
+  rejected before returning caller state;
+- authenticated `/api/webchat/v2/session` returns the host-minted tenant and
+  user identity for the Reborn WebUI v2 test operator;
+- the same session payload exposes the operator capability, deployment feature
+  gates, and inline attachment budgets used by the browser composer.
+
+Behavior adjustment:
+
+- Legacy ownership tests read/write old `/api/settings/*` rows and create
+  additional users through `/api/admin/users`. Reborn's standalone v2 surface
+  uses host-authenticated session identity plus `/api/webchat/v2/*` endpoints;
+  the port therefore asserts the visible session/auth contract and leaves
+  legacy admin-created multi-user greeting flows in the product-gap bucket until
+  Reborn exposes equivalent v2 admin/user provisioning behavior.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -2037,9 +2063,10 @@ Not yet ported:
 - legacy portfolio widget/share parity, because current Reborn project widgets
   are TODO client stubs and no portfolio-specific widget/share-modal contract
   exists in WebUI v2;
-- legacy owner-scope, multi-tenant greeting, and engine-v2 visibility parity,
-  because those tests target old gateway/admin/routine/engine endpoints rather
-  than current standalone Reborn WebUI v2 product surfaces;
+- remaining legacy owner-scope, multi-tenant greeting, and engine-v2 visibility
+  parity beyond the Reborn session/auth API coverage, because those tests target
+  old gateway/admin/routine/engine endpoints rather than current standalone
+  Reborn WebUI v2 product surfaces;
 - legacy empty-model-reply durable assistant-transcript parity remains
   intentionally unported because Reborn treats model `InvalidOutput` as a
   failed run without writing an assistant transcript row; browser-visible

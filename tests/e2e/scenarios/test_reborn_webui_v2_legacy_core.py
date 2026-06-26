@@ -8,10 +8,13 @@ sidebar routes, token login view, and ``data-testid`` selectors.
 
 import re
 
+import httpx
 from playwright.async_api import expect
 
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
+    USER_ID,
+    reborn_bearer_headers,
     reborn_v2_browser,  # noqa: F401 - imported fixture
     reborn_v2_page,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
@@ -50,6 +53,45 @@ async def test_reborn_legacy_core_auth_rejection(reborn_v2_server, reborn_v2_bro
         await expect(page.locator(SEL_V2["login_token"])).to_be_visible(timeout=15000)
     finally:
         await context.close()
+
+
+async def test_reborn_legacy_core_health_and_session_api(reborn_v2_server):
+    """Port of legacy connection/ownership API checks to Reborn's v2 endpoints."""
+    async with httpx.AsyncClient() as client:
+        health = await client.get(f"{reborn_v2_server}/api/health", timeout=10)
+        assert health.status_code == 200, health.text
+        assert health.json()["status"] == "healthy"
+
+        unauthenticated = await client.get(
+            f"{reborn_v2_server}/api/webchat/v2/session", timeout=10
+        )
+        assert unauthenticated.status_code in (401, 403), unauthenticated.text
+
+        invalid = await client.get(
+            f"{reborn_v2_server}/api/webchat/v2/session",
+            headers={"Authorization": "Bearer not-the-reborn-token"},
+            timeout=10,
+        )
+        assert invalid.status_code in (401, 403), invalid.text
+
+        session = await client.get(
+            f"{reborn_v2_server}/api/webchat/v2/session",
+            headers=reborn_bearer_headers(),
+            timeout=10,
+        )
+        assert session.status_code == 200, session.text
+
+    payload = session.json()
+    assert payload["tenant_id"] == "reborn-v2-e2e"
+    assert payload["user_id"] == USER_ID
+    assert payload["capabilities"]["operator_webui_config"] is True
+    assert "reborn_projects" in payload["features"]
+
+    attachments = payload["attachments"]
+    assert ".pdf" in attachments["accept"]
+    assert attachments["max_count"] >= 1
+    assert attachments["max_file_bytes"] > 0
+    assert attachments["max_total_bytes"] >= attachments["max_file_bytes"]
 
 
 async def test_reborn_legacy_core_send_message_and_receive_response(reborn_v2_page):
