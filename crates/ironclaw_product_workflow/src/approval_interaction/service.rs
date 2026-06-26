@@ -180,7 +180,10 @@ impl DefaultApprovalInteractionService {
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
         let action = ApprovalCapabilityAction::from_action(gate.request().action.as_ref())?;
         let status = gate.status();
-        if matches!(status, ApprovalStatus::Denied | ApprovalStatus::Expired | ApprovalStatus::Discarded) {
+        if matches!(
+            status,
+            ApprovalStatus::Denied | ApprovalStatus::Expired | ApprovalStatus::Discarded
+        ) {
             return Err(approval_rejected(
                 ApprovalInteractionRejectionKind::StaleGate,
             ));

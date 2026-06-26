@@ -138,7 +138,7 @@ risk).
 
 Per touched crate:
 
-- `cargo fmt --all`
+- `cargo fmt --all -- --check`
 - `cargo check` (default / postgres build)
 - `cargo check --no-default-features --features libsql`
 - `cargo check --all-features`

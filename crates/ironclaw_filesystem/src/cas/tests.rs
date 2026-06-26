@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 use super::{CasApply, CasUpdateError, cas_update};
 use crate::{
     BackendCapabilities, CasExpectation, ContentType, DirEntry, Entry, FileStat, FilesystemError,
-    InMemoryBackend, RecordVersion, RootFilesystem, ScopedFilesystem, VersionedEntry,
+    FilesystemOperation, InMemoryBackend, RecordVersion, RootFilesystem, ScopedFilesystem,
+    VersionedEntry,
 };
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────
@@ -496,5 +497,86 @@ async fn timeout_fires_when_backend_get_hangs() {
         matches!(result, Err(CasUpdateError::Timeout)),
         "a wedged backend `get` must trigger CasUpdateError::Timeout after \
          FILESYSTEM_APPLY_TIMEOUT elapses, got {result:?}"
+    );
+}
+
+// ─── A backend with default capabilities whose put returns Unsupported ────────
+
+/// Backend with default/unknown capabilities (so `capabilities_known()` returns
+/// `false` and the pre-flight gate defers to op-time) whose `get` returns
+/// `Ok(None)` and whose `put` returns
+/// `FilesystemError::Unsupported { operation: WriteFile }`. This simulates the
+/// composite-router fallback path: a backend that cannot honor CAS writes is
+/// not caught up front, but is caught fail-closed when the write is attempted.
+struct UnsupportedWriteBackend;
+
+#[async_trait]
+impl RootFilesystem for UnsupportedWriteBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        // Default/empty shape — identical to `BackendCapabilities::empty()`.
+        // `capabilities_known()` compares against `BackendCapabilities::default()`
+        // and returns `false` here, so the pre-flight gate is bypassed and the
+        // loop reaches `put` before the error surfaces.
+        BackendCapabilities::default()
+    }
+
+    async fn get(&self, _path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        // No existing record — the loop will attempt a first write.
+        Ok(None)
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        _entry: Entry,
+        _cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        Err(FilesystemError::Unsupported {
+            path: path.clone(),
+            operation: FilesystemOperation::WriteFile,
+        })
+    }
+
+    async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        unimplemented!("UnsupportedWriteBackend::list_dir is unreachable in this test")
+    }
+
+    async fn stat(&self, _path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        unimplemented!("UnsupportedWriteBackend::stat is unreachable in this test")
+    }
+}
+
+#[tokio::test]
+async fn unsupported_write_file_maps_to_cas_unsupported() {
+    // Regression for the op-time fail-closed path (distinct from the pre-flight
+    // path exercised by `non_cas_backend_is_rejected_not_overwritten`).
+    //
+    // The backend advertises `BackendCapabilities::default()` — the empty/unknown
+    // shape — so `capabilities_known()` returns `false` and the pre-flight gate
+    // does NOT fire. The helper enters the loop, `get` returns `Ok(None)`,
+    // `increment` returns a real change (`Counter { value: 1 }`), and `cas_update`
+    // attempts the write. The backend's `put` then returns
+    // `FilesystemError::Unsupported { operation: WriteFile }`, which the loop maps
+    // to `CasUpdateError::CasUnsupported` (cas.rs ~lines 337-340).
+    //
+    // This is the composite-router fallback path: a backend without CAS support
+    // is not always detectable at pre-flight but must still fail closed.
+    let fs = Arc::new(scoped(Arc::new(UnsupportedWriteBackend)));
+    let scope = ResourceScope::system();
+
+    let result = cas_update(
+        fs.as_ref(),
+        &scope,
+        &counter_path(),
+        decode_counter,
+        encode_counter,
+        increment,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(CasUpdateError::CasUnsupported)),
+        "an op-time Unsupported(WriteFile) from a default-capability backend must \
+         map to CasUpdateError::CasUnsupported (fail-closed op-time path), got {result:?}"
     );
 }

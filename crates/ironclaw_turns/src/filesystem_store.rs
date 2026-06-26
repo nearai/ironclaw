@@ -39,7 +39,8 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    CasApply, CasUpdateError, RecordVersion, RootFilesystem, ScopedFilesystem, cas_update,
+    CasApply, CasUpdateError, FILESYSTEM_APPLY_TIMEOUT, RecordVersion, RootFilesystem,
+    ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{ResourceScope, UserId};
 
@@ -74,7 +75,6 @@ use runner_lease::{RunnerLeaseOverlay, RunnerLeaseRecord, RunnerLeaseSidecar};
 #[cfg(test)]
 mod tests;
 
-const FILESYSTEM_APPLY_TIMEOUT: Duration = Duration::from_secs(15);
 const SNAPSHOT_READ_CACHE_TTL: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
@@ -378,11 +378,7 @@ where
     /// guarded read/modify/write is deadline-bounded so one wedged filesystem
     /// operation only consumes this caller's apply attempt until the deadline
     /// returns `TurnError::Unavailable`.
-    async fn apply<T, A, Fut>(
-        &self,
-        overlay: RunnerLeaseOverlay,
-        apply: A,
-    ) -> Result<T, TurnError>
+    async fn apply<T, A, Fut>(&self, overlay: RunnerLeaseOverlay, apply: A) -> Result<T, TurnError>
     where
         A: FnMut(InMemoryTurnStateStore) -> Fut + Send,
         Fut: std::future::Future<Output = (Result<T, TurnError>, InMemoryTurnStateStore)> + Send,
@@ -497,11 +493,12 @@ where
 
         // Run the CAS loop inside the apply timeout.
         //
-        // Note: `cas_update` has its own inner timeout (`FILESYSTEM_APPLY_TIMEOUT`
-        // from the shared helper), but `self.apply_timeout` may be shorter (used
-        // in tests via `with_apply_timeout`). The outer timeout governs the
-        // overall deadline; the inner `cas_update` timeout is an additional guard
-        // at the helper level.
+        // Note: `cas_update` internally applies `FILESYSTEM_APPLY_TIMEOUT` (from
+        // `ironclaw_filesystem`) to the whole CAS loop.  `self.apply_timeout`
+        // defaults to the same shared constant but can be shortened in tests via
+        // `with_apply_timeout`.  The outer `tokio::time::timeout` here enforces
+        // the per-call deadline; `cas_update`'s inner timeout is an additional
+        // guard inside the helper itself.
         let result: Result<(T, TurnPersistenceSnapshot), CasUpdateError<TurnError>> =
             match tokio::time::timeout(self.apply_timeout, cas_future).await {
                 Ok(result) => result,
@@ -531,7 +528,6 @@ where
             }
         }
     }
-
 
     async fn apply_run_state_transition<A, Fut>(
         &self,
