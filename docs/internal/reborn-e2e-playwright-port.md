@@ -1557,6 +1557,28 @@ Behavior adjustment:
   a non-installed free-form name. The test harness now mutates installed and
   registry state only after a successful remove response.
 
+### Step 43: Legacy Setup Load Failure Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the user-facing error-path intent from legacy `test_setup_noninstalled`
+and `test_configure_noninstalled` to Reborn's configure modal:
+
+- opening configuration for an installed extension can receive a non-2xx setup
+  schema response;
+- Reborn renders the setup load failure inside the modal with the humanized v2
+  error code;
+- the modal does not render a Save action for a failed setup schema load;
+- no setup submit request is emitted.
+
+Behavior adjustment:
+
+- Reborn's browser opens configuration from an installed card rather than a
+  free-form extension name. The port asserts the current v2
+  `/api/webchat/v2/extensions/{package_id}/setup` error boundary and modal
+  behavior instead of legacy `/api/extensions/{name}/setup` not-installed
+  requests.
+
 ## Open Migration Buckets
 
 Not yet ported:

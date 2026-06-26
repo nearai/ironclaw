@@ -158,6 +158,7 @@ async def _open_mocked_extensions_page(
     registry=None,
     tab="registry",
     setup_payloads=None,
+    setup_get_responses=None,
     setup_submit_responses=None,
     install_responses=None,
     oauth_start_responses=None,
@@ -169,6 +170,7 @@ async def _open_mocked_extensions_page(
     installed_extensions = [dict(extension) for extension in (installed or [])]
     registry_entries = [dict(entry) for entry in (registry or [])]
     setup_payloads_by_id = dict(setup_payloads or {})
+    setup_get_responses_by_id = dict(setup_get_responses or {})
     setup_submit_responses_by_id = dict(setup_submit_responses or {})
     install_responses_by_id = dict(install_responses or {})
     oauth_start_responses_by_id = dict(oauth_start_responses or {})
@@ -233,6 +235,14 @@ async def _open_mocked_extensions_page(
             package_id = unquote(
                 path.removeprefix("/api/webchat/v2/extensions/").removesuffix("/setup")
             )
+            if package_id in setup_get_responses_by_id:
+                response = setup_get_responses_by_id[package_id]
+                await fulfill_json(
+                    route,
+                    response.get("body", response),
+                    status=response.get("status", 200),
+                )
+                return
             await fulfill_json(
                 route,
                 setup_payloads_by_id.get(
@@ -1161,6 +1171,44 @@ async def test_reborn_legacy_configure_modal_save_failure_stays_open(
         assert harness["setup_submit_requests"][0]["body"]["payload"]["secrets"] == {
             "API_TOKEN": "bad-token"
         }
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_configure_modal_setup_load_failure_is_visible(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[CONFIG_TOOL],
+        setup_get_responses={
+            "config-tool": {
+                "status": 404,
+                "body": {
+                    "error": "not_found",
+                    "kind": "not_found",
+                    "field": "package_ref",
+                },
+            }
+        },
+        tab="installed",
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, "Config Tool")
+        await expect(card).to_be_visible(timeout=5000)
+        await card.get_by_role("button", name="Configure").click()
+
+        await expect(
+            page.get_by_role("heading", name="Configure Config Tool")
+        ).to_be_visible(timeout=5000)
+        await expect(page.get_by_text("Failed to load setup:")).to_be_visible(
+            timeout=5000
+        )
+        await expect(page.get_by_text("Not found (package_ref)")).to_be_visible()
+        await expect(page.get_by_role("button", name="Save")).to_have_count(0)
+        assert harness["setup_submit_requests"] == []
     finally:
         await harness["context"].close()
 
