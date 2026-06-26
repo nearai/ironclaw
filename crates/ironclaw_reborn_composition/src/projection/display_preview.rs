@@ -270,8 +270,16 @@ impl CapabilityDisplayPreviewStore {
         capability_id: &CapabilityId,
         summary: &str,
     ) {
+        // Hold the pending AND completed locks for the whole operation so the
+        // remove-from-pending + insert-into-completed pair is atomic with
+        // respect to `prune_run`. `prune_run` acquires the same two locks in
+        // the same order (pending before completed) and never holds both at
+        // once, so a concurrent prune cannot interleave between the two steps
+        // and leak a completed record that is never pruned. Lock order matches
+        // every other site, so holding both here cannot deadlock.
+        let mut pending = self.lock_pending_inputs();
+        let mut completed = self.lock_completed_previews();
         let input = {
-            let mut pending = self.lock_pending_inputs();
             let input_ref = pending
                 .input_ref_by_invocation
                 .remove(&invocation_id.to_string());
@@ -294,7 +302,6 @@ impl CapabilityDisplayPreviewStore {
             result_ref: None,
             truncated: bounded.truncated || input.as_ref().is_some_and(|input| input.truncated),
         };
-        let mut completed = self.lock_completed_previews();
         let invocation_id = invocation_id.to_string();
         completed
             .by_invocation

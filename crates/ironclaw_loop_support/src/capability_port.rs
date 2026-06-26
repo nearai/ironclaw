@@ -266,8 +266,9 @@ pub trait LoopCapabilityResultWriter: Send + Sync {
     /// instead of only the bare error kind. `summary` is a bounded,
     /// host-authored string (see `capability_failure_display_summary`).
     /// Default no-op: only writers that own a display-preview store implement
-    /// it. Mirrors `record_running_invocation`'s opt-in shape.
-    fn stage_capability_failure_preview(
+    /// it. Async so implementers can durably persist the failure preview the
+    /// same way `write_capability_result` persists success previews.
+    async fn stage_capability_failure_preview(
         &self,
         _run_context: &LoopRunContext,
         _invocation_id: InvocationId,
@@ -322,20 +323,26 @@ fn capability_failure_display_summary(failure: &CapabilityFailure) -> Option<Str
             let extra = issues.len() - CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES;
             summary.push_str(&format!(" (+{extra} more)"));
         }
-        return Some(truncate_on_char_boundary(
-            summary,
-            CAPABILITY_FAILURE_PREVIEW_MAX_BYTES,
-        ));
+        return Some(
+            ironclaw_host_api::truncate_capability_display_text(
+                &summary,
+                CAPABILITY_FAILURE_PREVIEW_MAX_BYTES,
+            )
+            .text,
+        );
     }
 
     let summary = failure.safe_summary.trim();
     if summary.is_empty() || GENERIC_CAPABILITY_FAILURE_SUMMARIES.contains(&summary) {
         return None;
     }
-    Some(truncate_on_char_boundary(
-        summary.to_string(),
-        CAPABILITY_FAILURE_PREVIEW_MAX_BYTES,
-    ))
+    Some(
+        ironclaw_host_api::truncate_capability_display_text(
+            summary,
+            CAPABILITY_FAILURE_PREVIEW_MAX_BYTES,
+        )
+        .text,
+    )
 }
 
 fn render_capability_input_issue(issue: &CapabilityInputIssue) -> String {
@@ -351,18 +358,6 @@ fn render_capability_input_issue(issue: &CapabilityInputIssue) -> String {
         }
         _ => format!("{} — {code}", issue.path),
     }
-}
-
-fn truncate_on_char_boundary(mut value: String, max_bytes: usize) -> String {
-    if value.len() <= max_bytes {
-        return value;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value.truncate(end);
-    value
 }
 
 pub struct CapabilityResultWrite<'a> {
@@ -2548,12 +2543,14 @@ async fn runtime_outcome_to_loop(
             if let CapabilityOutcome::Failed(ref cap_failure) = outcome
                 && let Some(summary) = capability_failure_display_summary(cap_failure)
             {
-                result_writer.stage_capability_failure_preview(
-                    run_context,
-                    conversion.invocation_id,
-                    &capability_id,
-                    &summary,
-                );
+                result_writer
+                    .stage_capability_failure_preview(
+                        run_context,
+                        conversion.invocation_id,
+                        &capability_id,
+                        &summary,
+                    )
+                    .await;
             }
             outcome
         }
