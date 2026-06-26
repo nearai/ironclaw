@@ -95,6 +95,8 @@ Ported initial behavior from legacy `test_connection.py` and basic
 - sidebar navigation reaches Reborn routes;
 - missing token shows the Reborn login token view;
 - a browser-sent message receives a mock LLM reply;
+- the first browser-created chat appears in the Reborn app sidebar as a normal
+  conversation row using the derived first-message title;
 - sequential browser messages render user and assistant bubbles;
 - empty/whitespace sends do not create messages.
 

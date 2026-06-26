@@ -66,6 +66,28 @@ async def test_reborn_legacy_core_send_message_and_receive_response(reborn_v2_pa
     )
 
 
+async def test_reborn_legacy_first_conversation_appears_in_sidebar(reborn_v2_page):
+    """Port of the legacy first gateway conversation sidebar-row regression."""
+    title = "sidebar label regression check"
+    composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
+
+    await composer.fill(title)
+    await composer.press("Enter")
+
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+        title, timeout=15000
+    )
+    await expect(reborn_v2_page.locator(SEL_V2["msg_assistant"]).first).to_be_visible(
+        timeout=30000
+    )
+
+    sidebar_row = reborn_v2_page.locator("#gateway-sidebar").get_by_role(
+        "button"
+    ).filter(has_text=title).first
+    await expect(sidebar_row).to_be_visible(timeout=15000)
+    await expect(sidebar_row).to_contain_text(title)
+
+
 async def test_reborn_legacy_core_multiple_messages(reborn_v2_page):
     """Port of the legacy two-message browser chat flow."""
     composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
