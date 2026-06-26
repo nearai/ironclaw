@@ -331,12 +331,7 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
                     "external tool name shadows a host capability",
                 ));
             }
-            let tool_name = ProviderToolName::new(spec.name()).map_err(|error| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    format!("external tool name is not provider-safe: {error}"),
-                )
-            })?;
+            let tool_name = spec.provider_tool_name().clone();
             let capability_id = spec.capability_id().clone();
             if surface
                 .descriptors

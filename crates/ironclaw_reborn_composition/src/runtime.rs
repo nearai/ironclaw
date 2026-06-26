@@ -22,7 +22,7 @@
 
 // arch-exempt: large_file, needs Reborn runtime helper extraction, plan #4471
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -32,7 +32,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use ironclaw_events::{DurableAuditLog, DurableEventLog, InMemoryAuditSink, RuntimeEvent};
-use ironclaw_extensions::SharedExtensionRegistry;
+use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_first_party_extension_ports::{
@@ -526,12 +526,19 @@ pub struct RebornRuntime {
 
 struct RegistryPersistentApprovalGranteeResolver {
     registry: Arc<SharedExtensionRegistry>,
+    cached_registry: StdMutex<CachedExtensionRegistrySnapshot>,
     outbound_delivery_target_set_provider: ExtensionId,
+}
+
+struct CachedExtensionRegistrySnapshot {
+    version: u64,
+    snapshot: Arc<ExtensionRegistry>,
 }
 
 impl PersistentApprovalGranteeResolver for RegistryPersistentApprovalGranteeResolver {
     fn persistent_approval_grantee(&self, capability_id: &CapabilityId) -> Option<Principal> {
-        if let Some(descriptor) = self.registry.snapshot().get_capability(capability_id) {
+        let registry = self.cached_snapshot();
+        if let Some(descriptor) = registry.get_capability(capability_id) {
             return Some(Principal::Extension(descriptor.provider.clone()));
         }
         if capability_id.as_str() == OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID {
@@ -545,14 +552,29 @@ impl PersistentApprovalGranteeResolver for RegistryPersistentApprovalGranteeReso
 
 impl RegistryPersistentApprovalGranteeResolver {
     fn new(registry: Arc<SharedExtensionRegistry>) -> Result<Self, RebornRuntimeError> {
+        let version = registry.version();
+        let snapshot = registry.snapshot();
         let outbound_delivery_target_set_provider = outbound_delivery_synthetic_provider()
             .map_err(|error| RebornRuntimeError::InvalidArgument {
                 reason: format!("outbound delivery synthetic provider id is invalid: {error}"),
             })?;
         Ok(Self {
             registry,
+            cached_registry: StdMutex::new(CachedExtensionRegistrySnapshot { version, snapshot }),
             outbound_delivery_target_set_provider,
         })
+    }
+
+    fn cached_snapshot(&self) -> Arc<ExtensionRegistry> {
+        let version = self.registry.version();
+        let Ok(mut cached) = self.cached_registry.lock() else {
+            return self.registry.snapshot();
+        };
+        if cached.version != version {
+            cached.snapshot = self.registry.snapshot();
+            cached.version = version;
+        }
+        Arc::clone(&cached.snapshot)
     }
 }
 
@@ -3974,6 +3996,19 @@ mod tests {
                 ))
             );
         }
+
+        registry
+            .insert(test_extension_package("google-drive", &["list_files"]))
+            .expect("insert later package");
+        assert_eq!(
+            ironclaw_product_workflow::PersistentApprovalGranteeResolver::persistent_approval_grantee(
+                &resolver,
+                &CapabilityId::new("google-drive.list_files").expect("capability id")
+            ),
+            Some(Principal::Extension(
+                ExtensionId::new("google-drive").expect("extension id")
+            ))
+        );
     }
 
     fn test_extension_package(

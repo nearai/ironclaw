@@ -22,14 +22,14 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::{CapabilityId, ProviderToolName};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::TurnRunId;
 
 /// Maximum accepted external tool name length, in bytes.
-const MAX_EXTERNAL_TOOL_NAME_BYTES: usize = 64;
+const MAX_EXTERNAL_TOOL_NAME_BYTES: usize = ProviderToolName::MAX_BYTES;
 /// Maximum accepted external tool description length, in bytes.
 const MAX_EXTERNAL_TOOL_DESCRIPTION_BYTES: usize = 8 * 1024;
 /// Maximum accepted serialized parameters-schema length, in bytes.
@@ -55,7 +55,7 @@ impl std::error::Error for ExternalToolSpecError {}
 /// parks the run and returns control to the API client.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExternalToolSpec {
-    name: String,
+    name: ProviderToolName,
     capability_id: CapabilityId,
     description: String,
     parameters_schema: serde_json::Value,
@@ -76,8 +76,8 @@ impl ExternalToolSpec {
                 reason: Cow::Borrowed("external tool name is too long"),
             });
         }
-        validate_external_tool_name(&name)?;
-        let capability_id = external_tool_capability_id(&name)?;
+        let name = provider_tool_name_for_external_tool(name)?;
+        let capability_id = external_tool_capability_id(name.as_str())?;
         let description = description.into();
         if description.len() > MAX_EXTERNAL_TOOL_DESCRIPTION_BYTES {
             return Err(ExternalToolSpecError {
@@ -101,6 +101,10 @@ impl ExternalToolSpec {
     }
 
     pub fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    pub fn provider_tool_name(&self) -> &ProviderToolName {
         &self.name
     }
 
@@ -123,7 +127,7 @@ impl Serialize for ExternalToolSpec {
         S: Serializer,
     {
         let mut state = serializer.serialize_struct("ExternalToolSpec", 3)?;
-        state.serialize_field("name", &self.name)?;
+        state.serialize_field("name", self.name.as_str())?;
         state.serialize_field("description", &self.description)?;
         state.serialize_field("parameters_schema", &self.parameters_schema)?;
         state.end()
@@ -138,13 +142,23 @@ impl<'de> Deserialize<'de> for ExternalToolSpec {
         #[derive(Deserialize)]
         struct ExternalToolSpecWire {
             name: String,
+            #[serde(default)]
+            capability_id: Option<CapabilityId>,
             description: String,
             parameters_schema: serde_json::Value,
         }
 
         let wire = ExternalToolSpecWire::deserialize(deserializer)?;
-        Self::new(wire.name, wire.description, wire.parameters_schema)
-            .map_err(serde::de::Error::custom)
+        let spec = Self::new(wire.name, wire.description, wire.parameters_schema)
+            .map_err(serde::de::Error::custom)?;
+        if let Some(capability_id) = wire.capability_id {
+            if capability_id != *spec.capability_id() {
+                return Err(serde::de::Error::custom(
+                    "external tool capability_id does not match name",
+                ));
+            }
+        }
+        Ok(spec)
     }
 }
 
@@ -169,27 +183,14 @@ fn external_tool_capability_id(name: &str) -> Result<CapabilityId, ExternalToolS
     })
 }
 
-fn validate_external_tool_name(name: &str) -> Result<(), ExternalToolSpecError> {
-    if name.is_empty() {
-        return Err(external_tool_name_error("must not be empty"));
-    }
-    if !name
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-    {
-        return Err(external_tool_name_error(
-            "only ASCII letters, digits, '_', and '-' are allowed",
-        ));
-    }
-    Ok(())
-}
-
-fn external_tool_name_error(reason: &'static str) -> ExternalToolSpecError {
-    ExternalToolSpecError {
+fn provider_tool_name_for_external_tool(
+    name: String,
+) -> Result<ProviderToolName, ExternalToolSpecError> {
+    ProviderToolName::new(name).map_err(|error| ExternalToolSpecError {
         reason: Cow::Owned(format!(
-            "external tool name cannot be represented as a provider tool name: invalid provider tool name id: {reason}"
+            "external tool name cannot be represented as a provider tool name: {error}"
         )),
-    }
+    })
 }
 
 /// Error surface for [`ExternalToolCatalog`] operations.
@@ -443,6 +444,8 @@ mod tests {
     fn spec_validation_rejects_bad_names_and_oversized_fields() {
         assert!(ExternalToolSpec::new("", "d", serde_json::json!({})).is_err());
         assert!(ExternalToolSpec::new(" x", "d", serde_json::json!({})).is_err());
+        assert!(ExternalToolSpec::new("client_tool", "d", serde_json::json!({})).is_ok());
+        assert!(ExternalToolSpec::new("client-tool", "d", serde_json::json!({})).is_ok());
         assert!(ExternalToolSpec::new("_hidden", "d", serde_json::json!({})).is_err());
         assert!(ExternalToolSpec::new("-hidden", "d", serde_json::json!({})).is_err());
         let provider_name_error =
@@ -466,6 +469,46 @@ mod tests {
             "external_tool.clienttool"
         );
         assert!(ExternalToolSpec::new("ok", "d", serde_json::json!({"type": "object"})).is_ok());
+    }
+
+    #[test]
+    fn spec_deserialize_rejects_provider_unsafe_name_before_registration() {
+        let error = serde_json::from_value::<ExternalToolSpec>(serde_json::json!({
+            "name": "client.tool",
+            "description": "desc",
+            "parameters_schema": {"type": "object"},
+        }))
+        .expect_err("provider-unsafe names must fail before catalog registration");
+        assert!(
+            error
+                .to_string()
+                .contains("external tool name cannot be represented as a provider tool name")
+        );
+    }
+
+    #[test]
+    fn spec_deserialize_rejects_mismatched_capability_id() {
+        let error = serde_json::from_value::<ExternalToolSpec>(serde_json::json!({
+            "name": "search",
+            "capability_id": "external_tool.other",
+            "description": "desc",
+            "parameters_schema": {"type": "object"},
+        }))
+        .expect_err("wire capability id must match the derived external-tool id");
+        assert!(
+            error
+                .to_string()
+                .contains("external tool capability_id does not match name")
+        );
+
+        let spec = serde_json::from_value::<ExternalToolSpec>(serde_json::json!({
+            "name": "search",
+            "capability_id": "external_tool.search",
+            "description": "desc",
+            "parameters_schema": {"type": "object"},
+        }))
+        .expect("matching capability id should deserialize");
+        assert_eq!(spec.capability_id().as_str(), "external_tool.search");
     }
 
     #[tokio::test]

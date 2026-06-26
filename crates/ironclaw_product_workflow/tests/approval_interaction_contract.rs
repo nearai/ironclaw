@@ -1000,8 +1000,6 @@ async fn always_allow_persists_provider_grantee_when_resolver_supplies_one() {
     let (service, _resolver, _coordinator, run_id, gate_ref) = service_fixture_for_request(request);
     let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
     let overrides = Arc::new(InMemoryToolPermissionOverrideStore::new());
-    let override_key =
-        ToolPermissionOverrideKey::new(&settings_scope(&policy_scope), capability.clone());
     overrides
         .set(ToolPermissionOverrideInput {
             scope: settings_scope(&policy_scope),
@@ -1016,7 +1014,7 @@ async fn always_allow_persists_provider_grantee_when_resolver_supplies_one() {
     let service = service
         .with_persistent_policy_store(policy_store)
         .with_persistent_grantee_resolver(Arc::new(StaticPersistentApprovalGranteeResolver {
-            capability_id: capability,
+            capability_id: capability.clone(),
             grantee: Principal::Extension(provider),
         }))
         .with_tool_permission_override_store(override_store);
@@ -1041,7 +1039,10 @@ async fn always_allow_persists_provider_grantee_when_resolver_supplies_one() {
     assert!(policy.active_grant().is_some());
     assert!(
         overrides
-            .get(&override_key)
+            .get(&ToolPermissionOverrideKey::new(
+                &settings_scope(&policy_scope),
+                capability.clone()
+            ))
             .await
             .expect("override lookup")
             .is_none(),
