@@ -60,7 +60,7 @@ use ironclaw_product_workflow::{
     RunStateApprovalInteractionReadModel,
 };
 use ironclaw_reborn::loop_exit_applier::{
-    ApprovalGateEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
+    ApprovalGateEvidenceStore, ResourceGateEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
 };
 use ironclaw_reborn::milestone_events::{
     DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
@@ -813,6 +813,42 @@ fn approval_request_id_from_gate_ref(gate_ref: &LoopGateRef) -> Option<ApprovalR
         .as_str()
         .strip_prefix("gate:approval-")
         .and_then(|value| ApprovalRequestId::parse(value).ok())
+}
+
+struct LocalDevResourceGateEvidence {
+    budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore>,
+}
+
+#[async_trait::async_trait]
+impl ResourceGateEvidenceStore for LocalDevResourceGateEvidence {
+    async fn pending_resource_gate(
+        &self,
+        scope: &TurnScope,
+        gate_ref: &LoopGateRef,
+    ) -> Result<bool, TurnError> {
+        let Some(gate_id) = budget_gate_id_from_gate_ref(gate_ref) else {
+            return Ok(false);
+        };
+        let record = self
+            .budget_gate_store
+            .get(&scope.to_resource_scope(), gate_id)
+            .map_err(|error| TurnError::Unavailable {
+                reason: format!("budget gate evidence lookup failed: {error}"),
+            })?;
+        Ok(record
+            .map(|record| record.status == ironclaw_resources::BudgetGateStatus::Pending)
+            .unwrap_or(false))
+    }
+}
+
+fn budget_gate_id_from_gate_ref(
+    gate_ref: &LoopGateRef,
+) -> Option<ironclaw_resources::BudgetGateId> {
+    gate_ref
+        .as_str()
+        .strip_prefix("gate:budget-")
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .map(ironclaw_resources::BudgetGateId::from_uuid)
 }
 
 #[async_trait::async_trait]
@@ -2760,6 +2796,11 @@ pub async fn build_reborn_runtime(
             LocalDevApprovalGateEvidence {
                 approval_requests: Arc::clone(&local_runtime.approval_requests)
                     as Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+            },
+        ));
+        loop_exit_evidence = loop_exit_evidence.with_resource_gate_evidence(Arc::new(
+            LocalDevResourceGateEvidence {
+                budget_gate_store: Arc::clone(&local_runtime.budget_gate_store),
             },
         ));
     }
