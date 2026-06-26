@@ -613,7 +613,7 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
               status: "failed",
               failure_category: "driver_invalid_request",
               failure_summary:
-                "The run failed because the execution driver rejected the request.",
+                "The agent runtime rejected the request before producing a reply.",
             },
           },
         ],
@@ -629,7 +629,7 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
       status: "failed",
       failureCategory: "driver_invalid_request",
       failureSummary:
-        "The run failed because the execution driver rejected the request.",
+        "The agent runtime rejected the request before producing a reply.",
     },
   ]);
   assert.equal(harness.messages.length, 1);
@@ -637,7 +637,7 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
   assert.equal(harness.messages[0].role, "error");
   assert.equal(
     harness.messages[0].content,
-    "The run failed because the execution driver rejected the request.",
+    "The agent runtime rejected the request before producing a reply.",
   );
 });
 

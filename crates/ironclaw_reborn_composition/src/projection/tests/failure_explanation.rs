@@ -48,7 +48,7 @@ async fn webui_event_stream_projects_scheduler_executor_panic_summary() {
     assert_failed_run_status_summary(
         "webui-events-scheduler-panic-thread",
         "scheduler_executor_panic",
-        "The run failed because the execution driver stopped unexpectedly.",
+        "The agent runtime stopped unexpectedly.",
     )
     .await;
 }
@@ -388,7 +388,7 @@ async fn webui_event_stream_projects_recovery_required_failure_summary() {
                 } if *run_id == turn_run
                     && status == "recovery_required"
                     && category.category() == "driver_failed"
-                    && summary == "The run failed because the execution driver reported an error."
+                    && summary == "The agent runtime reported an internal error before producing a reply."
             )
         }),
         _ => false,
@@ -459,7 +459,7 @@ async fn failure_details_returns_fallback_when_model_gateway_times_out() {
                     failure_summary: Some(summary),
                     ..
                 } if *run_id == turn_run
-                    && summary == "The run failed because the execution driver stopped unexpectedly."
+                    && summary == "The agent runtime stopped unexpectedly."
             )
         }),
         _ => false,
@@ -498,7 +498,7 @@ async fn model_failure_explainer_returns_bounded_assistant_reply() {
     let explanation = explainer
         .explain_failure(FailureExplanationInput {
             failure_category: "driver_invalid_request".to_string(),
-            fallback_summary: "The run failed because the execution driver rejected the request."
+            fallback_summary: "The agent runtime rejected the request before producing a reply."
                 .to_string(),
         })
         .await;
@@ -529,8 +529,7 @@ async fn model_failure_explainer_returns_none_when_gateway_fails() {
     let explanation = explainer
         .explain_failure(FailureExplanationInput {
             failure_category: "driver_unavailable".to_string(),
-            fallback_summary: "The run failed because the execution driver was unavailable."
-                .to_string(),
+            fallback_summary: "The run could not start the agent runtime.".to_string(),
         })
         .await;
 
