@@ -44,6 +44,17 @@ async def test_reborn_legacy_core_shell_loads_and_navigates(reborn_v2_page):
     )
 
 
+async def test_reborn_legacy_v2_shell_hides_removed_work_tabs(reborn_v2_page):
+    """Port of legacy v2 shell coverage for removed routines/activity tabs."""
+    sidebar = reborn_v2_page.locator(SEL_V2["sidebar"])
+
+    await expect(sidebar.get_by_role("link", name="Automations")).to_be_visible(
+        timeout=5000
+    )
+    await expect(sidebar.get_by_role("link", name="Routines")).to_have_count(0)
+    await expect(sidebar.get_by_role("link", name="Missions")).to_have_count(0)
+
+
 async def test_reborn_legacy_core_auth_rejection(reborn_v2_server, reborn_v2_browser):
     """Port of legacy no-token auth rejection to the Reborn login view."""
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})

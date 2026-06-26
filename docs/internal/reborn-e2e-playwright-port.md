@@ -2856,6 +2856,24 @@ Behavior mapping:
   same mock repeated-tool trigger. The exact failure taxonomy remains a parity
   gap.
 
+### Step 96: Legacy V2 Shell Removed-Tab Port
+
+Extended `test_reborn_webui_v2_legacy_core.py`.
+
+Ported the remaining browser-visible intent from legacy
+`test_v2_activity_shell.py` that still has a Reborn shell equivalent:
+
+- asserted Reborn's sidebar exposes the supported `Automations` work surface;
+- asserted removed legacy `Routines` and `Missions` navigation entries are not
+  present in the standalone Reborn WebUI v2 sidebar.
+
+Behavior mapping:
+
+- Legacy `ENGINE_V2=true` hid `Routines` and used `Missions` as the gateway v2
+  work surface. Standalone Reborn keeps the legacy routines/missions routes
+  hidden from primary navigation and exposes Automations for the implemented
+  browser workflow.
+
 ## Open Migration Buckets
 
 Not yet ported:
