@@ -400,6 +400,11 @@ async fn load_memory_snippets_aggregate_budget_bounds_combined_lanes_short_term_
         .await
         .unwrap();
 
+    assert!(
+        !snippets.is_empty(),
+        "budgeted retrieval must still admit at least one snippet (otherwise the \
+         all-short-term assertion below is vacuously true)"
+    );
     let total_bytes: usize = snippets.iter().map(|s| s.safe_summary.len()).sum();
     assert!(
         total_bytes <= 4 * 1024,

@@ -222,8 +222,9 @@ where
     pub memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
     /// After-turn memory writer (#3537 / mem0 `add` flow). The RAW document-store
     /// provider — the same `Arc<dyn MemoryService>` the memory tools resolve, NOT
-    /// wrapped in a prompt-context adapter. When `Some`, the executor records each
-    /// `Completed` run's `[user, assistant]` exchange via `record_interaction`.
+    /// wrapped in a prompt-context adapter. When `Some`, the executor forwards each
+    /// `Completed` run's full transcript to `record_interaction`, skipping only
+    /// runs with no user/assistant content (the provider decides what to retain).
     /// `None` is acceptable — and is the default for compositions whose memory
     /// binding is disabled or third-party-without-a-provider — degrading to no
     /// after-turn recording rather than failing the turn (mirrors

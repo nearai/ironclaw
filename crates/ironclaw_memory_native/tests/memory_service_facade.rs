@@ -268,6 +268,153 @@ async fn native_context_retrieve_scopes_short_term_to_active_thread() {
 }
 
 #[tokio::test]
+async fn native_short_term_retrieval_over_fetches_before_thread_lane_filter() {
+    // Regression (CR review #2): the FTS `search` must over-fetch BEFORE the
+    // short-term thread-lane filter, then truncate to `max_snippets` AFTER it.
+    // The native FTS repository caps results to the search limit *before* this
+    // method's lane `retain` runs, so capping the search to `max_snippets` up
+    // front lets general (long-term) hits that rank in the global top-N starve a
+    // thread-scoped (short-term) call — it would return zero. This drives the
+    // real `from_filesystem` (InMemoryBackend) FTS path end to end.
+    //
+    // All docs match the query "planning". The thread doc lives under
+    // `threads/<T>/`, which sorts lexicographically AFTER every `notes/*` doc, so
+    // under the FTS path-ascending rank it is the lowest-ranked match. With
+    // `max_snippets = 1` and a pre-truncate cap, the repository returns only the
+    // top general doc and the thread doc never reaches the lane filter (0
+    // results). With over-fetch + post-filter truncate, the thread doc survives.
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+
+    let mut scoped = invocation();
+    scoped.scope.thread_id = Some(ThreadId::new("thread-overfetch").expect("valid thread"));
+
+    // Several general (long-term) docs that all match the query and sort before
+    // `threads/` lexicographically, so they dominate the global FTS top-N.
+    for index in 0..6 {
+        write_general_doc(
+            &service,
+            &format!("notes/plan-{index:02}.md"),
+            "planning planning planning general note",
+        )
+        .await;
+    }
+    // Seed the single short-term doc via the legitimate per-run recorder: the
+    // public `write` reserves the `threads/` prefix (see the rejection test), so
+    // only `record_interaction` may write there.
+    service
+        .record_interaction(
+            scoped.clone(),
+            MemoryServiceRecordRequest {
+                messages: vec![MemoryInteractionMessage {
+                    role: MemoryInteractionRole::User,
+                    content: "planning note for the active thread".to_string(),
+                    name: Some("user-overfetch".to_string()),
+                }],
+                turn_run_id: Some("run-1".to_string()),
+                metadata: json!({}),
+            },
+        )
+        .await
+        .expect("record_interaction seeds the thread doc");
+
+    let snippets = service
+        .retrieve_context(
+            scoped,
+            MemoryServiceContextRequest {
+                query: "planning".to_string(),
+                max_snippets: 1,
+                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            },
+        )
+        .await
+        .expect("short-term context retrieval");
+
+    assert_eq!(
+        snippets.len(),
+        1,
+        "over-fetch must let the thread-scoped doc survive the lane filter even \
+         when general docs rank in the global top-N: {snippets:?}"
+    );
+    assert_eq!(
+        snippets[0].relative_path,
+        "threads/thread-overfetch/run-1.md"
+    );
+}
+
+#[tokio::test]
+async fn native_write_rejects_reserved_thread_namespace() {
+    // The `threads/` namespace is reserved for the after-turn recorder. A
+    // tool-/caller-authored write there would be a silent retrieval black hole
+    // (excluded from long-term, unreachable from every short-term lane but its own
+    // active thread), so the public `write` must reject it loudly rather than
+    // persist it — while `record_interaction` (the one legitimate writer) still
+    // succeeds via the reserved-namespace bypass.
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+
+    service
+        .write(
+            invocation(),
+            MemoryServiceWriteRequest {
+                target: "threads/sneaky/note.md".to_string(),
+                content: "smuggled into the reserved namespace".to_string(),
+                append: false,
+                old_string: None,
+                new_string: None,
+                replace_all: false,
+                metadata: None,
+                timezone: None,
+            },
+        )
+        .await
+        .expect_err("write to the reserved threads/ namespace must fail loud");
+
+    // The rejected write must not have persisted: a thread-scoped retrieve on that
+    // thread finds nothing.
+    let mut sneaky = invocation();
+    sneaky.scope.thread_id = Some(ThreadId::new("sneaky").expect("valid thread"));
+    let snippets = service
+        .retrieve_context(
+            sneaky,
+            MemoryServiceContextRequest {
+                query: "smuggled".to_string(),
+                max_snippets: 5,
+                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            },
+        )
+        .await
+        .expect("retrieve after rejected write");
+    assert!(
+        snippets.is_empty(),
+        "a rejected reserved-namespace write must not persist: {snippets:?}"
+    );
+
+    // record_interaction is the ONE legitimate writer of `threads/`: it must still
+    // succeed (it routes through the reserved-namespace bypass, not the guarded
+    // public `write`).
+    let mut legit = invocation();
+    legit.scope.thread_id = Some(ThreadId::new("legit").expect("valid thread"));
+    let recorded = service
+        .record_interaction(
+            legit,
+            MemoryServiceRecordRequest {
+                messages: vec![MemoryInteractionMessage {
+                    role: MemoryInteractionRole::User,
+                    content: "legit recorded note".to_string(),
+                    name: Some("user-legit".to_string()),
+                }],
+                turn_run_id: Some("run-legit".to_string()),
+                metadata: json!({}),
+            },
+        )
+        .await
+        .expect("record_interaction still writes the reserved namespace");
+    assert!(
+        recorded.recorded,
+        "record_interaction must report recorded=true for the reserved write"
+    );
+}
+
+#[tokio::test]
 async fn native_context_retrieve_excludes_thread_scratch_from_long_term() {
     // Long-term retrieval (no `thread_id` on the invocation scope) is the user's
     // general/durable memory; it must EXCLUDE per-thread short-term scratch
@@ -682,7 +829,9 @@ async fn native_record_interaction_without_turn_run_id_is_noop() {
 async fn native_record_interaction_without_thread_is_noop() {
     // With no `thread_id` on the invocation scope there is no short-term thread
     // subtree to record under, so the native provider degrades to a no-op
-    // (recorded=false) rather than erroring or writing to an unscoped path.
+    // (recorded=false) rather than erroring or writing to an unscoped path. A real
+    // `turn_run_id` is supplied so this isolates the missing-thread branch — it
+    // cannot pass via the separate missing-run-id no-op.
     let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
 
     // `invocation()` carries `thread_id: None`.
@@ -695,7 +844,7 @@ async fn native_record_interaction_without_thread_is_noop() {
                     content: "no thread to record under".to_string(),
                     name: Some("user-record".to_string()),
                 }],
-                turn_run_id: None,
+                turn_run_id: Some("run-threadless".to_string()),
                 metadata: json!({}),
             },
         )
@@ -901,6 +1050,25 @@ async fn read_profile(service: &NativeMemoryService) -> Value {
         .await
         .expect("profile document reads");
     serde_json::from_str(&profile.content).expect("profile is json")
+}
+
+async fn write_general_doc(service: &NativeMemoryService, path: &str, content: &str) {
+    service
+        .write(
+            invocation(),
+            MemoryServiceWriteRequest {
+                target: path.to_string(),
+                content: content.to_string(),
+                append: false,
+                old_string: None,
+                new_string: None,
+                replace_all: false,
+                metadata: None,
+                timezone: None,
+            },
+        )
+        .await
+        .expect("general (long-term) doc writes");
 }
 
 async fn write_raw_profile(service: &NativeMemoryService, content: &str) {

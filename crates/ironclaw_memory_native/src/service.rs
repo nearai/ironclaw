@@ -127,6 +127,16 @@ impl MemoryService for NativeMemoryService {
         reject_local_or_traversal_path(&request.target)?;
         let (scope, context) = self.scoped_context(&invocation)?;
         let resolved_path = resolve_target_path(&request.target, request.timezone.as_deref())?;
+        // The `threads/` namespace is reserved for per-thread short-term scratch
+        // written ONLY by the trusted after-turn recorder via `record_interaction`
+        // (which routes through `write_reserved_document`, bypassing this guard). A
+        // tool- or caller-authored `threads/...` document would be excluded from the
+        // long-term lane AND unreachable from every short-term lane but its own
+        // active thread — a silent retrieval black hole. Fail loud instead of
+        // persisting it. (CR review / audit L1.)
+        if is_thread_scoped_path(&resolved_path) {
+            return Err(MemoryServiceError::operation());
+        }
         let path = document_path(&scope, &resolved_path)?;
         let options = write_options(request.metadata.as_ref());
 
@@ -345,9 +355,18 @@ impl MemoryService for NativeMemoryService {
             return Ok(Vec::new());
         }
         let (_, context) = self.scoped_context(&invocation)?;
+        // Over-fetch BEFORE the lane filter below. `backend.search` caps results to
+        // the search limit, so capping at `max_snippets` up front would let general
+        // (long-term) hits in the global top-N starve the thread-scoped
+        // (short-term) lane — a short-term call could come back short or empty
+        // under normal ranking pressure. Fetch a wider candidate set, apply the
+        // scope + lane retains, THEN truncate to `max_snippets` so each lane keeps
+        // its own top results. (CR review: filter before limiting the short-term lane.)
+        let fetch_limit = request.max_snippets.saturating_mul(8).max(64);
         let search_request = MemorySearchRequest::new(&request.query)
             .map_err(|_| MemoryServiceError::input())?
-            .with_limit(request.max_snippets)
+            .with_limit(fetch_limit)
+            .with_pre_fusion_limit(fetch_limit.max(20))
             // Full-text only: the native backend declares vector_search=false and
             // fails closed on a vector request (matches the `search` method).
             //
@@ -380,14 +399,16 @@ impl MemoryService for NativeMemoryService {
             }
         }
         results.sort_by(compare_memory_search_results);
+        // Truncate to the requested count AFTER the lane filter so the over-fetch
+        // above never leaks extra candidates and each lane keeps its own top N.
+        results.truncate(request.max_snippets);
 
         // Return raw, ranked, in-scope candidates. The host sanitizes the text,
         // wraps it in the untrusted-memory envelope, builds the `memory-snippet:*`
         // reference, and enforces the per-snippet + aggregate model-visible byte
         // budgets — see `ironclaw_host_runtime::memory_context`. This provider only
         // ranks and scopes; it never shapes model-visible content, so a provider
-        // cannot bypass host prompt safety. (`with_limit` above already bounds the
-        // candidate count to `max_snippets`.)
+        // cannot bypass host prompt safety.
         Ok(results
             .into_iter()
             .map(map_search_result_to_snippet)
@@ -426,25 +447,42 @@ impl MemoryService for NativeMemoryService {
         // which builds the `MemoryDocumentScope`/`MemoryContext` via `scoped_context`.
         let target = format!("{}{turn_run_id}.md", thread_memory_prefix(&thread_id));
         let content = format_interaction(&request.messages);
-        self.write(
-            invocation,
-            MemoryServiceWriteRequest {
-                target,
-                content,
-                append: false,
-                old_string: None,
-                new_string: None,
-                replace_all: false,
-                metadata: None,
-                timezone: None,
-            },
-        )
-        .await?;
+        // Route through the reserved-namespace writer: `record_interaction` is the
+        // ONLY legitimate writer of `threads/<T>/...`, so it bypasses the public
+        // `write` guard that rejects tool-authored writes to that namespace.
+        self.write_reserved_document(&invocation, &target, &content)
+            .await?;
         Ok(MemoryServiceRecordResponse { recorded: true })
     }
 }
 
 impl NativeMemoryService {
+    /// Write `content` to the reserved `threads/` namespace, bypassing the
+    /// `write`-level reservation guard. ONLY the trusted per-run recorder
+    /// ([`MemoryService::record_interaction`]) may write there; the public
+    /// `write` rejects any `threads/`-prefixed target. Mirrors `write`'s
+    /// plain-overwrite path (no append / patch / bootstrap special cases).
+    async fn write_reserved_document(
+        &self,
+        invocation: &MemoryInvocation,
+        target: &str,
+        content: &str,
+    ) -> Result<(), MemoryServiceError> {
+        reject_local_or_traversal_path(target)?;
+        if content.trim().is_empty() {
+            return Err(MemoryServiceError::input());
+        }
+        let (scope, context) = self.scoped_context(invocation)?;
+        let resolved_path = resolve_target_path(target, None)?;
+        let path = document_path(&scope, &resolved_path)?;
+        let options = write_options(None);
+        self.backend
+            .write_document_with_backend_options(&context, &path, content.as_bytes(), &options)
+            .await
+            .map_err(MemoryServiceError::operation_from)?;
+        Ok(())
+    }
+
     async fn patch_document(
         &self,
         request: PatchDocumentRequest<'_>,
@@ -663,11 +701,11 @@ fn tree_for_paths(paths: &[String], root: &str, max_depth: usize) -> Vec<Value> 
 /// short-term lane: included by thread-scoped retrieval, excluded from long-term
 /// (general) retrieval. Reserved — general user memory does not use this prefix.
 ///
-/// Advisory reservation (audit L1): a document written under `threads/foo.md` is
-/// excluded from the long-term lane AND matched by no short-term lane unless
-/// `foo` is the active thread, so it can become a retrieval "black hole". v1
-/// keeps this advisory (pinned by the exclude/scope tests); rejecting
-/// tool-originated writes to `threads/` is a deferred follow-up.
+/// Enforced reservation (audit L1): a document under `threads/foo.md` is excluded
+/// from the long-term lane AND matched by no short-term lane unless `foo` is the
+/// active thread, so a stray write there is a silent retrieval "black hole". The
+/// public [`MemoryService::write`] rejects any `threads/`-prefixed target; only the
+/// trusted after-turn recorder writes there, via `write_reserved_document`.
 const THREAD_MEMORY_ROOT: &str = "threads/";
 
 /// Virtual-path prefix under which a specific thread's short-term memory lives.

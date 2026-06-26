@@ -34,7 +34,7 @@ use tracing::debug;
 
 use crate::thread_scope::ThreadScopeResolver;
 
-/// Records the completed `[user, assistant]` exchange of a run into memory.
+/// Records a completed run's full ordered transcript into memory.
 ///
 /// Held as a single dependency (no Arc sprawl): one recorder owns the thread
 /// read port, the memory write port, and the base thread scope it owner-rewrites
@@ -176,12 +176,14 @@ fn build_transcript(
                 MessageKind::ToolResultReference => (MemoryInteractionRole::Tool, None),
                 _ => return None,
             };
-            // Skip messages with no usable content (e.g. a redacted row).
+            // Skip messages with no usable content (e.g. a redacted or blank-only
+            // row), but pass the ORIGINAL content through unchanged — "LLM data is
+            // never deleted": the provider decides verbatim-vs-extract, so the host
+            // must not trim the transcript before recording it.
             let content = message
                 .content
                 .as_deref()
-                .map(str::trim)
-                .filter(|content| !content.is_empty())?;
+                .filter(|content| !content.trim().is_empty())?;
             Some(MemoryInteractionMessage {
                 role,
                 content: content.to_string(),
@@ -332,6 +334,50 @@ mod tests {
             "transcript must be the full ordered run: user, every finalized \
              assistant (including the FINAL one) and tool messages, each with its \
              actor name; System and other-run messages excluded"
+        );
+    }
+
+    /// CR review ("LLM data is never deleted"): `build_transcript` filters out
+    /// blank-only messages but must record the surviving content VERBATIM — it
+    /// must not trim leading/trailing whitespace before handing the transcript to
+    /// the provider (which alone decides verbatim-vs-extract).
+    #[test]
+    fn build_transcript_preserves_content_verbatim_and_filters_blanks() {
+        let run = "run-verbatim";
+        let messages = vec![
+            record(
+                1,
+                MessageKind::User,
+                MessageStatus::Accepted,
+                run,
+                "  surrounding whitespace kept  ",
+            ),
+            // A blank-only message has no usable content and is dropped entirely
+            // (not recorded as an empty string).
+            record(
+                2,
+                MessageKind::Assistant,
+                MessageStatus::Finalized,
+                run,
+                "   \n  ",
+            ),
+            record(
+                3,
+                MessageKind::Assistant,
+                MessageStatus::Finalized,
+                run,
+                "\tindented reply\n",
+            ),
+        ];
+
+        let transcript = build_transcript(&messages, run, "user-abc", Some("agent-def"));
+
+        let contents: Vec<&str> = transcript.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(
+            contents,
+            vec!["  surrounding whitespace kept  ", "\tindented reply\n"],
+            "surviving content must be byte-for-byte verbatim (no trim); blank-only \
+             messages are filtered out entirely"
         );
     }
 }

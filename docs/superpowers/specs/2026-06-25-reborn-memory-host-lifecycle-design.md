@@ -45,21 +45,26 @@ conversation," accumulating across the user's messages in the thread.
   the `(tenant,user[,agent,project])` scope isolation (fail-closed); the thread is
   a filter *within* the user's own memory, never a cross-user key.
 - **host `add` — new:** the first host-initiated write (today all writes are
-  agent-tool-only). Verbatim / host-curated (no LLM extraction in v1), stamped
-  with **provenance + a default TTL**, tagged `user/thread/agent/run` so it feeds
-  both lanes on the next run.
+  agent-tool-only). Verbatim in v1 (no LLM extraction); the host passes provenance
+  (`turn_run_id` + `correlation_id`) as opaque metadata and the **provider** decides
+  verbatim-vs-extract / provenance / TTL. Tagged `user/thread/agent/run` so it
+  feeds both lanes on the next run.
 
 ### B. Run-level orchestration (`ironclaw_reborn/src/turn_run_executor.rs`)
 
-- **`on_run_start`** (`:162-171`; `run_id`/`thread_id` already on
-  `LoopRunContext`, `turns/run_profile/host.rs:551`): fetch both lanes **once**
-  and stash for the run — replacing the current per-model-step re-fetch. Invalidate
-  on mid-run input/query change (`canonical.rs:65-86` / `:234-264`).
+- **`on_run_start`** (`run_id`/`thread_id` already on `LoopRunContext`,
+  `turns/run_profile/host.rs`): fetch both lanes **once per run** and cache for the
+  run — replacing the current per-model-step re-fetch. **v1 (shipped): NO mid-run
+  invalidation** — the first prompt build that carries a user message seeds the
+  per-run cache and freezes it for the run (see Q6).
 - **inject:** the existing `"memory"` prompt section
   (`instruction_bundle.rs:338`); reuse the host admission (512 B/snippet, 4 KiB
   total, untrusted envelope).
-- **`after each turn`** (`apply_exit`, `:252`): host `add` of `[user, assistant]`.
-- **`on_run_end`:** optional thread summary; **no hard-delete**.
+- **`after each turn`** (`apply_exit`): host `add` of the run's **full ordered
+  transcript** (every user / finalized-assistant / tool message of the turn),
+  skipping only runs with no user/assistant content — not just a `[user, assistant]`
+  pair. The provider decides what to retain.
+- **`on_run_end`:** optional thread summary (deferred, not in v1); **no hard-delete**.
 
 Nothing touches the lower capability contract (`host_runtime/lib.rs:323-329`
 origin-exclusion respected — run/origin coordination stays in the upper run
@@ -177,11 +182,13 @@ templates in `prompts/*.md`.
   - **Cache None-freeze (audit M1):** `load_memory_snippets_once` builds the
     request first and only seeds the per-run `OnceCell` when a request exists, so a
     first build with no user message no longer freezes memory to empty (see Q6).
-  - **`threads/` reserved prefix (audit L1, advisory):** `threads/` is reserved for
+  - **`threads/` reserved prefix (audit L1, enforced):** `threads/` is reserved for
     per-thread short-term scratch — a doc written there is excluded from the
-    long-term lane and matched by no short-term lane unless its thread is active.
-    This is advisory (documented + pinned by the native exclude/scope tests);
-    rejecting tool-originated writes to `threads/` is a deferred follow-up.
+    long-term lane and matched by no short-term lane unless its thread is active, so
+    a stray write is a silent retrieval black hole. The public `write` now
+    **rejects** any `threads/`-prefixed target (fail loud); only the trusted
+    after-turn recorder writes there, via a private `write_reserved_document`
+    bypass. (Updated in the re-review round below — was advisory in the initial PR.)
   - **Long-term starvation (audit L2):** the combined memory budget is
     short-term-first, so a scratch-heavy thread can still starve the long-term
     lane. Documented v1 follow-up (per-lane sub-budget floor) — not addressed here.
@@ -197,6 +204,17 @@ templates in `prompts/*.md`.
 - **Next:** the full add→surface **e2e** (run 1 records → run 2's short-term lane
   surfaces it in the model request), then the full gate, then the PR + audit +
   CodeRabbit loop above. Phase 3 (`on_run_end` durable summary) optional / follow-up.
+- **2026-06-26 · Re-review round (CodeRabbit + Gemini, PR #5327).** Behavioral fixes
+  (TDD): the short-term lane now **over-fetches before the thread filter** then
+  truncates, so general hits can't starve the thread lane; the public `write`
+  **rejects `threads/`** writes (audit L1 un-deferred — see above); `build_transcript`
+  no longer **trims** message content ("LLM data is never deleted"); the instruction
+  bundle **preserves the host's short-term-first order** (dropped the by-ref re-sort
+  that scrambled lane priority); `load_memory_snippets_once` now **caches empty on
+  failure** (true fetch-once-per-run, no retry-storm on a slow/down service). Plus a
+  caller-level test through `build_default_planned_runtime` for the after-turn writer
+  wiring; both retrieval lanes now share one `correlation_id`; and doc/comment
+  consistency. All touched-crate gates green.
 
 ## Ship & review plan (post-implementation — per Ben, 2026-06-25)
 

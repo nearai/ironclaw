@@ -1726,6 +1726,188 @@ async fn turn_runner_worker_records_after_turn_memory_on_completed_run() {
     );
 }
 
+/// Caller-level coverage of the after-turn memory WIRING (testing.md "test
+/// through the caller"). The sibling
+/// `turn_runner_worker_records_after_turn_memory_on_completed_run` installs the
+/// recorder directly on the executor via `with_after_turn_memory_recorder`, so it
+/// stays green even if `build_default_planned_runtime_inner` stops plumbing
+/// `DefaultPlannedRuntimeParts.after_turn_memory_writer` into the executor. This
+/// drives the real composition factory `build_default_planned_runtime` with
+/// `after_turn_memory_writer: Some(...)` and asserts the per-run thread doc is
+/// written once a queued run reaches `Completed`, so that exact call site cannot
+/// regress unnoticed.
+#[tokio::test]
+async fn build_default_planned_runtime_wires_after_turn_memory_writer() {
+    let fixture =
+        HostFixture::new_unsubmitted("thread-after-turn-wiring", "remember the demo is on monday")
+            .await;
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor("demo.allowed"),
+    ])));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    let capability_factory = Arc::new(TestHostRuntimeCapabilityFactory {
+        runtime,
+        visible_request: host_runtime_visible_request(&fixture, ["demo"]),
+        io: io.clone(),
+        milestone_sink: fixture.milestone_sink.clone(),
+    });
+    let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
+        CapabilityAllowSet::allowlist([CapabilityId::new("demo.allowed").unwrap()]),
+    ));
+    let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
+        fixture.thread_service.clone(),
+        turn_store.clone(),
+        turn_store.clone(),
+    ));
+
+    // Real native memory provider over an in-memory filesystem backend, wired
+    // through the composition's `after_turn_memory_writer` — NOT the executor
+    // builder shortcut the sibling test uses.
+    let memory_writer: Arc<dyn MemoryService> = Arc::new(NativeMemoryService::from_filesystem(
+        Arc::new(InMemoryBackend::new()) as Arc<dyn RootFilesystem>,
+        None,
+    ));
+
+    let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
+        attachment_read_port: None,
+        turn_state: turn_store.clone(),
+        thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
+        thread_scope: fixture.thread_scope.clone(),
+        model_gateway: fixture.gateway.clone(),
+        checkpoint_state_store: fixture.checkpoint_state_store.clone(),
+        loop_checkpoint_store: turn_store.clone(),
+        milestone_sink: fixture.milestone_sink.clone(),
+        capability_factory,
+        capability_surface_resolver: surface_resolver,
+        capability_result_writer: io.clone(),
+        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
+        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
+        subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        loop_exit_evidence: evidence,
+        config: DefaultPlannedRuntimeConfig {
+            heartbeat_interval: std::time::Duration::from_millis(20),
+            poll_interval: std::time::Duration::from_millis(10),
+            ..DefaultPlannedRuntimeConfig::default()
+        },
+        model_route_resolver: None,
+        cancellation_factory: None,
+        skill_context_source: None,
+        input_queue: None,
+        identity_context_source: Arc::new(StaticIdentityContextSource::new(Vec::new())),
+        user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_service: None,
+        after_turn_memory_writer: Some(Arc::clone(&memory_writer)),
+        model_policy_guard: None,
+        model_budget_accountant: None,
+        safety_context: None,
+        hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
+        hook_security_audit_sink: None,
+        turn_event_sink: None,
+        scheduler_wake_wiring: None,
+    })
+    .unwrap();
+
+    // Submit through the composition's OWN coordinator (queues the run and wakes
+    // the composition-internal scheduler), then wait for that scheduler to drive
+    // the run to Completed — the production submit→run→exit path end to end.
+    let SubmitTurnResponse::Accepted { run_id, .. } = composition
+        .coordinator
+        .submit_turn(SubmitTurnRequest {
+            scope: fixture.context.scope.clone(),
+            actor: TurnActor::new(UserId::new("user-text-host").unwrap()),
+            accepted_message_ref: AcceptedMessageRef::new("accepted-after-turn-wiring").unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+            requested_run_profile: None,
+            idempotency_key: IdempotencyKey::new("idem-after-turn-wiring").unwrap(),
+            received_at: Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+        })
+        .await
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let state = turn_store
+                .get_run_state(GetRunStateRequest {
+                    scope: fixture.context.scope.clone(),
+                    run_id,
+                })
+                .await
+                .unwrap();
+            if state.status == TurnStatus::Completed {
+                return;
+            }
+            assert!(
+                !matches!(state.status, TurnStatus::Failed),
+                "run unexpectedly failed: {state:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("composition scheduler should drive the submitted run to Completed");
+
+    // The recorder fires inside the executor's `apply_exit` after the run flips to
+    // Completed. Poll the memory store (same scope the recorder writes under) for
+    // the per-run thread doc — its presence proves `after_turn_memory_writer` was
+    // plumbed into the executor by `build_default_planned_runtime`.
+    let read_invocation = MemoryInvocation {
+        scope: ResourceScope {
+            tenant_id: TenantId::new("tenant-text-host").unwrap(),
+            user_id: UserId::new("user-text-host").unwrap(),
+            agent_id: Some(AgentId::new("agent-text-host").unwrap()),
+            project_id: Some(ProjectId::new("project-text-host").unwrap()),
+            mission_id: None,
+            thread_id: Some(fixture.thread_id.clone()),
+            invocation_id: InvocationId::new(),
+        },
+        correlation_id: CorrelationId::new(),
+    };
+    let log_path = format!("threads/{}/{run_id}.md", fixture.thread_id);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let content = loop {
+        match memory_writer
+            .read(
+                read_invocation.clone(),
+                MemoryServiceReadRequest {
+                    path: log_path.clone(),
+                },
+            )
+            .await
+        {
+            Ok(read) => break read.content,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!(
+                "after-turn memory doc was never written — after_turn_memory_writer was not \
+                 plumbed into the executor by build_default_planned_runtime: {error:?}"
+            ),
+        }
+    };
+
+    // The recorded assistant reply proves the after-turn recorder fired via the
+    // composition's `after_turn_memory_writer` wiring (the run produced it from the
+    // fixture gateway). That end-to-end path is the regression this caller-level
+    // test guards — the sibling test only covers the executor-builder shortcut.
+    assert!(
+        content.contains("model says hi"),
+        "after-turn memory (via composition wiring) must record the assistant reply: {content:?}"
+    );
+
+    composition.scheduler_handle.shutdown().await;
+}
+
 /// Verifies that `TurnRunScheduler` emits a "turn run started" debug event with
 /// `thread_id` and `run_id` correlation fields so the operator Logs panel can
 /// scope entries to a specific run.

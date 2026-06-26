@@ -136,7 +136,11 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
         let short_term_invocation = invocation_for_context_request(&request);
         let long_term_invocation = MemoryInvocation {
             scope: short_term_invocation.scope.without_thread_and_mission(),
-            correlation_id: CorrelationId::new(),
+            // Share the short-term lane's correlation id: both lanes are one logical
+            // "load memory for this turn" retrieval, so a single correlation id ties
+            // their provider calls together in traces/logs (the `MemoryLane` label
+            // still distinguishes them). `CorrelationId` is `Copy`.
+            correlation_id: short_term_invocation.correlation_id,
         };
 
         let mut combined = self

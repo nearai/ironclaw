@@ -466,27 +466,34 @@ where
         // user message yet, there is nothing to query: return empty WITHOUT seeding
         // the `OnceCell`, so a later prompt build that DOES carry a user message can
         // still fetch (M1 regression — seeding the cell with an empty vec here froze
-        // memory to empty for the rest of the run). Only `get_or_try_init` once a
-        // real request exists.
+        // memory to empty for the rest of the run). Only seed the cell once a real
+        // request exists.
         let Some(request) = self.build_memory_prompt_context_request(context_messages) else {
             return Vec::new();
         };
-        let cached = self
+        // Fetch exactly once per run and CACHE the outcome — including an empty vec
+        // on failure. A down or slow memory service must not be re-hit on every
+        // model step of the run: the prior `get_or_try_init` left the cell
+        // uninitialized on error, so each iteration retried and could stack
+        // timeouts into latency spikes. A retrieval failure degrades to empty memory
+        // for the rest of the run rather than failing the turn; the per-run cache
+        // makes that decision exactly once.
+        let snippets = self
             .memory_snippets_cache
-            .get_or_try_init(|| async { service.load_memory_snippets(request).await })
+            .get_or_init(|| async {
+                match service.load_memory_snippets(request).await {
+                    Ok(snippets) => snippets,
+                    Err(error) => {
+                        tracing::debug!(
+                            kind = ?error.kind,
+                            "memory context fetch failed; degrading to empty memory for this run"
+                        );
+                        Vec::new()
+                    }
+                }
+            })
             .await;
-        match cached {
-            Ok(snippets) => snippets.clone(),
-            // A retrieval failure must never break the turn: degrade to empty.
-            // The cell stays uninitialized, so a later iteration may retry.
-            Err(error) => {
-                tracing::debug!(
-                    kind = ?error.kind,
-                    "memory context fetch failed; degrading to empty memory for this run"
-                );
-                Vec::new()
-            }
-        }
+        snippets.clone()
     }
 
     /// Build the memory request from the run context. Returns `None` (no memory
