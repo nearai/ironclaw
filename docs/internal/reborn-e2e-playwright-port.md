@@ -3181,6 +3181,39 @@ Validation:
 - `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_*.py -q`
   -> `157 passed`
 
+### Step 105: LLM Provider Settings Port
+
+Extended `tests/e2e/scenarios/test_reborn_webui_v2_legacy_settings_search.py`.
+
+Ported the browser-visible Reborn equivalent of legacy provider/admin
+connection settings flows onto the current `/v2/settings/inference` surface:
+
+- mocked the operator session capability so the real inference tab is visible;
+- rendered the v2 `/api/webchat/v2/llm/providers` snapshot with active,
+  built-in, and custom providers;
+- added a custom provider from the browser dialog and asserted the generated
+  provider id, model-listing request, connection-test request, save payload,
+  active-provider request, and resulting active summary;
+- edited an existing custom provider while leaving the stored API key
+  unchanged; and
+- deleted the custom provider through the browser confirmation flow and v2
+  delete route.
+
+Behavior mapping:
+
+- Legacy coverage mixed old gateway provider/admin routes with settings UI
+  behavior. Reborn's matching user-facing contract is the operator-gated
+  inference tab backed by `/api/webchat/v2/llm/*` endpoints. The port drives
+  those v2 route shapes through the shipped browser UI. No Reborn product fix
+  was required.
+
+Validation:
+
+- `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_settings_search.py -q`
+  -> `5 passed`
+- `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_*.py -q`
+  -> `159 passed`
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -3205,10 +3238,10 @@ Not yet ported:
   always-approve restart persistence; legacy text-alias interception is v1
   behavior superseded by Reborn's disabled-composer gate flow;
 - remaining settings/extension lifecycle scenarios beyond Settings search,
-  Skills, tool permissions, channel label regressions, extension revisit
-  refetch, and the top-level extension install/manage/configure surface,
-  including any future persistence-backed extension-service contracts not
-  visible in the browser;
+  inference provider management, Skills, tool permissions, channel label
+  regressions, extension revisit refetch, and the top-level extension
+  install/manage/configure surface, including any future persistence-backed
+  extension-service contracts not visible in the browser;
 - deeper OAuth/product-auth install/callback flows beyond browser prompt
   handling, prompt replacement, cross-thread isolation, extension OAuth-start
   URL safety, and existing Rust callback contracts, including hosted provider
