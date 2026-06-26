@@ -1,3 +1,4 @@
+import { ChannelPairingSection } from "../../../components/channel-pairing-section.js";
 import { SlackPairingSection } from "../../../components/slack-pairing-section.js";
 import { Icon } from "../../../design-system/icons.js";
 import { html } from "../../../lib/html.js";
@@ -39,6 +40,13 @@ export function ChannelConnectCard({ connectAction, onDismiss }) {
 
       ${isSlackStrategy(connectAction, "inbound_proof_code")
         ? html`<${SlackPairingSection} action=${connectAction.action} />`
+        : connectAction.strategy === "inbound_proof_code"
+          ? html`
+              <${ChannelPairingSection}
+                channel=${channel}
+                action=${connectAction.action}
+              />
+            `
         : html`
             <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 text-xs leading-5 text-iron-300">
               ${connectAction.action?.instructions ||

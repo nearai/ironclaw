@@ -2779,6 +2779,48 @@ Behavior mapping:
   point for creating a project; child mission/thread/widget drill-in remains
   open until the v2 project child endpoints replace the current TODO stubs.
 
+### Step 94: Legacy Generic Channel Connect Pairing Port
+
+Extended `test_reborn_webui_v2_legacy_channel_connect.py` and fixed the
+chat-owned connect-card renderer.
+
+Ported the non-Slack pairing-card intent from legacy pairing UI coverage to
+Reborn's chat connect-command path:
+
+- loaded `/api/webchat/v2/channels/connectable` with a Telegram
+  `inbound_proof_code` action;
+- entered `connect telegram` in the chat composer and blocked normal
+  `/api/webchat/v2/threads/*/messages` sends to prove the command is handled
+  locally;
+- asserted the connect card renders Telegram-specific title/instructions;
+- submitted a padded lowercase proof code through the generic pairing section;
+- asserted `/api/webchat/v2/extensions/pairing/redeem` receives
+  `{ channel: "telegram", code: "PAIR-2468" }`;
+- asserted the success copy renders and the input clears.
+
+Issue found and fixed:
+
+- `ChannelConnectCard` only rendered a redeemable proof-code form for Slack.
+  Non-Slack channels advertising the same `inbound_proof_code` strategy showed
+  instructions but no input, so a typed Reborn connect action could not be
+  completed from chat. The chat card now reuses the generic Reborn
+  `PairingSection` and v2 pairing redeem endpoint for non-Slack
+  `inbound_proof_code` channels while preserving Slack's specialized copy and
+  selectors.
+
+Validation:
+
+- `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_channel_connect.py -q`
+  -> `4 passed`
+
+Behavior mapping:
+
+- Legacy pairing UI tests used v1 onboarding globals and
+  `/api/pairing/{channel}/approve`. Reborn's implemented chat-owned equivalent
+  is a typed connectable-channel action plus the v2 pairing redeem endpoint.
+  Admin pending-pairing enumeration and channel webhook behavior remain open
+  until standalone Reborn exposes matching v2 surfaces.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -2812,10 +2854,10 @@ Not yet ported:
   URL safety, and existing Rust callback contracts, including hosted provider
   refresh and provider-backed extension/MCP setup only where standalone Reborn
   exposes matching v2 browser endpoints or fixtures;
-- remaining Slack/Telegram/channel pairing scenarios beyond the Reborn Slack
-  proof-code connect card and generic member self-claim form, especially
-  lower-level admin pending pairing APIs once standalone Reborn exposes a
-  matching v2 pending-list endpoint;
+- remaining Slack/Telegram/channel pairing scenarios beyond Reborn proof-code
+  connect cards and the generic member self-claim form, especially lower-level
+  admin pending pairing APIs once standalone Reborn exposes a matching v2
+  pending-list endpoint;
 - remaining Slack/Telegram/channel approval and webhook scenarios beyond
   WebChat v2 approval cards and product-workflow/adapter contracts, because the
   legacy tests target old Slack/Telegram WASM-channel controllers and text alias
@@ -2982,6 +3024,12 @@ The project creation draft port found the same route-state issue in the
 top-level Projects `New project` action: the handler created a thread but
 navigated to `/chat` without the thread id in the URL. The browser now opens
 `/chat/{thread_id}` and preserves the seeded project-creation composer draft.
+
+The generic channel-connect pairing port found that chat-owned connect cards
+only rendered a proof-code form for Slack. Non-Slack `inbound_proof_code`
+actions now reuse the generic Reborn pairing form and v2 redeem endpoint, so
+typed Telegram-style connect actions can be completed from chat instead of
+displaying instructions with no input.
 
 The Responses API port confirmed a route-contract difference: Reborn's
 OpenAI-compatible Responses API accepts typed Responses input items and rejects
