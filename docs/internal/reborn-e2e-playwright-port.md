@@ -2595,6 +2595,29 @@ Issue found and fixed:
   The modal now parses setup URLs and renders only HTTPS links, matching the
   stricter auth/OAuth URL handling elsewhere in the Reborn Extensions UI.
 
+### Step 87: Legacy Selector-Sensitive Extension Name Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the intent from legacy
+`test_auth_and_configure_helpers_escape_selector_sensitive_extension_names` to
+Reborn's package-ref based Extensions UI:
+
+- opened the real Reborn Extensions Installed tab with an extension whose
+  display name and package id contain quotes;
+- opened the configure modal through the extension card instead of using legacy
+  global DOM helpers;
+- submitted a manual secret through the v2 setup endpoint;
+- asserted the setup request preserved the quoted package id and payload.
+
+Behavior mapping:
+
+- Legacy v1 had global auth/configure helper functions that queried DOM nodes
+  by extension-name attributes and therefore needed selector escaping. Reborn
+  no longer exposes those globals; the corresponding Reborn risk is URL/path
+  encoding of `package_ref.id` and role/text-based card selection. The port
+  verifies that path.
+
 ## Open Migration Buckets
 
 Not yet ported:

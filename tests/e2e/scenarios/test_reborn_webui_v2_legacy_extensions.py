@@ -1697,6 +1697,66 @@ async def test_reborn_legacy_configure_modal_setup_url_requires_https(
         await bad_harness["context"].close()
 
 
+async def test_reborn_legacy_configure_handles_selector_sensitive_package_ids(
+    reborn_v2_server, reborn_v2_browser
+):
+    package_id = 'quoted "tool" name'
+    quoted_tool = {
+        **CONFIG_TOOL,
+        "display_name": 'Quoted "Tool" Name',
+        "package_ref": _package_ref(package_id),
+    }
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[quoted_tool],
+        setup_payloads={
+            package_id: {
+                "name": package_id,
+                "kind": "wasm_tool",
+                "secrets": [
+                    {
+                        "name": "API_TOKEN",
+                        "prompt": "API token",
+                        "provided": False,
+                        "optional": False,
+                        "auto_generate": False,
+                    }
+                ],
+                "fields": [],
+                "onboarding": None,
+            }
+        },
+        tab="installed",
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, 'Quoted "Tool" Name')
+        await expect(card).to_be_visible(timeout=5000)
+        await card.get_by_role("button", name="Configure").click()
+
+        modal = page.get_by_role("dialog", name='Configure Quoted "Tool" Name')
+        await expect(modal).to_be_visible(timeout=5000)
+        await modal.locator('input[type="password"]').fill("quoted-secret")
+        await modal.get_by_role("button", name="Save").click()
+
+        await expect(modal).to_have_count(0)
+        assert harness["setup_submit_requests"] == [
+            {
+                "package_id": package_id,
+                "body": {
+                    "action": "submit",
+                    "payload": {
+                        "secrets": {"API_TOKEN": "quoted-secret"},
+                        "fields": {},
+                    },
+                },
+            }
+        ]
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_configure_modal_blank_existing_secret_is_not_submitted(
     reborn_v2_server, reborn_v2_browser
 ):
