@@ -1989,6 +1989,108 @@ test("useChat.send: routine setup prompts mentioning Slack submit to the model",
   assert.equal(response.thread_id, "thread-created");
 });
 
+test("useChat.submitOnboardingPairing: Slack redemption resumes chat without leaking code", async () => {
+  const threadId = "thread-slack-pairing";
+  const stateUpdates = [];
+  const slackPairingCalls = [];
+  const sendBodies = [];
+  let renderedMessages = [];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [
+          5,
+          {
+            state: "pairing_required",
+            extensionName: "slack",
+            threadId,
+            requestId: null,
+          },
+        ],
+      ]),
+      setCalls: stateUpdates,
+    }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    approvePairingCode: async () => {
+      throw new Error("Slack pairing should use the Slack redemption endpoint");
+    },
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    queryClient: {
+      getQueryData: () => ({
+        threads: [{ thread_id: threadId, title: "Slack pairing thread" }],
+      }),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    redeemSlackPairingCode: async (code, options) => {
+      slackPairingCalls.push({ code, options });
+      return { success: true };
+    },
+    removePending,
+    resolveGateRequest: async () => {},
+    sendMessage: async (body) => {
+      sendBodies.push(body);
+      return {
+        accepted_message_ref: "msg:message-continue",
+        run_id: "run-continue",
+        status: "queued",
+        thread_id: body.threadId,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  const response = await chat.submitOnboardingPairing(" A1B2C3 ");
+
+  assert.equal(slackPairingCalls.length, 1);
+  assert.equal(slackPairingCalls[0].code, "A1B2C3");
+  assert.equal(slackPairingCalls[0].options.threadId, threadId);
+  assert.equal(slackPairingCalls[0].options.requestId, null);
+  assert.equal(sendBodies.length, 1);
+  assert.equal(sendBodies[0].threadId, threadId);
+  assert.equal(
+    sendBodies[0].content,
+    "Slack is connected. Continue the previous request.",
+  );
+  assert.doesNotMatch(JSON.stringify(sendBodies), /A1B2C3/);
+  assert.equal(response.success, true);
+  assert.ok(
+    stateUpdates.some((update) => update.index === 5 && update.value === null),
+    "the pairing panel should clear before the continuation send",
+  );
+});
 
 test("useChat.send: rejected_busy appends system notice, marks optimistic failed, clears isProcessing", async () => {
   const threadId = "thread-busy";

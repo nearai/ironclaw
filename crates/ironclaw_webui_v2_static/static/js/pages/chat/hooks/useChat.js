@@ -408,16 +408,19 @@ export function useChat(threadId) {
   // hook can route to `/chat/<id>` after the first send.
   const send = React.useCallback(
     async (content, opts = {}) => {
-      const { threadId: targetThreadId, attachments: stagedAttachments = [] } =
-        opts;
+      const {
+        threadId: targetThreadId,
+        attachments: stagedAttachments = [],
+        bypassPendingOnboarding = false,
+      } = opts;
       const wireAttachments = stagedAttachments.map(toWireAttachment);
       const renderAttachments = stagedAttachments.map(toRenderAttachment);
 
       if (
         pendingGate ||
         pendingGateRef.current ||
-        pendingOnboarding ||
-        pendingOnboardingRef.current
+        (!bypassPendingOnboarding &&
+          (pendingOnboarding || pendingOnboardingRef.current))
       ) {
         throw approvalGatePendingSendError();
       }
@@ -831,19 +834,27 @@ export function useChat(threadId) {
         threadId: threadForResume,
         requestId: onboarding.requestId || null,
       };
-      const response = isSlackPersonalPairing(onboarding.extensionName)
+      const isSlackPairing = isSlackPersonalPairing(onboarding.extensionName);
+      const response = isSlackPairing
         ? await redeemSlackPairingCode(trimmed, options)
         : await approvePairingCode(onboarding.extensionName, trimmed, options);
       if (response?.success === false) {
         throw new Error(response.message || "Pairing failed");
       }
       setPendingOnboarding(null);
+      if (isSlackPairing && threadForResume && !onboarding.requestId) {
+        await send("Slack is connected. Continue the previous request.", {
+          threadId: threadForResume,
+          bypassPendingOnboarding: true,
+        });
+        return response;
+      }
       if (onboarding.requestId) {
         setIsProcessing(true);
       }
       return response;
     },
-    [threadId, setPendingOnboarding, setIsProcessing],
+    [threadId, send, setPendingOnboarding, setIsProcessing],
   );
 
   const dismissOnboardingPairing = React.useCallback(
