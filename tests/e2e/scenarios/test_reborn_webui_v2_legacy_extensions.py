@@ -162,6 +162,7 @@ async def _open_mocked_extensions_page(
     install_responses=None,
     oauth_start_responses=None,
     activate_responses=None,
+    remove_responses=None,
 ):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
@@ -172,6 +173,7 @@ async def _open_mocked_extensions_page(
     install_responses_by_id = dict(install_responses or {})
     oauth_start_responses_by_id = dict(oauth_start_responses or {})
     activate_responses_by_id = dict(activate_responses or {})
+    remove_responses_by_id = dict(remove_responses or {})
     install_requests: list[dict] = []
     activate_requests: list[str] = []
     remove_requests: list[str] = []
@@ -351,15 +353,20 @@ async def _open_mocked_extensions_page(
                 path.removeprefix("/api/webchat/v2/extensions/").removesuffix("/remove")
             )
             remove_requests.append(package_id)
-            installed_extensions = [
-                extension
-                for extension in installed_extensions
-                if extension.get("package_ref", {}).get("id") != package_id
-            ]
-            for entry in registry_entries:
-                if entry.get("package_ref", {}).get("id") == package_id:
-                    entry["installed"] = False
-            await fulfill_json(route, {"success": True, "message": f"{package_id} removed"})
+            response = remove_responses_by_id.get(
+                package_id,
+                {"success": True, "message": f"{package_id} removed"},
+            )
+            if response.get("success") is not False:
+                installed_extensions = [
+                    extension
+                    for extension in installed_extensions
+                    if extension.get("package_ref", {}).get("id") != package_id
+                ]
+                for entry in registry_entries:
+                    if entry.get("package_ref", {}).get("id") == package_id:
+                        entry["installed"] = False
+            await fulfill_json(route, response)
             return
 
         await route.continue_()
@@ -559,6 +566,47 @@ async def test_reborn_legacy_extensions_remove_cancel_keeps_card(
 
         await expect(active_card).to_be_visible(timeout=5000)
         assert harness["remove_requests"] == []
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_extensions_remove_failure_keeps_card(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[ACTIVE_TOOL],
+        registry=[REGISTRY_TOOL],
+        remove_responses={
+            "active-tool": {
+                "success": False,
+                "message": "Active Tool is still handling an active run.",
+            }
+        },
+        tab="registry",
+    )
+    try:
+        page = harness["page"]
+        active_card = _card_by_title(page, "Active Tool")
+        await expect(active_card).to_be_visible(timeout=5000)
+        await expect(active_card.get_by_text("active", exact=True)).to_be_visible()
+
+        await active_card.get_by_label("More actions").click()
+        dialog_future = await _capture_next_confirm(page, accept=True)
+        await page.get_by_role("menuitem", name="Remove").click()
+        dialog = await asyncio.wait_for(dialog_future, timeout=5)
+        assert dialog["type"] == "confirm"
+        assert "Active Tool" in dialog["message"]
+
+        await expect(
+            page.get_by_text("Active Tool is still handling an active run.")
+        ).to_be_visible(timeout=5000)
+        assert harness["remove_requests"] == ["active-tool"]
+
+        await expect(active_card).to_be_visible(timeout=5000)
+        await expect(active_card.get_by_text("active", exact=True)).to_be_visible()
+        await expect(active_card.get_by_label("More actions")).to_have_count(1)
     finally:
         await harness["context"].close()
 

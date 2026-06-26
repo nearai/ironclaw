@@ -1538,6 +1538,25 @@ Behavior adjustment:
   harness now mutates registry/installed state only after a successful install
   response.
 
+### Step 42: Legacy Remove Failure Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the user-facing error-path intent from legacy `test_remove_noninstalled`
+to Reborn's installed extension card:
+
+- a remove request can return `success: false` with a specific failure message;
+- Reborn surfaces that message in the Extensions page action toast;
+- a failed remove does not drop the installed extension card;
+- the card remains active/manageable after the failed remove.
+
+Behavior adjustment:
+
+- Reborn's browser can only remove an installed card, so this port asserts the
+  visible failed-remove contract instead of issuing a legacy remove request for
+  a non-installed free-form name. The test harness now mutates installed and
+  registry state only after a successful remove response.
+
 ## Open Migration Buckets
 
 Not yet ported:
