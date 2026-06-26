@@ -581,14 +581,9 @@ async def test_section3_step12_deletion_guards(org_state):
         assert deleted.status_code == 204, f"owner->admin delete: {deleted.status_code} {deleted.text}"
 
 
-@pytest.mark.xfail(
-    reason="step 12 deletion guards (D5/G1, #5355): self-delete, admin->owner, "
-    "admin->peer-admin, and last-owner protection are not built — the delete "
-    "handler today checks only is_admin + tenant, so these 403 cases 204.",
-    strict=False,
-)
 async def test_section3_step12_deletion_guards_403_cases(org_state):
-    """The four guard cases that must 403 once D5 lands (today they 204)."""
+    """The four guard cases that must 403 (D5/G1, #5355): self-delete,
+    admin->owner, admin->peer-admin, and last-owner protection."""
     base_url = org_state["base_url"]
     director = org_state["tokens"]["director"]
 
