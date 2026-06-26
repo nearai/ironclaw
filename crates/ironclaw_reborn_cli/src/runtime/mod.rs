@@ -1015,22 +1015,33 @@ fn resolve_concurrency_cap(
 ///   semaphore is then sized to `tokio::sync::Semaphore::MAX_PERMITS`, so the
 ///   per-user / per-origin caps become the only concurrency bound (used to
 ///   stress-test backends with no global throttle).
-/// - `Some(n)` → that worker count, verbatim. The operator's explicit override
-///   is trusted: a large value just sizes the scheduler semaphore counter (the
-///   permit count caps concurrency, runner tasks are still only spawned per
-///   claimed run), degrading smoothly toward the `0` = unlimited regime. No
-///   silent clamp — mirrors the per-user / per-origin caps in
-///   [`resolve_concurrency_cap`].
+/// - `Some(n)`, `1..=MAX_PERMITS` → that worker count, verbatim. The operator's
+///   explicit override is trusted: a large value just sizes the scheduler
+///   semaphore counter (the permit count caps concurrency, runner tasks are
+///   still only spawned per claimed run), degrading smoothly toward the
+///   `0` = unlimited regime. No silent clamp — mirrors the per-user /
+///   per-origin caps in [`resolve_concurrency_cap`].
+/// - `Some(n)`, `n > MAX_PERMITS` → fatal. The value flows into
+///   `tokio::sync::Semaphore::new`, which **panics** above
+///   [`tokio::sync::Semaphore::MAX_PERMITS`]; reject it as a config error so a
+///   malformed value fails loud at validation instead of crashing startup. (The
+///   `0` = unlimited path sizes the semaphore to exactly `MAX_PERMITS`, which is
+///   accepted, so the unlimited sentinel stays the way to ask for "no bound".)
 fn resolve_worker_count(
     raw: Option<usize>,
     current_default: Option<std::num::NonZeroUsize>,
-) -> Option<std::num::NonZeroUsize> {
+) -> anyhow::Result<Option<std::num::NonZeroUsize>> {
     match raw {
-        None => current_default,
-        Some(0) => None,
-        // `n` is non-zero here (the `Some(0)` arm handled zero), so this never
-        // collapses to the unlimited sentinel.
-        Some(n) => std::num::NonZeroUsize::new(n),
+        None => Ok(current_default),
+        Some(0) => Ok(None),
+        Some(n) if n > tokio::sync::Semaphore::MAX_PERMITS => anyhow::bail!(
+            "runner worker_count {n} exceeds the scheduler ceiling of {} permits \
+             (tokio::sync::Semaphore::MAX_PERMITS); reduce it, or set 0 for unlimited",
+            tokio::sync::Semaphore::MAX_PERMITS
+        ),
+        // `n` is non-zero and `<= MAX_PERMITS` here, so this never collapses to
+        // the unlimited sentinel and never panics the semaphore.
+        Some(n) => Ok(std::num::NonZeroUsize::new(n)),
     }
 }
 
@@ -1060,7 +1071,7 @@ fn apply_worker_count_env_override(
     slot: &mut Option<std::num::NonZeroUsize>,
 ) -> anyhow::Result<()> {
     if let Some(raw) = env_util::strict_env_var_parsed::<usize>(name)? {
-        *slot = resolve_worker_count(Some(raw), *slot);
+        *slot = resolve_worker_count(Some(raw), *slot)?;
     }
     Ok(())
 }
@@ -1085,8 +1096,8 @@ fn runner_settings(
             settings.poll_interval = Duration::from_millis(ms);
         }
         // worker_count: absent → default; `0` → unlimited (None); positive →
-        // that count, verbatim.
-        settings.worker_count = resolve_worker_count(runner.worker_count, settings.worker_count);
+        // that count, verbatim (rejected above the semaphore ceiling).
+        settings.worker_count = resolve_worker_count(runner.worker_count, settings.worker_count)?;
 
         // Each cap: absent in the file → keep the struct default already in
         // `settings`; explicit `0` → "unlimited" sentinel (None); positive → cap.
@@ -1238,6 +1249,25 @@ mod tests {
     }
 
     #[test]
+    fn runner_settings_worker_count_above_semaphore_max_is_fatal() {
+        // A value above `tokio::sync::Semaphore::MAX_PERMITS` would panic
+        // `Semaphore::new` at scheduler construction; it must fail loud at
+        // config validation instead. `0` stays the way to ask for unlimited.
+        let _lock = lock_trigger_env();
+        let _env = clear_runner_env();
+        let toml = format!(
+            "[runner]\nworker_count = {}\n",
+            tokio::sync::Semaphore::MAX_PERMITS + 1
+        );
+        let cfg = parse_runner_section(&toml);
+        let err = runner_settings(Some(&cfg)).expect_err("oversized worker_count must be rejected");
+        assert!(
+            err.to_string().contains("exceeds the scheduler ceiling"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn runner_settings_zero_caps_become_none_unlimited() {
         let _lock = lock_trigger_env();
         let _env = clear_runner_env();
@@ -1312,6 +1342,21 @@ mod tests {
         let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "512");
         let settings = runner_settings(None).expect("should succeed");
         assert_eq!(settings.worker_count.map(|v| v.get()), Some(512));
+    }
+
+    #[test]
+    fn runner_env_worker_count_above_semaphore_max_is_fatal() {
+        let _lock = lock_trigger_env();
+        let _guards = clear_runner_env();
+        let _w = EnvGuard::set(
+            "IRONCLAW_REBORN_RUNNER_WORKER_COUNT",
+            &(tokio::sync::Semaphore::MAX_PERMITS + 1).to_string(),
+        );
+        let err = runner_settings(None).expect_err("oversized worker_count must be rejected");
+        assert!(
+            err.to_string().contains("exceeds the scheduler ceiling"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
