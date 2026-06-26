@@ -15,7 +15,7 @@ use ironclaw_events::{
     DurableAuditSink, DurableEventSink, EventStreamKey, ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, ScopedFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
@@ -48,7 +48,11 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
     let temp = tempfile::tempdir().unwrap();
     let engine_root = temp.path().join("engine");
     let event_root = temp.path().join("events");
-    let first = durable_services(&engine_root, &event_root).await;
+    // Shared backend gives all three service-graph instances visibility into
+    // the same run-state and approval-request records, mirroring durability
+    // that production gets from the database-backed filesystem.
+    let shared_run_state = Arc::new(InMemoryBackend::new());
+    let first = durable_services(&engine_root, &event_root, Arc::clone(&shared_run_state)).await;
     let first_runtime = first.services.host_runtime_for_local_testing();
     let context = execution_context_without_grants_for_scope(sample_scope(InvocationId::new()));
     let scope = context.resource_scope.clone();
@@ -70,7 +74,7 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
     )
     .await;
 
-    let second = durable_services(&engine_root, &event_root).await;
+    let second = durable_services(&engine_root, &event_root, Arc::clone(&shared_run_state)).await;
     assert_blocked_run(
         second.run_state.as_ref(),
         &scope,
@@ -121,7 +125,7 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
         CapabilityLeaseStatus::Consumed
     );
 
-    let third = durable_services(&engine_root, &event_root).await;
+    let third = durable_services(&engine_root, &event_root, Arc::clone(&shared_run_state)).await;
     let completed_run = third
         .run_state
         .get(&scope, context.invocation_id)
@@ -336,19 +340,53 @@ type DurableHostRuntimeServices = HostRuntimeServices<
 
 struct DurableServices {
     services: DurableHostRuntimeServices,
-    run_state: Arc<FilesystemRunStateStore<LocalFilesystem>>,
-    approval_requests: Arc<FilesystemApprovalRequestStore<LocalFilesystem>>,
+    run_state: Arc<FilesystemRunStateStore<InMemoryBackend>>,
+    approval_requests: Arc<FilesystemApprovalRequestStore<InMemoryBackend>>,
     capability_leases: Arc<FilesystemCapabilityLeaseStore<LocalFilesystem>>,
     events: RebornEventStores,
 }
 
-async fn durable_services(engine_root: &Path, event_root: &Path) -> DurableServices {
+/// Build a [`ScopedFilesystem`] wrapping a shared [`InMemoryBackend`] for
+/// run-state and approval-request stores.  The shared backend is passed in so
+/// that multiple `durable_services` instances in the same test can read/write
+/// the same in-memory store — preserving the "state survives service-graph
+/// restart" semantics while being compatible with the record-shaped entries
+/// (`entry.kind = Some(RecordKind::new(…))`) that these stores now write.
+/// `LocalFilesystem` rejects record-shaped entries; `InMemoryBackend` accepts
+/// them via its full `BackendCapabilities`.
+fn scoped_in_memory_run_state_filesystem(
+    backend: Arc<InMemoryBackend>,
+) -> Arc<ScopedFilesystem<InMemoryBackend>> {
+    Arc::new(ScopedFilesystem::with_fixed_view(
+        backend,
+        MountView::new(vec![
+            MountGrant::new(
+                MountAlias::new("/run-state").unwrap(),
+                VirtualPath::new("/run-state").unwrap(),
+                MountPermissions::read_write_list_delete(),
+            ),
+            MountGrant::new(
+                MountAlias::new("/approvals").unwrap(),
+                VirtualPath::new("/approvals").unwrap(),
+                MountPermissions::read_write_list_delete(),
+            ),
+        ])
+        .unwrap(),
+    ))
+}
+
+async fn durable_services(
+    engine_root: &Path,
+    event_root: &Path,
+    shared_run_state_backend: Arc<InMemoryBackend>,
+) -> DurableServices {
     let event_stores = jsonl_event_stores(event_root).await;
-    // All three filesystem-backed stores now take `Arc<ScopedFilesystem<F>>`
-    // (run_state migrated in commit 475588153; capability lease in 34e3c68cb).
     let scoped_fs = scoped_engine_filesystem(engine_root);
-    let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&scoped_fs)));
-    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(&scoped_fs)));
+    let run_state_fs = scoped_in_memory_run_state_filesystem(shared_run_state_backend);
+    let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&run_state_fs)));
+    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
+        &run_state_fs,
+    )));
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped_fs)));
     let services = base_services(
         engine_root,
