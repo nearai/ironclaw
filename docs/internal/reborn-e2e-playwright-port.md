@@ -1951,6 +1951,31 @@ Behavior adjustment:
   asserts query refetches at that SPA boundary instead of old `/api/extensions`
   globals.
 
+### Step 59: Legacy Active Thread Summary-Refresh Port
+
+Extended `test_reborn_webui_v2_legacy_pending_messages.py`.
+
+Ported the user-facing invariant behind legacy
+`test_sidebar_refresh_keeps_active_thread_outside_summary_window` to Reborn's
+URL/thread-id driven chat surface:
+
+- opened a deep-linked Reborn thread whose sidebar cache entry was title-less,
+  so a successful send triggers the real thread-list invalidation path;
+- changed the mocked refreshed thread summary to omit the active thread and
+  include a newer thread, matching the legacy "outside summary window" shape;
+- sent through the real composer and asserted the message still targeted the
+  active `/v2/chat/{thread_id}` route;
+- asserted the refreshed sidebar can show the newer summary thread without
+  retargeting the active chat or losing the optimistic user message.
+
+Behavior adjustment:
+
+- Legacy v1 guarded a mutable `currentThreadId` plus `/api/chat/threads`
+  summary refresh. Reborn's equivalent source of truth is the route-scoped
+  `activeThreadId`; the port protects that a sidebar refetch does not navigate
+  or retarget the composer when the active thread is absent from the summary
+  response.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -1961,9 +1986,9 @@ Not yet ported:
 - remaining legacy SSE/history edge cases only where Reborn exposes a matching
   product concept; active-thread fallback and read-only external-channel refresh
   are legacy v1 routing semantics rather than current standalone Reborn v2 UI
-  behavior, while route-scoped cursor reset, stale replay dedupe, multi-tab
-  fan-out, keepalive comments, connection limits, and reload persistence are
-  covered;
+  behavior, while active-thread retention after summary refresh, route-scoped
+  cursor reset, stale replay dedupe, multi-tab fan-out, keepalive comments,
+  connection limits, and reload persistence are covered;
 - remaining DOM/resource-limit scenarios for any future capped long-running
   activity stores beyond the current timeline paging, near-cap response
   projection, and SSE reconnect-timeout cleanup coverage;

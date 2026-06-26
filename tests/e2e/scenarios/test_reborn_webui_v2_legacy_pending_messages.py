@@ -130,6 +130,7 @@ async def _open_mocked_pending_page(
         ]
     )
     timeline_requests: list[dict] = []
+    thread_requests: list[str] = []
     send_requests: list[dict] = []
 
     async def fulfill_json(route, body, status=200):
@@ -158,6 +159,7 @@ async def _open_mocked_pending_page(
         )
 
     async def handle_threads(route):
+        thread_requests.append(route.request.url)
         await fulfill_json(
             route,
             {
@@ -192,7 +194,9 @@ async def _open_mocked_pending_page(
         "context": context,
         "page": page,
         "timeline": timeline,
+        "threads": thread_records,
         "timeline_requests": timeline_requests,
+        "thread_requests": thread_requests,
         "send_requests": send_requests,
     }
 
@@ -336,6 +340,76 @@ async def test_reborn_legacy_pending_message_survives_thread_reload(
         assert harness["send_requests"][0]["content"] == "SSE reconnect race test 12345"
     finally:
         release_send.set()
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_sidebar_refresh_keeps_active_thread_outside_summary_window(
+    reborn_v2_server, reborn_v2_browser
+):
+    async def handle_successful_send(route, _payload, fulfill_json):
+        await fulfill_json(route, _submitted_response(), status=202)
+
+    harness = await _open_mocked_pending_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        threads=[
+            {
+                "thread_id": THREAD_ID,
+                "title": None,
+                "created_at": "2026-06-25T00:00:00Z",
+                "updated_at": "2026-06-25T00:00:00Z",
+            },
+            {
+                "thread_id": OTHER_THREAD_ID,
+                "title": "Newest summary thread",
+                "created_at": "2026-06-25T00:01:00Z",
+                "updated_at": "2026-06-25T00:01:00Z",
+            },
+        ],
+        send_handler=handle_successful_send,
+    )
+    try:
+        page = harness["page"]
+        composer = page.locator(SEL_V2["chat_composer"])
+        await expect(composer).to_be_visible(timeout=15000)
+        assert await page.evaluate("() => location.pathname") == f"/v2/chat/{THREAD_ID}"
+
+        harness["threads"][:] = [
+            {
+                "thread_id": OTHER_THREAD_ID,
+                "title": "Newest summary thread",
+                "created_at": "2026-06-25T00:01:00Z",
+                "updated_at": "2026-06-25T00:01:00Z",
+            }
+        ]
+        before_refresh_requests = len(harness["thread_requests"])
+
+        await composer.fill("Summary refresh should keep this Reborn thread")
+        await composer.press("Enter")
+
+        await expect(
+            page.locator(SEL_V2["msg_user"]).filter(
+                has_text="Summary refresh should keep this Reborn thread"
+            )
+        ).to_have_count(1, timeout=5000)
+        await _wait_for_request_count(
+            harness["thread_requests"],
+            before_refresh_requests,
+        )
+
+        assert len(harness["send_requests"]) == 1
+        assert (
+            harness["send_requests"][0]["content"]
+            == "Summary refresh should keep this Reborn thread"
+        )
+        assert await page.evaluate("() => location.pathname") == f"/v2/chat/{THREAD_ID}"
+        await expect(composer).to_be_visible(timeout=5000)
+        await expect(
+            page.locator("#gateway-sidebar").get_by_role("button").filter(
+                has_text="Newest summary thread"
+            )
+        ).to_be_visible(timeout=5000)
+    finally:
         await harness["context"].close()
 
 
