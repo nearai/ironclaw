@@ -44,9 +44,10 @@ const LOG_TARGET: &str = "ironclaw_reborn::memory";
 /// carries the chosen provider's connection details.
 #[derive(Clone, Default)]
 pub struct Mem0ConnectionConfig {
-    /// mem0 base URL. Defaults to the self-hosted mem0 OSS server at
-    /// `http://localhost:8888`; overridable via `[memory].mem0_base_url` or the
-    /// `MEMORY_MEM0_BASE_URL` env var.
+    /// mem0 base URL for the self-hosted mem0 OSS server, from
+    /// `[memory].mem0_base_url` or the `MEMORY_MEM0_BASE_URL` env var. There is
+    /// NO default: mem0 stays off unless it is explicitly bound AND given a base
+    /// URL here; a bound-but-unset mem0 fails closed in the factory.
     pub base_url: Option<String>,
     /// Optional mem0 API key, from `MEMORY_MEM0_API_KEY`. `None` for a self-hosted
     /// server with `AUTH_DISABLED=true` (the default). When set, held as a
@@ -288,7 +289,7 @@ mod tests {
     fn mem0_binding_with_real_connection_builds_a_provider() {
         // A well-formed base URL + key builds the real transport-backed provider.
         let deps = MemoryProviderDeps::for_third_party(Mem0ConnectionConfig {
-            base_url: Some("https://api.mem0.ai".to_string()),
+            base_url: Some("https://mem0.example.com".to_string()),
             api_key: Some(SecretString::from("m0-key".to_string())),
             app_id: Some("ironclaw-test".to_string()),
         });

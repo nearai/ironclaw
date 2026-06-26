@@ -690,7 +690,7 @@ pub(crate) fn build_services_input_with_options(
     // mem0 fails closed in the factory. The API key is OPTIONAL (a self-hosted
     // server with `AUTH_DISABLED=true` needs none) and, when set, comes as a
     // secret from `MEMORY_MEM0_API_KEY`. Inert unless a binding selects mem0.
-    let mem0_base_url = optional_nonempty_env("MEMORY_MEM0_BASE_URL").or_else(|| {
+    let mem0_base_url = optional_nonempty_env("MEMORY_MEM0_BASE_URL")?.or_else(|| {
         config_file
             .as_ref()
             .and_then(|file| file.memory.as_ref())
@@ -698,8 +698,8 @@ pub(crate) fn build_services_input_with_options(
     });
     let memory_provider_connection = ironclaw_reborn_composition::Mem0ConnectionConfig {
         base_url: mem0_base_url,
-        api_key: optional_nonempty_env("MEMORY_MEM0_API_KEY").map(SecretString::from),
-        app_id: optional_nonempty_env("MEMORY_MEM0_APP_ID"),
+        api_key: optional_nonempty_env("MEMORY_MEM0_API_KEY")?.map(SecretString::from),
+        app_id: optional_nonempty_env("MEMORY_MEM0_APP_ID")?,
     };
     services_input = services_input.with_memory_provider_connection(memory_provider_connection);
 
@@ -776,7 +776,11 @@ fn build_production_services_input(
 
 pub(crate) fn resolve_google_oauth_config_from_env()
 -> anyhow::Result<Option<ResolvedGoogleOAuthConfig>> {
-    resolve_google_oauth_config(optional_nonempty_env)
+    // The optional Google OAuth client overrides are benign when absent, so this
+    // path keeps the lenient lookup: a non-UTF-8 value collapses to "unset"
+    // (preserving the prior behavior) rather than failing startup on an unrelated
+    // malformed env var.
+    resolve_google_oauth_config(|name| optional_nonempty_env(name).ok().flatten())
 }
 
 fn resolve_google_oauth_config(
@@ -837,18 +841,30 @@ fn resolve_google_oauth_config(
     }))
 }
 
-/// Read an env var with lenient presence semantics: unset OR
-/// present-but-blank both collapse to `None`. Used for optional-config
-/// callers (OAuth client overrides, etc.) where a blank slot is benign.
+/// Read an env var with lenient presence semantics: unset OR present-but-blank
+/// both collapse to `Ok(None)`. Used for optional-config callers (the memory
+/// provider connection knobs, OAuth client overrides, etc.) where a blank slot is
+/// benign.
+///
+/// Fail-loud on the one case that is NOT benign: a value that is present but
+/// holds non-UTF-8 bytes is a hard error rather than being silently dropped (the
+/// repo fail-loud convention — `std::env::var(..).ok()` would collapse
+/// `VarError::NotUnicode` to `None` and hide the misconfiguration).
 ///
 /// **Not** for operator-control knobs like `IRONCLAW_TRIGGER_POLLER_*` —
 /// those use a strict-presence variant in the `trigger_poller` submodule,
 /// which treats a present-but-blank value as a fatal misconfiguration.
-fn optional_nonempty_env(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+fn optional_nonempty_env(name: &str) -> anyhow::Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("environment variable {name} contains non-UTF-8 bytes")
+        }
+    }
 }
 
 pub(crate) fn default_owner_id(

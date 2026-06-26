@@ -39,6 +39,18 @@ pub(crate) fn check_base_url(url: &str) -> Result<(), Mem0Error> {
         });
     }
 
+    // Reject a base URL that carries embedded credentials (`https://user:pass@host`).
+    // Credentials belong in `MEMORY_MEM0_API_KEY` (a redacted secret), never in the
+    // operator base URL where they would leak into logs and error messages. Redact
+    // the userinfo from the rejection error so the password is not echoed back.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(Mem0Error::InvalidUrl {
+            url: redact_userinfo(&parsed),
+            reason: "must not embed credentials in the base URL (userinfo is not allowed)"
+                .to_string(),
+        });
+    }
+
     let host = parsed.host_str().ok_or_else(|| Mem0Error::InvalidUrl {
         url: url.to_string(),
         reason: "missing host".to_string(),
@@ -55,6 +67,23 @@ pub(crate) fn check_base_url(url: &str) -> Result<(), Mem0Error> {
     }
 
     Ok(())
+}
+
+/// A copy of `url` with any embedded userinfo stripped, so a rejection error or
+/// log never echoes the credentials it is rejecting.
+fn redact_userinfo(url: &reqwest::Url) -> String {
+    let mut redacted = url.clone();
+    // `set_username`/`set_password` only reject cannot-be-a-base URLs, which an
+    // http(s) URL never is; on the impossible failure fall back to scheme + host.
+    if redacted.set_username("").is_ok() && redacted.set_password(None).is_ok() {
+        redacted.to_string()
+    } else {
+        format!(
+            "{}://{}",
+            url.scheme(),
+            url.host_str().unwrap_or("<redacted>")
+        )
+    }
 }
 
 fn is_always_blocked(ip: &IpAddr) -> bool {
@@ -80,10 +109,27 @@ mod tests {
 
     #[test]
     fn accepts_normal_endpoints() {
-        check_base_url("https://api.mem0.ai").unwrap();
+        check_base_url("https://mem0.example.com").unwrap();
         check_base_url("http://localhost:8080").unwrap();
         check_base_url("http://192.168.1.50:8000").unwrap(); // private — allowed at this layer
         check_base_url("http://127.0.0.1:8888").unwrap();
+    }
+
+    #[test]
+    fn rejects_embedded_credentials() {
+        // A base URL carrying userinfo must be rejected: credentials belong in
+        // the (redacted) API key, not the URL.
+        let err = check_base_url("https://operator:s3cr3t-token@mem0.example.com")
+            .expect_err("a URL with embedded credentials is rejected");
+        assert!(matches!(err, Mem0Error::InvalidUrl { .. }));
+        // The rejection must not echo the embedded password back into the error.
+        assert!(
+            !err.to_string().contains("s3cr3t-token"),
+            "embedded password must be redacted from the rejection error"
+        );
+        // A username-only URL (`https://user@host`) is rejected too.
+        check_base_url("https://operator@mem0.example.com")
+            .expect_err("a URL with embedded userinfo is rejected");
     }
 
     #[test]

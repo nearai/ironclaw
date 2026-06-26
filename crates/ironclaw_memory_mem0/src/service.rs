@@ -120,10 +120,13 @@ impl Mem0MemoryService {
     }
 
     /// Fetch the latest `kind=profile` memory for `namespace` and parse it as a
-    /// JSON object, for the read step of `profile_set`'s read-merge-write. Returns
-    /// an empty object when there is no prior profile (first write) or the stored
-    /// blob does not parse; surfaces a backend/list failure as an error so a
-    /// transient outage never silently drops the existing fields.
+    /// JSON object, for the read step of `profile_set`'s read-merge-write.
+    ///
+    /// Returns an empty object only when there is no prior profile at all (the
+    /// first write starts from empty). A backend/list failure, or a prior profile
+    /// blob that does not parse as a JSON object, surfaces as an error — failing
+    /// loud rather than silently treating the unavailable/corrupt state as empty,
+    /// which would drop every previously-stored field on the merge-write.
     async fn fetch_latest_profile_object(
         &self,
         namespace: &str,
@@ -137,9 +140,18 @@ impl Mem0MemoryService {
             .await
             .map_err(MemoryServiceError::operation_from)?;
         ensure_success(&response, "profile_set").map_err(MemoryServiceError::operation_from)?;
-        Ok(latest_profile_text(&response_items(&response.body))
-            .and_then(|text| serde_json::from_str::<Map<String, Value>>(text).ok())
-            .unwrap_or_default())
+        match latest_profile_text(&response_items(&response.body)) {
+            // No prior profile memory at all: the first write starts from empty.
+            None => Ok(Map::new()),
+            // A prior profile exists but does not parse as a JSON object. Fail
+            // loud: treating it as empty would drop every previously-stored field
+            // on the next merge-write.
+            Some(text) => serde_json::from_str::<Map<String, Value>>(text).map_err(|error| {
+                MemoryServiceError::operation_from(Mem0Error::CorruptProfile {
+                    reason: error.to_string(),
+                })
+            }),
+        }
     }
 }
 
@@ -825,5 +837,78 @@ mod tests {
             .await
             .expect_err("503 should surface as an error");
         assert_eq!(error.kind(), MemoryServiceErrorKind::Operation);
+    }
+
+    #[tokio::test]
+    async fn profile_read_returns_newest_profile_by_created_at_not_list_order() {
+        // mem0/Qdrant `get_all` order is not chronological, so the newest profile
+        // is deliberately placed in the MIDDLE of the list. profile_read must pick
+        // the max-`created_at` blob, not the first or last in list order — a
+        // `min_by` or a dropped comparator would return a different element.
+        let (service, _transport) = service_with(MockMem0Transport::always_ok(json!([
+            {
+                "memory": "{\"v\":\"middle\"}",
+                "created_at": "2026-02-15T00:00:00Z",
+                "metadata": { "kind": "profile", "target": "context/profile.json" }
+            },
+            {
+                "memory": "{\"v\":\"newest\"}",
+                "created_at": "2026-06-01T00:00:00Z",
+                "metadata": { "kind": "profile", "target": "context/profile.json" }
+            },
+            {
+                "memory": "{\"v\":\"oldest\"}",
+                "created_at": "2026-01-01T00:00:00Z",
+                "metadata": { "kind": "profile", "target": "context/profile.json" }
+            }
+        ])));
+        let read = service
+            .profile_read(invocation())
+            .await
+            .expect("profile_read should succeed");
+        assert_eq!(read.document, Some(b"{\"v\":\"newest\"}".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn profile_set_fails_loud_on_a_corrupt_existing_profile() {
+        // A prior profile memory exists but its stored blob is not a JSON object.
+        // profile_set must NOT silently treat it as empty (which would drop every
+        // previously-stored field); it must surface an Operation error and never
+        // issue the merge-write.
+        let transport = Arc::new(MockMem0Transport::new(Box::new(|request| {
+            match request.method {
+                Mem0HttpMethod::Get => Some(Mem0HttpResponse {
+                    status: 200,
+                    body: json!([{
+                        "memory": "this is not json",
+                        "metadata": { "kind": "profile", "target": "context/profile.json" }
+                    }]),
+                }),
+                Mem0HttpMethod::Post => Some(Mem0HttpResponse {
+                    status: 200,
+                    body: json!({ "results": [{ "id": "p-1", "event": "ADD" }] }),
+                }),
+            }
+        })));
+        let service = Mem0MemoryService::new(
+            Arc::clone(&transport) as Arc<dyn Mem0Transport>,
+            Mem0Config::new(),
+        );
+
+        let mut fields = Map::new();
+        fields.insert("timezone".to_string(), json!("PST"));
+        let error = service
+            .profile_set(invocation(), MemoryServiceProfileSetRequest { fields })
+            .await
+            .expect_err("a corrupt existing profile must fail loud, not erase fields");
+        assert_eq!(error.kind(), MemoryServiceErrorKind::Operation);
+
+        // The corrupt read aborted before any add: no field-erasing write occurred.
+        let posts = transport
+            .recorded()
+            .into_iter()
+            .filter(|request| request.method == Mem0HttpMethod::Post)
+            .count();
+        assert_eq!(posts, 0, "must not write when the prior profile is corrupt");
     }
 }

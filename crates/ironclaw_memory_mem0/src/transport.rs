@@ -34,7 +34,7 @@ pub enum Mem0HttpMethod {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mem0HttpRequest {
     pub method: Mem0HttpMethod,
-    /// Path under the mem0 base URL, e.g. `"/v1/memories/"`.
+    /// Path under the mem0 base URL, e.g. `"/memories"`.
     pub path: String,
     /// Query parameters (e.g. `("user_id", "...")`), applied for `GET` listing.
     pub query: Vec<(String, String)>,
@@ -223,6 +223,9 @@ impl Mem0Transport for Mem0HttpTransport {
         let body = if text.trim().is_empty() {
             Value::Null
         } else {
+            // silent-ok: the HTTP status is the authoritative success/failure
+            // signal and the service tolerates a null/unrecognized body, so a
+            // non-JSON body degrades to `Value::Null` rather than erroring.
             serde_json::from_str(&text).unwrap_or_default()
         };
         tracing::debug!(target: "ironclaw_memory_mem0", status, path = %request.path, "mem0 response");
@@ -324,9 +327,9 @@ mod tests {
 
     #[test]
     fn real_transport_builds_with_an_api_key() {
-        let transport = Mem0HttpTransport::new("https://api.mem0.ai", Some("m0-secret"))
+        let transport = Mem0HttpTransport::new("https://mem0.example.com", Some("m0-secret"))
             .expect("a normal https endpoint + key builds");
-        assert_eq!(transport.base_url, "https://api.mem0.ai");
+        assert_eq!(transport.base_url, "https://mem0.example.com");
     }
 
     #[test]
@@ -354,7 +357,7 @@ mod tests {
     #[test]
     fn real_transport_rejects_an_invalid_header_api_key() {
         // A control character cannot be encoded into an Authorization header.
-        let error = Mem0HttpTransport::new("https://api.mem0.ai", Some("bad\nkey"))
+        let error = Mem0HttpTransport::new("https://mem0.example.com", Some("bad\nkey"))
             .expect_err("an un-encodable API key is refused");
         assert!(matches!(error, Mem0Error::Client { .. }));
     }

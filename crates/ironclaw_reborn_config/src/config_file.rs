@@ -36,11 +36,13 @@ use std::borrow::Cow;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 
+use crate::RebornProfile;
 use crate::secrets_guard::{InlineSecretError, reject_inline_secret};
 
 /// API version stamp this crate understands. Mirrors
@@ -977,6 +979,12 @@ impl RebornConfigFile {
                     });
                 }
             }
+            // The mem0 base URL is operator-pasteable; run the same inline-secret
+            // guard as the sibling fields (a credentialed URL is rejected at
+            // transport construction, but a pasted secret must be caught here too).
+            if let Some(base_url) = memory.mem0_base_url.as_deref() {
+                check(Cow::Borrowed("memory.mem0_base_url"), base_url)?;
+            }
         }
         Ok(())
     }
@@ -1135,18 +1143,11 @@ fn write_edit_document(
 }
 
 /// Valid `deployment_profile` values for a memory admin override: a
-/// `RebornProfile` wire name, or `*` (all deployments). Kept in sync with
-/// [`RebornProfile::as_str`](crate::RebornProfile::as_str).
+/// `RebornProfile` wire name, or `*` (all deployments). Delegates to
+/// [`RebornProfile`]'s `FromStr` so the accepted set stays the single
+/// source of truth in `profile.rs` rather than a duplicated literal list.
 fn is_valid_memory_deployment_profile(value: &str) -> bool {
-    matches!(
-        value,
-        "local-dev"
-            | "local-dev-yolo"
-            | "hosted-single-tenant"
-            | "production"
-            | "migration-dry-run"
-            | "*"
-    )
+    value == "*" || RebornProfile::from_str(value).is_ok()
 }
 
 fn validate_api_version(found: &str, path: &Path) -> Result<(), RebornConfigFileError> {
@@ -2043,6 +2044,20 @@ deployment_profile = "*"
             cfg.memory.unwrap().admin_overrides[0].deployment_profile,
             "*"
         );
+    }
+
+    #[test]
+    fn memory_rejects_inline_secret_in_mem0_base_url() {
+        // The mem0 base URL runs the same inline-secret guard as the sibling
+        // memory fields: a pasted API key (here an `sk-` token embedded in the
+        // URL) must be rejected rather than round-tripped through config/git.
+        let toml = r#"
+[memory]
+mem0_base_url = "https://mem0.example.com/?key=sk-proj-1234567890abcdef12345678"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("an inline secret in mem0_base_url must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InlineSecret { .. }));
     }
 
     #[test]

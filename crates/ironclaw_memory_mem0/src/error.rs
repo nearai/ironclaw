@@ -45,4 +45,11 @@ pub enum Mem0Error {
         operation: &'static str,
         detail: &'static str,
     },
+
+    /// A stored `kind=profile` memory exists but does not parse as a JSON object.
+    /// Surfaced as an `Operation` failure so the `profile_set` read-merge-write
+    /// fails loud rather than silently treating the corrupt blob as empty — which
+    /// would drop every previously-stored profile field on the next write.
+    #[error("stored mem0 profile is not a JSON object: {reason}")]
+    CorruptProfile { reason: String },
 }

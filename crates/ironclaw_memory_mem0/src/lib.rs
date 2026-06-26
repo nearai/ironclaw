@@ -33,10 +33,13 @@
 //! (list) — which keys memories by a top-level `user_id`. This is the surface a
 //! `mem0.Memory` engine exposes behind a thin FastAPI (mem0's own `server/`
 //! shape), run fully locally against a self-hosted embedder/LLM (e.g. Ollama) and
-//! vector store (e.g. Qdrant); the default base URL is `http://localhost:8888`
-//! and no API key is required. Every add sets `infer=false` so content is stored
-//! verbatim (document-store semantics), needing only the embedder. The hosted
-//! cloud's `/v1/memories/…` paths and bearer key are *not* used. The endpoint
+//! vector store (e.g. Qdrant). There is no default base URL: mem0 stays off
+//! unless a deployment both binds it AND supplies a base URL (via config or the
+//! `MEMORY_MEM0_BASE_URL` env override); a bound-but-unset mem0 fails closed. No
+//! API key is required for a server running with `AUTH_DISABLED=true`. Every add
+//! sets `infer=false` so content is stored verbatim (document-store semantics),
+//! needing only the embedder. The hosted cloud's `/v1/memories/…` paths and
+//! bearer key are *not* used. The endpoint
 //! paths and request shaping are isolated to a handful of constants and helpers
 //! in [`service`], so retargeting another surface is a localized change. The
 //! tolerant response parsing accepts a bare array or the `results` / `memories` /
