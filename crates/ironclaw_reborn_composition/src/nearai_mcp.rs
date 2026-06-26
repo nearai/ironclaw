@@ -91,10 +91,20 @@ pub(crate) fn nearai_mcp_endpoint_from_env() -> Result<NearAiMcpEndpoint, String
 
 pub fn nearai_mcp_bootstrap_config_from_env()
 -> Result<Option<NearAiMcpBootstrapConfig>, NearAiMcpBootstrapConfigError> {
-    let configured_base = ironclaw_common::env_helpers::env_or_override("NEARAI_BASE_URL")
+    nearai_mcp_bootstrap_config_from_env_values(
+        ironclaw_common::env_helpers::env_or_override("NEARAI_BASE_URL"),
+        ironclaw_common::env_helpers::env_or_override("NEARAI_API_KEY"),
+    )
+}
+
+fn nearai_mcp_bootstrap_config_from_env_values(
+    configured_base: Option<String>,
+    api_key: Option<String>,
+) -> Result<Option<NearAiMcpBootstrapConfig>, NearAiMcpBootstrapConfigError> {
+    let configured_base = configured_base
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let api_key = ironclaw_common::env_helpers::env_or_override("NEARAI_API_KEY")
+    let api_key = api_key
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .map(SecretString::from);
@@ -448,42 +458,6 @@ mod tests {
     use super::*;
     use ironclaw_host_api::{InvocationId, UserId};
 
-    struct NearAiEnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl NearAiEnvGuard {
-        fn new() -> Self {
-            let lock = ironclaw_common::env_helpers::lock_env();
-            assert!(
-                std::env::var_os("NEARAI_BASE_URL").is_none(),
-                "NEARAI_BASE_URL must be unset for deterministic env tests"
-            );
-            assert!(
-                std::env::var_os("NEARAI_API_KEY").is_none(),
-                "NEARAI_API_KEY must be unset for deterministic env tests"
-            );
-            ironclaw_common::env_helpers::remove_runtime_env("NEARAI_BASE_URL");
-            ironclaw_common::env_helpers::remove_runtime_env("NEARAI_API_KEY");
-            Self { _lock: lock }
-        }
-
-        fn set_base_url(&self, value: &str) {
-            ironclaw_common::env_helpers::set_runtime_env("NEARAI_BASE_URL", value);
-        }
-
-        fn set_api_key(&self, value: &str) {
-            ironclaw_common::env_helpers::set_runtime_env("NEARAI_API_KEY", value);
-        }
-    }
-
-    impl Drop for NearAiEnvGuard {
-        fn drop(&mut self) {
-            ironclaw_common::env_helpers::remove_runtime_env("NEARAI_BASE_URL");
-            ironclaw_common::env_helpers::remove_runtime_env("NEARAI_API_KEY");
-        }
-    }
-
     fn account_for_bootstrap_decision(
         requester_extension: &ExtensionId,
         status: CredentialAccountStatus,
@@ -670,27 +644,24 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_config_from_env_defaults_base_url_when_only_api_key_set() {
-        let env = NearAiEnvGuard::new();
-        env.set_api_key("nearai-test-key");
-
-        let config = nearai_mcp_bootstrap_config_from_env()
-            .expect("env config")
-            .expect("present config");
+    fn bootstrap_config_from_env_values_defaults_base_url_when_only_api_key_set() {
+        let config =
+            nearai_mcp_bootstrap_config_from_env_values(None, Some("nearai-test-key".to_string()))
+                .expect("env config")
+                .expect("present config");
 
         assert_eq!(config.base_url, DEFAULT_NEARAI_MCP_BASE_URL);
         assert_eq!(config.api_key.expose_secret(), "nearai-test-key");
     }
 
     #[test]
-    fn bootstrap_config_from_env_uses_both_env_vars_when_set() {
-        let env = NearAiEnvGuard::new();
-        env.set_base_url(" https://search.example.test/v1/ ");
-        env.set_api_key(" nearai-test-key ");
-
-        let config = nearai_mcp_bootstrap_config_from_env()
-            .expect("env config")
-            .expect("present config");
+    fn bootstrap_config_from_env_values_uses_both_env_vars_when_set() {
+        let config = nearai_mcp_bootstrap_config_from_env_values(
+            Some(" https://search.example.test/v1/ ".to_string()),
+            Some(" nearai-test-key ".to_string()),
+        )
+        .expect("env config")
+        .expect("present config");
 
         assert_eq!(config.base_url, "https://search.example.test/v1/");
         assert_eq!(config.api_key.expose_secret(), "nearai-test-key");
@@ -701,11 +672,9 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_config_from_env_returns_none_when_no_env_vars() {
-        let _env = NearAiEnvGuard::new();
-
+    fn bootstrap_config_from_env_values_returns_none_when_no_env_vars() {
         assert!(
-            nearai_mcp_bootstrap_config_from_env()
+            nearai_mcp_bootstrap_config_from_env_values(None, None)
                 .expect("env config")
                 .is_none()
         );
