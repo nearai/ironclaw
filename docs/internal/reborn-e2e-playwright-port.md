@@ -2409,6 +2409,28 @@ Behavior adjustment:
   the migrated suite now pins install URL safety independently from the existing
   activation and configure OAuth URL-safety tests.
 
+### Step 79: Legacy Manual Auth Submit Failure Port
+
+Extended `test_reborn_webui_v2_legacy_auth_flows.py`.
+
+Ported the retry behavior from legacy `test_auth_card_submit_error` to Reborn's
+manual-token product-auth gate:
+
+- emitted a Reborn `manual_token` `auth_required` prompt;
+- mocked `/api/reborn/product-auth/manual-token/submit` returning a failed
+  credential-save response;
+- asserted the manual-token gate remains visible and retryable;
+- asserted the token input and submit action are re-enabled after the failure;
+- asserted the paused run is not resolved when credential storage fails.
+
+Behavior adjustment:
+
+- Legacy v1 submitted the raw token directly to `/api/chat/gate/resolve` and
+  rendered the backend's prose error. Reborn first stores credentials through
+  product-auth and resolves the gate only after receiving a credential ref, so
+  the migrated test pins the safer two-step contract and the localized
+  credential-save failure message.
+
 ## Open Migration Buckets
 
 Not yet ported:

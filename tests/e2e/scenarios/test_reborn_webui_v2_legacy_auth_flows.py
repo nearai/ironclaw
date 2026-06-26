@@ -27,7 +27,13 @@ def _assert_no_github_pat(text: str, *, context: str) -> None:
     assert match is None, f"GitHub PAT leaked into {context}: {match.group()!r}"
 
 
-async def _open_stubbed_auth_thread(reborn_v2_server, reborn_v2_browser):
+async def _open_stubbed_auth_thread(
+    reborn_v2_server,
+    reborn_v2_browser,
+    *,
+    manual_token_status=200,
+    manual_token_body=None,
+):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
     manual_token_requests: list[dict] = []
@@ -134,9 +140,12 @@ async def _open_stubbed_auth_thread(reborn_v2_server, reborn_v2_browser):
         manual_token_requests.append(body)
         await fulfill_json(
             route,
-            {
+            manual_token_body
+            if manual_token_body is not None
+            else {
                 "credential_ref": "credential-ref-github",
             },
+            status=manual_token_status,
         )
 
     async def handle_resolve(route):
@@ -287,6 +296,49 @@ async def test_reborn_legacy_manual_token_not_retained_in_browser(
             """
         )
         _assert_no_github_pat(browser_storage, context="browser storage")
+    finally:
+        await context.close()
+
+
+async def test_reborn_legacy_manual_token_submit_failure_keeps_gate_retryable(
+    reborn_v2_server, reborn_v2_browser
+):
+    context, page, manual_token_requests, resolve_requests = await _open_stubbed_auth_thread(
+        reborn_v2_server,
+        reborn_v2_browser,
+        manual_token_status=400,
+        manual_token_body={"error": "invalid_credential", "kind": "bad_request"},
+    )
+    try:
+        await _emit_auth_prompt(
+            page,
+            challenge_kind="manual_token",
+            gate_ref="manual-token-failure-gate",
+        )
+
+        gate = page.locator(SEL_V2["auth_gate_for"].format(kind="manual_token")).first
+        await expect(gate).to_be_visible(timeout=5000)
+        token_input = page.locator(SEL_V2["auth_token_input"])
+        await token_input.fill("wrong-token")
+
+        submit = gate.get_by_role("button", name="Use token")
+        await submit.click()
+
+        await expect(gate.get_by_role("alert")).to_contain_text("Could not save the token.")
+        await expect(gate).to_be_visible()
+        await expect(token_input).to_be_enabled()
+        await expect(submit).to_be_enabled()
+        assert manual_token_requests == [
+            {
+                "provider": "github",
+                "account_label": "GitHub PAT",
+                "token": "wrong-token",
+                "thread_id": THREAD_ID,
+                "run_id": RUN_ID,
+                "gate_ref": "manual-token-failure-gate",
+            }
+        ]
+        assert resolve_requests == []
     finally:
         await context.close()
 
