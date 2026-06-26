@@ -2346,6 +2346,27 @@ Issue fixed:
   message payload instead of rejecting it at the Responses route boundary. That
   diverged from legacy `/v1/responses`, which rejected empty input directly.
 
+### Step 76: Legacy EventSource Error Reconnect Port
+
+Extended `test_reborn_webui_v2_legacy_sse_history.py`.
+
+Ported the legacy EventSource reconnect-after-disconnect contract from
+`test_sse_reconnect.py` to Reborn WebUI v2:
+
+- opened a fake browser `EventSource` through the real chat page;
+- emitted a cursor-bearing `keep_alive` frame so the hook records the latest
+  stream position;
+- triggered the real `onerror` reconnect path;
+- asserted the next stream URL carries the bearer token and
+  `after_cursor=cursor-before-error`.
+
+Behavior adjustment:
+
+- Legacy v1 explicitly called `connectSSE()` and relied on private globals plus
+  `/api/chat/history` reload timing. Reborn's public behavior is a per-thread
+  event stream that resumes via `after_cursor`, so the migrated test asserts the
+  caller-visible reconnect URL rather than the removed v1 history-reload hook.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -2357,8 +2378,9 @@ Not yet ported:
   product concept; active-thread fallback and read-only external-channel refresh
   are legacy v1 routing semantics rather than current standalone Reborn v2 UI
   behavior, while active-thread retention after summary refresh, route-scoped
-  cursor reset, stale replay dedupe, multi-tab fan-out, keepalive comments,
-  connection limits, and reload persistence are covered;
+  cursor reset, EventSource error reconnect, stale replay dedupe, multi-tab
+  fan-out, keepalive comments, connection limits, and reload persistence are
+  covered;
 - remaining DOM/resource-limit scenarios for any future capped long-running
   activity stores beyond the current timeline paging, near-cap response
   projection, and SSE reconnect-timeout cleanup coverage;

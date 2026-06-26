@@ -218,6 +218,142 @@ async def test_reborn_legacy_sse_resume_reuses_last_cursor_without_history_reloa
         await context.close()
 
 
+async def test_reborn_legacy_sse_error_reconnect_resumes_after_last_cursor(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Port legacy EventSource reconnect to Reborn's after_cursor resume path."""
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    await page.add_init_script(
+        """
+        (() => {
+          const streams = [];
+          window.__v2SseUrls = [];
+          class FakeEventSource extends EventTarget {
+            constructor(url) {
+              super();
+              this.url = url;
+              this.readyState = 0;
+              streams.push(this);
+              window.__v2SseUrls.push(url);
+              queueMicrotask(() => {
+                this.readyState = 1;
+                if (typeof this.onopen === "function") this.onopen(new Event("open"));
+              });
+            }
+            close() {
+              this.readyState = 2;
+            }
+          }
+          window.EventSource = FakeEventSource;
+          window.__emitV2Sse = (type, frame, id = "cursor-before-error") => {
+            const stream = streams[streams.length - 1];
+            if (!stream) throw new Error("no EventSource stream is open");
+            const event = new MessageEvent(type, {
+              data: JSON.stringify({ type, ...frame }),
+              lastEventId: id,
+            });
+            stream.dispatchEvent(event);
+          };
+          window.__failLatestV2Sse = () => {
+            const stream = streams[streams.length - 1];
+            if (!stream) throw new Error("no EventSource stream is open");
+            if (typeof stream.onerror !== "function") {
+              throw new Error("EventSource has no error handler");
+            }
+            stream.onerror(new Event("error"));
+          };
+        })();
+        """
+    )
+
+    async def fulfill_json(route, body):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route):
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route):
+        await fulfill_json(
+            route,
+            {
+                "threads": [
+                    {
+                        "thread_id": THREAD_ID,
+                        "title": "Legacy SSE error reconnect port",
+                        "created_at": "2026-06-26T00:00:00Z",
+                        "updated_at": "2026-06-26T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_timeline(route):
+        await fulfill_json(
+            route,
+            {
+                "messages": [
+                    {
+                        "message_id": "error-reconnect-user",
+                        "kind": "user",
+                        "content": "Reconnect should resume after this cursor",
+                        "sequence": 1,
+                        "status": "accepted",
+                        "created_at": "2026-06-26T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads", handle_threads)
+    await page.route("**/api/webchat/v2/threads?**", handle_threads)
+    await page.route(f"**/api/webchat/v2/threads/{THREAD_ID}/timeline**", handle_timeline)
+
+    try:
+        await page.goto(f"{reborn_v2_server}/v2/chat/{THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}")
+        await expect(
+            page.locator(SEL_V2["msg_user"]).filter(
+                has_text="Reconnect should resume after this cursor"
+            )
+        ).to_be_visible(timeout=15000)
+        await page.wait_for_function("() => window.__v2SseUrls.length === 1", timeout=5000)
+
+        await page.evaluate(
+            "() => window.__emitV2Sse('keep_alive', {}, 'cursor-before-error')"
+        )
+        await page.evaluate("() => window.__failLatestV2Sse()")
+        await page.wait_for_function("() => window.__v2SseUrls.length === 2", timeout=5000)
+
+        reconnected_url = await page.evaluate("() => window.__v2SseUrls[1]")
+        query = parse_qs(urlparse(reconnected_url).query)
+        assert query.get("token") == [REBORN_V2_AUTH_TOKEN]
+        assert query.get("after_cursor") == ["cursor-before-error"]
+    finally:
+        await context.close()
+
+
 async def test_reborn_legacy_usage_event_does_not_render_message_badge(
     reborn_v2_server, reborn_v2_browser
 ):
