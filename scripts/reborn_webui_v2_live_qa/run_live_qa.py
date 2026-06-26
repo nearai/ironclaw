@@ -2441,12 +2441,51 @@ async def case_webui_api_auth_security_headers(ctx: LiveQaContext) -> ProbeResul
 
     started = time.monotonic()
     case_name = "webui_api_auth_security_headers"
-    checked_paths = ["/api/health", "/api/webchat/v2/session"]
+    checked_paths = [
+        "/api/health",
+        "/api/webchat/v2/session",
+        "/api/webchat/v2/threads",
+        "/api/webchat/v2/threads/{thread_id}/timeline",
+    ]
+    latency_budget_ms = 5_000
 
     try:
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
             health = await client.get(f"{ctx.base_url}/api/health")
             unauthorized = await client.get(f"{ctx.base_url}/api/webchat/v2/session")
+            disallowed_cors = await client.options(
+                f"{ctx.base_url}/api/webchat/v2/threads",
+                headers={
+                    "Origin": "http://evil.example.com",
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "authorization",
+                },
+            )
+            created_thread = await client.post(
+                f"{ctx.base_url}/api/webchat/v2/threads",
+                headers=_auth_json_headers(),
+                json={"client_action_id": "live-qa-create-thread"},
+            )
+            malformed_json = await client.post(
+                f"{ctx.base_url}/api/webchat/v2/threads",
+                headers=_auth_json_headers(),
+                content="{",
+            )
+            oversized_thread_create = await client.post(
+                f"{ctx.base_url}/api/webchat/v2/threads",
+                headers=_auth_json_headers(),
+                content=(
+                    '{"client_action_id":"live-qa-body-limit","padding":"'
+                    + ("x" * (16 * 1024 + 1))
+                    + '"}'
+                ),
+            )
+            timeline_with_body = await client.request(
+                "GET",
+                f"{ctx.base_url}/api/webchat/v2/threads/live-qa-missing/timeline",
+                headers=_auth_json_headers(),
+                content="body-not-allowed",
+            )
 
         if health.status_code != 200:
             raise AssertionError(f"/api/health returned HTTP {health.status_code}")
@@ -2455,25 +2494,91 @@ async def case_webui_api_auth_security_headers(ctx: LiveQaContext) -> ProbeResul
                 "/api/webchat/v2/session without bearer returned "
                 f"HTTP {unauthorized.status_code}"
             )
+        if created_thread.status_code != 200:
+            raise AssertionError(
+                "/api/webchat/v2/threads with bearer returned "
+                f"HTTP {created_thread.status_code}: {created_thread.text[:300]}"
+            )
+        if malformed_json.status_code != 400:
+            raise AssertionError(
+                "/api/webchat/v2/threads malformed JSON returned "
+                f"HTTP {malformed_json.status_code}, expected 400: {malformed_json.text[:300]}"
+            )
+        if oversized_thread_create.status_code != 413:
+            raise AssertionError(
+                "/api/webchat/v2/threads oversized body returned "
+                f"HTTP {oversized_thread_create.status_code}, expected 413: "
+                f"{oversized_thread_create.text[:300]}"
+            )
+        if "Request body exceeds the route's body limit." not in oversized_thread_create.text:
+            raise AssertionError(
+                "oversized create-thread body rejection did not explain the "
+                f"descriptor cap: {oversized_thread_create.text[:300]}"
+            )
+        if timeline_with_body.status_code != 413:
+            raise AssertionError(
+                "/api/webchat/v2/threads/{thread_id}/timeline with body returned "
+                f"HTTP {timeline_with_body.status_code}, expected 413: "
+                f"{timeline_with_body.text[:300]}"
+            )
+        if "Request body not allowed for this route." not in timeline_with_body.text:
+            raise AssertionError(
+                "timeline body rejection did not explain the NoBody policy: "
+                f"{timeline_with_body.text[:300]}"
+            )
 
         expected_headers = {
             "x-content-type-options": "nosniff",
             "x-frame-options": "DENY",
             "referrer-policy": "no-referrer",
         }
-        for header, expected in expected_headers.items():
-            actual = unauthorized.headers.get(header)
-            if actual != expected:
-                raise AssertionError(
-                    f"unauthorized response header {header}={actual!r}, "
-                    f"expected {expected!r}"
-                )
-        csp = unauthorized.headers.get("content-security-policy", "")
-        for required in ("object-src 'none'", "frame-ancestors 'none'", "base-uri 'self'"):
-            if required not in csp:
-                raise AssertionError(
-                    f"unauthorized response CSP missing {required!r}: {csp!r}"
-                )
+        responses_with_security_headers = {
+            "unauthorized": unauthorized,
+            "created_thread": created_thread,
+            "malformed_json": malformed_json,
+            "oversized_thread_create": oversized_thread_create,
+            "timeline_with_body": timeline_with_body,
+        }
+        for label, response in responses_with_security_headers.items():
+            for header, expected in expected_headers.items():
+                actual = response.headers.get(header)
+                if actual != expected:
+                    raise AssertionError(
+                        f"{label} response header {header}={actual!r}, "
+                        f"expected {expected!r}"
+                    )
+            csp = response.headers.get("content-security-policy", "")
+            for required in ("object-src 'none'", "frame-ancestors 'none'", "base-uri 'self'"):
+                if required not in csp:
+                    raise AssertionError(
+                        f"{label} response CSP missing {required!r}: {csp!r}"
+                    )
+
+        echoed_origin = disallowed_cors.headers.get("access-control-allow-origin")
+        if echoed_origin == "http://evil.example.com":
+            raise AssertionError("CORS echoed a disallowed Origin on preflight")
+
+        probe_latencies_ms = {
+            "health": round(health.elapsed.total_seconds() * 1000),
+            "unauthorized": round(unauthorized.elapsed.total_seconds() * 1000),
+            "disallowed_cors": round(disallowed_cors.elapsed.total_seconds() * 1000),
+            "created_thread": round(created_thread.elapsed.total_seconds() * 1000),
+            "malformed_json": round(malformed_json.elapsed.total_seconds() * 1000),
+            "oversized_thread_create": round(
+                oversized_thread_create.elapsed.total_seconds() * 1000
+            ),
+            "timeline_with_body": round(timeline_with_body.elapsed.total_seconds() * 1000),
+        }
+        slow_probe = max(probe_latencies_ms.items(), key=lambda item: item[1])
+        if slow_probe[1] > latency_budget_ms:
+            raise AssertionError(
+                f"{slow_probe[0]} probe took {slow_probe[1]}ms, "
+                f"expected <= {latency_budget_ms}ms"
+            )
+
+        for label, response in responses_with_security_headers.items():
+            if AUTH_TOKEN in response.text:
+                raise AssertionError(f"{label} response echoed the bearer token")
 
         return _result(
             case_name,
@@ -2483,6 +2588,14 @@ async def case_webui_api_auth_security_headers(ctx: LiveQaContext) -> ProbeResul
                 "checked_paths": checked_paths,
                 "health_status": health.status_code,
                 "unauthorized_status": unauthorized.status_code,
+                "created_thread_status": created_thread.status_code,
+                "malformed_json_status": malformed_json.status_code,
+                "oversized_thread_create_status": oversized_thread_create.status_code,
+                "timeline_with_body_status": timeline_with_body.status_code,
+                "disallowed_cors_status": disallowed_cors.status_code,
+                "disallowed_cors_allow_origin": echoed_origin,
+                "latency_budget_ms": latency_budget_ms,
+                "probe_latencies_ms": probe_latencies_ms,
                 "headers": {
                     header: unauthorized.headers.get(header)
                     for header in (*expected_headers, "content-security-policy")
@@ -5821,7 +5934,14 @@ CASES: dict[str, CaseSpec] = {
     ),
     "webui_api_auth_security_headers": CaseSpec(
         case_webui_api_auth_security_headers,
-        qa_matrix_test_ids=["REBCLI-055-TC-01", "REBCLI-055-TC-02", "REBCLI-055-TC-05"],
+        qa_matrix_test_ids=[
+            "REBCLI-055-TC-01",
+            "REBCLI-055-TC-02",
+            "REBCLI-055-TC-03",
+            "REBCLI-055-TC-04",
+            "REBCLI-055-TC-05",
+            "REBCLI-055-TC-06",
+        ],
     ),
     "webui_static_shell_csp_nonce": CaseSpec(
         case_webui_static_shell_csp_nonce,

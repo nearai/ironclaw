@@ -212,7 +212,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             run_live_qa.CASES["webui_api_auth_security_headers"].qa_matrix_test_ids,
-            ["REBCLI-055-TC-01", "REBCLI-055-TC-02", "REBCLI-055-TC-05"],
+            [
+                "REBCLI-055-TC-01",
+                "REBCLI-055-TC-02",
+                "REBCLI-055-TC-03",
+                "REBCLI-055-TC-04",
+                "REBCLI-055-TC-05",
+                "REBCLI-055-TC-06",
+            ],
         )
         self.assertEqual(
             run_live_qa.CASES["webui_static_shell_csp_nonce"].qa_matrix_test_ids,
@@ -295,7 +302,19 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             manifest["qa_matrix"]["represented_test_ids"],
         )
         self.assertIn(
+            "REBCLI-055-TC-03",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
+        self.assertIn(
+            "REBCLI-055-TC-04",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
+        self.assertIn(
             "REBCLI-055-TC-05",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
+        self.assertIn(
+            "REBCLI-055-TC-06",
             manifest["qa_matrix"]["represented_test_ids"],
         )
         self.assertIn(
@@ -381,7 +400,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             cases["webui_api_auth_security_headers"]["qa_matrix_test_ids"],
-            ["REBCLI-055-TC-01", "REBCLI-055-TC-02", "REBCLI-055-TC-05"],
+            [
+                "REBCLI-055-TC-01",
+                "REBCLI-055-TC-02",
+                "REBCLI-055-TC-03",
+                "REBCLI-055-TC-04",
+                "REBCLI-055-TC-05",
+                "REBCLI-055-TC-06",
+            ],
         )
         self.assertEqual(
             cases["webui_static_shell_csp_nonce"]["qa_matrix_test_ids"],
