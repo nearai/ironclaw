@@ -1,9 +1,13 @@
 use std::{
+    any::Any,
     collections::BTreeMap,
-    path::PathBuf,
-    process::{Command, Stdio},
-    sync::{Arc, Barrier, mpsc},
+    env::{self, VarError},
+    io::ErrorKind,
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    sync::{Arc, mpsc},
     thread,
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
@@ -163,25 +167,37 @@ async fn run() -> Result<(), String> {
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
     args.run_id = Some(run_id.clone());
-    if args.child_index.is_none()
-        && args.processes > 1
+    let generated_libsql_path = if args.child_index.is_none()
         && matches!(args.backend, Backend::Libsql)
         && args.libsql_path.is_none()
     {
-        args.libsql_path = Some(default_libsql_path());
+        let path = default_libsql_path();
+        args.libsql_path = Some(path.clone());
+        Some(path)
+    } else {
+        None
+    };
+
+    let result = if args.child_index.is_none() && args.processes > 1 {
+        match prewarm(&args, &run_id).await {
+            Ok(()) => run_child_processes(&args, &run_id)
+                .and_then(|summaries| print_parent_summary(&args, &run_id, &summaries)),
+            Err(error) => Err(error),
+        }
+    } else {
+        match run_in_process(&args, &run_id).await {
+            Ok(summary) => serde_json::to_string_pretty(&summary)
+                .map_err(|error| error.to_string())
+                .map(|encoded| println!("{encoded}")),
+            Err(error) => Err(error),
+        }
+    };
+
+    if let Some(path) = generated_libsql_path {
+        cleanup_generated_libsql_path(&path).await;
     }
 
-    if args.child_index.is_none() && args.processes > 1 {
-        prewarm(&args, &run_id).await?;
-        let summaries = run_child_processes(&args, &run_id)?;
-        print_parent_summary(&args, &run_id, &summaries)?;
-        return Ok(());
-    }
-
-    let summary = run_in_process(&args, &run_id).await?;
-    let encoded = serde_json::to_string_pretty(&summary).map_err(|error| error.to_string())?;
-    println!("{encoded}");
-    Ok(())
+    result
 }
 
 fn validate_args(args: &Args) -> Result<(), String> {
@@ -251,27 +267,53 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             command.arg("--libsql-path").arg(&libsql_path);
         }
         if let Some(url) = &args.postgres_url {
-            command.arg("--postgres-url").arg(url);
+            command.env("IRONCLAW_FILESYSTEM_POSTGRES_URL", url);
         }
-        children.push((child_index, command.spawn().map_err(display_err)?));
+        match command.spawn() {
+            Ok(child) => children.push((child_index, child)),
+            Err(error) => {
+                terminate_children(&mut children);
+                return Err(format!("spawn child {child_index}: {error}"));
+            }
+        }
     }
 
     let mut summaries = Vec::with_capacity(children.len());
-    for (child_index, child) in children {
-        let output = child
-            .wait_with_output()
-            .map_err(|error| format!("wait for child {child_index}: {error}"))?;
+    while !children.is_empty() {
+        let (child_index, child) = children.remove(0);
+        let output = match child.wait_with_output() {
+            Ok(output) => output,
+            Err(error) => {
+                terminate_children(&mut children);
+                return Err(format!("wait for child {child_index}: {error}"));
+            }
+        };
         if !output.status.success() {
+            terminate_children(&mut children);
             return Err(format!(
                 "child {child_index} failed with status {}: {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr)
             ));
         }
-        let stdout = String::from_utf8(output.stdout)
-            .map_err(|error| format!("child {child_index} emitted non-utf8 stdout: {error}"))?;
-        let summary: RunSummary = serde_json::from_str(stdout.trim())
-            .map_err(|error| format!("parse child {child_index} summary: {error}: {stdout}"))?;
+        let stdout = match String::from_utf8(output.stdout) {
+            Ok(stdout) => stdout,
+            Err(error) => {
+                terminate_children(&mut children);
+                return Err(format!(
+                    "child {child_index} emitted non-utf8 stdout: {error}"
+                ));
+            }
+        };
+        let summary: RunSummary = match serde_json::from_str(stdout.trim()) {
+            Ok(summary) => summary,
+            Err(error) => {
+                terminate_children(&mut children);
+                return Err(format!(
+                    "parse child {child_index} summary: {error}: {stdout}"
+                ));
+            }
+        };
         summaries.push(summary);
     }
     summaries.sort_by_key(|summary| summary.child_index.unwrap_or(usize::MAX));
@@ -280,37 +322,63 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
 
 async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, String> {
     let backend = build_backend(args, run_id).await?;
+    let identities = Arc::new(SyntheticIds::new(args)?);
     let started = Instant::now();
-    let samples = run_threads(&backend.governor, args)?;
+    let governor = Arc::clone(&backend.governor);
+    let args_clone = args.clone();
+    let samples =
+        tokio::task::spawn_blocking(move || run_threads(&governor, &args_clone, &identities))
+            .await
+            .map_err(|error| {
+                if error.is_panic() {
+                    eprintln!("run_threads task panicked: {error:?}");
+                    "run_threads task panicked".to_string()
+                } else {
+                    eprintln!("run_threads task cancelled: {error:?}");
+                    "run_threads task cancelled".to_string()
+                }
+            })??;
     let elapsed = started.elapsed();
     Ok(summarize(args, run_id, backend.target, elapsed, samples))
 }
 
-fn run_threads(governor: &Arc<dyn ResourceGovernor>, args: &Args) -> Result<Vec<Sample>, String> {
-    let barrier = Arc::new(Barrier::new(args.concurrency));
+fn run_threads(
+    governor: &Arc<dyn ResourceGovernor>,
+    args: &Args,
+    identities: &Arc<SyntheticIds>,
+) -> Result<Vec<Sample>, String> {
     let (sender, receiver) = mpsc::channel();
+    let mut handles = Vec::with_capacity(args.concurrency);
 
     for worker_index in 0..args.concurrency {
         let governor = Arc::clone(governor);
-        let barrier = Arc::clone(&barrier);
+        let identities = Arc::clone(identities);
         let sender = sender.clone();
         let args = args.clone();
-        thread::Builder::new()
+        let handle = match thread::Builder::new()
             .name(format!("storage-stress-{worker_index}"))
-            .spawn(move || {
-                barrier.wait();
+            .spawn(move || -> Result<(), String> {
                 let mut samples = Vec::with_capacity(args.operations);
                 for operation_index in 0..args.operations {
                     samples.push(run_one_operation(
                         &governor,
                         &args,
+                        &identities,
                         worker_index,
                         operation_index,
                     ));
                 }
-                let _ = sender.send(samples);
-            })
-            .map_err(display_err)?;
+                sender
+                    .send(samples)
+                    .map_err(|_| "sample receiver dropped".to_string())
+            }) {
+            Ok(handle) => handle,
+            Err(error) => {
+                join_workers(handles)?;
+                return Err(format!("spawn worker {worker_index}: {error}"));
+            }
+        };
+        handles.push((worker_index, handle));
     }
     drop(sender);
 
@@ -318,24 +386,25 @@ fn run_threads(governor: &Arc<dyn ResourceGovernor>, args: &Args) -> Result<Vec<
     for worker_samples in receiver {
         samples.extend(worker_samples);
     }
+    join_workers(handles)?;
+    let expected = args.concurrency * args.operations;
+    if samples.len() != expected {
+        return Err(format!(
+            "collected {} samples but expected {expected}",
+            samples.len()
+        ));
+    }
     Ok(samples)
 }
 
 fn run_one_operation(
     governor: &Arc<dyn ResourceGovernor>,
     args: &Args,
+    identities: &SyntheticIds,
     worker_index: usize,
     operation_index: usize,
 ) -> Sample {
-    let scope = match synthetic_scope(args, worker_index, operation_index) {
-        Ok(scope) => scope,
-        Err(error) => {
-            return Sample {
-                latency: Duration::ZERO,
-                error: Some(error),
-            };
-        }
-    };
+    let scope = identities.scope(args, worker_index, operation_index);
     let estimate = ResourceEstimate {
         usd: Some(dec!(0.000001)),
         input_tokens: Some(8),
@@ -370,29 +439,6 @@ fn run_one_operation(
         latency,
         error: outcome.err().map(|error| classify_error(&error)),
     }
-}
-
-fn synthetic_scope(
-    args: &Args,
-    worker_index: usize,
-    operation_index: usize,
-) -> Result<ResourceScope, String> {
-    let global_index = worker_index
-        .saturating_mul(args.operations)
-        .saturating_add(operation_index);
-    let user_index = global_index % args.users;
-    let tenant_index = user_index % args.tenants;
-    Ok(ResourceScope {
-        tenant_id: TenantId::new(format!("tenant-{tenant_index:04}"))
-            .map_err(|error| format!("build synthetic tenant id: {error}"))?,
-        user_id: UserId::new(format!("user-{user_index:06}"))
-            .map_err(|error| format!("build synthetic user id: {error}"))?,
-        agent_id: None,
-        project_id: None,
-        mission_id: None,
-        thread_id: None,
-        invocation_id: InvocationId::new(),
-    })
 }
 
 fn summarize(
@@ -551,7 +597,9 @@ async fn build_libsql_backend(args: &Args, run_id: &str) -> Result<BackendHandle
 
     let path = args.libsql_path.clone().unwrap_or_else(default_libsql_path);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(display_err)?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(display_err)?;
     }
     let db = Arc::new(
         libsql::Builder::new_local(&path)
@@ -563,7 +611,7 @@ async fn build_libsql_backend(args: &Args, run_id: &str) -> Result<BackendHandle
     filesystem.run_migrations().await.map_err(display_err)?;
     Ok(BackendHandle {
         governor: governor_from_root(filesystem, run_id)?,
-        target: path.display().to_string(),
+        target: redact_libsql_path(&path),
     })
 }
 
@@ -576,15 +624,7 @@ async fn build_libsql_backend(_args: &Args, _run_id: &str) -> Result<BackendHand
 async fn build_postgres_backend(args: &Args, run_id: &str) -> Result<BackendHandle, String> {
     use ironclaw_filesystem::PostgresRootFilesystem;
 
-    let url = args
-        .postgres_url
-        .clone()
-        .or_else(|| std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL").ok())
-        .or_else(|| std::env::var("DATABASE_URL").ok())
-        .ok_or_else(|| {
-            "Postgres requires --postgres-url, IRONCLAW_FILESYSTEM_POSTGRES_URL, or DATABASE_URL"
-                .to_string()
-        })?;
+    let url = resolve_postgres_url(args)?;
     let config = url
         .parse::<tokio_postgres::Config>()
         .map_err(|error| format!("parse Postgres URL: {error}"))?;
@@ -632,13 +672,261 @@ fn default_libsql_path() -> PathBuf {
     ))
 }
 
+async fn cleanup_generated_libsql_path(path: &Path) {
+    for candidate in [
+        path.to_path_buf(),
+        path.with_extension("db-wal"),
+        path.with_extension("db-shm"),
+    ] {
+        match tokio::fs::remove_file(&candidate).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => eprintln!(
+                "failed to remove generated libSQL file {}: {error}",
+                candidate.display()
+            ),
+        }
+    }
+}
+
+fn terminate_children(children: &mut Vec<(usize, Child)>) {
+    for (_, child) in children.iter_mut() {
+        let _ = child.kill();
+    }
+    for (_, mut child) in children.drain(..) {
+        let _ = child.wait();
+    }
+}
+
+fn join_workers(handles: Vec<(usize, JoinHandle<Result<(), String>>)>) -> Result<(), String> {
+    for (worker_index, handle) in handles {
+        match handle.join() {
+            Ok(result) => result.map_err(|error| format!("worker {worker_index}: {error}"))?,
+            Err(payload) => {
+                return Err(format!(
+                    "worker {worker_index} panicked: {}",
+                    panic_payload_to_string(&payload)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn panic_payload_to_string(payload: &Box<dyn Any + Send + 'static>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "non-string panic payload".to_string()
+}
+
+struct SyntheticIds {
+    tenants: Vec<TenantId>,
+    users: Vec<UserId>,
+}
+
+impl SyntheticIds {
+    fn new(args: &Args) -> Result<Self, String> {
+        let tenants = (0..args.tenants)
+            .map(|tenant_index| {
+                TenantId::new(format!("tenant-{tenant_index:04}"))
+                    .map_err(|error| format!("build synthetic tenant id: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let users = (0..args.users)
+            .map(|user_index| {
+                UserId::new(format!("user-{user_index:06}"))
+                    .map_err(|error| format!("build synthetic user id: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { tenants, users })
+    }
+
+    fn scope(&self, args: &Args, worker_index: usize, operation_index: usize) -> ResourceScope {
+        let global_index = worker_index
+            .saturating_mul(args.operations)
+            .saturating_add(operation_index);
+        let user_index = global_index % self.users.len();
+        let tenant_index = user_index % self.tenants.len();
+        ResourceScope {
+            tenant_id: self.tenants[tenant_index].clone(),
+            user_id: self.users[user_index].clone(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+}
+
+fn resolve_postgres_url(args: &Args) -> Result<String, String> {
+    if let Some(url) = args.postgres_url.clone() {
+        return Ok(url);
+    }
+    if let Some(url) = optional_env_var("IRONCLAW_FILESYSTEM_POSTGRES_URL")? {
+        return Ok(url);
+    }
+    // silent-ok: IRONCLAW_FILESYSTEM_POSTGRES_URL is optional; DATABASE_URL is the documented fallback.
+    if let Some(url) = optional_env_var("DATABASE_URL")? {
+        return Ok(url);
+    }
+    Err(
+        "Postgres requires --postgres-url, IRONCLAW_FILESYSTEM_POSTGRES_URL, or DATABASE_URL"
+            .to_string(),
+    )
+}
+
+fn optional_env_var(name: &str) -> Result<Option<String>, String> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(VarError::NotPresent) => Ok(None),
+        Err(VarError::NotUnicode(_)) => Err(format!("{name} is not valid Unicode")),
+    }
+}
+
+fn redact_libsql_path(_path: &Path) -> String {
+    "libsql://<redacted-local-path>".to_string()
+}
+
 fn redact_postgres_url(url: &str) -> String {
-    match url.find('@') {
-        Some(at) => format!("postgres://<redacted>@{}", &url[at + 1..]),
-        None => "postgres://<redacted>".to_string(),
+    if let Some(redacted) = redact_postgres_uri(url, "postgres://") {
+        return redacted;
+    }
+    if let Some(redacted) = redact_postgres_uri(url, "postgresql://") {
+        return redacted;
+    }
+    if let Some(redacted) = redact_postgres_key_value_config(url) {
+        return redacted;
+    }
+    "postgres://<redacted>".to_string()
+}
+
+fn redact_postgres_uri(url: &str, scheme: &str) -> Option<String> {
+    let rest = url.strip_prefix(scheme)?;
+    let redacted_rest = match rest.find('@') {
+        Some(at) => format!("<redacted>@{}", redact_uri_password_query(&rest[at + 1..])),
+        None => redact_uri_password_query(rest),
+    };
+    Some(format!("{scheme}{redacted_rest}"))
+}
+
+fn redact_uri_password_query(rest: &str) -> String {
+    let Some((prefix, query)) = rest.split_once('?') else {
+        return rest.to_string();
+    };
+    let redacted_query = query
+        .split('&')
+        .map(|pair| {
+            let key = pair.split_once('=').map(|(key, _)| key).unwrap_or(pair);
+            if key.eq_ignore_ascii_case("password") {
+                format!("{key}=<redacted>")
+            } else {
+                pair.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{prefix}?{redacted_query}")
+}
+
+fn redact_postgres_key_value_config(config: &str) -> Option<String> {
+    let mut saw_assignment = false;
+    let parts = config
+        .split_whitespace()
+        .map(|part| {
+            let Some((key, _)) = part.split_once('=') else {
+                return part.to_string();
+            };
+            saw_assignment = true;
+            if key.eq_ignore_ascii_case("password") {
+                format!("{key}=<redacted>")
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+    if saw_assignment {
+        Some(parts.join(" "))
+    } else {
+        None
     }
 }
 
 fn display_err(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacts_postgres_uri_credentials_but_keeps_host() {
+        let redacted = redact_postgres_url("postgres://user:secret@localhost:5432/app");
+
+        assert_eq!(redacted, "postgres://<redacted>@localhost:5432/app");
+        assert!(!redacted.contains("secret"));
+    }
+
+    #[test]
+    fn redacts_postgresql_uri_password_query_parameter() {
+        let redacted =
+            redact_postgres_url("postgresql://localhost/app?sslmode=require&password=secret");
+
+        assert_eq!(
+            redacted,
+            "postgresql://localhost/app?sslmode=require&password=<redacted>"
+        );
+        assert!(!redacted.contains("secret"));
+    }
+
+    #[test]
+    fn redacts_key_value_postgres_password() {
+        let redacted =
+            redact_postgres_url("host=localhost user=postgres password=secret dbname=app");
+
+        assert_eq!(
+            redacted,
+            "host=localhost user=postgres password=<redacted> dbname=app"
+        );
+        assert!(!redacted.contains("secret"));
+    }
+
+    #[test]
+    fn redacts_libsql_absolute_path() {
+        let redacted = redact_libsql_path(Path::new("/tmp/ironclaw-storage-stress-secret.db"));
+
+        assert_eq!(redacted, "libsql://<redacted-local-path>");
+        assert!(!redacted.contains("/tmp"));
+    }
+
+    #[test]
+    fn synthetic_ids_are_generated_once_for_requested_cardinality() {
+        let args = test_args();
+        let ids = SyntheticIds::new(&args).expect("synthetic ids build");
+
+        assert_eq!(ids.tenants.len(), args.tenants);
+        assert_eq!(ids.users.len(), args.users);
+    }
+
+    fn test_args() -> Args {
+        Args {
+            backend: Backend::Libsql,
+            processes: 1,
+            concurrency: 2,
+            operations: 3,
+            users: 4,
+            tenants: 2,
+            scenario: Scenario::ReserveRelease,
+            run_id: None,
+            libsql_path: None,
+            postgres_url: None,
+            postgres_pool_size: 4,
+            child_index: None,
+        }
+    }
 }

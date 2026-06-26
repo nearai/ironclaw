@@ -26,6 +26,6 @@ rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 rust_decimal_macros = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread"] }
 tokio-postgres = { version = "0.7", optional = true, features = ["with-serde_json-1"] }
 uuid = { version = "1", features = ["v4", "serde"] }
