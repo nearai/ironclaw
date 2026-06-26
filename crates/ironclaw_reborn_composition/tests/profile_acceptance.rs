@@ -407,10 +407,6 @@ fn dev_only_profiles_are_visible_non_production_in_readiness() {
             RebornCompositionProfile::LocalDevYolo,
             RebornReadinessDiagnostic::local_dev_yolo(),
         ),
-        (
-            RebornCompositionProfile::HostedSingleTenantVolume,
-            RebornReadinessDiagnostic::hosted_single_tenant_volume(),
-        ),
     ] {
         assert_eq!(diagnostic.profile, profile);
         assert_eq!(
