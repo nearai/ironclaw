@@ -174,6 +174,7 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
   `}function _w({onNewChat:e,isCreating:t,isAdmin:a=!1,onNavigate:n}){let r=C(),s=h.default.useMemo(()=>eA.filter(i=>a||i.id!=="admin"),[a]);return l`
     <div className="flex flex-col px-3 py-2">
       <button
+        data-testid="new-chat"
         onClick=${e}
         disabled=${t}
         className=${V("flex items-center gap-2.5 rounded-[10px] px-3 py-2","border border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]","bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]","hover:bg-[color-mix(in_srgb,var(--v2-accent)_18%,transparent)] disabled:opacity-50")}
