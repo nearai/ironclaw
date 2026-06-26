@@ -323,7 +323,9 @@ fn interactive_profile() -> RunProfileDefinition {
         steering_policy: SteeringPolicy {
             allow_steering: true,
             allow_interrupt: true,
-            allow_driver_specific_nudges: false,
+            // Final-answer nudge: synthesize a closing answer on budget/no-progress
+            // exhaustion instead of ending empty. See loop_exit::try_final_answer_nudge.
+            allow_driver_specific_nudges: true,
         },
         cancellation_policy: CancellationPolicy {
             allow_cancel: true,
