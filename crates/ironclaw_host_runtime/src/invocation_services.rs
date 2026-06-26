@@ -505,6 +505,14 @@ fn validate_network_plan(plan: &ExecutionPlan) -> Result<(), InvocationServicesE
     }
     match plan.network_mode {
         NetworkMode::Brokered => Ok(()),
+        NetworkMode::Allowlist
+            if matches!(
+                plan.deployment,
+                DeploymentMode::HostedMultiTenant | DeploymentMode::EnterpriseDedicated
+            ) =>
+        {
+            Ok(())
+        }
         NetworkMode::DirectLogged | NetworkMode::Direct
             if matches!(plan.deployment, DeploymentMode::LocalSingleUser) =>
         {
@@ -521,7 +529,7 @@ fn validate_secret_plan(plan: &ExecutionPlan) -> Result<(), InvocationServicesEr
         return Ok(());
     }
     match plan.secret_mode {
-        SecretMode::BrokeredHandles => Ok(()),
+        SecretMode::BrokeredHandles | SecretMode::TenantBroker | SecretMode::OrgBroker => Ok(()),
         SecretMode::ScrubbedEnv | SecretMode::InheritedEnv
             if matches!(plan.deployment, DeploymentMode::LocalSingleUser) =>
         {

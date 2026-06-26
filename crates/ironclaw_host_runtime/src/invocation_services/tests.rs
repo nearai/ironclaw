@@ -1,4 +1,3 @@
-
 use super::*;
 use async_trait::async_trait;
 use ironclaw_filesystem::{
@@ -81,6 +80,36 @@ fn local_resolver_accepts_local_required_process_backend() {
         .unwrap();
 
     assert!(services.runtime_http_egress.is_none());
+}
+
+#[test]
+fn local_resolver_rejects_hosted_local_host_process_backend() {
+    let resolver = resolver_without_http();
+    let mut plan = plan(
+        ProcessBackendKind::LocalHost,
+        true,
+        false,
+        NetworkMode::Deny,
+        false,
+    );
+    plan.deployment = DeploymentMode::HostedMultiTenant;
+    plan.resolved_profile = RuntimeProfile::HostedSafe;
+
+    let error = resolver
+        .resolve(InvocationServicesResolutionRequest {
+            plan: &plan,
+            scope: &ResourceScope::system(),
+            mounts: None,
+        })
+        .unwrap_err();
+
+    assert_eq!(error.kind(), RuntimeDispatchErrorKind::UnsupportedRunner);
+    assert!(matches!(
+        error,
+        InvocationServicesError::UnsupportedProcessBackend {
+            backend: ProcessBackendKind::LocalHost
+        }
+    ));
 }
 
 #[test]
@@ -246,6 +275,42 @@ fn local_resolver_accepts_host_workspace_and_home_when_filesystem_required() {
         .expect("local-yolo filesystem backend should resolve");
 
     assert!(services.runtime_http_egress.is_none());
+}
+
+#[test]
+fn local_resolver_rejects_hosted_raw_host_filesystem_backends() {
+    let resolver = resolver_without_http();
+    for filesystem_backend in [
+        FilesystemBackendKind::HostWorkspace,
+        FilesystemBackendKind::HostWorkspaceAndHome,
+    ] {
+        let mut plan = plan(
+            ProcessBackendKind::None,
+            false,
+            false,
+            NetworkMode::Deny,
+            false,
+        );
+        plan.deployment = DeploymentMode::HostedMultiTenant;
+        plan.resolved_profile = RuntimeProfile::HostedSafe;
+        plan.requires_filesystem = true;
+        plan.filesystem_backend = filesystem_backend;
+
+        let error = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::FilesystemDenied);
+        assert!(matches!(
+            error,
+            InvocationServicesError::UnsupportedFilesystemBackend { backend }
+                if backend == filesystem_backend
+        ));
+    }
 }
 
 #[test]
@@ -554,6 +619,43 @@ fn local_resolver_accepts_hosted_brokered_required_network() {
 }
 
 #[test]
+fn local_resolver_accepts_hosted_and_enterprise_allowlist_required_network() {
+    let resolver = LocalInvocationServicesResolver::new(
+        Arc::new(LocalFilesystem::new()),
+        Some(Arc::new(NoopRuntimeHttpEgress)),
+        Arc::new(NoopProcessPort),
+        None,
+    );
+    for (deployment, profile) in [
+        (DeploymentMode::HostedMultiTenant, RuntimeProfile::HostedDev),
+        (
+            DeploymentMode::EnterpriseDedicated,
+            RuntimeProfile::EnterpriseDev,
+        ),
+    ] {
+        let mut plan = plan(
+            ProcessBackendKind::None,
+            false,
+            true,
+            NetworkMode::Allowlist,
+            false,
+        );
+        plan.deployment = deployment;
+        plan.resolved_profile = profile;
+
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .expect("allowlisted network should resolve through host egress");
+
+        assert!(services.runtime_http_egress.is_some());
+    }
+}
+
+#[test]
 fn local_resolver_rejects_hosted_direct_required_network() {
     let resolver = LocalInvocationServicesResolver::new(
         Arc::new(LocalFilesystem::new()),
@@ -771,6 +873,49 @@ fn local_resolver_accepts_brokered_required_secret_with_secret_store() {
 }
 
 #[test]
+fn local_resolver_accepts_tenant_and_org_broker_required_secrets() {
+    let resolver = LocalInvocationServicesResolver::new(
+        Arc::new(LocalFilesystem::new()),
+        None,
+        Arc::new(NoopProcessPort),
+        Some(Arc::new(InMemorySecretStore::new())),
+    );
+    for (deployment, profile, secret_mode) in [
+        (
+            DeploymentMode::HostedMultiTenant,
+            RuntimeProfile::HostedSafe,
+            SecretMode::TenantBroker,
+        ),
+        (
+            DeploymentMode::EnterpriseDedicated,
+            RuntimeProfile::EnterpriseSafe,
+            SecretMode::OrgBroker,
+        ),
+    ] {
+        let mut plan = plan(
+            ProcessBackendKind::None,
+            false,
+            false,
+            NetworkMode::Deny,
+            true,
+        );
+        plan.deployment = deployment;
+        plan.resolved_profile = profile;
+        plan.secret_mode = secret_mode;
+
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .expect("brokered hosted secrets should resolve with a configured secret store");
+
+        assert!(services.secret_store.is_some());
+    }
+}
+
+#[test]
 fn local_resolver_rejects_hosted_inherited_env_secret() {
     let resolver = LocalInvocationServicesResolver::new(
         Arc::new(LocalFilesystem::new()),
@@ -842,6 +987,8 @@ fn first_party_tools_do_not_select_process_backends() {
     for source in sources {
         assert!(!source.contains("ProcessBackendKind"));
         assert!(!source.contains("FilesystemBackendKind"));
+        assert!(!source.contains("NetworkMode"));
+        assert!(!source.contains("SecretMode"));
     }
 }
 
