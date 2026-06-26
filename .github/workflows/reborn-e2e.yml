@@ -165,6 +165,7 @@ jobs:
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_rendering.py
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_csp.py
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_sse_history.py
+          tests/e2e/scenarios/test_reborn_webui_v2_legacy_dom_resource_limits.py
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_message_persistence.py
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_tool_execution.py
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_skills.py

@@ -624,6 +624,41 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the tool-execution API port
   in the Reborn WebUI v2 Playwright job.
 
+### Step 18: Legacy DOM Resource-Limit Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_dom_resource_limits.py`.
+
+Ported the user-visible resource-limit intent from legacy
+`test_dom_resource_limits.py` to Reborn's history model:
+
+- the chat page requests initial timeline history with `limit=50`;
+- the DOM renders only the first 50 timeline messages on initial load, even
+  when older history is available;
+- older history is fetched only after the user activates the visible "Load older
+  messages" control;
+- one explicit load appends one older 50-message page without auto-loading the
+  rest of a long thread.
+
+Behavior adjustment:
+
+- Legacy gateway used global browser functions (`addMessage`,
+  `pruneOldMessages`, `connectSSE`, `jobEvents`) and capped a growing in-page
+  transcript with DOM pruning. Reborn does not expose those v1 globals. Its
+  equivalent browser resource contract is timeline pagination through the
+  `/api/webchat/v2/threads/{thread_id}/timeline` boundary, with 50-message
+  pages and explicit user-driven older-page loading.
+
+Frontend harness adjustment:
+
+- Added stable Reborn message-list selectors for the scroll container, content
+  container, and "Load older messages" control so paging/resource assertions do
+  not depend on incidental Tailwind class structure.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the DOM resource-limit port
+  in the Reborn WebUI v2 Playwright job.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -632,7 +667,8 @@ Not yet ported:
 - remaining legacy SSE/history edge cases such as active-thread fallback and
   read-only external-channel refresh behavior where Reborn has a matching
   product concept;
-- DOM pruning/resource-limit scenarios;
+- remaining DOM/resource-limit scenarios for Reborn-specific SSE reconnect
+  timer cleanup and any future capped long-running activity stores;
 - deeper tool approval scenarios that need real Reborn runtime/tool execution,
   persistence, or recovery beyond the browser approval-card and persisted
   activity-card contracts;

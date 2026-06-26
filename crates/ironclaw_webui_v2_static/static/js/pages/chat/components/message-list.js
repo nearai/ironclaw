@@ -204,15 +204,21 @@ export function MessageList({
       onWheel=${markUserScrollIntent}
       onTouchMove=${markUserScrollIntent}
       onPointerDown=${markScrollbarDragIntent}
+      data-testid="message-list-scroll"
       className="flex min-w-0 flex-1 overflow-y-auto px-4 pt-6 pb-14 sm:px-5 lg:px-8"
     >
-      <div ref=${contentRef} className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-5">
+      <div
+        ref=${contentRef}
+        data-testid="message-list-content"
+        className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-5"
+      >
         ${hasMore &&
         html`
           <div className="text-center">
             <button
               onClick=${onLoadMore}
               disabled=${isLoading}
+              data-testid="message-list-load-older"
               className="v2-button rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-300 hover:border-signal/35 hover:text-white disabled:opacity-50"
             >
               ${isLoading
