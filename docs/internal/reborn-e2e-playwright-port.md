@@ -590,6 +590,40 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the message-persistence
   activity-card port in the Reborn WebUI v2 Playwright job.
 
+### Step 17: Legacy Tool Execution API Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_tool_execution.py`.
+
+Ported the direct API intent from legacy `test_tool_execution.py` to
+standalone Reborn's `/api/webchat/v2` surface:
+
+- a v2 message can dispatch the builtin echo capability and persist a
+  completed `capability_display_preview` record containing the echoed output;
+- a v2 message can dispatch the builtin time capability and persist a
+  completed preview containing the time result;
+- a normal non-tool message still finalizes an assistant response and does not
+  create capability-preview records.
+
+Behavior adjustment:
+
+- Legacy gateway history exposed tool calls as unqualified names (`echo`,
+  `time`) under `/api/chat/history`. Standalone Reborn exposes first-party
+  capabilities as `builtin.echo` and `builtin.time`, with provider-facing tool
+  names `builtin__echo` and `builtin__time`, and stores browser-visible tool
+  results as `capability_display_preview` timeline records.
+
+Harness adjustment:
+
+- The mock LLM now has a Reborn-specific `reborn builtin time` trigger that
+  emits `builtin__time`, matching the provider-facing name for Reborn's
+  `builtin.time` capability. The existing legacy `what time` trigger is
+  unchanged for legacy gateway/v2-engine tests.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the tool-execution API port
+  in the Reborn WebUI v2 Playwright job.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -669,6 +703,11 @@ durable `capability_display_preview` records already rehydrated the activity
 card after reload. It did add stable test hooks to the activity UI and a
 Reborn-specific mock trigger so the browser test dispatches `builtin__echo`
 instead of the legacy unqualified `echo` tool name.
+
+The tool-execution API port confirmed the same namespacing distinction for
+`builtin.time`. No Reborn behavior fix was required; the port asserts Reborn's
+native capability ids and timeline-preview records instead of legacy
+`/api/chat/history` turn fields.
 
 The same settings inspection confirmed an admin parity gap: Reborn Settings
 Users client methods still return TODO stub responses instead of calling real

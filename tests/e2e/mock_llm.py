@@ -149,6 +149,11 @@ TOOL_CALL_PATTERNS = [
         "builtin__echo",
         lambda m: {"message": m.group(1)},
     ),
+    (
+        re.compile(r"reborn builtin time", re.IGNORECASE),
+        "builtin__time",
+        lambda _: {"operation": "now"},
+    ),
     (re.compile(r"echo (.+)", re.IGNORECASE), "echo", lambda m: {"message": m.group(1)}),
     # Reborn v2 download chips: one assistant turn writes a CSV and a PDF into
     # the project workspace. Reborn exposes this first-party tool by capability
