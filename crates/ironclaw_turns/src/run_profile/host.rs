@@ -689,6 +689,9 @@ pub struct AgentLoopHostError {
     pub safe_summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_ref: Option<LoopGateRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
@@ -698,12 +701,18 @@ impl AgentLoopHostError {
             kind,
             safe_summary: safe_summary.into(),
             reason_kind: None,
+            gate_ref: None,
             diagnostic_ref: None,
         }
     }
 
     pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
         self.reason_kind = Some(reason_kind);
+        self
+    }
+
+    pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
+        self.gate_ref = Some(gate_ref);
         self
     }
 

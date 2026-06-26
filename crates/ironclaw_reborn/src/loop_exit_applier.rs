@@ -165,6 +165,7 @@ where
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
     checkpoint_state_store: Option<Arc<dyn CheckpointStateStore>>,
     approval_gate_evidence: Option<Arc<dyn ApprovalGateEvidenceStore>>,
+    resource_gate_evidence: Option<Arc<dyn ResourceGateEvidenceStore>>,
     thread_scope: Option<ThreadScope>,
     cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
 }
@@ -172,6 +173,15 @@ where
 #[async_trait]
 pub trait ApprovalGateEvidenceStore: Send + Sync {
     async fn pending_approval_gate(
+        &self,
+        scope: &TurnScope,
+        gate_ref: &ironclaw_turns::LoopGateRef,
+    ) -> Result<bool, TurnError>;
+}
+
+#[async_trait]
+pub trait ResourceGateEvidenceStore: Send + Sync {
+    async fn pending_resource_gate(
         &self,
         scope: &TurnScope,
         gate_ref: &ironclaw_turns::LoopGateRef,
@@ -193,6 +203,7 @@ where
             loop_checkpoint_store,
             checkpoint_state_store: None,
             approval_gate_evidence: None,
+            resource_gate_evidence: None,
             thread_scope: None,
             cancellation_factory: None,
         }
@@ -210,6 +221,7 @@ where
             loop_checkpoint_store,
             checkpoint_state_store: None,
             approval_gate_evidence: None,
+            resource_gate_evidence: None,
             thread_scope: Some(thread_scope),
             cancellation_factory: None,
         }
@@ -228,6 +240,14 @@ where
         approval_gate_evidence: Arc<dyn ApprovalGateEvidenceStore>,
     ) -> Self {
         self.approval_gate_evidence = Some(approval_gate_evidence);
+        self
+    }
+
+    pub fn with_resource_gate_evidence(
+        mut self,
+        resource_gate_evidence: Arc<dyn ResourceGateEvidenceStore>,
+    ) -> Self {
+        self.resource_gate_evidence = Some(resource_gate_evidence);
         self
     }
 
@@ -336,7 +356,12 @@ where
                     return Ok(false);
                 }
             }
-            LoopBlockedKind::Resource | LoopBlockedKind::AwaitDependentRun => {
+            LoopBlockedKind::Resource => {
+                if !self.verify_pending_resource_gate(&request).await? {
+                    return Ok(false);
+                }
+            }
+            LoopBlockedKind::AwaitDependentRun => {
                 // A BeforeBlock checkpoint alone is not sufficient for approval,
                 // resource, or dependent-run gates: #3424 requires a durable
                 // pending gate/process ref for those block types. Auth gates use
@@ -499,6 +524,18 @@ where
         };
         evidence
             .pending_approval_gate(request.scope, &request.blocked.gate_ref)
+            .await
+    }
+
+    async fn verify_pending_resource_gate(
+        &self,
+        request: &BlockedEvidenceRequest<'_>,
+    ) -> Result<bool, TurnError> {
+        let Some(evidence) = &self.resource_gate_evidence else {
+            return Ok(false);
+        };
+        evidence
+            .pending_resource_gate(request.scope, &request.blocked.gate_ref)
             .await
     }
 }

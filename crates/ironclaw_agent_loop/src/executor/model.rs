@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use ironclaw_turns::{
-    LoopExit, LoopFailureKind,
+    LoopBlocked, LoopBlockedKind, LoopExit, LoopFailureKind,
     run_profile::{
         AgentLoopHostErrorKind, LoopDriverNoteKind, LoopModelCapabilityView, LoopModelRequest,
         LoopProgressEvent, LoopSafeSummary,
@@ -10,14 +10,14 @@ use tracing::debug;
 
 use crate::{
     state::{CheckpointKind, LoopExecutionState},
-    strategies::{ModelErrorSummary, RecoveryOutcome, RetryAlteration, RetryScope},
+    strategies::{GateKind, ModelErrorSummary, RecoveryOutcome, RetryAlteration, RetryScope},
 };
 
 use super::prompt::build_prompt_bundle_for_surface;
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
-    MAX_MODEL_RETRIES, StageContext, failed_exit, honor_retry_alteration, model_error_class,
-    model_preference_to_host, sanitized_strategy_summary,
+    MAX_MODEL_RETRIES, StageContext, exit_id, failed_exit, honor_retry_alteration, loop_gate_kind,
+    model_error_class, model_preference_to_host, sanitized_strategy_summary,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -116,6 +116,11 @@ impl ExecutorStage<ModelInput> for ModelStage {
                 Err(error) => {
                     if error.kind == AgentLoopHostErrorKind::Cancelled {
                         return Err(AgentLoopExecutorError::Cancelled);
+                    }
+                    if error.kind == AgentLoopHostErrorKind::BudgetApprovalRequired
+                        && let Some(gate_ref) = error.gate_ref.clone()
+                    {
+                        return budget_approval_blocked_exit(ctx, state, gate_ref).await;
                     }
                     let Some(class) = model_error_class(&error) else {
                         return Err(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
@@ -224,6 +229,39 @@ impl ExecutorStage<ModelInput> for ModelStage {
             Some(checked.checkpoint_id),
         )?))
     }
+}
+
+async fn budget_approval_blocked_exit(
+    ctx: StageContext<'_>,
+    mut state: LoopExecutionState,
+    gate_ref: ironclaw_turns::LoopGateRef,
+) -> Result<ModelStep, AgentLoopExecutorError> {
+    state.last_gate = Some(gate_ref.clone());
+    state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
+        CancelCheck::Continue(state) => *state,
+        CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
+    };
+    CheckpointStage
+        .emit_progress(
+            ctx,
+            LoopProgressEvent::GateBlocked {
+                iteration: state.iteration,
+                gate_kind: loop_gate_kind(GateKind::Resource),
+            },
+        )
+        .await;
+    let checked = CheckpointStage
+        .write_before_block(ctx, state, &gate_ref)
+        .await?;
+    Ok(ModelStep::Exit(LoopExit::Blocked(LoopBlocked {
+        kind: LoopBlockedKind::Resource,
+        gate_ref,
+        blocked_activity_id: None,
+        credential_requirements: Vec::new(),
+        checkpoint_id: checked.checkpoint_id,
+        state_ref: checked.state_ref,
+        exit_id: exit_id(ctx.host, "blocked")?,
+    })))
 }
 
 async fn apply_model_retry_alteration(
