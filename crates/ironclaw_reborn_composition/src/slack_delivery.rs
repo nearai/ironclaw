@@ -1804,16 +1804,18 @@ fn is_accepted_auth_denial(envelope: &ProductInboundEnvelope, ack: &ProductInbou
 // using the same polling machinery as the observer path (above).
 
 /// Composition-owned hook invoked by the trigger poller after a successful fire
-/// submission. The composition root wires a real implementation (behind the
-/// `slack-v2-host-beta` feature) or a no-op.
+/// submission has been durably settled in trigger storage. The composition root
+/// wires a real implementation (behind the `slack-v2-host-beta` feature) or a
+/// no-op.
 #[async_trait]
 pub trait PostSubmitDeliveryHook: Send + Sync {
     /// Called with the original trigger fire, the submitted run id, and the
-    /// turn scope the run was submitted under. The trigger poller owns the
-    /// non-blocking handoff by invoking this hook from a detached task, so hook
-    /// latency cannot delay fire settlement. Implementations may still spawn
-    /// their own longer-lived delivery tasks when they need bounded admission or
-    /// shutdown tracking.
+    /// turn scope the run was submitted under. The trigger poller invokes this
+    /// hook from a detached task after the accepted fire appears as settled, so
+    /// hook latency cannot delay settlement and delivery cannot precede the
+    /// persisted run/thread mapping. Implementations may still spawn their own
+    /// longer-lived delivery tasks when they need bounded admission or shutdown
+    /// tracking.
     async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope);
 }
 
@@ -2975,8 +2977,6 @@ mod tests {
     // all I/O surfaces. They are intentionally NOT full-runtime e2e tests —
     // the plan explicitly forbids exposing `host_state_filesystem` from
     // `RebornRuntime` for that purpose.
-
-    use std::sync::OnceLock;
 
     use ironclaw_outbound::{
         CommunicationPreferenceRecord, DeliveryDefaultScope, InMemoryDeliveredGateRouteStore,
@@ -5850,65 +5850,6 @@ mod tests {
         assert!(
             body.contains(gate_ref_str),
             "approval prompt must reference the gate ref, body: {body}"
-        );
-    }
-
-    // --- OnceLock slot behaviour tests ----------------------------------------
-
-    #[tokio::test]
-    async fn post_submit_hook_slot_empty_hook_does_not_fire() {
-        // Verify the contract that `PostSubmitHookWrappedSubmitter` relies on:
-        // when the OnceLock slot is empty, reading it returns None and no hook fires.
-        let slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>> = Arc::new(OnceLock::new());
-
-        // Slot is empty — `get()` returns None, so no hook fires.
-        assert!(slot.get().is_none(), "empty slot must return None");
-
-        // When the slot IS occupied the hook IS reachable.
-        let fired = Arc::new(Mutex::new(false));
-        let fired_clone = Arc::clone(&fired);
-        struct FlagHook(Arc<Mutex<bool>>);
-        #[async_trait]
-        impl PostSubmitDeliveryHook for FlagHook {
-            async fn on_trigger_submitted(
-                &self,
-                _fire: TriggerFire,
-                _run_id: TurnRunId,
-                _scope: TurnScope,
-            ) {
-                *self.0.lock().expect("flag") = true;
-            }
-        }
-        slot.set(Arc::new(FlagHook(fired_clone)))
-            .unwrap_or_else(|_| panic!("first slot set should succeed"));
-        if let Some(hook) = slot.get() {
-            let fire = minimal_trigger_fire(None);
-            hook.on_trigger_submitted(fire, TurnRunId::new(), personal_turn_scope())
-                .await;
-        }
-        assert!(
-            *fired.lock().expect("flag"),
-            "hook must fire after slot is set"
-        );
-    }
-
-    #[test]
-    fn post_submit_hook_slot_second_set_is_noop() {
-        // OnceLock semantics: first set succeeds, second set returns the value.
-        // This is the contract behind `set_trigger_post_submit_hook` returning false
-        // on duplicate calls.
-        let slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>> = Arc::new(OnceLock::new());
-        let hook_a: Arc<dyn PostSubmitDeliveryHook> = Arc::new(NoopPostSubmitDeliveryHook);
-        let hook_b: Arc<dyn PostSubmitDeliveryHook> = Arc::new(NoopPostSubmitDeliveryHook);
-
-        assert!(slot.set(hook_a).is_ok(), "first set should succeed");
-        assert!(
-            slot.set(hook_b).is_err(),
-            "second set should fail (slot already occupied)"
-        );
-        assert!(
-            slot.get().is_some(),
-            "slot still occupied after duplicate set"
         );
     }
 

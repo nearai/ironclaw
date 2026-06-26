@@ -635,6 +635,7 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].id, "err-run-failed-1");
   assert.equal(harness.messages[0].role, "error");
+  assert.equal(harness.messages[0].turnRunId, "run-failed-1");
   assert.equal(
     harness.messages[0].content,
     "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL.",
@@ -681,6 +682,7 @@ test("useChatEvents: typed failed event appends visible error", () => {
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].id, "err-run-typed-failed-1");
   assert.equal(harness.messages[0].role, "error");
+  assert.equal(harness.messages[0].turnRunId, "run-typed-failed-1");
   assert.equal(harness.messages[0].content, "category:model_unavailable");
   assert.deepEqual(plain(seenFailureInputs), [
     {
