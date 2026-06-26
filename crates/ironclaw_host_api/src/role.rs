@@ -51,6 +51,25 @@ impl UserRole {
     pub fn is_owner(self) -> bool {
         matches!(self, Self::Owner)
     }
+
+    /// Privilege rank: `Owner` = 2, `Admin` = 1, `Member` = 0. Higher means
+    /// more privileged. Used for strict outranking comparisons; the enum
+    /// deliberately does not derive `Ord` because its variant declaration
+    /// order (Owner first) would invert the privilege order.
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Owner => 2,
+            Self::Admin => 1,
+            Self::Member => 0,
+        }
+    }
+
+    /// `true` when `self` is strictly more privileged than `other`. A role
+    /// never outranks itself, so callers can express "may only act on a
+    /// strictly lower role" without special-casing equality.
+    pub fn outranks(self, other: UserRole) -> bool {
+        self.rank() > other.rank()
+    }
 }
 
 /// Lifecycle status of a user. Persisted as the `users.status` column; the
@@ -115,6 +134,35 @@ mod tests {
         assert!(!UserRole::Member.is_admin());
         assert!(UserRole::Owner.is_owner());
         assert!(!UserRole::Admin.is_owner());
+    }
+
+    #[test]
+    fn rank_orders_owner_above_admin_above_member() {
+        assert_eq!(UserRole::Owner.rank(), 2);
+        assert_eq!(UserRole::Admin.rank(), 1);
+        assert_eq!(UserRole::Member.rank(), 0);
+    }
+
+    #[test]
+    fn outranks_is_strict_privilege_order() {
+        // Owner outranks Admin and Member.
+        assert!(UserRole::Owner.outranks(UserRole::Admin));
+        assert!(UserRole::Owner.outranks(UserRole::Member));
+
+        // Admin outranks Member only (not Owner, not a peer Admin).
+        assert!(UserRole::Admin.outranks(UserRole::Member));
+        assert!(!UserRole::Admin.outranks(UserRole::Owner));
+        assert!(!UserRole::Admin.outranks(UserRole::Admin));
+
+        // Member outranks nobody.
+        assert!(!UserRole::Member.outranks(UserRole::Owner));
+        assert!(!UserRole::Member.outranks(UserRole::Admin));
+        assert!(!UserRole::Member.outranks(UserRole::Member));
+
+        // No role outranks itself.
+        for role in [UserRole::Owner, UserRole::Admin, UserRole::Member] {
+            assert!(!role.outranks(role));
+        }
     }
 
     #[test]
