@@ -1,23 +1,25 @@
-import { React, html } from "../lib/html.js";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { React, html } from "../lib/html.js";
+import { apiFetch } from "../lib/api.js";
 import { Button } from "../design-system/button.js";
 import { useT } from "../lib/i18n.js";
-import { redeemSlackPairingCode } from "../lib/slack-pairing-api.js";
 
-export function SlackPairingSection({ action }) {
+const PAIRING_REDEEM_PATH = "/api/webchat/v2/extensions/pairing/redeem";
+
+export function ChannelPairingSection({ channel, action }) {
   const t = useT();
   const queryClient = useQueryClient();
+  const [manualCode, setManualCode] = React.useState("");
+  const copy = channelPairingCopy(action, t);
   const redeemMutation = useMutation({
-    mutationFn: ({ code }) => redeemSlackPairingCode(code),
+    mutationFn: ({ code }) => redeemChannelPairingCode(channel, code),
     onSuccess: () => {
       setManualCode("");
       queryClient.invalidateQueries({ queryKey: ["extensions"] });
       queryClient.invalidateQueries({ queryKey: ["connectable-channels"] });
-      queryClient.invalidateQueries({ queryKey: ["pairing", "slack"] });
+      queryClient.invalidateQueries({ queryKey: ["pairing", channel] });
     },
   });
-  const [manualCode, setManualCode] = React.useState("");
-  const copy = slackPairingCopy(action, t);
 
   const submit = () => {
     const code = manualCode.trim().toUpperCase();
@@ -27,15 +29,13 @@ export function SlackPairingSection({ action }) {
 
   return html`
     <div
-      data-testid="slack-pairing-section"
+      data-testid="pairing-section"
       className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4"
     >
       <h4 className="mb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
         ${copy.title}
       </h4>
-      <p className="mb-4 text-xs leading-5 text-iron-300">
-        ${copy.instructions}
-      </p>
+      <p className="mb-4 text-xs leading-5 text-iron-300">${copy.instructions}</p>
 
       <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
         <input
@@ -43,45 +43,56 @@ export function SlackPairingSection({ action }) {
           value=${manualCode}
           onChange=${(event) => setManualCode(event.target.value)}
           onKeyDown=${(event) => event.key === "Enter" && submit()}
-          placeholder=${copy.codePlaceholder}
-          data-testid="slack-pairing-code-input"
+          placeholder=${copy.placeholder}
+          data-testid="pairing-code-input"
           className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
         />
         <${Button}
           variant="secondary"
           className="h-9 shrink-0 px-3 text-xs"
-          data-testid="slack-pairing-submit"
           onClick=${submit}
           disabled=${redeemMutation.isPending || !manualCode.trim()}
+          data-testid="pairing-submit"
         >
           ${copy.submitLabel}
         <//>
       </div>
 
       ${redeemMutation.isSuccess &&
-      html`<p data-testid="slack-pairing-success" className="text-xs text-emerald-300">
+      html`<p data-testid="pairing-success" className="text-xs text-emerald-300">
         ${redeemMutation.data?.message || copy.successMessage}
       </p>`}
       ${redeemMutation.isError &&
-      html`<p data-testid="slack-pairing-error" className="text-xs text-red-300">
-        ${slackPairingError(redeemMutation.error, copy.errorMessage)}
+      html`<p data-testid="pairing-error" className="text-xs text-red-300">
+        ${channelPairingError(redeemMutation.error, copy.errorMessage)}
       </p>`}
     </div>
   `;
 }
 
-function slackPairingCopy(action, t) {
+function redeemChannelPairingCode(channel, code) {
+  return apiFetch(PAIRING_REDEEM_PATH, {
+    method: "POST",
+    body: JSON.stringify({ channel, code }),
+  }).then((response) => ({
+    success: true,
+    provider: response.provider,
+    provider_user_id: response.provider_user_id,
+  }));
+}
+
+function channelPairingCopy(action, t) {
   return {
-    title: action?.title || t("pairing.slackTitle"),
-    instructions: action?.instructions || t("pairing.slackInstructions"),
-    codePlaceholder:
-      action?.input_placeholder || action?.code_placeholder || t("pairing.slackPlaceholder"),
-    submitLabel: action?.submit_label || t("pairing.connect"),
-    successMessage: action?.success_message || t("pairing.slackSuccess"),
-    errorMessage: action?.error_message || t("pairing.slackError"),
+    title: action?.title || t("pairing.title"),
+    instructions: action?.instructions || t("pairing.instructions"),
+    placeholder:
+      action?.input_placeholder || action?.code_placeholder || t("pairing.placeholder"),
+    submitLabel: action?.submit_label || t("pairing.approve"),
+    successMessage: action?.success_message || t("pairing.success"),
+    errorMessage: action?.error_message || t("pairing.error"),
   };
 }
 
-function slackPairingError(error, fallback) {
+function channelPairingError(error, fallback) {
   return error?.payload?.error || error?.payload?.message || error?.message || fallback;
 }

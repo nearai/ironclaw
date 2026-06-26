@@ -51,6 +51,7 @@ export function AuthTokenCard({ gate, onSubmit, onCancel }) {
       accountLabel=${gate?.accountLabel || ""}
       body=${gate?.body || ""}
       pillHint=${t("authGate.pillEnterToken")}
+      challengeKind="manual_token"
     >
       <form onSubmit=${submit}>
         <div className="mb-3">
@@ -62,6 +63,7 @@ export function AuthTokenCard({ gate, onSubmit, onCancel }) {
             disabled=${isSubmitting}
             placeholder=${t("authGate.tokenPlaceholder")}
             aria-label=${t("authGate.tokenLabel")}
+            data-testid="auth-token-input"
             error=${Boolean(error)}
             onInput=${(event) => setToken(event.currentTarget.value)}
           />
