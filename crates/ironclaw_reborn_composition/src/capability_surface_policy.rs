@@ -210,7 +210,18 @@ impl crate::profile_approval_authorization::AdminApprovalSource
             user_id: scope.user_id.clone(),
         };
         match self.policy.resolve(&subject, capability_id).await {
-            Ok(effective) => Some(effective.approval),
+            // Only a definite admin opinion (Allow/Deny) is surfaced; `Ask`
+            // carries no org-wide decision, so it maps to `None` ("no admin
+            // opinion") exactly like a missing row or a fault. This makes the
+            // trait doc literally true and lets the dispatch chain fall through
+            // to the existing user/profile steps (require_approval_for_profile_policy
+            // matches only `Some(Allow)` / `Some(Deny)`, so `None` for `Ask`
+            // preserves the fall-through).
+            Ok(effective) => match effective.approval {
+                ironclaw_host_api::PermissionMode::Allow
+                | ironclaw_host_api::PermissionMode::Deny => Some(effective.approval),
+                ironclaw_host_api::PermissionMode::Ask => None,
+            },
             Err(error) => {
                 // Fail-SAFE (#5261 D5 approval): a resolver fault must NOT
                 // auto-approve (privilege escalation). Returning `None` makes

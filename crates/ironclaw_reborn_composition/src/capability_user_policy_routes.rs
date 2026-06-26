@@ -25,8 +25,9 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Extension, Path, State},
+    extract::{FromRequestParts, Path, State},
     http::StatusCode,
+    http::request::Parts,
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -159,19 +160,39 @@ fn route_policy(body_limit: BodyLimitPolicy) -> IngressPolicy {
     .expect("admin user capabilities policy must validate")
 }
 
-/// Admin gate: the caller's tenant must match (404 to avoid tenant
-/// enumeration) and the caller must hold an admin role (`is_admin`).
-fn ensure_admin(
-    config: &CapabilityUserPolicyRouteConfig,
-    caller: &WebUiAuthenticatedCaller,
-) -> Result<(), CapabilityUserPolicyError> {
-    if caller.tenant_id != config.tenant_id {
-        return Err(CapabilityUserPolicyError::NotFound);
+/// Admin gate extractor (admin-rest-1): runs the tenant-match (404 to avoid
+/// tenant enumeration) + admin-role (`is_admin`, 403) check as a
+/// [`FromRequestParts`] extractor. Declaring it BEFORE a `Json` body extractor
+/// in a handler signature means the admin gate runs before the body is parsed,
+/// so a non-admin caller cannot probe JSON-parse behaviour (no body-parse
+/// oracle). The caller identity is host-supplied authority (the
+/// `WebUiAuthenticatedCaller` extension inserted by the bearer-auth layer), not
+/// browser input.
+struct AdminCaller(#[allow(dead_code)] WebUiAuthenticatedCaller);
+
+impl FromRequestParts<CapabilityUserPolicyRouteConfig> for AdminCaller {
+    type Rejection = CapabilityUserPolicyError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        config: &CapabilityUserPolicyRouteConfig,
+    ) -> Result<Self, Self::Rejection> {
+        let caller = parts
+            .extensions
+            .get::<WebUiAuthenticatedCaller>()
+            .cloned()
+            // The bearer-auth layer always inserts this extension before any
+            // protected route runs; its absence is a composition fault, not a
+            // client error. Fail closed (403) rather than leak the distinction.
+            .ok_or(CapabilityUserPolicyError::Forbidden)?;
+        if caller.tenant_id != config.tenant_id {
+            return Err(CapabilityUserPolicyError::NotFound);
+        }
+        if !caller.is_admin() {
+            return Err(CapabilityUserPolicyError::Forbidden);
+        }
+        Ok(Self(caller))
     }
-    if !caller.is_admin() {
-        return Err(CapabilityUserPolicyError::Forbidden);
-    }
-    Ok(())
 }
 
 /// PUT body: the four optional policy dimensions written into one delta row.
@@ -219,13 +240,14 @@ fn summary_from_delta(delta: CapabilityPolicyDelta) -> UserCapabilityPolicySumma
 async fn set_user_capability_handler(
     State(config): State<CapabilityUserPolicyRouteConfig>,
     Path((user_id, capability_id)): Path<(String, String)>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    // `AdminCaller` is declared BEFORE `Json` so the admin gate (tenant-match +
+    // is_admin) runs before the body is parsed (admin-rest-1: no body-parse
+    // oracle for a non-admin caller).
+    _admin: AdminCaller,
     Json(request): Json<SetUserCapabilityPolicyRequest>,
 ) -> Result<Json<UserCapabilityPolicySummary>, CapabilityUserPolicyError> {
-    ensure_admin(&config, &caller)?;
-    let user_id = UserId::new(&user_id).map_err(|_| CapabilityUserPolicyError::BadRequest)?;
-    let capability =
-        CapabilityId::new(&capability_id).map_err(|_| CapabilityUserPolicyError::BadRequest)?;
+    let user_id = UserId::new(&user_id).map_err(bad_request_from_id_parse)?;
+    let capability = CapabilityId::new(&capability_id).map_err(bad_request_from_id_parse)?;
     let delta = CapabilityPolicyDelta {
         scope: PolicyScope::User { user_id },
         capability,
@@ -242,12 +264,10 @@ async fn set_user_capability_handler(
 async fn delete_user_capability_handler(
     State(config): State<CapabilityUserPolicyRouteConfig>,
     Path((user_id, capability_id)): Path<(String, String)>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    _admin: AdminCaller,
 ) -> Result<StatusCode, CapabilityUserPolicyError> {
-    ensure_admin(&config, &caller)?;
-    let user_id = UserId::new(&user_id).map_err(|_| CapabilityUserPolicyError::BadRequest)?;
-    let capability =
-        CapabilityId::new(&capability_id).map_err(|_| CapabilityUserPolicyError::BadRequest)?;
+    let user_id = UserId::new(&user_id).map_err(bad_request_from_id_parse)?;
+    let capability = CapabilityId::new(&capability_id).map_err(bad_request_from_id_parse)?;
     config
         .deltas
         .delete_delta(
@@ -262,22 +282,37 @@ async fn delete_user_capability_handler(
 async fn list_user_capabilities_handler(
     State(config): State<CapabilityUserPolicyRouteConfig>,
     Path(user_id): Path<String>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    _admin: AdminCaller,
 ) -> Result<Json<ListUserCapabilityPoliciesResponse>, CapabilityUserPolicyError> {
-    ensure_admin(&config, &caller)?;
-    let user_id = UserId::new(&user_id).map_err(|_| CapabilityUserPolicyError::BadRequest)?;
+    let user_id = UserId::new(&user_id).map_err(bad_request_from_id_parse)?;
     let subject = PolicySubject {
         tenant_id: config.tenant_id.clone(),
-        user_id,
+        user_id: user_id.clone(),
     };
+    // admin-rest-2: `list_subject_deltas` returns BOTH the user's User-scope
+    // deltas AND the tenant-scope deltas that apply to the subject. This is the
+    // per-user admin surface (PUT/DELETE write only `PolicyScope::User`), so a
+    // tenant-scope delta must NOT leak here — it belongs to the tenant-wide
+    // availability surface (`capability_admin_routes.rs`). Filter to the rows
+    // whose scope is exactly this user before mapping to summaries.
     let capabilities = config
         .deltas
         .list_subject_deltas(&subject)
         .await?
         .into_iter()
+        .filter(|delta| matches!(&delta.scope, PolicyScope::User { user_id: scoped } if *scoped == user_id))
         .map(summary_from_delta)
         .collect();
     Ok(Json(ListUserCapabilityPoliciesResponse { capabilities }))
+}
+
+/// Map a `UserId`/`CapabilityId` parse failure to a sanitized `BadRequest`,
+/// logging the bound `HostApiError` at debug first (admin-rest-3: never drop
+/// the cause — mirrors the `From<PolicyError>` discipline below). `debug!` only,
+/// so handler paths never corrupt the REPL/TUI surface.
+fn bad_request_from_id_parse(error: ironclaw_host_api::HostApiError) -> CapabilityUserPolicyError {
+    tracing::debug!(%error, "rejecting admin capability-policy request: invalid id in path");
+    CapabilityUserPolicyError::BadRequest
 }
 
 /// Sanitized error surface — never leaks store internals to the client.
@@ -485,5 +520,78 @@ mod tests {
             .await
             .expect("delete responds");
         assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn list_returns_user_scope_deltas_only_not_tenant_scope() {
+        // admin-rest-2: `list_subject_deltas` returns a subject's User-scope rows
+        // AND the tenant-wide rows. This per-user surface writes only
+        // `PolicyScope::User`, so the GET must NOT leak the tenant-scope row.
+        let (mount, store) = mount();
+        let tenant = TenantId::new(TENANT).expect("tenant");
+
+        // A tenant-wide delta (belongs to the availability surface, not here).
+        store
+            .upsert_delta(
+                &tenant,
+                CapabilityPolicyDelta {
+                    scope: PolicyScope::Tenant,
+                    capability: CapabilityId::new("tenant.cap").expect("cap"),
+                    availability: Some(Availability::Hidden),
+                    identity: None,
+                    approval: None,
+                    config_patch: None,
+                },
+            )
+            .await
+            .expect("seed tenant delta");
+        // A user-scope delta for user:bob (this IS the per-user surface).
+        store
+            .upsert_delta(
+                &tenant,
+                CapabilityPolicyDelta {
+                    scope: PolicyScope::User {
+                        user_id: UserId::new("user:bob").expect("user"),
+                    },
+                    capability: CapabilityId::new("user.cap").expect("cap"),
+                    availability: Some(Availability::Hidden),
+                    identity: None,
+                    approval: None,
+                    config_patch: None,
+                },
+            )
+            .await
+            .expect("seed user delta");
+
+        let list = mount
+            .router
+            .oneshot(request(
+                "GET",
+                "/api/webchat/v2/admin/users/user:bob/capabilities",
+                TENANT,
+                "user:director",
+                UserRole::Admin,
+            ))
+            .await
+            .expect("list responds");
+        assert_eq!(list.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(list.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let ids: Vec<&str> = body["capabilities"]
+            .as_array()
+            .expect("capabilities array")
+            .iter()
+            .map(|cap| cap["capability_id"].as_str().expect("capability_id"))
+            .collect();
+        assert!(
+            ids.contains(&"user.cap"),
+            "the per-user delta must be returned, got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"tenant.cap"),
+            "the tenant-scope delta must NOT leak through the per-user surface, got {ids:?}"
+        );
     }
 }

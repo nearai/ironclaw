@@ -563,6 +563,15 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             .map_err(|error| {
                 #[cfg(feature = "capability-policy")]
                 if matches!(identity_mandate, Some(IdentityMode::AdminKeyed)) {
+                    // Never drop the cause (error-handling.md): the typed
+                    // AuthProductError is logged at debug before we substitute
+                    // the sanitized Backend (admin-keyed → unavailable, no
+                    // re-auth gate), mirroring `resolve_identity_mandate`.
+                    tracing::debug!(
+                        %error,
+                        capability = %request.capability_id.as_str(),
+                        "admin-keyed capability account selection failed; treating credential as unavailable"
+                    );
                     return CredentialStageError::Backend;
                 }
                 map_account_error(error)
@@ -574,6 +583,14 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             .map_err(|error| {
                 #[cfg(feature = "capability-policy")]
                 if matches!(identity_mandate, Some(IdentityMode::AdminKeyed)) {
+                    // Never drop the cause (error-handling.md): log the typed
+                    // AuthProductError at debug before substituting the
+                    // sanitized Backend, mirroring `resolve_identity_mandate`.
+                    tracing::debug!(
+                        %error,
+                        capability = %request.capability_id.as_str(),
+                        "admin-keyed capability account refresh failed; treating credential as unavailable"
+                    );
                     return CredentialStageError::Backend;
                 }
                 map_account_error(error)

@@ -277,11 +277,14 @@ async fn require_approval_for_profile_policy(
             reason: DenyReason::PolicyDenied,
         };
     }
-    // 2. Hard floor (#4776/#4959): forced-gate effects (Financial, …) ALWAYS
+    // Hard floor (#4776/#4959): forced-gate effects (Financial, …) ALWAYS
     //    require an explicit approval and can NEVER be auto-approved — not by a
     //    stored grant, not by the global switch, and NOT by an admin `Allow`.
-    //    Pulled to the chain head so it runs BEFORE the admin `Allow`
-    //    short-circuit below (the #4776/#4959 contract preserved verbatim).
+    //    Sits in the chain head BELOW admin `Deny` (A) but ABOVE admin `Allow`
+    //    (B) and the entire numbered user/profile chain below — so it runs
+    //    BEFORE step 1 user `Disabled`, not after it (the old "step 2" position
+    //    relative to "step 1" no longer applies). The #4776/#4959 contract is
+    //    preserved verbatim.
     if gate_policy.effects_force_approval(&gate_effects) {
         return require_approval();
     }

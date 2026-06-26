@@ -318,13 +318,21 @@ impl LocalUserDirectoryStore for FilesystemLocalUserDirectoryStore {
         user_id: &UserId,
     ) -> Result<(), LocalUserDirectoryError> {
         let path = self.user_path(tenant_id, user_id)?;
-        if let Some(user) = self.get_json::<StoredUser>(&path).await? {
-            let token_path = self.token_path(tenant_id, &user.token_hash)?;
-            self.filesystem
-                .delete(&token_path)
-                .await
-                .map_err(|error| LocalUserDirectoryError::Backend(error.to_string()))?;
-        }
+        // r5272-3 (404 not 503): fetch the record first so a missing user maps
+        // to `NotFound` (→ 404) instead of letting the record-delete's
+        // `FilesystemError::NotFound` collapse into `Backend` (→ 503). With the
+        // record in hand we delete the token index then the record; both deletes
+        // target known-present leaves, so a `NotFound` there would be a genuine
+        // backend race and is left classified as `Backend`.
+        let user = self
+            .get_json::<StoredUser>(&path)
+            .await?
+            .ok_or(LocalUserDirectoryError::NotFound)?;
+        let token_path = self.token_path(tenant_id, &user.token_hash)?;
+        self.filesystem
+            .delete(&token_path)
+            .await
+            .map_err(|error| LocalUserDirectoryError::Backend(error.to_string()))?;
         self.filesystem
             .delete(&path)
             .await
@@ -349,6 +357,15 @@ impl LocalUserDirectoryStore for FilesystemLocalUserDirectoryStore {
         else {
             return Ok(None);
         };
+        // r5272-1 (token rotation + orphan index): the user record is the
+        // source of truth for the *current* token. A user re-created (or whose
+        // token was rotated) keeps a stale `token_hash → user_id` index entry
+        // pointing at a user whose record now stores a DIFFERENT hash. Resolve
+        // only when the presented hash matches the user's current hash, so an
+        // OLD bearer — and a stale index leaf — stops authenticating.
+        if user.token_hash != token_hash {
+            return Ok(None);
+        }
         Ok(Some(local_user_record(user)?))
     }
 }
@@ -395,12 +412,26 @@ pub fn local_user_admin_route_mount(config: LocalUserAdminRouteConfig) -> Protec
 pub fn build_local_user_directory_store(
     runtime: &crate::runtime::RebornRuntime,
 ) -> Option<Arc<dyn LocalUserDirectoryStore>> {
+    // No local substrate (production / migration-dry-run) → legitimately `None`;
+    // the directory simply isn't offered.
     let local_runtime = runtime.services().local_runtime.as_ref()?;
-    let store = FilesystemLocalUserDirectoryStore::new(Arc::clone(
-        &local_runtime.extension_filesystem,
-    ) as Arc<dyn RootFilesystem>)
-    .ok()?;
-    Some(Arc::new(store))
+    // XC-3: a `::new(...)` failure is a CONSTRUCTION fault, not "no local
+    // runtime". Do not `.ok()?`-collapse it into the same `None` — that would
+    // silently disable the admin user directory on a malformed durable root.
+    // Log the cause (server context, never the REPL surface) before returning
+    // `None` so the failure is diagnosable.
+    match FilesystemLocalUserDirectoryStore::new(
+        Arc::clone(&local_runtime.extension_filesystem) as Arc<dyn RootFilesystem>
+    ) {
+        Ok(store) => Some(Arc::new(store)),
+        Err(error) => {
+            tracing::error!(
+                %error,
+                "failed to construct local user directory store; admin user directory unavailable"
+            );
+            None
+        }
+    }
 }
 
 fn local_user_admin_descriptors() -> Vec<IngressRouteDescriptor> {
@@ -611,5 +642,247 @@ impl IntoResponse for LocalUserAdminError {
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         };
         status.into_response()
+    }
+}
+
+#[cfg(all(test, feature = "capability-policy"))]
+mod tests {
+    use super::*;
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use ironclaw_filesystem::InMemoryBackend;
+    use tower::ServiceExt;
+
+    const TENANT: &str = "tenant:acme";
+
+    /// Filesystem store on a root-mounted in-memory backend (so the
+    /// `/tenants/local_users` root is reachable), plus the admin route mount
+    /// over the SAME store `Arc` — driving the routes mutates what
+    /// `resolve_token`/`list_users` read, exactly like production.
+    fn mount() -> (ProtectedRouteMount, Arc<dyn LocalUserDirectoryStore>) {
+        let backend = Arc::new(InMemoryBackend::new()) as Arc<dyn RootFilesystem>;
+        let store: Arc<dyn LocalUserDirectoryStore> =
+            Arc::new(FilesystemLocalUserDirectoryStore::new(backend).expect("store constructs"));
+        let config =
+            LocalUserAdminRouteConfig::new(TenantId::new(TENANT).expect("tenant"), store.clone());
+        (local_user_admin_route_mount(config), store)
+    }
+
+    fn request(method: &str, uri: &str, tenant: &str, user: &str, role: UserRole) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .extension(WebUiAuthenticatedCaller {
+                tenant_id: TenantId::new(tenant).expect("tenant"),
+                user_id: UserId::new(user).expect("user"),
+                agent_id: None,
+                project_id: None,
+                // Admin gating comes from the role, not operator_webui_config.
+                operator_webui_config: false,
+                role,
+            });
+        if method == "GET" || method == "DELETE" {
+            builder = builder.header("content-length", "0");
+        }
+        let body = match method {
+            "POST" => "{\"user_id\":\"user:bob\",\"role\":\"member\"}",
+            "PUT" => "{\"role\":\"admin\"}",
+            _ => "",
+        };
+        builder.body(Body::from(body)).expect("request builds")
+    }
+
+    async fn body_json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    #[tokio::test]
+    async fn admin_create_list_set_role_delete_round_trip() {
+        let (mount, _store) = mount();
+
+        // create → mints a token, echoes the user + role.
+        let created = mount
+            .router
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/webchat/v2/admin/users",
+                TENANT,
+                "user:director",
+                UserRole::Admin,
+            ))
+            .await
+            .expect("create responds");
+        assert_eq!(created.status(), StatusCode::OK);
+        let created = body_json(created).await;
+        assert_eq!(created["user_id"], "user:bob");
+        assert_eq!(created["role"], "member");
+        assert!(
+            created["token"].as_str().is_some_and(|t| !t.is_empty()),
+            "create must return a non-empty bearer token"
+        );
+
+        // list → the created user appears.
+        let listed = mount
+            .router
+            .clone()
+            .oneshot(request(
+                "GET",
+                "/api/webchat/v2/admin/users",
+                TENANT,
+                "user:director",
+                UserRole::Admin,
+            ))
+            .await
+            .expect("list responds");
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed = body_json(listed).await;
+        assert_eq!(listed["users"][0]["user_id"], "user:bob");
+
+        // set-role → bumps user:bob to admin.
+        let set_role = mount
+            .router
+            .clone()
+            .oneshot(request(
+                "PUT",
+                "/api/webchat/v2/admin/users/user:bob/role",
+                TENANT,
+                "user:director",
+                UserRole::Admin,
+            ))
+            .await
+            .expect("set-role responds");
+        assert_eq!(set_role.status(), StatusCode::OK);
+        let set_role = body_json(set_role).await;
+        assert_eq!(set_role["role"], "admin");
+
+        // delete → 204.
+        let deleted = mount
+            .router
+            .oneshot(request(
+                "DELETE",
+                "/api/webchat/v2/admin/users/user:bob",
+                TENANT,
+                "user:director",
+                UserRole::Admin,
+            ))
+            .await
+            .expect("delete responds");
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn non_admin_is_forbidden_and_wrong_tenant_is_not_found() {
+        let (mount, store) = mount();
+
+        let member = mount
+            .router
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/webchat/v2/admin/users",
+                TENANT,
+                "user:bob",
+                UserRole::Member,
+            ))
+            .await
+            .expect("member responds");
+        assert_eq!(member.status(), StatusCode::FORBIDDEN);
+
+        let other_tenant = mount
+            .router
+            .oneshot(request(
+                "POST",
+                "/api/webchat/v2/admin/users",
+                "tenant:other",
+                "user:director",
+                UserRole::Admin,
+            ))
+            .await
+            .expect("cross-tenant responds");
+        assert_eq!(other_tenant.status(), StatusCode::NOT_FOUND);
+
+        // Neither a forbidden nor a wrong-tenant call may write.
+        let users = store
+            .list_users(&TenantId::new(TENANT).expect("tenant"))
+            .await
+            .expect("list");
+        assert!(users.is_empty(), "no user may have been created");
+    }
+
+    #[tokio::test]
+    async fn delete_missing_user_is_not_found() {
+        // r5272-3: deleting a user that was never created is a 404, not a 503.
+        let (mount, _store) = mount();
+        let response = mount
+            .router
+            .oneshot(request(
+                "DELETE",
+                "/api/webchat/v2/admin/users/user:ghost",
+                TENANT,
+                "user:director",
+                UserRole::Admin,
+            ))
+            .await
+            .expect("delete responds");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn resolve_token_rejects_rotated_bearer() {
+        // r5272-1: re-creating a user mints a new token; the OLD bearer's hash
+        // no longer matches the user record, so it stops resolving even though a
+        // stale token-index leaf may still point at the user.
+        let backend = Arc::new(InMemoryBackend::new()) as Arc<dyn RootFilesystem>;
+        let store = FilesystemLocalUserDirectoryStore::new(backend).expect("store constructs");
+        let tenant = TenantId::new(TENANT).expect("tenant");
+        let user_id = UserId::new("user:bob").expect("user");
+
+        let old_token = "old-bearer-token";
+        let old_hash = hash_user_token(old_token);
+        store
+            .create_user(&tenant, &user_id, UserRole::Member, &old_hash)
+            .await
+            .expect("create with old token");
+        assert!(
+            store
+                .resolve_token(&tenant, &old_hash)
+                .await
+                .expect("resolve")
+                .is_some(),
+            "the freshly-minted token resolves"
+        );
+
+        // Rotate: re-create the same user with a new token. This overwrites the
+        // user record's `token_hash` and writes a new token-index leaf; the OLD
+        // leaf is left dangling.
+        let new_token = "new-bearer-token";
+        let new_hash = hash_user_token(new_token);
+        store
+            .create_user(&tenant, &user_id, UserRole::Member, &new_hash)
+            .await
+            .expect("re-create with new token");
+
+        assert!(
+            store
+                .resolve_token(&tenant, &new_hash)
+                .await
+                .expect("resolve")
+                .is_some(),
+            "the current (new) token resolves"
+        );
+        assert!(
+            store
+                .resolve_token(&tenant, &old_hash)
+                .await
+                .expect("resolve")
+                .is_none(),
+            "the rotated (old) bearer must NOT resolve via the stale index leaf"
+        );
     }
 }
