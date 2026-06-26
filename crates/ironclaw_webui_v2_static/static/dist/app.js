@@ -7663,7 +7663,7 @@ ${Re}`;if(we.current.gateKey!==Qe&&(we.current={gateKey:Qe,credentialRef:null,in
       <span className="max-w-[18rem] truncate text-[var(--v2-text-base)]">${t}</span>
     </span>
   `}function eR(){let e=k(),{isAdmin:t=!1,threadsState:a}=ba()||{},{entries:n,totalCount:r,paused:s,togglePause:i,clearEntries:o,levelFilter:u,setLevelFilter:c,targetFilter:d,setTargetFilter:m,autoScroll:f,setAutoScroll:p,serverLevel:x,changeServerLevel:y,scope:w,isLoading:g,error:v,needsThreadScope:b}=Xk({isAdmin:t,defaultThreadId:t?null:a?.activeThreadId||null}),$=h.default.useRef(null),S=h.default.useRef(!0);h.default.useEffect(()=>{f&&S.current&&$.current&&($.current.scrollTop=0)},[n,f]);let C=h.default.useCallback(M=>{S.current=M.currentTarget.scrollTop<=48},[]),_=n.length>0,D=w?.active||[];return l`
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <!-- Toolbar -->
       <div
         className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)] px-4 py-2"
