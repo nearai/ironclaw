@@ -32,7 +32,8 @@ use ironclaw_host_api::runtime_policy::{
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, ResourceScope, SecretHandle, TenantId, UserId,
+    AgentId, CapabilityId, InvocationId, ProviderToolName, ResourceScope, SecretHandle, TenantId,
+    UserId,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -59,15 +60,23 @@ const SENSITIVE_TOOL_SENTINEL: &str = "sk-e2e-progress-secret";
 
 // ─── auth stub ────────────────────────────────────────────────────────
 
-struct OnlyValidToken;
+struct ValidTokenForUser {
+    user_id: UserId,
+}
+
+impl ValidTokenForUser {
+    fn new(user_id: &str) -> Self {
+        Self {
+            user_id: UserId::new(user_id).expect("valid user id"),
+        }
+    }
+}
 
 #[async_trait]
-impl WebuiAuthenticator for OnlyValidToken {
+impl WebuiAuthenticator for ValidTokenForUser {
     async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
         if token == VALID_TOKEN {
-            Some(WebuiAuthentication::user(
-                UserId::new(USER).expect("user id"),
-            ))
+            Some(WebuiAuthentication::user(self.user_id.clone()))
         } else {
             None
         }
@@ -232,7 +241,7 @@ struct WriteFileGateway {
 
 async fn register_write(
     capabilities: &Arc<dyn LoopCapabilityPort>,
-    tool_name: &str,
+    tool_name: ProviderToolName,
     call_id: &str,
     path: &str,
     content: &str,
@@ -243,7 +252,7 @@ async fn register_write(
             provider_model_id: "e2e-model".to_string(),
             turn_id: Some("e2e-write-turn".to_string()),
             id: call_id.to_string(),
-            name: tool_name.to_string(),
+            name: tool_name,
             arguments: json!({"path": path, "content": content}),
             response_reasoning: None,
             reasoning: None,
@@ -303,7 +312,7 @@ impl HostManagedModelGateway for WriteFileGateway {
         if call_index == 0 {
             let csv = register_write(
                 &capabilities,
-                &write_tool.name,
+                write_tool.name.clone(),
                 "e2e-write-csv",
                 CSV_PATH,
                 CSV_BODY,
@@ -311,7 +320,7 @@ impl HostManagedModelGateway for WriteFileGateway {
             .await?;
             let pdf = register_write(
                 &capabilities,
-                &write_tool.name,
+                write_tool.name,
                 "e2e-write-pdf",
                 PDF_PATH,
                 PDF_BODY,
@@ -369,8 +378,27 @@ async fn build_harness_at(
     gateway: Arc<dyn HostManagedModelGateway>,
     policy: EffectiveRuntimePolicy,
 ) -> Harness {
+    build_harness_at_with_runtime_owner_and_auth_user(
+        storage_root,
+        root,
+        gateway,
+        policy,
+        USER,
+        USER,
+    )
+    .await
+}
+
+async fn build_harness_at_with_runtime_owner_and_auth_user(
+    storage_root: PathBuf,
+    root: Option<tempfile::TempDir>,
+    gateway: Arc<dyn HostManagedModelGateway>,
+    policy: EffectiveRuntimePolicy,
+    runtime_owner_id: &str,
+    authenticated_user_id: &str,
+) -> Harness {
     let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev(USER, storage_root).with_runtime_policy(policy),
+        RebornBuildInput::local_dev(runtime_owner_id, storage_root).with_runtime_policy(policy),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: TENANT.to_string(),
@@ -385,10 +413,33 @@ async fn build_harness_at(
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    // The Tools-settings global auto-approve switch is authoritative for
+    // first-party tool dispatch; enable it for the e2e dispatch scope so
+    // scripted tool calls complete instead of parking on the per-tool approval
+    // gate (which would otherwise leave the turn without an assistant reply).
+    runtime
+        .services()
+        .local_dev_auto_approve_settings_for_test()
+        .expect("local-dev exposes auto-approve settings for test")
+        .set(ironclaw_approvals::AutoApproveSettingInput {
+            updated_by: ironclaw_host_api::Principal::User(UserId::new(USER).expect("user")),
+            scope: ResourceScope {
+                tenant_id: TenantId::new(TENANT).expect("tenant"),
+                user_id: UserId::new(USER).expect("user"),
+                agent_id: Some(AgentId::new(AGENT).expect("agent")),
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            enabled: true,
+        })
+        .await
+        .expect("enable global auto-approve for e2e dispatch");
     let bundle = build_webui_services(&runtime, None).expect("webui bundle");
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
-        Arc::new(OnlyValidToken),
+        Arc::new(ValidTokenForUser::new(authenticated_user_id)),
         // CORS allowlist is unused in oneshot tests (no Origin header
         // is set), but the WebuiServeConfig constructor rejects an
         // empty Vec to keep production deployments fail-closed. Any
@@ -609,6 +660,24 @@ fn assert_timeline_has_tool_result_reference(timeline: &Value) {
     );
 }
 
+fn assert_timeline_has_capability_display_preview(timeline: &Value) {
+    let messages = timeline["messages"]
+        .as_array()
+        .expect("timeline.messages must be an array");
+    let preview_seen = messages.iter().any(|message| {
+        message.get("kind").and_then(Value::as_str) == Some("capability_display_preview")
+            && message
+                .get("tool_result_ref")
+                .and_then(Value::as_str)
+                .is_some_and(|reference| reference.starts_with("result:"))
+    });
+    assert!(
+        preview_seen,
+        "timeline must include a durable capability display preview for the builtin.echo \
+         invocation, but the messages array was: {messages:#?}",
+    );
+}
+
 fn assert_no_sensitive_payload(label: &str, bytes_or_json: impl AsRef<[u8]>) {
     let text = String::from_utf8_lossy(bytes_or_json.as_ref());
     assert!(
@@ -757,6 +826,33 @@ async fn webui_v2_http_list_automations_uses_composed_runtime_facade() {
         body["automations"].as_array().is_some(),
         "list_automations response must include an automations array, got: {body:#?}"
     );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
+}
+
+#[tokio::test]
+async fn webui_v2_timeline_persists_display_preview_under_authenticated_owner() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage_root = root.path().join("local-dev");
+    let harness = build_harness_at_with_runtime_owner_and_auth_user(
+        storage_root,
+        Some(root),
+        Arc::new(ToolCallingGateway::default()),
+        local_dev_effective_policy(),
+        "e2e-runtime-owner",
+        USER,
+    )
+    .await;
+
+    let thread_id = create_thread(&harness.router, "e2e-preview-owner-create").await;
+    send_message(&harness.router, &thread_id, "e2e-preview-owner-send").await;
+
+    let timeline = wait_for_final_timeline(&harness.router, &thread_id).await;
+    assert_timeline_has_capability_display_preview(&timeline);
 
     harness
         .runtime

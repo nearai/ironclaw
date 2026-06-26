@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use ironclaw_events::{DurableAuditLog, DurableEventLog, InMemoryAuditSink, RuntimeEvent};
+use ironclaw_extensions::ExtensionRegistry;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_first_party_extension_ports::{
@@ -40,8 +41,8 @@ use ironclaw_first_party_extension_ports::{
 };
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
-    AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId,
-    ResourceScope, TenantId, ThreadId, UserId,
+    AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, ExtensionId,
+    InvocationId, Principal, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
@@ -55,7 +56,8 @@ use ironclaw_product_workflow::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
     DefaultApprovalInteractionService, DefaultAuthInteractionService,
-    OutboundPreferencesProductFacade, RunStateApprovalInteractionReadModel,
+    OutboundPreferencesProductFacade, PersistentApprovalGranteeResolver,
+    RunStateApprovalInteractionReadModel,
 };
 use ironclaw_reborn::loop_exit_applier::{
     ApprovalGateEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
@@ -101,6 +103,9 @@ use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
+use crate::outbound_delivery_capability_surface::{
+    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, outbound_delivery_synthetic_provider,
+};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound_preferences::{
@@ -506,6 +511,38 @@ pub struct RebornRuntime {
     /// Hot-swap handle for the live LLM provider, when one was wired at boot.
     #[cfg(feature = "root-llm-provider")]
     llm_reload: Option<RebornLlmReloadParts>,
+}
+
+struct RegistryPersistentApprovalGranteeResolver {
+    registry: Arc<ExtensionRegistry>,
+    outbound_delivery_target_set_provider: ExtensionId,
+}
+
+impl PersistentApprovalGranteeResolver for RegistryPersistentApprovalGranteeResolver {
+    fn persistent_approval_grantee(&self, capability_id: &CapabilityId) -> Option<Principal> {
+        if let Some(descriptor) = self.registry.get_capability(capability_id) {
+            return Some(Principal::Extension(descriptor.provider.clone()));
+        }
+        if capability_id.as_str() == OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID {
+            return Some(Principal::Extension(
+                self.outbound_delivery_target_set_provider.clone(),
+            ));
+        }
+        None
+    }
+}
+
+impl RegistryPersistentApprovalGranteeResolver {
+    fn new(registry: Arc<ExtensionRegistry>) -> Result<Self, RebornRuntimeError> {
+        let outbound_delivery_target_set_provider = outbound_delivery_synthetic_provider()
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("outbound delivery synthetic provider id is invalid: {error}"),
+            })?;
+        Ok(Self {
+            registry,
+            outbound_delivery_target_set_provider,
+        })
+    }
 }
 
 pub(crate) type LocalDevSelectableSkillContextSource =
@@ -1455,6 +1492,28 @@ impl RebornRuntime {
         self.turn_scope_for(&conversation.0).to_resource_scope()
     }
 
+    /// Test-only: enable the global auto-approve switch for this runtime's
+    /// actor scope so a scripted turn exercises the dispatch path instead of
+    /// blocking on the per-tool approval gate. The Tools-settings switch is
+    /// authoritative for first-party tool dispatch; turning it on here
+    /// mirrors what an operator would do before letting the agent run tools.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn enable_global_auto_approve_for_test(&self, conversation: &ConversationId) {
+        let store = self
+            .services
+            .local_dev_auto_approve_settings_for_test()
+            .expect("local-dev runtime should expose an auto-approve setting store");
+        let scope = self.turn_scope_for(&conversation.0).to_resource_scope();
+        store
+            .set(ironclaw_approvals::AutoApproveSettingInput {
+                updated_by: ironclaw_host_api::Principal::User(scope.user_id.clone()),
+                scope,
+                enabled: true,
+            })
+            .await
+            .expect("enabling global auto-approve should succeed");
+    }
+
     /// Apply the outcome of a resolved [`BudgetApprovalGate`]: when the
     /// gate is approved, raise the affected account's limit so a
     /// subsequent `send_user_message` can re-issue the reservation that
@@ -1924,8 +1983,9 @@ impl RebornRuntime {
     }
 
     /// Like [`Self::wait_for_terminal`], but also returns when the run parks on
-    /// a user-resolvable gate (auth/approval/resource) instead of polling until
-    /// those non-terminal states either resolve or hit `RunTimeout`.
+    /// a user-/client-resolvable gate (auth/approval/resource/external-tool)
+    /// instead of polling until those non-terminal states either resolve or hit
+    /// `RunTimeout`.
     /// `BlockedDependentRun` is deliberately excluded — it is an internal wait
     /// on a child run, not facade-resolvable, so it keeps polling. The returned
     /// state carries the `Blocked*` status and
@@ -1952,7 +2012,8 @@ impl RebornRuntime {
                 .await?;
             // Exhaustive on purpose: a new `TurnStatus` variant must force a
             // compile error here rather than silently defaulting to "not a
-            // gate". Only the user-resolvable gates short-circuit recording.
+            // gate". Only the user-/client-resolvable gates
+            // (auth/approval/resource/external-tool) short-circuit recording.
             // `BlockedDependentRun` is an internal wait on a child run (the
             // upstream contract names it `AwaitDependentRun`) — it is not
             // resolvable through the gate facade, so it keeps polling like
@@ -1961,6 +2022,10 @@ impl RebornRuntime {
             let blocked_on_gate = match state.status {
                 TurnStatus::BlockedApproval
                 | TurnStatus::BlockedAuth
+                // External-tool gates are resolved by the API client submitting
+                // tool output, not by the runtime — short-circuit the wait and
+                // return the parked state instead of polling forever.
+                | TurnStatus::BlockedExternalTool
                 | TurnStatus::BlockedResource => true,
                 TurnStatus::BlockedDependentRun
                 | TurnStatus::Queued
@@ -3102,7 +3167,15 @@ pub async fn build_reborn_runtime(
                     approval_resolver,
                     Arc::clone(&planned_turn_coordinator),
                 )
-                .with_persistent_policy_store(local_runtime.persistent_approval_policies.clone()),
+                .with_persistent_policy_store(local_runtime.persistent_approval_policies.clone())
+                .with_persistent_grantee_resolver(Arc::new(
+                    RegistryPersistentApprovalGranteeResolver::new(Arc::clone(
+                        &local_runtime.extension_registry,
+                    ))?,
+                ))
+                .with_tool_permission_override_store(
+                    local_runtime.tool_permission_overrides.clone(),
+                ),
             )
         } else {
             Arc::new(UnavailableApprovalInteractionService)
@@ -3840,6 +3913,28 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
+
+    #[test]
+    fn persistent_grantee_resolver_maps_outbound_delivery_target_set_to_synthetic_provider() {
+        let registry = Arc::new(ironclaw_extensions::ExtensionRegistry::new());
+        let resolver = super::RegistryPersistentApprovalGranteeResolver::new(registry)
+            .expect("resolver builds");
+        let capability_id = CapabilityId::new(
+            crate::outbound_delivery_capability_surface::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
+        )
+        .expect("capability id");
+        let expected_provider =
+            crate::outbound_delivery_capability_surface::outbound_delivery_synthetic_provider()
+                .expect("synthetic provider id");
+
+        assert_eq!(
+            ironclaw_product_workflow::PersistentApprovalGranteeResolver::persistent_approval_grantee(
+                &resolver,
+                &capability_id
+            ),
+            Some(Principal::Extension(expected_provider))
+        );
+    }
 
     /// Wiring guard: the `regex_skill_activation_enabled` flag from
     /// [`RebornRuntimeInput`] must reach
@@ -6564,6 +6659,9 @@ mod tests {
             .expect("activate Notion MCP");
 
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let outcome = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message_until_gate(&conversation, "search Notion"),
@@ -6837,6 +6935,9 @@ mod tests {
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let reply = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "use echo tool"),
@@ -6982,6 +7083,9 @@ mod tests {
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let reply = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "use echo tool"),
@@ -7052,6 +7156,9 @@ mod tests {
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let reply = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "echo a big payload"),
@@ -7866,6 +7973,9 @@ mod tests {
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let reply = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "list workspace"),
@@ -9341,6 +9451,9 @@ mod tests {
             .expect("facade slot should be empty before seeding");
 
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let reply = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "use echo tool twice"),

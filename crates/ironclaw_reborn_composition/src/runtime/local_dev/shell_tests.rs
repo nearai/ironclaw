@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
+};
 use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
 use ironclaw_loop_support::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
@@ -41,7 +43,7 @@ fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
         provider_model_id: "test-model".to_string(),
         turn_id: Some("provider-turn-1".to_string()),
         id: "call-1".to_string(),
-        name: "builtin_shell".to_string(),
+        name: ProviderToolName::new("builtin_shell").expect("provider tool name"), // safety: test-only provider-safe literal.
         arguments,
         response_reasoning: None,
         reasoning: None,
@@ -104,10 +106,34 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         trajectory_observer: None,
         outbound_preferences_facade: None,
         outbound_delivery_target_set_requires_approval: false,
+        approval_settings: Arc::new(
+            crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+        ),
         approval_requests: local_runtime.approval_requests.clone(),
         capability_leases: local_runtime.capability_leases.clone(),
+        external_tool_catalog: std::sync::Arc::new(
+            ironclaw_turns::InMemoryExternalToolCatalog::new(),
+        ),
     };
     let run_context = run_context("shell-workdir").await;
+    // Turn on the global auto-approve switch for this run's actor scope so the
+    // scripted shell call exercises the dispatch path instead of stopping at the
+    // per-tool approval gate (the Tools-settings switch is authoritative for
+    // first-party tool dispatch).
+    {
+        let mut scope = run_context.scope.to_resource_scope();
+        scope.user_id = UserId::new("local-dev-shell-user").expect("user id");
+        ironclaw_approvals::AutoApproveSettingStore::set(
+            local_runtime.auto_approve_settings.as_ref(),
+            ironclaw_approvals::AutoApproveSettingInput {
+                updated_by: ironclaw_host_api::Principal::User(scope.user_id.clone()),
+                scope,
+                enabled: true,
+            },
+        )
+        .await
+        .expect("enabling global auto-approve should succeed");
+    }
     let port = factory
         .create_capability_port(&run_context)
         .await

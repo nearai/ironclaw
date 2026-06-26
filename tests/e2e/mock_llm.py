@@ -990,11 +990,18 @@ def _derive_skill_name_from_url(url: str) -> str:
     return slug or "remote-skill"
 
 
-def _conversation_wants_slow_response(messages: list[dict]) -> bool:
-    return _conversation_has_user_trigger(
+def _conversation_slow_response_delay(messages: list[dict]) -> float:
+    if _conversation_has_user_trigger(
+        messages,
+        re.compile(r"editable composer slow response", re.IGNORECASE),
+    ):
+        return 5.0
+    if _conversation_has_user_trigger(
         messages,
         re.compile(r"refresh-mid-response|slow response|slowly", re.IGNORECASE),
-    )
+    ):
+        return 2.0
+    return 0.0
 
 
 def _assistant_has_phrase(messages: list[dict], phrase: str) -> bool:
@@ -2010,8 +2017,9 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     has_tools = bool(body.get("tools"))
     cid = f"mock-{uuid.uuid4().hex[:8]}"
 
-    if _conversation_wants_slow_response(messages):
-        await asyncio.sleep(2.0)
+    slow_response_delay = _conversation_slow_response_delay(messages)
+    if slow_response_delay > 0:
+        await asyncio.sleep(slow_response_delay)
 
     # Job-mode conversations (background routine/job execution)
     job_resp = match_job_response(messages, has_tools)

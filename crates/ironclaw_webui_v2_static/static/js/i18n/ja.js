@@ -368,8 +368,6 @@ registerPack("ja", {
   "settings.field.maxToolIterationsDesc": "1ターンあたりのツール呼び出し上限",
   "settings.field.planning": "プランニング",
   "settings.field.planningDesc": "実行前の多段プランニングを有効化",
-  "settings.field.autoApproveTools": "ツール自動承認",
-  "settings.field.autoApproveToolsDesc": "すべてのツール呼び出しを承認不要にする",
   "settings.field.timezone": "タイムゾーン",
   "settings.field.timezoneDesc": "スケジュール作業の IANA タイムゾーン",
   "settings.field.sessionIdleTimeout": "セッションアイドルタイムアウト",
@@ -474,11 +472,18 @@ registerPack("ja", {
   "channels.slackAccessError": "Slack チャネルの更新に失敗しました。",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "対象ツールを常に許可",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "「グローバルに従う」に設定されたツールにのみ適用されます。ツールごとの設定がこの切り替えより優先され、ハードフロアの承認ゲートでは引き続き承認が必要です。",
   "tools.permissions": "ツール権限",
   "tools.alwaysAllow": "常に許可",
   "tools.askEachTime": "毎回確認",
   "tools.disabled": "無効",
   "tools.default": "デフォルト",
+  "tools.followDefault": "グローバルに従う",
+  "tools.sourceDefault": "default permission",
+  "tools.sourceGlobal": "global setting",
+  "tools.sourceOverride": "per-tool override",
   "tools.saved": "保存済み",
   "tools.permissionFor": "{name} の権限",
   "tools.filterPlaceholder": "ツールをフィルタ…",

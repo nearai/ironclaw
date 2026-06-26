@@ -1,4 +1,4 @@
-use ironclaw_host_api::{ApprovalRequestId, CorrelationId, ResourceEstimate};
+use ironclaw_host_api::{ApprovalRequestId, CorrelationId, ProviderToolName, ResourceEstimate};
 use ironclaw_turns::{
     CapabilityActivityId, GateResumeDisposition, LoopCancelledReasonKind, LoopCompletionKind,
     LoopDiagnosticRef, LoopExit, LoopFailureKind, LoopGateRef, LoopResultRef, TurnRunId,
@@ -264,7 +264,9 @@ async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
-        PromptStep::ResumeApproval(_) | PromptStep::ResumeAuth(_) => {
+        PromptStep::ResumeApproval(_)
+        | PromptStep::ResumeAuth(_)
+        | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
@@ -342,7 +344,9 @@ async fn prompt_stage_deferred_compaction_returns_to_normal_prompt_path() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
-        PromptStep::ResumeApproval(_) | PromptStep::ResumeAuth(_) => {
+        PromptStep::ResumeApproval(_)
+        | PromptStep::ResumeAuth(_)
+        | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
@@ -427,7 +431,9 @@ async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
-        PromptStep::ResumeApproval(_) | PromptStep::ResumeAuth(_) => {
+        PromptStep::ResumeApproval(_)
+        | PromptStep::ResumeAuth(_)
+        | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
@@ -515,7 +521,9 @@ async fn prompt_stage_compaction_index_maps_system_summary_and_other_kinds() {
     let output = match step {
         PromptStep::Prepared(output) => output,
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
-        PromptStep::ResumeApproval(_) | PromptStep::ResumeAuth(_) => {
+        PromptStep::ResumeApproval(_)
+        | PromptStep::ResumeAuth(_)
+        | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
         PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
@@ -569,7 +577,9 @@ async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() 
             assert!(cancelled.checkpoint_id.is_some());
         }
         PromptStep::Prepared(_) => panic!("expected cancelled exit"),
-        PromptStep::ResumeApproval(_) | PromptStep::ResumeAuth(_) => {
+        PromptStep::ResumeApproval(_)
+        | PromptStep::ResumeAuth(_)
+        | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
         PromptStep::Exit(exit) => panic!("expected cancelled exit, got {exit:?}"),
@@ -674,7 +684,9 @@ async fn prompt_stage_compaction_security_rejection_returns_failed_exit() {
             assert!(failed.checkpoint_id.is_some());
         }
         PromptStep::Prepared(_) => panic!("security rejection should end the run"),
-        PromptStep::ResumeApproval(_) | PromptStep::ResumeAuth(_) => {
+        PromptStep::ResumeApproval(_)
+        | PromptStep::ResumeAuth(_)
+        | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
         PromptStep::Exit(exit) => panic!("expected failed exit, got {exit:?}"),
@@ -1501,7 +1513,7 @@ fn sanitize_result_ref_suffix_handles_empty_special_chars_and_truncation() {
             provider_model_id: "test-model".to_string(),
             provider_turn_id: oversized,
             provider_call_id: "call/with space".to_string(),
-            provider_tool_name: "demo__echo".to_string(),
+            provider_tool_name: ProviderToolName::new("demo__echo").expect("provider tool name"),
             arguments: serde_json::json!({}),
             response_reasoning: None,
             reasoning: None,
@@ -2768,7 +2780,7 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
         .expect("provider replay metadata");
     assert_eq!(provider_call.provider_turn_id, "turn_1");
     assert_eq!(provider_call.provider_call_id, "call_1");
-    assert_eq!(provider_call.provider_tool_name, "demo__echo");
+    assert_eq!(provider_call.provider_tool_name.as_str(), "demo__echo");
     assert_eq!(provider_call.capability_id, capability_id());
     assert_eq!(
         provider_call.arguments,
@@ -2832,7 +2844,10 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
         .expect("provider replay metadata");
     assert_eq!(denied_provider_call.provider_turn_id, "turn_1");
     assert_eq!(denied_provider_call.provider_call_id, "call_2");
-    assert_eq!(denied_provider_call.provider_tool_name, "demo__echo");
+    assert_eq!(
+        denied_provider_call.provider_tool_name.as_str(),
+        "demo__echo"
+    );
     match exit {
         LoopExit::Completed(completed) => {
             assert_eq!(
@@ -3160,7 +3175,7 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
             .expect("provider replay metadata");
         assert_eq!(provider_call.provider_turn_id, "turn_1");
         assert_eq!(provider_call.provider_call_id, "call_1");
-        assert_eq!(provider_call.provider_tool_name, "demo__echo");
+        assert_eq!(provider_call.provider_tool_name.as_str(), "demo__echo");
         match exit {
             LoopExit::Completed(completed) => {
                 assert_eq!(completed.result_refs, vec![appended[0].result_ref.clone()]);
@@ -3229,7 +3244,9 @@ async fn prompt_stage_returns_skip_model_when_flag_set() {
     let returned_state = match step {
         PromptStep::SkipModel(state, _ack) => *state,
         PromptStep::Prepared(_) => panic!("expected SkipModel, got Prepared"),
-        PromptStep::ResumeApproval(_) | PromptStep::ResumeAuth(_) => {
+        PromptStep::ResumeApproval(_)
+        | PromptStep::ResumeAuth(_)
+        | PromptStep::ResumeExternalTool(_) => {
             panic!("expected SkipModel, got resume step")
         }
         PromptStep::Exit(exit) => panic!("expected SkipModel, got Exit({exit:?})"),
@@ -3291,7 +3308,9 @@ async fn prompt_stage_skip_model_carries_pending_input_ack() {
     let mut carried_ack = match step {
         PromptStep::SkipModel(_state, ack) => ack,
         PromptStep::Prepared(_) => panic!("expected SkipModel, got Prepared"),
-        PromptStep::ResumeApproval(_) | PromptStep::ResumeAuth(_) => {
+        PromptStep::ResumeApproval(_)
+        | PromptStep::ResumeAuth(_)
+        | PromptStep::ResumeExternalTool(_) => {
             panic!("expected SkipModel, got resume step")
         }
         PromptStep::Exit(exit) => panic!("expected SkipModel, got Exit({exit:?})"),
@@ -4181,6 +4200,119 @@ async fn non_auth_gate_block_preserves_pending_auth_resume() {
 }
 
 #[tokio::test]
+async fn external_tool_gate_block_stores_pending_external_tool_resume() {
+    // Driving the full loop, an ExternalToolPending outcome must block the run
+    // and checkpoint a pending_external_tool_resume record (so resume can
+    // re-dispatch the parked client-tool call).
+    let gate_ref = LoopGateRef::new("gate:external_tool-block").expect("valid");
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::ExternalToolPending {
+                gate_ref: gate_ref.clone(),
+                safe_summary: "awaiting client tool output".to_string(),
+            }],
+            stopped_on_suspension: true,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("execute blocks on external tool gate");
+    assert!(
+        matches!(exit, LoopExit::Blocked(_)),
+        "expected Blocked exit for external tool gate, got {exit:?}"
+    );
+
+    let before_block_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    let pending = before_block_state
+        .pending_external_tool_resume
+        .as_ref()
+        .expect("BeforeBlock checkpoint must carry pending_external_tool_resume");
+    assert_eq!(pending.gate_ref, gate_ref);
+    assert_eq!(pending.capability_id, capability_id());
+    // External-tool blocks must not touch the auth/approval slots.
+    assert!(before_block_state.pending_auth_resume.is_none());
+    assert!(before_block_state.pending_approval_resume.is_none());
+}
+
+#[tokio::test]
+async fn resume_after_external_tool_gate_redispatches_without_model_turn() {
+    // Phase 1: the client tool call parks (ExternalToolPending). Phase 2: resume
+    // re-dispatches the parked call WITHOUT a model turn, restaging the provider
+    // tool call so the host decorator can complete it from the catalog output.
+    let gate_ref = LoopGateRef::new("gate:external_tool-resume").expect("valid");
+    let completed_ref = LoopResultRef::new("result:external-tool-resumed").expect("valid");
+    let host = MockHost::new(vec![provider_calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::ExternalToolPending {
+                gate_ref: gate_ref.clone(),
+                safe_summary: "awaiting client tool output".to_string(),
+            }],
+            stopped_on_suspension: true,
+        },
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(
+                ironclaw_turns::run_profile::CapabilityResultMessage {
+                    result_ref: completed_ref.clone(),
+                    safe_summary: "external tool output".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    terminate_hint: true,
+                    byte_len: 0,
+                    output_digest: None,
+                },
+            )],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let first_exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("first execute blocks on external tool gate");
+    assert!(
+        matches!(first_exit, LoopExit::Blocked(_)),
+        "expected Blocked exit, got {first_exit:?}"
+    );
+    assert_eq!(host.model_requests().len(), 1);
+
+    let before_block_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    assert!(
+        before_block_state.pending_external_tool_resume.is_some(),
+        "BeforeBlock checkpoint must carry pending_external_tool_resume"
+    );
+
+    let second_exit = executor
+        .execute_family(&crate::families::default(), &host, before_block_state)
+        .await
+        .expect("second execute resumes from external tool gate");
+    assert!(
+        matches!(second_exit, LoopExit::Completed(_)),
+        "expected Completed exit after external tool resume, got {second_exit:?}"
+    );
+
+    // No additional model call: the parked call is re-dispatched before the model.
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "external tool resume must re-dispatch without a model call"
+    );
+    // Two batch invocations: phase 1 (park) + phase 2 (complete).
+    assert_eq!(host.batch_invocations().len(), 2);
+    // Resume re-registered the provider tool call so the decorator re-binds and
+    // completes from the catalog.
+    assert_eq!(
+        host.registered_provider_calls().len(),
+        1,
+        "external tool resume must restage exactly one provider tool call"
+    );
+}
+
+#[tokio::test]
 async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() {
     // Phase 1: executor blocks on an auth gate and writes a BeforeBlock checkpoint
     // that carries a pending_auth_resume record with the original input_ref.
@@ -4317,7 +4449,8 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
         "auth resume must restage exactly one provider tool call"
     );
     assert_eq!(
-        registered_provider_calls[0].name, "demo__echo",
+        registered_provider_calls[0].name.as_str(),
+        "demo__echo",
         "auth resume must restage the checkpointed provider tool name"
     );
     assert_eq!(
@@ -6208,7 +6341,8 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
                 provider_call_id: "call_x".to_string(),
-                provider_tool_name: "demo__echo".to_string(),
+                provider_tool_name: ProviderToolName::new("demo__echo")
+                    .expect("provider tool name"),
                 arguments: serde_json::json!({"message": "x"}),
                 response_reasoning: None,
                 reasoning: None,
@@ -6396,7 +6530,8 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
                 provider_call_id: "call_x_same_cap".to_string(),
-                provider_tool_name: "demo__echo".to_string(),
+                provider_tool_name: ProviderToolName::new("demo__echo")
+                    .expect("provider tool name"),
                 arguments: serde_json::json!({"message": "x"}),
                 response_reasoning: None,
                 reasoning: None,
@@ -6564,7 +6699,8 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
                 provider_call_id: "call_x".to_string(),
-                provider_tool_name: "demo__echo".to_string(),
+                provider_tool_name: ProviderToolName::new("demo__echo")
+                    .expect("provider tool name"),
                 arguments: serde_json::json!({"message": "x"}),
                 response_reasoning: None,
                 reasoning: None,
@@ -6797,7 +6933,8 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
                 provider_call_id: "call_x".to_string(),
-                provider_tool_name: "demo__echo".to_string(),
+                provider_tool_name: ProviderToolName::new("demo__echo")
+                    .expect("provider tool name"),
                 arguments: serde_json::json!({"message": "x"}),
                 response_reasoning: None,
                 reasoning: None,

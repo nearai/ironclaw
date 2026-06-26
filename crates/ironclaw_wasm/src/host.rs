@@ -11,7 +11,7 @@ use ironclaw_host_api::{
     is_sensitive_runtime_response_header,
 };
 use serde_json::{Map, Value};
-use tokio::runtime::{Handle, RuntimeFlavor};
+use tokio::runtime::Handle;
 
 use crate::WasmHostError;
 
@@ -386,13 +386,15 @@ fn block_on_runtime_http_egress<F>(future: F) -> Result<RuntimeHttpEgressRespons
 where
     F: Future<Output = Result<RuntimeHttpEgressResponse, WasmHostError>> + Send + 'static,
 {
+    // WASM guest execution runs on the blocking thread pool (the host runtime
+    // dispatches `WitToolRuntime::execute` via `spawn_blocking`). Driving egress
+    // with `block_in_place` is the wrong tool here: `block_in_place` is for
+    // tokio *worker* threads, and using it would either no-op or, on a worker,
+    // park that worker for the whole HTTP round-trip — the worker-pool wedge.
+    // Route every on-runtime case through the dedicated single-thread egress
+    // runtime instead, so the synchronous guest thread blocks only on a channel
+    // recv while the actual I/O runs on its own runtime, never on a turn worker.
     match Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
-            catch_unwind(AssertUnwindSafe(|| {
-                tokio::task::block_in_place(|| handle.block_on(future))
-            }))
-            .map_err(|_| runtime_http_egress_panicked())?
-        }
         Ok(_) => run_runtime_http_egress_on_worker(future),
         Err(_) => run_runtime_http_egress_future(future),
     }
@@ -408,8 +410,17 @@ where
         .as_ref()
         .map_err(|error| error.clone())?;
     let (sender, receiver) = mpsc::sync_channel(1);
+    // Spawn on the worker runtime and recover the result via the join handle on
+    // a watchdog task, so a panicking egress future maps to the same
+    // `runtime_http_egress_panicked` error the previous `block_in_place` path
+    // produced via `catch_unwind`, rather than dropping the sender and
+    // surfacing a misleading "worker stopped" error.
+    let egress = runtime.spawn(future);
     runtime.spawn(async move {
-        let _ = sender.send(future.await);
+        let result = egress
+            .await
+            .unwrap_or_else(|_| Err(runtime_http_egress_panicked()));
+        let _ = sender.send(result);
     });
     receiver
         .recv()

@@ -368,8 +368,6 @@ registerPack("ar", {
   "settings.field.maxToolIterationsDesc": "حد استدعاءات الأدوات في الدور",
   "settings.field.planning": "التخطيط",
   "settings.field.planningDesc": "تمكين التخطيط متعدد الخطوات قبل التنفيذ",
-  "settings.field.autoApproveTools": "الموافقة التلقائية على الأدوات",
-  "settings.field.autoApproveToolsDesc": "تخطي الموافقة لكل استدعاءات الأدوات",
   "settings.field.timezone": "المنطقة الزمنية",
   "settings.field.timezoneDesc": "منطقة IANA للمهام المجدولة",
   "settings.field.sessionIdleTimeout": "مهلة خمول الجلسة",
@@ -474,11 +472,18 @@ registerPack("ar", {
   "channels.slackAccessError": "فشل تحديث قناة Slack.",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "السماح دائمًا بالأدوات المؤهلة",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "ينطبق فقط على الأدوات المضبوطة على \"اتباع الإعداد العام\". إعدادات كل أداة تتجاوز هذا المفتاح؛ وبوابات الموافقة ذات الحد الصارم ستظل تطلب الموافقة.",
   "tools.permissions": "أذونات الأدوات",
   "tools.alwaysAllow": "السماح دائمًا",
   "tools.askEachTime": "السؤال كل مرة",
   "tools.disabled": "معطّل",
   "tools.default": "افتراضي",
+  "tools.followDefault": "اتباع الإعداد العام",
+  "tools.sourceDefault": "default permission",
+  "tools.sourceGlobal": "global setting",
+  "tools.sourceOverride": "per-tool override",
   "tools.saved": "تم الحفظ",
   "tools.permissionFor": "إذن لـ {name}",
   "tools.filterPlaceholder": "تصفية الأدوات…",

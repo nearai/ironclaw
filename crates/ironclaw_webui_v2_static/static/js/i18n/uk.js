@@ -368,8 +368,6 @@ registerPack("uk", {
   "settings.field.maxToolIterationsDesc": "Ліміт викликів інструментів за хід",
   "settings.field.planning": "Планування",
   "settings.field.planningDesc": "Увімкнути багатокрокове планування перед виконанням",
-  "settings.field.autoApproveTools": "Автозатвердження інструментів",
-  "settings.field.autoApproveToolsDesc": "Пропускати затвердження для всіх викликів інструментів",
   "settings.field.timezone": "Часовий пояс",
   "settings.field.timezoneDesc": "IANA часовий пояс для запланованих робіт",
   "settings.field.sessionIdleTimeout": "Таймаут неактивності сесії",
@@ -474,11 +472,18 @@ registerPack("uk", {
   "channels.slackAccessError": "Помилка оновлення каналу Slack.",
 
   // Settings — tools tab
+  "settings.field.autoApproveEligibleTools": "Завжди дозволяти придатні інструменти",
+  "settings.field.autoApproveEligibleToolsDesc":
+    "Застосовується лише до інструментів із режимом «Дотримуватися глобальних». Налаштування окремого інструмента перекривають цей перемикач; жорсткі межі схвалення все одно вимагатимуть підтвердження.",
   "tools.permissions": "Дозволи інструментів",
   "tools.alwaysAllow": "Завжди дозволяти",
   "tools.askEachTime": "Питати щоразу",
   "tools.disabled": "Вимкнено",
   "tools.default": "за замовчуванням",
+  "tools.followDefault": "Дотримуватися глобальних",
+  "tools.sourceDefault": "default permission",
+  "tools.sourceGlobal": "global setting",
+  "tools.sourceOverride": "per-tool override",
   "tools.saved": "збережено",
   "tools.permissionFor": "Дозвіл для {name}",
   "tools.filterPlaceholder": "Фільтрувати інструменти…",

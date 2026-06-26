@@ -369,6 +369,12 @@ Slot bookkeeping is tied to acceptance, not merely polling:
   in that order; `active_fire_slot` is written before turn submission and
   `active_run_ref` is populated only after the accepted/replayed submit result
   returns a `TurnRunId`;
+- stale claim-only rows with `active_fire_slot` but no `active_run_ref` are
+  recovered by re-entering the same trusted submit path after a grace period.
+  The deterministic fire identity and trusted conversation binding must replay
+  any already accepted turn and backfill `active_run_ref` plus run-history
+  `thread_id`, instead of clearing the claim or minting a separate recovery
+  ledger;
 - retryable submit failures write `last_status = Error`, clear
   `active_fire_slot` and `active_run_ref`, leave `last_fired_slot` and
   `last_run_at` unchanged, and keep `next_run_at` at or before the failed
@@ -390,6 +396,8 @@ and submit-result bookkeeping:
 
 - `ironclaw_turns::active_run_ref_state` classifies
   `active_run_ref` through `get_run_state` and `TurnStatus::is_terminal`;
+  non-terminal states, including `BlockedApproval` and `BlockedAuth`, keep the
+  active fire locked as back-pressure until the turn reaches a terminal state;
 - `ironclaw_triggers::ClearActiveFireRequest` plus
   `TriggerRepository::clear_active_fire` clears only the exact matching
   `(tenant_id, trigger_id, active_fire_slot, active_run_ref)` after the caller
@@ -400,12 +408,12 @@ errors as structured tick report outcomes so one bad record does not block other
 eligible triggers in the same tick. Batch-level repository list failures remain
 fail-fast because the worker cannot know which records were safely observed.
 
-Approval waits are owned by the normal turn pipeline. While a submitted trigger
-turn is waiting for approval, the trigger remains active through
+Approval and auth waits are owned by the normal turn pipeline. While a submitted
+trigger turn is waiting for human interaction, the trigger remains active through
 `active_run_ref` back-pressure. Later lifecycle/notification work must define
-durable approval expiry, stale approval rejection, reminder throttling, and
-user/admin notification paths without making the trigger poller deliver outbound
-messages directly.
+durable gate expiry, stale gate rejection, reminder throttling, and user/admin
+notification paths without making the trigger poller deliver outbound messages
+directly.
 
 ---
 
