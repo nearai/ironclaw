@@ -224,6 +224,14 @@ export function useExtensions() {
 
   const isLoading = extensionsQuery.isLoading || registryQuery.isLoading;
   const isBusy = installMutation.isPending || activateMutation.isPending || removeMutation.isPending;
+  const remove = React.useCallback(
+    (extension) => {
+      const name = extension?.displayName || extension?.packageRef?.id || "this extension";
+      if (!window.confirm(`Remove ${name}?`)) return;
+      removeMutation.mutate(extension);
+    },
+    [removeMutation]
+  );
 
   return {
     status,
@@ -243,7 +251,7 @@ export function useExtensions() {
     clearResult,
     install: installMutation.mutate,
     activate: activateMutation.mutate,
-    remove: removeMutation.mutate,
+    remove,
     invalidate,
   };
 }

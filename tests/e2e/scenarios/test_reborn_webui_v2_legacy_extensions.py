@@ -1,5 +1,6 @@
 """Legacy extension lifecycle coverage ported to Reborn WebChat v2."""
 
+import asyncio
 import json
 from urllib.parse import unquote, urlparse
 
@@ -366,6 +367,19 @@ async def _open_card_menu(card):
     return card.get_by_role("menu")
 
 
+async def _capture_next_confirm(page, *, accept: bool):
+    loop = asyncio.get_running_loop()
+    dialog_future = loop.create_future()
+
+    def handle_dialog(dialog):
+        if not dialog_future.done():
+            dialog_future.set_result({"type": dialog.type, "message": dialog.message})
+        loop.create_task(dialog.accept() if accept else dialog.dismiss())
+
+    page.once("dialog", handle_dialog)
+    return dialog_future
+
+
 async def test_reborn_legacy_extensions_registry_search_and_install(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -422,9 +436,40 @@ async def test_reborn_legacy_extensions_installed_actions(
         assert harness["activate_requests"] == ["inactive-mcp"]
 
         await active_card.get_by_label("More actions").click()
+        dialog_future = await _capture_next_confirm(page, accept=True)
         await page.get_by_role("menuitem", name="Remove").click()
+        dialog = await asyncio.wait_for(dialog_future, timeout=5)
+        assert dialog["type"] == "confirm"
+        assert "Active Tool" in dialog["message"]
         await expect(page.get_by_text("Active Tool removed")).to_be_visible(timeout=5000)
         assert harness["remove_requests"] == ["active-tool"]
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_extensions_remove_cancel_keeps_card(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[ACTIVE_TOOL],
+        tab="registry",
+    )
+    try:
+        page = harness["page"]
+        active_card = _card_by_title(page, "Active Tool")
+        await expect(active_card).to_be_visible(timeout=5000)
+
+        await active_card.get_by_label("More actions").click()
+        dialog_future = await _capture_next_confirm(page, accept=False)
+        await page.get_by_role("menuitem", name="Remove").click()
+        dialog = await asyncio.wait_for(dialog_future, timeout=5)
+        assert dialog["type"] == "confirm"
+        assert "Active Tool" in dialog["message"]
+
+        await expect(active_card).to_be_visible(timeout=5000)
+        assert harness["remove_requests"] == []
     finally:
         await harness["context"].close()
 

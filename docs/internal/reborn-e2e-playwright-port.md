@@ -374,7 +374,9 @@ standalone Reborn WebUI v2 Extensions surface:
 - installed extensions render status, description, and capability disclosure;
 - activating an inactive installed extension posts to the v2 activate endpoint;
 - removing an installed extension posts to the v2 remove endpoint through the
-  card overflow menu and removes the projection;
+  card overflow menu only after user confirmation and removes the projection;
+- cancelling the remove confirmation keeps the extension card and sends no
+  remove request;
 - setup-required extensions open the Reborn configure modal, fetch setup
   metadata, submit manual secrets and fields to the v2 setup endpoint, and close
   on success;
@@ -406,6 +408,13 @@ Behavior adjustment:
 - Reborn configure-success currently closes the modal without rendering the
   setup response message as a toast. The port asserts the durable behavior
   contract: the modal closes and the v2 setup payload is posted.
+
+Issue fixed:
+
+- Reborn's extension overflow-menu Remove action previously posted the remove
+  request immediately. The hook now shows a native confirmation prompt before
+  calling the v2 remove mutation, matching the destructive-action guard already
+  present in the legacy extension lifecycle tests.
 
 CI update:
 
