@@ -372,6 +372,8 @@ standalone Reborn WebUI v2 Extensions surface:
   on success;
 - failed setup responses keep the configure modal open and show the server
   message so the user can correct the credential;
+- activation responses that include legacy-style `auth_url` values reject
+  non-HTTPS URLs and still accept mixed-case HTTPS schemes;
 - OAuth setup start posts provider/scopes metadata to the v2 OAuth-start
   endpoint;
 - OAuth authorization URLs are opened only when they parse as HTTPS, including

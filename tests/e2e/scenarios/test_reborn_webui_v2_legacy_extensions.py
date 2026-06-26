@@ -134,6 +134,7 @@ async def _open_mocked_extensions_page(
     setup_payloads=None,
     setup_submit_responses=None,
     oauth_start_responses=None,
+    activate_responses=None,
 ):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
@@ -142,6 +143,7 @@ async def _open_mocked_extensions_page(
     setup_payloads_by_id = dict(setup_payloads or {})
     setup_submit_responses_by_id = dict(setup_submit_responses or {})
     oauth_start_responses_by_id = dict(oauth_start_responses or {})
+    activate_responses_by_id = dict(activate_responses or {})
     install_requests: list[dict] = []
     activate_requests: list[str] = []
     remove_requests: list[str] = []
@@ -284,7 +286,13 @@ async def _open_mocked_extensions_page(
                 if extension.get("package_ref", {}).get("id") == package_id:
                     extension["active"] = True
                     extension["activation_status"] = "active"
-            await fulfill_json(route, {"success": True, "message": f"{package_id} activated"})
+            await fulfill_json(
+                route,
+                activate_responses_by_id.get(
+                    package_id,
+                    {"success": True, "message": f"{package_id} activated"},
+                ),
+            )
             return
 
         if (
@@ -399,6 +407,94 @@ async def test_reborn_legacy_extensions_installed_actions(
         await page.get_by_role("menuitem", name="Remove").click()
         await expect(page.get_by_text("Active Tool removed")).to_be_visible(timeout=5000)
         assert harness["remove_requests"] == ["active-tool"]
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_activate_auth_url_requires_https(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[INACTIVE_MCP],
+        activate_responses={
+            "inactive-mcp": {
+                "success": True,
+                "message": "Inactive MCP activated",
+                "auth_url": "javascript:alert('xss')",
+            }
+        },
+        tab="mcp",
+    )
+    try:
+        page = harness["page"]
+        await page.evaluate(
+            """
+            () => {
+              window.__openedUrls = [];
+              window.open = (url) => {
+                window.__openedUrls.push(url);
+                return null;
+              };
+            }
+            """
+        )
+
+        card = _card_by_title(page, "Inactive MCP")
+        await expect(card).to_be_visible(timeout=5000)
+        await card.get_by_role("button", name="Activate").click()
+
+        await expect(page.get_by_text("Authentication URL must use HTTPS.")).to_be_visible(
+            timeout=5000
+        )
+        assert await page.evaluate("() => window.__openedUrls") == []
+        assert harness["activate_requests"] == ["inactive-mcp"]
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_activate_auth_url_accepts_uppercase_https(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[INACTIVE_MCP],
+        activate_responses={
+            "inactive-mcp": {
+                "success": True,
+                "message": "Inactive MCP activated",
+                "auth_url": "HTTPS://example.com/oauth?state=abc",
+            }
+        },
+        tab="mcp",
+    )
+    try:
+        page = harness["page"]
+        await page.evaluate(
+            """
+            () => {
+              window.__openedUrls = [];
+              window.open = (url) => {
+                window.__openedUrls.push(url);
+                return null;
+              };
+            }
+            """
+        )
+
+        card = _card_by_title(page, "Inactive MCP")
+        await expect(card).to_be_visible(timeout=5000)
+        await card.get_by_role("button", name="Activate").click()
+
+        await page.wait_for_function(
+            "() => window.__openedUrls.some((url) => /^https:\\/\\//i.test(url))",
+            timeout=5000,
+        )
+        opened = await page.evaluate("() => window.__openedUrls")
+        assert opened[-1].lower().startswith("https://example.com/oauth"), opened
+        assert harness["activate_requests"] == ["inactive-mcp"]
     finally:
         await harness["context"].close()
 
