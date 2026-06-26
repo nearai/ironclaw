@@ -32,7 +32,7 @@ use ironclaw_turns::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
         RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
     },
 };
 use tokio::{sync::Notify, time::timeout};
@@ -566,6 +566,7 @@ enum ChaosOperation {
     CancelRun,
     FailRun,
     RecordRunnerFailure,
+    RelinquishRun,
     ApplyValidatedLoopExit,
 }
 
@@ -578,6 +579,7 @@ struct ChaosTransitionPort {
     store: Arc<InMemoryTurnStateStore>,
     rules: Mutex<Vec<ChaosRule>>,
     calls: Mutex<Vec<ChaosOperation>>,
+    hold_after_relinquish: Mutex<Option<Arc<Notify>>>,
 }
 
 impl HeartbeatTrackingTransitions {
@@ -605,8 +607,12 @@ impl HeartbeatTrackingTransitions {
 
     async fn wait_for_heartbeat_attempts(&self, expected: usize) {
         timeout(Duration::from_secs(2), async {
-            while self.heartbeat_attempts.load(Ordering::SeqCst) < expected {
-                self.notify_heartbeat_attempt.notified().await;
+            loop {
+                let notified = self.notify_heartbeat_attempt.notified();
+                if self.heartbeat_attempts.load(Ordering::SeqCst) >= expected {
+                    return;
+                }
+                notified.await;
             }
         })
         .await
@@ -643,6 +649,7 @@ impl ChaosTransitionPort {
             store,
             rules: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
+            hold_after_relinquish: Mutex::new(None),
         }
     }
 
@@ -665,6 +672,11 @@ impl ChaosTransitionPort {
             .iter()
             .filter(|recorded| **recorded == operation)
             .count()
+    }
+
+    fn hold_after_relinquish(self, gate: Arc<Notify>) -> Self {
+        *self.hold_after_relinquish.lock().unwrap() = Some(gate);
+        self
     }
 
     async fn wait_for_call_count(&self, operation: ChaosOperation, expected: usize) {
@@ -844,6 +856,21 @@ impl TurnRunTransitionPort for ChaosTransitionPort {
     ) -> Result<TurnRunState, TurnError> {
         self.maybe_drop(ChaosOperation::RecordRunnerFailure)?;
         self.store.record_runner_failure(request).await
+    }
+
+    async fn relinquish_run(
+        &self,
+        request: RelinquishRunRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.maybe_drop(ChaosOperation::RelinquishRun)?;
+        let result = self.store.relinquish_run(request).await;
+        let gate = self.hold_after_relinquish.lock().unwrap().clone();
+        if result.is_ok()
+            && let Some(gate) = gate
+        {
+            gate.notified().await;
+        }
+        result
     }
 
     async fn apply_validated_loop_exit(
@@ -1809,6 +1836,45 @@ async fn chaos_scheduler_retries_terminal_failure_recording_after_transient_stor
     handle.shutdown().await;
 
     assert_eq!(chaos.call_count(ChaosOperation::RecordRunnerFailure), 2);
+}
+
+#[tokio::test]
+async fn chaos_scheduler_relinquishes_run_when_terminal_failure_recording_is_exhausted() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let relinquish_gate = Arc::new(Notify::new());
+    let chaos = Arc::new(
+        ChaosTransitionPort::new(Arc::clone(&store))
+            .drop_next_n(ChaosOperation::RecordRunnerFailure, 3)
+            .hold_after_relinquish(Arc::clone(&relinquish_gate)),
+    );
+    let transition_port: Arc<dyn TurnRunTransitionPort> = chaos.clone();
+    let executor = Arc::new(FailingExecutor::default());
+    let scheduler = TurnRunScheduler::new(
+        transition_port,
+        executor.clone(),
+        fast_config()
+            .with_poll_interval(Duration::from_secs(60))
+            .with_terminal_failure_record_attempts(3)
+            .with_terminal_failure_record_backoff(Duration::from_millis(1)),
+    );
+    let handle = scheduler.start();
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
+
+    let request = submit_turn_request(
+        "thread-chaos-terminal-recording-exhausted",
+        "idem-chaos-terminal-recording-exhausted",
+    );
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+
+    executor.wait_for_started().await;
+    wait_for_status(&*store, scope, run_id, TurnStatus::Queued).await;
+    assert_eq!(chaos.call_count(ChaosOperation::RecordRunnerFailure), 3);
+    assert_eq!(chaos.call_count(ChaosOperation::RelinquishRun), 1);
+
+    relinquish_gate.notify_waiters();
+    handle.shutdown().await;
 }
 
 #[tokio::test]

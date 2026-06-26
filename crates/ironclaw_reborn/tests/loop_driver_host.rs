@@ -2148,11 +2148,9 @@ async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full
 
 #[tokio::test]
 async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_offline() {
-    let fixture = HostFixture::new_unsubmitted(
-        "thread-full-reborn-model-offline",
-        "RAW_PROMPT_TEXT_SENTINEL sk-prompt-secret /host/path tool_input",
-    )
-    .await;
+    let fixture =
+        HostFixture::new_unsubmitted("thread-full-reborn-model-offline", "hello model outage")
+            .await;
     fixture.gateway.fail_with_model_error(
         HostManagedModelErrorKind::Unavailable,
         "connection refused at https://api.example.test with sk-provider-secret /host/path",
@@ -2204,10 +2202,25 @@ async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_off
     .await;
     scheduler_handle.shutdown().await;
 
-    assert_eq!(failed.failure.expect("failure").category(), "model_error");
+    assert_eq!(
+        failed.failure.as_ref().expect("failure").category(),
+        "model_error"
+    );
+    assert_driver_public_outputs_hide_raw_payloads(&failed);
+    let model_requests = fixture.gateway.requests();
     assert!(
-        fixture.gateway.requests().len() >= 2,
+        model_requests.len() >= 2,
         "planned recovery should retry transient model unavailability before failing"
+    );
+    assert_serialized_value_omits(
+        "model-offline gateway requests",
+        &model_requests,
+        &[
+            "connection refused",
+            "sk-provider-secret",
+            "/host/path",
+            "https://api.example.test",
+        ],
     );
     assert_no_assistant_message(&fixture).await;
     assert_public_milestones_hide_raw_payloads(&fixture.milestones());
@@ -2371,6 +2384,11 @@ async fn turn_runner_worker_full_reborn_continues_after_tool_network_outage() {
         1,
         "the offline tool call should be surfaced to the model without killing the turn"
     );
+    assert_serialized_value_omits(
+        "tool-outage gateway requests",
+        &fixture.gateway.requests(),
+        &["offline transport", "sk-secret", "/host/path"],
+    );
     let history = fixture
         .thread_service
         .list_thread_history(ThreadHistoryRequest {
@@ -2379,6 +2397,11 @@ async fn turn_runner_worker_full_reborn_continues_after_tool_network_outage() {
         })
         .await
         .unwrap();
+    assert_string_omits(
+        "tool-outage public history",
+        &format!("{history:?}"),
+        &["offline transport", "sk-secret", "/host/path"],
+    );
     assert!(history.messages.iter().any(|message| {
         message.kind == MessageKind::Assistant
             && message.status == MessageStatus::Finalized
@@ -8623,6 +8646,17 @@ fn assert_driver_public_outputs_hide_raw_payloads<T: serde::Serialize>(value: &T
     assert_serialized_or_debug_hides_raw_payloads(&wire);
 }
 
+fn assert_serialized_value_omits<T: serde::Serialize>(label: &str, value: &T, forbidden: &[&str]) {
+    let wire = serde_json::to_string(value).unwrap();
+    assert_string_omits(label, &wire, forbidden);
+}
+
+fn assert_string_omits(label: &str, wire: &str, forbidden: &[&str]) {
+    for raw in forbidden {
+        assert!(!wire.contains(raw), "{label} leaked {raw}: {wire}");
+    }
+}
+
 fn assert_serialized_or_debug_hides_raw_payloads(wire: &str) {
     for forbidden in [
         "RAW_CHECKPOINT_PAYLOAD",
@@ -8722,8 +8756,12 @@ impl SlowHeartbeatTransitionPort {
 
     async fn wait_for_heartbeat_attempts(&self, expected: usize) {
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while self.heartbeat_attempts.load(Ordering::SeqCst) < expected {
-                self.notify_heartbeat_attempt.notified().await;
+            loop {
+                let notified = self.notify_heartbeat_attempt.notified();
+                if self.heartbeat_attempts.load(Ordering::SeqCst) >= expected {
+                    return;
+                }
+                notified.await;
             }
         })
         .await
