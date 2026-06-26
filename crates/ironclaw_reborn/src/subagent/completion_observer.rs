@@ -96,7 +96,13 @@ where
             })
     }
 
-    async fn handle_terminal(&self, event: &TurnLifecycleEvent) -> Result<(), TurnError> {
+    /// Returns `true` when the event belonged to a tracked subagent child and
+    /// was handled (gate-store terminal recorded, parent resumed as needed), or
+    /// `false` when the run is not a subagent child and nothing was done. The
+    /// boolean gates parked-child follow-up work (the real-run cancel) so it
+    /// never fires for a non-subagent run — e.g. the *main* run parking on an
+    /// approval gate, which the observer also sees but must NOT cancel.
+    async fn handle_terminal(&self, event: &TurnLifecycleEvent) -> Result<bool, TurnError> {
         let has_gate_record = self
             .gate_store
             .subagent_kind_for_child(event.run_id)
@@ -120,7 +126,7 @@ where
             .as_ref()
             .is_some_and(|record| record.parent_run_id.is_some() && record.subagent_depth > 0);
         if !has_gate_record && !is_subagent_child {
-            return Ok(());
+            return Ok(false);
         }
         let event = if event.owner_user_id.is_some() {
             event.clone()
@@ -151,7 +157,7 @@ where
             }
             return Err(error);
         }
-        Ok(())
+        Ok(true)
     }
 
     async fn handle_claimed_terminal_states(
@@ -777,31 +783,38 @@ where
     async fn observe_committed_state(&self, state: TurnRunState) -> Result<(), TurnError> {
         if is_subagent_parked_on_user_gate(state.status) {
             let event = blocked_child_as_failed_event_from_state(&state);
-            self.handle_terminal(&event).await?;
-            // Release the real child run's active lock and invalidate its gate;
-            // see `cancel_parked_child_run`. Runs after `handle_terminal` so the
-            // parent keeps the descriptive synthetic failure.
-            self.cancel_parked_child_run(&state.scope, state.run_id, state.actor.clone())
-                .await?;
+            // Only cancel the real run when `handle_terminal` confirms this was a
+            // tracked subagent child. The observer also fires for a *main* run
+            // parking on an approval gate (it has no gate record / parent), and
+            // that run must be surfaced to the user, NOT cancelled.
+            if self.handle_terminal(&event).await? {
+                // Release the real child run's active lock and invalidate its
+                // gate; see `cancel_parked_child_run`. Runs after
+                // `handle_terminal` so the parent keeps the descriptive synthetic
+                // failure.
+                self.cancel_parked_child_run(&state.scope, state.run_id, state.actor.clone())
+                    .await?;
+            }
             return Ok(());
         }
         let event = terminal_event_from_state(&state)?;
-        self.handle_terminal(&event).await
+        self.handle_terminal(&event).await.map(|_| ())
     }
 
     async fn observe_committed_event(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
         if is_subagent_parked_on_user_gate(event.status) {
             let synthetic = blocked_child_as_failed_event_from_event(&event);
-            self.handle_terminal(&synthetic).await?;
-            self.cancel_parked_child_run(
-                &event.scope,
-                event.run_id,
-                event.owner_user_id.clone().map(TurnActor::new),
-            )
-            .await?;
+            if self.handle_terminal(&synthetic).await? {
+                self.cancel_parked_child_run(
+                    &event.scope,
+                    event.run_id,
+                    event.owner_user_id.clone().map(TurnActor::new),
+                )
+                .await?;
+            }
             return Ok(());
         }
-        self.handle_terminal(&event).await
+        self.handle_terminal(&event).await.map(|_| ())
     }
 }
 
@@ -3296,91 +3309,134 @@ mod tests {
         assert_eq!(cancels[0].run_id, child_run_id);
     }
 
-    /// A real (non-race) `cancel_run` failure on the parked-child cleanup must
-    /// propagate out of the observer — not be swallowed — so the path retries
-    /// instead of silently leaving the child `Blocked*` with a held lock and a
-    /// still-resolvable gate. (Convergence races are covered by the production
-    /// match arm; this drives the backend-error arm.)
-    #[tokio::test]
-    async fn parked_child_cancel_backend_failure_propagates() {
-        let tenant = TenantId::new("tenant").unwrap();
-        let agent = AgentId::new("agent").unwrap();
-        let owner = UserId::new("owner").unwrap();
-        let scope = TurnScope::new(
-            tenant,
-            Some(agent),
-            None,
-            ThreadId::new("child-thread-cancel-fail").unwrap(),
-        );
-        let run_id = TurnRunId::new();
-
-        // Empty stores: handle_terminal short-circuits (no gate/child record), so
-        // the parent-resume side never runs and the test isolates the cancel arm.
-        let observer = SubagentCompletionObserver::new(
-            Arc::new(BoundedSubagentGateResolutionStore::new()),
-            Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-            Arc::new(RecordingTurnStateStore::default()),
-            Arc::new(RecordingResultWriter::new(
-                LoopResultRef::new("result:cancel-fail").unwrap(),
-            )),
-            Arc::new(RecordingCoordinator {
-                fail_cancel: true,
-                ..Default::default()
-            }),
-            Arc::new(InMemorySessionThreadService::default()),
-        )
-        .unwrap();
-
-        let event = TurnLifecycleEvent {
-            cursor: EventCursor(7),
-            scope,
-            occurred_at: None,
-            owner_user_id: Some(owner),
-            run_id,
-            status: TurnStatus::BlockedApproval,
-            kind: TurnEventKind::Blocked,
-            blocked_gate: None,
-            sanitized_reason: None,
-        };
-
-        let result = observer.observe_committed_event(event).await;
-        assert!(
-            matches!(result, Err(TurnError::Unavailable { .. })),
-            "a non-race cancel failure must propagate out of the observer, got {result:?}"
-        );
+    /// A tracked parked subagent child plus the wiring the observer needs to
+    /// react to it: a gate record (so `handle_terminal` recognizes it as a real
+    /// subagent child and returns `true`), the child run record, and a child run
+    /// state carrying the authoritative actor (so the cancel can recover it when
+    /// the observed event omits the owner). Mirrors the inline setup in
+    /// `blocking_child_parked_on_gate_resumes_parent_with_failure`.
+    struct ParkedChildScenario {
+        observer: SubagentCompletionObserver<InMemorySessionThreadService>,
+        child_scope: TurnScope,
+        child_run_id: TurnRunId,
+        child_owner: UserId,
     }
 
-    /// When the observed event carries no actor (an ownerless delivery that
-    /// `handle_terminal` would recover internally), the parked-child cancel must
-    /// still fire by recovering the authoritative actor from the child run's own
-    /// state — otherwise the orphaned child stays lock-held in exactly the
-    /// ownerless cases.
-    #[tokio::test]
-    async fn parked_child_cancel_recovers_actor_when_event_owner_missing() {
+    async fn build_parked_child_scenario(
+        coordinator: Arc<RecordingCoordinator>,
+        suffix: &str,
+    ) -> ParkedChildScenario {
         let tenant = TenantId::new("tenant").unwrap();
         let agent = AgentId::new("agent").unwrap();
         let owner = UserId::new("owner").unwrap();
-        let scope = TurnScope::new(
-            tenant,
-            Some(agent),
+        let parent_scope = TurnScope::new(
+            tenant.clone(),
+            Some(agent.clone()),
             None,
-            ThreadId::new("child-thread-recover-actor").unwrap(),
+            ThreadId::new(format!("parent-{suffix}")).unwrap(),
         );
-        let run_id = TurnRunId::new();
+        let parent_thread_scope = ThreadScope {
+            tenant_id: tenant.clone(),
+            agent_id: agent.clone(),
+            project_id: None,
+            owner_user_id: Some(owner.clone()),
+            mission_id: None,
+        };
+        let child_scope = TurnScope::new(
+            tenant.clone(),
+            Some(agent.clone()),
+            None,
+            ThreadId::new(format!("child-{suffix}")).unwrap(),
+        );
+        let child_thread_scope = ThreadScope {
+            tenant_id: tenant,
+            agent_id: agent,
+            project_id: None,
+            owner_user_id: Some(owner.clone()),
+            mission_id: None,
+        };
+        let parent_run_id = TurnRunId::new();
+        let child_run_id = TurnRunId::new();
+        let tree_root_run_id = parent_run_id;
+        let result_ref = LoopResultRef::new(format!("result:{suffix}")).unwrap();
 
         let turn_state_store = Arc::new(RecordingTurnStateStore::default());
-        // The child run's own state carries the authoritative actor. handle_terminal
-        // short-circuits on the empty gate store / missing run record, so the only
-        // actor source for the cancel is this state via get_run_state.
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: parent_thread_scope.clone(),
+                thread_id: Some(parent_scope.thread_id.clone()),
+                created_by_actor_id: "test".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        thread_service
+            .append_tool_result_reference(AppendToolResultReferenceRequest {
+                scope: parent_thread_scope,
+                thread_id: parent_scope.thread_id.clone(),
+                turn_run_id: parent_run_id.to_string(),
+                result_ref: result_ref.as_str().to_string(),
+                safe_summary: ToolResultSafeSummary::new("subagent spawned (blocking)").unwrap(),
+                provider_call: None,
+                model_observation: None,
+            })
+            .await
+            .unwrap();
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: child_thread_scope,
+                thread_id: Some(child_scope.thread_id.clone()),
+                created_by_actor_id: "test".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+
+        let gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+        let goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        goal_store
+            .put(
+                &child_scope,
+                child_run_id,
+                SubagentGoal {
+                    task: "child task".to_string(),
+                    handoff: None,
+                },
+            )
+            .unwrap();
+        let mut parent_run_context = ironclaw_agent_loop::test_support::test_run_context(&format!(
+            "completion-observer-{suffix}"
+        ));
+        parent_run_context.scope = parent_scope.clone();
+        parent_run_context.thread_id = parent_scope.thread_id.clone();
+        parent_run_context.run_id = parent_run_id;
+        parent_run_context.actor = Some(TurnActor::new(owner.clone()));
+        let mut child_run_context = ironclaw_agent_loop::test_support::test_run_context(&format!(
+            "completion-observer-{suffix}-child"
+        ));
+        child_run_context.scope = child_scope.clone();
+        child_run_context.thread_id = child_scope.thread_id.clone();
+        child_run_context.run_id = child_run_id;
+        turn_state_store.add_record(turn_record_for_context(
+            &child_run_context,
+            Some(parent_run_id),
+            1,
+            Some(parent_run_id),
+        ));
+        // The child run's own state carries the authoritative actor so the cancel
+        // can recover it when the observed event omits the owner.
         turn_state_store.add_state(TurnRunState {
-            scope: scope.clone(),
+            scope: child_scope.clone(),
             actor: Some(TurnActor::new(owner.clone())),
             turn_id: ironclaw_turns::TurnId::new(),
-            run_id,
+            run_id: child_run_id,
             status: TurnStatus::BlockedApproval,
-            accepted_message_ref: AcceptedMessageRef::new("msg:recover").unwrap(),
-            source_binding_ref: SourceBindingRef::new("source:recover").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:recover").unwrap(),
+            accepted_message_ref: AcceptedMessageRef::new("msg:parked-scenario").unwrap(),
+            source_binding_ref: SourceBindingRef::new("source:parked-scenario").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:parked-scenario").unwrap(),
             resolved_run_profile_id: RunProfileId::new("default").unwrap(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
@@ -3394,34 +3450,102 @@ mod tests {
             product_context: None,
             resume_disposition: None,
         });
+        gate_store
+            .record_awaited_child(AwaitedChildSetRecord {
+                gate_ref: GateRef::new(format!("gate:{suffix}")).unwrap(),
+                parent_run_context,
+                tree_root_run_id,
+                child_scope: child_scope.clone(),
+                child_run_id,
+                child_thread_id: child_scope.thread_id.clone(),
+                source_binding_ref: SourceBindingRef::new("subagent-source:scenario").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("subagent-reply:scenario")
+                    .unwrap(),
+                subagent_kind: SubagentKindId::new("general").unwrap(),
+                spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+                    .unwrap(),
+                result_ref: result_ref.clone(),
+                mode: SpawnSubagentMode::Blocking,
+            })
+            .await
+            .unwrap();
 
-        let coordinator = Arc::new(RecordingCoordinator::default());
+        let result_writer = Arc::new(RecordingResultWriter::new(result_ref));
         let observer = SubagentCompletionObserver::new(
-            Arc::new(BoundedSubagentGateResolutionStore::new()),
-            Arc::new(InMemoryBoundedSubagentGoalStore::new()),
+            gate_store,
+            goal_store,
             turn_state_store,
-            Arc::new(RecordingResultWriter::new(
-                LoopResultRef::new("result:recover").unwrap(),
-            )),
-            coordinator.clone(),
-            Arc::new(InMemorySessionThreadService::default()),
+            result_writer,
+            coordinator,
+            thread_service,
         )
         .unwrap();
 
-        // Event carries NO owner — the cancel must recover the actor from state.
-        let event = TurnLifecycleEvent {
+        ParkedChildScenario {
+            observer,
+            child_scope,
+            child_run_id,
+            child_owner: owner,
+        }
+    }
+
+    fn parked_child_event(
+        scope: TurnScope,
+        run_id: TurnRunId,
+        owner_user_id: Option<UserId>,
+    ) -> TurnLifecycleEvent {
+        TurnLifecycleEvent {
             cursor: EventCursor(7),
             scope,
             occurred_at: None,
-            owner_user_id: None,
+            owner_user_id,
             run_id,
             status: TurnStatus::BlockedApproval,
             kind: TurnEventKind::Blocked,
             blocked_gate: None,
             sanitized_reason: None,
-        };
+        }
+    }
 
-        observer
+    /// A real (non-race) `cancel_run` failure on the parked-child cleanup must
+    /// propagate out of the observer — not be swallowed — so the path retries
+    /// instead of silently leaving the child `Blocked*` with a held lock and a
+    /// still-resolvable gate. (Convergence races are covered by the production
+    /// match arm; this drives the backend-error arm.)
+    #[tokio::test]
+    async fn parked_child_cancel_backend_failure_propagates() {
+        let coordinator = Arc::new(RecordingCoordinator {
+            fail_cancel: true,
+            ..Default::default()
+        });
+        let scenario = build_parked_child_scenario(coordinator, "cancel-fail").await;
+        let event = parked_child_event(
+            scenario.child_scope.clone(),
+            scenario.child_run_id,
+            Some(scenario.child_owner.clone()),
+        );
+
+        let result = scenario.observer.observe_committed_event(event).await;
+        assert!(
+            matches!(result, Err(TurnError::Unavailable { .. })),
+            "a non-race cancel failure must propagate out of the observer, got {result:?}"
+        );
+    }
+
+    /// When the observed event carries no actor (an ownerless delivery that
+    /// `handle_terminal` recovers internally before resuming the parent), the
+    /// parked-child cancel must still fire by recovering the authoritative actor
+    /// from the child run's own state — otherwise the orphaned child stays
+    /// lock-held in exactly the ownerless cases.
+    #[tokio::test]
+    async fn parked_child_cancel_recovers_actor_when_event_owner_missing() {
+        let coordinator = Arc::new(RecordingCoordinator::default());
+        let scenario = build_parked_child_scenario(coordinator.clone(), "recover-actor").await;
+        // Event carries NO owner — the cancel must recover the actor from state.
+        let event = parked_child_event(scenario.child_scope.clone(), scenario.child_run_id, None);
+
+        scenario
+            .observer
             .observe_committed_event(event)
             .await
             .expect("ownerless parked child must still cancel via recovered actor");
@@ -3432,11 +3556,56 @@ mod tests {
             1,
             "the cancel must fire for an ownerless parked child by recovering the actor from state"
         );
-        assert_eq!(cancels[0].run_id, run_id);
+        assert_eq!(cancels[0].run_id, scenario.child_run_id);
         assert_eq!(
             cancels[0].actor,
-            TurnActor::new(owner),
+            TurnActor::new(scenario.child_owner),
             "the recovered actor must be the child run's own actor"
+        );
+    }
+
+    /// Regression: the observer also fires when a *main* (non-subagent) run parks
+    /// on an approval gate, because `observes_*` keys on the parked status alone.
+    /// Such a run has no gate record / parent, so `handle_terminal` does nothing
+    /// and the parked-child cancel MUST be skipped — the main run has to stay
+    /// parked for the user to resolve, not be cancelled out from under them.
+    #[tokio::test]
+    async fn main_run_parked_on_gate_is_not_cancelled_by_observer() {
+        let coordinator = Arc::new(RecordingCoordinator::default());
+        let observer = SubagentCompletionObserver::new(
+            Arc::new(BoundedSubagentGateResolutionStore::new()),
+            Arc::new(InMemoryBoundedSubagentGoalStore::new()),
+            Arc::new(RecordingTurnStateStore::default()),
+            Arc::new(RecordingResultWriter::new(
+                LoopResultRef::new("result:main").unwrap(),
+            )),
+            coordinator.clone(),
+            Arc::new(InMemorySessionThreadService::default()),
+        )
+        .unwrap();
+        let event = parked_child_event(
+            TurnScope::new(
+                TenantId::new("tenant").unwrap(),
+                Some(AgentId::new("agent").unwrap()),
+                None,
+                ThreadId::new("main-thread").unwrap(),
+            ),
+            TurnRunId::new(),
+            Some(UserId::new("owner").unwrap()),
+        );
+
+        observer
+            .observe_committed_event(event)
+            .await
+            .expect("a main run parked on a gate must be a no-op for the observer");
+
+        assert!(
+            coordinator.cancels().is_empty(),
+            "the observer must NOT cancel a non-subagent main run parked on a gate"
+        );
+        assert!(
+            coordinator.resumes().is_empty(),
+            "a main run has no parent to resume"
         );
     }
 
