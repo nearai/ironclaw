@@ -1,9 +1,9 @@
 # Capability Policy Architecture (v1)
 
-**Status:** settled design — ready to outline implementation
-**Date:** 2026-06-24 (settled 2026-06-25)
+**Status:** in implementation — design §1–§14 holds; **§17 records what's built + the corrections implementation forced.** Read §17 alongside the design.
+**Date:** 2026-06-24 (settled 2026-06-25; implementation status 2026-06-26)
 **Build target:** IronClaw **Reborn** (Rust) — Reborn crates only, **not** engine v2 or legacy `src/`. goclaw is **reference only** (Appendix B).
-**Continues:** nearai/ironclaw#4628 — this design picks up from it (see §1.5).
+**Continues:** nearai/ironclaw#4628; tracked under epic **#5261**. Child issues: #5266 (role), #5267 (availability resolver), #5268 (admin capability surface), #5272 (REST-created users), #5273 (delta store + four-dimension enforcement).
 
 ## Goal
 
@@ -211,11 +211,16 @@ Each capability declares a default in its **manifest**:
 
 | Capability | availability | approval | identity |
 |---|---|---|---|
-| `builtin.web_search` | Available | Prompt | None |
+| `nearai.web_search` (web-access ext) | Available | Prompt | None |
 | `builtin.time` | Available | AlwaysAllow | None |
 | `builtin.shell` | Hidden | Prompt | None |
-| `mcp.slack` | Hidden | Prompt | user-keyed |
+| `slack.*` (slack WASM extension) | Hidden | Prompt | user-keyed |
+| `gmail.*` (gmail WASM extension) | Hidden | Prompt | user-keyed |
 | `skill.code-review` | Available | AlwaysAllow | None |
+
+(First-party integrations on Reborn are **WASM extensions** — `slack`, `gmail`,
+`github`, `google-*`, `web-access` — not MCP. `nearai-mcp` / `notion-mcp` are the
+only MCP-kind packages. See §17.)
 
 Zero admin config ⇒ a user already has the safe built-ins and nothing
 credentialed.
@@ -301,14 +306,18 @@ Tenant `acme` (= its default project). Admin **`director@`**. Members **Bob**,
 Google Workspace lets sign in as it).
 
 `director@` (Admin) sets:
-1. `web_search` Available **for Bob** (per-user grant) → Bob has it, Carol doesn't.
-2. `mcp.slack` config `{workspace: acme}`, identity **admin-keyed**, and provides
-   the key → all who have it can use Slack; nobody sets a key themselves.
-3. `gmail` identity **user-keyed** → each person connects their own Gmail via the
-   auth gate; `engineering@`'s operator connects the team mailbox.
+1. `nearai.web_search` Available **for Bob** (per-user grant) → Bob has it, Carol
+   doesn't. (Per-user availability is a **User-scoped delta** combined with the
+   installation set — see §17; #4544 alone can't express per-user from an admin.)
+2. `slack` WASM extension, config `{workspace: acme}`, identity **admin-keyed**,
+   and provides the key → all who have it can use Slack; nobody sets a key
+   themselves. (Not MCP — a sandboxed WASM extension.)
+3. `gmail` WASM extension, identity **user-keyed** → each person connects their
+   own Gmail via the auth gate; `engineering@`'s operator connects the team mailbox.
 4. `shell` left `Hidden`.
 
-Nothing here is Acme-specific; every line is a delta.
+Nothing here is Acme-specific; every line is a delta (availability/config/identity/
+approval) or a tenant-wide install.
 
 ---
 
@@ -410,6 +419,104 @@ the 2 corrections are folded in below).
 5. **Credential-account binding** — after the §1.5 shared-account-vs-shared-config
    decision.
 6. **Benchmark (#59)** — in the benchmarks repo.
+
+---
+
+## 17. Implementation status & corrections (2026-06-26)
+
+The design above (§1–§14) holds. Implementation surfaced corrections and concrete
+decisions; **where this section conflicts with §1–§16, this section wins** (it
+reflects live, in some cases live-validated, code).
+
+### What's built (integration branch `feat/capability-policy-milestone`, on top of main)
+
+All child branches are assembled into one local integration branch; nothing
+landed on main yet (co-land after the manual Acme test passes).
+
+| Issue | Built | State |
+|---|---|---|
+| #5266 | `ironclaw_host_api::UserRole{Owner>Admin>Member}` + `WebUiAuthenticatedCaller::is_admin()` | PR #5270 |
+| #5262/#5263 | `ironclaw_capability_policy`: `EffectivePolicy`, `resolve_effective_policy` (pure fold), `PolicyResolver` port, `CapabilityDefaultPolicySource` | PR #5262/#5263 |
+| #4544 | `ScopedLifecycleInstallationStore` (AdminShared/UserPrivate) + libSQL/Postgres/Filesystem backends | PR #4544 (taken over) |
+| #5267 | `ScopedLifecyclePolicyCapabilitySurfaceResolver` — availability allow-set from #4544 installs; `PackageCapabilitySource` seeded from the extension catalog | PR #5277 |
+| #5273 (foundation) | `CapabilityPolicyDeltaStore` (in-memory) + `StoreBackedPolicyResolver` | PR #5288 |
+| #5268 | **admin capability-availability REST** (`PUT/DELETE/GET /api/webchat/v2/admin/extensions[/{package_id}]`), `is_admin`-gated → #4544 store | committed; **live-validated** |
+| #5272 | local multi-user auth → **reworked** to REST-created users (`POST /admin/users`, `PUT /role`) + durable user store + dynamic authenticator over the operator bootstrap | **in progress** (supersedes the env-token `StaticUserTokenAuthenticator`, PR #5286) |
+
+**Live-validated** (booted `ironclaw-reborn serve`, curled): admin installs an
+extension tenant-wide → persists across restart (libSQL); non-admin → 403; no
+auth → 401.
+
+### Corrections the design didn't anticipate
+
+1. **First-party integrations are WASM extensions, not MCP.** `slack`, `gmail`,
+   `github`, `google-*`, `web-access` ship as sandboxed WASM extensions (+ a
+   native channel/adapter for transport); `nearai-mcp` / `notion-mcp` are the
+   only MCP-kind packages. §7/§12 corrected. A **Channel** (transport) and an
+   **extension** (capability) are independent — the Slack *extension* (a tool) is
+   not the deferred Slack *channel* (room addressability, §13).
+
+2. **Per-user availability is a `CapabilityPolicyDelta`, not a #4544 install an
+   admin can write.** #4544 ownership is `AdminShared` (tenant-wide,
+   admin-writable) or `UserPrivate` (self-owned); its `can_be_mutated_by`
+   **forbids an admin writing a `UserPrivate` row for another user**. So
+   "web_search for Bob not Carol" = a `User{bob}` availability **delta**, and full
+   availability = *installed* (#4544) **AND** *not-hidden*
+   (`EffectivePolicy.available` from default+deltas). #5268's admin-extension
+   surface therefore manages the **tenant-shared (AdminShared)** set only; per-user
+   availability rides the delta store + the resolver combining both (remaining
+   #5273 enforcement).
+
+3. **Availability resolver is feature- + flag-gated.** Compiled in by the
+   `capability-policy` cargo feature; **activated** per-runtime by
+   `IRONCLAW_REBORN_CAPABILITY_POLICY` (default OFF). Off ⇒ local-dev keeps the
+   historical `AllowAll` surface (flipping to deny-by-default broke 24 existing
+   local-dev tests). It can become the default once those tests are reconciled.
+
+4. **Durable store FS root.** The scoped-lifecycle store's default `/engine/...`
+   root has **no mounted backend** in the local-dev composite (mounts are
+   `/tenants`, `/memory`, `/events`, `/projects`, `/system/extensions`) → it must
+   root under the libSQL-backed **`/tenants`** mount. The #5267 resolver (read) and
+   #5268 admin surface (write) construct the store via the same shared helper, so
+   writes are visible to reads.
+
+5. **#5272 — users are created through REST, not env.** Durable user store
+   (`user_id → {role, token_hash}` + token index over `/tenants`) + admin routes
+   (`POST /admin/users` mints a token — a *local-dev affordance*; `PUT /role`;
+   `GET`/`DELETE`) + a dynamic authenticator layered over the operator
+   `EnvBearerAuthenticator` (the bootstrap admin). **These endpoints are the
+   contract the future user-creation / role UI will reuse** — only the auth
+   mechanism (local-dev token vs production SSO/session) differs, not the routes.
+   §5's "shared account = a User you SSO into" is the production model; local-dev
+   realizes users via these REST routes + tokens. (`IRONCLAW_REBORN_USER_TOKENS`,
+   the env-table first cut, is removed.)
+
+6. **Approval has no admin path today.** `ironclaw_approvals` stores are
+   per-`(tenant,user)` **user-set**. Admin approval policy is a new layer
+   (`EffectivePolicy.approval` from the delta store) merged into
+   `effective_tool_permission` with precedence **admin Deny > admin AlwaysAllow >
+   user choice > tool default**.
+
+7. **Reborn admin gate = `ironclaw_host_api::UserRole` (#5266), not
+   `src/ownership`.** §16's `src/ownership::UserRole` note was the *legacy v1*
+   tree; the Reborn build gates on `WebUiAuthenticatedCaller::is_admin()` carrying
+   #5266's role.
+
+### Revised build order (status)
+
+1. ✅ Policy types + `PolicyResolver` port + default-policy source (#5262/#5263).
+2. ✅ Availability resolver from #4544 installs (#5267), feature+flag gated.
+3. ✅ Admin capability-availability REST — tenant-shared installs (#5268), live.
+4. ⏳ (in progress) REST-created durable users + roles + dynamic auth (#5272).
+5. ⏳ **Four-dimension enforcement (#5273):** durable delta backend; resolver
+   combines #4544-installed **AND** delta-available (per-user availability); config
+   injection; identity ownership-filter at
+   `RuntimeCredentialAccountResolver::resolve_access_secret`; approval admin layer.
+6. ⏳ Manual Acme run with an LLM (per-user `web_search`, `slack` admin-keyed,
+   `gmail` user-keyed, `shell` hidden), durable across restart.
+
+The live REST catalog is `.claude/rules/rest-endpoints.md` (the "list it
+somewhere" contract).
 
 ---
 
