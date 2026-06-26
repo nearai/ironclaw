@@ -461,6 +461,38 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the settings-search port in
   the Reborn WebUI v2 Playwright job.
 
+### Step 13: Legacy Extension Channel Label Regression Port
+
+Extended `tests/e2e/scenarios/test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the action-label intent from legacy
+`test_settings_extensions_labels.py` to Reborn's top-level
+`/v2/extensions/channels` surface:
+
+- unauthenticated channel extensions show `Configure`, not `Reconfigure`;
+- authenticated channel extensions show `Reconfigure`;
+- `setup_required` channel extensions expose one primary configure action and
+  do not duplicate it with a second setup menu item;
+- clicking `Reconfigure` opens the local configure modal and does not post to
+  the activation endpoint.
+
+Issue fixed:
+
+- Reborn extension cards could add duplicate configuration menu actions for
+  channel extensions: `setup_required` channels could show both primary
+  `Configure` and overflow `Setup`, while ready/authenticated channels could
+  receive overlapping `Reconfigure` entries. The card presenter now suppresses
+  those duplicate overflow actions.
+
+Behavior adjustment:
+
+- The legacy Settings Channels UI used `Setup` for unauthenticated fallback
+  setup. Reborn's top-level Extensions UI uses `Configure` for the same
+  unauthenticated configuration action and `Reconfigure` after credentials are
+  present, so the port asserts Reborn terminology while preserving the original
+  regression intent: do not label an unauthenticated channel as already
+  reconfigurable.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -473,7 +505,8 @@ Not yet ported:
 - deeper tool approval scenarios that need real Reborn runtime/tool execution,
   persistence, or recovery beyond the browser approval-card contract;
 - remaining settings/extension lifecycle scenarios beyond Settings search,
-  Skills, and the top-level extension install/manage surface;
+  Skills, channel label regressions, and the top-level extension
+  install/manage surface;
 - OAuth/product-auth flows;
 - Slack/Telegram/channel pairing scenarios;
 - admin/operator flows, including Reborn Settings Users search once the v2
@@ -518,6 +551,12 @@ embedded. The build script now tracks served asset files explicitly.
 The settings Channels card also displayed installed channel package names
 instead of `display_name` when no registry entry was present. That is fixed in
 the Settings Channels presenter.
+
+The extension label port found duplicate channel configuration menu actions in
+the top-level Extensions surface. `setup_required` channels no longer get a
+secondary overflow `Setup` action when the primary `Configure` button already
+covers setup, and ready/authenticated channels no longer receive overlapping
+`Reconfigure` menu items.
 
 The same settings inspection confirmed an admin parity gap: Reborn Settings
 Users client methods still return TODO stub responses instead of calling real

@@ -83,6 +83,18 @@ AVAILABLE_CHANNEL = {
     "installed": False,
 }
 
+LABEL_CHANNEL_BASE = {
+    "package_ref": _package_ref("label-channel"),
+    "display_name": "Label Channel",
+    "kind": "wasm_channel",
+    "description": "A WASM channel used to assert card action labels.",
+    "active": False,
+    "authenticated": False,
+    "has_auth": False,
+    "needs_setup": True,
+    "tools": [],
+}
+
 
 async def _open_mocked_extensions_page(
     reborn_v2_server,
@@ -91,11 +103,13 @@ async def _open_mocked_extensions_page(
     installed=None,
     registry=None,
     tab="registry",
+    setup_payloads=None,
 ):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
     installed_extensions = [dict(extension) for extension in (installed or [])]
     registry_entries = [dict(entry) for entry in (registry or [])]
+    setup_payloads_by_id = dict(setup_payloads or {})
     install_requests: list[dict] = []
     activate_requests: list[str] = []
     remove_requests: list[str] = []
@@ -119,6 +133,29 @@ async def _open_mocked_extensions_page(
 
         if path == "/api/webchat/v2/extensions/registry" and request.method == "GET":
             await fulfill_json(route, {"entries": registry_entries})
+            return
+
+        if (
+            path.startswith("/api/webchat/v2/extensions/")
+            and path.endswith("/setup")
+            and request.method == "GET"
+        ):
+            package_id = unquote(
+                path.removeprefix("/api/webchat/v2/extensions/").removesuffix("/setup")
+            )
+            await fulfill_json(
+                route,
+                setup_payloads_by_id.get(
+                    package_id,
+                    {
+                        "name": package_id,
+                        "kind": "wasm_channel",
+                        "secrets": [],
+                        "fields": [],
+                        "onboarding": None,
+                    },
+                ),
+            )
             return
 
         if path == "/api/webchat/v2/extensions/install" and request.method == "POST":
@@ -210,6 +247,15 @@ def _card_by_title(page, title: str):
     )
 
 
+def _label_channel(**overrides):
+    return {**LABEL_CHANNEL_BASE, **overrides}
+
+
+async def _open_card_menu(card):
+    await card.get_by_label("More actions").click()
+    return card.get_by_role("menu")
+
+
 async def test_reborn_legacy_extensions_registry_search_and_install(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -269,6 +315,138 @@ async def test_reborn_legacy_extensions_installed_actions(
         await page.get_by_role("menuitem", name="Remove").click()
         await expect(page.get_by_text("Active Tool removed")).to_be_visible(timeout=5000)
         assert harness["remove_requests"] == ["active-tool"]
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_channel_config_label_depends_on_authentication(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[
+            _label_channel(
+                authenticated=False,
+                activation_status="configured",
+                onboarding_state="activation_in_progress",
+            ),
+            _label_channel(
+                package_ref=_package_ref("label-channel-authenticated"),
+                display_name="Authenticated Label Channel",
+                authenticated=True,
+                activation_status="configured",
+                onboarding_state="activation_in_progress",
+            ),
+        ],
+        tab="channels",
+    )
+    try:
+        page = harness["page"]
+
+        unauthenticated = _card_by_title(page, "Label Channel")
+        await expect(unauthenticated).to_be_visible(timeout=5000)
+        await _open_card_menu(unauthenticated)
+        await expect(
+            page.get_by_role("menuitem", name="Configure", exact=True)
+        ).to_have_count(1)
+        await expect(
+            page.get_by_role("menuitem", name="Reconfigure", exact=True)
+        ).to_have_count(0)
+
+        await page.mouse.click(8, 8)
+        authenticated = _card_by_title(page, "Authenticated Label Channel")
+        await expect(authenticated).to_be_visible(timeout=5000)
+        await _open_card_menu(authenticated)
+        await expect(
+            page.get_by_role("menuitem", name="Reconfigure", exact=True)
+        ).to_have_count(1)
+        await expect(
+            page.get_by_role("menuitem", name="Configure", exact=True)
+        ).to_have_count(0)
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_channel_setup_required_has_single_configure_action(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[
+            _label_channel(
+                authenticated=False,
+                activation_status="installed",
+                onboarding_state="setup_required",
+            )
+        ],
+        tab="channels",
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, "Label Channel")
+        await expect(card).to_be_visible(timeout=5000)
+
+        await expect(card.get_by_role("button", name="Configure")).to_have_count(1)
+        await _open_card_menu(card)
+        await expect(page.get_by_role("menuitem", name="Setup", exact=True)).to_have_count(
+            0
+        )
+        await expect(
+            page.get_by_role("menuitem", name="Configure", exact=True)
+        ).to_have_count(0)
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_channel_reconfigure_opens_modal_without_activate(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[
+            _label_channel(
+                active=True,
+                authenticated=True,
+                has_auth=True,
+                needs_setup=True,
+                activation_status="active",
+                onboarding_state="ready",
+            )
+        ],
+        setup_payloads={
+            "label-channel": {
+                "name": "label-channel",
+                "kind": "wasm_channel",
+                "secrets": [
+                    {
+                        "name": "BOT_TOKEN",
+                        "prompt": "Bot token",
+                        "provided": True,
+                        "optional": False,
+                        "auto_generate": False,
+                    }
+                ],
+                "fields": [],
+                "onboarding": None,
+            }
+        },
+        tab="channels",
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, "Label Channel")
+        await expect(card).to_be_visible(timeout=5000)
+
+        await _open_card_menu(card)
+        await page.get_by_role("menuitem", name="Reconfigure", exact=True).click()
+        await expect(page.get_by_role("heading", name="Configure Label Channel")).to_be_visible(
+            timeout=5000
+        )
+        await expect(page.get_by_text("Bot token")).to_be_visible()
+        assert harness["activate_requests"] == []
     finally:
         await harness["context"].close()
 

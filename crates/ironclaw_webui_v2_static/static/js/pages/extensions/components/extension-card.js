@@ -155,7 +155,15 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
       run: () => onConfigure(configurePayload),
     });
   }
-  if (canManage && isChannelExtensionKind(ext.kind) && (state === "setup_required" || state === "failed")) {
+  const hasOverflowConfigureAction = overflowActions.some(
+    (action) => action.id === "configure"
+  );
+  if (
+    canManage &&
+    primaryAction !== "configure" &&
+    isChannelExtensionKind(ext.kind) &&
+    (state === "setup_required" || state === "failed")
+  ) {
     overflowActions.push({
       id: "setup",
       label: "Setup",
@@ -166,6 +174,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   if (
     canManage &&
     isChannelExtensionKind(ext.kind) &&
+    !hasOverflowConfigureAction &&
     (state === "active" || state === "ready" || state === "pairing_required" || state === "pairing")
   ) {
     overflowActions.push({
