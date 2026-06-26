@@ -46,3 +46,18 @@ These are still embedded by the crate's `build.rs` (and covered by the
 crate's Rust asset tests), but the browser no longer loads them
 individually — only the bundle. They are the source of truth for the
 bundle; keep editing them, not `dist/`.
+
+## Conventions
+
+- **Never wire a UI action handler to a truthy no-op stub.** Controls
+  here gate their own visibility on the handler prop being truthy — e.g.
+  `const showRetryAction = status === "error" && onRetry;` in
+  `message-bubble.js`. A truthy `() => {}` (such as a shared `noop`)
+  still satisfies that `&& handler` guard, so the control renders fully
+  but does nothing when clicked — a dead button. Either implement the
+  action for real, or leave the handler `null`/`undefined` so the guard
+  hides the control. This is the regression the retry button shipped
+  with (`retryMessage: noop` in `useChat.js`). Cover such handlers with
+  a test that drives the hook's returned callback and asserts the real
+  side effect fires (see `hooks/useChat.test.mjs`), not just that the
+  button renders.

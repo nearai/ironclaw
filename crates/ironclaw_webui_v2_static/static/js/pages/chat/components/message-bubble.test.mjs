@@ -69,3 +69,21 @@ test("message timestamp and actions share a hover-only meta row", () => {
     "hover controls should use fixed-size icons instead of text that competes with the timestamp",
   );
 });
+
+test("retry button is gated on a real onRetry handler and invokes it on click", () => {
+  // The button must only render when `onRetry` is truthy — so callers that
+  // have no retry handler pass null/undefined and the control hides. A
+  // truthy no-op handler would satisfy this guard yet do nothing on click
+  // (the dead-button regression this test exists to prevent).
+  assert.match(
+    messageBubbleSource,
+    /const showRetryAction = status === "error" && onRetry;/,
+    "retry button must be gated on a truthy onRetry handler, not rendered unconditionally",
+  );
+  // Clicking the button must actually call the handler with the message.
+  assert.match(
+    messageBubbleSource,
+    /onClick=\$\{\(\)\s*=>\s*onRetry\(message\)\}/,
+    "retry button click must invoke onRetry(message)",
+  );
+});

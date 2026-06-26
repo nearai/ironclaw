@@ -798,8 +798,49 @@ export function useChat(threadId) {
     [resolveGate],
   );
 
+  // Retry a message that failed to send. The action bar renders a Retry
+  // button on any bubble with `status: "error"` (a network/API failure or a
+  // server `rejected_busy`), so this must re-dispatch the send.
+  const retryMessage = React.useCallback(
+    async (message) => {
+      // Only failed user bubbles are retryable, and only with non-empty
+      // text. Re-send is CONTENT-ONLY: a failed bubble's `attachments` are
+      // render-shape (the original File blobs are gone after the first send),
+      // so they cannot be reconstructed into wire attachments. rejected_busy
+      // and network errors are almost always plain text, so the impact is
+      // low — but a retried message never re-uploads its attachments.
+      if (
+        !message ||
+        message.role !== "user" ||
+        message.status !== "error" ||
+        typeof message.content !== "string" ||
+        message.content.trim() === ""
+      ) {
+        return;
+      }
+      let response;
+      try {
+        // Reuse send(): it owns the optimistic bubble, the
+        // busy/processing/pendingGate guards, the SSE wiring, and the
+        // failure handling. Don't reimplement the network path here.
+        response = await send(message.content, { threadId });
+      } catch {
+        // send() already marked the fresh optimistic bubble as error; there
+        // is nothing else to do — keep the original failed bubble too.
+        return;
+      }
+      // send() returns null when the thread is still busy. Only drop the old
+      // failed bubble AFTER the re-send is actually accepted — deleting it on
+      // a blocked send would make the message vanish with no feedback.
+      if (response) {
+        setMessages((prev) => prev.filter((m) => m.id !== message.id));
+      }
+    },
+    [send, threadId, setMessages],
+  );
+
   // Fork chat.js expects these as stubs: v2 stream is deterministic
-  // enough that retry / suggestions / recovery are not necessary in
+  // enough that suggestions / recovery are not necessary in
   // local-dev. Wire them as no-ops so the chat UI renders without
   // additional branches.
   const noop = React.useCallback(() => {}, []);
@@ -826,7 +867,7 @@ export function useChat(threadId) {
     // fork-shape compatibility — see comments above
     suggestions: [],
     setSuggestions: noop,
-    retryMessage: noop,
+    retryMessage,
     approve,
     recoverHistory: noop,
     recoveryNotice: null,
