@@ -1027,11 +1027,36 @@ Behavior adjustment:
   the matching user-visible invariant that accounting frames do not mutate the
   chat transcript.
 
+### Step 28: Legacy Slash Autocomplete Review
+
+Reviewed legacy `test_slash_autocomplete_shows_commands_and_skills` against
+the current Reborn WebChat v2 chat surface.
+
+Already-covered functional Reborn behavior:
+
+- channel-connect commands are handled through chat input and do not create
+  user/assistant transcript messages when they resolve to a pairing action;
+  see `test_reborn_legacy_slack_connect_command_renders_pairing_card_and_redeems_code`;
+- skill usage hints are rendered on the Reborn Settings Skills surface, covered
+  by `test_reborn_webui_v2_legacy_skills.py` and settings-search coverage.
+
+Behavior adjustment:
+
+- Legacy v1 exposed an inline `#slash-autocomplete` menu that mixed built-in
+  slash commands with installed skills and inserted `/{skill} ` into the chat
+  input. Reborn WebChat v2 currently has no equivalent inline slash menu. It
+  uses a separate command palette for navigation/actions and handles only
+  channel-connect intent phrases in the chat composer. The legacy slash menu
+  test is therefore not a direct Reborn port target unless the Reborn product
+  intentionally adds an inline skill/command autocomplete surface.
+
 ## Open Migration Buckets
 
 Not yet ported:
 
-- remaining legacy chat UI affordances that have Reborn equivalents;
+- remaining legacy chat UI affordances that have Reborn equivalents; the legacy
+  inline slash autocomplete menu has no current Reborn v2 surface and is
+  documented above;
 - remaining legacy SSE/history edge cases only where Reborn exposes a matching
   product concept; active-thread fallback and read-only external-channel refresh
   are legacy v1 routing semantics rather than current standalone Reborn v2 UI
