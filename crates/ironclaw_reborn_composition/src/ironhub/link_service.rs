@@ -8,20 +8,25 @@ use ironclaw_product_workflow::{
     IronhubLinkService, IronhubRegisterRequest, LifecyclePhase,
 };
 
+use crate::RebornBuildError;
 use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::lifecycle::RebornLocalSkillManagementPort;
 
-use super::agent_link::{InstallDelivery, RegisterChallenge, verify_signature};
+use super::agent_link::{IronhubSharedKey, install_payload, register_payload, verify_signature};
 use super::model::{IronHubCommand, IronHubEntryKind, IronHubInstallOptions};
 use super::service::IronHubService;
 
 const MAX_TIMESTAMP_DRIFT_SECS: i64 = 300;
+const LINK_USER_ID: &str = "reborn-ironhub-link";
+const INSTALL_CAPABILITY_ID: &str = "builtin.ironhub_install";
 
 pub(crate) struct RebornIronhubLinkService {
     skill_management: Arc<RebornLocalSkillManagementPort>,
     extension_management: Arc<RebornLocalExtensionManagementPort>,
     host_runtime_http_egress: HostRuntimeHttpEgressPort,
-    shared_key: String,
+    shared_key: IronhubSharedKey,
+    link_user_id: UserId,
+    install_capability: CapabilityId,
 }
 
 impl RebornIronhubLinkService {
@@ -29,30 +34,34 @@ impl RebornIronhubLinkService {
         skill_management: Arc<RebornLocalSkillManagementPort>,
         extension_management: Arc<RebornLocalExtensionManagementPort>,
         host_runtime_http_egress: HostRuntimeHttpEgressPort,
-        shared_key: String,
-    ) -> Self {
-        Self {
+        shared_key: IronhubSharedKey,
+    ) -> Result<Self, RebornBuildError> {
+        Ok(Self {
             skill_management,
             extension_management,
             host_runtime_http_egress,
             shared_key,
-        }
+            link_user_id: UserId::new(LINK_USER_ID).map_err(invalid_config)?,
+            install_capability: CapabilityId::new(INSTALL_CAPABILITY_ID).map_err(invalid_config)?,
+        })
     }
 
     fn install_service(&self) -> Result<IronHubService, IronhubLinkError> {
-        let scope = ResourceScope::local_default(
-            UserId::new("reborn-ironhub-link").map_err(internal)?,
-            InvocationId::new(),
-        )
-        .map_err(internal)?;
-        let capability_id = CapabilityId::new("builtin.ironhub_install").map_err(internal)?;
+        let scope = ResourceScope::local_default(self.link_user_id.clone(), InvocationId::new())
+            .map_err(internal)?;
         Ok(IronHubService::new_with_host_egress(
             Arc::clone(&self.skill_management),
             Arc::clone(&self.extension_management),
             self.host_runtime_http_egress.clone(),
-            capability_id,
+            self.install_capability.clone(),
             scope,
         ))
+    }
+}
+
+fn invalid_config(error: impl std::fmt::Display) -> RebornBuildError {
+    RebornBuildError::InvalidConfig {
+        reason: format!("ironhub link service: {error}"),
     }
 }
 
@@ -81,13 +90,7 @@ impl IronhubLinkService for RebornIronhubLinkService {
         if !timestamp_fresh(request.ts) {
             return Err(IronhubLinkError::StaleTimestamp);
         }
-        let challenge = RegisterChallenge {
-            uid: &request.uid,
-            aid: &request.aid,
-            ts: request.ts,
-            nonce: &request.nonce,
-        };
-        if verify_signature(&self.shared_key, &challenge.payload(), &request.sig) {
+        if verify_signature(self.shared_key.as_str(), &register_payload(&request), &request.sig) {
             Ok(())
         } else {
             Err(IronhubLinkError::InvalidSignature)
@@ -101,16 +104,7 @@ impl IronhubLinkService for RebornIronhubLinkService {
         if !timestamp_fresh(request.ts) {
             return Err(IronhubLinkError::StaleTimestamp);
         }
-        let delivery = InstallDelivery {
-            slug: &request.slug,
-            version: &request.version,
-            uid: &request.uid,
-            aid: &request.aid,
-            ts: request.ts,
-            nonce: &request.nonce,
-            artifact_digest: &request.artifact_digest,
-        };
-        if !verify_signature(&self.shared_key, &delivery.payload(), &request.sig) {
+        if !verify_signature(self.shared_key.as_str(), &install_payload(&request), &request.sig) {
             return Err(IronhubLinkError::InvalidSignature);
         }
 

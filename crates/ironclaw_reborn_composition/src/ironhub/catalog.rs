@@ -81,6 +81,15 @@ pub(super) fn classify_gate_and_digest(
             )
         }
     };
+    let provenance = if options.private_manifest_url.is_some() {
+        IronHubProvenance::Private
+    } else if matches!(provenance, IronHubProvenance::Private) {
+        return Err(invalid_input(format!(
+            "catalog entry '{name}' claims private provenance but was not installed from a private manifest"
+        )));
+    } else {
+        provenance
+    };
     if let Some(expected) = &options.expected_version
         && expected != version
     {

@@ -27,7 +27,8 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult,
+    IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, LifecyclePackageRef,
+    LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult,
     LlmProbeRequest, LlmProbeResult, LlmProviderView, RebornAutomationInfo, RebornAutomationSource,
     RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
     RebornChannelConnectStrategy, RebornConnectableChannelInfo,
@@ -83,6 +84,7 @@ struct StubServices {
     list_extensions_calls: Mutex<usize>,
     list_extension_registry_calls: Mutex<usize>,
     install_extension_calls: Mutex<Vec<String>>,
+    ironhub_deliver_install_calls: Mutex<Vec<IronhubInstallDeliveryRequest>>,
     activate_extension_calls: Mutex<Vec<String>>,
     remove_extension_calls: Mutex<Vec<String>>,
     get_llm_config_calls: Mutex<usize>,
@@ -400,6 +402,22 @@ impl RebornServicesApi for StubServices {
         Ok(extension_action_response("installed"))
     }
 
+    async fn ironhub_deliver_install(
+        &self,
+        request: IronhubInstallDeliveryRequest,
+    ) -> Result<IronhubInstallDeliveryResult, RebornServicesError> {
+        let slug = request.slug.clone();
+        self.ironhub_deliver_install_calls
+            .lock()
+            .expect("lock")
+            .push(request);
+        Ok(IronhubInstallDeliveryResult {
+            installed: true,
+            slug,
+            message: "installed".to_string(),
+        })
+    }
+
     async fn activate_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -602,6 +620,34 @@ async fn create_thread_dispatches_through_facade() {
         1,
         "facade called exactly once"
     );
+}
+
+#[tokio::test]
+async fn ironhub_deliver_install_dispatches_through_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/ironhub/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"slug":"my-skill","version":"1.0.0","uid":"u","aid":"a","ts":1700000000,"nonce":"n","artifact_digest":"sha256:deadbeef","sig":"sig-1"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["slug"], "my-skill");
+    let calls = services.ironhub_deliver_install_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1, "facade called exactly once");
+    assert_eq!(calls[0].slug, "my-skill");
+    assert_eq!(calls[0].artifact_digest, "sha256:deadbeef");
 }
 
 #[tokio::test]

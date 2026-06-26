@@ -123,7 +123,7 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                     extension_management.clone(),
                     host_runtime_http_egress.clone(),
                     shared_key,
-                ),
+                )?,
             ));
         }
     }

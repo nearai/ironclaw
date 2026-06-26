@@ -241,7 +241,7 @@ pub struct RebornRuntime {
     /// Shared HMAC key for the IronHub deep-link register/install webhooks,
     /// carried so the WebUI facade can compose the agent-link service.
     #[cfg(feature = "webui-v2-beta")]
-    ironhub_agent_shared_key: Option<String>,
+    ironhub_agent_shared_key: Option<crate::ironhub::IronhubSharedKey>,
     /// Hot-swap handle for the live LLM provider, when one was wired at boot.
     #[cfg(feature = "root-llm-provider")]
     llm_reload: Option<RebornLlmReloadParts>,
@@ -580,16 +580,27 @@ impl RebornRuntime {
     /// Shared HMAC key for the IronHub deep-link webhooks, when one was wired
     /// at boot. The WebUI facade uses it to compose the agent-link service.
     #[cfg(feature = "webui-v2-beta")]
-    pub(crate) fn webui_ironhub_agent_shared_key(&self) -> Option<String> {
+    pub(crate) fn webui_ironhub_agent_shared_key(
+        &self,
+    ) -> Option<crate::ironhub::IronhubSharedKey> {
         self.ironhub_agent_shared_key.clone()
     }
 
-    /// Whether the IronHub deep-link register/install webhooks are configured
-    /// (a shared HMAC key was wired at boot). The serve path uses this to
-    /// decide whether to mount the public register webhook.
+    /// Whether the IronHub register/install webhooks have everything the link
+    /// service needs (shared key plus local-runtime extension + host egress),
+    /// matching the facade-attach gate so serve never mounts a webhook the
+    /// facade left unavailable.
     #[cfg(feature = "webui-v2-beta")]
     pub fn ironhub_register_enabled(&self) -> bool {
         self.ironhub_agent_shared_key.is_some()
+            && self
+                .services
+                .local_runtime
+                .as_ref()
+                .is_some_and(|local_runtime| {
+                    local_runtime.extension_management.is_some()
+                        && local_runtime.host_runtime_http_egress.is_some()
+                })
     }
 
     /// The runtime's NEAR AI session manager, when an LLM seam is wired. The

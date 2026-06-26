@@ -257,7 +257,7 @@ pub struct RebornRuntimeInput {
     /// the WebUI facade composes the IronHub agent-link service and the serve
     /// path mounts the public `/api/ironhub/register` webhook.
     #[cfg(feature = "webui-v2-beta")]
-    pub ironhub_agent_shared_key: Option<String>,
+    pub ironhub_agent_shared_key: Option<crate::ironhub::IronhubSharedKey>,
     pub runner: TurnRunnerSettings,
     pub trigger_poller: TriggerPollerSettings,
     pub trigger_fire_access_checker: Option<Arc<dyn TriggerFireAccessChecker>>,
@@ -372,7 +372,10 @@ impl RebornRuntimeInput {
     /// Supply the IronHub agent-link shared HMAC key. Enables the deep-link
     /// register/install webhooks for this runtime.
     #[cfg(feature = "webui-v2-beta")]
-    pub fn with_ironhub_agent_shared_key(mut self, shared_key: String) -> Self {
+    pub fn with_ironhub_agent_shared_key(
+        mut self,
+        shared_key: crate::ironhub::IronhubSharedKey,
+    ) -> Self {
         self.ironhub_agent_shared_key = Some(shared_key);
         self
     }
