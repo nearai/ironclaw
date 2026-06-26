@@ -538,10 +538,12 @@ Issue fixed:
 
 Behavior adjustment:
 
-- Legacy Users search covered the old admin users table. Reborn's
-  `fetchUsers`, `createUser`, and `updateUser` settings client methods are
-  currently TODO stubs, so Users search remains an operator/admin parity gap
-  rather than a meaningful browser port in this step.
+- Legacy Users search covered the old admin users table. Reborn's Admin page
+  still depends on `pages/admin/lib/admin-api.js`, whose users, dashboard, and
+  usage methods intentionally return TODO stub payloads until v2 admin
+  endpoints replace the legacy `/api/admin/*` contracts. Admin/operator
+  browser parity therefore remains open rather than a meaningful port in this
+  step.
 
 CI update:
 
@@ -1050,6 +1052,27 @@ Behavior adjustment:
   test is therefore not a direct Reborn port target unless the Reborn product
   intentionally adds an inline skill/command autocomplete surface.
 
+### Step 29: Legacy Admin/Operator Review
+
+Reviewed legacy `test_admin_api.py` and related operator/admin browser
+coverage against the current Reborn Admin page.
+
+Current blocker:
+
+- `crates/ironclaw_webui_v2_static/static/js/pages/admin/lib/admin-api.js`
+  explicitly avoids legacy `/api/admin/*` calls and returns TODO stub payloads
+  for users, user detail, create/update/delete/suspend/activate, token
+  creation, usage summary, and usage rows;
+- the Reborn Admin route is registered but hidden while those v2 endpoint
+  contracts are missing.
+
+Behavior adjustment:
+
+- Legacy admin API/browser tests are not portable to Reborn WebUI v2 yet. A
+  real port requires v2 admin endpoints and a non-stub Admin API client; until
+  then, browser tests would only validate placeholder data rather than the
+  legacy user/secret/usage lifecycle behavior.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -1078,8 +1101,9 @@ Not yet ported:
 - remaining Slack/Telegram/channel pairing scenarios beyond the Reborn Slack
   proof-code connect card, especially lower-level member/admin pairing APIs and
   Telegram-specific pairing once standalone Reborn exposes matching surfaces;
-- admin/operator flows, including Reborn Settings Users search once the v2
-  users endpoints replace the current TODO client stubs;
+- admin/operator flows, including Users, dashboard, and usage views, because the
+  current Reborn Admin API adapter intentionally returns TODO stub payloads until
+  v2 admin endpoints replace the legacy `/api/admin/*` contracts;
 - legacy `/v2/routines` parity, because the current Reborn routines page still
   uses TODO client stubs instead of real v2 endpoints;
 - legacy project mission/thread/widget drill-in parity, because the current
