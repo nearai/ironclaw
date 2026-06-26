@@ -1619,6 +1619,26 @@ Behavior adjustment:
   filters client-side, so the port asserts the visible no-match state in
   `/v2/extensions/registry` instead of a query-parameter API response.
 
+### Step 46: Legacy Auto-Resolved Setup Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the user-visible setup-schema invariant from legacy
+`test_gmail_setup_schema_auto_resolves`:
+
+- an OAuth-backed extension can return a setup schema with no user-facing
+  secrets or fields;
+- Reborn renders the configure modal's "No configuration required" state;
+- the modal does not expose Save, Authorize, or manual password inputs;
+- no setup-submit or OAuth-start request is emitted.
+
+Behavior adjustment:
+
+- The legacy test asserted Gmail's backend setup JSON directly. Reborn's
+  browser port asserts the corresponding modal behavior for the v2
+  `/api/webchat/v2/extensions/{package_id}/setup` projection instead of
+  pinning legacy `client_id` / `client_secret` auto-resolution internals.
+
 ## Open Migration Buckets
 
 Not yet ported:

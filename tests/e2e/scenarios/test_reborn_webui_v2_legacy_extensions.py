@@ -1267,6 +1267,50 @@ async def test_reborn_legacy_configure_modal_setup_load_failure_is_visible(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_configure_modal_auto_resolved_setup_has_no_manual_fields(
+    reborn_v2_server, reborn_v2_browser
+):
+    auto_resolved_tool = {
+        **OAUTH_TOOL,
+        "display_name": "Auto Resolved OAuth Tool",
+        "package_ref": _package_ref("auto-resolved-oauth-tool"),
+    }
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[auto_resolved_tool],
+        setup_payloads={
+            "auto-resolved-oauth-tool": {
+                "name": "auto-resolved-oauth-tool",
+                "kind": "wasm_tool",
+                "secrets": [],
+                "fields": [],
+                "onboarding": None,
+            }
+        },
+        tab="installed",
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, "Auto Resolved OAuth Tool")
+        await expect(card).to_be_visible(timeout=5000)
+        await card.get_by_role("button", name="Configure").click()
+
+        await expect(
+            page.get_by_role("heading", name="Configure Auto Resolved OAuth Tool")
+        ).to_be_visible(timeout=5000)
+        await expect(
+            page.get_by_text("No configuration required for this extension.")
+        ).to_be_visible()
+        await expect(page.get_by_role("button", name="Save")).to_have_count(0)
+        await expect(page.get_by_role("button", name="Authorize")).to_have_count(0)
+        await expect(page.locator('input[type="password"]')).to_have_count(0)
+        assert harness["setup_submit_requests"] == []
+        assert harness["oauth_start_requests"] == []
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_configure_modal_dismisses_without_saving(
     reborn_v2_server, reborn_v2_browser
 ):
