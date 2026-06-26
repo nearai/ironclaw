@@ -866,18 +866,9 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         local_runtime_identity,
         turn_state_store_limits,
         memory_binding_policy,
-        memory_provider_connection,
+        mut memory_provider_connection,
         ..
     } = input;
-    // One memory provider resolver for this runtime (issue #3537): the memory
-    // tools and the local-dev profile source both build their `MemoryService`
-    // through it, so there is a single place that maps the binding to a provider.
-    // For a third-party document-store binding (e.g. mem0, issue #5264) the
-    // factory builds and registers that provider here; native stays per-invocation.
-    let memory_service_resolver = crate::build_memory_service_resolver(
-        memory_binding_policy,
-        &crate::MemoryProviderDeps::for_third_party(memory_provider_connection),
-    );
     let local_runtime_identity_for_nearai_mcp = local_runtime_identity.clone();
     let (root, workspace_root, host_home_root, storage_backend_input, secret_master_key) =
         match storage {
@@ -943,6 +934,33 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         reason: "local-dev workspace root could not be initialized".to_string(),
     })?;
     let root = canonicalize_local_dev_path(&root, "storage root")?;
+    // LOCAL-DEV ONLY: bound mem0 memory to this workspace so memories from one
+    // local-dev root never leak into another, even when both point at the same
+    // mem0 server. A stable hash of the canonical root path is used as the mem0
+    // `app_id`; this mirrors how native memory is already isolated (its
+    // filesystem store lives under `local_dev_root`). An explicitly-configured
+    // `app_id` always wins (operator override takes precedence).
+    //
+    // Production paths (`build_*_production` / `RebornProductionBuildContext`)
+    // are NOT touched here: production keeps `app_id` from config (default None
+    // → pure user/tenant scope, persistent across restarts for the same tenant).
+    if memory_provider_connection.app_id.is_none() {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        root.hash(&mut hasher);
+        memory_provider_connection.app_id = Some(format!("ws-{:016x}", hasher.finish()));
+    }
+    // One memory provider resolver for this runtime (issue #3537): the memory
+    // tools and the local-dev profile source both build their `MemoryService`
+    // through it, so there is a single place that maps the binding to a provider.
+    // For a third-party document-store binding (e.g. mem0, issue #5264) the
+    // factory builds and registers that provider here; native stays per-invocation.
+    // Built here (after root canonicalization) so the workspace-bounded `app_id`
+    // set above is already in place when the mem0 transport is constructed.
+    let memory_service_resolver = crate::build_memory_service_resolver(
+        memory_binding_policy,
+        &crate::MemoryProviderDeps::for_third_party(memory_provider_connection),
+    );
     let workspace_root = canonicalize_local_dev_path(&workspace_root, "workspace root")?;
     let include_host_home = runtime_policy.as_ref().is_some_and(|policy| {
         policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome

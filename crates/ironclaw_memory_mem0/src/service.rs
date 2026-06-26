@@ -61,6 +61,7 @@ const ADD_PATH: &str = "/memories";
 const SEARCH_PATH: &str = "/search";
 const LIST_PATH: &str = "/memories";
 const USER_ID_QUERY: &str = "user_id";
+const APP_ID_QUERY: &str = "app_id";
 const TARGET_KEY: &str = "target";
 const SOURCE_KEY: &str = "source";
 const SOURCE_VALUE: &str = "ironclaw.memory";
@@ -119,6 +120,53 @@ impl Mem0MemoryService {
         }
     }
 
+    /// Fold the workspace partition (`config.app_id`) into the mem0 `user_id`
+    /// namespace.
+    ///
+    /// CRITICAL ISOLATION INVARIANT: the self-hosted mem0 OSS server enforces
+    /// search/`get_all` filtering by `user_id` (and `agent_id`), but NOT by
+    /// `app_id` — a top-level `app_id` is accepted and stored, yet silently
+    /// ignored when filtering (verified empirically: a cross-`app_id` query
+    /// returns the other partition's rows). Rather than depend on which secondary
+    /// identifiers a given mem0 version actually enforces, the provider encodes
+    /// the ENTIRE partition — full scope AND workspace — into the one key that is
+    /// guaranteed enforced: `user_id`. So the workspace partition the local-dev
+    /// composition passes as `config.app_id` is prefixed into the `user_id`
+    /// namespace here; that prefix IS the isolation boundary. (`app_id` is still
+    /// stamped via `stamp_app_id` as forward-compatible metadata, but MUST NOT be
+    /// relied on for isolation.) Production leaves `app_id` unset → no prefix →
+    /// pure scope namespace, so memory persists across restarts for the same scope.
+    fn with_workspace_prefix(&self, base: String) -> String {
+        match self.config.app_id.as_deref() {
+            Some(prefix) => format!("{prefix}/{base}"),
+            None => base,
+        }
+    }
+
+    /// Full-scope memory namespace (tenant/user/agent/project) + workspace prefix.
+    fn scoped_namespace(&self, scope: &ResourceScope) -> String {
+        self.with_workspace_prefix(scope_namespace(scope))
+    }
+
+    /// Owner-only (profile) namespace (tenant/user) + workspace prefix.
+    fn owner_scoped_namespace(&self, scope: &ResourceScope) -> String {
+        self.with_workspace_prefix(owner_namespace(scope))
+    }
+
+    /// Build the query-string parameters for a GET `/memories` (list) request.
+    ///
+    /// Always includes `user_id=<namespace>`. When `self.config.app_id` is set,
+    /// also appends `app_id=<value>` so that list-based operations (read, tree,
+    /// profile_read, and the profile_set read-step) scope to the same app_id
+    /// partition that search and write already use via [`Self::stamp_app_id`].
+    fn list_query(&self, namespace: String) -> Vec<(String, String)> {
+        let mut query = vec![(USER_ID_QUERY.to_string(), namespace)];
+        if let Some(app_id) = self.config.app_id.as_deref() {
+            query.push((APP_ID_QUERY.to_string(), app_id.to_string()));
+        }
+        query
+    }
+
     /// Fetch the latest `kind=profile` memory for `namespace` and parse it as a
     /// JSON object, for the read step of `profile_set`'s read-merge-write.
     ///
@@ -135,7 +183,7 @@ impl Mem0MemoryService {
             .transport
             .execute(Mem0HttpRequest::get(
                 LIST_PATH,
-                vec![(USER_ID_QUERY.to_string(), namespace.to_string())],
+                self.list_query(namespace.to_string()),
             ))
             .await
             .map_err(MemoryServiceError::operation_from)?;
@@ -163,7 +211,7 @@ impl MemoryService for Mem0MemoryService {
         invocation: MemoryInvocation,
         request: MemoryServiceSearchRequest,
     ) -> Result<MemoryServiceSearchResponse, MemoryServiceError> {
-        let namespace = scope_namespace(&invocation.scope);
+        let namespace = self.scoped_namespace(&invocation.scope);
         let body = self.search_body(&namespace, &request.query, request.limit);
         let response = self
             .transport
@@ -223,7 +271,7 @@ impl MemoryService for Mem0MemoryService {
         if request.content.trim().is_empty() {
             return Err(MemoryServiceError::input());
         }
-        let namespace = scope_namespace(&invocation.scope);
+        let namespace = self.scoped_namespace(&invocation.scope);
         let metadata = json!({ TARGET_KEY: request.target, SOURCE_KEY: SOURCE_VALUE });
         let body = self.add_body(&namespace, &request.content, metadata);
         let response = self
@@ -248,13 +296,10 @@ impl MemoryService for Mem0MemoryService {
         invocation: MemoryInvocation,
         request: MemoryServiceReadRequest,
     ) -> Result<MemoryServiceReadResponse, MemoryServiceError> {
-        let namespace = scope_namespace(&invocation.scope);
+        let namespace = self.scoped_namespace(&invocation.scope);
         let response = self
             .transport
-            .execute(Mem0HttpRequest::get(
-                LIST_PATH,
-                vec![(USER_ID_QUERY.to_string(), namespace)],
-            ))
+            .execute(Mem0HttpRequest::get(LIST_PATH, self.list_query(namespace)))
             .await
             .map_err(MemoryServiceError::operation_from)?;
         ensure_success(&response, "read").map_err(MemoryServiceError::operation_from)?;
@@ -291,13 +336,10 @@ impl MemoryService for Mem0MemoryService {
         invocation: MemoryInvocation,
         request: MemoryServiceTreeRequest,
     ) -> Result<MemoryServiceTreeResponse, MemoryServiceError> {
-        let namespace = scope_namespace(&invocation.scope);
+        let namespace = self.scoped_namespace(&invocation.scope);
         let response = self
             .transport
-            .execute(Mem0HttpRequest::get(
-                LIST_PATH,
-                vec![(USER_ID_QUERY.to_string(), namespace)],
-            ))
+            .execute(Mem0HttpRequest::get(LIST_PATH, self.list_query(namespace)))
             .await
             .map_err(MemoryServiceError::operation_from)?;
         ensure_success(&response, "tree").map_err(MemoryServiceError::operation_from)?;
@@ -330,7 +372,7 @@ impl MemoryService for Mem0MemoryService {
         // `profile_read` (which returns the latest) sees every preserved field.
         // mem0 has no compare-and-set, so concurrent writers still race; this
         // closes the unconditional-drop gap, not the CAS gap.
-        let namespace = owner_namespace(&invocation.scope);
+        let namespace = self.owner_scoped_namespace(&invocation.scope);
         let mut merged = self.fetch_latest_profile_object(&namespace).await?;
         for (key, value) in request.fields {
             merged.insert(key, value);
@@ -357,13 +399,10 @@ impl MemoryService for Mem0MemoryService {
         &self,
         invocation: MemoryInvocation,
     ) -> Result<MemoryServiceProfileReadResponse, MemoryServiceError> {
-        let namespace = owner_namespace(&invocation.scope);
+        let namespace = self.owner_scoped_namespace(&invocation.scope);
         let response = self
             .transport
-            .execute(Mem0HttpRequest::get(
-                LIST_PATH,
-                vec![(USER_ID_QUERY.to_string(), namespace)],
-            ))
+            .execute(Mem0HttpRequest::get(LIST_PATH, self.list_query(namespace)))
             .await
             .map_err(MemoryServiceError::operation_from)?;
         ensure_success(&response, "profile_read").map_err(MemoryServiceError::operation_from)?;
@@ -384,7 +423,7 @@ impl MemoryService for Mem0MemoryService {
         {
             return Ok(Vec::new());
         }
-        let namespace = scope_namespace(&invocation.scope);
+        let namespace = self.scoped_namespace(&invocation.scope);
         let body = self.search_body(&namespace, &request.query, request.max_snippets);
         // Context retrieval degrades to "no memory context" (Unavailable) on a
         // backend failure rather than aborting the turn, matching native.
@@ -1010,6 +1049,132 @@ mod tests {
             .filter(|request| request.method == Mem0HttpMethod::Post)
             .count();
         assert_eq!(posts, 0, "must not write when the prior profile is corrupt");
+    }
+
+    /// Build a service with a specific `app_id` configured (for isolation tests).
+    fn service_with_app_id(
+        transport: MockMem0Transport,
+        app_id: &str,
+    ) -> (Mem0MemoryService, Arc<MockMem0Transport>) {
+        let transport = Arc::new(transport);
+        let service = Mem0MemoryService::new(
+            Arc::clone(&transport) as Arc<dyn Mem0Transport>,
+            Mem0Config::new().with_app_id(app_id),
+        );
+        (service, transport)
+    }
+
+    #[tokio::test]
+    async fn list_query_includes_app_id_when_configured() {
+        // When a service has `app_id` set, every GET /memories list request
+        // (used by `read`, `tree`, `profile_read`, and the profile_set read-step)
+        // must carry `app_id` as a query param — matching how `search` and `write`
+        // already scope via the request body `stamp_app_id`. Without this,
+        // list-based operations leak across app partitions.
+        let (service, transport) = service_with_app_id(
+            MockMem0Transport::always_ok(json!([
+                { "memory": "isolated", "metadata": { "target": "notes/a.md" } }
+            ])),
+            "ws-abc123",
+        );
+        service
+            .read(
+                invocation(),
+                MemoryServiceReadRequest {
+                    path: "notes/a.md".to_string(),
+                },
+            )
+            .await
+            .expect("read should succeed");
+
+        let recorded = transport.recorded();
+        assert_eq!(recorded.len(), 1);
+        let request = &recorded[0];
+        assert_eq!(request.method, Mem0HttpMethod::Get);
+        // The query must contain both user_id and app_id.
+        let has_user_id = request.query.iter().any(|(key, _)| key == USER_ID_QUERY);
+        let app_id_value = request
+            .query
+            .iter()
+            .find(|(key, _)| key == APP_ID_QUERY)
+            .map(|(_, value)| value.as_str());
+        assert!(has_user_id, "user_id must always be present in list query");
+        assert_eq!(
+            app_id_value,
+            Some("ws-abc123"),
+            "app_id must appear in list query when configured"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_is_prefixed_into_the_user_id_namespace() {
+        // CRITICAL no-leak guard. mem0 OSS enforces filtering by `user_id`, NOT
+        // `app_id` (verified empirically), so the workspace partition the
+        // composition passes as `app_id` MUST be folded into the `user_id`
+        // namespace — that prefix IS the isolation boundary. A regression that
+        // drops it silently re-opens cross-workspace leakage (two workspaces would
+        // share one `user_id` partition). Every op routes through
+        // `scoped_namespace`/`owner_scoped_namespace`, so checking one list op
+        // proves the shared `with_workspace_prefix` mechanism.
+        let (service, transport) = service_with_app_id(
+            MockMem0Transport::always_ok(json!([
+                { "memory": "x", "metadata": { "target": "notes/a.md" } }
+            ])),
+            "ws-deadbeef",
+        );
+        service
+            .read(
+                invocation(),
+                MemoryServiceReadRequest {
+                    path: "notes/a.md".to_string(),
+                },
+            )
+            .await
+            .expect("read should succeed");
+
+        let recorded = transport.recorded();
+        let user_id = recorded[0]
+            .query
+            .iter()
+            .find(|(key, _)| key == USER_ID_QUERY)
+            .map(|(_, value)| value.as_str())
+            .expect("list query must carry user_id");
+        assert!(
+            user_id.starts_with("ws-deadbeef/"),
+            "workspace MUST prefix the user_id namespace (the enforced isolation \
+             boundary), got {user_id:?}"
+        );
+        assert!(
+            user_id.contains("tenant-mem0/user-mem0"),
+            "the logical scope must remain in the namespace after the prefix, got {user_id:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_query_omits_app_id_when_not_configured() {
+        // When no `app_id` is set (the default / production path where scope is
+        // handled only by `user_id`), GET /memories must NOT add an `app_id`
+        // query param — consistent with how `stamp_app_id` behaves for POST bodies.
+        let (service, transport) = service_with(MockMem0Transport::always_ok(json!([
+            { "memory": "m", "metadata": { "target": "notes/a.md" } }
+        ])));
+        service
+            .read(
+                invocation(),
+                MemoryServiceReadRequest {
+                    path: "notes/a.md".to_string(),
+                },
+            )
+            .await
+            .expect("read should succeed");
+
+        let recorded = transport.recorded();
+        let request = &recorded[0];
+        let has_app_id = request.query.iter().any(|(key, _)| key == APP_ID_QUERY);
+        assert!(
+            !has_app_id,
+            "app_id must NOT appear in list query when not configured"
+        );
     }
 
     #[tokio::test]
