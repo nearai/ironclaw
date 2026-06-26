@@ -417,7 +417,7 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 
 - Rust 1.92+
 - PostgreSQL 15+ with [pgvector](https://github.com/pgvector/pgvector) extension
-- Node.js 22+ with npm for source builds that enable the `webui-v2-beta` feature
+- Node.js 22+ (npm) for source builds that enable the `webui-v2-beta` feature
 - NEAR AI account (authentication handled via setup wizard)
 - `libclang` and a working C toolchain if you build the WeChat voice/SILK path from source
 
