@@ -2215,28 +2215,7 @@ Issue fixed:
   through the normal send path. Failed rows keep their retry content and staged
   attachment payload so text and attachment sends can be retried consistently.
 
-### Step 70: Legacy Failed Attachment Retry Port
-
-Extended `test_reborn_webui_v2_legacy_pending_messages.py` to prove the retry
-fix covers attachment payloads, not just typed text.
-
-Ported the attachment side of legacy failed-send retry behavior:
-
-- staged a text attachment in the Reborn composer;
-- forced the first send to fail with a service-unavailable response;
-- asserted the failed optimistic row still renders the staged attachment card
-  and retry action;
-- clicked `Retry message`;
-- asserted the second Reborn send request preserves the same message content
-  and `{ filename, mime_type, data_base64 }` attachment payload.
-
-Behavior result:
-
-- no additional Reborn product change was required after Step 69. The retry
-  metadata added there already preserved staged attachments through the normal
-  send path, and this test locks that browser contract down.
-
-### Step 71: Legacy OAuth Completion Isolation Port
+### Step 70: Legacy OAuth Completion Isolation Port
 
 Extended `test_reborn_webui_v2_legacy_auth_flows.py`.
 
@@ -2253,6 +2232,55 @@ Behavior result:
 - no Reborn product change was required. `useChat` already matches callback
   completions by `turn_run_ref` and `gate_ref`; this browser test now protects
   that isolation contract.
+
+### Step 71: Legacy Manual Auth Cancel Port
+
+Extended `test_reborn_webui_v2_legacy_auth_flows.py`.
+
+Ported the browser-visible part of legacy v2 auth-cancel behavior to Reborn's
+manual-token gate:
+
+- emitted a Reborn manual-token `auth_required` prompt;
+- clicked the gate's `Cancel` action before entering a token;
+- asserted no product-auth manual-token submit request was sent;
+- asserted the run-scoped gate resolve endpoint received a `cancelled`
+  resolution with a client action id;
+- asserted the prompt clears from the thread.
+
+Behavior adjustment:
+
+- legacy v2 accepted typed chat text such as `cancel` while an auth gate was
+  pending. Reborn blocks new composer sends during pending gates and exposes
+  cancellation through the structured gate action, so the port protects the
+  same cancellation outcome through the current UI contract.
+
+### Step 72: Responses API Rate-Limit Harness Hardening
+
+Hardened `test_reborn_webui_v2_legacy_responses_api.py` after a full migrated
+suite run exposed a transient `429 rate_limited` response on the second
+Responses create request in the continue/retrieve scenario.
+
+Issue found:
+
+- the Responses API scenario passes in isolation, but the full migrated suite
+  shares the same mock-backed model environment and fixed Reborn user identity
+  across many browser/API tests. Under that suite pressure, a create request can
+  hit a temporary rate-limit response even though the behavior under test is
+  previous-response continuation and retrieval, not rate-limit enforcement.
+
+Adjustment:
+
+- `_create_response` now retries short-lived 429 responses before asserting the
+  normal 200 contract. This keeps production rate limits intact while preventing
+  unrelated shared-fixture pressure from flaking the migrated Responses
+  compatibility coverage.
+
+Harness cleanup:
+
+- `test_reborn_webui_v2_legacy_pending_messages.py` now mocks Reborn's current
+  attachment capability field names (`max_count`, `max_file_bytes`,
+  `max_total_bytes`) instead of legacy names, so pending-message tests read the
+  same session shape as production.
 
 ## Open Migration Buckets
 

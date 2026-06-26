@@ -1,5 +1,6 @@
 """Legacy Responses API coverage ported to standalone Reborn."""
 
+import asyncio
 import os
 import subprocess
 from pathlib import Path
@@ -88,7 +89,13 @@ def _response_output_text(response: dict) -> str:
 
 
 async def _create_response(client: httpx.AsyncClient, path="/v1/responses", **payload):
-    response = await client.post(path, json={"model": "default", **payload})
+    response = None
+    for attempt in range(6):
+        response = await client.post(path, json={"model": "default", **payload})
+        if response.status_code != 429:
+            break
+        await asyncio.sleep(1 + attempt * 0.5)
+    assert response is not None
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["id"].startswith("resp_")

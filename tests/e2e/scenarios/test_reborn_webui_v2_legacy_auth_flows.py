@@ -291,6 +291,36 @@ async def test_reborn_legacy_manual_token_not_retained_in_browser(
         await context.close()
 
 
+async def test_reborn_legacy_manual_token_cancel_resolves_gate_without_token_submit(
+    reborn_v2_server, reborn_v2_browser
+):
+    context, page, manual_token_requests, resolve_requests = await _open_stubbed_auth_thread(
+        reborn_v2_server, reborn_v2_browser
+    )
+    try:
+        await _emit_auth_prompt(
+            page,
+            challenge_kind="manual_token",
+            gate_ref="manual-token-cancel-gate",
+        )
+
+        gate = page.locator(SEL_V2["auth_gate_for"].format(kind="manual_token")).first
+        await expect(gate).to_be_visible(timeout=5000)
+        await gate.get_by_role("button", name="Cancel").click()
+        await expect(gate).to_be_hidden(timeout=5000)
+
+        assert manual_token_requests == []
+        assert len(resolve_requests) == 1
+        assert f"/threads/{THREAD_ID}/runs/{RUN_ID}/gates/manual-token-cancel-gate/resolve" in (
+            resolve_requests[0]["url"]
+        )
+        assert resolve_requests[0]["body"]["resolution"] == "cancelled"
+        assert resolve_requests[0]["body"]["always"] is False
+        assert resolve_requests[0]["body"]["client_action_id"]
+    finally:
+        await context.close()
+
+
 async def test_reborn_legacy_auth_prompt_does_not_duplicate_as_assistant_text(
     reborn_v2_server, reborn_v2_browser
 ):
