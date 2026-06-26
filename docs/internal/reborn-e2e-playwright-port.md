@@ -1267,6 +1267,55 @@ Current blocker:
   product decision about how failed model calls should surface in WebChat v2
   without leaking raw provider errors.
 
+### Step 35: Legacy Webhook, Widget, Routines, and Cleanup Review
+
+Reviewed legacy `test_webhook.py`, `test_widget_customization.py`,
+`test_extension_uninstall_cleanup.py`, `test_routine_event_batch.py`,
+`test_routine_full_job.py`, and `test_routine_oauth_credential_injection.py`.
+
+Already-covered functional Reborn behavior:
+
+- Reborn top-level extension install/manage/configure browser behavior is
+  covered by `test_reborn_webui_v2_legacy_extensions.py`;
+- Reborn extension setup and OAuth-start safety are covered by the migrated
+  extension and auth-flow ports plus Rust product-auth callback contracts;
+- Reborn Automations has browser coverage for the current standalone scheduled
+  work surface;
+- Reborn Projects and Workspace have separate v2 overview coverage for the
+  current project/workspace surfaces.
+
+Current blocker:
+
+- legacy webhook tests target the standalone HTTP channel server's `/webhook`
+  endpoint, including HMAC header authentication, deprecated body-secret
+  compatibility, content-type/JSON validation, and queued message ids.
+  Standalone Reborn WebUI v2 does not expose a matching HTTP-channel webhook
+  product surface;
+- legacy widget customization tests rely on chat-driven `memory_write` calls
+  into `.system/gateway/*`, dynamic `custom.css`, legacy tab/widget discovery,
+  and per-user/multi-tenant gateway HTML bundle behavior. Reborn WebUI v2 uses a
+  static React app and has no equivalent gateway widget loader or CSS injection
+  contract;
+- legacy uninstall cleanup tests inspect the legacy `secrets` DB rows after
+  `/api/extensions/*` remove operations. Reborn v2 extension lifecycle and
+  product-auth cleanup use different services and do not expose that legacy
+  table-level contract through WebUI v2 Playwright;
+- legacy routine event/full-job/OAuth tests exercise `/api/routines/*`,
+  `/api/jobs/*`, the legacy routines tab, HTTP-channel event triggers, and
+  routine-scoped OAuth credential fallback. The current Reborn routines page is
+  still TODO-stubbed, and the migrated Reborn coverage is intentionally scoped
+  to the real Automations surface.
+
+Behavior adjustment:
+
+- These legacy files are not line-for-line Reborn Playwright ports. A true
+  functional port requires Reborn-native v2 webhook/channel ingress contracts,
+  a v2 widget/customization system if that product capability is retained,
+  lifecycle cleanup contract tests against Reborn product-auth/extension
+  services, and non-stub routines endpoints/pages. Until those surfaces exist,
+  the branch should keep Reborn tests focused on the v2 surfaces that are
+  implemented today.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -1302,6 +1351,16 @@ Not yet ported:
   v2 admin endpoints replace the legacy `/api/admin/*` contracts;
 - legacy `/v2/routines` parity, because the current Reborn routines page still
   uses TODO client stubs instead of real v2 endpoints;
+- legacy HTTP webhook/channel ingress parity, because standalone Reborn WebUI
+  v2 has no matching `/webhook` HTTP-channel product surface;
+- legacy gateway widget customization parity, because Reborn WebUI v2 has no
+  dynamic `.system/gateway/*` widget/CSS loader contract;
+- legacy extension uninstall secret-table cleanup parity, because those tests
+  inspect legacy `secrets` rows behind `/api/extensions/*` rather than Reborn
+  product-auth/extension service contracts;
+- legacy routine event/full-job/OAuth-credential parity, because those tests
+  target legacy `/api/routines/*`, `/api/jobs/*`, HTTP-channel triggers, and the
+  legacy routines tab;
 - legacy project mission/thread/widget drill-in parity, because the current
   Reborn project page maps real project entities but still uses TODO client
   stubs for per-project missions, threads, widgets, and detail actions;
