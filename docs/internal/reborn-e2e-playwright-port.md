@@ -369,9 +369,12 @@ standalone Reborn WebUI v2 Extensions surface:
 
 - registry entries render through `/v2/extensions/registry`;
 - registry search filters available extensions;
+- registry keyword disclosures show available extension keywords;
 - installing a registry extension posts the v2 `package_ref` payload and
   refreshes the installed projection;
 - installed extensions render status, description, and capability disclosure;
+- installed extensions whose backend payload has `tools: null` render a no
+  capabilities state instead of breaking the card;
 - activating an inactive installed extension posts to the v2 activate endpoint;
 - removing an installed extension posts to the v2 remove endpoint through the
   card overflow menu only after user confirmation and removes the projection;

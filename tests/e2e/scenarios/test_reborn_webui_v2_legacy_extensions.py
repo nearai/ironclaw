@@ -393,6 +393,11 @@ async def test_reborn_legacy_extensions_registry_search_and_install(
         await expect(page.get_by_text("Registry Tool")).to_be_visible(timeout=5000)
         await expect(page.get_by_text("Registry MCP Server")).to_be_visible(timeout=5000)
 
+        registry_tool_card = _card_by_title(page, "Registry Tool")
+        await registry_tool_card.get_by_role("button", name="2 keywords").click()
+        await expect(registry_tool_card.get_by_text("search")).to_be_visible()
+        await expect(registry_tool_card.get_by_text("utility")).to_be_visible()
+
         await page.locator('input[placeholder^="Search extensions"]').fill("mcp")
         await expect(page.get_by_text("Registry MCP Server")).to_be_visible()
         await expect(page.get_by_text("Registry Tool")).to_have_count(0)
@@ -470,6 +475,25 @@ async def test_reborn_legacy_extensions_remove_cancel_keeps_card(
 
         await expect(active_card).to_be_visible(timeout=5000)
         assert harness["remove_requests"] == []
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_extensions_null_tools_render_no_capabilities(
+    reborn_v2_server, reborn_v2_browser
+):
+    null_tools_extension = {**ACTIVE_TOOL, "tools": None}
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[null_tools_extension],
+        tab="registry",
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, "Active Tool")
+        await expect(card).to_be_visible(timeout=5000)
+        await expect(card.get_by_text("No capabilities")).to_be_visible()
     finally:
         await harness["context"].close()
 
