@@ -196,6 +196,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             if spec.default_enabled
         ]
         self.assertIn("qa_4b_github_connect", default_cases)
+        self.assertIn("webui_mobile_live_llm_chat", default_cases)
+        self.assertEqual(
+            run_live_qa.CASES["webui_mobile_live_llm_chat"].qa_matrix_test_ids,
+            ["REBCLI-065-TC-20", "REBCLI-065-TC-21"],
+        )
 
     def test_case_manifest_distinguishes_targeted_from_placeholder_gates(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -218,7 +223,19 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertNotIn("qa_sheet", manifest)
         self.assertEqual(manifest["qa_matrix"]["source"], "local_xlsx")
         self.assertEqual(manifest["qa_matrix"]["path"], str(matrix_path))
+        self.assertIn(
+            "REBCLI-065-TC-20",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
+        self.assertIn(
+            "REBCLI-065-TC-21",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
         cases = {case["case"]: case for case in manifest["cases"]}
+        self.assertEqual(
+            cases["webui_mobile_live_llm_chat"]["qa_matrix_test_ids"],
+            ["REBCLI-065-TC-20", "REBCLI-065-TC-21"],
+        )
         self.assertTrue(cases["qa_2d_calendar_prep_live_chat"]["implemented"])
         self.assertEqual(
             cases["qa_2d_calendar_prep_live_chat"]["status"],
