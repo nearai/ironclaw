@@ -19,6 +19,26 @@ import {
 const OAUTH_SETUP_REFRESH_MS = 2000;
 const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
 
+function isHttpsAuthUrl(url) {
+  try {
+    return new URL(url).protocol === "https:";
+  } catch (_) {
+    return false;
+  }
+}
+
+function openAuthUrl(url, popup = null) {
+  if (!isHttpsAuthUrl(url)) return { ok: false, popup: null };
+  if (popup && !popup.closed) {
+    popup.location.href = url;
+    return { ok: true, popup };
+  }
+  return {
+    ok: true,
+    popup: window.open(url, "_blank", "noopener,noreferrer"),
+  };
+}
+
 function packageId(item) {
   return item?.package_ref?.id || null;
 }
@@ -84,8 +104,11 @@ export function useExtensions() {
             res.instructions ||
             `${displayName || "Extension"} installed`,
         });
-        if (res.auth_url) {
-          window.open(res.auth_url, "_blank", "noopener,noreferrer");
+        if (res.auth_url && !openAuthUrl(res.auth_url).ok) {
+          setActionResult({
+            type: "error",
+            message: "Authentication URL must use HTTPS.",
+          });
         }
       } else {
         setActionResult({ type: "error", message: res.message || "Install failed" });
@@ -109,12 +132,21 @@ export function useExtensions() {
             res.instructions ||
             `${displayName || "Extension"} activated`,
         });
-        if (res.auth_url) {
-          window.open(res.auth_url, "_blank", "noopener,noreferrer");
+        if (res.auth_url && !openAuthUrl(res.auth_url).ok) {
+          setActionResult({
+            type: "error",
+            message: "Authentication URL must use HTTPS.",
+          });
         }
       } else if (res.auth_url) {
-        window.open(res.auth_url, "_blank", "noopener,noreferrer");
-        setActionResult({ type: "info", message: "Opening authentication…" });
+        if (openAuthUrl(res.auth_url).ok) {
+          setActionResult({ type: "info", message: "Opening authentication…" });
+        } else {
+          setActionResult({
+            type: "error",
+            message: "Authentication URL must use HTTPS.",
+          });
+        }
       } else if (res.awaiting_token) {
         setActionResult({ type: "info", message: "Configuration required" });
       } else {
@@ -237,7 +269,13 @@ export function useSetupSubmit(packageRef, onSuccess) {
   const packageKey = packageRef?.id || packageRef;
 
   return useMutation({
-    mutationFn: ({ secrets, fields }) => submitExtensionSetup(packageRef, secrets, fields),
+    mutationFn: ({ secrets, fields }) =>
+      submitExtensionSetup(packageRef, secrets, fields).then((res) => {
+        if (res.success === false) {
+          throw new Error(res.message || "Setup failed");
+        }
+        return res;
+      }),
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ["extensions"] });
       queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
@@ -301,13 +339,16 @@ export function useOauthSetup(packageRef) {
 
   return useMutation({
     mutationFn: ({ secret, popup }) =>
-      startExtensionOauth(packageRef, secret).then((res) => ({ res, popup })),
+      startExtensionOauth(packageRef, secret).then((res) => {
+        if (res.authorization_url && !isHttpsAuthUrl(res.authorization_url)) {
+          throw new Error("Authorization URL must use HTTPS.");
+        }
+        return { res, popup };
+      }),
     onSuccess: ({ res, popup }) => {
       let authPopup = popup;
-      if (res.authorization_url && popup && !popup.closed) {
-        popup.location.href = res.authorization_url;
-      } else if (res.authorization_url) {
-        authPopup = window.open(res.authorization_url, "_blank", "noopener,noreferrer");
+      if (res.authorization_url) {
+        authPopup = openAuthUrl(res.authorization_url, popup).popup;
       } else if (popup && !popup.closed) {
         popup.close();
       }

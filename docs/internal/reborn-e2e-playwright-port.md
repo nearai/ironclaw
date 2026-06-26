@@ -367,6 +367,15 @@ standalone Reborn WebUI v2 Extensions surface:
 - activating an inactive installed extension posts to the v2 activate endpoint;
 - removing an installed extension posts to the v2 remove endpoint through the
   card overflow menu and removes the projection;
+- setup-required extensions open the Reborn configure modal, fetch setup
+  metadata, submit manual secrets and fields to the v2 setup endpoint, and close
+  on success;
+- failed setup responses keep the configure modal open and show the server
+  message so the user can correct the credential;
+- OAuth setup start posts provider/scopes metadata to the v2 OAuth-start
+  endpoint;
+- OAuth authorization URLs are opened only when they parse as HTTPS, including
+  mixed-case `HTTPS://` schemes;
 - channel and MCP tabs render installed and available entries from the v2
   extension registry/list endpoints.
 
@@ -380,6 +389,9 @@ Behavior adjustment:
 - Reborn cards intentionally use a compact overflow menu for secondary actions
   such as remove. The port asserts the current card/menu behavior rather than
   legacy always-visible action buttons.
+- Reborn configure-success currently closes the modal without rendering the
+  setup response message as a toast. The port asserts the durable behavior
+  contract: the modal closes and the v2 setup payload is posted.
 
 CI update:
 
@@ -900,11 +912,12 @@ Not yet ported:
   persistence, or recovery beyond the browser approval-card and persisted
   activity-card contracts;
 - remaining settings/extension lifecycle scenarios beyond Settings search,
-  Skills, tool permissions, channel label regressions, and the top-level extension
-  install/manage surface;
+  Skills, tool permissions, channel label regressions, and the top-level
+  extension install/manage/configure surface;
 - deeper OAuth/product-auth install/callback flows beyond browser prompt
-  handling, including hosted callback replay/removal and provider-backed
-  extension/MCP setup where standalone Reborn has matching endpoints;
+  handling and extension OAuth-start URL safety, including hosted callback
+  replay/removal and provider-backed extension/MCP setup where standalone Reborn
+  has matching endpoints;
 - remaining Slack/Telegram/channel pairing scenarios beyond the Reborn Slack
   proof-code connect card, especially lower-level member/admin pairing APIs and
   Telegram-specific pairing once standalone Reborn exposes matching surfaces;
@@ -961,6 +974,15 @@ the top-level Extensions surface. `setup_required` channels no longer get a
 secondary overflow `Setup` action when the primary `Configure` button already
 covers setup, and ready/authenticated channels no longer receive overlapping
 `Reconfigure` menu items.
+
+The configure-modal extension port found two Reborn product defects. First,
+`success: false` setup responses kept the modal open but did not show the
+server's failure message; setup submission now treats that envelope as a
+mutation error so the existing modal error region renders it. Second, extension
+install/activate auth URLs and configure OAuth authorization URLs were opened or
+navigated without validating the scheme. Extension auth popup handling now
+parses URLs and allows only HTTPS before calling `window.open` or assigning
+`popup.location.href`.
 
 The tool-permission port did not require a behavior fix in the Reborn settings
 API: the v2 endpoint already persisted mutable tool overrides and rejected

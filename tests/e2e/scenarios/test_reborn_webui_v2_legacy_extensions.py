@@ -95,6 +95,34 @@ LABEL_CHANNEL_BASE = {
     "tools": [],
 }
 
+CONFIG_TOOL = {
+    "package_ref": _package_ref("config-tool"),
+    "display_name": "Config Tool",
+    "kind": "wasm_tool",
+    "description": "A tool that requires manual setup.",
+    "active": False,
+    "authenticated": False,
+    "has_auth": True,
+    "needs_setup": True,
+    "tools": [],
+    "activation_status": "setup_required",
+    "onboarding_state": "setup_required",
+}
+
+OAUTH_TOOL = {
+    "package_ref": _package_ref("oauth-tool"),
+    "display_name": "OAuth Tool",
+    "kind": "wasm_tool",
+    "description": "A tool that requires OAuth setup.",
+    "active": False,
+    "authenticated": False,
+    "has_auth": True,
+    "needs_setup": True,
+    "tools": [],
+    "activation_status": "setup_required",
+    "onboarding_state": "setup_required",
+}
+
 
 async def _open_mocked_extensions_page(
     reborn_v2_server,
@@ -104,15 +132,21 @@ async def _open_mocked_extensions_page(
     registry=None,
     tab="registry",
     setup_payloads=None,
+    setup_submit_responses=None,
+    oauth_start_responses=None,
 ):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
     installed_extensions = [dict(extension) for extension in (installed or [])]
     registry_entries = [dict(entry) for entry in (registry or [])]
     setup_payloads_by_id = dict(setup_payloads or {})
+    setup_submit_responses_by_id = dict(setup_submit_responses or {})
+    oauth_start_responses_by_id = dict(oauth_start_responses or {})
     install_requests: list[dict] = []
     activate_requests: list[str] = []
     remove_requests: list[str] = []
+    setup_submit_requests: list[dict] = []
+    oauth_start_requests: list[dict] = []
 
     async def fulfill_json(route, payload, status=200):
         await route.fulfill(
@@ -137,6 +171,30 @@ async def _open_mocked_extensions_page(
 
         if (
             path.startswith("/api/webchat/v2/extensions/")
+            and path.endswith("/setup/oauth/start")
+            and request.method == "POST"
+        ):
+            package_id = unquote(
+                path.removeprefix("/api/webchat/v2/extensions/").removesuffix(
+                    "/setup/oauth/start"
+                )
+            )
+            payload = json.loads(request.post_data or "{}")
+            oauth_start_requests.append({"package_id": package_id, "body": payload})
+            await fulfill_json(
+                route,
+                oauth_start_responses_by_id.get(
+                    package_id,
+                    {
+                        "success": True,
+                        "authorization_url": "https://example.com/oauth",
+                    },
+                ),
+            )
+            return
+
+        if (
+            path.startswith("/api/webchat/v2/extensions/")
             and path.endswith("/setup")
             and request.method == "GET"
         ):
@@ -156,6 +214,30 @@ async def _open_mocked_extensions_page(
                     },
                 ),
             )
+            return
+
+        if (
+            path.startswith("/api/webchat/v2/extensions/")
+            and path.endswith("/setup")
+            and request.method == "POST"
+        ):
+            package_id = unquote(
+                path.removeprefix("/api/webchat/v2/extensions/").removesuffix("/setup")
+            )
+            payload = json.loads(request.post_data or "{}")
+            setup_submit_requests.append({"package_id": package_id, "body": payload})
+            response = setup_submit_responses_by_id.get(
+                package_id,
+                {"success": True, "message": f"{package_id} configured"},
+            )
+            if response.get("success") is not False:
+                for extension in installed_extensions:
+                    if extension.get("package_ref", {}).get("id") == package_id:
+                        extension["authenticated"] = True
+                        extension["needs_setup"] = False
+                        extension["activation_status"] = "configured"
+                        extension["onboarding_state"] = "configured"
+            await fulfill_json(route, response)
             return
 
         if path == "/api/webchat/v2/extensions/install" and request.method == "POST":
@@ -238,6 +320,8 @@ async def _open_mocked_extensions_page(
         "install_requests": install_requests,
         "activate_requests": activate_requests,
         "remove_requests": remove_requests,
+        "setup_submit_requests": setup_submit_requests,
+        "oauth_start_requests": oauth_start_requests,
     }
 
 
@@ -447,6 +531,290 @@ async def test_reborn_legacy_channel_reconfigure_opens_modal_without_activate(
         )
         await expect(page.get_by_text("Bot token")).to_be_visible()
         assert harness["activate_requests"] == []
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_configure_modal_saves_manual_secret_and_fields(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[CONFIG_TOOL],
+        setup_payloads={
+            "config-tool": {
+                "name": "config-tool",
+                "kind": "wasm_tool",
+                "secrets": [
+                    {
+                        "name": "API_TOKEN",
+                        "prompt": "API token",
+                        "provided": False,
+                        "optional": False,
+                        "auto_generate": False,
+                    },
+                    {
+                        "name": "OPTIONAL_SECRET",
+                        "prompt": "Optional secret",
+                        "provided": True,
+                        "optional": True,
+                        "auto_generate": False,
+                    },
+                ],
+                "fields": [
+                    {
+                        "name": "workspace",
+                        "prompt": "Workspace",
+                        "placeholder": "team-slug",
+                        "optional": False,
+                    }
+                ],
+                "onboarding": {
+                    "credential_instructions": "Paste credentials from the provider.",
+                    "credential_next_step": "Save to continue.",
+                },
+            }
+        },
+        tab="installed",
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, "Config Tool")
+        await expect(card).to_be_visible(timeout=5000)
+        await card.get_by_role("button", name="Configure").click()
+
+        await expect(page.get_by_role("heading", name="Configure Config Tool")).to_be_visible(
+            timeout=5000
+        )
+        await expect(page.get_by_text("Paste credentials from the provider.")).to_be_visible()
+        await page.locator('input[type="password"]').nth(0).fill("secret-token")
+        await page.locator('input[type="password"]').nth(1).fill("rotated-secret")
+        await page.locator('input[type="text"][placeholder="team-slug"]').fill("team-a")
+        await page.get_by_role("button", name="Save").click()
+
+        await expect(page.get_by_role("heading", name="Configure Config Tool")).to_have_count(0)
+        assert harness["setup_submit_requests"] == [
+            {
+                "package_id": "config-tool",
+                "body": {
+                    "action": "submit",
+                    "payload": {
+                        "secrets": {
+                            "API_TOKEN": "secret-token",
+                            "OPTIONAL_SECRET": "rotated-secret",
+                        },
+                        "fields": {"workspace": "team-a"},
+                    },
+                },
+            }
+        ]
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_configure_modal_save_failure_stays_open(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[CONFIG_TOOL],
+        setup_payloads={
+            "config-tool": {
+                "name": "config-tool",
+                "kind": "wasm_tool",
+                "secrets": [
+                    {
+                        "name": "API_TOKEN",
+                        "prompt": "API token",
+                        "provided": False,
+                        "optional": False,
+                        "auto_generate": False,
+                    }
+                ],
+                "fields": [],
+                "onboarding": None,
+            }
+        },
+        setup_submit_responses={
+            "config-tool": {"success": False, "message": "Invalid API token"}
+        },
+        tab="installed",
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, "Config Tool")
+        await expect(card).to_be_visible(timeout=5000)
+        await card.get_by_role("button", name="Configure").click()
+
+        await expect(page.get_by_role("heading", name="Configure Config Tool")).to_be_visible(
+            timeout=5000
+        )
+        await page.locator('input[type="password"]').first.fill("bad-token")
+        await page.get_by_role("button", name="Save").click()
+
+        await expect(page.get_by_text("Invalid API token")).to_be_visible(timeout=5000)
+        await expect(page.get_by_role("heading", name="Configure Config Tool")).to_be_visible()
+        assert harness["setup_submit_requests"][0]["body"]["payload"]["secrets"] == {
+            "API_TOKEN": "bad-token"
+        }
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_configure_oauth_requires_https_authorization_url(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[OAUTH_TOOL],
+        setup_payloads={
+            "oauth-tool": {
+                "name": "oauth-tool",
+                "kind": "wasm_tool",
+                "secrets": [
+                    {
+                        "name": "GOOGLE_AUTH",
+                        "prompt": "Google account",
+                        "provider": "google",
+                        "provided": False,
+                        "optional": False,
+                        "auto_generate": False,
+                        "setup": {
+                            "kind": "oauth",
+                            "account_label": "QA account",
+                            "scopes": ["email"],
+                            "invocation_id": "inv-1",
+                        },
+                    }
+                ],
+                "fields": [],
+                "onboarding": None,
+            }
+        },
+        oauth_start_responses={
+            "oauth-tool": {
+                "success": True,
+                "authorization_url": "javascript:alert('xss')",
+            }
+        },
+        tab="installed",
+    )
+    try:
+        page = harness["page"]
+        await page.evaluate(
+            """
+            () => {
+              window.__openedUrls = [];
+              window.open = (url) => {
+                const popup = {
+                  closed: false,
+                  close() { this.closed = true; },
+                  location: {
+                    _href: url,
+                    get href() { return this._href; },
+                    set href(value) {
+                      this._href = value;
+                      window.__openedUrls.push(value);
+                    },
+                  },
+                };
+                window.__openedUrls.push(url);
+                return popup;
+              };
+            }
+            """
+        )
+
+        card = _card_by_title(page, "OAuth Tool")
+        await expect(card).to_be_visible(timeout=5000)
+        await card.get_by_role("button", name="Configure").click()
+        await page.get_by_role("button", name="Authorize").click()
+
+        await expect(page.get_by_text("Authorization URL must use HTTPS.")).to_be_visible(
+            timeout=5000
+        )
+        opened = await page.evaluate("() => window.__openedUrls")
+        assert opened == ["about:blank"]
+        assert harness["oauth_start_requests"][0]["body"]["provider"] == "google"
+        assert harness["oauth_start_requests"][0]["body"]["scopes"] == ["email"]
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_configure_oauth_accepts_uppercase_https_url(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[OAUTH_TOOL],
+        setup_payloads={
+            "oauth-tool": {
+                "name": "oauth-tool",
+                "kind": "wasm_tool",
+                "secrets": [
+                    {
+                        "name": "GOOGLE_AUTH",
+                        "prompt": "Google account",
+                        "provider": "google",
+                        "provided": False,
+                        "optional": False,
+                        "auto_generate": False,
+                        "setup": {"kind": "oauth", "scopes": ["email"]},
+                    }
+                ],
+                "fields": [],
+                "onboarding": None,
+            }
+        },
+        oauth_start_responses={
+            "oauth-tool": {
+                "success": True,
+                "authorization_url": "HTTPS://example.com/oauth?state=abc",
+            }
+        },
+        tab="installed",
+    )
+    try:
+        page = harness["page"]
+        await page.evaluate(
+            """
+            () => {
+              window.__openedUrls = [];
+              window.open = (url) => {
+                const popup = {
+                  closed: false,
+                  close() { this.closed = true; },
+                  location: {
+                    _href: url,
+                    get href() { return this._href; },
+                    set href(value) {
+                      this._href = value;
+                      window.__openedUrls.push(value);
+                    },
+                  },
+                };
+                window.__openedUrls.push(url);
+                return popup;
+              };
+            }
+            """
+        )
+
+        card = _card_by_title(page, "OAuth Tool")
+        await expect(card).to_be_visible(timeout=5000)
+        await card.get_by_role("button", name="Configure").click()
+        await page.get_by_role("button", name="Authorize").click()
+
+        await page.wait_for_function(
+            "() => window.__openedUrls.some((url) => /^https:\\/\\//i.test(url))",
+            timeout=5000,
+        )
+        opened = await page.evaluate("() => window.__openedUrls")
+        assert opened[-1].lower().startswith("https://example.com/oauth"), opened
     finally:
         await harness["context"].close()
 
