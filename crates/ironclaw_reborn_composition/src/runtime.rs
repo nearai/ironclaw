@@ -2817,12 +2817,60 @@ pub async fn build_reborn_runtime(
             trajectory_observer,
         )
         .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
+        // Capability availability at the dispatch seam (#5267). The
+        // `capability-policy` feature *compiles in* a resolver that derives the
+        // per-(tenant, user) allow-set from #4544's scoped-lifecycle
+        // installations (admin grants); it is *activated* per-runtime by
+        // `capability_policy_activated()` (default OFF), mirroring the
+        // `HooksActivationConfig` master-flag-default-off pattern. When the
+        // feature is absent or the flag is off, local-dev keeps the historical
+        // `AllowAll` surface so existing flows are unchanged.
+        #[cfg(feature = "capability-policy")]
+        let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
+            if capability_policy_activated() {
+                use crate::available_extensions::AvailableExtensionCatalog;
+                use crate::capability_surface_policy::{
+                    ScopedLifecyclePolicyCapabilitySurfaceResolver, StaticPackageCapabilitySource,
+                };
+                use ironclaw_product_workflow_storage::FilesystemScopedLifecycleInstallationStore;
+
+                // Safe in this `is_some()` arm; `ok_or` avoids an `expect`.
+                let local_runtime =
+                    local_runtime.ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
+                let installation_store = Arc::new(FilesystemScopedLifecycleInstallationStore::new(
+                    Arc::clone(&local_runtime.extension_filesystem)
+                        as Arc<dyn ironclaw_filesystem::RootFilesystem>,
+                ));
+                // First-party extension manifests are the capability-id source:
+                // the catalog has no live `(tenant, package_ref)` facade and
+                // `product_workflow` cannot depend on this crate's lifecycle.
+                // Filesystem-installed (non-first-party) extensions are not yet
+                // mapped — extension-tools-first. The `slack` extension is only
+                // catalogued under `slack-v2-host-beta`.
+                let catalog =
+                    AvailableExtensionCatalog::from_first_party_assets_with_nearai_mcp_config(None)
+                        .map_err(|error| RebornRuntimeError::InvalidArgument {
+                            reason: format!(
+                                "capability-policy: extension catalog seed failed: {error}"
+                            ),
+                        })?;
+                let package_capabilities =
+                    Arc::new(StaticPackageCapabilitySource::from_catalog(&catalog));
+                Arc::new(ScopedLifecyclePolicyCapabilitySurfaceResolver::new(
+                    installation_store,
+                    package_capabilities,
+                ))
+            } else {
+                Arc::new(AllowAllCapabilitySurfaceResolver)
+            };
+        #[cfg(not(feature = "capability-policy"))]
+        let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
+            Arc::new(AllowAllCapabilitySurfaceResolver);
         (
             local_dev_capabilities.capability_factory,
             local_dev_capabilities.capability_input_resolver,
             local_dev_capabilities.capability_result_writer,
-            Arc::new(AllowAllCapabilitySurfaceResolver)
-                as Arc<dyn CapabilitySurfaceProfileResolver>,
+            capability_surface_resolver,
             local_dev_capabilities.model_gateway,
             Some(local_dev_capability_policy),
             Some(local_dev_capabilities.display_previews),
@@ -3624,6 +3672,23 @@ fn validate_runtime_identity(
     })
 }
 
+/// Whether the per-(tenant, user) capability policy resolver (#5267) is active
+/// for this runtime. Compiled in by the `capability-policy` feature, but OFF
+/// unless `IRONCLAW_REBORN_CAPABILITY_POLICY` is set truthy
+/// (`1` / `true` / `yes` / `on`). Enabling the feature alone therefore never
+/// changes local-dev behaviour — the operator opts in (e.g. for the
+/// four-dimension admin demo / #5268). Mirrors the `HooksActivationConfig`
+/// master-flag-default-off shape with an env toggle.
+#[cfg(feature = "capability-policy")]
+fn capability_policy_activated() -> bool {
+    std::env::var("IRONCLAW_REBORN_CAPABILITY_POLICY")
+        .map(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+// The local-dev capability-surface default: expose everything. Under the
+// `capability-policy` feature it remains the fallback when the policy is not
+// activated at runtime (see `capability_policy_activated`).
 struct AllowAllCapabilitySurfaceResolver;
 
 #[async_trait::async_trait]

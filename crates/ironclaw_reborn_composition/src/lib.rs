@@ -32,8 +32,12 @@ mod available_extensions;
 mod budget;
 mod budget_events;
 mod bundled_skills;
+#[cfg(all(feature = "capability-policy", feature = "webui-v2-beta"))]
+mod capability_admin_routes;
 #[cfg(feature = "capability-policy")]
 mod capability_policy_engine;
+#[cfg(feature = "capability-policy")]
+mod capability_surface_policy;
 mod communication_context;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod credential_refresh_worker;
