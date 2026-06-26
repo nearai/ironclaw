@@ -540,11 +540,12 @@ where
         actor: Option<TurnActor>,
     ) -> Result<(), TurnError> {
         let Some(coordinator) = self.coordinator.get() else {
-            tracing::debug!(
-                run_id = %run_id,
-                "parked child cancel skipped: coordinator not bound; active lock not released"
-            );
-            return Ok(());
+            // Fail loud: the child is still Blocked* with its lock held. Returning
+            // Ok would acknowledge cleanup that did not happen and the path would
+            // never retry.
+            return Err(TurnError::Unavailable {
+                reason: "parked child cancel requires a bound coordinator".to_string(),
+            });
         };
         // Prefer the actor carried by the observed state/event. When it is absent
         // (the ownerless event/state cases `handle_terminal` recovers internally
@@ -564,11 +565,13 @@ where
                 Ok(state) => match state.actor {
                     Some(actor) => actor,
                     None => {
-                        tracing::debug!(
-                            run_id = %run_id,
-                            "parked child cancel skipped: run state carries no actor to authorize the cancel"
-                        );
-                        return Ok(());
+                        // Fail loud: without an actor the cancel cannot be
+                        // authorized and the child stays lock-held. Surface it
+                        // rather than acknowledging cleanup that did not happen.
+                        return Err(TurnError::Unavailable {
+                            reason: "parked child cancel requires an actor to authorize the cancel"
+                                .to_string(),
+                        });
                     }
                 },
                 // Run record already gone — nothing left to cancel.
