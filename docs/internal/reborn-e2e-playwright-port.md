@@ -1190,6 +1190,52 @@ Behavior adjustment:
   Reborn Rust contract tests, with browser coverage limited to the v2 surfaces
   users can actually operate.
 
+### Step 33: Legacy Ownership, Multi-Tenant, and Engine-Visibility Review
+
+Reviewed legacy `test_owner_scope.py`, `test_ownership_model.py`,
+`test_multi_tenant_greeting.py`, and `test_v2_thread_visibility.py` against
+current Reborn WebUI v2 and product-workflow caller-scope contracts.
+
+Already-covered functional Reborn behavior:
+
+- Reborn WebUI v2 browser login and no-token rejection are covered by the
+  migrated core shell/auth tests;
+- Reborn v2 chat send/reply, sidebar title creation, and timeline persistence
+  are covered by migrated browser chat and message-persistence tests;
+- `/api/webchat/v2/session` returns the host-minted authenticated tenant/user
+  identity and capabilities in WebUI v2 handler contract tests;
+- Reborn composition tests assert that untrusted request bodies cannot inject
+  `tenant_id`, `user_id`, or `scope` to divert thread creation away from the
+  authenticated caller;
+- WebUI v2 stream concurrency limits are caller-scoped and shared across SSE and
+  WebSocket transports in handler contract tests.
+
+Current blocker:
+
+- legacy owner-scope tests exercise the old web gateway, owner-scoped HTTP
+  webhook channel, and legacy routines tab/API. Standalone Reborn does not
+  expose the same `/api/chat/*`, HTTP webhook, or `/api/routines` browser
+  contract; the visible Reborn routines page remains TODO-stubbed as documented
+  earlier;
+- legacy multi-tenant greeting tests create users through `/api/admin/users` and
+  assert per-user assistant greeting persistence through legacy chat history.
+  Reborn's Admin API adapter is currently TODO-stubbed, and WebChat v2 has no
+  matching initial-greeting assistant-thread contract;
+- legacy engine-visibility tests cover the old `ENGINE_V2=true` gateway split
+  between `/api/chat/threads`, `/api/engine/threads`, and synthesized legacy
+  history for deep-linked engine execution threads. Standalone Reborn WebUI v2
+  uses product-workflow thread/timeline projections instead of exposing that
+  legacy engine sidebar split.
+
+Behavior adjustment:
+
+- The Reborn port should keep caller-scope and authentication guarantees in
+  caller-level WebUI/ProductWorkflow contract tests and browser-test only the
+  visible v2 chat/session surfaces. Legacy owner HTTP webhook, routines,
+  admin-created user greeting, and engine-v2 visibility scenarios are not
+  direct Playwright ports until Reborn intentionally exposes equivalent
+  standalone v2 product surfaces.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -1233,6 +1279,9 @@ Not yet ported:
 - legacy portfolio widget/share parity, because current Reborn project widgets
   are TODO client stubs and no portfolio-specific widget/share-modal contract
   exists in WebUI v2;
+- legacy owner-scope, multi-tenant greeting, and engine-v2 visibility parity,
+  because those tests target old gateway/admin/routine/engine endpoints rather
+  than current standalone Reborn WebUI v2 product surfaces;
 - legacy Responses API context-injection parity for
   `x_context.notification_response`, because the Reborn OpenAI-compatible
   Responses DTO does not currently expose a matching context field;
