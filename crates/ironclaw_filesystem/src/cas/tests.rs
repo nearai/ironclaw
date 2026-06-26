@@ -8,7 +8,7 @@
 //! capped at 50ms so the storm test stays fast and deterministic.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
@@ -508,7 +508,21 @@ async fn timeout_fires_when_backend_get_hangs() {
 /// `FilesystemError::Unsupported { operation: WriteFile }`. This simulates the
 /// composite-router fallback path: a backend that cannot honor CAS writes is
 /// not caught up front, but is caught fail-closed when the write is attempted.
-struct UnsupportedWriteBackend;
+///
+/// `put_called` is set to `true` the moment `put` is entered, proving that
+/// the loop reached the write path via the op-time gate rather than aborting
+/// early at the pre-flight capability gate.
+struct UnsupportedWriteBackend {
+    put_called: AtomicBool,
+}
+
+impl UnsupportedWriteBackend {
+    fn new() -> Self {
+        Self {
+            put_called: AtomicBool::new(false),
+        }
+    }
+}
 
 #[async_trait]
 impl RootFilesystem for UnsupportedWriteBackend {
@@ -531,6 +545,10 @@ impl RootFilesystem for UnsupportedWriteBackend {
         _entry: Entry,
         _cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
+        // Record that `put` was reached before returning the error, so the
+        // test can assert the loop took the op-time path rather than the
+        // pre-flight capability gate.
+        self.put_called.store(true, Ordering::SeqCst);
         Err(FilesystemError::Unsupported {
             path: path.clone(),
             operation: FilesystemOperation::WriteFile,
@@ -561,7 +579,8 @@ async fn unsupported_write_file_maps_to_cas_unsupported() {
     //
     // This is the composite-router fallback path: a backend without CAS support
     // is not always detectable at pre-flight but must still fail closed.
-    let fs = Arc::new(scoped(Arc::new(UnsupportedWriteBackend)));
+    let backend = Arc::new(UnsupportedWriteBackend::new());
+    let fs = Arc::new(scoped(backend.clone()));
     let scope = ResourceScope::system();
 
     let result = cas_update(
@@ -578,5 +597,95 @@ async fn unsupported_write_file_maps_to_cas_unsupported() {
         matches!(result, Err(CasUpdateError::CasUnsupported)),
         "an op-time Unsupported(WriteFile) from a default-capability backend must \
          map to CasUpdateError::CasUnsupported (fail-closed op-time path), got {result:?}"
+    );
+    // Prove the error came from the op-time path: `put` must have been reached.
+    // If a future change made `BackendCapabilities::default()` trip the
+    // pre-flight gate instead, `put` would never fire and the assertion above
+    // would pass for the wrong reason — this guard catches that regression.
+    assert!(
+        backend.put_called.load(Ordering::SeqCst),
+        "put must have been invoked: the loop must reach the write path (op-time gate) \
+         before CasUpdateError::CasUnsupported is returned"
+    );
+}
+
+// ─── A CAS-capable backend whose `put` returns a generic non-CAS error ────────
+
+/// CAS-capable backend whose `get` returns `Ok(None)` and whose `put` returns
+/// a plain [`FilesystemError::Backend`] — neither `VersionMismatch` nor
+/// `Unsupported { operation: WriteFile }`. Used to exercise the catch-all
+/// `Err(error) => Err(CasUpdateError::Backend(error))` arm in `cas_update_loop`
+/// (cas.rs ~line 341). The pre-flight gate passes because full capabilities are
+/// declared; `get` returns absent so the loop attempts a first write; `put`
+/// then returns the generic error the loop must forward as-is.
+struct GenericPutErrorBackend;
+
+#[async_trait]
+impl RootFilesystem for GenericPutErrorBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        // Full CAS-capable shape — pre-flight gate passes and the loop enters.
+        BackendCapabilities::in_memory_full()
+    }
+
+    async fn get(&self, _path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        // No existing record — loop takes the first-write path and reaches `put`.
+        Ok(None)
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        _entry: Entry,
+        _cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        // A plain backend failure that is neither `VersionMismatch` (which
+        // would trigger a retry) nor `Unsupported { WriteFile }` (which maps
+        // to `CasUnsupported`). The loop's catch-all arm must forward it as
+        // `CasUpdateError::Backend`.
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::WriteFile,
+            reason: "simulated generic backend failure".to_string(),
+        })
+    }
+
+    async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        unimplemented!("GenericPutErrorBackend::list_dir is unreachable in this test")
+    }
+
+    async fn stat(&self, _path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        unimplemented!("GenericPutErrorBackend::stat is unreachable in this test")
+    }
+}
+
+#[tokio::test]
+async fn backend_put_error_maps_to_backend() {
+    // Regression for the catch-all `put` error arm in `cas_update_loop`
+    // (cas.rs ~line 341): `Err(error) => Err(CasUpdateError::Backend(error))`.
+    //
+    // The backend advertises full CAS capability so the pre-flight gate passes
+    // and the helper enters the loop. `get` returns `Ok(None)` so the loop
+    // takes the first-write (`CasExpectation::Absent`) path and calls `put`.
+    // `put` returns `FilesystemError::Backend` — a generic infrastructure
+    // failure that is neither `VersionMismatch` (retry) nor
+    // `Unsupported { WriteFile }` (maps to CasUnsupported). The helper must
+    // forward it unchanged as `CasUpdateError::Backend(_)`.
+    let fs = Arc::new(scoped(Arc::new(GenericPutErrorBackend)));
+    let scope = ResourceScope::system();
+
+    let result: Result<u64, CasUpdateError<TestError>> = cas_update(
+        fs.as_ref(),
+        &scope,
+        &counter_path(),
+        decode_counter,
+        encode_counter,
+        increment,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(CasUpdateError::Backend(_))),
+        "a non-VersionMismatch, non-Unsupported(WriteFile) put error must surface as \
+         CasUpdateError::Backend, got {result:?}"
     );
 }

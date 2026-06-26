@@ -103,9 +103,11 @@ pub const FILESYSTEM_CAS_BACKOFF_MAX: Duration = Duration::from_millis(50);
 /// skip the write entirely:
 ///
 /// 1. **Existing record, unchanged snapshot** — return `CasApply::new` with
-///    the same value that `apply` received (`Some(existing) == snapshot`).
-///    `cas_update` detects the equality and skips the write as a convenience
-///    fast-path for callers that already have an `PartialEq` snapshot.
+///    the same value that `apply` received. `cas_update` checks whether
+///    `current` is `Some(existing)` and the returned snapshot equals
+///    `existing` (i.e. `matches!(&current, Some(e) if *e == snapshot)`),
+///    and skips the write as a convenience fast-path for callers that already
+///    have a `PartialEq` snapshot.
 /// 2. **Any record state (including absent), explicit skip** — return
 ///    `CasApply::no_op`. The `write: false` flag unconditionally bypasses the
 ///    write regardless of what `snapshot` is set to. This is the correct signal
@@ -330,8 +332,12 @@ where
         match filesystem.put(scope, path, entry, cas).await {
             Ok(_) => return Ok(outcome),
             // 5a. Lost the CAS race — re-read and retry with backoff.
+            //     Skip the sleep on the final attempt: no retry follows it,
+            //     so the delay is pure tail latency (2–50 ms) with no benefit.
             Err(FilesystemError::VersionMismatch { .. }) => {
-                cas_retry_backoff(attempt).await;
+                if attempt + 1 < FILESYSTEM_CAS_RETRIES {
+                    cas_retry_backoff(attempt).await;
+                }
             }
             // 5b. Backend cannot CAS-write — fail closed (no blind overwrite).
             Err(FilesystemError::Unsupported {

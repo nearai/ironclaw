@@ -410,4 +410,15 @@ mod tests {
             CapabilityRunStateTransition::BlockAuth { .. }
         ));
     }
+
+    /// Regression for the `ApprovalStatus::Discarded` arm added to
+    /// `approval_not_approved_error_kind`: ensures the arm maps to the
+    /// correct string constant and does not silently drift to another value.
+    #[test]
+    fn approval_not_approved_error_kind_maps_discarded_status() {
+        assert_eq!(
+            approval_not_approved_error_kind(ApprovalStatus::Discarded),
+            "ApprovalDiscarded",
+        );
+    }
 }
