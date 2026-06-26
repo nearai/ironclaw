@@ -95,6 +95,36 @@ async fn openai_responses_retrieve_returns_incomplete_when_run_parks_on_gate() {
     assert!(response.output.is_empty());
 }
 
+/// Retrieve must agree with the wait path on auth-parked runs. A run parked on
+/// an auth gate emits an `AuthPrompt` but no terminal `RunStatus`, so a retrieve
+/// that only checked `GatePrompt` would report `in_progress` for auth-parked runs
+/// while `wait_for_response_completion` reports `incomplete`. The retrieve path
+/// must treat `AuthPrompt` as a parked signal and surface `Incomplete`, matching
+/// the wait path (`openai_responses_wait_returns_incomplete_when_run_parks_on_auth_gate`).
+#[tokio::test]
+async fn openai_responses_retrieve_returns_incomplete_when_run_parks_on_auth_gate() {
+    let fixture = ResponseReaderFixture::new("retrieve-auth-gate").await;
+    let run_id = TurnRunId::new();
+    let reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![auth_prompt_envelope(
+            run_id,
+        )])),
+    );
+
+    let response = reader
+        .read_response(fixture.read_request(run_id))
+        .await
+        .expect("read response");
+
+    assert_eq!(
+        response.status,
+        OpenAiResponseStatus::Incomplete,
+        "an auth-parked run must read as Incomplete on retrieve, matching the wait path"
+    );
+    assert!(response.output.is_empty());
+}
+
 /// Chat Completions must not spin forever on a run parked on a user gate.
 /// Unlike Responses, Chat Completions has no `incomplete` status, so the waiter
 /// returns a bounded, non-retryable `409 Conflict` (the run cannot produce a

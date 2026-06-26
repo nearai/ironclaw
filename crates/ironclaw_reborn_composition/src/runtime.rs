@@ -353,8 +353,16 @@ use crate::runtime_input::ResolvedRebornLlm;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConversationId(pub ThreadId);
 
-/// Final-form assistant reply read back from the session thread service after
-/// a `send_user_message` completes.
+/// Reply read back from the session thread service after a `send_user_message`
+/// returns — either because the run reached a terminal status or because it
+/// parked on a user-resolvable gate.
+///
+/// `gate_ref` is `Some` exactly when `status` is a `ParkedAwaitingUser` gate
+/// (`BlockedApproval`/`BlockedAuth`/`BlockedResource`): the run paused for the
+/// user and `gate_ref` identifies the gate to resolve (via the WebUI
+/// `RebornServicesApi` facade per #3094). It is `None` for every terminal
+/// status. `send_user_message` enforces this invariant, so a parked reply
+/// always carries a `gate_ref`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssistantReply {
     pub conversation: ConversationId,
@@ -362,6 +370,7 @@ pub struct AssistantReply {
     pub status: TurnStatus,
     pub failure_category: Option<String>,
     pub text: Option<String>,
+    pub gate_ref: Option<ironclaw_turns::GateRef>,
 }
 
 impl AssistantReply {
@@ -1583,8 +1592,15 @@ impl RebornRuntime {
     }
 
     /// Submit a user message into the conversation, wait for the run to
-    /// reach a terminal state, and return the assistant reply read back
-    /// from the session thread service.
+    /// either reach a terminal state or park on a user-resolvable gate, and
+    /// return the assistant reply read back from the session thread service.
+    ///
+    /// A run that parks on an approval/auth/resource gate is **surfaced, not
+    /// killed**: the returned [`AssistantReply`] carries the `Blocked*`
+    /// `status` and a `Some(gate_ref)` the caller can resolve through the
+    /// WebUI `RebornServicesApi` facade (`resolve_gate`, #3094). Terminal
+    /// replies carry `gate_ref = None`. Use [`AssistantReply::is_successful_final_reply`]
+    /// to distinguish a completed reply from a parked/failed one.
     ///
     /// Without an LLM gateway wired in (i.e. when this crate is built
     /// without the `root-llm-provider` feature or an LLM config is not
@@ -1642,6 +1658,23 @@ impl RebornRuntime {
                 .read_latest_assistant_text(&conversation.0, submitted.run_id)
                 .await?;
 
+            // `wait_for_terminal` returns either a terminal status or a run
+            // parked on a user-resolvable gate. A parked run MUST carry a
+            // `gate_ref` (the blocked-reason contract guarantees one); its
+            // absence is an invariant violation, surfaced rather than returned as
+            // a gate-less parked reply the caller can't act on.
+            let gate_ref = terminal_state.gate_ref.clone();
+            if matches!(
+                terminal_state.status.wait_class(),
+                RunWaitClass::ParkedAwaitingUser
+            ) && gate_ref.is_none()
+            {
+                return Err(RebornRuntimeError::TurnSubmission(format!(
+                    "run parked on {:?} without a gate ref",
+                    terminal_state.status
+                )));
+            }
+
             Ok(AssistantReply {
                 conversation: conversation.clone(),
                 run_id: submitted.run_id,
@@ -1651,6 +1684,7 @@ impl RebornRuntime {
                     .as_ref()
                     .map(|failure| failure.category().to_string()),
                 text: assistant_text,
+                gate_ref,
             })
         }
         .await;
@@ -2077,6 +2111,9 @@ impl RebornRuntime {
                         .as_ref()
                         .map(|failure| failure.category().to_string()),
                     text: assistant_text,
+                    // Terminal arm by construction (`state.status.is_terminal()`),
+                    // so there is no gate to carry.
+                    gate_ref: None,
                 }))
             } else {
                 // `wait_for_terminal_or_gate` only returns terminal or a

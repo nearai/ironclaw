@@ -207,6 +207,12 @@ async fn gate_parked_run_is_surfaced_not_killed_on_send() {
          got {:?} — if this is RunTimeout the old wait_for_terminal bug is active",
         reply.status,
     );
+    // The parked reply must carry the gate_ref so the caller can resolve the
+    // gate from the return value alone (not just observe that it's blocked).
+    assert!(
+        reply.gate_ref.is_some(),
+        "a run surfaced as BlockedApproval must carry a gate_ref to resolve; got None",
+    );
 
     runtime.shutdown().await.expect("shutdown");
 }
