@@ -1898,6 +1898,30 @@ Behavior adjustment:
   the port asserts the equivalent response-integrity behavior at the current SSE
   projection boundary.
 
+### Step 57: Legacy Stale Replay Timeline Dedupe Port
+
+Extended `test_reborn_webui_v2_legacy_sse_history.py`.
+
+Ported the remaining duplicate-protection intent from legacy
+`test_reconnect_with_stale_last_event_id_does_not_duplicate_messages` to
+Reborn's terminal projection and timeline refresh path:
+
+- seeded a Reborn thread with one user message;
+- emitted a terminal `projection_update` run-status frame to drive the real
+  `onRunSettled` timeline refresh;
+- returned a refreshed timeline containing duplicate copies of the same user
+  and assistant message ids, matching the stale/replayed-data failure shape;
+- asserted the browser renders each message id once.
+
+Behavior adjustment:
+
+- Legacy v1 forced reconnect with an old `Last-Event-ID` and then rebuilt
+  `/api/chat/history` without duplicating messages. Reborn v2 resumes streams
+  with `after_cursor` and refreshes durable state through
+  `/api/webchat/v2/threads/{thread_id}/timeline`, so the equivalent regression
+  target is id-based dedupe during the terminal timeline refresh that follows a
+  replayed or stale projection sequence.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -1908,7 +1932,9 @@ Not yet ported:
 - remaining legacy SSE/history edge cases only where Reborn exposes a matching
   product concept; active-thread fallback and read-only external-channel refresh
   are legacy v1 routing semantics rather than current standalone Reborn v2 UI
-  behavior;
+  behavior, while route-scoped cursor reset, stale replay dedupe, multi-tab
+  fan-out, keepalive comments, connection limits, and reload persistence are
+  covered;
 - remaining DOM/resource-limit scenarios for any future capped long-running
   activity stores beyond the current timeline paging, near-cap response
   projection, and SSE reconnect-timeout cleanup coverage;
