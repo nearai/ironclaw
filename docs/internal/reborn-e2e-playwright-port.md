@@ -955,6 +955,34 @@ Behavior adjustment:
   authentication instructions appear as a gate only, not as duplicate assistant
   transcript text.
 
+### Step 25: Legacy Approval Text-Intercept Review
+
+Reviewed legacy `test_tool_approval.py` against Reborn's approval contract.
+
+Already-covered functional ports:
+
+- approval card rendering, tool/action detail rendering, payload expansion, and
+  approve/deny/always resolution are covered by
+  `test_reborn_webui_v2_legacy_approval.py`;
+- bare `yes`/`no`/`always` with no pending gate send as normal chat in
+  `test_reborn_legacy_bare_approval_keywords_send_as_chat_without_gate`;
+- attempting to send any new message while a Reborn approval gate is pending is
+  blocked locally and shows a non-error waiting message in
+  `test_reborn_v2_approval_gate_blocks_composer_send`.
+
+Behavior adjustment:
+
+- Legacy v1 allowed the composer to remain writable with an approval card in
+  the DOM, then intercepted text aliases such as `yes`, `no`, `approve`,
+  `deny`, and `/approve` by finding the matching unresolved card and posting
+  legacy `/api/chat/gate/resolve` or `/api/chat/approval` requests. Reborn
+  WebChat v2 instead disables all composer sends while `pendingGate` is set and
+  resolves the explicit gate through
+  `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve`.
+  The old same-thread/other-thread text-intercept matrix is therefore legacy
+  v1 DOM/API behavior, not an additional Reborn port target unless product
+  requirements change to reintroduce text approval aliases.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -968,8 +996,9 @@ Not yet ported:
   activity stores beyond the current timeline paging and SSE reconnect-timeout
   cleanup coverage;
 - deeper tool approval scenarios that need real Reborn runtime/tool execution,
-  persistence, or recovery beyond the browser approval-card and persisted
-  activity-card contracts;
+  persistence, or recovery beyond the browser approval-card, local send-blocking,
+  and persisted activity-card contracts; legacy text-alias interception is v1
+  behavior superseded by Reborn's disabled-composer gate flow;
 - remaining settings/extension lifecycle scenarios beyond Settings search,
   Skills, tool permissions, channel label regressions, and the top-level
   extension install/manage/configure surface;
