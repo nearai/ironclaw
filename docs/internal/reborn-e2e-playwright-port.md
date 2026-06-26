@@ -2388,6 +2388,27 @@ Behavior adjustment:
   WebUI v2 extension registry action and the package-ref DTO; auth UI after
   provider callback remains covered by the product-auth/browser prompt tests.
 
+### Step 78: Legacy Extension Install Auth URL Safety Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Completed the install-side security coverage for the legacy
+`test_oauth_url_injection_blocked` regression:
+
+- mocked a successful Reborn extension install response with a non-HTTPS
+  `auth_url`;
+- asserted the browser shows the existing HTTPS-only error;
+- asserted `window.open` is not called;
+- asserted the install request still reaches the Reborn package-ref install
+  boundary exactly once.
+
+Behavior adjustment:
+
+- Legacy grouped activate/configure URL validation under the old extension
+  APIs. Reborn has separate install, activate, and configure OAuth branches, so
+  the migrated suite now pins install URL safety independently from the existing
+  activation and configure OAuth URL-safety tests.
+
 ## Open Migration Buckets
 
 Not yet ported:

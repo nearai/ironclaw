@@ -691,6 +691,50 @@ async def test_reborn_legacy_extensions_install_auth_url_opens_popup(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_extensions_install_auth_url_requires_https(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        registry=[REGISTRY_TOOL],
+        install_responses={
+            "registry-tool": {
+                "success": True,
+                "message": "Registry Tool installed",
+                "auth_url": "javascript:alert('install-xss')",
+            }
+        },
+    )
+    try:
+        page = harness["page"]
+        await page.evaluate(
+            """
+            () => {
+              window.__openedUrls = [];
+              window.open = (url) => {
+                window.__openedUrls.push(url);
+                return null;
+              };
+            }
+            """
+        )
+
+        card = _card_by_title(page, "Registry Tool")
+        await expect(card).to_be_visible(timeout=5000)
+        await card.get_by_role("button", name="Install").click()
+
+        await expect(page.get_by_text("Authentication URL must use HTTPS.")).to_be_visible(
+            timeout=5000
+        )
+        assert await page.evaluate("() => window.__openedUrls") == []
+        assert harness["install_requests"] == [
+            {"package_ref": _package_ref("registry-tool")}
+        ]
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_install_setup_required_channel_opens_configure_modal(
     reborn_v2_server, reborn_v2_browser
 ):
