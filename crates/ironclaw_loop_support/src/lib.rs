@@ -141,18 +141,24 @@ use ironclaw_turns::{
         CapabilityOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage,
         InstructionMaterializationStore, LoopCapabilityPort, LoopContextBundle,
         LoopContextCompactionKind, LoopContextCompactionMetadata, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopDriverNoteKind, LoopHostMilestoneEmitter,
-        LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRunContext,
-        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
-        PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
+        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind,
+        LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage,
+        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
+        LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
+        LoopTranscriptPort, MemoryPromptContextRequest, MemoryPromptContextService,
+        ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
+        sort_instruction_snippets_for_prompt,
     },
 };
 use serde::{Deserialize, Serialize};
 
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
 const LOOP_SYSTEM_ROLE: &str = "system";
+/// Upper bound on memory snippets requested per lane. The host's admission
+/// budget (4 KiB aggregate / 512 B per snippet) admits at most ~8 snippets, so a
+/// small per-lane request fills the budget without over-fetching the provider.
+const MEMORY_PROMPT_CONTEXT_MAX_SNIPPETS: usize = 8;
 
 pub fn raw_agent_loop_host_error(
     component: &'static str,
@@ -209,6 +215,18 @@ where
     context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     identity_candidates: Arc<IdentityCandidateCache>,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+    /// Optional proactive-memory source. When wired, memory snippets are fetched
+    /// ONCE per run (cached in `memory_snippets_cache`) and surfaced into the
+    /// prompt's `"memory"` section; when absent, `memory_snippets` stays empty.
+    /// Optional; production wires `None` pending #5013 — a composition without a
+    /// memory backend degrades to no memory, never failing the turn. (Unlike the
+    /// non-optional null-object `user_profile_source`, this is a genuine `Option`.)
+    // arch-exempt: optional_arc, deferred production wiring, issue #5013
+    memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
+    /// Per-run cache for the fetched memory snippets. Shared across clones via
+    /// `Arc` so the "fetch once per run" guarantee holds even if the port is
+    /// cloned, exactly like `identity_candidates`.
+    memory_snippets_cache: Arc<OnceCell<Vec<LoopContextSnippet>>>,
 }
 
 struct IdentityCandidateCache {
@@ -276,11 +294,25 @@ where
             context_window_cache: None,
             identity_candidates: Arc::new(IdentityCandidateCache::new()),
             milestone_sink: None,
+            memory_context_service: None,
+            memory_snippets_cache: Arc::new(OnceCell::new()),
         }
     }
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
+        self
+    }
+
+    /// Installs the proactive-memory source. When wired, the loop fetches both
+    /// the short-term (per-thread) and long-term memory lanes ONCE at the first
+    /// prompt build of the run, caches the admitted snippets, and surfaces them
+    /// into the prompt every turn. When not called the loop carries no memory.
+    pub fn with_memory_context_service(
+        mut self,
+        service: Arc<dyn MemoryPromptContextService>,
+    ) -> Self {
+        self.memory_context_service = Some(service);
         self
     }
 
@@ -383,6 +415,11 @@ where
             None => Vec::new(),
         };
 
+        // Proactive memory: fetch both lanes ONCE per run (cached) using the
+        // latest user message as the query, and surface them into the prompt's
+        // "memory" section. Derived from `context.messages` before the move below.
+        let memory_snippets = self.load_memory_snippets_once(&context.messages).await;
+
         let compaction_message_index = context
             .messages
             .iter()
@@ -401,7 +438,7 @@ where
                 .collect(),
             compaction_message_index,
             instruction_snippets,
-            memory_snippets: Vec::new(),
+            memory_snippets,
         })
     }
 }
@@ -410,6 +447,81 @@ impl<S> ThreadBackedLoopContextPort<S>
 where
     S: SessionThreadService + ?Sized + Send + Sync,
 {
+    /// Fetch proactive memory snippets ONCE per run, caching the result.
+    ///
+    /// The first prompt build of the run seeds the query from the latest user
+    /// message and fetches both lanes through the wired
+    /// [`MemoryPromptContextService`]; subsequent per-iteration calls reuse the
+    /// cached snippets (the "fetch once per run" guarantee). When no service is
+    /// wired, or there is no actor / user message to scope a query to, this
+    /// returns empty. A fetch failure degrades to empty and never fails the turn.
+    async fn load_memory_snippets_once(
+        &self,
+        context_messages: &[ContextMessage],
+    ) -> Vec<LoopContextSnippet> {
+        let Some(service) = self.memory_context_service.as_deref() else {
+            return Vec::new();
+        };
+        // Build the request BEFORE touching the cache. When there is no actor or no
+        // user message yet, there is nothing to query: return empty WITHOUT seeding
+        // the `OnceCell`, so a later prompt build that DOES carry a user message can
+        // still fetch (M1 regression — seeding the cell with an empty vec here froze
+        // memory to empty for the rest of the run). Only seed the cell once a real
+        // request exists.
+        let Some(request) = self.build_memory_prompt_context_request(context_messages) else {
+            return Vec::new();
+        };
+        // Fetch exactly once per run and CACHE the outcome — including an empty vec
+        // on failure. A down or slow memory service must not be re-hit on every
+        // model step of the run: the prior `get_or_try_init` left the cell
+        // uninitialized on error, so each iteration retried and could stack
+        // timeouts into latency spikes. A retrieval failure degrades to empty memory
+        // for the rest of the run rather than failing the turn; the per-run cache
+        // makes that decision exactly once.
+        let snippets = self
+            .memory_snippets_cache
+            .get_or_init(|| async {
+                match service.load_memory_snippets(request).await {
+                    Ok(snippets) => snippets,
+                    Err(error) => {
+                        tracing::debug!(
+                            kind = ?error.kind,
+                            "memory context fetch failed; degrading to empty memory for this run"
+                        );
+                        Vec::new()
+                    }
+                }
+            })
+            .await;
+        snippets.clone()
+    }
+
+    /// Build the memory request from the run context. Returns `None` (no memory
+    /// fetch) when there is no actor to scope to, or no user message to derive a
+    /// query from — both degrade to empty rather than failing the turn.
+    fn build_memory_prompt_context_request(
+        &self,
+        context_messages: &[ContextMessage],
+    ) -> Option<MemoryPromptContextRequest> {
+        // Memory is keyed to the human user; without an actor there is no user to
+        // scope to.
+        let actor = self.run_context.actor()?.clone();
+        // The query is the latest user message — the first prompt build of the
+        // run carries the real user turn, which the per-run cache then freezes.
+        let query = latest_user_message_text(context_messages)?;
+        Some(MemoryPromptContextRequest {
+            scope: self.run_context.scope.clone(),
+            actor,
+            query,
+            max_snippets: MEMORY_PROMPT_CONTEXT_MAX_SNIPPETS,
+            context_profile_id: self
+                .run_context
+                .resolved_run_profile
+                .context_profile_id
+                .clone(),
+        })
+    }
+
     fn publish_personal_context_admitted(
         &self,
         mode: PromptMode,
@@ -1860,6 +1972,20 @@ fn compaction_kind_for_message(kind: MessageKind) -> LoopContextCompactionKind {
     }
 }
 
+/// The text of the latest user message in the context window, used as the memory
+/// retrieval query. Returns `None` when there is no (non-blank) user message yet.
+/// Messages arrive ordered ascending by sequence, so the last `User` message is
+/// the most recent.
+fn latest_user_message_text(messages: &[ContextMessage]) -> Option<String> {
+    // The latest NON-BLANK user message: skip blank trailing user rows and keep
+    // looking back, so a whitespace-only newest user turn doesn't drop memory for
+    // the run when an earlier user turn carries real content.
+    messages.iter().rev().find_map(|message| {
+        (message.kind == MessageKind::User && !message.content.trim().is_empty())
+            .then(|| message.content.clone())
+    })
+}
+
 fn message_ref_from_context(message: &ContextMessage) -> Option<LoopMessageRef> {
     if let Some(message_id) = message.message_id {
         return message_ref(message_id).ok();
@@ -2053,6 +2179,62 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ctx_msg(sequence: u64, kind: MessageKind, content: &str) -> ContextMessage {
+        ContextMessage {
+            message_id: None,
+            summary_id: None,
+            sequence,
+            kind,
+            tool_result_provider_call: None,
+            content: content.to_string(),
+            image_attachments: Vec::new(),
+        }
+    }
+
+    /// CR review: `latest_user_message_text` returns the latest NON-BLANK user
+    /// message — a blank trailing user turn must not drop memory for the run when
+    /// an earlier user turn has content, and non-user rows are skipped.
+    #[test]
+    fn latest_user_message_text_uses_latest_non_blank_user_turn() {
+        // A blank newest user turn must fall back to the earlier non-blank one.
+        let blank_trailing = vec![
+            ctx_msg(1, MessageKind::User, "remember the launch is friday"),
+            ctx_msg(2, MessageKind::User, "   \n  "),
+        ];
+        assert_eq!(
+            latest_user_message_text(&blank_trailing).as_deref(),
+            Some("remember the launch is friday"),
+            "a blank trailing user turn must not drop the earlier non-blank one"
+        );
+
+        // All-blank user rows → None (nothing to query memory with).
+        let all_blank = vec![
+            ctx_msg(1, MessageKind::User, "   "),
+            ctx_msg(2, MessageKind::User, ""),
+        ];
+        assert_eq!(latest_user_message_text(&all_blank), None);
+
+        // The newest non-blank user turn wins over an older one.
+        let two_users = vec![
+            ctx_msg(1, MessageKind::User, "older"),
+            ctx_msg(2, MessageKind::User, "newest"),
+        ];
+        assert_eq!(
+            latest_user_message_text(&two_users).as_deref(),
+            Some("newest")
+        );
+
+        // A newer non-user row is skipped in favor of the latest user turn.
+        let user_then_assistant = vec![
+            ctx_msg(1, MessageKind::User, "the user turn"),
+            ctx_msg(2, MessageKind::Assistant, "model reply"),
+        ];
+        assert_eq!(
+            latest_user_message_text(&user_then_assistant).as_deref(),
+            Some("the user turn")
+        );
+    }
 
     #[test]
     fn personal_context_admitted_summary_empty_paths_uses_count_only() {
