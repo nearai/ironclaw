@@ -192,10 +192,14 @@ export function toolCardFromPreview(preview) {
     toolResultPreview: failed
       ? null
       : preview.output_preview || preview.output_summary || null,
+    // Prefer the backend's failure summary/preview (which carries actionable
+    // detail like invalid-input field issues) over the bare error kind, so the
+    // Error tab shows "Invalid input: field — missing required field" rather
+    // than just "invalid_input". Falls back to the kind when no summary exists.
     toolError: failed
-      ? toolErrorText(errorKind) ||
-        preview.output_summary ||
+      ? preview.output_summary ||
         preview.output_preview ||
+        toolErrorText(errorKind) ||
         preview.result_ref ||
         null
       : null,

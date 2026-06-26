@@ -40,8 +40,8 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
         // Categories below come from `LoopFailureKind::as_str()` via the normal
         // loop-exit path (`ironclaw_turns::loop_exit`), not the driver-error
         // path above. They were previously unmapped and degraded to the generic
-        // fallback, which masked the real failure (issue #5289: a tool failure
-        // surfaced to the user as a vague "driver protocol error").
+        // fallback, which masked the real failure (a tool failure surfaced to
+        // the user as a vague "driver protocol error").
         "capability_protocol_error" => {
             "The run stopped because a tool returned a response it could not process."
         }
@@ -156,11 +156,11 @@ mod tests {
         }
     }
 
-    // Regression guard for issue #5289: categories emitted by
-    // `LoopFailureKind::as_str()` through the normal loop-exit path must map to
-    // specific, honest summaries instead of degrading to the generic fallback
-    // (which the LLM failure explainer then paraphrased into a vague "driver
-    // protocol error" that masked the real tool failure).
+    // Regression guard: categories emitted by `LoopFailureKind::as_str()`
+    // through the normal loop-exit path must map to specific, honest summaries
+    // instead of degrading to the generic fallback (which the LLM failure
+    // explainer then paraphrased into a vague "driver protocol error" that
+    // masked the real tool failure).
     #[test]
     fn reborn_failure_summary_describes_capability_protocol_error() {
         assert_eq!(

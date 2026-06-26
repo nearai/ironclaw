@@ -260,6 +260,89 @@ pub trait LoopCapabilityResultWriter: Send + Sync {
         _input_ref: &CapabilityInputRef,
     ) {
     }
+
+    /// Stage a display preview for a FAILED capability invocation so the UI can
+    /// render the specific failure detail (e.g. invalid-input field issues)
+    /// instead of only the bare error kind. `summary` is a bounded,
+    /// host-authored string (see `capability_failure_display_summary`).
+    /// Default no-op: only writers that own a display-preview store implement
+    /// it. Mirrors `record_running_invocation`'s opt-in shape.
+    fn stage_capability_failure_preview(
+        &self,
+        _run_context: &LoopRunContext,
+        _invocation_id: InvocationId,
+        _capability_id: &CapabilityId,
+        _summary: &str,
+    ) {
+    }
+}
+
+/// Maximum number of input issues rendered into a failure display preview.
+const CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES: usize = 5;
+/// Byte budget for the rendered failure summary. Stays well under the display
+/// preview's own `CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES` (2 KiB) cap.
+const CAPABILITY_FAILURE_PREVIEW_MAX_BYTES: usize = 1024;
+
+/// Render a bounded, host-authored display summary for a failed capability.
+///
+/// Returns `Some(..)` only for `InvalidInput` failures, where the per-field
+/// `issues` carry actionable detail the model-visible observation already
+/// surfaces to the LLM but which never reached the UI's per-tool preview.
+/// Other failure kinds return `None` so the projection keeps its existing
+/// `tool failed: <kind>` fallback.
+///
+/// Only schema-derived fields (`path`, `code`, `expected`) are interpolated.
+/// The `received` value is deliberately omitted: it echoes raw tool input and
+/// must not be rendered into a display surface.
+fn capability_failure_display_summary(failure: &CapabilityFailure) -> Option<String> {
+    let Some(CapabilityFailureDetail::InvalidInput { issues }) = failure.detail.as_ref() else {
+        return None;
+    };
+    if issues.is_empty() {
+        return None;
+    }
+    let rendered = issues
+        .iter()
+        .take(CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES)
+        .map(render_capability_input_issue)
+        .collect::<Vec<_>>()
+        .join("; ");
+    let mut summary = format!("Invalid input: {rendered}");
+    if issues.len() > CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES {
+        let extra = issues.len() - CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES;
+        summary.push_str(&format!(" (+{extra} more)"));
+    }
+    Some(truncate_on_char_boundary(
+        summary,
+        CAPABILITY_FAILURE_PREVIEW_MAX_BYTES,
+    ))
+}
+
+fn render_capability_input_issue(issue: &CapabilityInputIssue) -> String {
+    let code = match issue.code {
+        CapabilityInputIssueCode::MissingRequired => "missing required field",
+        CapabilityInputIssueCode::UnexpectedField => "unexpected field",
+        CapabilityInputIssueCode::TypeMismatch => "type mismatch",
+        CapabilityInputIssueCode::InvalidValue => "invalid value",
+    };
+    match issue.expected.as_deref() {
+        Some(expected) if !expected.is_empty() => {
+            format!("{} — {code} (expected {expected})", issue.path)
+        }
+        _ => format!("{} — {code}", issue.path),
+    }
+}
+
+fn truncate_on_char_boundary(mut value: String, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value
 }
 
 pub struct CapabilityResultWrite<'a> {
@@ -2435,7 +2518,25 @@ async fn runtime_outcome_to_loop(
                 safe_summary: "capability spawned background work".to_string(),
             })
         }
-        RuntimeCapabilityOutcome::Failed(failure) => runtime_failure_to_loop(failure)?,
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            let capability_id = failure.capability_id.clone();
+            let outcome = runtime_failure_to_loop(failure)?;
+            // Surface actionable failure detail (e.g. invalid-input field
+            // issues) to the per-tool UI preview by staging a display-preview
+            // record. Without this the projection falls back to the bare error
+            // kind. The model-visible observation is unaffected.
+            if let CapabilityOutcome::Failed(ref cap_failure) = outcome
+                && let Some(summary) = capability_failure_display_summary(cap_failure)
+            {
+                result_writer.stage_capability_failure_preview(
+                    run_context,
+                    conversion.invocation_id,
+                    &capability_id,
+                    &summary,
+                );
+            }
+            outcome
+        }
         RuntimeCapabilityOutcome::Unknown(unknown) => {
             CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind: capability_failure_kind(unknown.kind)?,
@@ -3138,6 +3239,49 @@ mod tests {
                 if failure.error_kind == CapabilityFailureKind::Transient
                     && failure.safe_summary == "temporary outage"
         ));
+    }
+
+    #[test]
+    fn capability_failure_display_summary_renders_invalid_input_issues() {
+        let failure = CapabilityFailure {
+            error_kind: CapabilityFailureKind::InvalidInput,
+            safe_summary: "tool input failed validation".to_string(),
+            detail: Some(CapabilityFailureDetail::InvalidInput {
+                issues: vec![
+                    CapabilityInputIssue {
+                        path: "schedule.kind".to_string(),
+                        code: CapabilityInputIssueCode::MissingRequired,
+                        expected: Some("cron or once".to_string()),
+                        received: Some("super-secret-raw-value".to_string()),
+                        schema_path: None,
+                    },
+                    CapabilityInputIssue {
+                        path: "schedule.timezone".to_string(),
+                        code: CapabilityInputIssueCode::InvalidValue,
+                        expected: None,
+                        received: None,
+                        schema_path: None,
+                    },
+                ],
+            }),
+        };
+        let summary =
+            capability_failure_display_summary(&failure).expect("invalid input renders a summary");
+        assert!(summary.starts_with("Invalid input:"));
+        assert!(summary.contains("schedule.kind — missing required field (expected cron or once)"));
+        assert!(summary.contains("schedule.timezone — invalid value"));
+        // `received` echoes raw tool input and must never reach a display surface.
+        assert!(!summary.contains("super-secret-raw-value"));
+    }
+
+    #[test]
+    fn capability_failure_display_summary_is_none_for_non_invalid_input() {
+        let failure = CapabilityFailure {
+            error_kind: CapabilityFailureKind::Backend,
+            safe_summary: "capability backend failed".to_string(),
+            detail: None,
+        };
+        assert!(capability_failure_display_summary(&failure).is_none());
     }
 
     #[test]

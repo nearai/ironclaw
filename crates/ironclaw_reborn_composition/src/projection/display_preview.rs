@@ -256,6 +256,56 @@ impl CapabilityDisplayPreviewStore {
             .push(invocation_id);
     }
 
+    /// Stage a display preview for a FAILED invocation, carrying a
+    /// host-authored failure summary (e.g. rendered invalid-input issues) as
+    /// the output so the per-tool UI card shows the actionable detail instead
+    /// of only the bare error kind. Title/subtitle/input are pulled from the
+    /// pending input recorded at registration, mirroring the success path in
+    /// `record_result_with_preview`. No result ref is staged: the model-visible
+    /// result is written separately through the transcript port.
+    pub(crate) fn record_failure_preview(
+        &self,
+        run_id: &str,
+        invocation_id: InvocationId,
+        capability_id: &CapabilityId,
+        summary: &str,
+    ) {
+        let input = {
+            let mut pending = self.lock_pending_inputs();
+            let input_ref = pending
+                .input_ref_by_invocation
+                .remove(&invocation_id.to_string());
+            input_ref.and_then(|input_ref| pending.by_ref.remove(&input_ref))
+        };
+        let title = input
+            .as_ref()
+            .map(|input| input.title.clone())
+            .unwrap_or_else(|| safe_capability_title(capability_id.as_str()).to_string());
+        let bounded = bounded_display_text(summary, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES);
+        let record = CapabilityDisplayPreviewRecord {
+            timeline_message_id: None,
+            title,
+            subtitle: input.as_ref().and_then(|input| input.subtitle.clone()),
+            input_summary: input.as_ref().and_then(|input| input.input_summary.clone()),
+            output_summary: Some(bounded.text.clone()),
+            output_preview: Some(bounded.text),
+            output_kind: Some("text".to_string()),
+            output_bytes: None,
+            result_ref: None,
+            truncated: bounded.truncated || input.as_ref().is_some_and(|input| input.truncated),
+        };
+        let mut completed = self.lock_completed_previews();
+        let invocation_id = invocation_id.to_string();
+        completed
+            .by_invocation
+            .insert(invocation_id.clone(), record);
+        completed
+            .invocations_by_run
+            .entry(run_id.to_string())
+            .or_default()
+            .push(invocation_id);
+    }
+
     pub(crate) fn prune_run(&self, run_id: &str) {
         let mut pending = self.lock_pending_inputs();
         if let Some(input_refs) = pending.refs_by_run.remove(run_id) {
