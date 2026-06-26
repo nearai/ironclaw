@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from playwright.async_api import expect
 
@@ -15,6 +15,7 @@ from reborn_webui_harness import (
 
 
 THREAD_ID = "thread-legacy-pending"
+OTHER_THREAD_ID = "thread-legacy-pending-other"
 RUN_ID = "11111111-2222-3333-4444-555555555555"
 
 
@@ -104,12 +105,30 @@ async def _open_mocked_pending_page(
     reborn_v2_browser,
     *,
     timeline_messages=None,
+    timeline_by_thread=None,
+    threads=None,
     send_handler,
 ):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
     await _install_fake_event_source(page)
     timeline = list(timeline_messages or [])
+    timelines = {
+        thread_id: list(messages)
+        for thread_id, messages in (timeline_by_thread or {}).items()
+    }
+    timelines.setdefault(THREAD_ID, timeline)
+    thread_records = list(
+        threads
+        or [
+            {
+                "thread_id": THREAD_ID,
+                "title": "Pending message regression",
+                "created_at": "2026-06-25T00:00:00Z",
+                "updated_at": "2026-06-25T00:00:00Z",
+            }
+        ]
+    )
     timeline_requests: list[dict] = []
     send_requests: list[dict] = []
 
@@ -142,21 +161,19 @@ async def _open_mocked_pending_page(
         await fulfill_json(
             route,
             {
-                "threads": [
-                    {
-                        "thread_id": THREAD_ID,
-                        "title": "Pending message regression",
-                        "created_at": "2026-06-25T00:00:00Z",
-                        "updated_at": "2026-06-25T00:00:00Z",
-                    }
-                ],
+                "threads": thread_records,
                 "next_cursor": None,
             },
         )
 
     async def handle_timeline(route):
-        timeline_requests.append(dict(urlparse(route.request.url)._asdict()))
-        await fulfill_json(route, {"messages": timeline, "next_cursor": None})
+        parsed = urlparse(route.request.url)
+        timeline_requests.append(dict(parsed._asdict()))
+        thread_id = unquote(parsed.path.split("/threads/", 1)[1].split("/timeline", 1)[0])
+        await fulfill_json(
+            route,
+            {"messages": timelines.get(thread_id, []), "next_cursor": None},
+        )
 
     async def handle_send(route):
         payload = json.loads(route.request.post_data or "{}")
@@ -165,7 +182,7 @@ async def _open_mocked_pending_page(
 
     await page.route("**/api/webchat/v2/session", handle_session)
     await page.route("**/api/webchat/v2/threads", handle_threads)
-    await page.route(f"**/api/webchat/v2/threads/{THREAD_ID}/timeline**", handle_timeline)
+    await page.route("**/api/webchat/v2/threads/*/timeline**", handle_timeline)
     await page.route(f"**/api/webchat/v2/threads/{THREAD_ID}/messages", handle_send)
 
     await page.goto(f"{reborn_v2_server}/v2/chat/{THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}")
@@ -256,6 +273,69 @@ async def test_reborn_legacy_pending_message_reconciles_with_confirmed_timeline(
             "The duplicate check is complete.", timeout=5000
         )
     finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_pending_message_survives_thread_reload(
+    reborn_v2_server, reborn_v2_browser
+):
+    release_send = asyncio.Event()
+
+    async def handle_delayed_send(route, _payload, fulfill_json):
+        await release_send.wait()
+        await fulfill_json(route, _submitted_response(), status=202)
+
+    harness = await _open_mocked_pending_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        threads=[
+            {
+                "thread_id": THREAD_ID,
+                "title": "Pending message regression",
+                "created_at": "2026-06-25T00:00:00Z",
+                "updated_at": "2026-06-25T00:00:00Z",
+            },
+            {
+                "thread_id": OTHER_THREAD_ID,
+                "title": "Other thread",
+                "created_at": "2026-06-25T00:01:00Z",
+                "updated_at": "2026-06-25T00:01:00Z",
+            },
+        ],
+        timeline_by_thread={
+            THREAD_ID: [],
+            OTHER_THREAD_ID: [_user_record("other-user", "Other thread seed")],
+        },
+        send_handler=handle_delayed_send,
+    )
+    try:
+        page = harness["page"]
+        composer = page.locator(SEL_V2["chat_composer"])
+        await composer.fill("SSE reconnect race test 12345")
+        await composer.press("Enter")
+
+        pending_message = page.locator(SEL_V2["msg_user"]).filter(
+            has_text="SSE reconnect race test 12345"
+        )
+        await expect(pending_message).to_have_count(1, timeout=5000)
+        pending_timeline_requests = len(harness["timeline_requests"])
+
+        await page.locator("#gateway-sidebar button").filter(
+            has_text="Other thread"
+        ).first.click()
+        await expect(
+            page.locator(SEL_V2["msg_user"]).filter(has_text="Other thread seed")
+        ).to_be_visible(timeout=15000)
+
+        await page.locator("#gateway-sidebar button").filter(
+            has_text="Pending message regression"
+        ).first.click()
+        await expect(pending_message).to_have_count(1, timeout=15000)
+        await expect(pending_message).to_contain_text("SSE reconnect race test 12345")
+        assert len(harness["timeline_requests"]) > pending_timeline_requests
+        assert harness["send_requests"][0]["content"] == "SSE reconnect race test 12345"
+    finally:
+        release_send.set()
         await harness["context"].close()
 
 

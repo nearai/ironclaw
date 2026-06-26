@@ -421,6 +421,8 @@ Ported the caller-visible pending-message intent from legacy
 - a terminal Reborn projection event reloads the timeline and reconciles the
   optimistic message with the confirmed `accepted_message_ref` row without
   duplicating the user message;
+- an unconfirmed optimistic message survives switching away from the thread and
+  back through the real sidebar while the refreshed timeline is still empty;
 - a failed v2 send renders one error-state optimistic user message and exposes
   the Retry affordance.
 
@@ -432,6 +434,11 @@ Behavior adjustment:
   visible thread with error styling. The port asserts behavior through the
   composer, `/api/webchat/v2/threads/:id/messages`, terminal SSE projection,
   and `/timeline` reload instead of private hook internals.
+- The legacy reconnect-race test forced a v1 SSE reconnect to call
+  `loadHistory()`. Reborn's v2 visibility reconnect keeps the rendered history
+  intact and does not refetch by itself, so the functional port uses the real
+  sidebar thread switch and timeline reload path to protect the same invariant:
+  an unconfirmed optimistic message is not erased by a history refresh.
 
 CI update:
 
