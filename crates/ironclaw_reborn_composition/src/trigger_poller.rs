@@ -1,3 +1,5 @@
+#[cfg(feature = "slack-v2-host-beta")]
+use std::collections::VecDeque;
 use std::sync::Arc;
 #[cfg(feature = "slack-v2-host-beta")]
 use std::sync::Mutex;
@@ -120,17 +122,23 @@ pub(crate) fn spawn_trigger_poller(
 ///
 /// Runtime construction starts the poller before Slack mounts are fully built.
 /// Accepted fires that settle in that startup window are buffered here and
-/// replayed once `set_trigger_post_submit_hook` installs the Slack hook.
+/// replayed once `set_trigger_post_submit_hook` installs the Slack hook. The
+/// startup buffer is bounded to match Slack's pending-delivery admission cap;
+/// if the hook is delayed long enough to fill the buffer, the oldest settlement
+/// is dropped before accepting a newer one.
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) struct PostSubmitHookDispatch {
     state: Mutex<PostSubmitHookDispatchState>,
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
+const POST_SUBMIT_HOOK_PENDING_CAPACITY: usize = 256;
+
+#[cfg(feature = "slack-v2-host-beta")]
 #[derive(Default)]
 struct PostSubmitHookDispatchState {
     hook: Option<Arc<dyn PostSubmitDeliveryHook>>,
-    pending: Vec<TriggerAcceptedFireSettlement>,
+    pending: VecDeque<TriggerAcceptedFireSettlement>,
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
@@ -176,7 +184,15 @@ impl PostSubmitHookDispatch {
             match state.hook.as_ref() {
                 Some(hook) => Arc::clone(hook),
                 None => {
-                    state.pending.push(event);
+                    if state.pending.len() >= POST_SUBMIT_HOOK_PENDING_CAPACITY {
+                        state.pending.pop_front();
+                        tracing::debug!(
+                            target = "ironclaw::reborn::trigger_poller",
+                            pending_capacity = POST_SUBMIT_HOOK_PENDING_CAPACITY,
+                            "post-submit hook startup buffer full; dropped oldest pending trigger settlement"
+                        );
+                    }
+                    state.pending.push_back(event);
                     return;
                 }
             }
@@ -337,7 +353,9 @@ mod tests {
         use ironclaw_turns::{TurnRunId, TurnScope};
         use tokio::sync::Notify;
 
-        use super::super::{PostSubmitHookDispatch, PostSubmitHookObserver};
+        use super::super::{
+            POST_SUBMIT_HOOK_PENDING_CAPACITY, PostSubmitHookDispatch, PostSubmitHookObserver,
+        };
         use crate::slack_delivery::PostSubmitDeliveryHook;
 
         #[derive(Default)]
@@ -458,6 +476,51 @@ mod tests {
                 .await
                 .expect("buffered settlement should be delivered after hook install");
             assert_eq!(calls[0].1, run_id);
+        }
+
+        #[tokio::test]
+        async fn uninstalled_hook_buffer_drops_oldest_when_full() {
+            let dispatch = Arc::new(PostSubmitHookDispatch::new());
+            let observer = PostSubmitHookObserver::new(Arc::clone(&dispatch));
+            let recording = Arc::new(RecordingHook::default());
+            let run_ids: Vec<_> = (0..=POST_SUBMIT_HOOK_PENDING_CAPACITY)
+                .map(|_| TurnRunId::new())
+                .collect();
+
+            for run_id in run_ids.iter().copied() {
+                observer
+                    .on_accepted_fire_settled(settlement_event(run_id))
+                    .await;
+            }
+
+            assert!(
+                dispatch.install_hook(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>),
+                "first hook install must succeed"
+            );
+
+            let calls = tokio::time::timeout(
+                Duration::from_secs(1),
+                recording.wait_for_calls(POST_SUBMIT_HOOK_PENDING_CAPACITY),
+            )
+            .await
+            .expect("capped buffered settlements should be delivered after hook install");
+            let delivered_run_ids: Vec<_> = calls
+                .iter()
+                .map(|(_, delivered_run_id, _)| *delivered_run_id)
+                .collect();
+            assert_eq!(
+                delivered_run_ids.len(),
+                POST_SUBMIT_HOOK_PENDING_CAPACITY,
+                "startup buffer must deliver only the capped number of settlements"
+            );
+            assert!(
+                !delivered_run_ids.contains(&run_ids[0]),
+                "oldest settlement must be dropped on overflow"
+            );
+            assert!(
+                delivered_run_ids.contains(run_ids.last().expect("run ids")),
+                "newest settlement must be retained on overflow"
+            );
         }
 
         #[tokio::test]

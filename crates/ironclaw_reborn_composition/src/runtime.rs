@@ -1328,8 +1328,8 @@ impl RebornRuntime {
     /// the hook itself is constructed (e.g. inside
     /// [`crate::slack_host_beta::build_slack_host_beta_mounts`]). The hook is
     /// idempotent: a second call is silently ignored. Returns `false` when the
-    /// trigger poller is not enabled (slot is `None`) or the slot is already
-    /// occupied, `true` on first successful set.
+    /// trigger poller is not enabled (no dispatcher) or a hook is already
+    /// installed, `true` on first successful install.
     #[cfg(feature = "slack-v2-host-beta")]
     pub fn set_trigger_post_submit_hook(
         &self,
