@@ -676,6 +676,8 @@ Ported the user-visible resource-limit intent from legacy
   messages" control;
 - one explicit load appends one older 50-message page without auto-loading the
   rest of a long thread.
+- an SSE error schedules Reborn's first reconnect timeout, and hiding the tab
+  clears that pending reconnect timeout instead of leaving it active.
 
 Behavior adjustment:
 
@@ -685,6 +687,10 @@ Behavior adjustment:
   equivalent browser resource contract is timeline pagination through the
   `/api/webchat/v2/threads/{thread_id}/timeline` boundary, with 50-message
   pages and explicit user-driven older-page loading.
+- Legacy v1 tracked reconnect/status-polling interval leaks. Reborn's matching
+  risk is the `useSSE` reconnect timeout. The port instruments browser timers
+  and isolates the 2000ms first-reconnect delay because the SPA also has
+  unrelated React Query timers in the same page.
 
 Frontend harness adjustment:
 
@@ -887,8 +893,9 @@ Not yet ported:
   product concept; active-thread fallback and read-only external-channel refresh
   are legacy v1 routing semantics rather than current standalone Reborn v2 UI
   behavior;
-- remaining DOM/resource-limit scenarios for Reborn-specific SSE reconnect
-  timer cleanup and any future capped long-running activity stores;
+- remaining DOM/resource-limit scenarios for any future capped long-running
+  activity stores beyond the current timeline paging and SSE reconnect-timeout
+  cleanup coverage;
 - deeper tool approval scenarios that need real Reborn runtime/tool execution,
   persistence, or recovery beyond the browser approval-card and persisted
   activity-card contracts;

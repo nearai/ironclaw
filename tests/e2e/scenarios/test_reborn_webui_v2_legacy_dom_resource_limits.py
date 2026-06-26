@@ -14,6 +14,7 @@ from reborn_webui_harness import (
 
 
 THREAD_ID = "thread-legacy-dom-resource-limits"
+RECONNECT_THREAD_ID = "thread-legacy-dom-reconnect"
 
 
 def _timeline_message(sequence: int) -> dict:
@@ -141,5 +142,151 @@ async def test_reborn_chat_history_dom_stays_page_bounded_until_user_loads_more(
         await expect(page.get_by_text("DOM page message 151")).to_be_visible()
         await expect(page.get_by_text("DOM page message 250")).to_be_visible()
         await expect(page.get_by_text("DOM page message 101")).to_have_count(0)
+    finally:
+        await context.close()
+
+
+async def test_reborn_sse_reconnect_timer_clears_when_tab_hidden(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Port legacy reconnect timer cleanup to Reborn's visibility pause path."""
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    await page.add_init_script(
+        """
+        (() => {
+          const streams = [];
+          const reconnectTimers = new Map();
+          const timeoutDelays = [];
+          const nativeSetTimeout = window.setTimeout.bind(window);
+          const nativeClearTimeout = window.clearTimeout.bind(window);
+
+          window.setTimeout = (callback, delay = 0, ...args) => {
+            timeoutDelays.push(delay);
+            const id = nativeSetTimeout(() => {
+              reconnectTimers.delete(id);
+              callback(...args);
+            }, delay);
+            if (delay >= 2000 && delay <= 30000) reconnectTimers.set(id, delay);
+            return id;
+          };
+          window.clearTimeout = (id) => {
+            reconnectTimers.delete(id);
+            return nativeClearTimeout(id);
+          };
+          window.__activeSseReconnectTimeoutCount = () =>
+            Array.from(reconnectTimers.values()).filter((delay) => delay === 2000).length;
+          window.__timerDebugState = () => ({
+            activeReconnectTimeouts: reconnectTimers.size,
+            activeReconnectDelays: Array.from(reconnectTimers.values()),
+            activeSseReconnectTimeouts: window.__activeSseReconnectTimeoutCount(),
+            timeoutDelays,
+            failCalls: window.__sseFailCalls || 0,
+          });
+
+          class FakeEventSource extends EventTarget {
+            constructor(url) {
+              super();
+              this.url = url;
+              this.readyState = 0;
+              streams.push(this);
+              queueMicrotask(() => {
+                this.readyState = 1;
+                if (typeof this.onopen === "function") this.onopen(new Event("open"));
+              });
+            }
+            close() {
+              this.readyState = 2;
+            }
+          }
+          window.EventSource = FakeEventSource;
+          window.__v2SseHasErrorHandler = () =>
+            streams.some((stream) => typeof stream.onerror === "function");
+          window.__failLatestV2Sse = () => {
+            const stream = streams[streams.length - 1];
+            if (!stream) throw new Error("no EventSource stream is open");
+            window.__sseFailCalls = (window.__sseFailCalls || 0) + 1;
+            if (typeof stream.onerror === "function") stream.onerror(new Event("error"));
+          };
+        })();
+        """
+    )
+
+    async def fulfill_json(route, body):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route):
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route):
+        await fulfill_json(
+            route,
+            {
+                "threads": [
+                    {
+                        "thread_id": RECONNECT_THREAD_ID,
+                        "title": "Legacy reconnect timer port",
+                        "created_at": "2026-06-26T00:00:00Z",
+                        "updated_at": "2026-06-26T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_timeline(route):
+        await fulfill_json(route, {"messages": [], "next_cursor": None})
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads", handle_threads)
+    await page.route("**/api/webchat/v2/threads?**", handle_threads)
+    await page.route(
+        f"**/api/webchat/v2/threads/{RECONNECT_THREAD_ID}/timeline**",
+        handle_timeline,
+    )
+
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/v2/chat/{RECONNECT_THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
+        await page.wait_for_function("() => window.__v2SseHasErrorHandler()")
+        await page.evaluate("() => window.__failLatestV2Sse()")
+        await page.wait_for_timeout(100)
+        timer_state = await page.evaluate("() => window.__timerDebugState()")
+        assert timer_state["activeSseReconnectTimeouts"] == 1, timer_state
+
+        await page.evaluate(
+            """
+            () => {
+              Object.defineProperty(document, 'visibilityState', {
+                configurable: true,
+                get: () => 'hidden',
+              });
+              document.dispatchEvent(new Event('visibilitychange'));
+            }
+            """
+        )
+
+        await page.wait_for_function("() => window.__activeSseReconnectTimeoutCount() === 0")
     finally:
         await context.close()
