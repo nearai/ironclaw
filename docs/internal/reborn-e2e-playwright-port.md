@@ -875,8 +875,8 @@ standalone Reborn OpenAI-compatible route mount:
 
 - `/v1/responses` accepts non-streaming text input and returns a completed
   `response` object with a `resp_` id;
-- `/api/v1/responses` works as the route alias for typed Responses message
-  input;
+- `/api/v1/responses` works as the route alias for legacy untyped Responses
+  message input;
 - `previous_response_id` continues a conversation and `GET
   /api/v1/responses/{id}` retrieves the resulting response;
 - streaming requests return an SSE lifecycle on the Reborn projection stream;
@@ -885,16 +885,15 @@ standalone Reborn OpenAI-compatible route mount:
 
 Behavior adjustment:
 
-- Legacy tests sent `input=[{"role": "user", "content": "..."}]`. Reborn's
-  OpenAI-compatible DTO uses the typed Responses item shape, so the migrated
-  test sends `{"type": "message", "role": "user", "content": [...]}`.
+- Reborn now accepts the legacy `input=[{"role": "user", "content": "..."}]`
+  message-item shape and normalizes it to the internal typed Responses payload
+  before submitting the product-workflow turn.
 - The legacy streaming assertion only required raw SSE events. Reborn can
   complete a fast response with `response.created` and `response.completed`
   events without an intermediate `response.output_text.delta`, so the migrated
   test asserts the lifecycle events rather than requiring a delta.
-- Legacy `x_context.notification_response` injection has no matching Reborn
-  OpenAI-compatible Responses DTO field yet, so those approval/rejection context
-  cases remain open until a Reborn route-level context contract lands.
+- The original port left legacy `x_context.notification_response` injection
+  open; Step 73 closes that gap with a Reborn route-level context contract.
 
 Harness adjustment:
 
@@ -2303,6 +2302,29 @@ Issue fixed:
 - Reborn's Responses DTO did not carry `x_context`, so legacy clients could
   send notification approval/rejection context and receive a normal response
   while the structured context was silently dropped before the agent turn.
+
+### Step 74: Legacy Responses Untyped Message Input Port
+
+Extended `test_reborn_webui_v2_legacy_responses_api.py` and fixed the Reborn
+OpenAI-compatible Responses request DTO.
+
+Ported the legacy message-array shape from `test_responses_api.py`:
+
+- accepted `input=[{"role": "user", "content": "..."}]` without requiring a
+  `type: "message"` discriminator;
+- normalized untyped message items into Reborn's internal
+  `openai_compat.responses_input.v1` payload before the product-workflow turn;
+- kept existing typed `message`, `function_call`, and `function_call_output`
+  request forms intact;
+- covered the behavior at the Rust route-handler boundary and in the migrated
+  Python E2E Responses scenario.
+
+Issue fixed:
+
+- The initial Reborn Responses port had to alter the legacy test input to the
+  typed Responses item shape. That left clients using the older
+  role/content-only message form with a `400` even though legacy IronClaw
+  accepted it.
 
 ## Open Migration Buckets
 

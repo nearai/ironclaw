@@ -116,7 +116,7 @@ async def test_reborn_legacy_responses_non_streaming_text_input(
     assert _response_output_text(response).strip()
 
 
-async def test_reborn_legacy_responses_typed_message_input_alias(
+async def test_reborn_legacy_responses_untyped_message_input_alias(
     reborn_responses_client,
 ):
     response = await _create_response(
@@ -124,14 +124,8 @@ async def test_reborn_legacy_responses_typed_message_input_alias(
         path="/api/v1/responses",
         input=[
             {
-                "type": "message",
                 "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": "What is 2+2? Reply with just the number.",
-                    }
-                ],
+                "content": "What is 2+2? Reply with just the number.",
             }
         ],
     )

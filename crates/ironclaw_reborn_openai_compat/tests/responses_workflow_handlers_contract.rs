@@ -112,6 +112,43 @@ async fn responses_context_extension_is_injected_into_product_workflow_payload()
 }
 
 #[tokio::test]
+async fn responses_legacy_untyped_message_input_is_normalized_before_product_workflow() {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let router = test_router(
+        workflow.clone(),
+        Arc::new(StaticResponsesReader::completed("ok")),
+    );
+
+    let response = router
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            json!({
+                "model": "gpt-reborn",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": "What is 2+2? Reply with just the number."
+                    }
+                ]
+            }),
+            None,
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let envelopes = workflow.accepted_envelopes();
+    assert_eq!(envelopes.len(), 1);
+    let submitted = submitted_user_message_json(&envelopes[0]);
+    assert_eq!(submitted["input"][0]["type"], "message");
+    assert_eq!(submitted["input"][0]["role"], "user");
+    assert_eq!(
+        submitted["input"][0]["content"],
+        "What is 2+2? Reply with just the number."
+    );
+}
+
+#[tokio::test]
 async fn responses_context_alias_is_accepted_and_sanitized_before_product_workflow() {
     let workflow = Arc::new(FakeProductWorkflow::new());
     let router = test_router(
