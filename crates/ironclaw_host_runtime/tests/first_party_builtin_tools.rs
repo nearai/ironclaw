@@ -6004,6 +6004,30 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
 }
 
 #[tokio::test]
+async fn builtin_http_offline_runtime_egress_returns_network_failure_without_panicking() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_error(
+        RuntimeHttpEgressError::Network {
+            reason: "network_unavailable".to_string(),
+            request_bytes: 7,
+            response_bytes: 0,
+        },
+    ));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/v1/items"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Network);
+    assert_eq!(egress.requests().len(), 1);
+}
+
+#[tokio::test]
 async fn builtin_http_maps_panicking_runtime_egress_to_backend_failure() {
     let runtime = runtime_with_http_egress(Arc::new(PanickingRuntimeHttpEgress));
     let error = invoke_with_context(
@@ -8665,13 +8689,16 @@ fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFiles
 }
 
 fn in_memory_mounted_filesystem(permissions: MountPermissions) -> (InMemoryBackend, MountView) {
-    let mounts = MountView::new(vec![MountGrant::new(
+    (InMemoryBackend::new(), workspace_mounts(permissions))
+}
+
+fn workspace_mounts(permissions: MountPermissions) -> MountView {
+    MountView::new(vec![MountGrant::new(
         MountAlias::new("/workspace").unwrap(),
         VirtualPath::new("/projects/coding-pack").unwrap(),
         permissions,
     )])
-    .unwrap();
-    (InMemoryBackend::new(), mounts)
+    .unwrap()
 }
 
 fn memory_mounts(permissions: MountPermissions) -> MountView {

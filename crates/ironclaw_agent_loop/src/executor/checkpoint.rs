@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use ironclaw_turns::{
     LoopGateRef,
-    run_profile::{LoopCheckpointRequest, LoopProgressEvent, StageCheckpointPayloadRequest},
+    run_profile::{
+        AgentLoopHostError, AgentLoopHostErrorKind, LoopCheckpointRequest, LoopProgressEvent,
+        LoopSafeSummary, StageCheckpointPayloadRequest,
+    },
 };
 
 use crate::state::{CheckpointKind, LoopExecutionState};
@@ -13,9 +16,9 @@ use crate::executor::CanonicalAgentLoopExecutor;
 use ironclaw_turns::run_profile::AgentLoopDriverHost;
 
 use super::{
-    AgentLoopExecutorError, CancelCheck, CheckpointWrite, ExecutorStage, PendingInputAck,
-    StageContext, cancelled_exit_with_reason, cancelled_reason_from_signal,
-    checkpoint_kind_to_host,
+    AgentLoopExecutorError, CancelCheck, CheckpointWrite, ExecutorStage, HostStage,
+    PendingInputAck, StageContext, cancelled_exit_with_reason, cancelled_reason_from_signal,
+    checkpoint_kind_to_host, debug_host_unavailable,
 };
 
 #[cfg(test)]
@@ -75,7 +78,7 @@ impl CheckpointStage {
                 payload,
             })
             .await
-            .map_err(|_| AgentLoopExecutorError::CheckpointFailed { stage: kind })?;
+            .map_err(|error| checkpoint_host_error(kind, error))?;
         let checkpoint_id = ctx
             .host
             .checkpoint(LoopCheckpointRequest {
@@ -84,7 +87,7 @@ impl CheckpointStage {
                 gate_ref,
             })
             .await
-            .map_err(|_| AgentLoopExecutorError::CheckpointFailed { stage: kind })?;
+            .map_err(|error| checkpoint_host_error(kind, error))?;
         self.emit_progress(
             ctx,
             LoopProgressEvent::CheckpointWritten {
@@ -194,6 +197,32 @@ impl CheckpointStage {
             Err(error) => Err(error),
         }
     }
+}
+
+fn checkpoint_host_error(
+    kind: CheckpointKind,
+    error: AgentLoopHostError,
+) -> AgentLoopExecutorError {
+    if error.kind == AgentLoopHostErrorKind::Cancelled {
+        return AgentLoopExecutorError::Cancelled;
+    }
+    debug_host_unavailable(HostStage::Checkpoint, &error);
+    if matches!(
+        error.kind,
+        AgentLoopHostErrorKind::Unavailable
+            | AgentLoopHostErrorKind::Internal
+            | AgentLoopHostErrorKind::BudgetAccountingFailed
+    ) {
+        return AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Checkpoint,
+            kind: error.kind,
+            safe_summary: LoopSafeSummary::new(error.safe_summary)
+                .unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed()),
+            reason_kind: error.reason_kind,
+            diagnostic_ref: error.diagnostic_ref,
+        };
+    }
+    AgentLoopExecutorError::CheckpointFailed { stage: kind }
 }
 
 pub(super) struct CheckpointInput {

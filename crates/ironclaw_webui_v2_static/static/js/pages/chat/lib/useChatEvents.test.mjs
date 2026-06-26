@@ -611,9 +611,9 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
             run_status: {
               run_id: "run-failed-1",
               status: "failed",
-              failure_category: "driver_invalid_request",
+              failure_category: "model_credentials_unavailable",
               failure_summary:
-                "The run failed because the execution driver rejected the request.",
+                "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL.",
             },
           },
         ],
@@ -627,9 +627,9 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
   assert.deepEqual(plain(seenFailureInputs), [
     {
       status: "failed",
-      failureCategory: "driver_invalid_request",
+      failureCategory: "model_credentials_unavailable",
       failureSummary:
-        "The run failed because the execution driver rejected the request.",
+        "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL.",
     },
   ]);
   assert.equal(harness.messages.length, 1);
@@ -637,8 +637,22 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
   assert.equal(harness.messages[0].role, "error");
   assert.equal(
     harness.messages[0].content,
-    "The run failed because the execution driver rejected the request.",
+    "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL.",
   );
+});
+
+test("useChatEvents: consumer fixtures do not pin internal driver categories", () => {
+  const source = readFileSync(new URL(import.meta.url), "utf8");
+  for (const forbidden of [
+    `failure_category: "${"driver_"}`,
+    `failureCategory: "${"driver_"}`,
+  ]) {
+    assert.equal(
+      source.includes(forbidden),
+      false,
+      `consumer test fixture leaked internal category prefix ${forbidden}`,
+    );
+  }
 });
 
 test("useChatEvents: typed failed event appends visible error", () => {
