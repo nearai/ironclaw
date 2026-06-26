@@ -43,8 +43,20 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-057-TC-01",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "REBCLI-058-TC-06",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-065-TC-25",
                 manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "openai_responses_api_workflow_regression",
+                {case["case"] for case in manifest["cases"]},
             )
             self.assertIn(
                 "webui_v2_route_contract_regression",
@@ -155,6 +167,50 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertEqual(commands[0]["name"], "webui_v2_composition_regression")
             self.assertIn(
                 "--test webui_v2_product_auth_4201",
+                commands[0]["command"],
+            )
+
+    def test_responses_api_case_dry_run_maps_create_retrieve_cancel_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "openai_responses_api_workflow_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-057-TC-01",
+                    "REBCLI-057-TC-02",
+                    "REBCLI-057-TC-03",
+                    "REBCLI-057-TC-04",
+                    "REBCLI-057-TC-05",
+                    "REBCLI-057-TC-06",
+                    "REBCLI-058-TC-01",
+                    "REBCLI-058-TC-02",
+                    "REBCLI-058-TC-03",
+                    "REBCLI-058-TC-04",
+                    "REBCLI-058-TC-05",
+                    "REBCLI-058-TC-06",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                commands[0]["name"],
+                "openai_responses_workflow_handlers_contract",
+            )
+            self.assertIn(
+                "--test responses_workflow_handlers_contract",
                 commands[0]["command"],
             )
 

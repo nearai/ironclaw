@@ -73,6 +73,29 @@ OPENAI_OWNER_CRATE_COMMAND = CommandSpec(
     ],
 )
 
+OPENAI_RESPONSES_WORKFLOW_COMMAND = CommandSpec(
+    name="openai_responses_workflow_handlers_contract",
+    description=(
+        "Focused OpenAI-compatible Responses create, retrieve, cancel, "
+        "authorization, validation, idempotency, timeout, and sanitized-error "
+        "handler contracts."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_openai_compat",
+        "--test",
+        "responses_workflow_handlers_contract",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 PRODUCT_WORKFLOW_LEDGER_COMMAND = CommandSpec(
     name="product_workflow_storage_durable_ledger",
     description=(
@@ -307,6 +330,32 @@ CASES: dict[str, CaseSpec] = {
             "Matches the QA matrix owner-crate command for REBCLI-056-TC-07; "
             "the same cargo command also exercises Responses API owner-crate "
             "behavior, but only the explicit spreadsheet row is counted here."
+        ),
+    ),
+    "openai_responses_api_workflow_regression": CaseSpec(
+        name="openai_responses_api_workflow_regression",
+        feature="OpenAI-compatible Responses create, retrieve, and cancel APIs",
+        category="Hermetic Responses API Handler Contract",
+        qa_matrix_test_ids=[
+            "REBCLI-057-TC-01",
+            "REBCLI-057-TC-02",
+            "REBCLI-057-TC-03",
+            "REBCLI-057-TC-04",
+            "REBCLI-057-TC-05",
+            "REBCLI-057-TC-06",
+            "REBCLI-058-TC-01",
+            "REBCLI-058-TC-02",
+            "REBCLI-058-TC-03",
+            "REBCLI-058-TC-04",
+            "REBCLI-058-TC-05",
+            "REBCLI-058-TC-06",
+        ],
+        commands=[OPENAI_RESPONSES_WORKFLOW_COMMAND],
+        notes=(
+            "Focused ResponsesAPI contract coverage that PR #5348 does not "
+            "duplicate: create on /api/v1 and /v1, retrieve/cancel, auth, "
+            "invalid input, unsupported fields, wait timeout, cross-scope "
+            "not-found shape, and sanitized ProductWorkflow errors."
         ),
     ),
     "support_substrate_product_workflow_regression": CaseSpec(
