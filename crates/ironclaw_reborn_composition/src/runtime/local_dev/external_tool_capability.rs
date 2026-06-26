@@ -111,20 +111,12 @@ struct ExternalToolCapabilityPort {
     surface: StdMutex<Option<ResolvedSurface>>,
 }
 
-/// Synthetic capability id for an external tool. Sanitizes the client tool name
-/// into a valid id under the `external_tool.` namespace.
-fn external_tool_capability_id(tool_name: &str) -> Result<CapabilityId, AgentLoopHostError> {
-    let sanitized: String = tool_name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    CapabilityId::new(format!("external_tool.{sanitized}")).map_err(|_| {
+/// Synthetic capability id for an external tool under the `external_tool.`
+/// namespace.
+fn external_tool_capability_id(
+    provider_tool_name: &ProviderToolName,
+) -> Result<CapabilityId, AgentLoopHostError> {
+    CapabilityId::new(format!("external_tool.{}", provider_tool_name.as_str())).map_err(|_| {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             "external tool name cannot be represented as a capability id",
@@ -135,7 +127,17 @@ fn external_tool_capability_id(tool_name: &str) -> Result<CapabilityId, AgentLoo
 fn provider_tool_name_for_external_tool(
     tool_name: &str,
 ) -> Result<ProviderToolName, AgentLoopHostError> {
-    ProviderToolName::new(tool_name).map_err(|_| {
+    let sanitized: String = tool_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    ProviderToolName::new(sanitized).map_err(|_| {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             "external tool name cannot be represented as a provider tool name",
@@ -352,19 +354,19 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
         let mut capability_ids_by_tool_name = HashMap::new();
         let mut descriptors = Vec::new();
         for spec in specs {
+            let provider_tool_name = provider_tool_name_for_external_tool(spec.name())?;
             // Reject a client tool that shadows a host capability on the surface.
             if surface
                 .descriptors
                 .iter()
-                .any(|descriptor| descriptor.safe_name == spec.name())
+                .any(|descriptor| descriptor.safe_name == provider_tool_name.as_str())
             {
                 return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::InvalidInvocation,
                     "external tool name shadows a host capability",
                 ));
             }
-            let provider_tool_name = provider_tool_name_for_external_tool(spec.name())?;
-            let capability_id = external_tool_capability_id(provider_tool_name.as_str())?;
+            let capability_id = external_tool_capability_id(&provider_tool_name)?;
             if surface
                 .descriptors
                 .iter()
@@ -671,7 +673,7 @@ mod tests {
     #[tokio::test]
     async fn external_tool_surface_maps_provider_name_to_capability_id() {
         let (port, _run_context) =
-            wrapped_port_with_specs(vec![external_tool_spec("client_tool")]).await;
+            wrapped_port_with_specs(vec![external_tool_spec("ClientTool")]).await;
 
         let surface = port
             .visible_capabilities(VisibleCapabilityRequest)
@@ -680,13 +682,13 @@ mod tests {
         assert_eq!(surface.descriptors.len(), 1);
         assert_eq!(
             surface.descriptors[0].capability_id.as_str(),
-            "external_tool.client_tool"
+            "external_tool.clienttool"
         );
-        assert_eq!(surface.descriptors[0].safe_name, "client_tool");
+        assert_eq!(surface.descriptors[0].safe_name, "clienttool");
 
         let definitions = port.tool_definitions().expect("tool definitions");
         assert_eq!(definitions.len(), 1);
-        assert_eq!(definitions[0].name.as_str(), "client_tool");
+        assert_eq!(definitions[0].name.as_str(), "clienttool");
 
         let ids = port
             .provider_tool_call_capability_ids(&ProviderToolCall {
@@ -694,7 +696,7 @@ mod tests {
                 provider_model_id: "test-model".to_string(),
                 turn_id: Some("turn-1".to_string()),
                 id: "call-1".to_string(),
-                name: ProviderToolName::new("client_tool").expect("provider tool name"),
+                name: ProviderToolName::new("clienttool").expect("provider tool name"),
                 arguments: serde_json::json!({}),
                 response_reasoning: None,
                 reasoning: None,
@@ -703,7 +705,7 @@ mod tests {
             .expect("capability ids");
         assert_eq!(
             ids.provider_capability_id.as_str(),
-            "external_tool.client_tool"
+            "external_tool.clienttool"
         );
     }
 
