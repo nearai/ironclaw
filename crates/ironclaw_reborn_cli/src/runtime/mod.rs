@@ -32,7 +32,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::RebornCliContext;
 
-mod env_util;
 #[cfg(test)]
 mod test_env;
 mod trigger_poller;
@@ -1015,34 +1014,56 @@ fn resolve_concurrency_cap(
 ///   semaphore is then sized to `tokio::sync::Semaphore::MAX_PERMITS`, so the
 ///   per-user / per-origin caps become the only concurrency bound (used to
 ///   stress-test backends with no global throttle).
-/// - `Some(n)`, `1..=MAX_PERMITS` → that worker count, verbatim. The operator's
-///   explicit override is trusted: a large value just sizes the scheduler
-///   semaphore counter (the permit count caps concurrency, runner tasks are
-///   still only spawned per claimed run), degrading smoothly toward the
-///   `0` = unlimited regime. No silent clamp — mirrors the per-user /
-///   per-origin caps in [`resolve_concurrency_cap`].
-/// - `Some(n)`, `n > MAX_PERMITS` → fatal. The value flows into
-///   `tokio::sync::Semaphore::new`, which **panics** above
-///   [`tokio::sync::Semaphore::MAX_PERMITS`]; reject it as a config error so a
-///   malformed value fails loud at validation instead of crashing startup. (The
-///   `0` = unlimited path sizes the semaphore to exactly `MAX_PERMITS`, which is
-///   accepted, so the unlimited sentinel stays the way to ask for "no bound".)
+/// - `Some(n)` → that worker count, verbatim. The operator's explicit override
+///   is trusted: a large value just sizes the scheduler semaphore counter (the
+///   permit count caps concurrency, runner tasks are still only spawned per
+///   claimed run), degrading smoothly toward the `0` = unlimited regime. No
+///   silent clamp — mirrors the per-user / per-origin caps in
+///   [`resolve_concurrency_cap`].
+///
+/// This is pure layering only. The upper-bound check against tokio's semaphore
+/// ceiling is deliberately NOT done here so a higher-precedence env override can
+/// still replace an oversized lower-precedence config value before validation;
+/// see [`ensure_worker_count_within_ceiling`], applied once to the final value.
 fn resolve_worker_count(
     raw: Option<usize>,
     current_default: Option<std::num::NonZeroUsize>,
-) -> anyhow::Result<Option<std::num::NonZeroUsize>> {
+) -> Option<std::num::NonZeroUsize> {
     match raw {
-        None => Ok(current_default),
-        Some(0) => Ok(None),
-        Some(n) if n > tokio::sync::Semaphore::MAX_PERMITS => anyhow::bail!(
+        None => current_default,
+        Some(0) => None,
+        // `n` is non-zero here (the `Some(0)` arm handled zero), so this never
+        // collapses to the unlimited sentinel.
+        Some(n) => std::num::NonZeroUsize::new(n),
+    }
+}
+
+/// Reject a *resolved* worker count above tokio's semaphore ceiling.
+///
+/// The value flows into `tokio::sync::Semaphore::new`, which **panics** above
+/// [`tokio::sync::Semaphore::MAX_PERMITS`]. Applied once to the FINAL effective
+/// `worker_count` — after config + env precedence — so a valid env override can
+/// win over an oversized lower-precedence config value instead of the config
+/// value failing startup before the override is even read. The `0` = unlimited
+/// path resolves to `None` (sized to exactly `MAX_PERMITS`, which tokio
+/// accepts), so the unlimited sentinel stays the way to ask for "no bound".
+///
+/// `ironclaw_reborn`'s `scheduler_permit_count` additionally saturates at the
+/// ceiling as an infallible backstop for direct composition callers; this gate
+/// is the operator-facing fail-loud half of that defense.
+fn ensure_worker_count_within_ceiling(
+    worker_count: Option<std::num::NonZeroUsize>,
+) -> anyhow::Result<()> {
+    if let Some(count) = worker_count {
+        let n = count.get();
+        anyhow::ensure!(
+            n <= tokio::sync::Semaphore::MAX_PERMITS,
             "runner worker_count {n} exceeds the scheduler ceiling of {} permits \
              (tokio::sync::Semaphore::MAX_PERMITS); reduce it, or set 0 for unlimited",
             tokio::sync::Semaphore::MAX_PERMITS
-        ),
-        // `n` is non-zero and `<= MAX_PERMITS` here, so this never collapses to
-        // the unlimited sentinel and never panics the semaphore.
-        Some(n) => Ok(std::num::NonZeroUsize::new(n)),
+        );
     }
+    Ok(())
 }
 
 /// Apply an `IRONCLAW_REBORN_RUNNER_*` env override for a concurrency cap onto
@@ -1052,7 +1073,7 @@ fn apply_cap_env_override(
     name: &str,
     slot: &mut Option<std::num::NonZeroU32>,
 ) -> anyhow::Result<()> {
-    if let Some(raw) = env_util::strict_env_var_parsed::<u32>(name)? {
+    if let Some(raw) = crate::operator_env::strict_env_var_parsed::<u32>(name)? {
         *slot = resolve_concurrency_cap(Some(raw), *slot);
     }
     Ok(())
@@ -1070,8 +1091,8 @@ fn apply_worker_count_env_override(
     name: &str,
     slot: &mut Option<std::num::NonZeroUsize>,
 ) -> anyhow::Result<()> {
-    if let Some(raw) = env_util::strict_env_var_parsed::<usize>(name)? {
-        *slot = resolve_worker_count(Some(raw), *slot)?;
+    if let Some(raw) = crate::operator_env::strict_env_var_parsed::<usize>(name)? {
+        *slot = resolve_worker_count(Some(raw), *slot);
     }
     Ok(())
 }
@@ -1096,8 +1117,9 @@ fn runner_settings(
             settings.poll_interval = Duration::from_millis(ms);
         }
         // worker_count: absent → default; `0` → unlimited (None); positive →
-        // that count, verbatim (rejected above the semaphore ceiling).
-        settings.worker_count = resolve_worker_count(runner.worker_count, settings.worker_count)?;
+        // that count, verbatim. The semaphore-ceiling check is deferred to the
+        // final merged value below so a valid env override can still win.
+        settings.worker_count = resolve_worker_count(runner.worker_count, settings.worker_count);
 
         // Each cap: absent in the file → keep the struct default already in
         // `settings`; explicit `0` → "unlimited" sentinel (None); positive → cap.
@@ -1136,6 +1158,11 @@ fn runner_settings(
         &mut settings.max_concurrent_conversation_runs,
     )?;
 
+    // Validate the final, fully-merged worker count once (env override has the
+    // highest precedence), so an oversized lower-precedence config value can be
+    // rescued by a valid env override before this fail-loud ceiling check.
+    ensure_worker_count_within_ceiling(settings.worker_count)?;
+
     Ok(settings)
 }
 
@@ -1151,7 +1178,7 @@ mod tests {
     use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
     use ironclaw_reborn_config::RebornBootConfig;
 
-    use super::test_env::{EnvGuard, lock_trigger_env};
+    use super::test_env::{EnvGuard, lock_runtime_env};
     #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
@@ -1176,7 +1203,7 @@ mod tests {
     fn runner_settings_absent_runner_gives_defaults() {
         // Hold the env lock + clear runner env so a sibling env-override test
         // cannot bleed `IRONCLAW_REBORN_RUNNER_*` into this config/default case.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _env = clear_runner_env();
         let settings = runner_settings(None).expect("should succeed");
         assert_eq!(
@@ -1200,7 +1227,7 @@ mod tests {
     fn runner_settings_present_section_absent_caps_keep_defaults() {
         // A `[runner]` section that only tunes worker_count must NOT silently
         // wipe the protective cap defaults.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _env = clear_runner_env();
         let cfg = parse_runner_section("[runner]\nworker_count = 7\n");
         let settings = runner_settings(Some(&cfg)).expect("should succeed");
@@ -1221,7 +1248,7 @@ mod tests {
         // `0` is the explicit "no global throttle" sentinel: worker_count
         // resolves to None and the scheduler semaphore is sized to
         // Semaphore::MAX_PERMITS downstream.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _env = clear_runner_env();
         let cfg = parse_runner_section("[runner]\nworker_count = 0\n");
         let settings = runner_settings(Some(&cfg)).expect("should succeed");
@@ -1230,7 +1257,7 @@ mod tests {
 
     #[test]
     fn runner_settings_present_worker_count_round_trips() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _env = clear_runner_env();
         let cfg = parse_runner_section("[runner]\nworker_count = 7\n");
         let settings = runner_settings(Some(&cfg)).expect("should succeed");
@@ -1241,7 +1268,7 @@ mod tests {
     fn runner_settings_large_worker_count_passes_through_unclamped() {
         // A deliberate operator override is trusted verbatim — no silent clamp.
         // `0` remains the only "unlimited" sentinel.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _env = clear_runner_env();
         let cfg = parse_runner_section("[runner]\nworker_count = 512\n");
         let settings = runner_settings(Some(&cfg)).expect("should succeed");
@@ -1253,7 +1280,7 @@ mod tests {
         // A value above `tokio::sync::Semaphore::MAX_PERMITS` would panic
         // `Semaphore::new` at scheduler construction; it must fail loud at
         // config validation instead. `0` stays the way to ask for unlimited.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _env = clear_runner_env();
         let toml = format!(
             "[runner]\nworker_count = {}\n",
@@ -1268,8 +1295,26 @@ mod tests {
     }
 
     #[test]
+    fn runner_settings_worker_count_at_semaphore_max_is_accepted() {
+        // The exact ceiling is valid (tokio accepts `Semaphore::new(MAX_PERMITS)`);
+        // guards against an off-by-one that would reject the boundary. Covers
+        // both the config-file and env-override paths.
+        let max = tokio::sync::Semaphore::MAX_PERMITS;
+        let _lock = lock_runtime_env();
+
+        let _env = clear_runner_env();
+        let cfg = parse_runner_section(&format!("[runner]\nworker_count = {max}\n"));
+        let settings = runner_settings(Some(&cfg)).expect("ceiling value must be accepted");
+        assert_eq!(settings.worker_count.map(|v| v.get()), Some(max));
+
+        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", &max.to_string());
+        let settings = runner_settings(None).expect("ceiling value must be accepted");
+        assert_eq!(settings.worker_count.map(|v| v.get()), Some(max));
+    }
+
+    #[test]
     fn runner_settings_zero_caps_become_none_unlimited() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _env = clear_runner_env();
         let cfg = parse_runner_section(
             "[runner]\nmax_concurrent_runs_per_user = 0\nmax_concurrent_trigger_runs = 0\nmax_concurrent_conversation_runs = 0\n",
@@ -1282,7 +1327,7 @@ mod tests {
 
     #[test]
     fn runner_settings_nonzero_caps_round_trip() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _env = clear_runner_env();
         let cfg = parse_runner_section(
             "[runner]\nmax_concurrent_runs_per_user = 3\nmax_concurrent_trigger_runs = 5\nmax_concurrent_conversation_runs = 2\n",
@@ -1316,7 +1361,7 @@ mod tests {
 
     #[test]
     fn runner_env_worker_count_zero_means_unlimited() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
         let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "0");
         let settings = runner_settings(None).expect("should succeed");
@@ -1327,7 +1372,7 @@ mod tests {
     fn runner_env_worker_count_overrides_config_file() {
         // Env is the highest-precedence layer: it must win over a `[runner]`
         // worker_count set in the config file.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
         let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "4");
         let cfg = parse_runner_section("[runner]\nworker_count = 7\n");
@@ -1336,8 +1381,27 @@ mod tests {
     }
 
     #[test]
+    fn runner_env_worker_count_overrides_oversized_config_file() {
+        // Env has the highest precedence, and the ceiling check runs on the
+        // FINAL merged value — so a valid env override must rescue a config file
+        // whose worker_count is above the semaphore ceiling, rather than the
+        // lower-precedence config value failing startup first.
+        let _lock = lock_runtime_env();
+        let _guards = clear_runner_env();
+        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "512");
+        let toml = format!(
+            "[runner]\nworker_count = {}\n",
+            tokio::sync::Semaphore::MAX_PERMITS + 1
+        );
+        let cfg = parse_runner_section(&toml);
+        let settings =
+            runner_settings(Some(&cfg)).expect("valid env override must win over oversized config");
+        assert_eq!(settings.worker_count.map(|v| v.get()), Some(512));
+    }
+
+    #[test]
     fn runner_env_large_worker_count_passes_through_unclamped() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
         let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "512");
         let settings = runner_settings(None).expect("should succeed");
@@ -1346,7 +1410,7 @@ mod tests {
 
     #[test]
     fn runner_env_worker_count_above_semaphore_max_is_fatal() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
         let _w = EnvGuard::set(
             "IRONCLAW_REBORN_RUNNER_WORKER_COUNT",
@@ -1361,7 +1425,7 @@ mod tests {
 
     #[test]
     fn runner_env_caps_zero_means_unlimited() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
         let _u = EnvGuard::set("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER", "0");
         let _t = EnvGuard::set("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_TRIGGER_RUNS", "0");
@@ -1372,7 +1436,7 @@ mod tests {
 
     #[test]
     fn runner_env_cap_overrides_config_file() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
         let _u = EnvGuard::set("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER", "9");
         let cfg = parse_runner_section("[runner]\nmax_concurrent_runs_per_user = 3\n");
@@ -1387,7 +1451,7 @@ mod tests {
     fn runner_env_blank_value_is_fatal() {
         // Strict-presence semantics: a set-but-blank slot is an operator error,
         // not a silent fall-through to the default.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
         let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "   ");
         let err = runner_settings(None).expect_err("blank env value must be rejected");
@@ -1400,7 +1464,7 @@ mod tests {
 
     #[test]
     fn runner_env_non_numeric_value_is_fatal() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
         let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "lots");
         let err = runner_settings(None).expect_err("non-numeric env value must be rejected");
@@ -1412,11 +1476,29 @@ mod tests {
     }
 
     #[test]
+    fn runner_env_oversized_invalid_value_truncates_display() {
+        // A long invalid value (e.g. a pasted credential) must be truncated in
+        // the parse error, never echoed in full into startup logs.
+        let _lock = lock_runtime_env();
+        let _guards = clear_runner_env();
+        let oversized = "z".repeat(100);
+        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", &oversized);
+        let err = runner_settings(None)
+            .expect_err("oversized non-numeric env value must be rejected")
+            .to_string();
+        assert!(err.contains('…'), "error should be truncated: {err}");
+        assert!(
+            !err.contains(&oversized),
+            "error must not echo the full oversized value: {err}"
+        );
+    }
+
+    #[test]
     fn build_runtime_input_env_runner_worker_count_zero_reaches_runtime_input() {
         // Drives the full startup boundary to prove the WORKER_COUNT=0 env
         // override propagates onto RebornRuntimeInput.runner, not only inside
         // the runner_settings helper.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "0");
@@ -1442,7 +1524,7 @@ mod tests {
     fn runner_env_cap_blank_value_is_fatal() {
         // Strict-presence semantics apply to cap vars, not just worker_count:
         // a set-but-blank slot must be rejected rather than silently ignored.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
         let _u = EnvGuard::set("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER", "   ");
         let err = runner_settings(None).expect_err("blank env cap value must be rejected");
@@ -1455,7 +1537,7 @@ mod tests {
 
     #[test]
     fn runner_env_cap_non_numeric_value_is_fatal() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
         let _u = EnvGuard::set(
             "IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER",
@@ -1474,7 +1556,7 @@ mod tests {
         // max_concurrent_conversation_runs defaults to None (unlimited); a
         // positive env value must set a bounded cap so a misspelled or
         // silently-ignored knob cannot escape detection.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
         let _c = EnvGuard::set(
             "IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_CONVERSATION_RUNS",
@@ -1634,7 +1716,7 @@ mod tests {
 
     #[test]
     fn build_runtime_input_maps_configured_cli_identity() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1669,7 +1751,7 @@ default_owner = "custom-owner"
 
     #[test]
     fn build_runtime_input_maps_regex_skill_activation_config() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1699,7 +1781,7 @@ regex_activation_enabled = false
 
     #[test]
     fn build_runtime_input_rejects_local_dev_yolo_without_host_access_confirmation() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1723,7 +1805,7 @@ regex_activation_enabled = false
 
     #[test]
     fn build_runtime_input_accepts_confirmed_local_dev_yolo_profile() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1760,7 +1842,7 @@ regex_activation_enabled = false
     #[cfg(feature = "libsql")]
     #[test]
     fn build_runtime_input_accepts_hosted_single_tenant_volume_profile() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1817,7 +1899,7 @@ regex_activation_enabled = false
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_for_local_dev_rejects_policy_section() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let (_temp, config) = boot_config_with_config_toml(
             "local-dev",
@@ -1841,7 +1923,7 @@ default_profile = "secure_default"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_for_hosted_volume_rejects_storage_section() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let (_temp, config) = boot_config_with_config_toml(
             "hosted-single-tenant-volume",
@@ -1866,7 +1948,7 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_requires_storage_section() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _postgres_url = EnvGuard::clear("IRONCLAW_REBORN_POSTGRES_URL");
         let _secret_master_key = EnvGuard::clear("IRONCLAW_REBORN_SECRET_MASTER_KEY");
@@ -1895,7 +1977,7 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_requires_postgres_url_env_value() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _postgres_url = EnvGuard::clear("IRONCLAW_REBORN_POSTGRES_URL");
         let _secret_master_key = EnvGuard::clear("IRONCLAW_REBORN_SECRET_MASTER_KEY");
@@ -1938,7 +2020,7 @@ default_profile = "secure_default"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_storage_section_missing_backend_field() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _postgres_url = EnvGuard::clear("IRONCLAW_REBORN_POSTGRES_URL");
         let _secret_master_key = EnvGuard::clear("IRONCLAW_REBORN_SECRET_MASTER_KEY");
@@ -1963,7 +2045,7 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_requires_policy_section() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _postgres_url = EnvGuard::set(
             "IRONCLAW_REBORN_POSTGRES_URL",
@@ -1996,7 +2078,7 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_invalid_policy_deployment_mode() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _postgres_url = EnvGuard::set(
             "IRONCLAW_REBORN_POSTGRES_URL",
@@ -2033,7 +2115,7 @@ default_profile = "secure_default"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_invalid_policy_default_profile() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _postgres_url = EnvGuard::set(
             "IRONCLAW_REBORN_POSTGRES_URL",
@@ -2070,7 +2152,7 @@ default_profile = "not_a_profile"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_unsupported_backend() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let (_temp, config) = boot_config_with_config_toml(
             "production",
@@ -2094,7 +2176,7 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_whitespace_only_postgres_url() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _postgres_url = EnvGuard::set("IRONCLAW_REBORN_POSTGRES_URL", "   ");
         let _secret_master_key =
@@ -2121,7 +2203,7 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_hosted_single_tenant_constructs_postgres_local_runtime_input() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let (database_sslmode, allow_cleartext) = clear_reborn_postgres_tls_env();
         let postgres_url = EnvGuard::set(
@@ -2162,7 +2244,7 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_rejects_invalid_postgres_pool_max_size_override() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let (database_sslmode, allow_cleartext) = clear_reborn_postgres_tls_env();
         let postgres_url = EnvGuard::set(
@@ -2202,7 +2284,7 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_preserves_whitespace_secret_master_key() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _postgres_url = EnvGuard::set(
             "IRONCLAW_REBORN_POSTGRES_URL",
@@ -2232,7 +2314,7 @@ default_profile = "secure_default"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_uses_custom_url_env_name() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _default_postgres_url = EnvGuard::clear("IRONCLAW_REBORN_POSTGRES_URL");
         let _custom_postgres_url = EnvGuard::set(
@@ -2264,7 +2346,7 @@ default_profile = "secure_default"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_constructs_migration_dry_run_services_input() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _postgres_url = EnvGuard::set(
             "IRONCLAW_REBORN_POSTGRES_URL",
@@ -2298,7 +2380,7 @@ default_profile = "secure_default"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_requires_secret_master_key_env_value() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _postgres_url = EnvGuard::set(
             "IRONCLAW_REBORN_POSTGRES_URL",
@@ -2347,7 +2429,7 @@ default_profile = "secure_default"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_remote_postgres_sslmode_disable_redacted() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let (_database_sslmode, _allow_cleartext) = clear_reborn_postgres_tls_env();
         let _postgres_url = EnvGuard::set(
@@ -2399,7 +2481,7 @@ default_profile = "secure_default"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_database_sslmode_disable_without_opt_in() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _database_sslmode = EnvGuard::set("DATABASE_SSLMODE", "Disable");
         let _allow_cleartext = EnvGuard::clear("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT");
@@ -2440,7 +2522,7 @@ default_profile = "secure_default"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_allows_database_sslmode_disable_with_opt_in() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _database_sslmode = EnvGuard::set("DATABASE_SSLMODE", "DISABLE");
         let _allow_cleartext =
@@ -2474,7 +2556,7 @@ default_profile = "secure_default"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_invalid_cleartext_opt_in() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _database_sslmode = EnvGuard::set("DATABASE_SSLMODE", "disable");
         let _allow_cleartext = EnvGuard::set(
@@ -2517,7 +2599,7 @@ default_profile = "secure_default"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_accepts_verify_full_database_sslmode() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
         let _database_sslmode = EnvGuard::set("DATABASE_SSLMODE", "verify-full");
         let _allow_cleartext = EnvGuard::clear("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT");
@@ -2550,7 +2632,7 @@ default_profile = "secure_default"
     #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_constructs_postgres_services_input() {
-        let lock = lock_trigger_env();
+        let lock = lock_runtime_env();
         let (enabled, interval) = clear_trigger_poller_env();
         let (database_sslmode, allow_cleartext) = clear_reborn_postgres_tls_env();
         let postgres_url = EnvGuard::set(
@@ -2616,7 +2698,7 @@ default_profile = "secure_default"
     // ensures both branches do the right thing.
     #[test]
     fn build_runtime_input_for_run_rejects_default_project() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2649,7 +2731,7 @@ default_project = "project-alpha"
 
     #[test]
     fn build_runtime_input_for_run_rejects_default_project_when_trigger_poller_enabled() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2687,7 +2769,7 @@ enabled = true
     #[allow(clippy::await_holding_lock, reason = "serializes env guards")]
     #[tokio::test]
     async fn run_trigger_poller_bootstrap_seeds_local_access_checker() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2815,7 +2897,7 @@ enabled = true
 
     #[test]
     fn build_runtime_input_for_serve_accepts_default_project() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2843,7 +2925,7 @@ default_project = "project-alpha"
 
     #[test]
     fn build_runtime_input_maps_trigger_poller_enabled_config() {
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2882,7 +2964,7 @@ poll_interval_secs = 42
     #[test]
     fn build_runtime_input_env_enables_trigger_poller_with_no_config_section() {
         // No [trigger_poller] in config; env var enables → input.trigger_poller.enabled must be true.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "true");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
 
@@ -2910,7 +2992,7 @@ poll_interval_secs = 42
     #[test]
     fn build_runtime_input_env_interval_overrides_config_interval() {
         // Config says interval=15s, env says interval=45s → env must win at the caller boundary.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS", "45");
 
@@ -2949,7 +3031,7 @@ poll_interval_secs = 15
         // Invalid env value (`yes`) must error out through build_runtime_input,
         // not slip through to the runtime input. Closes the caller-level gap
         // for the error path; previous tests covered only happy/override paths.
-        let _lock = lock_trigger_env();
+        let _lock = lock_runtime_env();
         let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "yes");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
 

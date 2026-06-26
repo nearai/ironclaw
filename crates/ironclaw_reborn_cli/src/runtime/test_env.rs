@@ -2,8 +2,8 @@
 //! `runtime::trigger_poller::tests`. These modules read or mutate process
 //! env vars (`IRONCLAW_TRIGGER_POLLER_*`, `IRONCLAW_REBORN_RUNNER_*`, OAuth
 //! knobs); without a single lock + single `EnvGuard` they would race in the
-//! same test binary. The lock is process-wide, not trigger-specific — its
-//! name is historical.
+//! same test binary. The lock is process-wide across all runtime env-var
+//! tests (trigger, runner, OAuth), hence the scope-neutral name.
 //!
 //! Not exposed outside `#[cfg(test)]`.
 
@@ -13,10 +13,10 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 /// each other. cargo test runs tests in parallel by default; without this
 /// each env-mutating test would observe sibling tests' mutations. Held for
 /// the whole body of every env-touching test.
-static TRIGGER_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static RUNTIME_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-pub(super) fn lock_trigger_env() -> MutexGuard<'static, ()> {
-    TRIGGER_ENV_LOCK
+pub(super) fn lock_runtime_env() -> MutexGuard<'static, ()> {
+    RUNTIME_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -34,7 +34,7 @@ impl EnvGuard {
     pub(super) fn set(key: &'static str, value: &str) -> Self {
         let prior = std::env::var(key).ok();
         // SAFETY: env mutation is process-global; restore on Drop covers
-        // panic unwind. Callers must hold `lock_trigger_env()` for the
+        // panic unwind. Callers must hold `lock_runtime_env()` for the
         // life of this guard to serialise against sibling test threads.
         unsafe { std::env::set_var(key, value) };
         Self { key, prior }

@@ -122,11 +122,21 @@ impl Default for DefaultPlannedRuntimeConfig {
 /// `IRONCLAW_REBORN_RUNNER_WORKER_COUNT=0`) yields
 /// [`tokio::sync::Semaphore::MAX_PERMITS`] so the global scheduler never
 /// throttles claimed runs — the per-user / per-origin caps remain the only
-/// concurrency bound. A bounded count passes through unchanged.
+/// concurrency bound. A bounded count is saturated at
+/// [`tokio::sync::Semaphore::MAX_PERMITS`] — values above that ceiling are
+/// clamped down rather than passed through, so this function never produces a
+/// count that would panic `Semaphore::new` regardless of caller.
 fn scheduler_permit_count(worker_count: Option<std::num::NonZeroUsize>) -> usize {
     worker_count
         .map(std::num::NonZeroUsize::get)
+        // Saturate at tokio's ceiling: `Semaphore::new` panics ABOVE
+        // `MAX_PERMITS`, and a request for more permits than that is already in
+        // "no effective bound" territory (the `None` = unlimited path sizes the
+        // semaphore to exactly `MAX_PERMITS`). This is a defense-in-depth
+        // backstop for direct composition callers; the CLI layer still rejects
+        // oversized operator config loudly before it ever reaches here.
         .unwrap_or(tokio::sync::Semaphore::MAX_PERMITS)
+        .min(tokio::sync::Semaphore::MAX_PERMITS)
 }
 
 pub trait RuntimeTurnStateStore:
@@ -815,6 +825,18 @@ mod tests {
         let permits =
             scheduler_permit_count(Some(std::num::NonZeroUsize::new(7).expect("non-zero")));
         assert_eq!(permits, 7);
+    }
+
+    #[test]
+    fn scheduler_permit_count_saturates_above_max_permits() {
+        // A direct composition caller passing more permits than tokio accepts must
+        // not panic the scheduler; it saturates to the ceiling instead.
+        let over =
+            std::num::NonZeroUsize::new(tokio::sync::Semaphore::MAX_PERMITS + 1).expect("non-zero");
+        let permits = scheduler_permit_count(Some(over));
+        assert_eq!(permits, tokio::sync::Semaphore::MAX_PERMITS);
+        // Must not panic.
+        let _ = tokio::sync::Semaphore::new(permits);
     }
 
     async fn test_run_context() -> LoopRunContext {
