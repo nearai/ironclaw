@@ -24,8 +24,9 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_config::{IdentitySection, RebornProfile, seed_default_config_file_if_missing};
 use ironclaw_reborn_webui_ingress::{
-    DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
-    RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2,
+    DeferredWebuiRouterHandle, EnvBearerAuthenticator, LayeredWebuiAuthenticator,
+    RebornWebuiServeError, RebornWebuiServeOptions, StaticUserTokenAuthenticator,
+    deferred_webui_v2_startup_router, serve_webui_v2,
 };
 use secrecy::SecretString;
 
@@ -135,10 +136,33 @@ impl ServeCommand {
         // value is consumed here.
         let token_byte_len = token_value.len();
         let session_signing_secret = SecretString::from(token_value.clone());
-        let env_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(EnvBearerAuthenticator::new(
-            SecretString::from(token_value),
-            user_id.clone(),
-        )?);
+        let operator_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(
+            EnvBearerAuthenticator::new(SecretString::from(token_value), user_id.clone())?,
+        );
+
+        // Optional local-dev multi-user auth (#5272): when
+        // `IRONCLAW_REBORN_USER_TOKENS` carries a JSON token table, layer those
+        // per-user tokens *over* the operator credential so one process can be
+        // driven as several users (e.g. `director@` / `Bob` / `Carol` /
+        // `engineering@`). The operator env token is retained as the fallback,
+        // so it keeps its SSO signing key, runtime-owner pin, and operator WebUI
+        // routes; each per-turn caller is isolated by `resolve_for_turn`.
+        let env_authenticator: Arc<dyn WebuiAuthenticator> =
+            match env::var("IRONCLAW_REBORN_USER_TOKENS") {
+                Ok(json) if !json.trim().is_empty() => {
+                    let user_tokens = StaticUserTokenAuthenticator::from_json(&json)
+                        .map_err(|err| anyhow!("IRONCLAW_REBORN_USER_TOKENS is invalid: {err}"))?;
+                    eprintln!(
+                        "ironclaw-reborn: multi-user local auth enabled \
+                         (IRONCLAW_REBORN_USER_TOKENS); operator env token retained as fallback"
+                    );
+                    Arc::new(LayeredWebuiAuthenticator::new(vec![
+                        Arc::new(user_tokens),
+                        operator_authenticator,
+                    ]))
+                }
+                _ => operator_authenticator,
+            };
 
         // Resolve trusted host-installation default agent/project from
         // `[identity]`. The v2 facade builds `ThreadScope` from

@@ -424,6 +424,47 @@ impl WebuiAuthenticator for StaticUserTokenAuthenticator {
     }
 }
 
+/// Tries several [`WebuiAuthenticator`]s in order, returning the first match.
+///
+/// Used by the standalone `serve` command to layer the multi-user
+/// [`StaticUserTokenAuthenticator`] *over* the single-operator
+/// [`EnvBearerAuthenticator`]: a user-token resolves to its `(UserId, role)`,
+/// and anything else falls through to the operator credential — so the operator
+/// keeps its signing key, runtime-owner pin, and operator WebUI routes while the
+/// extra users are added on top. Operator-route mounting is the OR across
+/// layers (any layer that mounts them wins).
+pub struct LayeredWebuiAuthenticator {
+    layers: Vec<Arc<dyn WebuiAuthenticator>>,
+}
+
+impl LayeredWebuiAuthenticator {
+    /// Build from layers in match-priority order (earlier layers win).
+    pub fn new(layers: Vec<Arc<dyn WebuiAuthenticator>>) -> Self {
+        Self { layers }
+    }
+}
+
+#[async_trait]
+impl WebuiAuthenticator for LayeredWebuiAuthenticator {
+    async fn authenticate(
+        &self,
+        candidate: &str,
+    ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
+        for layer in &self.layers {
+            if let Some(auth) = layer.authenticate(candidate).await {
+                return Some(auth);
+            }
+        }
+        None
+    }
+
+    fn mounts_operator_webui_config_routes(&self) -> bool {
+        self.layers
+            .iter()
+            .any(|layer| layer.mounts_operator_webui_config_routes())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,5 +589,38 @@ mod tests {
     async fn static_user_token_authenticator_does_not_mount_operator_routes() {
         let auth = StaticUserTokenAuthenticator::from_json(USER_TOKENS_JSON).expect("auth");
         assert!(!auth.mounts_operator_webui_config_routes());
+    }
+
+    #[tokio::test]
+    async fn layered_authenticator_prefers_user_tokens_then_falls_back_to_operator() {
+        let user_tokens = StaticUserTokenAuthenticator::from_json(USER_TOKENS_JSON).expect("auth");
+        let operator = EnvBearerAuthenticator::new(
+            SecretString::from("operator-token".to_string()),
+            UserId::new("user:operator").expect("user"),
+        )
+        .expect("operator auth");
+        let layered =
+            LayeredWebuiAuthenticator::new(vec![Arc::new(user_tokens), Arc::new(operator)]);
+
+        // A user-token resolves to its own user + role (no operator caps).
+        let director = layered
+            .authenticate("director-token")
+            .await
+            .expect("director");
+        assert_eq!(director.user_id.as_str(), "user:director");
+        assert_eq!(director.role, UserRole::Admin);
+        assert!(!director.capabilities.operator_webui_config);
+
+        // The operator token falls through to the env-bearer layer.
+        let operator = layered
+            .authenticate("operator-token")
+            .await
+            .expect("operator");
+        assert_eq!(operator.user_id.as_str(), "user:operator");
+        assert!(operator.capabilities.operator_webui_config);
+
+        assert!(layered.authenticate("nope").await.is_none());
+        // Operator routes mount because a layer (the env-bearer) provides them.
+        assert!(layered.mounts_operator_webui_config_routes());
     }
 }
