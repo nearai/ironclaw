@@ -3030,6 +3030,41 @@ Validation:
 - `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_*.py -q`
   -> `154 passed`
 
+### Step 101: Reborn Provider Full-Path Audit
+
+Reviewed the provider-fixture and product-auth buckets against the current
+Reborn-native tests:
+
+- `tests/e2e/scenarios/test_reborn_emulate_full_path.py` covers full-path
+  Reborn extension installs, OAuth callback completion, tool execution, and
+  provider-side Emulate mutation for Google Calendar, Google Drive, and
+  GitHub.
+- `tests/e2e/scenarios/test_emulate_reborn_provider_contracts.py` covers the
+  Emulate fixture contracts for Google, Slack, and GitHub provider APIs,
+  including seeded reads and provider-side writes.
+- `tests/e2e/scenarios/test_reborn_webui_v2_legacy_auth_flows.py` covers the
+  WebUI v2 browser projection for manual-token and OAuth URL product-auth
+  prompts, including the Notion provider label, HTTPS URL handling, prompt
+  replacement, cancel, cross-thread isolation, and no-token-retention
+  behavior.
+- `tests/e2e/scenarios/test_v2_notion_mcp_oauth_flow.py` still contains the
+  old gateway-oriented Notion MCP OAuth HTTP tests and two historical skipped
+  browser tests. Their browser-facing intent is now represented by the
+  Reborn WebUI v2 auth-flow port above; their `/api/chat/*` HTTP path remains
+  an old gateway contract rather than a standalone Reborn WebUI v2 contract.
+
+Behavior mapping:
+
+- No new browser test was added here because the matching Reborn browser
+  assertions already exist in the migrated auth-flow suite, and duplicating
+  them would not move legacy coverage forward.
+- Slack remains split: provider API behavior is covered through Emulate
+  contracts, but the legacy Slack channel-host/webhook tests still depend on
+  old channel fixtures and gateway HTTP ingress. A true Reborn port needs a
+  standalone `webui-v2-beta` fixture with Slack host-beta mounts and v2
+  channel-route/personal-binding endpoints, not a direct copy of the legacy
+  `/api/chat/*` or webhook tests.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -3114,11 +3149,17 @@ Not yet ported:
   fields and old extension auth state. Reborn browser coverage now includes the
   remove/reinstall fresh-setup invariant, but not the legacy API shape or
   secret-table side effects;
-- provider-fixture full-path parity for Google/GitHub/Slack/Notion flows where
-  the current tests still use old gateway chat/history endpoints or remain
-  browser-skipped pending a Reborn-native `webui-v2-beta` harness;
-- Emulate provider full-path scenarios against standalone Reborn where the
-  current test still routes through legacy `/api/chat/*`.
+- remaining Slack host/channel full-path parity where the legacy tests still
+  depend on old Slack WASM-channel fixtures, `/api/chat/*` history/send
+  endpoints, and webhook ingress. Emulate provider contracts and Reborn
+  product-auth prompt projection are covered, but a full Reborn Slack port
+  needs a standalone `webui-v2-beta` host-beta fixture with v2
+  channel-route/personal-binding endpoints;
+- old gateway provider-flow tests that still route through `/api/chat/*` are
+  intentionally not copied as Reborn WebUI v2 browser tests. Their matching
+  browser-facing Notion/OAuth prompt behavior is covered by the migrated
+  auth-flow suite, while runner/driver/provider integration should be covered
+  through Reborn-native composition or product-auth contracts.
 
 ## Issues Found
 
