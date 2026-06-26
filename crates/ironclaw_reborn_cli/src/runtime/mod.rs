@@ -288,7 +288,8 @@ pub(crate) async fn open_trigger_access_store_for_profile(
                 let _ = runtime_input;
                 let _ = local_store_path;
                 anyhow::bail!(
-                    "profile=hosted-single-tenant requires the `postgres` feature for trigger-fire access"
+                    "profile=hosted-single-tenant requires the default ironclaw-reborn binary; \
+                     this custom build omitted PostgreSQL trigger-fire access support"
                 );
             }
         }
@@ -706,8 +707,9 @@ fn build_hosted_single_tenant_services_input(
     _config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornBuildInput> {
     anyhow::bail!(
-        "profile={profile} requires a binary built with the `postgres` feature for hosted \
-         single-tenant storage; the default PostgreSQL URL env var is IRONCLAW_REBORN_POSTGRES_URL"
+        "profile={profile} requires the default ironclaw-reborn binary; this custom build omitted \
+         PostgreSQL hosted single-tenant storage support. The default PostgreSQL URL env var is \
+         IRONCLAW_REBORN_POSTGRES_URL"
     )
 }
 
@@ -731,8 +733,9 @@ fn build_production_services_input(
     _config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornBuildInput> {
     anyhow::bail!(
-        "profile={profile} requires a binary built with the `postgres` feature for production \
-         storage; the default PostgreSQL URL env var is IRONCLAW_REBORN_POSTGRES_URL"
+        "profile={profile} requires the default ironclaw-reborn binary; this custom build omitted \
+         PostgreSQL production storage support. The default PostgreSQL URL env var is \
+         IRONCLAW_REBORN_POSTGRES_URL"
     )
 }
 

@@ -109,16 +109,13 @@ fn write_sparse_reborn_config(reborn_home: &Path) {
 }
 
 #[test]
-fn dockerfile_reborn_builds_with_postgres_feature() {
+fn dockerfile_reborn_uses_default_single_binary_features() {
     let dockerfile = std::fs::read_to_string(workspace_root().join("Dockerfile.reborn"))
         .expect("Dockerfile.reborn");
 
     assert!(
-        dockerfile
-            .matches("webui-v2-beta,slack-v2-host-beta,postgres")
-            .count()
-            >= 2,
-        "Dockerfile.reborn must compile both cargo-chef deps and final binary with postgres: {dockerfile}"
+        !dockerfile.contains("--features"),
+        "Dockerfile.reborn should build the default one-binary Reborn CLI without per-surface feature flags: {dockerfile}"
     );
     assert!(
         dockerfile.contains("config.production.toml"),
@@ -421,10 +418,6 @@ fn help_mentions_reborn_commands() {
     assert!(stdout.contains("profile"), "stdout: {stdout}");
     assert!(stdout.contains("repl"), "stdout: {stdout}");
     assert!(stdout.contains("run"), "stdout: {stdout}");
-    // `serve` is gated behind the `webui-v2-beta` Cargo feature so a
-    // default binary build does not link the beta HTTP/auth gateway.
-    // The dedicated `serve_*` tests below also `#[cfg]` themselves.
-    #[cfg(feature = "webui-v2-beta")]
     assert!(stdout.contains("serve"), "stdout: {stdout}");
     assert!(stdout.contains("skills"), "stdout: {stdout}");
 }
