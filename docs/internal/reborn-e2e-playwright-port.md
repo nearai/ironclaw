@@ -1260,14 +1260,9 @@ Test harness issue fixed:
 
 Current blocker:
 
-- legacy `test_empty_reply_uses_chat_fallback` expects an empty model reply to
-  produce a visible assistant error. Reborn's `LlmProviderModelGateway` already
-  rejects empty tool-capable stop responses as `InvalidOutput`, and existing
-  Reborn driver tests intentionally assert that model failures skip transcript
-  writes. The current WebUI v2 timeline therefore exposes no finalized
-  assistant message for that case. Porting the legacy empty-reply UX requires a
-  product decision about how failed model calls should surface in WebChat v2
-  without leaking raw provider errors.
+- this first pass left empty-model-reply and low-iteration loop-cap browser
+  behavior open. Later Reborn ports cover empty replies through failed-run
+  projection and loop caps through a low-iteration v2 turn harness.
 
 ### Step 35: Legacy Webhook, Widget, Routines, and Cleanup Review
 
@@ -2820,6 +2815,46 @@ Behavior mapping:
   is a typed connectable-channel action plus the v2 pairing redeem endpoint.
   Admin pending-pairing enumeration and channel webhook behavior remain open
   until standalone Reborn exposes matching v2 surfaces.
+
+### Step 95: Legacy Looping Tool-Call Termination Port
+
+Extended `test_reborn_webui_v2_legacy_tool_execution.py`.
+
+Ported the functional intent of legacy
+`test_looping_tool_calls_terminate_under_low_iteration_limit` to Reborn's
+standalone WebChat v2 turn path:
+
+- added `IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT` as a local harness
+  override for the default planned loop family, because legacy
+  `AGENT_MAX_TOOL_ITERATIONS` does not configure Reborn's planner budget;
+- submitted the mock LLM's `issue 1780 loop forever` trigger through the v2
+  message API while a live WebChat v2 SSE stream was open;
+- asserted the stream observes one completed `builtin.echo` invocation under
+  the low cap and then receives a terminal failed-run projection.
+
+Issue found:
+
+- Reborn's low-cap loop path is bounded, but the terminal category currently
+  projects as `driver_protocol_violation` rather than legacy
+  `iteration_limit`. With the cap set to one, the run completes one echo call
+  and then fails during result-only exit application. The port records that
+  current behavior instead of pretending the old category is already preserved.
+
+Validation:
+
+- `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_tool_execution.py -q`
+  -> 7 passed
+- `cargo test -p ironclaw_agent_loop default_family_iteration_limit_can_be_overridden_for_harnesses`
+  -> passed
+- `cargo build -p ironclaw_reborn_cli --features webui-v2-beta`
+  -> passed
+
+Behavior mapping:
+
+- Legacy coverage used the gateway server with `AGENT_MAX_TOOL_ITERATIONS=2`.
+  Reborn's current equivalent is the WebChat v2 failed-run projection for the
+  same mock repeated-tool trigger. The exact failure taxonomy remains a parity
+  gap.
 
 ## Open Migration Buckets
 

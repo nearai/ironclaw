@@ -4,6 +4,7 @@ import asyncio
 import json
 from urllib.parse import unquote, urlparse
 
+import aiohttp
 import httpx
 from playwright.async_api import expect
 
@@ -14,6 +15,7 @@ from reborn_webui_harness import (
     fetch_timeline,
     reborn_bearer_headers,
     reborn_v2_browser,  # noqa: F401 - imported fixture
+    reborn_v2_loop_limited_yolo_server,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
     reborn_v2_yolo_server,  # noqa: F401 - imported fixture
     send_message,
@@ -115,6 +117,75 @@ async def _wait_for_request_count(
         await asyncio.sleep(0.05)
     raise AssertionError(
         f"Timed out waiting for request count > {count}; got {len(requests)}"
+    )
+
+
+async def _wait_for_failed_run_projection(
+    response, *, timeout: float = 45.0
+) -> tuple[dict, int]:
+    current_event = None
+    data_lines: list[str] = []
+    seen_frames: list[dict] = []
+    completed_loop_echo_invocations: set[str] = set()
+    deadline = asyncio.get_running_loop().time() + timeout
+
+    async def next_line() -> str:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        raw = await asyncio.wait_for(response.content.readline(), timeout=remaining)
+        if raw == b"":
+            raise AssertionError(
+                f"SSE stream closed before failed-run projection. Seen frames: {seen_frames}"
+            )
+        return raw.decode("utf-8", errors="replace").rstrip("\r\n")
+
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            line = await next_line()
+        except asyncio.TimeoutError:
+            break
+        if not line:
+            if current_event and data_lines:
+                frame = json.loads("\n".join(data_lines))
+                seen_frames.append({"event": current_event, "frame": frame})
+                if current_event == "capability_activity":
+                    activity = frame.get("activity") or {}
+                    if (
+                        activity.get("capability_id") == "builtin.echo"
+                        and activity.get("status") == "completed"
+                    ):
+                        if invocation_id := activity.get("invocation_id"):
+                            completed_loop_echo_invocations.add(invocation_id)
+                if current_event in ("projection_snapshot", "projection_update"):
+                    for item in frame.get("state", {}).get("items", []):
+                        activity = item.get("capability_activity") or {}
+                        if (
+                            activity.get("capability_id") == "builtin.echo"
+                            and activity.get("status") == "completed"
+                        ):
+                            if invocation_id := activity.get("invocation_id"):
+                                completed_loop_echo_invocations.add(invocation_id)
+                        run_status = item.get("run_status")
+                        if not run_status:
+                            continue
+                        if run_status.get("status") == "failed":
+                            return run_status, len(completed_loop_echo_invocations)
+                if current_event == "failed":
+                    return frame, len(completed_loop_echo_invocations)
+            current_event = None
+            data_lines = []
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("event:"):
+            current_event = line.removeprefix("event:").strip()
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line.removeprefix("data:").strip())
+
+    raise AssertionError(
+        f"Timed out waiting for failed-run projection. Seen frames: {seen_frames}"
     )
 
 
@@ -378,3 +449,36 @@ async def test_reborn_legacy_empty_reply_failure_projection_is_visible(
         ).to_have_count(0)
     finally:
         await harness["context"].close()
+
+
+async def test_reborn_legacy_looping_tool_calls_stop_at_low_iteration_boundary(
+    reborn_v2_loop_limited_yolo_server,
+):
+    """Port issue-1780 looping tool-call termination to Reborn's v2 turn path."""
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        thread_id = await create_thread(client, reborn_v2_loop_limited_yolo_server)
+
+        timeout = aiohttp.ClientTimeout(total=60, sock_read=60)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            events_url = (
+                f"{reborn_v2_loop_limited_yolo_server}"
+                f"/api/webchat/v2/threads/{thread_id}/events"
+            )
+            async with session.get(
+                events_url,
+                params={"token": REBORN_V2_AUTH_TOKEN},
+                headers={"Accept": "text/event-stream"},
+            ) as response:
+                assert response.status == 200, await response.text()
+                await send_message(
+                    client,
+                    reborn_v2_loop_limited_yolo_server,
+                    thread_id,
+                    "issue 1780 loop forever",
+                )
+                run_status, completed_loop_echoes = (
+                    await _wait_for_failed_run_projection(response)
+                )
+
+    assert run_status.get("failure_category") == "driver_protocol_violation", run_status
+    assert completed_loop_echoes == 1

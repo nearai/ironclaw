@@ -3038,6 +3038,9 @@ pub async fn build_reborn_runtime(
             heartbeat_interval: runner.heartbeat_interval,
             poll_interval: runner.poll_interval,
             worker_count: runner.worker_count,
+            planned_default_iteration_limit: optional_u32_env(
+                "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
+            )?,
             ..DefaultPlannedRuntimeConfig::default()
         },
         model_route_resolver: None,
@@ -3466,6 +3469,32 @@ struct LocalDevSkillContextSource {
 }
 
 const LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS: usize = 6000;
+
+fn optional_u32_env(key: &'static str) -> Result<Option<u32>, RebornRuntimeError> {
+    match std::env::var(key) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let parsed = trimmed.parse::<u32>().map_err(|error| {
+                RebornRuntimeError::InvalidArgument {
+                    reason: format!("{key} must be a positive integer: {error}"),
+                }
+            })?;
+            if parsed == 0 {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason: format!("{key} must be greater than zero"),
+                });
+            }
+            Ok(Some(parsed))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(RebornRuntimeError::InvalidArgument {
+            reason: format!("could not read {key}: {error}"),
+        }),
+    }
+}
 
 /// Build the [`SkillActivationSelectorConfig`] used by the local-dev
 /// filesystem skill context source. Extracted from
