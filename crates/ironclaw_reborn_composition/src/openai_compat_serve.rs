@@ -155,10 +155,11 @@ pub async fn build_openai_compat_route_mount(
             ref_filesystem,
             openai_compat_ref_root(&tenant_id)?,
         ));
+    let projection_stream = runtime.webui_event_stream();
     let chat_projection_reader = Arc::new(OpenAiChatCompletionThreadProjectionReader::new(
         runtime.webui_thread_service(),
+        projection_stream.clone(),
     ));
-    let projection_stream = runtime.webui_event_stream();
     let responses_projection_reader = Arc::new(OpenAiResponsesThreadProjectionReader::new(
         runtime.webui_thread_service(),
         projection_stream.clone(),
@@ -271,15 +272,42 @@ impl ProductActorUserResolver for OpenAiCompatActorUserResolver {
 
 struct OpenAiChatCompletionThreadProjectionReader {
     thread_service: Arc<dyn SessionThreadService>,
+    projection_stream: Arc<dyn ProjectionStream>,
     poll_interval: Duration,
 }
 
 impl OpenAiChatCompletionThreadProjectionReader {
-    fn new(thread_service: Arc<dyn SessionThreadService>) -> Self {
+    fn new(
+        thread_service: Arc<dyn SessionThreadService>,
+        projection_stream: Arc<dyn ProjectionStream>,
+    ) -> Self {
         Self {
             thread_service,
+            projection_stream,
             poll_interval: OPENAI_COMPAT_PROJECTION_POLL_INTERVAL,
         }
+    }
+
+    /// True when the submitted run has parked on a user-resolvable gate
+    /// (approval/auth/resource). A parked run never produces a finalized
+    /// assistant message, so the chat-completion poll must detect it instead of
+    /// spinning until the outer HTTP timeout. Mirrors the Responses waiter's
+    /// `run_parked_on_gate_in_events` check; reads the whole window
+    /// (`after_cursor: None`) because the parked signal is sticky.
+    async fn submitted_run_parked_on_gate(
+        &self,
+        request: &OpenAiChatCompletionProjectionRequest,
+        submitted_run_id: &str,
+    ) -> Result<bool, OpenAiCompatHttpError> {
+        let events = self
+            .projection_stream
+            .drain(ProjectionSubscriptionRequest {
+                actor: request.projection_read.actor.clone(),
+                scope: request.projection_read.scope.clone(),
+                after_cursor: None,
+            })
+            .await?;
+        Ok(run_parked_on_gate_in_events(&events, submitted_run_id))
     }
 }
 
@@ -311,7 +339,29 @@ impl OpenAiChatCompletionProjectionReader for OpenAiChatCompletionThreadProjecti
                         message.content.unwrap_or_default(),
                     ));
                 }
-                Ok(None) => tokio::time::sleep(self.poll_interval).await,
+                Ok(None) => {
+                    // A run parked on a user-resolvable gate (approval/auth/
+                    // resource) never finalizes an assistant message, so without
+                    // this check the loop would spin until the outer HTTP
+                    // timeout, turning a permanent "needs user action" state into
+                    // a misleading retryable 503. Chat Completions has no
+                    // `incomplete` status (unlike Responses), so surface a
+                    // bounded, non-retryable `Conflict` instead of spinning: the
+                    // run cannot produce a completion through this surface until
+                    // the user resolves the gate out of band.
+                    if self
+                        .submitted_run_parked_on_gate(&request, &submitted_run_id)
+                        .await?
+                    {
+                        return Err(OpenAiCompatHttpError::from_kind(
+                            409,
+                            false,
+                            OpenAiCompatErrorKind::Conflict,
+                            None,
+                        ));
+                    }
+                    tokio::time::sleep(self.poll_interval).await;
+                }
                 Err(
                     SessionThreadError::UnknownThread { .. }
                     | SessionThreadError::ThreadScopeMismatch { .. },
@@ -517,6 +567,7 @@ impl OpenAiResponsesThreadProjectionReader {
         let next_cursor = events.last().map(|event| event.projection_cursor().clone());
         Ok(ProjectedResponseStatusRead {
             status: response_status_from_projection_events(&events, submitted_run_id),
+            parked_on_gate: run_parked_on_gate_in_events(&events, submitted_run_id),
             next_cursor,
         })
     }
@@ -677,6 +728,22 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
                     Vec::new(),
                 )));
             }
+            // A run parked on a user-resolvable gate (approval/auth/resource)
+            // never produces a finalized message and never emits a terminal
+            // `RunStatus` projection — so without this check the loop would spin
+            // until the outer HTTP timeout, turning a permanent "needs user
+            // action" state into a misleading retryable 503. Surface it promptly
+            // as `Incomplete` (the OpenAI Responses status for a run that
+            // stopped before finishing) so the caller stops polling.
+            if projected.parked_on_gate {
+                return Ok(OpenAiResponseProjection::new(response_object(
+                    request.public_id,
+                    request.mapping.created_at,
+                    request.requested_model,
+                    OpenAiResponseStatus::Incomplete,
+                    Vec::new(),
+                )));
+            }
             tokio::time::sleep(self.poll_interval).await;
         }
     }
@@ -693,24 +760,41 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
                 &request.public_id,
             )
             .await?;
-        let projected_status = if projection.assistant_finalized {
+        let projected = if projection.assistant_finalized {
             None
         } else {
-            self.read_projected_response_status(
-                &request.projection_read,
-                &submitted_run_id,
-                request.projection_read.after_cursor.clone(),
+            Some(
+                self.read_projected_response_status(
+                    &request.projection_read,
+                    &submitted_run_id,
+                    request.projection_read.after_cursor.clone(),
+                )
+                .await?,
             )
-            .await?
-            .status
         };
-        let status = match (projection.assistant_finalized, projected_status) {
-            (true, _) => OpenAiResponseStatus::Completed,
-            (false, Some(OpenAiResponseStatus::Completed | OpenAiResponseStatus::InProgress)) => {
-                OpenAiResponseStatus::InProgress
+        let status = if projection.assistant_finalized {
+            OpenAiResponseStatus::Completed
+        } else {
+            match projected {
+                // Terminal failure/cancellation surfaces as-is.
+                Some(ProjectedResponseStatusRead {
+                    status:
+                        Some(
+                            status @ (OpenAiResponseStatus::Failed
+                            | OpenAiResponseStatus::Cancelled),
+                        ),
+                    ..
+                }) => status,
+                // Parked on a user-resolvable gate: mirror the wait path
+                // (`wait_for_response_completion`) so retrieve and wait agree.
+                // Without this, a run awaiting user action reports `in_progress`
+                // on retrieve forever while the wait path reports `incomplete`,
+                // and a polling client never learns the run needs the user.
+                Some(projected) if projected.parked_on_gate => OpenAiResponseStatus::Incomplete,
+                // Otherwise still in flight (incl. a non-finalized `completed`
+                // RunStatus, which stays InProgress until the message finalizes).
+                _ => OpenAiResponseStatus::InProgress,
             }
-            (false, Some(status)) => status,
-            (false, None) => OpenAiResponseStatus::InProgress,
         };
         Ok(response_object(
             request.public_id,
@@ -726,6 +810,11 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
 
 struct ProjectedResponseStatusRead {
     status: Option<OpenAiResponseStatus>,
+    /// True when the run emitted a gate prompt (it parked on a user-resolvable
+    /// approval/auth/resource gate) and has not since produced a terminal
+    /// status. Parked runs never self-advance, so a poll loop must surface this
+    /// rather than wait for a status/message that will never arrive.
+    parked_on_gate: bool,
     next_cursor: Option<ProjectionCursor>,
 }
 
@@ -761,6 +850,65 @@ fn response_status_from_projection_events(
         | ProductOutboundPayload::GatePrompt(_)
         | ProductOutboundPayload::AuthPrompt(_)
         | ProductOutboundPayload::KeepAlive => None,
+    })
+}
+
+/// Detect whether the run parked on a user-resolvable gate. A `GatePrompt`
+/// (approval/resource) and an `AuthPrompt` (auth) each carry the parked run's
+/// `turn_run_id`, so they correlate directly to the run we are waiting on — the
+/// three `Blocked*` user-resolvable states map onto these two payloads (see
+/// `TurnStatus::wait_class`'s `ParkedAwaitingUser`).
+///
+/// Ordering matters: a `RunStatus` that appears **after** the latest matching
+/// prompt means the run resumed past the gate, so that prompt is stale and this
+/// returns `false` (the caller keeps polling). A `RunStatus` that appears
+/// **before** the latest prompt belongs to a prior poll window and must not
+/// suppress the prompt — the first drain window with `after_cursor: None` can
+/// contain both an earlier running status and the later `GatePrompt` in the
+/// same batch. The terminal-status check in the wait loop runs before this, so
+/// a failed/cancelled run is already returned by then.
+fn run_parked_on_gate_in_events(
+    events: &[ProductOutboundEnvelope],
+    submitted_run_id: &str,
+) -> bool {
+    let last_prompt_idx = events.iter().rposition(|event| match event.payload() {
+        ProductOutboundPayload::GatePrompt(prompt) => {
+            prompt.turn_run_id.to_string() == submitted_run_id
+        }
+        ProductOutboundPayload::AuthPrompt(prompt) => {
+            prompt.turn_run_id.to_string() == submitted_run_id
+        }
+        _ => false,
+    });
+    let Some(prompt_idx) = last_prompt_idx else {
+        return false;
+    };
+    // A RunStatus that appears after the latest prompt means the run has
+    // resumed past the gate; the prompt is stale. A status that appears
+    // before the prompt is from a prior window and must not suppress it.
+    let last_status_idx = events.iter().rposition(|event| match event.payload() {
+        ProductOutboundPayload::ProjectionSnapshot { state }
+        | ProductOutboundPayload::ProjectionUpdate { state } => {
+            run_status_present_in_state(state, submitted_run_id)
+        }
+        _ => false,
+    });
+    match last_status_idx {
+        Some(status_idx) => prompt_idx > status_idx,
+        None => true,
+    }
+}
+
+/// True when the run emitted any `RunStatus` projection item in this state. The
+/// wire only emits non-parked statuses (running/completed/failed/cancelled/
+/// killed), so the presence of one means the run is no longer parked.
+fn run_status_present_in_state(state: &ProductProjectionState, submitted_run_id: &str) -> bool {
+    state.items.iter().any(|item| {
+        matches!(
+            item,
+            ProductProjectionItem::RunStatus { run_id, .. }
+                if run_id.to_string() == submitted_run_id
+        )
     })
 }
 

@@ -41,6 +41,7 @@ pub fn assistant_reply_without_text_for_test(
         status,
         failure_category: failure_category.map(str::to_owned),
         text: None,
+        gate_ref: None,
     }
 }
 

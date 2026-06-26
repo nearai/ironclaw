@@ -83,10 +83,10 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
     InMemoryTurnStateStoreLimits, LoopGateRef, ReplyTargetBindingRef, RunProfileResolutionRequest,
-    SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot,
-    TurnRunId, TurnRunRecord, TurnRunState, TurnRunWake, TurnScope, TurnSpawnTreeStateStore,
-    TurnStatus,
+    RunWaitClass, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    TurnActor, TurnCoordinator, TurnError, TurnEventProjectionSource, TurnId,
+    TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState, TurnRunWake, TurnScope,
+    TurnSpawnTreeStateStore, TurnStatus,
     events::EventCursor,
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
@@ -353,8 +353,16 @@ use crate::runtime_input::ResolvedRebornLlm;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConversationId(pub ThreadId);
 
-/// Final-form assistant reply read back from the session thread service after
-/// a `send_user_message` completes.
+/// Reply read back from the session thread service after a `send_user_message`
+/// returns — either because the run reached a terminal status or because it
+/// parked on a user-resolvable gate.
+///
+/// `gate_ref` is `Some` exactly when `status` is a `ParkedAwaitingUser` gate
+/// (`BlockedApproval`/`BlockedAuth`/`BlockedResource`): the run paused for the
+/// user and `gate_ref` identifies the gate to resolve (via the WebUI
+/// `RebornServicesApi` facade per #3094). It is `None` for every terminal
+/// status. `send_user_message` enforces this invariant, so a parked reply
+/// always carries a `gate_ref`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssistantReply {
     pub conversation: ConversationId,
@@ -362,6 +370,7 @@ pub struct AssistantReply {
     pub status: TurnStatus,
     pub failure_category: Option<String>,
     pub text: Option<String>,
+    pub gate_ref: Option<ironclaw_turns::GateRef>,
 }
 
 impl AssistantReply {
@@ -1583,8 +1592,15 @@ impl RebornRuntime {
     }
 
     /// Submit a user message into the conversation, wait for the run to
-    /// reach a terminal state, and return the assistant reply read back
-    /// from the session thread service.
+    /// either reach a terminal state or park on a user-resolvable gate, and
+    /// return the assistant reply read back from the session thread service.
+    ///
+    /// A run that parks on an approval/auth/resource gate is **surfaced, not
+    /// killed**: the returned [`AssistantReply`] carries the `Blocked*`
+    /// `status` and a `Some(gate_ref)` the caller can resolve through the
+    /// WebUI `RebornServicesApi` facade (`resolve_gate`, #3094). Terminal
+    /// replies carry `gate_ref = None`. Use [`AssistantReply::is_successful_final_reply`]
+    /// to distinguish a completed reply from a parked/failed one.
     ///
     /// Without an LLM gateway wired in (i.e. when this crate is built
     /// without the `root-llm-provider` feature or an LLM config is not
@@ -1642,6 +1658,23 @@ impl RebornRuntime {
                 .read_latest_assistant_text(&conversation.0, submitted.run_id)
                 .await?;
 
+            // `wait_for_terminal` returns either a terminal status or a run
+            // parked on a user-resolvable gate. A parked run MUST carry a
+            // `gate_ref` (the blocked-reason contract guarantees one); its
+            // absence is an invariant violation, surfaced rather than returned as
+            // a gate-less parked reply the caller can't act on.
+            let gate_ref = terminal_state.gate_ref.clone();
+            if matches!(
+                terminal_state.status.wait_class(),
+                RunWaitClass::ParkedAwaitingUser
+            ) && gate_ref.is_none()
+            {
+                return Err(RebornRuntimeError::TurnSubmission(format!(
+                    "run parked on {:?} without a gate ref",
+                    terminal_state.status
+                )));
+            }
+
             Ok(AssistantReply {
                 conversation: conversation.clone(),
                 run_id: submitted.run_id,
@@ -1651,6 +1684,7 @@ impl RebornRuntime {
                     .as_ref()
                     .map(|failure| failure.category().to_string()),
                 text: assistant_text,
+                gate_ref,
             })
         }
         .await;
@@ -1931,6 +1965,21 @@ impl RebornRuntime {
         )
     }
 
+    /// Wait until the run reaches a terminal status *or* parks on a
+    /// user-resolvable gate (auth/approval/resource).
+    ///
+    /// Waiting is classified through the canonical [`TurnStatus::wait_class`]
+    /// rather than a hand-rolled `is_terminal()` predicate: the four `Blocked*`
+    /// states never self-advance, so a waiter that only checks `is_terminal()`
+    /// would poll a gate-parked run until `poll_settings.max_total` and then
+    /// **kill** it with a `Timeout` cancel — destroying a run that was
+    /// correctly waiting on the user. A [`RunWaitClass::ParkedAwaitingUser`]
+    /// run is returned to the caller (its status carries the `Blocked*` state
+    /// and `gate_ref`) so the caller can surface the gate instead of cancelling
+    /// it. [`RunWaitClass::ParkedAwaitingRun`] (`BlockedDependentRun`) is an
+    /// internal wait on a child run, not resolvable through a user gate facade,
+    /// so it keeps polling like `Running` until the dependent run completes or
+    /// the poll budget expires.
     async fn wait_for_terminal(
         &self,
         scope: &TurnScope,
@@ -1949,89 +1998,14 @@ impl RebornRuntime {
                     run_id,
                 })
                 .await?;
-            if state.status.is_terminal() {
-                return Ok(state);
-            }
-            // TurnStatus::RecoveryRequired is now terminal (is_terminal() returns true)
-            // so the branch above handles it; no special cancel-to-release-lock is needed.
-            if start.elapsed() > self.poll_settings.max_total {
-                self.cancel_run(
-                    scope,
-                    run_id,
-                    SanitizedCancelReason::Timeout,
-                    "timeout-cancel",
-                )
-                .await?;
-                return Err(RebornRuntimeError::RunTimeout {
-                    timeout: self.poll_settings.max_total,
-                });
-            }
-            tokio::select! {
-                _ = cancellation.cancelled() => {
-                    self.cancel_run(
-                        scope,
-                        run_id,
-                        SanitizedCancelReason::UserRequested,
-                        "caller-cancel",
-                    )
-                    .await?;
-                    return Err(RebornRuntimeError::OperationCancelled);
-                }
-                _ = tokio::time::sleep(self.poll_settings.interval) => {}
-            }
-        }
-    }
-
-    /// Like [`Self::wait_for_terminal`], but also returns when the run parks on
-    /// a user-resolvable gate (auth/approval/resource) instead of polling until
-    /// those non-terminal states either resolve or hit `RunTimeout`.
-    /// `BlockedDependentRun` is deliberately excluded — it is an internal wait
-    /// on a child run, not facade-resolvable, so it keeps polling. The returned
-    /// state carries the `Blocked*` status and
-    /// `gate_ref`; the caller decides whether to resolve (through the WebUI
-    /// facade) or stop. Test/recording-support only.
-    #[cfg(any(test, feature = "test-support"))]
-    async fn wait_for_terminal_or_gate(
-        &self,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-        cancellation: &CancellationToken,
-    ) -> Result<TurnRunState, RebornRuntimeError> {
-        let start = std::time::Instant::now();
-        loop {
-            if self.turn_scheduler.is_stopped() {
-                return Err(RebornRuntimeError::WorkerStopped);
-            }
-            let state = self
-                .turn_coordinator
-                .get_run_state(GetRunStateRequest {
-                    scope: scope.clone(),
-                    run_id,
-                })
-                .await?;
-            // Exhaustive on purpose: a new `TurnStatus` variant must force a
-            // compile error here rather than silently defaulting to "not a
-            // gate". Only the user-resolvable gates short-circuit recording.
-            // `BlockedDependentRun` is an internal wait on a child run (the
-            // upstream contract names it `AwaitDependentRun`) — it is not
-            // resolvable through the gate facade, so it keeps polling like
-            // `Queued`/`Running` until the dependent run completes or the poll
-            // budget expires.
-            let blocked_on_gate = match state.status {
-                TurnStatus::BlockedApproval
-                | TurnStatus::BlockedAuth
-                | TurnStatus::BlockedResource => true,
-                TurnStatus::BlockedDependentRun
-                | TurnStatus::Queued
-                | TurnStatus::Running
-                | TurnStatus::CancelRequested
-                | TurnStatus::Cancelled
-                | TurnStatus::Completed
-                | TurnStatus::Failed
-                | TurnStatus::RecoveryRequired => false,
-            };
-            if state.status.is_terminal() || blocked_on_gate {
-                return Ok(state);
+            // `TurnStatus::RecoveryRequired` classifies as a terminal-failure
+            // wait class, so it is returned here too — no special
+            // cancel-to-release-lock is needed.
+            match state.status.wait_class() {
+                RunWaitClass::TerminalSuccess
+                | RunWaitClass::TerminalFailure
+                | RunWaitClass::ParkedAwaitingUser => return Ok(state),
+                RunWaitClass::Running | RunWaitClass::ParkedAwaitingRun => {}
             }
             if start.elapsed() > self.poll_settings.max_total {
                 // Surface the primary `RunTimeout`; a failure of the secondary
@@ -2048,7 +2022,7 @@ impl RebornRuntime {
                     .await
                     .is_err()
                 {
-                    tracing::debug!(run_id = %run_id, "failed to cancel run after recorder timeout");
+                    tracing::debug!(run_id = %run_id, "failed to cancel run after timeout");
                 }
                 return Err(RebornRuntimeError::RunTimeout {
                     timeout: self.poll_settings.max_total,
@@ -2056,6 +2030,8 @@ impl RebornRuntime {
             }
             tokio::select! {
                 _ = cancellation.cancelled() => {
+                    // Same primary/secondary split: surface `OperationCancelled`
+                    // even if the secondary cancel call fails.
                     if self
                         .cancel_run(
                             scope,
@@ -2073,6 +2049,26 @@ impl RebornRuntime {
                 _ = tokio::time::sleep(self.poll_settings.interval) => {}
             }
         }
+    }
+
+    /// Test/recording-support alias of [`Self::wait_for_terminal`], kept for the
+    /// QA-trace recorder's intent-revealing call site.
+    ///
+    /// Since [`Self::wait_for_terminal`] now classifies waits through
+    /// [`TurnStatus::wait_class`] and returns a [`RunWaitClass::ParkedAwaitingUser`]
+    /// run instead of killing it, this is behaviorally identical and simply
+    /// delegates — the gate-aware behavior is no longer test-only. The returned
+    /// state carries the `Blocked*` status and `gate_ref`; the caller decides
+    /// whether to resolve (through the WebUI facade) or stop. `BlockedDependentRun`
+    /// is not user-resolvable, so (like `Running`) it keeps polling.
+    #[cfg(any(test, feature = "test-support"))]
+    async fn wait_for_terminal_or_gate(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        cancellation: &CancellationToken,
+    ) -> Result<TurnRunState, RebornRuntimeError> {
+        self.wait_for_terminal(scope, run_id, cancellation).await
     }
 
     /// Test/recording-support sibling of [`Self::send_user_message`] that
@@ -2115,6 +2111,9 @@ impl RebornRuntime {
                         .as_ref()
                         .map(|failure| failure.category().to_string()),
                     text: assistant_text,
+                    // Terminal arm by construction (`state.status.is_terminal()`),
+                    // so there is no gate to carry.
+                    gate_ref: None,
                 }))
             } else {
                 // `wait_for_terminal_or_gate` only returns terminal or a

@@ -65,6 +65,103 @@ async fn openai_responses_retrieve_returns_cancelled_projection_status() {
     assert!(response.error.is_none());
 }
 
+/// Retrieve must agree with the wait path on parked runs. A run parked on a
+/// user-resolvable gate emits a `GatePrompt` but no terminal `RunStatus`, so a
+/// retrieve that only looked at `status` would report `in_progress` forever
+/// while `wait_for_response_completion` reports `incomplete`. The retrieve path
+/// must honor `parked_on_gate` and surface `Incomplete` too, so a polling client
+/// learns the run is waiting on the user.
+#[tokio::test]
+async fn openai_responses_retrieve_returns_incomplete_when_run_parks_on_gate() {
+    let fixture = ResponseReaderFixture::new("retrieve-gate").await;
+    let run_id = TurnRunId::new();
+    let reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![gate_prompt_envelope(
+            run_id,
+        )])),
+    );
+
+    let response = reader
+        .read_response(fixture.read_request(run_id))
+        .await
+        .expect("read response");
+
+    assert_eq!(
+        response.status,
+        OpenAiResponseStatus::Incomplete,
+        "a parked run must read as Incomplete on retrieve, matching the wait path"
+    );
+    assert!(response.output.is_empty());
+}
+
+/// Retrieve must agree with the wait path on auth-parked runs. A run parked on
+/// an auth gate emits an `AuthPrompt` but no terminal `RunStatus`, so a retrieve
+/// that only checked `GatePrompt` would report `in_progress` for auth-parked runs
+/// while `wait_for_response_completion` reports `incomplete`. The retrieve path
+/// must treat `AuthPrompt` as a parked signal and surface `Incomplete`, matching
+/// the wait path (`openai_responses_wait_returns_incomplete_when_run_parks_on_auth_gate`).
+#[tokio::test]
+async fn openai_responses_retrieve_returns_incomplete_when_run_parks_on_auth_gate() {
+    let fixture = ResponseReaderFixture::new("retrieve-auth-gate").await;
+    let run_id = TurnRunId::new();
+    let reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![auth_prompt_envelope(
+            run_id,
+        )])),
+    );
+
+    let response = reader
+        .read_response(fixture.read_request(run_id))
+        .await
+        .expect("read response");
+
+    assert_eq!(
+        response.status,
+        OpenAiResponseStatus::Incomplete,
+        "an auth-parked run must read as Incomplete on retrieve, matching the wait path"
+    );
+    assert!(response.output.is_empty());
+}
+
+/// Chat Completions must not spin forever on a run parked on a user gate.
+/// Unlike Responses, Chat Completions has no `incomplete` status, so the waiter
+/// returns a bounded, non-retryable `409 Conflict` (the run cannot produce a
+/// completion through this surface until the user resolves the gate) instead of
+/// polling until the outer HTTP timeout (the original Bug #1 symptom). A static
+/// stream carrying only a gate prompt would, on the pre-fix code, loop forever
+/// on `Ok(None)`; this test would hang.
+#[tokio::test]
+async fn openai_chat_completion_returns_conflict_when_run_parks_on_gate() {
+    let fixture = ResponseReaderFixture::new("chat-gate").await;
+    let run_id = TurnRunId::new();
+    let reader = OpenAiChatCompletionThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![gate_prompt_envelope(
+            run_id,
+        )])),
+    );
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        reader.read_chat_completion_projection(fixture.chat_request(run_id)),
+    )
+    .await
+    .expect("chat completion must return promptly on a parked run, not spin to timeout");
+
+    let error = result.expect_err("a parked run must surface an error, not a completion");
+    assert_eq!(
+        error.status_code(),
+        409,
+        "a parked chat completion must surface a 409 Conflict, not spin"
+    );
+    assert!(
+        !error.retryable(),
+        "a parked run is not resolved by retrying the request; the user must act out of band"
+    );
+}
+
 #[tokio::test]
 async fn openai_responses_retrieve_ignores_other_run_statuses() {
     let fixture = ResponseReaderFixture::new("other-run").await;
@@ -188,6 +285,222 @@ async fn openai_responses_wait_advances_projection_cursor_between_polls() {
     assert_eq!(stream.after_cursors(), vec![None, Some(first_cursor)]);
 }
 
+/// RED regression for the unbounded `wait_for_response_completion` loop.
+///
+/// A run that parks on a user-resolvable gate emits a `GatePrompt` projection
+/// but never a finalized assistant message and never a terminal `RunStatus`
+/// update. The old loop only returned on a finalized message or a
+/// `Failed`/`Cancelled` projection status, so a parked run spun forever (the
+/// outer HTTP timeout would turn it into a permanent retryable 503 with no gate
+/// info). After the fix, the loop detects the run-matched `GatePrompt` and
+/// returns promptly with `OpenAiResponseStatus::Incomplete`.
+///
+/// On OLD code this test TIMES OUT (the loop never returns); on FIXED code it
+/// returns `Incomplete` within milliseconds.
+#[tokio::test]
+async fn openai_responses_wait_returns_incomplete_when_run_parks_on_gate() {
+    let fixture = ResponseReaderFixture::new("wait-gate").await;
+    let run_id = TurnRunId::new();
+    let mut reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![gate_prompt_envelope(
+            run_id,
+        )])),
+    );
+    reader.poll_interval = Duration::from_millis(1);
+
+    let projection = tokio::time::timeout(
+        Duration::from_secs(2),
+        reader.wait_for_response_completion(fixture.wait_request(run_id)),
+    )
+    .await
+    .expect("wait must return promptly when the run parks on a gate, not spin forever")
+    .expect("parked run must surface as a projection, not an error");
+
+    assert_eq!(
+        projection.response.status,
+        OpenAiResponseStatus::Incomplete,
+        "a run parked on a gate must surface as Incomplete; the wait must not hang"
+    );
+}
+
+/// Ordering regression: when the first drain window (after_cursor: None) contains
+/// BOTH an earlier `ProjectionUpdate` carrying a `running` RunStatus AND a later
+/// `GatePrompt` for the same run, the wait loop must return `Incomplete` — not
+/// spin — because the running status predates the gate prompt in the same batch.
+///
+/// On OLD buggy code the `any(...)` scan would find the running status anywhere
+/// in the window and treat the prompt as superseded, causing an infinite poll.
+/// The fixed code uses positional comparison (`rposition`): only a RunStatus
+/// that appears AFTER the latest matching prompt supersedes it.
+#[tokio::test]
+async fn openai_responses_wait_returns_incomplete_when_run_status_precedes_gate_prompt_in_same_window()
+ {
+    let fixture = ResponseReaderFixture::new("wait-gate-ordering").await;
+    let run_id = TurnRunId::new();
+    // Envelopes in emission order: running status first, gate prompt second.
+    // Both arrive in a single drain batch (simulating after_cursor: None).
+    let mut reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![
+            run_status_envelope(fixture.thread_id.as_str(), run_id, "running"),
+            gate_prompt_envelope(run_id),
+        ])),
+    );
+    reader.poll_interval = Duration::from_millis(1);
+
+    let projection = tokio::time::timeout(
+        Duration::from_secs(2),
+        reader.wait_for_response_completion(fixture.wait_request(run_id)),
+    )
+    .await
+    .expect(
+        "wait must return promptly when a gate prompt follows a running status in the same \
+         drain window, not spin forever (ordering bug regression)",
+    )
+    .expect("parked run must surface as a projection, not an error");
+
+    assert_eq!(
+        projection.response.status,
+        OpenAiResponseStatus::Incomplete,
+        "a gate prompt that appears after a running status in the same window must surface \
+         as Incomplete; the earlier running status must not suppress the gate prompt"
+    );
+}
+
+/// Supersede branch: a stale `GatePrompt` followed by a later `running`
+/// `RunStatus` for the same run in a single drain batch must keep the caller
+/// polling — it must NOT surface `Incomplete`.
+///
+/// When the gate prompt arrives first (index 0) and the running `RunStatus`
+/// arrives after it (index 1) in the same drain window,
+/// `run_parked_on_gate_in_events` returns `false` because the status at index 1
+/// is positioned after the prompt at index 0, meaning the run already resumed
+/// past the gate. The wait loop therefore does NOT short-circuit to `Incomplete`;
+/// it continues polling.
+///
+/// A `StaticProjectionStream` that always returns the same batch never reaches a
+/// terminal state, so the loop spins indefinitely. This test wraps the call in a
+/// short `tokio::time::timeout` and asserts it TIMES OUT (i.e. the result is
+/// `Err(Elapsed)`), proving the wait did NOT return `Incomplete` for the resumed
+/// run.
+#[tokio::test]
+async fn openai_responses_wait_ignores_stale_gate_prompt_after_run_resumes() {
+    let fixture = ResponseReaderFixture::new("wait-gate-supersede").await;
+    let run_id = TurnRunId::new();
+    // Envelopes in emission order: gate prompt first (run was parked at the time
+    // of that event), then a later running RunStatus (the run has since resumed
+    // past the gate). Both arrive in a single drain batch so run_parked_on_gate_in_events
+    // must compare their positions: status at index 1 supersedes the prompt at index 0,
+    // so the function returns false and the loop keeps polling rather than surfacing Incomplete.
+    let mut reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![
+            gate_prompt_envelope(run_id),
+            run_status_envelope(fixture.thread_id.as_str(), run_id, "running"),
+        ])),
+    );
+    reader.poll_interval = Duration::from_millis(1);
+
+    // The superseded prompt must NOT cause the wait to surface Incomplete.
+    // With parked_on_gate=false and status=InProgress, the loop keeps polling.
+    // The static stream never delivers a terminal status, so the timeout fires —
+    // proving the wait did not return Incomplete for a run that already resumed.
+    let result = tokio::time::timeout(
+        Duration::from_millis(300),
+        reader.wait_for_response_completion(fixture.wait_request(run_id)),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a stale gate prompt superseded by a later running status must not surface Incomplete; \
+         the wait must keep polling (and time out on a static stream) rather than return early"
+    );
+}
+
+/// Supersede branch (auth variant): a stale `AuthPrompt` followed by a later
+/// `running` `RunStatus` for the same run in a single drain batch must keep the
+/// caller polling — it must NOT surface `Incomplete`.
+///
+/// Mirrors `openai_responses_wait_ignores_stale_gate_prompt_after_run_resumes`
+/// but uses `AuthPrompt` instead of `GatePrompt`. The supersede logic applies
+/// symmetrically: only a `RunStatus` that appears AFTER the latest matching
+/// prompt overrides it. When the auth prompt arrives first (index 0) and the
+/// running status arrives after it (index 1), the run already resumed past the
+/// auth gate and the wait loop must NOT short-circuit to `Incomplete`.
+///
+/// A `StaticProjectionStream` that always returns the same batch never reaches a
+/// terminal state, so the loop spins indefinitely. This test wraps the call in a
+/// short `tokio::time::timeout` and asserts it TIMES OUT (i.e. the result is
+/// `Err(Elapsed)`), proving the wait did NOT return `Incomplete` for the resumed
+/// run.
+#[tokio::test]
+async fn openai_responses_wait_ignores_stale_auth_prompt_after_run_resumes() {
+    let fixture = ResponseReaderFixture::new("wait-auth-supersede").await;
+    let run_id = TurnRunId::new();
+    // Envelopes in emission order: auth prompt first (run was parked on an auth
+    // gate at the time of that event), then a later running RunStatus (the run
+    // has since resumed past the auth gate). Both arrive in a single drain batch
+    // so the supersede check must compare their positions: status at index 1
+    // supersedes the prompt at index 0, so the function returns false and the
+    // loop keeps polling rather than surfacing Incomplete.
+    let mut reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![
+            auth_prompt_envelope(run_id),
+            run_status_envelope(fixture.thread_id.as_str(), run_id, "running"),
+        ])),
+    );
+    reader.poll_interval = Duration::from_millis(1);
+
+    // The superseded auth prompt must NOT cause the wait to surface Incomplete.
+    // With parked_on_gate=false and status=InProgress, the loop keeps polling.
+    // The static stream never delivers a terminal status, so the timeout fires —
+    // proving the wait did not return Incomplete for a run that already resumed.
+    let result = tokio::time::timeout(
+        Duration::from_millis(300),
+        reader.wait_for_response_completion(fixture.wait_request(run_id)),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a stale auth prompt superseded by a later running status must not surface Incomplete; \
+         the wait must keep polling (and time out on a static stream) rather than return early"
+    );
+}
+
+/// Auth gates (`TurnStatus::BlockedAuth`) surface as `AuthPrompt`, not
+/// `GatePrompt`. Without treating `AuthPrompt` as a parked signal the wait loop
+/// would spin forever on an auth-parked run — the same hang as the gate case.
+#[tokio::test]
+async fn openai_responses_wait_returns_incomplete_when_run_parks_on_auth_gate() {
+    let fixture = ResponseReaderFixture::new("wait-auth-gate").await;
+    let run_id = TurnRunId::new();
+    let mut reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![auth_prompt_envelope(
+            run_id,
+        )])),
+    );
+    reader.poll_interval = Duration::from_millis(1);
+
+    let projection = tokio::time::timeout(
+        Duration::from_secs(2),
+        reader.wait_for_response_completion(fixture.wait_request(run_id)),
+    )
+    .await
+    .expect("wait must return promptly when the run parks on an auth gate, not spin forever")
+    .expect("auth-parked run must surface as a projection, not an error");
+
+    assert_eq!(
+        projection.response.status,
+        OpenAiResponseStatus::Incomplete,
+        "a run parked on an auth gate must surface as Incomplete; the wait must not hang"
+    );
+}
+
 struct ResponseReaderFixture {
     threads: Arc<InMemorySessionThreadService>,
     actor_scope: OpenAiCompatActorScope,
@@ -270,6 +583,25 @@ impl ResponseReaderFixture {
             requested_model: "reborn-test".to_string(),
             projection_read: self.projection_read.clone(),
             mapping: self.mapping(run_id),
+        }
+    }
+
+    fn chat_request(
+        &self,
+        run_id: TurnRunId,
+    ) -> ironclaw_reborn_openai_compat::OpenAiChatCompletionProjectionRequest {
+        ironclaw_reborn_openai_compat::OpenAiChatCompletionProjectionRequest {
+            public_id: ironclaw_reborn_openai_compat::OpenAiChatCompletionId::new("chatcmpl-test")
+                .expect("chat completion id"),
+            actor_scope: self.actor_scope.clone(),
+            accepted_ack: ProductInboundAck::Accepted {
+                accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("accepted:test")
+                    .expect("accepted ref"),
+                submitted_run_id: run_id,
+            },
+            projection_read: self.projection_read.clone(),
+            requested_model: "reborn-test".to_string(),
+            model_only_tools: None,
         }
     }
 
@@ -382,6 +714,62 @@ impl ProjectionStream for SequencedProjectionStream {
             .pop_front()
             .unwrap_or_default())
     }
+}
+
+/// A gate-prompt envelope for `run_id`: the projection signal a run emits when
+/// it parks on a user-resolvable gate (approval/auth/resource). No `RunStatus`
+/// update is emitted for parked runs, so this is the only signal the wait loop
+/// can observe to detect a parked run.
+fn gate_prompt_envelope(run_id: TurnRunId) -> ProductOutboundEnvelope {
+    ProductOutboundEnvelope::new(
+        ProductAdapterId::new(OPENAI_COMPAT_ADAPTER_ID).expect("adapter id"),
+        AdapterInstallationId::new(OPENAI_COMPAT_INSTALLATION_ID).expect("installation id"),
+        ProductOutboundTarget::new(
+            ReplyTargetBindingRef::new("reply:test").expect("reply target"),
+            ExternalConversationRef::new(None, "conversation:test", None, None)
+                .expect("conversation ref"),
+            None,
+        ),
+        ProjectionCursor::new(format!("gate-cursor:{}", run_id.as_uuid())).expect("cursor"),
+        ProductOutboundPayload::GatePrompt(ironclaw_product_adapters::GatePromptView {
+            turn_run_id: run_id,
+            gate_ref: "gate:test".to_string(),
+            invocation_id: None,
+            headline: "Approval required".to_string(),
+            body: "The agent wants to run a shell command.".to_string(),
+            allow_always: false,
+            approval_context: None,
+        }),
+    )
+}
+
+/// An auth-prompt envelope for `run_id`: the projection signal a run emits when
+/// it parks on an auth gate (`TurnStatus::BlockedAuth`). Auth gates surface as
+/// `AuthPrompt`, not `GatePrompt`, so the wait loop must treat both as parked.
+fn auth_prompt_envelope(run_id: TurnRunId) -> ProductOutboundEnvelope {
+    ProductOutboundEnvelope::new(
+        ProductAdapterId::new(OPENAI_COMPAT_ADAPTER_ID).expect("adapter id"),
+        AdapterInstallationId::new(OPENAI_COMPAT_INSTALLATION_ID).expect("installation id"),
+        ProductOutboundTarget::new(
+            ReplyTargetBindingRef::new("reply:test").expect("reply target"),
+            ExternalConversationRef::new(None, "conversation:test", None, None)
+                .expect("conversation ref"),
+            None,
+        ),
+        ProjectionCursor::new(format!("auth-cursor:{}", run_id.as_uuid())).expect("cursor"),
+        ProductOutboundPayload::AuthPrompt(ironclaw_product_adapters::AuthPromptView {
+            turn_run_id: run_id,
+            auth_request_ref: "auth:test".to_string(),
+            invocation_id: None,
+            headline: "Connect your account".to_string(),
+            body: "The agent needs access to your Gmail.".to_string(),
+            challenge_kind: None,
+            provider: None,
+            account_label: None,
+            authorization_url: None,
+            expires_at: None,
+        }),
+    )
 }
 
 fn run_status_envelope(
