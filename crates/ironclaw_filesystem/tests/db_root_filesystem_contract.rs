@@ -2026,17 +2026,24 @@ mod postgres_tests {
         // through `fs`, so re-derive it from the same env vars.
         let pool = postgres_pool().await.expect("pool available");
         let client = pool.get().await.unwrap();
+        // Scope the read-back to THIS test's GIN FTS index. Parallel postgres
+        // tests share `current_schema()` and every one creates `idx_rfs_*`
+        // indexes, so `ORDER BY indexname DESC LIMIT 1` alone can return another
+        // test's index. The declaring prefix is uuid-unique and embedded in the
+        // partial-index predicate, so match on it and require GIN (the FTS kind).
         let row = client
             .query_one(
                 "SELECT indexdef FROM pg_indexes \
                  WHERE schemaname = current_schema() \
                    AND tablename = 'root_filesystem_entries' \
                    AND indexname LIKE 'idx_rfs_%' \
+                   AND indexdef ILIKE '%using gin%' \
+                   AND strpos(indexdef, $1) > 0 \
                  ORDER BY indexname DESC LIMIT 1",
-                &[],
+                &[&prefix],
             )
             .await
-            .expect("at least one rfs index visible");
+            .expect("the GIN FTS index for this prefix must be visible");
         let indexdef: String = row.get("indexdef");
         assert!(
             indexdef.contains(prefix.as_str()),

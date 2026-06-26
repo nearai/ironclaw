@@ -74,7 +74,6 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     ChatInput() {},
     ConnectionStatus() {},
     EmptyState() {},
-    Icon() {},
     KeyboardShortcuts() {},
     Link() {},
     MessageList() {},
@@ -339,7 +338,7 @@ test("Chat renders a timeline load failure as an alert instead of the empty land
   assert.equal(findComponent(tree, components.EmptyState), null);
 });
 
-test("Chat links to scoped logs for the active thread run", () => {
+test("Chat does not render a duplicate logs bar while a run is active", () => {
   const { tree, components } = renderChat({
     hookState: {
       messages: [{ id: "message-1" }],
@@ -366,18 +365,10 @@ test("Chat links to scoped logs for the active thread run", () => {
   });
 
   const logsLink = findComponent(tree, components.Link);
-  assert.ok(logsLink, "active chat should render a scoped logs link");
   assert.equal(
-    componentProps(logsLink, components.Link).to,
-    "/v2/logs?thread_id=thread-1&run_id=run-1",
-  );
-  assert.ok(logsLink.values.includes("nav.logs"));
-
-  const messageList = findComponent(tree, components.MessageList);
-  assert.equal(
-    findComponent(messageList, components.Link),
+    logsLink,
     null,
-    "active run logs link should not render in the message list footer near the composer",
+    "active chat should not render a second Logs link below the page header",
   );
 });
 

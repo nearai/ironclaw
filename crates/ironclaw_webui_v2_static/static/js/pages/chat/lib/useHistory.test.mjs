@@ -341,8 +341,19 @@ test("mergeFullRefresh keeps run errors next to their run and lets the timeline 
       toolResultPreview: "ok",
       turnRunId: "run-1",
     },
+    {
+      id: "msg-assistant-1",
+      role: "assistant",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    },
     { id: "msg-user-2", role: "user", turnRunId: "run-2" },
-    { id: "msg-assistant-2", role: "assistant", turnRunId: "run-2" },
+    {
+      id: "msg-assistant-2",
+      role: "assistant",
+      isFinalReply: true,
+      turnRunId: "run-2",
+    },
   ];
   const current = [
     { id: "msg-user-1", role: "user", turnRunId: "run-1" },
@@ -353,7 +364,12 @@ test("mergeFullRefresh keeps run errors next to their run and lets the timeline 
       toolResultPreview: null,
       turnRunId: "run-1",
     },
-    { id: "err-run-1", role: "error", content: "run failed", turnRunId: "run-1" },
+    {
+      id: "err-run-1",
+      role: "error",
+      content: "run failed",
+      turnRunId: "run-1",
+    },
   ];
 
   const merged = mergeFullRefresh(timeline, current, {
@@ -361,11 +377,10 @@ test("mergeFullRefresh keeps run errors next to their run and lets the timeline 
   });
 
   // Timeline order is authoritative and the rich tool card replaces the
-  // sparse live one; the client-only err-* bubble stays with its failed run
-  // instead of drifting below newer successful turns.
+  // sparse live one; the client-only err-* bubble stays anchored to its run.
   assert.equal(
     merged.map((m) => m.id).join(","),
-    "msg-user-1,tool-abc,err-run-1,msg-user-2,msg-assistant-2",
+    "msg-user-1,tool-abc,msg-assistant-1,err-run-1,msg-user-2,msg-assistant-2",
   );
   const toolCard = merged.find((m) => m.id === "tool-abc");
   assert.equal(toolCard.toolParameters, "{}");

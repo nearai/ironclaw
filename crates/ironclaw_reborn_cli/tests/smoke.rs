@@ -115,14 +115,18 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
 
     assert!(
         dockerfile
-            .matches("webui-v2-beta,slack-v2-host-beta,postgres")
+            .matches("webui-v2-beta,slack-v2-host-beta,libsql,postgres")
             .count()
             >= 2,
-        "Dockerfile.reborn must compile both cargo-chef deps and final binary with postgres: {dockerfile}"
+        "Dockerfile.reborn must compile both cargo-chef deps and final binary with libsql and postgres: {dockerfile}"
     );
     assert!(
         dockerfile.contains("config.production.toml"),
         "Dockerfile.reborn must ship the opt-in production config: {dockerfile}"
+    );
+    assert!(
+        dockerfile.contains("config.hosted-single-tenant-volume.toml"),
+        "Dockerfile.reborn must ship the hosted volume seed config: {dockerfile}"
     );
     let builder_stage = dockerfile
         .split_once("FROM deps AS builder")
@@ -475,6 +479,10 @@ fn profile_list_shows_supported_profiles_without_reborn_home() {
     assert!(stdout.contains("local-dev (default)"), "stdout: {stdout}");
     assert!(stdout.contains("local-dev-yolo"), "stdout: {stdout}");
     assert!(stdout.contains("hosted-single-tenant"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("hosted-single-tenant-volume"),
+        "stdout: {stdout}"
+    );
     assert!(stdout.contains("production"), "stdout: {stdout}");
     assert!(stdout.contains("migration-dry-run"), "stdout: {stdout}");
     assert!(
@@ -502,7 +510,7 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
     let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(json["selector"], "IRONCLAW_REBORN_PROFILE");
     let profiles = json["profiles"].as_array().expect("profiles array");
-    assert_eq!(profiles.len(), 5);
+    assert_eq!(profiles.len(), 6);
     assert!(
         profiles
             .iter()
@@ -517,6 +525,12 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
         profiles
             .iter()
             .any(|profile| profile["name"] == "hosted-single-tenant"
+                && profile["default"] == false)
+    );
+    assert!(
+        profiles
+            .iter()
+            .any(|profile| profile["name"] == "hosted-single-tenant-volume"
                 && profile["default"] == false)
     );
     assert!(
@@ -1930,6 +1944,10 @@ fn repl_resolves_codex_api_key_auth_env_without_openai_api_key() {
     );
 }
 
+// Provider/auth validation lives behind `root-llm-provider` (a default
+// feature); the `libsql-only` build drops it and boots a stub, so this test
+// only applies when that feature is compiled in.
+#[cfg(feature = "root-llm-provider")]
 #[test]
 fn run_rejects_codex_backend_when_auth_file_is_missing() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -2847,6 +2865,7 @@ api_key_env = "sk-proj-1234567890abcdef12345678"
     );
 }
 
+#[cfg(feature = "root-llm-provider")]
 #[test]
 fn run_warns_when_falling_back_to_stub_gateway() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -3278,6 +3297,7 @@ default_approval_policy = "ask_always"
     );
 }
 
+#[cfg(feature = "root-llm-provider")]
 #[test]
 fn run_rejects_malformed_explicit_provider_overlay() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -3307,6 +3327,7 @@ provider_id = "openai"
     );
 }
 
+#[cfg(feature = "root-llm-provider")]
 #[test]
 fn run_rejects_empty_required_api_key_env() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -3411,6 +3432,7 @@ poll_interval_ms = 0
     );
 }
 
+#[cfg(feature = "root-llm-provider")]
 #[test]
 fn run_resolves_provider_from_config_and_demands_api_key_env() {
     let temp = tempfile::tempdir().expect("tempdir");
