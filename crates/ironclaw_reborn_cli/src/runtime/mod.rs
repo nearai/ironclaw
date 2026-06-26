@@ -1129,9 +1129,12 @@ mod tests {
     use super::{
         MAX_WORKER_COUNT, RuntimeInputCaller, RuntimeInputOptions,
         apply_credential_refresh_override, block_on_cli, build_runtime_input,
-        build_runtime_input_with_options, local_runtime_storage_root, no_assistant_text_message,
-        protect_reborn_log_filter, resolve_google_oauth_config, runner_settings,
+        build_runtime_input_with_options, no_assistant_text_message, protect_reborn_log_filter,
+        resolve_google_oauth_config, runner_settings,
     };
+    // Only the `#[cfg(feature = "libsql")]` hosted-volume test consumes this.
+    #[cfg(feature = "libsql")]
+    use super::local_runtime_storage_root;
     use ironclaw_reborn_composition::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 
     fn parse_runner_section(toml: &str) -> ironclaw_reborn_config::RebornConfigFile {
@@ -1352,6 +1355,82 @@ mod tests {
             err.to_string()
                 .contains("IRONCLAW_REBORN_RUNNER_WORKER_COUNT"),
             "error should name the offending var: {err}"
+        );
+    }
+
+    #[test]
+    fn build_runtime_input_env_runner_worker_count_zero_reaches_runtime_input() {
+        // Drives the full startup boundary to prove the WORKER_COUNT=0 env
+        // override propagates onto RebornRuntimeInput.runner, not only inside
+        // the runner_settings helper.
+        let _lock = lock_trigger_env();
+        let _guards = clear_runner_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "0");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+
+        assert!(runtime_input.runner.worker_count.is_none());
+    }
+
+    #[test]
+    fn runner_env_cap_blank_value_is_fatal() {
+        // Strict-presence semantics apply to cap vars, not just worker_count:
+        // a set-but-blank slot must be rejected rather than silently ignored.
+        let _lock = lock_trigger_env();
+        let _guards = clear_runner_env();
+        let _u = EnvGuard::set("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER", "   ");
+        let err = runner_settings(None).expect_err("blank env cap value must be rejected");
+        assert!(
+            err.to_string()
+                .contains("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER"),
+            "error should name the offending var: {err}"
+        );
+    }
+
+    #[test]
+    fn runner_env_cap_non_numeric_value_is_fatal() {
+        let _lock = lock_trigger_env();
+        let _guards = clear_runner_env();
+        let _u = EnvGuard::set(
+            "IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER",
+            "many",
+        );
+        let err = runner_settings(None).expect_err("non-numeric env cap value must be rejected");
+        assert!(
+            err.to_string()
+                .contains("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER"),
+            "error should name the offending var: {err}"
+        );
+    }
+
+    #[test]
+    fn runner_env_conversation_runs_positive_value_overrides() {
+        // max_concurrent_conversation_runs defaults to None (unlimited); a
+        // positive env value must set a bounded cap so a misspelled or
+        // silently-ignored knob cannot escape detection.
+        let _lock = lock_trigger_env();
+        let _guards = clear_runner_env();
+        let _c = EnvGuard::set(
+            "IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_CONVERSATION_RUNS",
+            "2",
+        );
+        let settings = runner_settings(None).expect("should succeed");
+        assert_eq!(
+            settings.max_concurrent_conversation_runs.map(|v| v.get()),
+            Some(2)
         );
     }
 

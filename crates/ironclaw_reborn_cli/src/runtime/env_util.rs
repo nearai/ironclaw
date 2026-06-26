@@ -66,7 +66,10 @@ where
     };
     let parsed = raw.trim().parse::<T>().map_err(|e| {
         let display = truncate_env_value_for_display(&raw);
-        anyhow::anyhow!("{name} must be a valid non-negative integer, got {display:?}: {e}")
+        anyhow::anyhow!(
+            "{name} could not be parsed as a valid {}, got {display:?}: {e}",
+            std::any::type_name::<T>()
+        )
     })?;
     Ok(Some(parsed))
 }

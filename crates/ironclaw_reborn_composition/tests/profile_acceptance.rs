@@ -1,5 +1,8 @@
-#[cfg(feature = "libsql")]
 use ironclaw_reborn_composition::hosted_single_tenant_volume_build_input;
+// Only the `#[cfg(not(feature = "libsql"))]` no-libsql regression test below
+// consumes this error type; `webui-v2-beta` (hence CI) pulls in `libsql`.
+#[cfg(not(feature = "libsql"))]
+use ironclaw_reborn_composition::RebornLocalRuntimeProfileError;
 use ironclaw_reborn_composition::{
     RebornBuildInput, RebornCompositionProfile, RebornFacadeReadiness,
     RebornLocalRuntimeProfileOptions, RebornReadiness, RebornReadinessDiagnostic,
@@ -403,6 +406,23 @@ async fn hosted_single_tenant_volume_factory_readiness_includes_preview_diagnost
         services.readiness.diagnostics,
         vec![RebornReadinessDiagnostic::hosted_single_tenant_volume()]
     );
+}
+
+#[cfg(not(feature = "libsql"))]
+#[test]
+fn hosted_single_tenant_volume_build_input_errors_without_libsql_feature() {
+    let dir = tempfile::tempdir().unwrap();
+    // `RebornBuildInput` (the Ok type) is not `Debug`, so `unwrap_err()` won't
+    // compile; match on the `Result` directly instead.
+    let result = hosted_single_tenant_volume_build_input(
+        "readiness-contract-owner",
+        dir.path().to_path_buf(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(RebornLocalRuntimeProfileError::MissingLibsqlFeature)
+    ));
 }
 
 #[tokio::test]
