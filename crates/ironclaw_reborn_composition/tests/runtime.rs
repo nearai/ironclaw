@@ -126,15 +126,12 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     .unwrap()
     .unwrap();
 
-    // With no LLM gateway configured the stubbed driver path reports a
-    // protocol violation, which maps to a terminal Failed turn instead of the
+    // With no LLM gateway configured the stubbed model gateway reports model
+    // unavailability, which maps to a terminal Failed turn instead of the
     // pre-PR RecoveryRequired path that cancelled via the standalone-runtime
     // cancel guard.
     assert_eq!(reply.status, TurnStatus::Failed);
-    assert_eq!(
-        reply.failure_category.as_deref(),
-        Some("driver_protocol_violation")
-    );
+    assert_eq!(reply.failure_category.as_deref(), Some("model_error"));
     assert_eq!(reply.text, None);
 
     let second_reply = tokio::time::timeout(
@@ -148,7 +145,7 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     assert_eq!(second_reply.status, TurnStatus::Failed);
     assert_eq!(
         second_reply.failure_category.as_deref(),
-        Some("driver_protocol_violation")
+        Some("model_error")
     );
     assert_eq!(second_reply.text, None);
 
@@ -457,8 +454,8 @@ async fn build_reborn_runtime_wires_per_user_cap_from_turn_runner_settings() {
     let runtime = build_reborn_runtime(input).await.unwrap();
 
     // Submit two sequential turns on two conversations. With the stub gateway
-    // each turn completes (as Failed / driver_protocol_violation) before the
-    // next is submitted, so the per-user slot is always free and neither
+    // each turn completes (as Failed / model_error) before the next is
+    // submitted, so the per-user slot is always free and neither
     // submission should be rejected. If the cap was accidentally set to 0 (a
     // misconfiguration the wiring layer could introduce) the store would block
     // every claim and both turns would never be completed, causing a timeout.
