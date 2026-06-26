@@ -143,25 +143,28 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
             correlation_id: short_term_invocation.correlation_id,
         };
 
-        let mut combined = self
-            .retrieve_lane(
+        // The two lanes are independent (they share only the `Copy` correlation
+        // id), so fetch them concurrently — a slow lane no longer stacks its
+        // latency on top of the other on the run-start prompt path. Concatenate
+        // short-term FIRST to keep the active conversation's budget priority.
+        let (short_term, long_term) = tokio::join!(
+            self.retrieve_lane(
                 short_term_invocation,
                 request.query.clone(),
                 request.max_snippets,
                 context_profile_id.clone(),
                 MemoryLane::ShortTerm,
-            )
-            .await;
-        combined.extend(
+            ),
             self.retrieve_lane(
                 long_term_invocation,
                 request.query,
                 request.max_snippets,
                 context_profile_id,
                 MemoryLane::LongTerm,
-            )
-            .await,
+            ),
         );
+        let mut combined = short_term;
+        combined.extend(long_term);
 
         // Host-owned admission over the COMBINED list (short-term first): hash the
         // reference, sanitize, and wrap each raw candidate, then enforce the
