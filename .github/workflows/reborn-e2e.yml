@@ -167,6 +167,7 @@ jobs:
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_skills.py
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_extensions.py
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_automations.py
+          tests/e2e/scenarios/test_reborn_webui_v2_legacy_pending_messages.py
           -v --timeout=120
 
       - name: Upload screenshots on failure

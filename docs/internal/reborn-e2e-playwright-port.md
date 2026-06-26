@@ -388,6 +388,35 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the automations port in the
   Reborn WebUI v2 Playwright job.
 
+### Step 11: Legacy Pending Message Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_pending_messages.py`.
+
+Ported the caller-visible pending-message intent from legacy
+`test_pending_user_messages.py` to Reborn's v2 chat surface:
+
+- a composer send appends the user message optimistically before the v2 send
+  request resolves;
+- a terminal Reborn projection event reloads the timeline and reconciles the
+  optimistic message with the confirmed `accepted_message_ref` row without
+  duplicating the user message;
+- a failed v2 send renders one error-state optimistic user message and exposes
+  the Retry affordance.
+
+Behavior adjustment:
+
+- Legacy v1 exposed `_pendingUserMessages` and `loadHistory()` globals, so
+  tests asserted private map cleanup directly. Reborn keeps pending messages in
+  React hook state and intentionally preserves a failed optimistic row in the
+  visible thread with error styling. The port asserts behavior through the
+  composer, `/api/webchat/v2/threads/:id/messages`, terminal SSE projection,
+  and `/timeline` reload instead of private hook internals.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the pending-message port in
+  the Reborn WebUI v2 Playwright job.
+
 ## Open Migration Buckets
 
 Not yet ported:
