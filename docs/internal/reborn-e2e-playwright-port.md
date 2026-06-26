@@ -205,8 +205,18 @@ message action buttons:
 - user-message copy writes the user-authored raw text;
 - assistant-message copy writes the raw markdown content, not rendered link
   text;
+- selected assistant message content populates only `text/plain` clipboard data
+  and leaves `text/html` empty;
 - the copy action flips to the copied state and then returns to the normal
   action label.
+
+Issue fixed:
+
+- Reborn WebUI v2 did not have the legacy chat selection-copy guard, so copying
+  selected rendered markdown could allow the browser to populate rich HTML
+  clipboard data. `MessageList` now handles copy events inside the chat surface,
+  writes only the selected plain text, clears other clipboard formats, and
+  prevents the default rich-copy behavior.
 
 Legacy-only / non-1:1 cases in the same area:
 

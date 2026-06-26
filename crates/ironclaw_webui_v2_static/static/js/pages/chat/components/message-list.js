@@ -32,6 +32,11 @@ export function isNewUserMessage(previousKey, message) {
   return Boolean(key && message?.role === "user" && key !== previousKey);
 }
 
+function plainTextSelection() {
+  if (typeof window === "undefined" || !window.getSelection) return "";
+  return String(window.getSelection()?.toString?.() || "");
+}
+
 export function MessageList({
   messages,
   isLoading,
@@ -192,6 +197,14 @@ export function MessageList({
     setAtBottom(true);
   }, []);
 
+  const onCopy = React.useCallback((event) => {
+    const text = plainTextSelection();
+    if (!text || !event.clipboardData) return;
+    event.preventDefault();
+    event.clipboardData.clearData();
+    event.clipboardData.setData("text/plain", text);
+  }, []);
+
   React.useEffect(() => cancelScrollSync, [cancelScrollSync]);
 
   const grouped = React.useMemo(() => groupMessages(messages), [messages]);
@@ -204,6 +217,7 @@ export function MessageList({
       onWheel=${markUserScrollIntent}
       onTouchMove=${markUserScrollIntent}
       onPointerDown=${markScrollbarDragIntent}
+      onCopy=${onCopy}
       data-testid="message-list-scroll"
       className="flex min-w-0 flex-1 overflow-y-auto px-4 pt-6 pb-14 sm:px-5 lg:px-8"
     >
