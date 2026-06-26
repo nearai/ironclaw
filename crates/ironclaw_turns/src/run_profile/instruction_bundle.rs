@@ -20,6 +20,12 @@ use super::{
     runtime_context::LoopRuntimeContext,
     skill_snippet_model_message_ref,
 };
+
+const CAPABILITY_SURFACE_USAGE_POLICY: &str = concat!(
+    "capability policy use only visible capabilities ",
+    "do not use another capability as a workaround for a disabled or unavailable capability ",
+    "requested by the user"
+);
 /// Stable fingerprint for an instruction bundle rebuild.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InstructionBundleFingerprint(String);
@@ -626,6 +632,8 @@ fn push_visible_surface(
         .descriptors
         .sort_by(|a, b| a.capability_id.cmp(&b.capability_id));
     let mut summary = format!("surface {}", surface.version.as_str());
+    summary.push('|');
+    summary.push_str(CAPABILITY_SURFACE_USAGE_POLICY);
     for descriptor in &surface.descriptors {
         validate_surface_descriptor(descriptor)?;
         summary.push('|');
@@ -645,6 +653,11 @@ fn push_visible_surface(
     feed_field(fingerprint, b"section", b"surface");
     feed_field(fingerprint, b"ref", content_ref.as_str().as_bytes());
     feed_field(fingerprint, b"version", surface.version.as_str().as_bytes());
+    feed_field(
+        fingerprint,
+        b"capability_policy",
+        CAPABILITY_SURFACE_USAGE_POLICY.as_bytes(),
+    );
     for descriptor in &surface.descriptors {
         feed_field(
             fingerprint,

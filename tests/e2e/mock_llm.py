@@ -110,6 +110,13 @@ TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
 EMPTY_REPLY_TRIGGER = re.compile(r"issue 1780 empty reply", re.IGNORECASE)
 LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
 MULTI_STEP_TRIGGER = re.compile(r"multi step echo then time", re.IGNORECASE)
+ISSUE_5197_DISABLED_TOOL_WORKAROUND_TRIGGER = re.compile(
+    r"issue 5197 disabled echo workaround",
+    re.IGNORECASE,
+)
+DISABLED_TOOL_WORKAROUND_POLICY_TEXT = (
+    "do not use another capability as a workaround for a disabled or unavailable capability"
+)
 
 # Lifecycle canary triggers for write+cleanup flows against real provider APIs.
 GITHUB_ISSUE_LIFECYCLE_TRIGGER = re.compile(
@@ -876,6 +883,11 @@ def _last_user_message(messages: list[dict]) -> dict:
     return {}
 
 
+def _conversation_has_disabled_tool_workaround_policy(messages: list[dict]) -> bool:
+    needle = DISABLED_TOOL_WORKAROUND_POLICY_TEXT.lower()
+    return any(needle in _message_text(msg).lower() for msg in messages)
+
+
 def _message_payload_text(msg: dict) -> str:
     try:
         return json.dumps(msg, sort_keys=True).lower()
@@ -1118,6 +1130,14 @@ def match_response(messages: list[dict]) -> str:
     resumed = _resumed_action_summary(messages)
     if resumed:
         return resumed
+    if (
+        ISSUE_5197_DISABLED_TOOL_WORKAROUND_TRIGGER.search(content)
+        and _conversation_has_disabled_tool_workaround_policy(messages)
+    ):
+        return (
+            "Echo is disabled for this request, so I will not route it through "
+            "another tool."
+        )
     denial_text = f"{content}\n{payload_text}"
     if DENIAL_PATTERN.search(denial_text):
         action_match = re.search(
@@ -1312,6 +1332,16 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
         return None
     lower = content.lower()
     recent_tool_results = _find_tool_results(messages)
+    if ISSUE_5197_DISABLED_TOOL_WORKAROUND_TRIGGER.search(content):
+        if _conversation_has_disabled_tool_workaround_policy(messages):
+            return None
+        return [{
+            "tool_name": "builtin_shell",
+            "arguments": {
+                "command": "printf '%s' issue-5197-disabled-echo-workaround",
+                "workdir": "/workspace",
+            },
+        }]
     # #3533: gmail-install-then-retry sequence.
     #
     # Turn 1: user says "check gmail unread" → match_tool_call below dispatches
