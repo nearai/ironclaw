@@ -165,6 +165,26 @@ pub trait RebornOperatorToolCatalog: Send + Sync {
     fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo>;
 }
 
+/// Port that answers "is this capability available to this caller's
+/// `(tenant, user)` surface?" so the per-tool approval-preference write
+/// (`tool.<capability_id>` via [`RebornServices::set_operator_config_key`])
+/// can refuse to persist a preference for a capability the caller cannot
+/// actually see at dispatch (#5261 D7 / G5).
+///
+/// The trait is defined in `ironclaw_host_api` vocabulary only
+/// ([`ResourceScope`], [`CapabilityId`], [`RebornServicesError`]) so it stays
+/// inside this crate's dependency boundary — the policy-resolver-backed
+/// implementation lives in `ironclaw_reborn_composition`, which owns the
+/// `ironclaw_capability_policy` dependency.
+#[async_trait]
+pub trait CapabilityAvailabilityProbe: Send + Sync {
+    async fn is_available(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+    ) -> Result<bool, RebornServicesError>;
+}
+
 #[derive(Clone)]
 struct RebornOperatorApprovalConfig {
     overrides: Arc<dyn ToolPermissionOverrideStore>,
@@ -2366,6 +2386,10 @@ pub struct RebornServices {
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
+    // Genuinely optional: only attached under the capability-policy feature +
+    // activation (the xyzorg serve profile). When `None` (every non-policy
+    // deployment) the per-tool approval-preference write is byte-unchanged.
+    availability_probe: Option<Arc<dyn CapabilityAvailabilityProbe>>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
 }
 
@@ -2402,6 +2426,7 @@ impl RebornServices {
             skill_activation_clearer: None,
             llm_config: None,
             operator_approval_config: None,
+            availability_probe: None,
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
@@ -2482,6 +2507,18 @@ impl RebornServices {
             persistent_policies,
             tool_catalog,
         });
+        self
+    }
+
+    /// Attach the per-(tenant, user) availability gate consulted before a
+    /// per-tool approval preference is persisted. Only the policy-activated
+    /// serve profile wires this; without it, the write is not availability-
+    /// gated (today's behavior, #5261 D7).
+    pub fn with_capability_availability_probe(
+        mut self,
+        probe: Arc<dyn CapabilityAvailabilityProbe>,
+    ) -> Self {
+        self.availability_probe = Some(probe);
         self
     }
 
@@ -2802,6 +2839,29 @@ impl RebornServicesApi for RebornServices {
             auto_approve_config_entry(config, &scope).await?
         } else if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
             let tool = find_operator_tool(config, capability_id)?;
+            // Refuse to persist an approval preference for a capability the
+            // caller cannot actually see at dispatch. The probe is keyed off
+            // the caller's own (tenant, user) scope so a member cannot set a
+            // pref on a capability an admin hid from them (#5261 D7). A probe
+            // error is fail-closed: deny rather than leak a backend fault or
+            // let a write through during a policy outage. We log the cause at
+            // debug (never drop it) and return the sanitized 403.
+            if let Some(probe) = &self.availability_probe {
+                let available = match probe.is_available(&scope, &tool.capability_id).await {
+                    Ok(available) => available,
+                    Err(error) => {
+                        tracing::debug!(
+                            %error,
+                            capability_id = %tool.capability_id,
+                            "capability availability probe failed; denying approval-pref write (fail-closed)"
+                        );
+                        return Err(participant_denied());
+                    }
+                };
+                if !available {
+                    return Err(participant_denied());
+                }
+            }
             if tool_permission_locked(&tool) {
                 return Err(operator_config_invalid_value("state"));
             }

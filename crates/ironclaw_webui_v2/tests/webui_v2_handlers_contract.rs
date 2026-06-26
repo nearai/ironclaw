@@ -3263,6 +3263,73 @@ async fn settings_tool_permission_rejects_overlong_capability_id_before_dispatch
     );
 }
 
+// The PUT verb is the canonical method for setting a per-tool approval pref
+// (POST is kept for back-compat). Drive the real router with PUT and assert it
+// reaches the facade — a route-method mismatch would surface as 405 here.
+#[tokio::test]
+async fn settings_tool_permission_accepts_put_verb() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/settings/tools/ext.search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"always_allow"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [(
+            "tool.ext.search".to_string(),
+            serde_json::json!({ "state": "always_allow" })
+        )]
+    );
+}
+
+// When the facade rejects an unavailable capability with `participant_denied`
+// (the D7 availability gate), the PUT must surface as 403 to the caller — this
+// is the route-level half of step-16's unavailable-rejection contract.
+#[tokio::test]
+async fn settings_tool_permission_put_on_unavailable_cap_is_forbidden() {
+    let services = Arc::new(StubServices::default());
+    services.fail_set_operator_config_key(RebornServicesError {
+        code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
+        status_code: 403,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    });
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/settings/tools/ext.search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"always_allow"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = read_json(response).await;
+    assert_eq!(body["kind"], "participant_denied");
+}
+
 #[tokio::test]
 async fn operator_logs_require_operator_capability() {
     let services = Arc::new(StubServices::default());

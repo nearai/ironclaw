@@ -681,8 +681,9 @@ async def test_section4_step14_dispatch_surface_enforcement(org_state):
 
 async def test_section4_step16_approval_pref_available_capability(org_state):
     """Step 16 (available case): a member may set an approval pref on a cap
-    AVAILABLE to them. The live route is POST /settings/tools/{capability_id}
-    (PUT is not yet accepted — see the xfail below)."""
+    AVAILABLE to them. Exercises the back-compat POST verb on
+    /settings/tools/{capability_id}; the PUT verb is covered by the
+    unavailable-rejection test below."""
     base_url = org_state["base_url"]
     alice = org_state["tokens"]["alice"]
     # alice's allow-set intersected with the live catalog; fall back to the
@@ -701,12 +702,6 @@ async def test_section4_step16_approval_pref_available_capability(org_state):
         assert resp.status_code == 200, f"approval pref on available cap: {resp.status_code} {resp.text}"
 
 
-@pytest.mark.xfail(
-    reason="step 16 PUT + unavailable-rejection (D7, #5344/#5355): the route only "
-    "accepts POST today (no .put()), and there is no CapabilityAvailabilityProbe "
-    "gating, so a pref on an UNAVAILABLE cap is not yet rejected with 403/404.",
-    strict=False,
-)
 async def test_section4_step16_approval_pref_unavailable_rejected(org_state):
     """Step 16 (rejection case): PUT an approval pref on a cap UNAVAILABLE to the
     member -> 403/404. Needs the PUT verb + availability probe (D7)."""
