@@ -502,6 +502,10 @@ async fn blocked_gate_prompt(
         TurnStatus::Queued
         | TurnStatus::Running
         | TurnStatus::BlockedDependentRun
+        // External-tool gates are not user-clickable prompts; the OpenAI
+        // Responses surface reads them via its own projection path. No generic
+        // gate-prompt payload here.
+        | TurnStatus::BlockedExternalTool
         | TurnStatus::RecoveryRequired
         | TurnStatus::CancelRequested
         | TurnStatus::Completed
@@ -855,6 +859,7 @@ fn product_gate_kind(kind: TurnBlockedGateKind) -> ProductGateKind {
         TurnBlockedGateKind::Auth => ProductGateKind::Auth,
         TurnBlockedGateKind::Resource => ProductGateKind::Resource,
         TurnBlockedGateKind::AwaitDependentRun => ProductGateKind::Generic,
+        TurnBlockedGateKind::ExternalTool => ProductGateKind::Generic,
     }
 }
 
@@ -864,6 +869,7 @@ fn gate_projection_headline(kind: TurnBlockedGateKind) -> &'static str {
         TurnBlockedGateKind::Auth => "Authentication required",
         TurnBlockedGateKind::Resource => "Resource unavailable",
         TurnBlockedGateKind::AwaitDependentRun => "Waiting for dependent run",
+        TurnBlockedGateKind::ExternalTool => "External tool call pending",
     }
 }
 
@@ -873,6 +879,7 @@ fn gate_projection_body(kind: TurnBlockedGateKind) -> &'static str {
         TurnBlockedGateKind::Auth => "Authenticate to continue this run.",
         TurnBlockedGateKind::Resource => "Resolve this resource gate to continue the run.",
         TurnBlockedGateKind::AwaitDependentRun => "Waiting for a dependent run to finish.",
+        TurnBlockedGateKind::ExternalTool => "Submit the external tool output to continue the run.",
     }
 }
 
@@ -1036,6 +1043,7 @@ fn turn_status_wire(status: TurnStatus) -> &'static str {
         TurnStatus::BlockedAuth => "blocked_auth",
         TurnStatus::BlockedResource => "blocked_resource",
         TurnStatus::BlockedDependentRun => "blocked_dependent_run",
+        TurnStatus::BlockedExternalTool => "blocked_external_tool",
         TurnStatus::RecoveryRequired => "recovery_required",
         TurnStatus::CancelRequested => "cancel_requested",
         TurnStatus::Completed => "completed",

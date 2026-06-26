@@ -1031,6 +1031,7 @@ fn status_label(status: TurnStatus) -> &'static str {
         TurnStatus::BlockedAuth => "blocked_auth",
         TurnStatus::BlockedResource => "blocked_resource",
         TurnStatus::BlockedDependentRun => "blocked_dependent_run",
+        TurnStatus::BlockedExternalTool => "blocked_external_tool",
         TurnStatus::CancelRequested => "cancel_requested",
         TurnStatus::Cancelled => "cancelled",
         TurnStatus::Completed => "completed",

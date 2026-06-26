@@ -723,8 +723,10 @@ pub(crate) fn parse_chat_request(
             "body".to_string(),
         )));
     }
-    serde_json::from_slice(raw_body)
-        .map_err(|_| OpenAiCompatHttpError::invalid_request(Some("body".to_string())))
+    let request: OpenAiChatCompletionRequest = serde_json::from_slice(raw_body)
+        .map_err(|_| OpenAiCompatHttpError::invalid_request(Some("body".to_string())))?;
+    crate::model_validation::validate_model_name(&request.model)?;
+    Ok(request)
 }
 
 fn chat_messages_to_product_text_and_images(
