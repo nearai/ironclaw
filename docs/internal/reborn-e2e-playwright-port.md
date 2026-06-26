@@ -2553,6 +2553,28 @@ Behavior mapping:
   that Reborn-native visible state instead of the removed v1 resolved-copy
   element.
 
+### Step 85: Legacy Configure Field Variants Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the setup-field rendering intent from legacy
+`test_configure_modal_field_variants` to Reborn's v2 Extensions configure
+modal:
+
+- opened a configured extension's setup modal through the real Extensions page;
+- mocked v2 setup metadata containing required, optional, provided, and
+  auto-generated manual secrets plus an optional text field;
+- asserted the visible labels, `configured` badge, optional badges, existing
+  secret keep-placeholder, auto-generate hint, and text-field placeholder;
+- asserted dismissing the modal does not submit setup payloads.
+
+Issue found and fixed:
+
+- `ConfigureModal` used modal visuals but did not expose dialog semantics to the
+  browser accessibility tree. The modal shell now renders `role="dialog"`,
+  `aria-modal="true"`, and an `aria-labelledby` link to its title so tests and
+  assistive tooling can address it as a named dialog.
+
 ## Open Migration Buckets
 
 Not yet ported:

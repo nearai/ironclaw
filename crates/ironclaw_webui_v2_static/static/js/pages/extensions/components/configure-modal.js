@@ -262,6 +262,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
 }
 
 function ModalShell({ onClose, title, children }) {
+  const titleId = React.useId();
   React.useEffect(() => {
     const handleKey = (e) => {
       if (e.key === "Escape") onClose();
@@ -278,11 +279,14 @@ function ModalShell({ onClose, title, children }) {
       }}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby=${titleId}
         className="v2-panel mx-4 w-full max-w-lg rounded-2xl p-6"
         onClick=${(e) => e.stopPropagation()}
       >
         <div className="mb-5 flex items-center justify-between">
-          <h3 className="text-lg font-semibold text-white">${title}</h3>
+          <h3 id=${titleId} className="text-lg font-semibold text-white">${title}</h3>
           <button
             onClick=${onClose}
             className="grid h-8 w-8 place-items-center rounded-md text-iron-300 hover:bg-white/[0.06] hover:text-white"

@@ -5357,17 +5357,20 @@ ${$e}`;if(je.current.gateKey!==k&&(je.current={gateKey:k,credentialRef:null,inFl
         `}
       </div>
     <//>
-  `}function vd({onClose:e,title:t,children:a}){return p.default.useEffect(()=>{let n=r=>{r.key==="Escape"&&e()};return window.addEventListener("keydown",n),()=>window.removeEventListener("keydown",n)},[e]),u`
+  `}function vd({onClose:e,title:t,children:a}){let n=p.default.useId();return p.default.useEffect(()=>{let r=s=>{s.key==="Escape"&&e()};return window.addEventListener("keydown",r),()=>window.removeEventListener("keydown",r)},[e]),u`
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
-      onClick=${n=>{n.target===n.currentTarget&&e()}}
+      onClick=${r=>{r.target===r.currentTarget&&e()}}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby=${n}
         className="v2-panel mx-4 w-full max-w-lg rounded-2xl p-6"
-        onClick=${n=>n.stopPropagation()}
+        onClick=${r=>r.stopPropagation()}
       >
         <div className="mb-5 flex items-center justify-between">
-          <h3 className="text-lg font-semibold text-white">${t}</h3>
+          <h3 id=${n} className="text-lg font-semibold text-white">${t}</h3>
           <button
             onClick=${e}
             className="grid h-8 w-8 place-items-center rounded-md text-iron-300 hover:bg-white/[0.06] hover:text-white"

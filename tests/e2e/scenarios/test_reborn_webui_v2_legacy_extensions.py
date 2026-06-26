@@ -1556,6 +1556,87 @@ async def test_reborn_legacy_configure_modal_saves_manual_secret_and_fields(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_configure_modal_renders_field_variants(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[CONFIG_TOOL],
+        setup_payloads={
+            "config-tool": {
+                "name": "config-tool",
+                "kind": "wasm_tool",
+                "secrets": [
+                    {
+                        "name": "API_TOKEN",
+                        "prompt": "Enter API key",
+                        "provided": False,
+                        "optional": False,
+                        "auto_generate": False,
+                    },
+                    {
+                        "name": "EXISTING_TOKEN",
+                        "prompt": "Existing token",
+                        "provided": True,
+                        "optional": False,
+                        "auto_generate": False,
+                    },
+                    {
+                        "name": "OPTIONAL_SECRET",
+                        "prompt": "Optional secret",
+                        "provided": False,
+                        "optional": True,
+                        "auto_generate": False,
+                    },
+                    {
+                        "name": "AUTO_SECRET",
+                        "prompt": "Generated secret",
+                        "provided": False,
+                        "optional": False,
+                        "auto_generate": True,
+                    },
+                ],
+                "fields": [
+                    {
+                        "name": "workspace",
+                        "prompt": "Workspace",
+                        "placeholder": "team-slug",
+                        "optional": True,
+                    }
+                ],
+                "onboarding": None,
+            }
+        },
+        tab="installed",
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, "Config Tool")
+        await expect(card).to_be_visible(timeout=5000)
+        await card.get_by_role("button", name="Configure").click()
+
+        modal = page.get_by_role("dialog", name="Configure Config Tool")
+        await expect(modal).to_be_visible(timeout=5000)
+        await expect(modal).to_contain_text("Enter API key")
+        await expect(modal).to_contain_text("Existing token")
+        await expect(modal).to_contain_text("Optional secret")
+        await expect(modal).to_contain_text("Generated secret")
+        await expect(modal).to_contain_text("Workspace")
+        await expect(modal.get_by_text("configured", exact=True)).to_be_visible()
+        await expect(modal.get_by_text("optional", exact=True)).to_have_count(2)
+        await expect(modal.get_by_text("Auto-generated if left blank")).to_be_visible()
+        await expect(
+            modal.locator('input[type="password"][placeholder*="leave blank to keep"]')
+        ).to_have_count(1)
+        await expect(modal.locator('input[type="text"][placeholder="team-slug"]')).to_be_visible()
+
+        await modal.get_by_role("button", name="Cancel").click()
+        assert harness["setup_submit_requests"] == []
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_configure_modal_blank_existing_secret_is_not_submitted(
     reborn_v2_server, reborn_v2_browser
 ):
