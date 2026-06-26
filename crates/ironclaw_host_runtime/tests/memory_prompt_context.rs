@@ -348,14 +348,18 @@ async fn load_memory_snippets_fetches_both_short_term_and_long_term_lanes() {
         "long-term lane clears the thread"
     );
 
-    // Both lanes' snippets are returned, short-term first (it wins under budget).
+    // Both lanes' snippets are returned, long-term first — this conversation sits
+    // last, nearest the current message (the mem0 on_run_start prompt order).
     assert_eq!(snippets.len(), 2);
     assert_eq!(
         snippets[0].snippet_ref,
-        expected_ref("threads/thread-1/scratch.md"),
-        "short-term lane is concatenated first"
+        expected_ref("notes/long-term.md"),
+        "long-term lane is concatenated first"
     );
-    assert_eq!(snippets[1].snippet_ref, expected_ref("notes/long-term.md"));
+    assert_eq!(
+        snippets[1].snippet_ref,
+        expected_ref("threads/thread-1/scratch.md")
+    );
 }
 
 #[tokio::test]
@@ -381,9 +385,9 @@ async fn load_memory_snippets_degrades_when_one_lane_fails() {
 }
 
 #[tokio::test]
-async fn load_memory_snippets_aggregate_budget_bounds_combined_lanes_short_term_first() {
+async fn load_memory_snippets_aggregate_budget_bounds_combined_lanes_long_term_first() {
     // Each lane alone returns enough ~512-byte snippets to exceed the 4 KiB
-    // aggregate budget. Short-term is concatenated first, so it wins under budget
+    // aggregate budget. Long-term is concatenated first, so it wins under budget
     // pressure and the COMBINED block still stays within the 4 KiB ceiling.
     let long_text = "a".repeat(1000);
     let short_term: Vec<_> = (0..20)
@@ -410,14 +414,14 @@ async fn load_memory_snippets_aggregate_budget_bounds_combined_lanes_short_term_
         total_bytes <= 4 * 1024,
         "combined block must stay within the 4 KiB ceiling, got {total_bytes}"
     );
-    let short_term_refs: std::collections::HashSet<String> = (0..20)
-        .map(|index| expected_ref(&format!("threads/thread-1/s-{index:02}.md")))
+    let long_term_refs: std::collections::HashSet<String> = (0..20)
+        .map(|index| expected_ref(&format!("notes/l-{index:02}.md")))
         .collect();
     assert!(
         snippets
             .iter()
-            .all(|snippet| short_term_refs.contains(&snippet.snippet_ref)),
-        "short-term lane must win under budget pressure (concatenated first)"
+            .all(|snippet| long_term_refs.contains(&snippet.snippet_ref)),
+        "long-term lane must win under budget pressure (concatenated first)"
     );
 }
 

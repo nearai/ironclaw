@@ -415,6 +415,71 @@ async fn native_write_rejects_reserved_thread_namespace() {
 }
 
 #[tokio::test]
+async fn native_read_long_term_and_thread_split_lanes_and_envelope_text() {
+    // The provider-agnostic `read_long_term`/`read_thread` defaults own the lane
+    // scoping AND the safety: long-term clears the thread (general memory, excludes
+    // `threads/`), short-term keeps it (this conversation), and BOTH return text
+    // already wrapped in the untrusted-memory envelope so callers never see raw.
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let thread = ThreadId::new("convo").expect("valid thread");
+    let mut scoped = invocation();
+    scoped.scope.thread_id = Some(thread);
+
+    write_general_doc(&service, "notes/plan.md", "launch is on friday").await;
+    service
+        .record_interaction(
+            scoped.clone(),
+            MemoryServiceRecordRequest {
+                messages: vec![MemoryInteractionMessage {
+                    role: MemoryInteractionRole::User,
+                    content: "launch prep for the active thread".to_string(),
+                    name: Some("user-convo".to_string()),
+                }],
+                turn_run_id: Some("run-1".to_string()),
+                metadata: json!({}),
+            },
+        )
+        .await
+        .expect("seed the thread doc");
+
+    let profile = MemoryContextProfileId::new("default").unwrap();
+
+    let long = service
+        .read_long_term(scoped.clone(), "launch".to_string(), 5, profile.clone())
+        .await;
+    assert!(
+        !long.is_empty(),
+        "long-term lane should surface the general doc"
+    );
+    assert!(
+        long.iter()
+            .all(|snippet| snippet.text.starts_with("Untrusted memory content:")),
+        "read_long_term must return untrusted-enveloped text, not raw: {long:?}"
+    );
+    assert!(
+        long.iter()
+            .all(|snippet| !snippet.relative_path.starts_with("threads/")),
+        "long-term lane must exclude per-thread scratch: {long:?}"
+    );
+
+    let short = service
+        .read_thread(scoped, "launch".to_string(), 5, profile)
+        .await;
+    assert!(
+        short
+            .iter()
+            .any(|snippet| snippet.relative_path.starts_with("threads/convo/")),
+        "thread lane must surface the active thread's doc: {short:?}"
+    );
+    assert!(
+        short
+            .iter()
+            .all(|snippet| snippet.text.starts_with("Untrusted memory content:")),
+        "read_thread must return untrusted-enveloped text, not raw: {short:?}"
+    );
+}
+
+#[tokio::test]
 async fn native_context_retrieve_excludes_thread_scratch_from_long_term() {
     // Long-term retrieval (no `thread_id` on the invocation scope) is the user's
     // general/durable memory; it must EXCLUDE per-thread short-term scratch
