@@ -65,7 +65,7 @@ fn parse_error_for_install(error_label: &str, error: SkillParseError) -> SkillRe
 /// Rewrite the `name` field in raw YAML frontmatter while preserving every
 /// other key and value in the original mapping.
 ///
-/// We deliberately operate on `serde_yml::Value` instead of the typed
+/// We deliberately operate on `serde_yaml_ng::Value` instead of the typed
 /// `SkillManifest`: re-serializing through the typed struct silently drops
 /// any unknown frontmatter fields published upstream (custom metadata, future
 /// fields, vendor extensions). The recovery path must be lossless except for
@@ -75,8 +75,8 @@ fn rewrite_frontmatter_name(
     new_name: &str,
     error_label: &str,
 ) -> Result<String, SkillRegistryError> {
-    let mut value: serde_yml::Value =
-        serde_yml::from_str(frontmatter).map_err(|e| SkillRegistryError::ParseError {
+    let mut value: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(frontmatter).map_err(|e| SkillRegistryError::ParseError {
             name: error_label.to_string(),
             reason: format!("Failed to parse SKILL.md frontmatter for rewrite: {}", e),
         })?;
@@ -89,11 +89,11 @@ fn rewrite_frontmatter_name(
         })?;
 
     mapping.insert(
-        serde_yml::Value::String("name".to_string()),
-        serde_yml::Value::String(new_name.to_string()),
+        serde_yaml_ng::Value::String("name".to_string()),
+        serde_yaml_ng::Value::String(new_name.to_string()),
     );
 
-    let yaml = serde_yml::to_string(&value).map_err(|e| SkillRegistryError::ParseError {
+    let yaml = serde_yaml_ng::to_string(&value).map_err(|e| SkillRegistryError::ParseError {
         name: error_label.to_string(),
         reason: format!("Failed to rewrite normalized SKILL.md: {}", e),
     })?;
@@ -2639,5 +2639,29 @@ mod tests {
                 i
             );
         }
+    }
+
+    #[test]
+    fn rewrite_frontmatter_name_is_lossless_and_no_doc_end_marker() {
+        // Verifies that rewrite_frontmatter_name:
+        //   1. updates the name field to the new value,
+        //   2. preserves unknown/custom fields (lossless),
+        //   3. does NOT emit a YAML document-end `...` marker.
+        let frontmatter = "name: old-name\nversion: \"1.0\"\ncustom_field: keepme\n";
+        let result = rewrite_frontmatter_name(frontmatter, "new-name", "test-skill")
+            .expect("rewrite should succeed");
+
+        assert!(
+            result.contains("name: new-name"),
+            "rewritten frontmatter should contain updated name; got: {result:?}"
+        );
+        assert!(
+            result.contains("custom_field: keepme"),
+            "rewritten frontmatter must preserve unknown keys (lossless); got: {result:?}"
+        );
+        assert!(
+            !result.contains("..."),
+            "rewritten frontmatter must not contain a YAML document-end marker; got: {result:?}"
+        );
     }
 }

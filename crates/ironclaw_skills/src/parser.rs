@@ -187,8 +187,8 @@ fn parse_skill_md_impl(content: &str, validate_name: bool) -> Result<ParsedSkill
     let yaml_str = &after_first_line[..yaml_end];
 
     // Parse YAML frontmatter
-    let mut manifest: SkillManifest =
-        serde_yml::from_str(yaml_str).map_err(|e| SkillParseError::InvalidYaml(e.to_string()))?;
+    let mut manifest: SkillManifest = serde_yaml_ng::from_str(yaml_str)
+        .map_err(|e| SkillParseError::InvalidYaml(e.to_string()))?;
 
     // Detect the legacy `metadata.openclaw.requires` shape and warn loudly.
     // The new flat `requires:` field replaces it; serde silently drops the
@@ -248,7 +248,7 @@ fn parse_skill_md_impl(content: &str, validate_name: bool) -> Result<ParsedSkill
 /// `SkillManifest`, so without this check a skill author can think their
 /// gating/dependency requirements are honored when they are completely inert.
 pub(crate) fn has_legacy_metadata_openclaw_requires(yaml_str: &str) -> bool {
-    let raw: serde_yml::Value = match serde_yml::from_str(yaml_str) {
+    let raw: serde_yaml_ng::Value = match serde_yaml_ng::from_str(yaml_str) {
         Ok(v) => v,
         Err(_) => return false,
     };
