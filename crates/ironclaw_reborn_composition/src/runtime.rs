@@ -2868,6 +2868,39 @@ pub async fn build_reborn_runtime(
                         })?;
                 let package_capabilities =
                     Arc::new(StaticPackageCapabilitySource::from_catalog(&catalog));
+                // Built-in capability governance (#5261 D4). Builtins
+                // (`builtin.shell`, `builtin.web_fetch`, the extension-lifecycle
+                // tools, …) ship with the host and are NOT contributed by any
+                // installable extension package, so the installation-seeded
+                // allow-set excludes them and the on-policy filter would deny
+                // `builtin.shell` for everyone. We treat them as always-installed
+                // by feeding their ids into the resolver's base set.
+                //
+                // SOURCE = the active extension-registry snapshot capabilities
+                // MINUS the capabilities reachable via the installable
+                // `AvailableExtensionCatalog` packages. The subtraction keeps
+                // extension caps gated by installation (they only surface when
+                // actually installed via `effective.installations`) and avoids
+                // double-counting; what remains is exactly the host-bundled
+                // builtins. In the local-dev registry the only package is the
+                // "builtin" first-party package, so this resolves to its caps.
+                use crate::available_extensions::visible_capability_ids;
+                use ironclaw_host_api::CapabilityId;
+                use std::collections::BTreeSet;
+                let installable_caps: BTreeSet<CapabilityId> = catalog
+                    .search("")
+                    .flat_map(|package| visible_capability_ids(package).cloned())
+                    .collect();
+                let registry_snapshot = local_runtime
+                    .shared_extension_registry
+                    .as_ref()
+                    .map(|shared| shared.snapshot())
+                    .unwrap_or_else(|| Arc::clone(&local_runtime.extension_registry));
+                let builtin_capabilities: Vec<CapabilityId> = registry_snapshot
+                    .capabilities()
+                    .map(|descriptor| descriptor.id.clone())
+                    .filter(|capability_id| !installable_caps.contains(capability_id))
+                    .collect();
                 // The SINGLE shared policy resolver (#5261 D3), constructed once
                 // in factory.rs over the SAME delta store the admin REST surface
                 // writes. Availability = installed AND policy-available; the
@@ -2882,6 +2915,7 @@ pub async fn build_reborn_runtime(
                     installation_store,
                     package_capabilities,
                     capability_policy_resolver,
+                    builtin_capabilities,
                 ))
             } else {
                 Arc::new(AllowAllCapabilitySurfaceResolver)
