@@ -26,7 +26,7 @@ FROM chef AS planner
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
-COPY tools/ tools/
+COPY tools/storage_stress/ tools/storage_stress/
 COPY build.rs build.rs
 COPY src/ src/
 COPY tests/ tests/
@@ -55,7 +55,7 @@ FROM deps AS builder
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
-COPY tools/ tools/
+COPY tools/storage_stress/ tools/storage_stress/
 COPY build.rs build.rs
 COPY src/ src/
 COPY tests/ tests/
