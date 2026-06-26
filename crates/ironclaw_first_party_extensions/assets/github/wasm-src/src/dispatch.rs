@@ -1,10 +1,11 @@
 use crate::api::*;
+use crate::schema::action_name_from_capability_id;
 use crate::types::{GitHubAction, ToolContext};
 use crate::webhook::handle_webhook;
 
 pub(crate) fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> {
     let action_name = action_from_context(context)?;
-    let action_params = params_with_action(params, action_name)?;
+    let action_params = params_with_action(params, &action_name)?;
     let action: GitHubAction =
         serde_json::from_value(action_params).map_err(|_| "invalid_parameters".to_string())?;
 
@@ -31,16 +32,83 @@ pub(crate) fn execute_inner(params: &str, context: Option<&str>) -> Result<Strin
             owner,
             repo,
             state,
+            labels,
+            assignee,
+            milestone,
             page,
             limit,
-        } => list_issues(&owner, &repo, state.as_deref(), page, limit),
+        } => list_issues(
+            &owner,
+            &repo,
+            state.as_deref(),
+            labels,
+            assignee.as_deref(),
+            milestone.as_deref(),
+            page,
+            limit,
+        ),
         GitHubAction::CreateIssue {
             owner,
             repo,
             title,
             body,
+            milestone,
             labels,
-        } => create_issue(&owner, &repo, &title, body.as_deref(), labels),
+            assignees,
+        } => create_issue(
+            &owner,
+            &repo,
+            &title,
+            body.as_deref(),
+            milestone,
+            labels,
+            assignees,
+        ),
+        GitHubAction::UpdateIssue {
+            owner,
+            repo,
+            issue_number,
+            title,
+            body,
+            state,
+            milestone,
+            labels,
+            assignees,
+        } => update_issue(
+            &owner,
+            &repo,
+            issue_number,
+            title.as_deref(),
+            body.as_ref().map(|body| body.as_deref()),
+            state,
+            milestone,
+            labels,
+            assignees,
+        ),
+        GitHubAction::AddIssueLabels {
+            owner,
+            repo,
+            issue_number,
+            labels,
+        } => add_issue_labels(&owner, &repo, issue_number, labels),
+        GitHubAction::RemoveIssueLabel {
+            owner,
+            repo,
+            issue_number,
+            name,
+        } => remove_issue_label(&owner, &repo, issue_number, &name),
+        GitHubAction::AddIssueAssignees {
+            owner,
+            repo,
+            issue_number,
+            assignees,
+        } => add_issue_assignees(&owner, &repo, issue_number, assignees),
+        GitHubAction::RemoveIssueAssignees {
+            owner,
+            repo,
+            issue_number,
+            assignees,
+        } => remove_issue_assignees(&owner, &repo, issue_number, assignees),
         GitHubAction::GetIssue {
             owner,
             repo,
@@ -63,9 +131,23 @@ pub(crate) fn execute_inner(params: &str, context: Option<&str>) -> Result<Strin
             owner,
             repo,
             state,
+            head,
+            base,
+            sort,
+            direction,
             page,
             limit,
-        } => list_pull_requests(&owner, &repo, state.as_deref(), page, limit),
+        } => list_pull_requests(
+            &owner,
+            &repo,
+            state.as_deref(),
+            head.as_deref(),
+            base.as_deref(),
+            sort.as_deref(),
+            direction.as_deref(),
+            page,
+            limit,
+        ),
         GitHubAction::CreatePullRequest {
             owner,
             repo,
@@ -73,15 +155,40 @@ pub(crate) fn execute_inner(params: &str, context: Option<&str>) -> Result<Strin
             head,
             base,
             body,
+            issue,
+            head_repo,
+            maintainer_can_modify,
             draft,
         } => create_pull_request(
             &owner,
             &repo,
-            &title,
+            title.as_deref(),
             &head,
             &base,
             body.as_deref(),
+            issue,
+            head_repo.as_deref(),
+            maintainer_can_modify,
             draft.unwrap_or(false),
+        ),
+        GitHubAction::UpdatePullRequest {
+            owner,
+            repo,
+            pr_number,
+            title,
+            body,
+            state,
+            base,
+            maintainer_can_modify,
+        } => update_pull_request(
+            &owner,
+            &repo,
+            pr_number,
+            title.as_deref(),
+            body.as_deref(),
+            state,
+            base.as_deref(),
+            maintainer_can_modify,
         ),
         GitHubAction::GetPullRequest {
             owner,
@@ -92,21 +199,45 @@ pub(crate) fn execute_inner(params: &str, context: Option<&str>) -> Result<Strin
             owner,
             repo,
             pr_number,
-        } => get_pull_request_files(&owner, &repo, pr_number),
+            page,
+            limit,
+        } => get_pull_request_files(&owner, &repo, pr_number, page, limit),
         GitHubAction::CreatePrReview {
             owner,
             repo,
             pr_number,
             body,
             event,
-        } => create_pr_review(&owner, &repo, pr_number, &body, event),
+            commit_id,
+            comments,
+        } => create_pr_review(
+            &owner,
+            &repo,
+            pr_number,
+            &body,
+            event,
+            commit_id.as_deref(),
+            comments,
+        ),
         GitHubAction::ListPullRequestComments {
             owner,
             repo,
             pr_number,
+            sort,
+            direction,
+            since,
             page,
             limit,
-        } => list_pull_request_comments(&owner, &repo, pr_number, page, limit),
+        } => list_pull_request_comments(
+            &owner,
+            &repo,
+            pr_number,
+            sort,
+            direction,
+            since.as_deref(),
+            page,
+            limit,
+        ),
         GitHubAction::ReplyPullRequestComment {
             owner,
             repo,
@@ -121,6 +252,15 @@ pub(crate) fn execute_inner(params: &str, context: Option<&str>) -> Result<Strin
             page,
             limit,
         } => get_pull_request_reviews(&owner, &repo, pr_number, page, limit),
+        GitHubAction::ListPullRequestReviewThreads {
+            owner,
+            repo,
+            pr_number,
+            first,
+            after,
+        } => list_pull_request_review_threads(&owner, &repo, pr_number, first, after.as_deref()),
+        GitHubAction::ResolveReviewThread { thread_id } => resolve_review_thread(&thread_id),
+        GitHubAction::UnresolveReviewThread { thread_id } => unresolve_review_thread(&thread_id),
         GitHubAction::GetCombinedStatus { owner, repo, r#ref } => {
             get_combined_status(&owner, &repo, &r#ref)
         }
@@ -131,6 +271,7 @@ pub(crate) fn execute_inner(params: &str, context: Option<&str>) -> Result<Strin
             commit_title,
             commit_message,
             merge_method,
+            sha,
         } => merge_pull_request(
             &owner,
             &repo,
@@ -138,13 +279,14 @@ pub(crate) fn execute_inner(params: &str, context: Option<&str>) -> Result<Strin
             commit_title.as_deref(),
             commit_message.as_deref(),
             merge_method,
+            sha.as_deref(),
         ),
         GitHubAction::GetAuthenticatedUser {} => get_authenticated_user(),
         GitHubAction::ListRepos {
-            username,
+            repo_type,
             page,
             limit,
-        } => list_repos(username.as_deref(), page, limit),
+        } => list_repos(repo_type, page, limit),
         GitHubAction::SearchRepositories {
             query,
             page,
@@ -285,9 +427,69 @@ pub(crate) fn execute_inner(params: &str, context: Option<&str>) -> Result<Strin
             owner,
             repo,
             workflow_id,
+            actor,
+            branch,
+            event,
+            status,
+            created,
+            exclude_pull_requests,
+            check_suite_id,
+            head_sha,
             page,
             limit,
-        } => get_workflow_runs(&owner, &repo, workflow_id.as_deref(), page, limit),
+        } => get_workflow_runs(
+            &owner,
+            &repo,
+            workflow_id.as_deref(),
+            actor.as_deref(),
+            branch.as_deref(),
+            event.as_deref(),
+            status,
+            created.as_deref(),
+            exclude_pull_requests,
+            check_suite_id,
+            head_sha.as_deref(),
+            page,
+            limit,
+        ),
+        GitHubAction::GetWorkflowRunJobs {
+            owner,
+            repo,
+            run_id,
+            filter,
+            page,
+            limit,
+        } => get_workflow_run_jobs(&owner, &repo, run_id, filter, page, limit),
+        GitHubAction::GetWorkflowRunArtifacts {
+            owner,
+            repo,
+            run_id,
+            name,
+            direction,
+            page,
+            limit,
+        } => get_workflow_run_artifacts(
+            &owner,
+            &repo,
+            run_id,
+            name.as_deref(),
+            direction,
+            page,
+            limit,
+        ),
+        GitHubAction::RerunFailedWorkflowRunJobs {
+            owner,
+            repo,
+            run_id,
+            enable_debug_logging,
+        } => rerun_failed_workflow_run_jobs(&owner, &repo, run_id, enable_debug_logging),
+        GitHubAction::RerunWorkflowJob {
+            owner,
+            repo,
+            job_id,
+            enable_debug_logging,
+            enable_debugger,
+        } => rerun_workflow_job(&owner, &repo, job_id, enable_debug_logging, enable_debugger),
         GitHubAction::ForkRepo {
             owner,
             repo,
@@ -305,48 +507,12 @@ pub(crate) fn execute_inner(params: &str, context: Option<&str>) -> Result<Strin
     }
 }
 
-pub(crate) fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
+pub(crate) fn action_from_context(context: Option<&str>) -> Result<String, String> {
     let context = context.ok_or_else(|| "missing_invocation_context".to_string())?;
     let context: ToolContext =
         serde_json::from_str(context).map_err(|_| "invalid_invocation_context".to_string())?;
-    match context.capability_id.as_str() {
-        "github.get_repo" => Ok("get_repo"),
-        "github.create_repo" => Ok("create_repo"),
-        "github.list_issues" => Ok("list_issues"),
-        "github.create_issue" => Ok("create_issue"),
-        "github.get_issue" => Ok("get_issue"),
-        "github.list_issue_comments" => Ok("list_issue_comments"),
-        "github.create_issue_comment" | "github.comment_issue" => Ok("create_issue_comment"),
-        "github.list_pull_requests" => Ok("list_pull_requests"),
-        "github.create_pull_request" => Ok("create_pull_request"),
-        "github.get_pull_request" => Ok("get_pull_request"),
-        "github.get_pull_request_files" => Ok("get_pull_request_files"),
-        "github.create_pr_review" => Ok("create_pr_review"),
-        "github.list_pull_request_comments" => Ok("list_pull_request_comments"),
-        "github.reply_pull_request_comment" => Ok("reply_pull_request_comment"),
-        "github.get_pull_request_reviews" => Ok("get_pull_request_reviews"),
-        "github.get_combined_status" => Ok("get_combined_status"),
-        "github.merge_pull_request" => Ok("merge_pull_request"),
-        "github.get_authenticated_user" => Ok("get_authenticated_user"),
-        "github.list_repos" => Ok("list_repos"),
-        "github.search_repositories" => Ok("search_repositories"),
-        "github.search_code" => Ok("search_code"),
-        "github.search_issues" | "github.search_issues_pull_requests" => {
-            Ok("search_issues_pull_requests")
-        }
-        "github.list_branches" => Ok("list_branches"),
-        "github.create_branch" => Ok("create_branch"),
-        "github.get_file_content" => Ok("get_file_content"),
-        "github.create_or_update_file" => Ok("create_or_update_file"),
-        "github.delete_file" => Ok("delete_file"),
-        "github.list_releases" => Ok("list_releases"),
-        "github.create_release" => Ok("create_release"),
-        "github.trigger_workflow" => Ok("trigger_workflow"),
-        "github.get_workflow_runs" => Ok("get_workflow_runs"),
-        "github.fork_repo" => Ok("fork_repo"),
-        "github.handle_webhook" => Ok("handle_webhook"),
-        _ => Err("unsupported_github_capability".to_string()),
-    }
+    action_name_from_capability_id(&context.capability_id)
+        .ok_or_else(|| "unsupported_github_capability".to_string())
 }
 
 fn params_with_action(params: &str, action: &str) -> Result<serde_json::Value, String> {

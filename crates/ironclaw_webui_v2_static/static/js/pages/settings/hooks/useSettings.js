@@ -45,6 +45,9 @@ export function useSettings() {
       if (RESTART_REQUIRED_KEYS.has(key)) {
         setNeedsRestart(true);
       }
+      if (key === "agent.auto_approve_tools") {
+        queryClient.invalidateQueries({ queryKey: ["settings-tools"] });
+      }
     },
   });
 
@@ -58,6 +61,9 @@ export function useSettings() {
     onSuccess: (_data, payload) => {
       queryClient.invalidateQueries({ queryKey: ["settings-export"] });
       const importedKeys = Object.keys(payload?.settings || {});
+      if (importedKeys.includes("agent.auto_approve_tools")) {
+        queryClient.invalidateQueries({ queryKey: ["settings-tools"] });
+      }
       if (importedKeys.some((key) => RESTART_REQUIRED_KEYS.has(key))) {
         setNeedsRestart(true);
       }

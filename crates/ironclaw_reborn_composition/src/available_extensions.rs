@@ -22,7 +22,8 @@ use crate::extension_credential_requirements::{
     product_auth_credential_source,
 };
 use crate::nearai_mcp::{
-    NearAiMcpBootstrapConfig, NearAiMcpEndpoint, nearai_mcp_endpoint_from_env,
+    NearAiMcpBootstrapConfig, NearAiMcpEndpoint, durable_product_auth_storage_enabled,
+    nearai_mcp_endpoint_from_base, nearai_mcp_endpoint_from_env,
 };
 
 const GITHUB_MANIFEST: &str =
@@ -550,9 +551,13 @@ pub(crate) fn slack_manifest_digest() -> String {
 pub(crate) fn nearai_mcp_manifest_toml_for_config(
     config: Option<&NearAiMcpBootstrapConfig>,
 ) -> Result<String, ProductWorkflowError> {
-    let endpoint = match config {
-        Some(config) => config.endpoint().map_err(map_binding_error)?,
-        None => nearai_mcp_endpoint_from_env().map_err(map_binding_error)?,
+    let endpoint = if durable_product_auth_storage_enabled() {
+        match config {
+            Some(config) => config.endpoint().map_err(map_binding_error)?,
+            None => nearai_mcp_endpoint_from_env().map_err(map_binding_error)?,
+        }
+    } else {
+        nearai_mcp_endpoint_from_base(None).map_err(map_binding_error)?
     };
     nearai_mcp_manifest_toml_for_endpoint(&endpoint)
 }
@@ -702,6 +707,8 @@ fn github_assets() -> Vec<AvailableExtensionAsset> {
 
     vec![
         bytes_asset("manifest.toml", GITHUB_MANIFEST.as_bytes()),
+        github_schema_asset!("add_issue_assignees.input.v1.json"),
+        github_schema_asset!("add_issue_labels.input.v1.json"),
         github_schema_asset!("comment_issue.input.v1.json"),
         github_schema_asset!("comment_issue.output.v1.json"),
         github_schema_asset!("create_branch.input.v1.json"),
@@ -723,24 +730,37 @@ fn github_assets() -> Vec<AvailableExtensionAsset> {
         github_schema_asset!("get_pull_request_reviews.input.v1.json"),
         github_schema_asset!("get_repo.input.v1.json"),
         github_schema_asset!("get_authenticated_user.input.v1.json"),
+        github_schema_asset!("get_workflow_run_artifacts.input.v1.json"),
+        github_schema_asset!("get_workflow_run_jobs.input.v1.json"),
         github_schema_asset!("get_workflow_runs.input.v1.json"),
         github_schema_asset!("handle_webhook.input.v1.json"),
         github_schema_asset!("list_branches.input.v1.json"),
         github_schema_asset!("list_issue_comments.input.v1.json"),
         github_schema_asset!("list_issues.input.v1.json"),
         github_schema_asset!("list_pull_request_comments.input.v1.json"),
+        github_schema_asset!("list_pull_request_review_threads.input.v1.json"),
         github_schema_asset!("list_pull_requests.input.v1.json"),
         github_schema_asset!("list_releases.input.v1.json"),
         github_schema_asset!("list_repos.input.v1.json"),
         github_schema_asset!("merge_pull_request.input.v1.json"),
         github_schema_asset!("raw_output.v1.json"),
+        github_schema_asset!("remove_issue_assignees.input.v1.json"),
+        github_schema_asset!("remove_issue_label.input.v1.json"),
         github_schema_asset!("reply_pull_request_comment.input.v1.json"),
+        github_schema_asset!("rerun_failed_workflow_run_jobs.input.v1.json"),
+        github_schema_asset!("rerun_workflow_job.input.v1.json"),
+        github_schema_asset!("resolve_review_thread.input.v1.json"),
         github_schema_asset!("search_code.input.v1.json"),
         github_schema_asset!("search_issues.input.v1.json"),
         github_schema_asset!("search_issues.output.v1.json"),
         github_schema_asset!("search_issues_pull_requests.input.v1.json"),
         github_schema_asset!("search_repositories.input.v1.json"),
         github_schema_asset!("trigger_workflow.input.v1.json"),
+        github_schema_asset!("unresolve_review_thread.input.v1.json"),
+        github_schema_asset!("update_issue.input.v1.json"),
+        github_schema_asset!("update_pull_request.input.v1.json"),
+        github_prompt_asset!("add_issue_assignees.md"),
+        github_prompt_asset!("add_issue_labels.md"),
         github_prompt_asset!("comment_issue.md"),
         github_prompt_asset!("create_branch.md"),
         github_prompt_asset!("create_issue.md"),
@@ -760,22 +780,33 @@ fn github_assets() -> Vec<AvailableExtensionAsset> {
         github_prompt_asset!("get_pull_request_reviews.md"),
         github_prompt_asset!("get_repo.md"),
         github_prompt_asset!("get_authenticated_user.md"),
+        github_prompt_asset!("get_workflow_run_artifacts.md"),
+        github_prompt_asset!("get_workflow_run_jobs.md"),
         github_prompt_asset!("get_workflow_runs.md"),
         github_prompt_asset!("handle_webhook.md"),
         github_prompt_asset!("list_branches.md"),
         github_prompt_asset!("list_issue_comments.md"),
         github_prompt_asset!("list_issues.md"),
         github_prompt_asset!("list_pull_request_comments.md"),
+        github_prompt_asset!("list_pull_request_review_threads.md"),
         github_prompt_asset!("list_pull_requests.md"),
         github_prompt_asset!("list_releases.md"),
         github_prompt_asset!("list_repos.md"),
         github_prompt_asset!("merge_pull_request.md"),
+        github_prompt_asset!("remove_issue_assignees.md"),
+        github_prompt_asset!("remove_issue_label.md"),
         github_prompt_asset!("reply_pull_request_comment.md"),
+        github_prompt_asset!("rerun_failed_workflow_run_jobs.md"),
+        github_prompt_asset!("rerun_workflow_job.md"),
+        github_prompt_asset!("resolve_review_thread.md"),
         github_prompt_asset!("search_code.md"),
         github_prompt_asset!("search_issues.md"),
         github_prompt_asset!("search_issues_pull_requests.md"),
         github_prompt_asset!("search_repositories.md"),
         github_prompt_asset!("trigger_workflow.md"),
+        github_prompt_asset!("unresolve_review_thread.md"),
+        github_prompt_asset!("update_issue.md"),
+        github_prompt_asset!("update_pull_request.md"),
         bytes_asset("wasm/github_tool.wasm", GITHUB_WASM_MODULE),
     ]
 }
@@ -1596,8 +1627,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::nearai_mcp::nearai_mcp_endpoint_from_base;
-
     #[test]
     fn visible_capability_ids_include_write_effects() {
         let extension = test_extension_package();
@@ -2172,6 +2201,26 @@ handle = "web_token"
         )
         .await
         .unwrap();
+
+        let update_issue_schema = fs
+            .read_file(
+                &VirtualPath::new(
+                    "/system/extensions/github/schemas/github/update_issue.input.v1.json",
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            std::str::from_utf8(&update_issue_schema)
+                .unwrap()
+                .contains("GitHub update_issue input")
+        );
+        fs.read_file(
+            &VirtualPath::new("/system/extensions/github/prompts/github/update_issue.md").unwrap(),
+        )
+        .await
+        .unwrap();
     }
 
     #[test]
@@ -2209,6 +2258,24 @@ handle = "web_token"
         assert_eq!(
             manifest["capabilities"][0]["runtime_credentials"][0]["audience"]["port"].as_integer(),
             Some(8443)
+        );
+    }
+
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    #[test]
+    fn nearai_manifest_renderer_ignores_config_endpoint_without_durable_product_auth() {
+        let config = NearAiMcpBootstrapConfig::new(
+            "http://invalid-nearai.example.test",
+            secrecy::SecretString::from("nearai-test-key"),
+        )
+        .unwrap();
+
+        let manifest_toml = nearai_mcp_manifest_toml_for_config(Some(&config)).unwrap();
+        let manifest: Value = toml::from_str(&manifest_toml).unwrap();
+
+        assert_eq!(
+            manifest["runtime"]["url"].as_str(),
+            Some("https://cloud-api.near.ai/mcp")
         );
     }
 

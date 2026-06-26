@@ -8,7 +8,7 @@ use ironclaw_host_api::Timestamp;
 use super::{
     TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerWorker,
     TrustedTriggerFireSubmitOutcome, TrustedTriggerSubmitRequest,
-    failure::{SubmitFailureKind, classify_failure},
+    failure::{SubmitFailureKind, classify_failure, classify_submit_failure},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +63,7 @@ impl TriggerPollerWorker {
         Ok(outcome)
     }
 
-    async fn process_claimed_fire(
+    pub(super) async fn process_claimed_fire(
         &self,
         record: TriggerRecord,
         fire_slot: Timestamp,
@@ -176,7 +176,7 @@ impl TriggerPollerWorker {
                 Ok(TriggerPollerFireOutcome::Replayed { original_run_id })
             }
             Err(error) => {
-                let classification = classify_failure(&error);
+                let classification = classify_submit_failure(&error);
                 let disposition = match classification.kind {
                     SubmitFailureKind::Retryable => FailedFireDisposition::Retryable,
                     SubmitFailureKind::Permanent => {

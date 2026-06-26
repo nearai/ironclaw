@@ -59,6 +59,7 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 | `test_extensions.py` | Extensions tab: install, remove, configure, OAuth, auth card, activate |
 | `test_oauth_refresh.py` | Hosted Gmail/MCP OAuth refresh; the Gmail path refreshes through the proxy and reads seeded Gmail data from Emulate |
 | `test_emulate_reborn_provider_contracts.py` | Emulate provider contracts for Reborn-backed Google Gmail/Calendar/Drive reads and writes, Slack channel/thread/DM delivery plus reactions/user lookup, and GitHub repo/issue/PR/search/branch/git-object/release/fork/action-route surfaces |
+| `test_reborn_emulate_full_path.py` | Full-path Reborn + Emulate coverage: install/auth a first-party extension, drive a scripted model tool call, and assert provider-side Emulate state |
 
 ## Adding new scenarios
 
@@ -92,6 +93,12 @@ Actions workflow/run routes, but it does not expose `/contents` routes or a
 seed hook for workflows. The provider contract therefore covers the emulatable
 Git object mutation/readback path plus empty Actions route readback, not direct
 `/contents` file create/update/delete or workflow dispatch.
+
+The direct provider-contract tests prove the emulator fixture layer. Full-path
+Reborn + Emulate tests should use `hosted_google_emulate_server` or a matching
+provider fixture, install/auth the extension through IronClaw, drive
+`/api/chat/send` with the scripted mock LLM, and assert provider state through
+Emulate readback.
 
 ### Manual QA mapping
 

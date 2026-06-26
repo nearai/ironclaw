@@ -31,16 +31,19 @@ use ironclaw_threads::{
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
-    LoopResultRef,
+    ExternalToolCatalog, LoopResultRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopCapabilityPort,
         LoopHostMilestoneSink, LoopRunContext, ProviderToolCall, sanitize_model_visible_text,
     },
 };
 
-use crate::local_dev_authorization::local_dev_effects_require_approval;
+use crate::local_dev_authorization::{
+    StoreApprovalSettingsProvider, local_dev_effects_require_approval,
+};
 use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
 use crate::local_dev_mounts::scoped_skill_management_mount_view;
+use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::{
     RebornServices,
     projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
@@ -48,6 +51,7 @@ use crate::{
 };
 
 pub(super) mod extension_surface;
+mod external_tool_capability;
 mod outbound_delivery;
 mod project_create;
 mod refreshing_capability_port;
@@ -99,6 +103,16 @@ pub(super) fn capability_wiring(
         local_runtime.system_extensions_lifecycle_mounts.clone();
     let approval_requests: Arc<dyn ApprovalRequestStore> = local_runtime.approval_requests.clone();
     let capability_leases: Arc<dyn CapabilityLeaseStore> = local_runtime.capability_leases.clone();
+    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+        local_runtime.tool_permission_overrides.clone();
+    let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+        local_runtime.auto_approve_settings.clone();
+    let approval_settings: Arc<dyn ApprovalSettingsProvider> =
+        Arc::new(StoreApprovalSettingsProvider::new(
+            tool_permission_overrides,
+            auto_approve_settings,
+            local_runtime.persistent_approval_policies.clone(),
+        ));
     let outbound_delivery_target_set_requires_approval = local_dev_effects_require_approval(
         local_runtime.runtime_policy.as_ref(),
         policy.as_ref(),
@@ -122,6 +136,11 @@ pub(super) fn capability_wiring(
     );
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+    // Shared per-runtime catalog (owned by local_runtime services) so the
+    // OpenAI-compatible Responses surface and this loop host see the same
+    // run-scoped external-tool state.
+    let external_tool_catalog: Arc<dyn ExternalToolCatalog> =
+        Arc::clone(&local_runtime.external_tool_catalog);
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(LocalDevLoopCapabilityPortFactory {
             runtime,
@@ -139,8 +158,10 @@ pub(super) fn capability_wiring(
             trajectory_observer,
             outbound_preferences_facade,
             outbound_delivery_target_set_requires_approval,
+            approval_settings,
             approval_requests,
             capability_leases,
+            external_tool_catalog,
         });
     let model_gateway: Arc<dyn HostManagedModelGateway> = Arc::new(
         LocalDevResultHydratingModelGateway::new(model_gateway, capability_io),
@@ -172,8 +193,13 @@ struct LocalDevLoopCapabilityPortFactory {
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     outbound_delivery_target_set_requires_approval: bool,
+    approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
+    /// Per-runtime catalog of client-supplied ("external") tools. Shared across
+    /// all runs in this runtime so a parked external-tool call and its later
+    /// client-submitted output (across a pause/resume) hit the same store.
+    external_tool_catalog: Arc<dyn ExternalToolCatalog>,
 }
 
 #[async_trait::async_trait]
@@ -209,8 +235,10 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             outbound_preferences_facade: self.outbound_preferences_facade.clone(),
             outbound_delivery_target_set_requires_approval: self
                 .outbound_delivery_target_set_requires_approval,
+            approval_settings: Arc::clone(&self.approval_settings),
             approval_requests: Arc::clone(&self.approval_requests),
             capability_leases: Arc::clone(&self.capability_leases),
+            external_tool_catalog: Arc::clone(&self.external_tool_catalog),
         })
         .await
     }
@@ -338,7 +366,11 @@ impl LocalDevCapabilityIo {
         let message = match durable_previews
             .thread_service
             .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
-                scope: durable_previews.thread_scope.clone(),
+                scope: ironclaw_reborn::thread_scope::ThreadScopeResolver::resolve_for_turn(
+                    &durable_previews.thread_scope,
+                    &run_context.scope,
+                    run_context.actor(),
+                ),
                 thread_id: run_context.thread_id.clone(),
                 turn_run_id: run_context.run_id.to_string(),
                 preview,
@@ -504,7 +536,7 @@ impl LoopCapabilityInputResolver for LocalDevCapabilityIo {
         self.display_previews.record_input(
             &run_context.run_id.to_string(),
             &input_ref,
-            &tool_call.name,
+            tool_call.name.as_str(),
             &tool_call.arguments,
         );
         Ok(input_ref)

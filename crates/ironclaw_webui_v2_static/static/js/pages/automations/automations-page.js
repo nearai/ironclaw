@@ -115,6 +115,7 @@ export function AutomationsPage() {
                         onSelectAutomation=${setSelectedAutomationId}
                         onPauseAutomation=${automationsState.pauseAutomation}
                         onResumeAutomation=${automationsState.resumeAutomation}
+                        onDeleteAutomation=${automationsState.deleteAutomation}
                       />
                     `}
               `}

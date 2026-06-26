@@ -1,5 +1,5 @@
 tokens:
-  emulate-github-token:
+  ghp_emulate_github_token:
     login: reborn-dev
     scopes:
       - repo

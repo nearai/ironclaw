@@ -11,6 +11,13 @@ use crate::store::StoreData;
 use crate::types::{PreparedWitTool, WitToolExecution, WitToolRequest};
 
 /// Reborn WIT-compatible WASM tool runtime.
+///
+/// Cloning is cheap: [`Engine`] is internally reference-counted and
+/// [`WitToolRuntimeConfig`] is a small `Clone` value. A clone shares the same
+/// underlying wasmtime engine, so a clone can be moved into a blocking task
+/// (`tokio::task::spawn_blocking`) to run the synchronous guest call off the
+/// async worker pool without re-creating the engine.
+#[derive(Clone)]
 pub struct WitToolRuntime {
     engine: Engine,
     config: WitToolRuntimeConfig,

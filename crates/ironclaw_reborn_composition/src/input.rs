@@ -335,6 +335,31 @@ impl RebornBuildInput {
         ))
     }
 
+    /// Open the hosted-single-tenant trigger access store from this build
+    /// input's already-resolved PostgreSQL storage.
+    #[cfg(all(feature = "webui-v2-beta", feature = "postgres"))]
+    pub async fn open_hosted_single_tenant_trigger_access_store(
+        &self,
+    ) -> Result<Arc<dyn crate::LocalTriggerAccessStore>, crate::RebornLocalTriggerAccessStoreError>
+    {
+        let RebornStorageInput::HostedSingleTenantPostgres { pool, .. } = &self.storage else {
+            return Err(crate::RebornLocalTriggerAccessStoreError::Backend(
+                "hosted-single-tenant trigger access requires PostgreSQL-backed runtime storage"
+                    .to_string(),
+            ));
+        };
+        let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
+            pool.clone(),
+        ));
+        filesystem.run_migrations().await.map_err(|error| {
+            crate::RebornLocalTriggerAccessStoreError::Backend(error.to_string())
+        })?;
+        let scoped = crate::wrap_scoped(filesystem);
+        Ok(Arc::new(
+            crate::RebornFilesystemLocalTriggerAccessStore::new(scoped),
+        ))
+    }
+
     pub fn with_local_runtime_workspace_root(mut self, workspace_root: PathBuf) -> Self {
         match &mut self.storage {
             RebornStorageInput::LocalDev {

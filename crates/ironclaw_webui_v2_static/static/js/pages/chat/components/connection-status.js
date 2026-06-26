@@ -12,7 +12,7 @@ const STYLES = {
 
 export function ConnectionStatus({ status }) {
   const t = useT();
-  if (status === "idle" || status === "connected" || !status) return null;
+  if (status === "idle" || status === "connecting" || status === "connected" || !status) return null;
 
   const labelKey = "connection." + status;
   const label = t(labelKey);

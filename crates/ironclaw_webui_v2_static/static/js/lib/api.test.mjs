@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   attachmentUrl,
+  deleteAutomation,
   deleteThread,
   fetchAttachmentBlob,
   fetchAttachmentDataUrl,
@@ -57,7 +58,7 @@ test("listAutomations propagates api errors from the automations route", async (
   });
 });
 
-test("pauseAutomation and resumeAutomation post to encoded v2 automation routes", async () => {
+test("automation mutations use encoded v2 automation routes", async () => {
   const calls = [];
   globalThis.sessionStorage = {
     getItem: () => "token-1",
@@ -74,8 +75,9 @@ test("pauseAutomation and resumeAutomation post to encoded v2 automation routes"
 
   await pauseAutomation({ automationId: "automation/needs encoding" });
   await resumeAutomation({ automationId: "automation/needs encoding" });
+  await deleteAutomation({ automationId: "automation/needs encoding" });
 
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   assert.equal(
     calls[0].path,
     "/api/webchat/v2/automations/automation%2Fneeds%20encoding/pause",
@@ -86,6 +88,11 @@ test("pauseAutomation and resumeAutomation post to encoded v2 automation routes"
     "/api/webchat/v2/automations/automation%2Fneeds%20encoding/resume",
   );
   assert.equal(calls[1].options.method, "POST");
+  assert.equal(
+    calls[2].path,
+    "/api/webchat/v2/automations/automation%2Fneeds%20encoding",
+  );
+  assert.equal(calls[2].options.method, "DELETE");
   assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
 });
 
@@ -103,6 +110,7 @@ test("automation state mutations reject before fetch when automation id is missi
 
   await assert.rejects(pauseAutomation(), /automationId is required/);
   await assert.rejects(resumeAutomation({}), /automationId is required/);
+  await assert.rejects(deleteAutomation({ automationId: "" }), /automationId is required/);
   assert.equal(fetchCalled, false);
 });
 

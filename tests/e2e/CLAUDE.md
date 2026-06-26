@@ -56,6 +56,7 @@ HEADED=1 pytest scenarios/
 | `test_extension_uninstall_cleanup.py` | Real install/setup/remove coverage for WASM tools, WASM channels, OAuth-backed shared Google tools, and MCP servers; verifies uninstall deletes stored secrets from the libSQL `secrets` table while preserving shared credentials until the last referencing extension is removed |
 | `test_oauth_refresh.py` | Hosted Gmail OAuth regression: complete setup via `/oauth/callback`, expire the stored access token in libSQL, trigger a real `gmail` tool call through `/api/chat/send`, verify refresh goes through the mock `/oauth/refresh` proxy without forwarding `client_secret`, and assert the Gmail tool result contains seeded Emulate data |
 | `test_emulate_reborn_provider_contracts.py` | Provider-contract coverage for Reborn-backed Emulate fixtures: Google Gmail/Calendar/Drive seeded reads and writes, Slack auth/conversation/channel/thread/DM delivery plus reactions/user lookup, and GitHub repo/issue/PR/search/branch/git-object/release/fork/action-route surfaces |
+| `test_reborn_emulate_full_path.py` | Full-path Reborn + Emulate coverage: install/auth a first-party extension through IronClaw, drive a scripted model tool call through chat, and assert provider-side state through Emulate readback |
 | `test_dom_resource_limits.py` | DOM pruning at MAX_DOM_MESSAGES cap, no setInterval timer leaks across SSE reconnect cycles, streaming message preservation during pruning |
 
 ## `helpers.py`
@@ -83,7 +84,8 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 | `emulate_github_server` | Starts `npx --yes emulate@0.7.0 --service github` with `fixtures/emulate/github.yaml`, waits for `/user` to return the seeded actor, and yields the base URL for GitHub provider-contract assertions. |
 | `ironclaw_server` | Starts the ironclaw binary with a minimal env (see below), waits for `/api/health` (timeout 60s). Yields the base URL. On teardown sends **SIGINT** (not SIGTERM) so the tokio ctrl_c handler triggers a graceful shutdown and LLVM coverage data is flushed. |
 | `hosted_oauth_refresh_server` | Starts a second ironclaw instance with a dedicated libSQL DB and `GOOGLE_OAUTH_CLIENT_ID=hosted-google-client-id`, while still pointing `IRONCLAW_OAUTH_EXCHANGE_URL` at `mock_llm.py`. Yields a dict with `base_url`, `db_path`, and `mock_llm_url` for hosted refresh scenarios that do not need provider API calls. |
-| `hosted_google_oauth_refresh_server` | Starts the same hosted OAuth fixture shape, but sets `IRONCLAW_TEST_HTTP_REWRITE_MAP` so Gmail WASM HTTP calls to `gmail.googleapis.com` hit `emulate_google_server`. Yields `emulate_google_url` in addition to the hosted OAuth server fields. |
+| `hosted_google_emulate_server` | Starts the same hosted OAuth fixture shape, but sets `IRONCLAW_TEST_HTTP_REWRITE_MAP` so Google WASM HTTP calls to `gmail.googleapis.com` and `www.googleapis.com` hit `emulate_google_server`. Yields `emulate_google_url` in addition to the hosted OAuth server fields. |
+| `hosted_google_oauth_refresh_server` | Compatibility alias for `hosted_google_emulate_server`, retained for hosted Gmail OAuth refresh regression tests. |
 | `extension_cleanup_server` | Starts an isolated ironclaw instance with its own temp DB/home/WASM dirs, `SECRETS_MASTER_KEY`, and hosted-style OAuth env so uninstall-cleanup scenarios can inspect the `secrets` table without interfering with the shared E2E server state. |
 | `managed_gateway_server` | Function-scoped restartable gateway instance for SSE/connectivity scenarios; preserves port/DB/home across explicit stop/start calls so tests can simulate server restarts. |
 | `limited_gateway_server` | Function-scoped gateway instance with `GATEWAY_MAX_CONNECTIONS=2` for connection-cap coverage. |
@@ -108,6 +110,14 @@ Drive upload/readback, Slack channel/thread/DM delivery/reactions, GitHub repo
 create/list, release create/list/latest, issue create/read/comment/search, PR
 create/read/list/files/review/comment/merge, branch/ref creation, Git
 blob/tree/commit read/write, fork create/list, and empty Actions route readback.
+
+Direct provider-contract tests prove the Emulate fixture layer itself. Full-path
+Reborn + Emulate tests should use `hosted_google_emulate_server` or a matching
+provider fixture, install/auth the first-party extension through IronClaw, drive
+the scripted mock model through `/api/chat/send`, auto-resolve expected approval
+gates, and read provider state back from Emulate. This is the contract tier to
+use when the behavior being protected is extension install/auth, model-to-tool
+routing, tool execution, and provider mutation together.
 
 Google Docs, Sheets, and Slides are first-party extension assets, but Emulate
 0.7.0 does not provide those APIs directly; do not claim those are covered
@@ -134,7 +144,7 @@ EMBEDDING_ENABLED=false, SKILLS_ENABLED=true
 ONBOARD_COMPLETED=true   # prevents setup wizard
 ```
 
-The hosted OAuth refresh fixtures use the same baseline, but with their own DB/home tempdirs and `GOOGLE_OAUTH_CLIENT_ID=hosted-google-client-id` so hosted OAuth flows exercise proxy credential injection instead of the baked-in desktop Google app. Use `hosted_google_oauth_refresh_server` when the test needs Gmail WASM HTTP calls to hit the Emulate Google server seeded from `fixtures/emulate/google_gmail.yaml`.
+The hosted OAuth refresh fixtures use the same baseline, but with their own DB/home tempdirs and `GOOGLE_OAUTH_CLIENT_ID=hosted-google-client-id` so hosted OAuth flows exercise proxy credential injection instead of the baked-in desktop Google app. Use `hosted_google_emulate_server` when the test needs Google WASM HTTP calls to hit the Emulate Google server seeded from `fixtures/emulate/google_gmail.yaml`.
 
 For isolated v2 auth/prompt fixtures, do not rely on env-vs-DB precedence to
 keep the mock LLM active. Pin the provider explicitly (typically by writing

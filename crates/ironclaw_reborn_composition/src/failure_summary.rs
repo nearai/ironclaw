@@ -22,12 +22,16 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
         "driver_invalid_request" => {
             "The run failed because the execution driver rejected the request."
         }
-        "driver_panic" => "The run failed because the execution driver stopped unexpectedly.",
+        "scheduler_executor_panic" => {
+            "The run failed because the execution driver stopped unexpectedly."
+        }
         "host_creation_failed" => "The run failed while preparing the runtime host.",
         "route_snapshot_persistence_failed" => {
             "The run failed while saving the selected model route."
         }
-        "heartbeat_failed" => "The run failed after the runner heartbeat could not be recorded.",
+        "scheduler_heartbeat_failed" => {
+            "The run failed after the runner heartbeat could not be recorded."
+        }
         "exit_application_failed" => "The run failed while recording its final result.",
         "lease_expired" => "The run failed because its runner lease expired.",
         "interrupted_unexpectedly" => "The run stopped before it could complete cleanly.",
@@ -78,6 +82,40 @@ mod tests {
     fn reborn_failure_summary_falls_back_for_unknown_category() {
         assert_eq!(
             reborn_failure_summary_for_category(Some("unexpected_category")),
+            "The run failed before producing a reply."
+        );
+    }
+
+    // The scheduler emits `scheduler_heartbeat_failed` / `scheduler_executor_panic`
+    // (see `ironclaw_host_runtime::turn_scheduler`), not the previously-matched
+    // `heartbeat_failed` / `driver_panic`. These two assertions pin the live
+    // mapping to the real producer strings.
+    #[test]
+    fn reborn_failure_summary_describes_scheduler_heartbeat_failure() {
+        assert_eq!(
+            reborn_failure_summary_for_category(Some("scheduler_heartbeat_failed")),
+            "The run failed after the runner heartbeat could not be recorded."
+        );
+    }
+
+    #[test]
+    fn reborn_failure_summary_describes_scheduler_executor_panic() {
+        assert_eq!(
+            reborn_failure_summary_for_category(Some("scheduler_executor_panic")),
+            "The run failed because the execution driver stopped unexpectedly."
+        );
+    }
+
+    // Regression guard: the old, never-produced category strings must no longer
+    // be specially cased — they now fall through to the generic summary.
+    #[test]
+    fn reborn_failure_summary_treats_legacy_dead_categories_as_generic() {
+        assert_eq!(
+            reborn_failure_summary_for_category(Some("heartbeat_failed")),
+            "The run failed before producing a reply."
+        );
+        assert_eq!(
+            reborn_failure_summary_for_category(Some("driver_panic")),
             "The run failed before producing a reply."
         );
     }

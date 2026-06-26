@@ -31,6 +31,7 @@ pub(super) fn blocked_kind(kind: GateKind) -> LoopBlockedKind {
         GateKind::Auth => LoopBlockedKind::Auth,
         GateKind::Resource => LoopBlockedKind::Resource,
         GateKind::AwaitDependentRun => LoopBlockedKind::AwaitDependentRun,
+        GateKind::ExternalTool => LoopBlockedKind::ExternalTool,
     }
 }
 
@@ -40,6 +41,7 @@ pub(super) fn loop_gate_kind(kind: GateKind) -> LoopGateKind {
         GateKind::Auth => LoopGateKind::Auth,
         GateKind::Resource => LoopGateKind::ResourceWait,
         GateKind::AwaitDependentRun => LoopGateKind::AwaitDependentRun,
+        GateKind::ExternalTool => LoopGateKind::ExternalTool,
     }
 }
 
@@ -64,6 +66,9 @@ pub(super) fn capability_batch_counts(outcomes: &[CapabilityOutcome]) -> (u32, u
             CapabilityOutcome::ApprovalRequired { .. }
             | CapabilityOutcome::AuthRequired { .. }
             | CapabilityOutcome::ResourceBlocked { .. }
+            // ExternalToolPending: the run parks waiting for the client to submit
+            // tool output — a non-completing, non-failing, non-denied gate.
+            | CapabilityOutcome::ExternalToolPending { .. }
             | CapabilityOutcome::AwaitDependentRun { .. }
             // SpawnedProcess: treated as gated — it is a non-completing, non-failing, non-denied
             // outcome that defers completion to a background process. Grouped with gated to avoid
@@ -143,9 +148,9 @@ pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> Capability
         | CapabilityFailureKind::OutputTooLarge
         | CapabilityFailureKind::Process
         | CapabilityFailureKind::Resource => CapabilityErrorClass::OperationFailed,
-        CapabilityFailureKind::Authorization | CapabilityFailureKind::PolicyDenied => {
-            CapabilityErrorClass::PolicyDenied
-        }
+        CapabilityFailureKind::Authorization
+        | CapabilityFailureKind::GateDeclined
+        | CapabilityFailureKind::PolicyDenied => CapabilityErrorClass::PolicyDenied,
         CapabilityFailureKind::Internal => CapabilityErrorClass::Internal,
         CapabilityFailureKind::Dispatcher => CapabilityErrorClass::Permanent,
         CapabilityFailureKind::Cancelled => CapabilityErrorClass::Permanent,
@@ -161,9 +166,9 @@ pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> Capability
 pub(super) fn capability_failure_kind(kind: &CapabilityFailureKind) -> LoopFailureKind {
     match kind {
         CapabilityFailureKind::InvalidInput => LoopFailureKind::ModelError,
-        CapabilityFailureKind::Authorization | CapabilityFailureKind::PolicyDenied => {
-            LoopFailureKind::PolicyDenied
-        }
+        CapabilityFailureKind::Authorization
+        | CapabilityFailureKind::GateDeclined
+        | CapabilityFailureKind::PolicyDenied => LoopFailureKind::PolicyDenied,
         _ => LoopFailureKind::CapabilityProtocolError,
     }
 }

@@ -207,6 +207,12 @@ pub(crate) async fn bootstrap_nearai_mcp(
     let Some(config) = config else {
         return Ok(NearAiMcpBootstrapOutcome::NotConfigured);
     };
+    if !durable_product_auth_storage_enabled() {
+        tracing::debug!(
+            "NEAR AI MCP credentials are present, but durable product-auth secret storage is not enabled; skipping auto-activation"
+        );
+        return Ok(NearAiMcpBootstrapOutcome::SkippedUnsupportedStorage);
+    }
     config
         .endpoint()
         .map_err(|error| RebornBuildError::InvalidConfig {
@@ -355,6 +361,7 @@ pub(crate) enum NearAiMcpBootstrapOutcome {
     NotConfigured,
     SkippedDisabled,
     SkippedUnavailable,
+    SkippedUnsupportedStorage,
     SkippedPreservedRemoved,
     SkippedNonActivatable,
     ReusedCredential,
@@ -368,6 +375,7 @@ impl NearAiMcpBootstrapOutcome {
             Self::NotConfigured => tracing::debug!("NEAR AI MCP bootstrap is not configured"),
             Self::SkippedDisabled
             | Self::SkippedUnavailable
+            | Self::SkippedUnsupportedStorage
             | Self::SkippedPreservedRemoved
             | Self::SkippedNonActivatable => tracing::debug!(
                 outcome = ?self,
@@ -378,6 +386,10 @@ impl NearAiMcpBootstrapOutcome {
             }
         }
     }
+}
+
+pub(crate) fn durable_product_auth_storage_enabled() -> bool {
+    cfg!(any(feature = "libsql", feature = "postgres"))
 }
 
 fn nearai_mcp_bootstrap_account_is_usable(

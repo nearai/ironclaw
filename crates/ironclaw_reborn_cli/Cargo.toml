@@ -42,8 +42,9 @@ webui-v2-beta = [
     "dep:async-trait",
 ]
 # Compile in the Slack Events API host-beta mount for `ironclaw-reborn serve`.
-# Still requires `[slack].enabled = true` at runtime before the route is
-# mounted; ambient Slack env vars alone do not enable it.
+# Still requires effective Slack enablement at runtime before the route is
+# mounted: either `[slack].enabled = true` or
+# `IRONCLAW_REBORN_SLACK_ENABLED=true`.
 slack-v2-host-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/slack-v2-host-beta",

@@ -1,5 +1,5 @@
 import { React } from "../../../lib/html.js";
-import { gateFromEvent } from "./gates.js";
+import { gateFromEvent, gateFromProjectionGate } from "./gates.js";
 import {
   toolCardFromActivity,
   toolCardFromPreview,
@@ -12,17 +12,16 @@ import {
 
 // Handler factory for v2 `WebChatV2EventFrame` events.
 //
-// The current local-dev runtime ONLY emits `projection_snapshot` and
-// `projection_update` over the WebUI stream (the typed `accepted` /
-// `running` / `final_reply` / `gate` / `failed` variants are
-// scaffolded in the schema but never published by the runtime-owned
-// projection bridge today). The handler therefore drives the UI off
-// the projection items rather than the typed variants — see
+// The current local-dev runtime primarily emits `projection_snapshot` and
+// `projection_update` over the WebUI stream. Rich `gate` / `auth_required`
+// prompt payloads may also arrive for a blocked turn, but the projection gate
+// item is the rebuildable source of the pending gate identity. The handler
+// therefore drives long-lived UI state off projection items — see
 // `ironclaw_product_adapters::outbound::ProductProjectionItem` for
 // the item shapes.
 //
 // Items are externally-tagged enums so each entry carries exactly
-// one of `{ run_status, thinking, text, gate }` as a sub-object.
+// one renderable sub-object such as `{ run_status, thinking, text, gate }`.
 //
 // Status mapping (from `RunStatus.status`):
 //   "queued" | "running"           → processing
@@ -50,10 +49,9 @@ export function useChatEvents({
   // input/output previews are recovered from the durable record even when
   // the run failed, was cancelled, or needs recovery.
   const settledRunsRef = React.useRef(new Set());
-  // Last `run_status.run_id` we've observed, persisted across event
-  // frames. Used by `applyProjectionItems` to correlate an `item.gate`
-  // (which doesn't carry `run_id`) with the active run so resolveGate
-  // can build its `/runs/{run_id}/gates/{gate_ref}/resolve` URL.
+  // Last `run_status.run_id` we've observed, persisted across event frames.
+  // Used to reject stale terminal statuses after a locally resolved gate
+  // resumes a newer active run.
   const latestRunIdRef = React.useRef(null);
   const promptRunIdRef = React.useRef(null);
 
@@ -82,7 +80,7 @@ export function useChatEvents({
             latestRunIdRef.current = progress.turn_run_id;
             setActiveRun?.((current) =>
               current && current.runId === progress.turn_run_id
-                ? current
+                ? { ...current, status: "running" }
                 : { runId: progress.turn_run_id, threadId, status: "running" },
             );
             clearPendingNonAuthGateForRun(
@@ -247,6 +245,14 @@ const PROMPT_RUN_STATUSES = new Set([
   "blocked_auth",
   "blocked_approval",
   "blocked_resource",
+  "blocked_dependent_run",
+]);
+const GATE_ACTIVE_RUN_STATUSES = new Set([
+  "awaiting_gate",
+  "blocked_auth",
+  "blocked_approval",
+  "blocked_resource",
+  "blocked_dependent_run",
 ]);
 
 function clearPendingGateForRun(setPendingGate, runId, promptRunIdRef) {
@@ -270,6 +276,39 @@ function clearPendingNonAuthGateForRun(setPendingGate, runId, promptRunIdRef) {
   });
 }
 
+function isObsoleteProjectionGate(
+  activeRunRef,
+  pendingGate,
+  batchRunStatusByRunId,
+  latestRunIdRef,
+  stalePromptRunIds,
+  promptRunIdRef,
+) {
+  const runId = pendingGate?.runId || null;
+  if (!runId) return true;
+  if (stalePromptRunIds?.has(runId)) {
+    return true;
+  }
+  const batchStatus = batchRunStatusByRunId?.get(runId);
+  if (batchStatus) return !GATE_ACTIVE_RUN_STATUSES.has(batchStatus);
+  const activeRun = activeRunRef?.current;
+  const activeRunId = activeRun?.runId || latestRunIdRef?.current || null;
+  if (activeRunId && runId !== activeRunId) return true;
+  const activePromptRunIsCurrent = promptRunIdRef?.current === activeRunId;
+  if (
+    activeRunId &&
+    runId === activeRunId &&
+    !activePromptRunIsCurrent &&
+    activeRun?.status &&
+    !GATE_ACTIVE_RUN_STATUSES.has(activeRun.status)
+  ) {
+    return true;
+  }
+  if (!activeRun?.runId) return false;
+  if (!activeRun.status) return false;
+  return !GATE_ACTIVE_RUN_STATUSES.has(activeRun.status);
+}
+
 function applyProjectionItems({
   items,
   threadId,
@@ -285,15 +324,28 @@ function applyProjectionItems({
   locallyResolvedGatesRef,
   toolActivityStateRef,
 }) {
-  // Snapshot the run_id surfaced by the most recent `run_status` item
-  // we've seen — either earlier in this same items batch, or carried
-  // over from a prior frame via `latestRunIdRef`. `item.gate` doesn't
-  // include a `run_id`, but resolveGate at the v2 endpoint needs both
-  // `run_id` + `gate_ref` in the URL, so we have to correlate the
-  // gate back to whichever run is currently active. setActiveRun is a
-  // React setter and doesn't update synchronously inside this loop;
-  // tracking the value locally lets the gate handler that runs later
-  // in the same iteration see the run we just learned about.
+  // Snapshot the most recent run id so stale terminal run_status frames can
+  // be filtered while a locally resolved gate is resuming a newer run.
+  const batchRunStatusByRunId = new Map();
+  const stalePromptRunIds = new Set();
+  const activeRunAtBatchStart = activeRunRef?.current || null;
+  const protectedRunId =
+    activeRunAtBatchStart?.runId || latestRunIdRef?.current || null;
+  for (const item of items) {
+    const runStatus = item.run_status;
+    if (runStatus?.run_id && runStatus.status) {
+      batchRunStatusByRunId.set(runStatus.run_id, runStatus.status);
+      if (
+        protectedRunId &&
+        protectedRunId !== runStatus.run_id &&
+        activeRunAtBatchStart?.status &&
+        !TERMINAL_RUN_STATUSES.has(activeRunAtBatchStart.status) &&
+        PROMPT_RUN_STATUSES.has(runStatus.status)
+      ) {
+        stalePromptRunIds.add(runStatus.run_id);
+      }
+    }
+  }
   let activeRunId = latestRunIdRef?.current ?? null;
   for (const item of items) {
     if (item.run_status) {
@@ -320,6 +372,9 @@ function applyProjectionItems({
         runId && PROMPT_RUN_STATUSES.has(status)
           ? locallyResolvedStateForRun(locallyResolvedGatesRef, runId)
           : null;
+      if (runId && stalePromptRunIds.has(runId)) {
+        continue;
+      }
       if (isStaleLocalRunStatus) {
         continue;
       }
@@ -490,25 +545,33 @@ function applyProjectionItems({
     }
 
     if (item.gate) {
-      // ProductProjectionItem::Gate carries gate_ref but not run_id, so we correlate to the
-      // active run (snapshotted above). Without a run_id the
-      // pendingGate is unusable (`resolveGate` would 400 at the path
-      // construction in `api.js`), so skip emitting the gate entirely
-      // if no run is active yet — a later projection_update will
-      // re-surface it once a run_status arrives.
+      const pendingGate = gateFromProjectionGate(item.gate);
+      const runId = pendingGate?.runId || null;
       if (
-        activeRunId &&
-        promptRunIdRef?.current === activeRunId &&
-        !isLocallyResolvedGate(locallyResolvedGatesRef, activeRunId, item.gate.gate_ref)
+        runId &&
+        !isObsoleteProjectionGate(
+          activeRunRef,
+          pendingGate,
+          batchRunStatusByRunId,
+          latestRunIdRef,
+          stalePromptRunIds,
+          promptRunIdRef,
+        ) &&
+        !isLocallyResolvedGate(locallyResolvedGatesRef, runId, pendingGate.gateRef)
       ) {
-        setPendingGate((current) => current || {
-          kind: "gate",
-          runId: activeRunId,
-          gateRef: item.gate.gate_ref,
-          headline: item.gate.headline,
-          body: "",
-          allowAlways: item.gate.allow_always === true,
-        });
+        ensureGateToolActivity(setMessages, pendingGate, toolActivityStateRef);
+        setPendingGate((current) => current || pendingGate);
+        setActiveRun?.((current) =>
+          current && current.runId === runId
+            ? {
+                ...current,
+                status: GATE_ACTIVE_RUN_STATUSES.has(current.status)
+                  ? current.status
+                  : "awaiting_gate",
+              }
+            : { runId, threadId, status: "awaiting_gate" },
+        );
+        if (promptRunIdRef) promptRunIdRef.current = runId;
         setIsProcessing(false);
       }
     }

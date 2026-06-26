@@ -10,43 +10,10 @@ use ironclaw_host_runtime::{default_host_api_contract_registry, default_host_por
 type GithubSupportResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 pub fn capability_ids() -> GithubSupportResult<Vec<CapabilityId>> {
-    Ok(vec![
-        CapabilityId::new("github.get_repo")?,
-        CapabilityId::new("github.create_repo")?,
-        CapabilityId::new("github.list_issues")?,
-        CapabilityId::new("github.create_issue")?,
-        CapabilityId::new("github.get_issue")?,
-        CapabilityId::new("github.list_issue_comments")?,
-        CapabilityId::new("github.create_issue_comment")?,
-        CapabilityId::new("github.comment_issue")?,
-        CapabilityId::new("github.list_pull_requests")?,
-        CapabilityId::new("github.create_pull_request")?,
-        CapabilityId::new("github.get_pull_request")?,
-        CapabilityId::new("github.get_pull_request_files")?,
-        CapabilityId::new("github.create_pr_review")?,
-        CapabilityId::new("github.list_pull_request_comments")?,
-        CapabilityId::new("github.reply_pull_request_comment")?,
-        CapabilityId::new("github.get_pull_request_reviews")?,
-        CapabilityId::new("github.get_combined_status")?,
-        CapabilityId::new("github.merge_pull_request")?,
-        CapabilityId::new("github.get_authenticated_user")?,
-        CapabilityId::new("github.list_repos")?,
-        CapabilityId::new("github.search_repositories")?,
-        CapabilityId::new("github.search_code")?,
-        CapabilityId::new("github.search_issues")?,
-        CapabilityId::new("github.search_issues_pull_requests")?,
-        CapabilityId::new("github.list_branches")?,
-        CapabilityId::new("github.create_branch")?,
-        CapabilityId::new("github.get_file_content")?,
-        CapabilityId::new("github.create_or_update_file")?,
-        CapabilityId::new("github.delete_file")?,
-        CapabilityId::new("github.list_releases")?,
-        CapabilityId::new("github.create_release")?,
-        CapabilityId::new("github.trigger_workflow")?,
-        CapabilityId::new("github.get_workflow_runs")?,
-        CapabilityId::new("github.fork_repo")?,
-        CapabilityId::new("github.handle_webhook")?,
-    ])
+    Ok(extension_registry()?
+        .capabilities()
+        .map(|descriptor| descriptor.id.clone())
+        .collect())
 }
 
 pub fn effect_kinds() -> Vec<EffectKind> {

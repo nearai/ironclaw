@@ -35,6 +35,7 @@ impl EventPublishingTurnRunTransitionPort {
                     TurnBlockedGateMetadata {
                         gate_ref,
                         gate_kind,
+                        activity_id: state.blocked_activity_id,
                         credential_requirements: state.credential_requirements.clone(),
                     }
                 })
@@ -64,7 +65,8 @@ impl EventPublishingTurnRunTransitionPort {
             TurnStatus::BlockedApproval
             | TurnStatus::BlockedAuth
             | TurnStatus::BlockedResource
-            | TurnStatus::BlockedDependentRun => TurnEventKind::Blocked,
+            | TurnStatus::BlockedDependentRun
+            | TurnStatus::BlockedExternalTool => TurnEventKind::Blocked,
             TurnStatus::Completed => TurnEventKind::Completed,
             TurnStatus::Cancelled => TurnEventKind::Cancelled,
             TurnStatus::Failed => TurnEventKind::Failed,

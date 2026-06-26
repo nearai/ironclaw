@@ -140,12 +140,14 @@ export function SkillCard({
               size="sm"
               disabled=${isSettingAutoActivate}
               title=${autoActivate
-                ? "Auto-activation on — runs on matching requests. Click to make it explicit-only (/name)."
-                : "Explicit-only — runs only when you type /name. Click to enable auto-activation."}
+                ? t("skills.autoActivateOnTitle")
+                : t("skills.autoActivateOffTitle")}
               onClick=${() => onSetAutoActivate(name, !autoActivate)}
             >
               <${Icon} name=${autoActivate ? "check" : "close"} className="h-4 w-4" />
-              ${autoActivate ? "Auto-activate: On" : "Auto-activate: Off"}
+              ${autoActivate
+                ? t("skills.autoActivateOnLabel")
+                : t("skills.autoActivateOffLabel")}
             <//>
           `}
           ${canDelete && !isEditing &&

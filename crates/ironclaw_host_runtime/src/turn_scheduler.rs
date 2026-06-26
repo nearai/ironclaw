@@ -643,8 +643,10 @@ fn spawn_executor_task(
                 AssertUnwindSafe(executor.execute_claimed_run(claimed, Arc::clone(&transitions)))
                     .catch_unwind();
             tokio::pin!(executor_result);
+            let mut heartbeats = InFlightHeartbeat::new();
             let outcome = loop {
                 tokio::select! {
+                    biased;
                     result = &mut executor_result => {
                         break match result {
                             Ok(Ok(())) => ExecutorTaskOutcome::Completed,
@@ -656,14 +658,17 @@ fn spawn_executor_task(
                             )),
                         };
                     }
-                    _ = heartbeat_tick.tick() => {
-                        if !heartbeat_claimed_run(
+                    _ = heartbeat_tick.tick(), if heartbeats.is_idle() => {
+                        heartbeats.spawn(
                             Arc::clone(&transitions),
                             recovery_run_id,
                             recovery_runner_id,
                             recovery_lease_token,
                             runner_heartbeat_interval,
-                        ).await {
+                        );
+                    }
+                    Some(heartbeat) = heartbeats.join(), if heartbeats.is_running() => {
+                        if !heartbeat_succeeded(heartbeat) {
                             break ExecutorTaskOutcome::TerminalFailure(scheduler_failure(
                                 "scheduler_heartbeat_failed",
                             ));
@@ -671,6 +676,7 @@ fn spawn_executor_task(
                     }
                 }
             };
+            heartbeats.abort_all();
 
             match outcome {
                 ExecutorTaskOutcome::Completed => {}
@@ -697,6 +703,57 @@ fn spawn_executor_task(
         }
         .instrument(run_span),
     );
+}
+
+struct InFlightHeartbeat {
+    task: Option<JoinHandle<bool>>,
+}
+
+impl InFlightHeartbeat {
+    fn new() -> Self {
+        Self { task: None }
+    }
+
+    fn is_idle(&self) -> bool {
+        self.task.is_none()
+    }
+
+    fn is_running(&self) -> bool {
+        self.task.is_some()
+    }
+
+    fn spawn(
+        &mut self,
+        transitions: Arc<dyn TurnRunTransitionPort>,
+        run_id: ironclaw_turns::TurnRunId,
+        runner_id: ironclaw_turns::TurnRunnerId,
+        lease_token: ironclaw_turns::TurnLeaseToken,
+        timeout_after: Duration,
+    ) {
+        debug_assert!(self.task.is_none());
+        // Heartbeat transitions may wait on the same store lock currently held by
+        // the executor. Run them in child tasks so the executor future keeps polling.
+        self.task = Some(tokio::spawn(async move {
+            heartbeat_claimed_run(transitions, run_id, runner_id, lease_token, timeout_after).await
+        }));
+    }
+
+    async fn join(&mut self) -> Option<Result<bool, tokio::task::JoinError>> {
+        let task = self.task.as_mut()?;
+        let result = task.await;
+        self.task = None;
+        Some(result)
+    }
+
+    fn abort_all(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+fn heartbeat_succeeded(result: Result<bool, tokio::task::JoinError>) -> bool {
+    matches!(result, Ok(true))
 }
 
 async fn heartbeat_claimed_run(
