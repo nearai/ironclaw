@@ -223,6 +223,39 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the chat-action port in the
   Reborn WebUI v2 Playwright job.
 
+### Step 6: Legacy Approval UI Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_approval.py`.
+
+Ported the browser-visible approval-card behavior from legacy
+`test_tool_approval.py` to Reborn's WebChat v2 gate surface:
+
+- approval gate SSE frames render the Reborn approval card;
+- tool name, reason, structured details, and long command payloads render in
+  the card;
+- long command details start collapsed and can be expanded with the visible
+  `View full command` action;
+- approve, deny, and approve-and-always all post to the v2
+  `/api/webchat/v2/threads/{thread}/runs/{run}/gates/{gate}/resolve` endpoint;
+- the always-allow checkbox changes the primary button action from normal
+  approve to approve-and-always.
+
+Behavior adjustment:
+
+- Legacy v1 posted approval decisions through `/api/chat/approval` and rendered
+  resolved text inside the old `.approval-card` DOM. Reborn resolves approvals
+  through the run-scoped gate endpoint and removes the pending card after a
+  terminal resolution response. The port asserts the v2 request contract and
+  hidden-card outcome instead of legacy resolved-copy text.
+- Reborn's v1-compatible `approve(requestId, action, kind)` wrapper always
+  includes `always: false` for normal approve/deny and `always: true` only for
+  approve-and-always. The browser port records that shape explicitly.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the approval UI port in the
+  Reborn WebUI v2 Playwright job.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -230,7 +263,8 @@ Not yet ported:
 - remaining legacy chat UI affordances that have Reborn equivalents;
 - legacy SSE reconnect/history-reload edge cases;
 - DOM pruning/resource-limit scenarios;
-- tool approval scenarios;
+- deeper tool approval scenarios that need real Reborn runtime/tool execution,
+  persistence, or recovery beyond the browser approval-card contract;
 - skills/settings/extension lifecycle scenarios;
 - OAuth/product-auth flows;
 - Slack/Telegram/channel pairing scenarios;
