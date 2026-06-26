@@ -14,7 +14,7 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     CheckpointStateStore, GetCheckpointStateRequest, GetLoopCheckpointRequest, GetRunStateRequest,
     LoopBlockedKind, LoopCheckpointKind, LoopMessageRef, LoopResultRef, TurnError, TurnId,
-    TurnRunId, TurnScope, TurnStateStore, TurnStatus,
+    TurnRunId, TurnScope, TurnStateStore, TurnStatus, run_profile::LoopCheckpointStateRef,
 };
 
 pub use ironclaw_turns::loop_exit::{
@@ -400,12 +400,13 @@ where
         if checkpoint.kind != LoopCheckpointKind::Final {
             return Ok(false);
         }
+        let state_ref = checkpoint_state_store_ref(request.run_id, &checkpoint.state_ref)?;
         let Some(checkpoint_state) = checkpoint_state_store
             .get_checkpoint_state(GetCheckpointStateRequest {
                 scope: request.scope.clone(),
                 turn_id: request.turn_id,
                 run_id: request.run_id,
-                state_ref: checkpoint.state_ref,
+                state_ref,
                 schema_id: checkpoint.schema_id,
                 schema_version: checkpoint.schema_version,
                 kind: checkpoint.kind,
@@ -530,6 +531,23 @@ fn ensure_thread_scope_matches_turn_scope(
 fn message_id_from_ref(message_ref: &LoopMessageRef) -> Option<ThreadMessageId> {
     let raw = message_ref.as_str().strip_prefix("msg:")?;
     ThreadMessageId::parse(raw).ok()
+}
+
+fn checkpoint_state_store_ref(
+    run_id: TurnRunId,
+    state_ref: &LoopCheckpointStateRef,
+) -> Result<LoopCheckpointStateRef, TurnError> {
+    let run_scoped_prefix = format!("checkpoint:{run_id}:");
+    if let Some(token) = state_ref.as_str().strip_prefix(&run_scoped_prefix) {
+        return LoopCheckpointStateRef::new(format!("checkpoint:{token}")).map_err(|reason| {
+            TurnError::InvalidRequest {
+                reason: format!(
+                    "could not rebuild store key from run-scoped checkpoint ref: {reason}"
+                ),
+            }
+        });
+    }
+    Ok(state_ref.clone())
 }
 
 fn verify_reply_message_ref(

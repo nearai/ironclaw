@@ -214,13 +214,19 @@ impl ExecutorStage<ModelInput> for ModelStage {
             }
         }
 
+        let failure_kind = state
+            .recent_failure_kinds
+            .iter()
+            .next_back()
+            .copied()
+            .unwrap_or(LoopFailureKind::DriverBug);
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
         Ok(ModelStep::Exit(failed_exit(
             ctx.host,
             checked.state,
-            LoopFailureKind::DriverBug,
+            failure_kind,
             Some(checked.checkpoint_id),
         )?))
     }

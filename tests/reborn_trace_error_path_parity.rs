@@ -14,7 +14,8 @@ use reborn_support::{
 };
 
 /// Exercises read_file with a missing `path` parameter, proving malformed real
-/// built-in tool input is persisted as a terminal Reborn run failure.
+/// built-in tool input is persisted as the model/tool-call failure instead of
+/// being overwritten by a generic driver protocol violation.
 #[tokio::test]
 async fn reborn_trace_error_path_parity() {
     let read_file = CapabilityId::new(READ_FILE_CAPABILITY_ID).expect("valid capability id");
@@ -46,7 +47,7 @@ async fn reborn_trace_error_path_parity() {
         .expect("failed run");
     assert_eq!(
         state.failure.expect("failure category").category(),
-        "driver_protocol_violation"
+        "model_error"
     );
 
     let invocations = harness.capability_invocations();

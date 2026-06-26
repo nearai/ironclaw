@@ -852,7 +852,8 @@ impl RebornBinaryE2EHarness {
                 turn_state_for_evidence,
                 Arc::clone(&loop_checkpoint_store),
                 thread_scope.clone(),
-            ),
+            )
+            .with_checkpoint_state_store(checkpoint_state_store.clone()),
             loop_checkpoint_store: Arc::clone(&loop_checkpoint_store),
             accept_harness_blocked_evidence,
         });

@@ -103,15 +103,34 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         AgentLoopHostErrorKind::BudgetApprovalRequired => None,
         AgentLoopHostErrorKind::Cancelled => None,
         AgentLoopHostErrorKind::CredentialUnavailable => None,
+        // The model gateway uses InvalidInvocation for provider-emitted tool
+        // calls that fail capability schema validation. That is invalid model
+        // output, not a host transport/protocol outage, so surface it as
+        // model_error. Other InvalidInvocation cases are request/driver bugs
+        // and should keep the diagnostic host-unavailable path.
+        AgentLoopHostErrorKind::InvalidInvocation
+            if is_provider_tool_schema_validation_error(&error.safe_summary) =>
+        {
+            Some(ModelErrorClass::ContentFiltered)
+        }
+        AgentLoopHostErrorKind::InvalidInvocation => None,
         AgentLoopHostErrorKind::Unauthorized
         | AgentLoopHostErrorKind::ScopeMismatch
         | AgentLoopHostErrorKind::StaleSurface
-        | AgentLoopHostErrorKind::InvalidInvocation
         | AgentLoopHostErrorKind::Invalid
         | AgentLoopHostErrorKind::PolicyDenied
         | AgentLoopHostErrorKind::CheckpointRejected
         | AgentLoopHostErrorKind::TranscriptWriteFailed => None,
     }
+}
+
+fn is_provider_tool_schema_validation_error(summary: &str) -> bool {
+    let summary = summary.to_ascii_lowercase();
+    summary.contains("schema validation")
+        && (summary.contains("provider")
+            || summary.contains("tool")
+            || summary.contains("capability")
+            || summary.contains("arguments"))
 }
 
 pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecutorError {
@@ -218,5 +237,28 @@ mod tests {
             capability_failure_kind(&CapabilityFailureKind::PolicyDenied),
             LoopFailureKind::PolicyDenied
         );
+    }
+
+    #[test]
+    fn provider_tool_schema_failure_is_model_error() {
+        let error = AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "provider tool call failed schema validation",
+        );
+
+        assert_eq!(
+            model_error_class(&error),
+            Some(ModelErrorClass::ContentFiltered)
+        );
+    }
+
+    #[test]
+    fn non_tool_invalid_invocation_is_not_model_error() {
+        let error = AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "model request does not match the host-built prompt bundle",
+        );
+
+        assert_eq!(model_error_class(&error), None);
     }
 }
