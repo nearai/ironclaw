@@ -222,6 +222,12 @@ async fn require_approval_for_profile_policy(
     //    must beat explicit ask_each_time and hard-floor gates: those settings
     //    require a fresh human approval for each new invocation, but the lease
     //    is the durable proof that this invocation was just approved.
+    //
+    // Fingerprinted approval leases are not ambient grants: CapabilityHost
+    // excludes them from normal grant loading and injects this grant into the
+    // resume context only after validating the run's approval_request_id and
+    // invocation fingerprint. This predicate therefore recognizes the already
+    // selected resume lease; it is not the lease lookup boundary.
     if has_matching_one_shot_approval_grant(context, descriptor, &gate_effects) {
         return decision;
     }

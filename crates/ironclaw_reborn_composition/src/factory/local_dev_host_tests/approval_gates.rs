@@ -370,7 +370,31 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
         "explicit ask_each_time must create a pending approval"
     );
 
-    ApprovalResolver::new(
+    let premature_resume = host_runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context.clone(),
+            gate.approval_request_id,
+            capability_id.clone(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision(echo_dispatch_allowed_effects()),
+        ))
+        .await
+        .expect("pending echo approval resume resolves to non-completion");
+    assert!(
+        !matches!(premature_resume, RuntimeCapabilityOutcome::Completed(_)),
+        "pending ask_each_time approval must not allow echo resume, got {premature_resume:?}"
+    );
+    assert!(
+        local_runtime
+            .capability_leases
+            .leases_for_scope(&context.resource_scope)
+            .await
+            .is_empty(),
+        "pending approval must not issue an approval lease"
+    );
+
+    let lease = ApprovalResolver::new(
         local_runtime.approval_requests.as_ref(),
         local_runtime.capability_leases.as_ref(),
     )
@@ -381,6 +405,22 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
     )
     .await
     .expect("approval issues echo lease");
+    let approved_record = local_runtime
+        .approval_requests
+        .get(&context.resource_scope, gate.approval_request_id)
+        .await
+        .expect("approval record lookup")
+        .expect("approval record exists");
+    assert_eq!(approved_record.status, ApprovalStatus::Approved);
+    assert!(
+        lease.invocation_fingerprint.is_some(),
+        "approval lease must be tied to the approved invocation fingerprint"
+    );
+    assert_eq!(
+        lease.invocation_fingerprint.as_ref(),
+        approved_record.request.invocation_fingerprint.as_ref(),
+        "approval lease fingerprint must match the approved request"
+    );
 
     let resumed = host_runtime
         .resume_capability(RuntimeCapabilityResumeRequest::new(
