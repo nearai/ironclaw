@@ -125,7 +125,7 @@ impl WebUiAuthenticatedCaller {
     }
 
     pub fn actor(&self) -> TurnActor {
-        TurnActor::new(self.user_id.clone())
+        TurnActor::new(self.user_id.clone()).with_role(self.role)
     }
 
     pub fn turn_scope(&self, thread_id: ThreadId) -> TurnScope {

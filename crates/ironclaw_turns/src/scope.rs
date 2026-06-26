@@ -1,4 +1,4 @@
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId, UserRole};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -127,11 +127,29 @@ impl TurnScope {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TurnActor {
     pub user_id: UserId,
+    /// Authority role of the acting user. Defaults to the least-privilege
+    /// [`UserRole::Member`] so legacy run-context rows (and channel/non-WebUI
+    /// actors that do not resolve a role) rehydrate fail-closed. The WebUI
+    /// inbound path carries the authenticated caller's resolved role through
+    /// [`TurnActor::with_role`].
+    #[serde(default)]
+    pub role: UserRole,
 }
 
 impl TurnActor {
     pub fn new(user_id: UserId) -> Self {
-        Self { user_id }
+        Self {
+            user_id,
+            role: UserRole::Member,
+        }
+    }
+
+    /// Attach the acting user's authority role (the default from
+    /// [`TurnActor::new`] is the least-privilege [`UserRole::Member`]).
+    #[must_use]
+    pub fn with_role(mut self, role: UserRole) -> Self {
+        self.role = role;
+        self
     }
 }
 
@@ -199,6 +217,43 @@ mod tests {
                 user: actor.user_id.clone()
             }
         );
+    }
+
+    #[test]
+    fn turn_actor_defaults_role_to_member() {
+        let actor = TurnActor::new(UserId::from_trusted("user:default".to_string()));
+        assert_eq!(actor.role, UserRole::Member);
+        assert_eq!(UserRole::default(), UserRole::Member);
+    }
+
+    #[test]
+    fn turn_actor_with_role_overrides_default() {
+        let actor = TurnActor::new(UserId::from_trusted("user:owner".to_string()))
+            .with_role(UserRole::Owner);
+        assert_eq!(actor.role, UserRole::Owner);
+    }
+
+    #[test]
+    fn turn_actor_legacy_json_without_role_deserializes_to_member() {
+        // Wire-stable rule (types.md): a persisted/in-flight TurnActor row that
+        // predates the `role` field must rehydrate fail-closed to Member.
+        let actor: TurnActor = serde_json::from_value(serde_json::json!({
+            "user_id": "user:legacy"
+        }))
+        .expect("legacy actor without role should deserialize");
+
+        assert_eq!(actor.user_id.as_str(), "user:legacy");
+        assert_eq!(actor.role, UserRole::Member);
+    }
+
+    #[test]
+    fn turn_actor_roundtrips_role() {
+        let actor = TurnActor::new(UserId::from_trusted("user:admin".to_string()))
+            .with_role(UserRole::Admin);
+        let json = serde_json::to_value(&actor).expect("serialize actor");
+        let restored: TurnActor = serde_json::from_value(json).expect("deserialize actor");
+        assert_eq!(restored, actor);
+        assert_eq!(restored.role, UserRole::Admin);
     }
 
     #[test]
