@@ -1316,6 +1316,57 @@ Behavior adjustment:
   the branch should keep Reborn tests focused on the v2 surfaces that are
   implemented today.
 
+### Step 36: Legacy Slack, Telegram, and Channel Approval Review
+
+Reviewed legacy `test_channel_approval_gates.py`, `test_slack_e2e.py`,
+`test_telegram_e2e.py`, `test_telegram_hot_activation.py`,
+`test_telegram_pairing_chat_claim.py`, and `test_telegram_token_validation.py`.
+
+Already-covered functional Reborn behavior:
+
+- Reborn WebChat v2 approval cards and gate-resolution requests are covered by
+  `test_reborn_webui_v2_legacy_approval.py`;
+- Reborn product-workflow contract tests cover v2 gate resolution, scoped
+  approval fallback, automation-trigger approval fallback, and operator approval
+  config persistence;
+- Reborn Slack personal proof-code connect/redeem behavior is covered by the
+  migrated channel-connect Playwright test and composition route tests;
+- Reborn extension setup/configure modal behavior, including Telegram token
+  field preservation, is covered by the migrated extensions tests;
+- Slack and Telegram v2 adapter crates carry parser/rendering/authentication
+  unit and contract coverage for their current Reborn adapter boundaries.
+
+Current blocker:
+
+- legacy channel approval tests drive old Telegram/Slack WASM-channel webhook
+  fixtures, legacy `/api/chat/history` pending gates, text aliases (`yes`,
+  `no`, `always`) inside channel DMs, and cross-channel resolution through
+  legacy `/api/chat/approval`. Reborn WebChat v2 intentionally uses structured
+  gate cards and v2 gate-resolution endpoints, while product adapter approval
+  routing is covered below the browser layer;
+- legacy Slack tests assert the old channel server's URL verification, HMAC
+  headers, DM/app-mention parsing, bot/subtype ignores, thread replies, file
+  attachments, and malformed payload handling. Standalone Reborn WebUI v2 does
+  not expose that legacy Slack webhook server surface as Playwright API/UI;
+- legacy Telegram tests assert the old Telegram channel server's webhook/polling
+  modes, pairing, unauthorized-user rejection, group mention filtering, long
+  message chunking, Markdown fallback, document-download failure, and malformed
+  payload resilience. Current Reborn Telegram v2 behavior is implemented in
+  adapter crates and setup projections rather than an equivalent WebUI v2
+  browser surface;
+- legacy Telegram hot-activation and pairing-chat tests mix legacy extension
+  activation state, generic pairing APIs, and Telegram DM command interception.
+  Generic pairing APIs remain TODO-stubbed in the Reborn Extensions client as
+  documented earlier.
+
+Behavior adjustment:
+
+- The remaining Slack/Telegram/channel tests should be ported as Reborn adapter
+  or product-workflow contract tests where the v2 adapter boundary exists, not
+  as WebUI v2 Playwright tests against legacy webhook controllers. New browser
+  ports become appropriate only when standalone Reborn exposes channel-specific
+  setup, pairing, and webhook/DM approval flows as first-class v2 surfaces.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -1346,6 +1397,10 @@ Not yet ported:
   proof-code connect card, especially lower-level member/admin pairing APIs and
   Telegram-specific/generic pairing once standalone Reborn exposes matching
   non-stub v2 surfaces;
+- remaining Slack/Telegram/channel approval and webhook scenarios beyond
+  WebChat v2 approval cards and product-workflow/adapter contracts, because the
+  legacy tests target old Slack/Telegram WASM-channel controllers and text alias
+  behavior rather than current standalone Reborn WebUI v2 surfaces;
 - admin/operator flows, including Users, dashboard, and usage views, because the
   current Reborn Admin API adapter intentionally returns TODO stub payloads until
   v2 admin endpoints replace the legacy `/api/admin/*` contracts;
