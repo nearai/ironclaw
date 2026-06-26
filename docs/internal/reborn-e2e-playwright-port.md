@@ -2455,6 +2455,36 @@ Behavior adjustment:
   invariant and verifies the submit path targets the replacement
   `auth_request_ref`.
 
+### Step 81: Legacy Pairing Enter-Key Submit Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Completed the keyboard path from legacy `test_pairing_card_submit_success` for
+Reborn's channel pairing section:
+
+- opened a Telegram channel in `pairing_required` state;
+- filled the pairing-code input with padded lowercase text;
+- pressed Enter inside the input instead of clicking the submit button;
+- asserted the Reborn pairing redeem endpoint receives the trimmed uppercase
+  code;
+- asserted the pairing success state renders and clears the input.
+
+Behavior adjustment:
+
+- Legacy submitted to `/api/pairing/telegram/approve` with a thread id from the
+  chat card. Reborn's equivalent channel surface submits
+  `{ channel, code }` to `/api/webchat/v2/extensions/pairing/redeem`, so the
+  migrated test protects the keyboard affordance and Reborn DTO normalization
+  instead of the removed legacy chat-card payload.
+
+Issue found and fixed:
+
+- The shared Reborn `PairingSection` trimmed manually entered codes but did not
+  uppercase them before redeeming. The legacy gateway normalized pairing codes
+  with `trim().toUpperCase()`, and provider-issued pairing codes are rendered
+  uppercase. Reborn now applies the same normalization for both click-submit
+  and Enter-submit paths.
+
 ## Open Migration Buckets
 
 Not yet ported:

@@ -1383,6 +1383,56 @@ async def test_reborn_legacy_channel_pairing_redeems_trimmed_code(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_channel_pairing_enter_key_submits_code(
+    reborn_v2_server, reborn_v2_browser
+):
+    pairing_channel = {
+        **TELEGRAM_CHANNEL_SETUP,
+        "active": False,
+        "authenticated": True,
+        "activation_status": "pairing",
+        "onboarding_state": "pairing_required",
+    }
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[pairing_channel],
+        tab="channels",
+    )
+    try:
+        page = harness["page"]
+        redeem_requests: list[dict] = []
+
+        async def handle_redeem(route):
+            redeem_requests.append(json.loads(route.request.post_data or "{}"))
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "provider": "telegram",
+                        "provider_user_id": "987654321",
+                    }
+                ),
+            )
+
+        await page.route("**/api/webchat/v2/extensions/pairing/redeem", handle_redeem)
+
+        section = page.locator("[data-testid='pairing-section']").first
+        await expect(section).to_be_visible(timeout=5000)
+        input_field = section.locator("[data-testid='pairing-code-input']")
+        await input_field.fill("  pair-5678  ")
+        await input_field.press("Enter")
+
+        await expect(section.locator("[data-testid='pairing-success']")).to_contain_text(
+            "Pairing complete.", timeout=5000
+        )
+        await expect(input_field).to_have_value("")
+        assert redeem_requests == [{"channel": "telegram", "code": "PAIR-5678"}]
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_channel_pairing_failure_keeps_code_for_retry(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -1423,7 +1473,7 @@ async def test_reborn_legacy_channel_pairing_failure_keeps_code_for_retry(
             "Invalid pairing code", timeout=5000
         )
         await expect(input_field).to_have_value("bad-code")
-        assert redeem_requests == [{"channel": "telegram", "code": "bad-code"}]
+        assert redeem_requests == [{"channel": "telegram", "code": "BAD-CODE"}]
     finally:
         await harness["context"].close()
 

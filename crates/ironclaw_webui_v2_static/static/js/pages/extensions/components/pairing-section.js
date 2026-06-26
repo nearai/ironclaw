@@ -46,12 +46,12 @@ export function PairingSection({
   );
 
   const handleManualSubmit = React.useCallback(() => {
-    const trimmed = manualCode.trim();
-    if (!trimmed) return;
+    const normalizedCode = manualCode.trim().toUpperCase();
+    if (!normalizedCode) return;
     if (customRedeem) {
-      redeemMutation.mutate({ code: trimmed });
+      redeemMutation.mutate({ code: normalizedCode });
     } else {
-      pairing.approve({ code: trimmed });
+      pairing.approve({ code: normalizedCode });
     }
   }, [customRedeem, manualCode, pairing.approve, redeemMutation]);
 
