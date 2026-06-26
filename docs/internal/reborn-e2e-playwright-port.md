@@ -2096,6 +2096,29 @@ Behavior adjustment:
   the no-retention browser boundary while leaving full provider execution to
   lower-level Reborn/product-auth contracts.
 
+### Step 65: Legacy Notion OAuth Card Render Port
+
+Extended `test_reborn_webui_v2_legacy_auth_flows.py`.
+
+Ported the skipped browser render assertion from
+`test_v2_notion_mcp_oauth_flow.py` that an OAuth auth card visibly identifies
+the provider that requires authorization:
+
+- emitted a Reborn WebChat v2 `auth_required` prompt with
+  `challenge_kind=oauth_url`;
+- supplied Notion-specific provider, account label, headline, body, and HTTPS
+  authorization URL metadata;
+- asserted the Reborn OAuth gate renders the Notion headline/account label and
+  provider-specific authorization action.
+
+Behavior adjustment:
+
+- The legacy skipped test triggered a Notion MCP OAuth challenge through the old
+  gateway chat path. The Reborn port covers the browser projection contract for
+  provider-labelled OAuth gates. End-to-end MCP bearer injection remains a
+  lower-level runtime/product-auth concern until a standalone Reborn provider
+  harness exposes that full path through `/api/webchat/v2/*`.
+
 ## Open Migration Buckets
 
 Not yet ported:

@@ -175,7 +175,17 @@ async def _open_stubbed_auth_thread(reborn_v2_server, reborn_v2_browser):
     return context, page, manual_token_requests, resolve_requests
 
 
-async def _emit_auth_prompt(page, *, challenge_kind, gate_ref, authorization_url=None):
+async def _emit_auth_prompt(
+    page,
+    *,
+    challenge_kind,
+    gate_ref,
+    authorization_url=None,
+    provider="github",
+    account_label="GitHub PAT",
+    headline="Connect GitHub",
+    body="GitHub needs credentials before this run can continue.",
+):
     await page.evaluate(
         """
         (prompt) => window.__emitV2Sse("auth_required", { prompt })
@@ -185,12 +195,12 @@ async def _emit_auth_prompt(page, *, challenge_kind, gate_ref, authorization_url
             "auth_request_ref": gate_ref,
             "invocation_id": f"invoke-{gate_ref}",
             "challenge_kind": challenge_kind,
-            "provider": "github",
-            "account_label": "GitHub PAT",
+            "provider": provider,
+            "account_label": account_label,
             "authorization_url": authorization_url,
             "expires_at": "2026-06-26T12:00:00Z" if authorization_url else None,
-            "headline": "Connect GitHub",
-            "body": "GitHub needs credentials before this run can continue.",
+            "headline": headline,
+            "body": body,
         },
     )
 
@@ -355,6 +365,33 @@ async def test_reborn_legacy_oauth_prompt_opens_https_authorization_only(
         await expect(gate).to_be_hidden(timeout=5000)
         assert len(resolve_requests) == 1
         assert resolve_requests[0]["body"]["resolution"] == "cancelled"
+    finally:
+        await context.close()
+
+
+async def test_reborn_legacy_notion_oauth_prompt_renders_provider_label(
+    reborn_v2_server, reborn_v2_browser
+):
+    context, page, _manual_token_requests, _resolve_requests = await _open_stubbed_auth_thread(
+        reborn_v2_server, reborn_v2_browser
+    )
+    try:
+        await _emit_auth_prompt(
+            page,
+            challenge_kind="oauth_url",
+            gate_ref="notion-oauth-gate",
+            authorization_url="https://api.notion.com/v1/oauth/authorize?state=notion-state",
+            provider="notion",
+            account_label="Notion workspace",
+            headline="Connect Notion",
+            body="Notion needs authorization before this run can continue.",
+        )
+
+        gate = page.locator(SEL_V2["auth_gate_for"].format(kind="oauth_url")).first
+        await expect(gate).to_be_visible(timeout=5000)
+        await expect(gate).to_contain_text("Connect Notion")
+        await expect(gate).to_contain_text("Notion workspace")
+        await expect(gate).to_contain_text("Open Notion authorization")
     finally:
         await context.close()
 
