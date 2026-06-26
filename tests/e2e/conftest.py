@@ -609,6 +609,10 @@ async def reset_mock_llm_state(mock_llm_server):
             f"{mock_llm_server}/__mock/chat_requests/reset",
             timeout=10,
         )
+        await client.post(
+            f"{mock_llm_server}/__mock/capability_policy/reset",
+            timeout=10,
+        )
 
 
 @pytest.fixture(autouse=True)

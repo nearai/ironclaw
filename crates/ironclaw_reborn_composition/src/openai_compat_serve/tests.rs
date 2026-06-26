@@ -353,7 +353,12 @@ async fn openai_responses_wait_surfaces_pending_external_call_with_sibling_tool_
         fixture.threads.clone(),
         Arc::new(StaticProjectionStream::new(vec![])),
         catalog,
-    );
+    )
+    .with_turn_coordinator(Arc::new(StaticTurnCoordinator::new(turn_run_state(
+        &fixture.projection_read,
+        run_id,
+        TurnStatus::BlockedExternalTool,
+    ))));
     reader.poll_interval = Duration::from_millis(1);
 
     let projection = reader
@@ -451,12 +456,10 @@ async fn external_tool_store_accepts_output_for_pending_call_id() {
         .await
         .expect("pending call id is accepted");
 
-    assert!(
-        catalog
-            .pending_calls(run_id)
-            .await
-            .expect("pending")
-            .is_empty()
+    assert_eq!(
+        catalog.pending_calls(run_id).await.expect("pending").len(),
+        1,
+        "pending call is cleared only after the resumed capability result is written"
     );
     assert_eq!(
         catalog
@@ -509,6 +512,30 @@ fn external_tool_resume_idempotency_key_is_stable_and_gate_scoped() {
     assert_ne!(first.as_str(), other.as_str());
     assert!(first.as_str().starts_with("openai-compat-ext-resume-v1-"));
     assert!(!first.as_str().contains(gate_ref.as_str()));
+}
+
+#[tokio::test]
+async fn external_tool_resume_rejects_non_blocked_running_run() {
+    let fixture = ResponseReaderFixture::new("resume-running").await;
+    let run_id = TurnRunId::new();
+    let resume = OpenAiCompatRuntimeExternalToolResume {
+        coordinator: Arc::new(StaticTurnCoordinator::new(turn_run_state(
+            &fixture.projection_read,
+            run_id,
+            TurnStatus::Running,
+        ))),
+    };
+
+    let error = resume
+        .resume_external_tool_run(OpenAiCompatExternalToolResumeRequest {
+            actor_scope: fixture.actor_scope.clone(),
+            run_ref: OpenAiCompatTurnRunRef::new(run_id.to_string()).expect("run ref"),
+            thread_id: fixture.thread_id.as_str().to_string(),
+        })
+        .await
+        .expect_err("running run must not accept external tool resume");
+
+    assert_eq!(error.status_code(), 409);
 }
 
 struct ResponseReaderFixture {

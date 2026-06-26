@@ -1607,9 +1607,9 @@ async fn responses_function_call_output_resumes_parked_run_without_new_submit() 
 }
 
 #[tokio::test]
-async fn responses_function_call_output_without_external_tools_is_a_normal_submit() {
-    // With no external-tool store wired, a `function_call_output` continuation is
-    // NOT a resume — it serializes into the transcript and submits a new turn.
+async fn responses_function_call_output_without_external_tools_is_rejected() {
+    // With no external-tool store wired, a `function_call_output` continuation
+    // fails closed instead of being serialized into a fresh transcript turn.
     let workflow = Arc::new(FakeProductWorkflow::new());
     let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
     let router = router_with_store(
@@ -1644,9 +1644,11 @@ async fn responses_function_call_output_without_external_tools_is_a_normal_submi
         .await
         .expect("follow up");
 
-    assert_eq!(follow_up.status(), http::StatusCode::OK);
-    // Two submits: the create and the (non-resume) continuation.
-    assert_eq!(workflow.accepted_count(), 2);
+    assert_eq!(follow_up.status(), http::StatusCode::BAD_REQUEST);
+    let body = json_body(follow_up).await;
+    assert_eq!(body["error"]["param"], "input");
+    // Only the create was submitted.
+    assert_eq!(workflow.accepted_count(), 1);
 }
 
 fn assert_error_body_excludes_redaction_sentinels(rendered: &str) {

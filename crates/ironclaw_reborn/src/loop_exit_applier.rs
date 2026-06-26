@@ -13,8 +13,8 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     CheckpointStateStore, GetCheckpointStateRequest, GetLoopCheckpointRequest, GetRunStateRequest,
-    LoopBlockedKind, LoopCheckpointKind, LoopMessageRef, LoopResultRef, TurnError, TurnId,
-    TurnRunId, TurnScope, TurnStateStore, TurnStatus,
+    LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef, LoopMessageRef, LoopResultRef,
+    TurnError, TurnId, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
 };
 
 pub use ironclaw_turns::loop_exit::{
@@ -165,6 +165,7 @@ where
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
     checkpoint_state_store: Option<Arc<dyn CheckpointStateStore>>,
     approval_gate_evidence: Option<Arc<dyn ApprovalGateEvidenceStore>>,
+    resource_gate_evidence: Option<Arc<dyn ResourceGateEvidenceStore>>,
     thread_scope: Option<ThreadScope>,
     cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
 }
@@ -172,6 +173,15 @@ where
 #[async_trait]
 pub trait ApprovalGateEvidenceStore: Send + Sync {
     async fn pending_approval_gate(
+        &self,
+        scope: &TurnScope,
+        gate_ref: &ironclaw_turns::LoopGateRef,
+    ) -> Result<bool, TurnError>;
+}
+
+#[async_trait]
+pub trait ResourceGateEvidenceStore: Send + Sync {
+    async fn pending_resource_gate(
         &self,
         scope: &TurnScope,
         gate_ref: &ironclaw_turns::LoopGateRef,
@@ -193,6 +203,7 @@ where
             loop_checkpoint_store,
             checkpoint_state_store: None,
             approval_gate_evidence: None,
+            resource_gate_evidence: None,
             thread_scope: None,
             cancellation_factory: None,
         }
@@ -210,6 +221,7 @@ where
             loop_checkpoint_store,
             checkpoint_state_store: None,
             approval_gate_evidence: None,
+            resource_gate_evidence: None,
             thread_scope: Some(thread_scope),
             cancellation_factory: None,
         }
@@ -228,6 +240,14 @@ where
         approval_gate_evidence: Arc<dyn ApprovalGateEvidenceStore>,
     ) -> Self {
         self.approval_gate_evidence = Some(approval_gate_evidence);
+        self
+    }
+
+    pub fn with_resource_gate_evidence(
+        mut self,
+        resource_gate_evidence: Arc<dyn ResourceGateEvidenceStore>,
+    ) -> Self {
+        self.resource_gate_evidence = Some(resource_gate_evidence);
         self
     }
 
@@ -336,7 +356,12 @@ where
                     return Ok(false);
                 }
             }
-            LoopBlockedKind::Resource | LoopBlockedKind::AwaitDependentRun => {
+            LoopBlockedKind::Resource => {
+                if !self.verify_pending_resource_gate(&request).await? {
+                    return Ok(false);
+                }
+            }
+            LoopBlockedKind::AwaitDependentRun => {
                 // A BeforeBlock checkpoint alone is not sufficient for approval,
                 // resource, or dependent-run gates: #3424 requires a durable
                 // pending gate/process ref for those block types. Auth gates use
@@ -400,12 +425,13 @@ where
         if checkpoint.kind != LoopCheckpointKind::Final {
             return Ok(false);
         }
+        let state_ref = checkpoint_state_store_ref(request.run_id, &checkpoint.state_ref)?;
         let Some(checkpoint_state) = checkpoint_state_store
             .get_checkpoint_state(GetCheckpointStateRequest {
                 scope: request.scope.clone(),
                 turn_id: request.turn_id,
                 run_id: request.run_id,
-                state_ref: checkpoint.state_ref,
+                state_ref,
                 schema_id: checkpoint.schema_id,
                 schema_version: checkpoint.schema_version,
                 kind: checkpoint.kind,
@@ -468,6 +494,23 @@ where
     }
 }
 
+fn checkpoint_state_store_ref(
+    run_id: TurnRunId,
+    state_ref: &LoopCheckpointStateRef,
+) -> Result<LoopCheckpointStateRef, TurnError> {
+    let run_scoped_prefix = format!("checkpoint:{run_id}:");
+    if let Some(token) = state_ref.as_str().strip_prefix(&run_scoped_prefix) {
+        return LoopCheckpointStateRef::new(format!("checkpoint:{token}")).map_err(|reason| {
+            TurnError::InvalidRequest {
+                reason: format!(
+                    "could not rebuild store key from run-scoped checkpoint ref: {reason}"
+                ),
+            }
+        });
+    }
+    Ok(state_ref.clone())
+}
+
 impl<S> ThreadCheckpointLoopExitEvidencePort<S>
 where
     S: SessionThreadService + ?Sized + Send + Sync,
@@ -481,6 +524,18 @@ where
         };
         evidence
             .pending_approval_gate(request.scope, &request.blocked.gate_ref)
+            .await
+    }
+
+    async fn verify_pending_resource_gate(
+        &self,
+        request: &BlockedEvidenceRequest<'_>,
+    ) -> Result<bool, TurnError> {
+        let Some(evidence) = &self.resource_gate_evidence else {
+            return Ok(false);
+        };
+        evidence
+            .pending_resource_gate(request.scope, &request.blocked.gate_ref)
             .await
     }
 }

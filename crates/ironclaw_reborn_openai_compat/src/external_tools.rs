@@ -11,6 +11,7 @@
 
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::collections::HashSet;
 
 use crate::{OpenAiCompatActorScope, OpenAiCompatHttpError, OpenAiCompatTurnRunRef};
 
@@ -18,6 +19,9 @@ use crate::{OpenAiCompatActorScope, OpenAiCompatHttpError, OpenAiCompatTurnRunRe
 /// engine catalog's per-run cap so an over-large `tools` array is rejected at
 /// the parse boundary with a stable `400` rather than deep in composition.
 const MAX_RESPONSES_EXTERNAL_TOOLS: usize = 256;
+const MAX_RESPONSES_EXTERNAL_TOOL_NAME_BYTES: usize = 64;
+const MAX_RESPONSES_EXTERNAL_TOOL_DESCRIPTION_BYTES: usize = 8 * 1024;
+const MAX_RESPONSES_EXTERNAL_TOOL_SCHEMA_BYTES: usize = 64 * 1024;
 
 /// A client-declared function tool parsed from a Responses `tools` entry. The
 /// model may call it; the host never executes it — a call parks the run and the
@@ -99,6 +103,8 @@ pub(crate) fn parse_external_tools(
         return Err(invalid_tools());
     }
     let mut specs = Vec::with_capacity(tools.len());
+    let mut seen_names = HashSet::with_capacity(tools.len());
+    let mut seen_capability_names = HashSet::with_capacity(tools.len());
     for tool in tools {
         let wire: ExternalToolWire =
             serde_json::from_value(tool.clone()).map_err(|_| invalid_tools())?;
@@ -109,15 +115,52 @@ pub(crate) fn parse_external_tools(
             .name
             .filter(|name| !name.is_empty())
             .ok_or_else(invalid_tools)?;
+        validate_external_tool_name(&name)?;
+        if !seen_names.insert(name.clone()) {
+            return Err(invalid_tools());
+        }
+        if !seen_capability_names.insert(name.to_ascii_lowercase()) {
+            return Err(invalid_tools());
+        }
+        let description = wire.description.unwrap_or_default();
+        if description.len() > MAX_RESPONSES_EXTERNAL_TOOL_DESCRIPTION_BYTES {
+            return Err(invalid_tools());
+        }
+        let parameters_schema = wire
+            .parameters
+            .unwrap_or_else(|| serde_json::json!({"type": "object"}));
+        let schema_len = serde_json::to_string(&parameters_schema)
+            .map(|schema| schema.len())
+            .unwrap_or(usize::MAX);
+        if schema_len > MAX_RESPONSES_EXTERNAL_TOOL_SCHEMA_BYTES {
+            return Err(invalid_tools());
+        }
         specs.push(OpenAiCompatExternalToolSpec {
             name,
-            description: wire.description.unwrap_or_default(),
-            parameters_schema: wire
-                .parameters
-                .unwrap_or_else(|| serde_json::json!({"type": "object"})),
+            description,
+            parameters_schema,
         });
     }
     Ok(specs)
+}
+
+fn validate_external_tool_name(name: &str) -> Result<(), OpenAiCompatHttpError> {
+    if name.len() > MAX_RESPONSES_EXTERNAL_TOOL_NAME_BYTES {
+        return Err(invalid_tools());
+    }
+    let Some(first_byte) = name.as_bytes().first() else {
+        return Err(invalid_tools());
+    };
+    if !first_byte.is_ascii_alphanumeric() {
+        return Err(invalid_tools());
+    }
+    if !name
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return Err(invalid_tools());
+    }
+    Ok(())
 }
 
 fn invalid_tools() -> OpenAiCompatHttpError {
@@ -162,6 +205,41 @@ mod tests {
         assert!(parse_external_tools(&[serde_json::json!({"type": "function"})]).is_err());
         assert!(
             parse_external_tools(&[serde_json::json!({"type": "function", "name": ""})]).is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_duplicate_and_oversized_tools() {
+        assert!(
+            parse_external_tools(&[serde_json::json!({"type": "function", "name": "bad name"})])
+                .is_err()
+        );
+        assert!(
+            parse_external_tools(&[serde_json::json!({"type": "function", "name": "_hidden"})])
+                .is_err()
+        );
+        assert!(
+            parse_external_tools(&[
+                serde_json::json!({"type": "function", "name": "Search"}),
+                serde_json::json!({"type": "function", "name": "search"}),
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_external_tools(&[serde_json::json!({
+                "type": "function",
+                "name": "tool",
+                "description": "x".repeat(MAX_RESPONSES_EXTERNAL_TOOL_DESCRIPTION_BYTES + 1),
+            })])
+            .is_err()
+        );
+        assert!(
+            parse_external_tools(&[serde_json::json!({
+                "type": "function",
+                "name": "tool",
+                "parameters": {"description": "x".repeat(MAX_RESPONSES_EXTERNAL_TOOL_SCHEMA_BYTES)},
+            })])
+            .is_err()
         );
     }
 }

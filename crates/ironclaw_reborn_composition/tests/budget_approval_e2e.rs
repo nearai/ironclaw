@@ -146,13 +146,20 @@ async fn pump_until_pending_gate(
 ) {
     let conversation = runtime.new_conversation().await.expect("conversation");
     let scope = runtime.budget_gate_scope_for_conversation(&conversation);
-    let outcome = tokio::time::timeout(
+    let reply = tokio::time::timeout(
         Duration::from_secs(3),
         runtime.send_user_message(&conversation, "first try"),
     )
     .await
-    .expect("send finishes");
-    let _ = outcome; // we don't care about Err vs non-Completed shape here
+    .expect("send finishes")
+    .expect("budget approval should return a blocked gate outcome");
+    assert_eq!(
+        reply.status,
+        ironclaw_turns::TurnStatus::BlockedResource,
+        "unexpected budget approval reply: {reply:?}"
+    );
+    assert_eq!(reply.failure_category, None);
+    assert_eq!(reply.text, None);
     assert_eq!(
         gateway.call_count(),
         0,

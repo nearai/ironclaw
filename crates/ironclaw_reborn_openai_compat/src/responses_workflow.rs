@@ -840,13 +840,8 @@ impl OpenAiResponsesWorkflow {
                 "stream".to_string(),
             )));
         }
-        // Client `tools`/`tool_choice` are accepted only when external tools are
-        // wired; otherwise they fail closed with a stable 400 (unchanged for
-        // deployments without the capability). When wired, `tool_choice` stays a
-        // model-only hint (the engine decides tool use) and `tools` are validated
-        // at registration.
         if self.external_tools_enabled() {
-            return Ok(());
+            return validate_responses_supported_fields_with_external_tools(request);
         }
         validate_responses_supported_fields(request)
     }
@@ -910,13 +905,6 @@ impl OpenAiResponsesWorkflow {
             OpenAiCompatRefReservationOutcome::Created(mapping) => {
                 self.bind_and_drive_resume(caller, request, previous_mapping, mapping)
                     .await?
-            }
-            // An identical replay that already bound its run/thread refs was
-            // fully processed; do not re-submit outputs or re-resume — just read.
-            OpenAiCompatRefReservationOutcome::Replayed(mapping)
-                if matches!(mapping.binding, OpenAiCompatResourceBinding::Bound { .. }) =>
-            {
-                mapping
             }
             OpenAiCompatRefReservationOutcome::Replayed(mapping) => {
                 self.bind_and_drive_resume(caller, request, previous_mapping, mapping)
@@ -1147,6 +1135,22 @@ fn validate_responses_supported_fields(
     if request.tool_choice.is_some() {
         return Err(OpenAiCompatHttpError::invalid_request(Some(
             "tool_choice".to_string(),
+        )));
+    }
+    if request_has_function_call_output(request) {
+        return Err(OpenAiCompatHttpError::invalid_request(Some(
+            "input".to_string(),
+        )));
+    }
+    Ok(())
+}
+
+fn validate_responses_supported_fields_with_external_tools(
+    request: &OpenAiResponsesCreateRequest,
+) -> Result<(), OpenAiCompatHttpError> {
+    if request_has_function_call_output(request) && request.previous_response_id.is_none() {
+        return Err(OpenAiCompatHttpError::invalid_request(Some(
+            "previous_response_id".to_string(),
         )));
     }
     Ok(())

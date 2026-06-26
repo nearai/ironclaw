@@ -17,16 +17,19 @@
 //! exists only to bridge a parked external-tool call to its client-supplied
 //! result for the lifetime of the run.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use ironclaw_host_api::CapabilityId;
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::TurnRunId;
 
 /// Maximum accepted external tool name length, in bytes.
-const MAX_EXTERNAL_TOOL_NAME_BYTES: usize = 128;
+const MAX_EXTERNAL_TOOL_NAME_BYTES: usize = 64;
 /// Maximum accepted external tool description length, in bytes.
 const MAX_EXTERNAL_TOOL_DESCRIPTION_BYTES: usize = 8 * 1024;
 /// Maximum accepted serialized parameters-schema length, in bytes.
@@ -35,14 +38,14 @@ const MAX_EXTERNAL_TOOL_SCHEMA_BYTES: usize = 64 * 1024;
 const MAX_EXTERNAL_TOOLS_PER_RUN: usize = 256;
 
 /// Reason an [`ExternalToolSpec`] failed validation. Stable, user-safe strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalToolSpecError {
-    pub reason: &'static str,
+    pub reason: Cow<'static, str>,
 }
 
 impl std::fmt::Display for ExternalToolSpecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.reason)
+        f.write_str(self.reason.as_ref())
     }
 }
 
@@ -50,46 +53,35 @@ impl std::error::Error for ExternalToolSpecError {}
 
 /// A client-declared tool the model may call. The host never executes it: a call
 /// parks the run and returns control to the API client.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExternalToolSpec {
     name: String,
+    capability_id: CapabilityId,
     description: String,
     parameters_schema: serde_json::Value,
 }
 
 impl ExternalToolSpec {
-    /// Validate and construct a spec. Rejects empty/oversized/control-character
-    /// names, oversized descriptions, and oversized parameter schemas.
+    /// Validate and construct a spec. Rejects names that cannot be safely
+    /// advertised to model providers, oversized descriptions, and oversized
+    /// parameter schemas.
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
         parameters_schema: serde_json::Value,
     ) -> Result<Self, ExternalToolSpecError> {
         let name = name.into();
-        if name.is_empty() {
-            return Err(ExternalToolSpecError {
-                reason: "external tool name must not be empty",
-            });
-        }
         if name.len() > MAX_EXTERNAL_TOOL_NAME_BYTES {
             return Err(ExternalToolSpecError {
-                reason: "external tool name is too long",
+                reason: Cow::Borrowed("external tool name is too long"),
             });
         }
-        if name.trim() != name {
-            return Err(ExternalToolSpecError {
-                reason: "external tool name must not have surrounding whitespace",
-            });
-        }
-        if name.chars().any(char::is_control) {
-            return Err(ExternalToolSpecError {
-                reason: "external tool name must not contain control characters",
-            });
-        }
+        validate_external_tool_name(&name)?;
+        let capability_id = external_tool_capability_id(name.as_str())?;
         let description = description.into();
         if description.len() > MAX_EXTERNAL_TOOL_DESCRIPTION_BYTES {
             return Err(ExternalToolSpecError {
-                reason: "external tool description is too long",
+                reason: Cow::Borrowed("external tool description is too long"),
             });
         }
         let schema_len = serde_json::to_string(&parameters_schema)
@@ -97,11 +89,12 @@ impl ExternalToolSpec {
             .unwrap_or(usize::MAX);
         if schema_len > MAX_EXTERNAL_TOOL_SCHEMA_BYTES {
             return Err(ExternalToolSpecError {
-                reason: "external tool parameters schema is too large",
+                reason: Cow::Borrowed("external tool parameters schema is too large"),
             });
         }
         Ok(Self {
             name,
+            capability_id,
             description,
             parameters_schema,
         })
@@ -111,6 +104,10 @@ impl ExternalToolSpec {
         &self.name
     }
 
+    pub fn capability_id(&self) -> &CapabilityId {
+        &self.capability_id
+    }
+
     pub fn description(&self) -> &str {
         &self.description
     }
@@ -118,6 +115,87 @@ impl ExternalToolSpec {
     pub fn parameters_schema(&self) -> &serde_json::Value {
         &self.parameters_schema
     }
+}
+
+impl Serialize for ExternalToolSpec {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("ExternalToolSpec", 3)?;
+        state.serialize_field("name", &self.name)?;
+        state.serialize_field("description", &self.description)?;
+        state.serialize_field("parameters_schema", &self.parameters_schema)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ExternalToolSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct ExternalToolSpecWire {
+            name: String,
+            #[serde(default)]
+            capability_id: Option<CapabilityId>,
+            description: String,
+            parameters_schema: serde_json::Value,
+        }
+
+        let wire = ExternalToolSpecWire::deserialize(deserializer)?;
+        let spec = Self::new(wire.name, wire.description, wire.parameters_schema)
+            .map_err(serde::de::Error::custom)?;
+        if let Some(capability_id) = wire.capability_id
+            && capability_id != *spec.capability_id()
+        {
+            return Err(serde::de::Error::custom(
+                "external tool capability_id does not match name",
+            ));
+        }
+        Ok(spec)
+    }
+}
+
+/// Synthetic capability id for an external tool. Keep this validation at the
+/// registration boundary so accepted specs do not fail later during
+/// capability-id construction.
+fn external_tool_capability_id(name: &str) -> Result<CapabilityId, ExternalToolSpecError> {
+    let Some(first_byte) = name.as_bytes().first() else {
+        return Err(ExternalToolSpecError {
+            reason: Cow::Borrowed("external tool name cannot be represented as a capability id"),
+        });
+    };
+    if !first_byte.is_ascii_alphanumeric() {
+        return Err(ExternalToolSpecError {
+            reason: Cow::Borrowed("external tool name cannot be represented as a capability id"),
+        });
+    }
+    CapabilityId::new(format!("external_tool.{}", name.to_ascii_lowercase())).map_err(|_| {
+        ExternalToolSpecError {
+            reason: Cow::Borrowed("external tool name cannot be represented as a capability id"),
+        }
+    })
+}
+
+fn validate_external_tool_name(name: &str) -> Result<(), ExternalToolSpecError> {
+    if name.is_empty() {
+        return Err(ExternalToolSpecError {
+            reason: Cow::Borrowed("external tool name cannot be empty"),
+        });
+    }
+    if !name
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return Err(ExternalToolSpecError {
+            reason: Cow::Borrowed(
+                "external tool name must contain only ASCII letters, digits, '_', and '-'",
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// A model-invoked external tool call that parked the run, recorded by the loop
@@ -224,6 +302,36 @@ pub trait ExternalToolCatalog: Send + Sync {
         output: serde_json::Value,
     ) -> Result<(), ExternalToolCatalogError>;
 
+    /// Atomically validate that `call_id` is still a pending parked external
+    /// call and record its client-submitted output.
+    async fn submit_output_for_pending_call(
+        &self,
+        run_id: TurnRunId,
+        call_id: String,
+        output: serde_json::Value,
+    ) -> Result<(), ExternalToolCatalogError>;
+
+    /// Read a submitted output without consuming it.
+    async fn output(
+        &self,
+        run_id: TurnRunId,
+        call_id: &str,
+    ) -> Result<Option<serde_json::Value>, ExternalToolCatalogError>;
+
+    /// Resolve the `call_id` bound to `input_ref`, then read its submitted
+    /// output without consuming it. The loop host uses this to keep client
+    /// output durable until the capability-result write commits.
+    async fn output_for_input_ref(
+        &self,
+        run_id: TurnRunId,
+        input_ref: &str,
+    ) -> Result<Option<serde_json::Value>, ExternalToolCatalogError> {
+        let Some(call_id) = self.call_id_for_input_ref(run_id, input_ref).await? else {
+            return Ok(None);
+        };
+        self.output(run_id, &call_id).await
+    }
+
     /// Take (remove) a previously submitted output for a call, if present. The
     /// host calls this when re-dispatching a resumed external-tool call so each
     /// output is consumed once.
@@ -246,6 +354,14 @@ pub trait ExternalToolCatalog: Send + Sync {
         };
         self.take_output(run_id, &call_id).await
     }
+
+    /// After the capability result has been written durably, consume the
+    /// submitted output and clear the pending-call record in one catalog update.
+    async fn complete_call_for_input_ref(
+        &self,
+        run_id: TurnRunId,
+        input_ref: &str,
+    ) -> Result<(), ExternalToolCatalogError>;
 
     /// Record (replacing any prior record with the same `call_id`) a model-invoked
     /// external tool call that parked the run. The loop host calls this when it
@@ -320,10 +436,16 @@ impl ExternalToolCatalog for InMemoryExternalToolCatalog {
             });
         }
         let mut seen = std::collections::HashSet::with_capacity(specs.len());
+        let mut seen_capability_ids = std::collections::HashSet::with_capacity(specs.len());
         for spec in &specs {
             if !seen.insert(spec.name()) {
                 return Err(ExternalToolCatalogError::InvalidRegistration {
                     reason: "duplicate external tool name",
+                });
+            }
+            if !seen_capability_ids.insert(spec.capability_id()) {
+                return Err(ExternalToolCatalogError::InvalidRegistration {
+                    reason: "duplicate external tool capability id",
                 });
             }
         }
@@ -396,9 +518,54 @@ impl ExternalToolCatalog for InMemoryExternalToolCatalog {
             .lock()
             .map_err(|_| ExternalToolCatalogError::Unavailable)?;
         let entry = runs.entry(run_id).or_default();
-        entry.pending_calls.retain(|call| call.call_id() != call_id);
         entry.outputs.insert(call_id, output);
         Ok(())
+    }
+
+    async fn submit_output_for_pending_call(
+        &self,
+        run_id: TurnRunId,
+        call_id: String,
+        output: serde_json::Value,
+    ) -> Result<(), ExternalToolCatalogError> {
+        let mut runs = self
+            .runs
+            .lock()
+            .map_err(|_| ExternalToolCatalogError::Unavailable)?;
+        let entry = runs.entry(run_id).or_default();
+        if !entry
+            .pending_calls
+            .iter()
+            .any(|call| call.call_id() == call_id)
+        {
+            return Err(ExternalToolCatalogError::InvalidRegistration {
+                reason: "external tool call_id is not pending",
+            });
+        }
+        if let Some(existing) = entry.outputs.get(&call_id) {
+            if existing == &output {
+                return Ok(());
+            }
+            return Err(ExternalToolCatalogError::InvalidRegistration {
+                reason: "external tool output already submitted",
+            });
+        }
+        entry.outputs.insert(call_id, output);
+        Ok(())
+    }
+
+    async fn output(
+        &self,
+        run_id: TurnRunId,
+        call_id: &str,
+    ) -> Result<Option<serde_json::Value>, ExternalToolCatalogError> {
+        let runs = self
+            .runs
+            .lock()
+            .map_err(|_| ExternalToolCatalogError::Unavailable)?;
+        Ok(runs
+            .get(&run_id)
+            .and_then(|entry| entry.outputs.get(call_id).cloned()))
     }
 
     async fn take_output(
@@ -413,6 +580,27 @@ impl ExternalToolCatalog for InMemoryExternalToolCatalog {
         Ok(runs
             .get_mut(&run_id)
             .and_then(|entry| entry.outputs.remove(call_id)))
+    }
+
+    async fn complete_call_for_input_ref(
+        &self,
+        run_id: TurnRunId,
+        input_ref: &str,
+    ) -> Result<(), ExternalToolCatalogError> {
+        let mut runs = self
+            .runs
+            .lock()
+            .map_err(|_| ExternalToolCatalogError::Unavailable)?;
+        let Some(entry) = runs.get_mut(&run_id) else {
+            return Ok(());
+        };
+        let Some(call_id) = entry.call_ids_by_input_ref.get(input_ref).cloned() else {
+            return Ok(());
+        };
+        entry.outputs.remove(&call_id);
+        entry.pending_calls.retain(|call| call.call_id() != call_id);
+        entry.call_ids_by_input_ref.remove(input_ref);
+        Ok(())
     }
 
     async fn record_pending_call(
@@ -489,12 +677,71 @@ mod tests {
     fn spec_validation_rejects_bad_names_and_oversized_fields() {
         assert!(ExternalToolSpec::new("", "d", serde_json::json!({})).is_err());
         assert!(ExternalToolSpec::new(" x", "d", serde_json::json!({})).is_err());
+        assert!(ExternalToolSpec::new("client_tool", "d", serde_json::json!({})).is_ok());
+        assert!(ExternalToolSpec::new("client-tool", "d", serde_json::json!({})).is_ok());
+        assert!(ExternalToolSpec::new("_hidden", "d", serde_json::json!({})).is_err());
+        assert!(ExternalToolSpec::new("-hidden", "d", serde_json::json!({})).is_err());
+        let provider_name_error =
+            ExternalToolSpec::new("client.tool", "d", serde_json::json!({})).unwrap_err();
+        assert!(
+            provider_name_error
+                .to_string()
+                .contains("must contain only ASCII letters, digits, '_', and '-'")
+        );
         assert!(ExternalToolSpec::new("x\u{0000}", "d", serde_json::json!({})).is_err());
         let long_name = "n".repeat(MAX_EXTERNAL_TOOL_NAME_BYTES + 1);
         assert!(ExternalToolSpec::new(long_name, "d", serde_json::json!({})).is_err());
         let big_desc = "d".repeat(MAX_EXTERNAL_TOOL_DESCRIPTION_BYTES + 1);
         assert!(ExternalToolSpec::new("ok", big_desc, serde_json::json!({})).is_err());
+        let uppercase =
+            ExternalToolSpec::new("ClientTool", "d", serde_json::json!({"type": "object"}))
+                .expect("uppercase provider-safe name is normalized for capability id");
+        assert_eq!(uppercase.name(), "ClientTool");
+        assert_eq!(
+            uppercase.capability_id().as_str(),
+            "external_tool.clienttool"
+        );
         assert!(ExternalToolSpec::new("ok", "d", serde_json::json!({"type": "object"})).is_ok());
+    }
+
+    #[test]
+    fn spec_deserialize_rejects_provider_unsafe_name_before_registration() {
+        let error = serde_json::from_value::<ExternalToolSpec>(serde_json::json!({
+            "name": "client.tool",
+            "description": "desc",
+            "parameters_schema": {"type": "object"},
+        }))
+        .expect_err("provider-unsafe names must fail before catalog registration");
+        assert!(
+            error
+                .to_string()
+                .contains("external tool name must contain only ASCII letters, digits")
+        );
+    }
+
+    #[test]
+    fn spec_deserialize_rejects_mismatched_capability_id() {
+        let error = serde_json::from_value::<ExternalToolSpec>(serde_json::json!({
+            "name": "search",
+            "capability_id": "external_tool.other",
+            "description": "desc",
+            "parameters_schema": {"type": "object"},
+        }))
+        .expect_err("wire capability id must match the derived external-tool id");
+        assert!(
+            error
+                .to_string()
+                .contains("external tool capability_id does not match name")
+        );
+
+        let spec = serde_json::from_value::<ExternalToolSpec>(serde_json::json!({
+            "name": "search",
+            "capability_id": "external_tool.search",
+            "description": "desc",
+            "parameters_schema": {"type": "object"},
+        }))
+        .expect("matching capability id should deserialize");
+        assert_eq!(spec.capability_id().as_str(), "external_tool.search");
     }
 
     #[tokio::test]
@@ -537,6 +784,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_rejects_case_folded_capability_id_collision() {
+        let catalog = InMemoryExternalToolCatalog::new();
+        let run = TurnRunId::new();
+        let err = catalog
+            .register(run, vec![spec("Search"), spec("search")])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ExternalToolCatalogError::InvalidRegistration {
+                reason: "duplicate external tool capability id",
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn submit_and_take_output_is_once_only() {
         let catalog = InMemoryExternalToolCatalog::new();
         let run = TurnRunId::new();
@@ -549,6 +812,49 @@ mod tests {
         // Consumed: a second take yields nothing.
         let second = catalog.take_output(run, "call_1").await.expect("take");
         assert_eq!(second, None);
+    }
+
+    #[tokio::test]
+    async fn submit_output_for_pending_call_validates_and_is_idempotent() {
+        let catalog = InMemoryExternalToolCatalog::new();
+        let run = TurnRunId::new();
+        catalog
+            .record_pending_call(
+                run,
+                PendingExternalCall::new("call_1", "get_weather", serde_json::json!({})),
+            )
+            .await
+            .expect("record pending");
+
+        catalog
+            .submit_output_for_pending_call(run, "call_1".to_string(), serde_json::json!("72F"))
+            .await
+            .expect("submit pending output");
+        catalog
+            .submit_output_for_pending_call(run, "call_1".to_string(), serde_json::json!("72F"))
+            .await
+            .expect("identical replay is idempotent");
+
+        let duplicate = catalog
+            .submit_output_for_pending_call(run, "call_1".to_string(), serde_json::json!("70F"))
+            .await
+            .expect_err("different output for same call is rejected");
+        assert_eq!(
+            duplicate,
+            ExternalToolCatalogError::InvalidRegistration {
+                reason: "external tool output already submitted",
+            }
+        );
+        let wrong_call = catalog
+            .submit_output_for_pending_call(run, "call_2".to_string(), serde_json::json!("ok"))
+            .await
+            .expect_err("non-pending call is rejected");
+        assert_eq!(
+            wrong_call,
+            ExternalToolCatalogError::InvalidRegistration {
+                reason: "external tool call_id is not pending",
+            }
+        );
     }
 
     #[tokio::test]
@@ -565,6 +871,11 @@ mod tests {
             .await
             .expect("submit");
         // ...is taken by the host using the parked invocation's input_ref.
+        let peeked = catalog
+            .output_for_input_ref(run, "input-1")
+            .await
+            .expect("peek");
+        assert_eq!(peeked, Some(serde_json::json!("sunny")));
         let taken = catalog
             .take_output_for_input_ref(run, "input-1")
             .await
@@ -665,7 +976,7 @@ mod tests {
                 .iter()
                 .map(PendingExternalCall::call_id)
                 .collect::<Vec<_>>(),
-            vec!["call_1"]
+            vec!["call_1", "call_2"]
         );
         assert_eq!(
             catalog
@@ -681,6 +992,19 @@ mod tests {
             .await
             .expect("clear one");
         let pending = catalog.pending_calls(run).await.expect("pending");
+        assert_eq!(
+            pending
+                .iter()
+                .map(PendingExternalCall::call_id)
+                .collect::<Vec<_>>(),
+            vec!["call_2"]
+        );
+
+        catalog
+            .clear_pending_call(run, "call_2")
+            .await
+            .expect("clear second");
+        let pending = catalog.pending_calls(run).await.expect("pending");
         assert!(pending.is_empty());
 
         // Unknown run yields no pending calls.
@@ -690,6 +1014,48 @@ mod tests {
                 .await
                 .expect("empty")
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_call_for_input_ref_consumes_output_and_clears_pending_call() {
+        let catalog = InMemoryExternalToolCatalog::new();
+        let run = TurnRunId::new();
+        catalog
+            .bind_call(run, "input-1".to_string(), "call_1".to_string())
+            .await
+            .expect("bind");
+        catalog
+            .record_pending_call(
+                run,
+                PendingExternalCall::new("call_1", "get_weather", serde_json::json!({})),
+            )
+            .await
+            .expect("record");
+        catalog
+            .submit_output_for_pending_call(run, "call_1".to_string(), serde_json::json!("72F"))
+            .await
+            .expect("submit");
+
+        catalog
+            .complete_call_for_input_ref(run, "input-1")
+            .await
+            .expect("complete");
+
+        assert_eq!(catalog.output(run, "call_1").await.expect("output"), None);
+        assert!(
+            catalog
+                .pending_calls(run)
+                .await
+                .expect("pending")
+                .is_empty()
+        );
+        assert_eq!(
+            catalog
+                .call_id_for_input_ref(run, "input-1")
+                .await
+                .expect("binding"),
+            None
         );
     }
 

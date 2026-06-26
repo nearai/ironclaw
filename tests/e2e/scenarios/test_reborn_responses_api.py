@@ -13,6 +13,7 @@ import pytest
 from helpers import REBORN_V2_AUTH_TOKEN, wait_for_ready
 
 USER_ID = "reborn-responses-e2e-user"
+PROFILE = "local-dev"
 
 
 def _find_free_port() -> int:
@@ -51,12 +52,24 @@ async def _stop_process(proc, *, sig=signal.SIGINT, timeout: float = 10) -> None
         await asyncio.wait_for(proc.wait(), timeout=5)
 
 
+async def _enable_reborn_global_auto_approve(base_url: str) -> None:
+    async with httpx.AsyncClient(
+        headers={"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    ) as client:
+        response = await client.post(
+            f"{base_url}/api/webchat/v2/settings/tools",
+            json={"enabled": True},
+            timeout=15,
+        )
+        response.raise_for_status()
+
+
 def _write_config_toml(path: Path, mock_llm_server: str) -> None:
     path.write_text(
         f"""api_version = "ironclaw.runtime/v1"
 
 [boot]
-profile = "local-dev"
+profile = "{PROFILE}"
 
 [identity]
 default_owner = "{USER_ID}"
@@ -102,7 +115,7 @@ async def reborn_responses_server(
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": str(home_dir),
             "IRONCLAW_REBORN_HOME": str(reborn_home),
-            "IRONCLAW_REBORN_PROFILE": "local-dev",
+            "IRONCLAW_REBORN_PROFILE": PROFILE,
             "IRONCLAW_REBORN_WEBUI_TOKEN": REBORN_V2_AUTH_TOKEN,
             "IRONCLAW_REBORN_WEBUI_USER_ID": USER_ID,
             "MOCK_LLM_API_KEY": "mock-api-key",
@@ -130,6 +143,7 @@ async def reborn_responses_server(
 
         try:
             await wait_for_ready(f"{base_url}/api/health", timeout=60)
+            await _enable_reborn_global_auto_approve(base_url)
             break
         except TimeoutError:
             if proc.returncode is None:
