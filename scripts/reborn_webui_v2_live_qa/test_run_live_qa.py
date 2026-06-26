@@ -197,9 +197,19 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         ]
         self.assertIn("qa_4b_github_connect", default_cases)
         self.assertIn("webui_mobile_live_llm_chat", default_cases)
+        self.assertIn("webui_api_auth_security_headers", default_cases)
+        self.assertIn("webui_static_shell_csp_nonce", default_cases)
         self.assertEqual(
             run_live_qa.CASES["webui_mobile_live_llm_chat"].qa_matrix_test_ids,
             ["REBCLI-065-TC-20", "REBCLI-065-TC-21"],
+        )
+        self.assertEqual(
+            run_live_qa.CASES["webui_api_auth_security_headers"].qa_matrix_test_ids,
+            ["REBCLI-055-TC-01", "REBCLI-055-TC-02", "REBCLI-055-TC-05"],
+        )
+        self.assertEqual(
+            run_live_qa.CASES["webui_static_shell_csp_nonce"].qa_matrix_test_ids,
+            ["REBCLI-063-TC-01"],
         )
 
     def test_case_manifest_distinguishes_targeted_from_placeholder_gates(self):
@@ -231,10 +241,34 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "REBCLI-065-TC-21",
             manifest["qa_matrix"]["represented_test_ids"],
         )
+        self.assertIn(
+            "REBCLI-055-TC-01",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
+        self.assertIn(
+            "REBCLI-055-TC-02",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
+        self.assertIn(
+            "REBCLI-055-TC-05",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
+        self.assertIn(
+            "REBCLI-063-TC-01",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
         cases = {case["case"]: case for case in manifest["cases"]}
         self.assertEqual(
             cases["webui_mobile_live_llm_chat"]["qa_matrix_test_ids"],
             ["REBCLI-065-TC-20", "REBCLI-065-TC-21"],
+        )
+        self.assertEqual(
+            cases["webui_api_auth_security_headers"]["qa_matrix_test_ids"],
+            ["REBCLI-055-TC-01", "REBCLI-055-TC-02", "REBCLI-055-TC-05"],
+        )
+        self.assertEqual(
+            cases["webui_static_shell_csp_nonce"]["qa_matrix_test_ids"],
+            ["REBCLI-063-TC-01"],
         )
         self.assertTrue(cases["qa_2d_calendar_prep_live_chat"]["implemented"])
         self.assertEqual(

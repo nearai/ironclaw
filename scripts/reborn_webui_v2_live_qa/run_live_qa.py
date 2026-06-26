@@ -2392,6 +2392,16 @@ async def _with_page(output_dir: Path, case_name: str, action: Callable[[object]
 
 
 def _result(case_name: str, success: bool, started: float, details: dict[str, object]) -> ProbeResult:
+    case_spec = globals().get("CASES", {}).get(case_name)
+    if (
+        case_spec is not None
+        and getattr(case_spec, "qa_matrix_test_ids", None)
+        and "qa_matrix_test_ids" not in details
+    ):
+        details = {
+            **details,
+            "qa_matrix_test_ids": case_spec.qa_matrix_test_ids,
+        }
     details = {"case": case_name, **details}
     if case_name in QA_SHEET_CASES:
         qa_spec = QA_SHEET_CASES[case_name]
@@ -2424,6 +2434,129 @@ async def case_webui_auth_gate(ctx: LiveQaContext) -> ProbeResult:
         return _result(case_name, True, started, {"checked": "/v2/ without token"})
     except Exception as exc:
         return _result(case_name, False, started, {"error": str(exc)})
+
+
+async def case_webui_api_auth_security_headers(ctx: LiveQaContext) -> ProbeResult:
+    import httpx
+
+    started = time.monotonic()
+    case_name = "webui_api_auth_security_headers"
+    checked_paths = ["/api/health", "/api/webchat/v2/session"]
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
+            health = await client.get(f"{ctx.base_url}/api/health")
+            unauthorized = await client.get(f"{ctx.base_url}/api/webchat/v2/session")
+
+        if health.status_code != 200:
+            raise AssertionError(f"/api/health returned HTTP {health.status_code}")
+        if unauthorized.status_code != 401:
+            raise AssertionError(
+                "/api/webchat/v2/session without bearer returned "
+                f"HTTP {unauthorized.status_code}"
+            )
+
+        expected_headers = {
+            "x-content-type-options": "nosniff",
+            "x-frame-options": "DENY",
+            "referrer-policy": "no-referrer",
+        }
+        for header, expected in expected_headers.items():
+            actual = unauthorized.headers.get(header)
+            if actual != expected:
+                raise AssertionError(
+                    f"unauthorized response header {header}={actual!r}, "
+                    f"expected {expected!r}"
+                )
+        csp = unauthorized.headers.get("content-security-policy", "")
+        for required in ("object-src 'none'", "frame-ancestors 'none'", "base-uri 'self'"):
+            if required not in csp:
+                raise AssertionError(
+                    f"unauthorized response CSP missing {required!r}: {csp!r}"
+                )
+
+        return _result(
+            case_name,
+            True,
+            started,
+            {
+                "checked_paths": checked_paths,
+                "health_status": health.status_code,
+                "unauthorized_status": unauthorized.status_code,
+                "headers": {
+                    header: unauthorized.headers.get(header)
+                    for header in (*expected_headers, "content-security-policy")
+                },
+            },
+        )
+    except Exception as exc:
+        return _result(
+            case_name,
+            False,
+            started,
+            {"error": str(exc), "checked_paths": checked_paths},
+        )
+
+
+def _html_nonce(body: str) -> str:
+    match = re.search(r'nonce="([^"]+)"', body)
+    if not match:
+        raise AssertionError("SPA shell did not include a nonce attribute")
+    return match.group(1)
+
+
+async def case_webui_static_shell_csp_nonce(ctx: LiveQaContext) -> ProbeResult:
+    import httpx
+
+    started = time.monotonic()
+    case_name = "webui_static_shell_csp_nonce"
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
+            first = await client.get(f"{ctx.base_url}/v2/")
+            second = await client.get(f"{ctx.base_url}/v2/")
+
+        for label, response in (("first", first), ("second", second)):
+            if response.status_code != 200:
+                raise AssertionError(f"{label} /v2/ returned HTTP {response.status_code}")
+            content_type = response.headers.get("content-type", "")
+            if "text/html" not in content_type:
+                raise AssertionError(f"{label} /v2/ content-type was {content_type!r}")
+            if "__IRONCLAW_CSP_NONCE__" in response.text:
+                raise AssertionError(f"{label} /v2/ leaked the CSP nonce placeholder")
+
+        first_nonce = _html_nonce(first.text)
+        second_nonce = _html_nonce(second.text)
+        if first_nonce == second_nonce:
+            raise AssertionError("SPA shell reused the same CSP nonce across requests")
+        first_csp = first.headers.get("content-security-policy", "")
+        if f"'nonce-{first_nonce}'" not in first_csp:
+            raise AssertionError(
+                "SPA shell CSP does not include the HTML nonce: "
+                f"nonce={first_nonce!r} csp={first_csp!r}"
+            )
+        script_src_match = re.search(r"(?:^|;\s*)script-src\s+([^;]+)", first_csp)
+        script_src = script_src_match.group(1) if script_src_match else ""
+        if "'unsafe-inline'" in script_src or "unsafe-eval" in first_csp:
+            raise AssertionError(f"SPA shell CSP allows unsafe script execution: {first_csp!r}")
+        if first.headers.get("cache-control") != "no-store":
+            raise AssertionError(
+                "SPA shell cache-control must be no-store when nonce changes per request"
+            )
+
+        return _result(
+            case_name,
+            True,
+            started,
+            {
+                "path": "/v2/",
+                "first_nonce_len": len(first_nonce),
+                "second_nonce_len": len(second_nonce),
+                "cache_control": first.headers.get("cache-control"),
+            },
+        )
+    except Exception as exc:
+        return _result(case_name, False, started, {"error": str(exc), "path": "/v2/"})
 
 
 async def case_webui_live_llm_chat(ctx: LiveQaContext) -> ProbeResult:
@@ -4903,6 +5036,14 @@ CASES: dict[str, CaseSpec] = {
     "webui_auth_gate": CaseSpec(
         case_webui_auth_gate,
         qa_matrix_test_ids=["REBCLI-055-TC-02", "REBCLI-055-TC-05"],
+    ),
+    "webui_api_auth_security_headers": CaseSpec(
+        case_webui_api_auth_security_headers,
+        qa_matrix_test_ids=["REBCLI-055-TC-01", "REBCLI-055-TC-02", "REBCLI-055-TC-05"],
+    ),
+    "webui_static_shell_csp_nonce": CaseSpec(
+        case_webui_static_shell_csp_nonce,
+        qa_matrix_test_ids=["REBCLI-063-TC-01"],
     ),
     "webui_live_llm_chat": CaseSpec(
         case_webui_live_llm_chat,
