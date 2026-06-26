@@ -740,6 +740,8 @@ impl Default for ResourceGovernorSnapshot {
 }
 
 impl crate::cas_snapshot::Snapshot for ResourceGovernorSnapshot {
+    const RECORD_KIND: &'static str = "resource_governor_snapshot";
+
     fn fresh() -> Self {
         Self::default()
     }

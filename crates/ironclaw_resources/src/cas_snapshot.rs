@@ -25,7 +25,8 @@ use std::future::Future;
 use std::sync::{Arc, OnceLock, mpsc};
 
 use ironclaw_filesystem::{
-    CasApply, CasUpdateError, ContentType, Entry, RootFilesystem, ScopedFilesystem, cas_update,
+    CasApply, CasUpdateError, ContentType, Entry, RecordKind, RootFilesystem, ScopedFilesystem,
+    cas_update,
 };
 use ironclaw_host_api::{ResourceScope, ScopedPath};
 use serde::{Serialize, de::DeserializeOwned};
@@ -179,7 +180,10 @@ where
                 },
                 |snapshot: &S| {
                     let encoded = serde_json::to_vec_pretty(snapshot).map_err(E::storage_from)?;
-                    Ok(Entry::bytes(encoded).with_content_type(ContentType::json()))
+                    let kind = RecordKind::new(S::RECORD_KIND).map_err(E::storage_from)?;
+                    let mut entry = Entry::bytes(encoded).with_content_type(ContentType::json());
+                    entry.kind = Some(kind);
+                    Ok(entry)
                 },
                 apply,
             )
@@ -219,6 +223,12 @@ where
 /// decode, build a default-on-absent, and re-encode without knowing
 /// per-store schema details.
 pub(crate) trait Snapshot: DeserializeOwned + Serialize + Send + 'static {
+    /// Filesystem record-kind tag written into [`Entry::kind`] on every
+    /// encode. Must satisfy `[A-Za-z_][A-Za-z0-9_]*` (the
+    /// `validate_simple_identifier` invariant). Examples:
+    /// `"resource_governor_snapshot"`, `"budget_gate_snapshot"`.
+    const RECORD_KIND: &'static str;
+
     /// Construct the snapshot used when the underlying file does not
     /// yet exist (first write).
     fn fresh() -> Self;
@@ -358,6 +368,8 @@ mod tests {
     }
 
     impl Snapshot for Counter {
+        const RECORD_KIND: &'static str = "test_counter";
+
         fn fresh() -> Self {
             Counter { value: 0 }
         }

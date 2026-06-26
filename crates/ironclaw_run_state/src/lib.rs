@@ -18,7 +18,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    CasApply, CasUpdateError, ContentType, Entry, FilesystemError, RootFilesystem,
+    CasApply, CasUpdateError, ContentType, Entry, FilesystemError, RecordKind, RootFilesystem,
     ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
@@ -535,6 +535,15 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
     }
 }
 
+/// `RecordKind` tag written on every run-state entry so byte-only backends
+/// (e.g. `LocalFilesystem`) are rejected with `Unsupported{WriteFile}` on
+/// first put, which `cas_update` maps to `CasUnsupported` (fail-closed).
+const RUN_STATE_RECORD_KIND: &str = "run_state_record";
+
+/// `RecordKind` tag written on every approval-request entry for the same
+/// fail-closed CAS gate as [`RUN_STATE_RECORD_KIND`].
+const APPROVAL_RECORD_KIND: &str = "approval_record";
+
 /// Filesystem-backed run-state store under the `/run-state` mount alias.
 ///
 /// Construct with a [`ScopedFilesystem`] over any [`RootFilesystem`]. The
@@ -563,7 +572,11 @@ where
 
     fn record_entry(record: &RunRecord) -> Result<Entry, RunStateError> {
         let body = serialize_pretty(record)?;
-        Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+        let kind = RecordKind::new(RUN_STATE_RECORD_KIND)
+            .map_err(|e| RunStateError::Backend(e.to_string()))?;
+        let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+        entry.kind = Some(kind);
+        Ok(entry)
     }
 
     async fn read_versioned(
@@ -783,7 +796,11 @@ where
 
     fn record_entry(record: &ApprovalRecord) -> Result<Entry, RunStateError> {
         let body = serialize_pretty(record)?;
-        Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+        let kind = RecordKind::new(APPROVAL_RECORD_KIND)
+            .map_err(|e| RunStateError::Backend(e.to_string()))?;
+        let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+        entry.kind = Some(kind);
+        Ok(entry)
     }
 
     async fn read_versioned(

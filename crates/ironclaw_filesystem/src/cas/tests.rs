@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use super::{CasApply, CasUpdateError, cas_update};
 use crate::{
     BackendCapabilities, CasExpectation, ContentType, DirEntry, Entry, FileStat, FilesystemError,
-    FilesystemOperation, InMemoryBackend, RecordVersion, RootFilesystem, ScopedFilesystem,
-    VersionedEntry,
+    FilesystemOperation, InMemoryBackend, RecordKind, RecordVersion, RootFilesystem,
+    ScopedFilesystem, VersionedEntry,
 };
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────
@@ -609,6 +609,152 @@ async fn unsupported_write_file_maps_to_cas_unsupported() {
     );
 }
 
+// ─── A CAS-capable backend whose `get` returns a generic error ────────────────
+
+/// CAS-capable backend whose `get` always returns a [`FilesystemError::Backend`]
+/// error — not a not-found / `Ok(None)`, not a `VersionMismatch`. Used to
+/// exercise the `Err(error) => return Err(CasUpdateError::Backend(error))` arm in
+/// `cas_update_loop` when the read itself fails (cas.rs ~line 298). The pre-flight
+/// gate passes because full capabilities are declared; `get` then fails before any
+/// decode or apply runs.
+struct GetErrorBackend;
+
+#[async_trait]
+impl RootFilesystem for GetErrorBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        // Full CAS-capable shape — pre-flight gate passes and the loop enters.
+        BackendCapabilities::in_memory_full()
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        // A plain infrastructure error on the read path. Not a not-found
+        // (`Ok(None)`) and not a `VersionMismatch` — a backend that is simply
+        // broken or temporarily unavailable. The loop's get-error arm must
+        // forward it unchanged as `CasUpdateError::Backend`.
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::ReadFile,
+            reason: "simulated backend read failure".to_string(),
+        })
+    }
+
+    async fn put(
+        &self,
+        _path: &VirtualPath,
+        _entry: Entry,
+        _cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        unimplemented!("GetErrorBackend::put is unreachable in this test")
+    }
+
+    async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        unimplemented!("GetErrorBackend::list_dir is unreachable in this test")
+    }
+
+    async fn stat(&self, _path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        unimplemented!("GetErrorBackend::stat is unreachable in this test")
+    }
+}
+
+// ─── A backend whose `get` returns a record with an unparseable body ──────────
+
+/// CAS-capable backend whose `get` always returns a [`VersionedEntry`] whose
+/// body is not valid JSON — simulating a corrupted or schema-incompatible
+/// snapshot. Used to exercise the
+/// `decode(&versioned.entry.body).map_err(CasUpdateError::Apply)?` arm in
+/// `cas_update_loop` (cas.rs ~line 294): the record is present so decode runs,
+/// `serde_json` fails, and the error is wrapped as `CasUpdateError::Apply`.
+struct MalformedBodyBackend;
+
+#[async_trait]
+impl RootFilesystem for MalformedBodyBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        // Full CAS-capable shape — pre-flight gate passes and the loop enters.
+        BackendCapabilities::in_memory_full()
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        // Return a present record whose body is not valid JSON. `decode_counter`
+        // calls `serde_json::from_slice` on it, which fails and produces a
+        // `TestError`; the loop wraps it as `CasUpdateError::Apply`.
+        Ok(Some(VersionedEntry {
+            path: path.clone(),
+            entry: Entry::bytes(b"not-valid-json".to_vec()),
+            version: RecordVersion::from_backend(1),
+        }))
+    }
+
+    async fn put(
+        &self,
+        _path: &VirtualPath,
+        _entry: Entry,
+        _cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        unimplemented!("MalformedBodyBackend::put is unreachable in this test")
+    }
+
+    async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        unimplemented!("MalformedBodyBackend::list_dir is unreachable in this test")
+    }
+
+    async fn stat(&self, _path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        unimplemented!("MalformedBodyBackend::stat is unreachable in this test")
+    }
+}
+
+// ─── A CAS-capable backend that tracks whether `put` was invoked ──────────────
+
+/// CAS-capable backend whose `get` returns `Ok(None)` (absent record) and whose
+/// `put` records that it was invoked via `put_called`. Used to assert that a
+/// failing `encode` closure prevents the write from ever being attempted: the
+/// loop reaches the encode step, the `?` operator short-circuits before
+/// `filesystem.put(...)` is reached, and `put_called` remains `false`.
+struct PutTrackingBackend {
+    put_called: AtomicBool,
+}
+
+impl PutTrackingBackend {
+    fn new() -> Self {
+        Self {
+            put_called: AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for PutTrackingBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        // Full CAS-capable shape — pre-flight gate passes and the loop enters.
+        BackendCapabilities::in_memory_full()
+    }
+
+    async fn get(&self, _path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        // No existing record. `apply` (`increment`) receives `None`, returns a
+        // real change (Counter { value: 1 }), so the loop reaches the encode step.
+        Ok(None)
+    }
+
+    async fn put(
+        &self,
+        _path: &VirtualPath,
+        _entry: Entry,
+        _cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        // Record that `put` was reached. If `encode` fails with `?` before this
+        // point, the loop never arrives here and this flag stays `false`.
+        self.put_called.store(true, Ordering::SeqCst);
+        Ok(RecordVersion::from_backend(1))
+    }
+
+    async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        unimplemented!("PutTrackingBackend::list_dir is unreachable in this test")
+    }
+
+    async fn stat(&self, _path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        unimplemented!("PutTrackingBackend::stat is unreachable in this test")
+    }
+}
+
 // ─── A CAS-capable backend whose `put` returns a generic non-CAS error ────────
 
 /// CAS-capable backend whose `get` returns `Ok(None)` and whose `put` returns
@@ -687,5 +833,226 @@ async fn backend_put_error_maps_to_backend() {
         matches!(result, Err(CasUpdateError::Backend(_))),
         "a non-VersionMismatch, non-Unsupported(WriteFile) put error must surface as \
          CasUpdateError::Backend, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn backend_get_error_maps_to_backend() {
+    // Regression for the `get`-error arm in `cas_update_loop` (cas.rs ~line 298):
+    // `Err(error) => return Err(CasUpdateError::Backend(error))`.
+    //
+    // The backend advertises full CAS capability so the pre-flight gate passes
+    // and the helper enters the loop. `get` then returns a plain infrastructure
+    // error (not `Ok(None)` and not a `VersionMismatch`). The helper must
+    // forward it unchanged as `CasUpdateError::Backend(_)`.
+    let fs = Arc::new(scoped(Arc::new(GetErrorBackend)));
+    let scope = ResourceScope::system();
+
+    let result: Result<u64, CasUpdateError<TestError>> = cas_update(
+        fs.as_ref(),
+        &scope,
+        &counter_path(),
+        decode_counter,
+        encode_counter,
+        increment,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(CasUpdateError::Backend(_))),
+        "a backend error from get must surface as CasUpdateError::Backend, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn malformed_snapshot_decode_maps_to_apply() {
+    // Regression for the decode-error arm in `cas_update_loop` (cas.rs ~line 294):
+    // `decode(&versioned.entry.body).map_err(CasUpdateError::Apply)?`.
+    //
+    // The backend advertises full CAS capability so the pre-flight gate passes
+    // and the helper enters the loop. `get` returns a present record whose body
+    // is not valid JSON. `decode_counter` calls `serde_json::from_slice` on the
+    // garbled bytes, which fails and produces a `TestError`; the loop wraps it
+    // as `CasUpdateError::Apply`.
+    let fs = Arc::new(scoped(Arc::new(MalformedBodyBackend)));
+    let scope = ResourceScope::system();
+
+    let result: Result<u64, CasUpdateError<TestError>> = cas_update(
+        fs.as_ref(),
+        &scope,
+        &counter_path(),
+        decode_counter,
+        encode_counter,
+        increment,
+    )
+    .await;
+
+    match result {
+        Err(CasUpdateError::Apply(_)) => {}
+        other => panic!(
+            "a decode failure on a present snapshot must surface as CasUpdateError::Apply, \
+             got {other:?}"
+        ),
+    }
+}
+
+#[tokio::test]
+async fn encode_failure_maps_to_apply_without_write() {
+    // Regression for the encode-error arm in `cas_update_loop` (cas.rs ~line 327):
+    // `encode(&snapshot).map_err(CasUpdateError::Apply)?`.
+    //
+    // The backend advertises full CAS capability so the pre-flight gate passes
+    // and the helper enters the loop. `get` returns `Ok(None)` so `apply`
+    // (`increment`) receives `None` and produces a real change (Counter { value: 1 }),
+    // which the loop attempts to encode. The encode closure always returns an error;
+    // the `?` operator short-circuits before `filesystem.put(...)` is ever called,
+    // and the error is wrapped as `CasUpdateError::Apply`.
+    let backend = Arc::new(PutTrackingBackend::new());
+    let fs = Arc::new(scoped(backend.clone()));
+    let scope = ResourceScope::system();
+
+    let result: Result<u64, CasUpdateError<TestError>> = cas_update(
+        fs.as_ref(),
+        &scope,
+        &counter_path(),
+        decode_counter,
+        |_snapshot: &Counter| -> Result<Entry, TestError> {
+            Err(TestError("encode always fails".to_string()))
+        },
+        increment,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(CasUpdateError::Apply(_))),
+        "an encode error must surface as CasUpdateError::Apply, got {result:?}"
+    );
+    assert!(
+        !backend.put_called.load(Ordering::SeqCst),
+        "put must not be called when encode fails before the write"
+    );
+}
+
+// ─── A byte-only backend that rejects record-shaped entries at put time ───────
+
+/// Backend with default/unknown capabilities (pre-flight gate deferred to op
+/// time) whose `get` returns `Ok(None)` (absent → first write) and whose `put`
+/// gates on `entry.kind.is_some()`: a record-shaped entry is rejected with
+/// `FilesystemError::Unsupported { operation: WriteFile }`, while a byte-only
+/// entry (kind = None) would be accepted. This models `LocalFilesystem`'s check
+/// at local.rs:189-208: `if entry.kind.is_some() || !entry.indexed.is_empty() {
+/// return Unsupported { WriteFile } }`.
+///
+/// `put_called` records that `put` was reached, proving the rejection came via
+/// the op-time path (not the pre-flight capability gate).
+struct KindGatedByteOnlyBackend {
+    put_called: AtomicBool,
+}
+
+impl KindGatedByteOnlyBackend {
+    fn new() -> Self {
+        Self {
+            put_called: AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for KindGatedByteOnlyBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        // Default/unknown shape — `capabilities_known()` returns `false`, so the
+        // pre-flight gate is bypassed and the loop enters before the error
+        // surfaces at op time.
+        BackendCapabilities::default()
+    }
+
+    async fn get(&self, _path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        // Absent record → loop takes the first-write (`CasExpectation::Absent`)
+        // path and calls encode then put.
+        Ok(None)
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        _cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.put_called.store(true, Ordering::SeqCst);
+        if entry.kind.is_some() {
+            // Record-shaped entries are rejected — mirrors `LocalFilesystem`'s
+            // `if entry.kind.is_some() || !entry.indexed.is_empty()` guard.
+            Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+            })
+        } else {
+            // Byte-only entries (kind = None) would be accepted.
+            // This branch is not exercised in this test (the encode closure
+            // always produces a record-shaped entry).
+            Ok(RecordVersion::from_backend(1))
+        }
+    }
+
+    async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        unimplemented!("KindGatedByteOnlyBackend::list_dir is unreachable in this test")
+    }
+
+    async fn stat(&self, _path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        unimplemented!("KindGatedByteOnlyBackend::stat is unreachable in this test")
+    }
+}
+
+#[tokio::test]
+async fn record_shaped_first_write_fails_closed_on_byte_only_backend() {
+    // Regression for the byte-only first-write fail-closed gap.
+    //
+    // Store encoders now set `entry.kind = Some(RecordKind)` (record-shaped).
+    // `LocalFilesystem` rejects record-shaped entries with `Unsupported { WriteFile }`
+    // BEFORE the CAS check (local.rs:189-208: `if entry.kind.is_some() ||
+    // !entry.indexed.is_empty() { return Unsupported { WriteFile } }`), even for
+    // `CasExpectation::Absent`. This means `cas_update` with a record-shaped encode
+    // closure against a byte-only backend must fail-closed as
+    // `CasUpdateError::CasUnsupported` on the first (absent) write — closing the
+    // gap where byte-only entries previously slipped through via Absent create.
+    //
+    // This test differs from `unsupported_write_file_maps_to_cas_unsupported`
+    // (which returns Unsupported unconditionally regardless of entry shape) by
+    // making the backend's `put` branch specifically on `entry.kind.is_some()` —
+    // documenting that it is the record-shaped nature of the entry that triggers
+    // the rejection, not a blanket refusal.
+    let backend = Arc::new(KindGatedByteOnlyBackend::new());
+    let fs = Arc::new(scoped(backend.clone()));
+    let scope = ResourceScope::system();
+
+    let result: Result<u64, CasUpdateError<TestError>> = cas_update(
+        fs.as_ref(),
+        &scope,
+        &counter_path(),
+        decode_counter,
+        |snapshot: &Counter| -> Result<Entry, TestError> {
+            // Produce a record-shaped entry: `entry.kind = Some(RecordKind)`.
+            // This is what post-fix store encoders emit.
+            let kind = RecordKind::new("test_record").map_err(|e| TestError(e.to_string()))?;
+            let data = serde_json::to_value(snapshot).map_err(|e| TestError(e.to_string()))?;
+            Entry::record(kind, &data).map_err(|e| TestError(e.to_string()))
+        },
+        increment,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(CasUpdateError::CasUnsupported)),
+        "a record-shaped entry against a byte-only backend must fail-closed as \
+         CasUpdateError::CasUnsupported on the first (absent) write, got {result:?}"
+    );
+    // Prove the rejection came from the op-time path: `put` must have been reached.
+    // If a future change made `BackendCapabilities::default()` trip the pre-flight
+    // gate, `put` would never be entered and `CasUnsupported` would surface for the
+    // wrong reason — this guard catches that regression.
+    assert!(
+        backend.put_called.load(Ordering::SeqCst),
+        "put must have been reached (op-time path): the kind-gated rejection must \
+         come from the backend's put, not from the pre-flight capability gate"
     );
 }

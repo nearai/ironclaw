@@ -42,7 +42,8 @@ use chrono::Utc;
 use futures::{StreamExt, future::join_all};
 use ironclaw_filesystem::{
     CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FileType, FilesystemError,
-    FilesystemOperation, Filter, Page, RecordVersion, RootFilesystem, ScopedFilesystem, cas_update,
+    FilesystemOperation, Filter, Page, RecordKind, RecordVersion, RootFilesystem, ScopedFilesystem,
+    cas_update,
 };
 use ironclaw_host_api::{HostApiError, InvocationId, ResourceScope, ScopedPath, ThreadId};
 use serde::{Deserialize, Serialize};
@@ -73,6 +74,16 @@ use message_sequence_index::{MessageSequenceIndexStore, message_sequence_index_e
 /// store budgets — enough to absorb routine cross-process contention,
 /// small enough to surface pathological loops loudly.
 const FILESYSTEM_CAS_RETRIES: usize = 8;
+
+/// [`RecordKind`] discriminants for the four record types persisted by this
+/// service. Setting `entry.kind` makes writes record-shaped so
+/// [`LocalFilesystem`] (which rejects record-shaped puts) triggers the
+/// fail-closed path on the CAS gate instead of accepting a byte-only first
+/// write without CAS enforcement.
+const SESSION_THREAD_KIND: &str = "session_thread";
+const THREAD_MESSAGE_KIND: &str = "thread_message";
+const THREAD_SUMMARY_KIND: &str = "thread_summary";
+const THREAD_IDEMPOTENCY_KIND: &str = "thread_idempotency";
 
 /// Conservative fan-out for indexed range materialization.
 const INDEXED_RANGE_MESSAGE_READ_CONCURRENCY: usize = 8;
@@ -170,22 +181,42 @@ where
 
     fn thread_entry(record: &StoredThreadRecord) -> Result<Entry, SessionThreadError> {
         let body = serialize_pretty(record)?;
-        Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+        let kind = RecordKind::new(SESSION_THREAD_KIND).map_err(|error| {
+            SessionThreadError::Backend(format!("invalid session_thread record kind: {error}"))
+        })?;
+        let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+        entry.kind = Some(kind);
+        Ok(entry)
     }
 
     fn message_entry(record: &ThreadMessageRecord) -> Result<Entry, SessionThreadError> {
         let body = serialize_pretty(&StoredThreadMessageRecord::from(record))?;
-        Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+        let kind = RecordKind::new(THREAD_MESSAGE_KIND).map_err(|error| {
+            SessionThreadError::Backend(format!("invalid thread_message record kind: {error}"))
+        })?;
+        let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+        entry.kind = Some(kind);
+        Ok(entry)
     }
 
     fn summary_entry(record: &SummaryArtifact) -> Result<Entry, SessionThreadError> {
         let body = serialize_pretty(record)?;
-        Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+        let kind = RecordKind::new(THREAD_SUMMARY_KIND).map_err(|error| {
+            SessionThreadError::Backend(format!("invalid thread_summary record kind: {error}"))
+        })?;
+        let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+        entry.kind = Some(kind);
+        Ok(entry)
     }
 
     fn idempotency_entry(record: &InboundIdempotencyRecord) -> Result<Entry, SessionThreadError> {
         let body = serialize_pretty(record)?;
-        Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+        let kind = RecordKind::new(THREAD_IDEMPOTENCY_KIND).map_err(|error| {
+            SessionThreadError::Backend(format!("invalid thread_idempotency record kind: {error}"))
+        })?;
+        let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+        entry.kind = Some(kind);
+        Ok(entry)
     }
 
     async fn read_thread_versioned(

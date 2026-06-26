@@ -46,8 +46,8 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{
     CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FilesystemError, Filter,
-    IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem,
-    cas_update,
+    IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, RecordKind, RootFilesystem,
+    ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{HostApiError, ResourceScope, ScopedPath, SecretHandle, Timestamp};
 use secrecy::ExposeSecret;
@@ -63,6 +63,18 @@ use crate::{
 
 // (Master-key sentinel constants and `KEY_CHECK_PATH` removed alongside
 // `verify_can_decrypt_existing_secrets`; see comment in the impl block.)
+
+// -- Record kind constants ---------------------------------------------------
+//
+// Every persisted entry must carry a `RecordKind` so that record-aware
+// backends (Postgres, libSQL) can distinguish schema families and reject
+// byte-only `CasExpectation::Absent` blind-write attempts that the
+// `LocalFilesystem` byte-only backend would otherwise let through.
+
+const SECRET_RECORD_KIND: &str = "secret_record";
+const SECRET_LEASE_KIND: &str = "secret_lease";
+const CREDENTIAL_ACCOUNT_KIND: &str = "credential_account";
+const CREDENTIAL_SESSION_KIND: &str = "credential_session";
 
 // -- Serialized DTOs --------------------------------------------------------
 //
@@ -252,10 +264,14 @@ where
     async fn write_secret(&self, secret: &StoredSecret) -> Result<(), SecretStoreError> {
         let path = secret_path(&secret.scope, &secret.handle)?;
         let body = serialize_secret(secret)?;
-        let entry = tag_entry_with_tenant(
-            Entry::bytes(body).with_content_type(ContentType::json()),
-            &secret.scope,
-        );
+        let kind = RecordKind::new(SECRET_RECORD_KIND).map_err(|error| {
+            SecretStoreError::StoreUnavailable {
+                reason: format!("invalid secret record kind: {error}"),
+            }
+        })?;
+        let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
+        base_entry.kind = Some(kind);
+        let entry = tag_entry_with_tenant(base_entry, &secret.scope);
         ensure_tenant_id_index_secret(
             &self.filesystem,
             &secret.scope,
@@ -272,10 +288,14 @@ where
     async fn write_lease(&self, lease: &StoredLease) -> Result<(), SecretStoreError> {
         let path = lease_path(&lease.scope, lease.lease_id)?;
         let body = serialize_secret(lease)?;
-        let entry = tag_entry_with_tenant(
-            Entry::bytes(body).with_content_type(ContentType::json()),
-            &lease.scope,
-        );
+        let kind = RecordKind::new(SECRET_LEASE_KIND).map_err(|error| {
+            SecretStoreError::StoreUnavailable {
+                reason: format!("invalid secret lease record kind: {error}"),
+            }
+        })?;
+        let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
+        base_entry.kind = Some(kind);
+        let entry = tag_entry_with_tenant(base_entry, &lease.scope);
         ensure_tenant_id_index_secret(&self.filesystem, &lease.scope, &lease_root(&lease.scope)?)
             .await?;
         self.filesystem
@@ -718,10 +738,14 @@ where
         };
         let path = credential_account_path(&account.scope, &account.id)?;
         let body = serialize_credential(&stored)?;
-        let entry = tag_entry_with_tenant(
-            Entry::bytes(body).with_content_type(ContentType::json()),
-            &account.scope,
-        );
+        let kind = RecordKind::new(CREDENTIAL_ACCOUNT_KIND).map_err(|error| {
+            CredentialBrokerError::BrokerUnavailable {
+                reason: format!("invalid credential account record kind: {error}"),
+            }
+        })?;
+        let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
+        base_entry.kind = Some(kind);
+        let entry = tag_entry_with_tenant(base_entry, &account.scope);
         ensure_tenant_id_index_broker(
             &self.filesystem,
             &account.scope,
@@ -825,10 +849,14 @@ where
         };
         let path = credential_session_path(session.scope(), session.correlation_id())?;
         let body = serialize_credential(&stored)?;
-        let entry = tag_entry_with_tenant(
-            Entry::bytes(body).with_content_type(ContentType::json()),
-            session.scope(),
-        );
+        let kind = RecordKind::new(CREDENTIAL_SESSION_KIND).map_err(|error| {
+            CredentialBrokerError::BrokerUnavailable {
+                reason: format!("invalid credential session record kind: {error}"),
+            }
+        })?;
+        let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
+        base_entry.kind = Some(kind);
+        let entry = tag_entry_with_tenant(base_entry, session.scope());
         ensure_tenant_id_index_broker(
             &self.filesystem,
             session.scope(),
@@ -1107,10 +1135,13 @@ fn serialize_lease_entry(
     _scope: &ResourceScope,
 ) -> Result<Entry, SecretStoreError> {
     let body = serialize_secret(lease)?;
-    Ok(tag_entry_with_tenant(
-        Entry::bytes(body).with_content_type(ContentType::json()),
-        &lease.scope,
-    ))
+    let kind =
+        RecordKind::new(SECRET_LEASE_KIND).map_err(|error| SecretStoreError::StoreUnavailable {
+            reason: format!("invalid secret lease record kind: {error}"),
+        })?;
+    let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
+    base_entry.kind = Some(kind);
+    Ok(tag_entry_with_tenant(base_entry, &lease.scope))
 }
 
 fn serialize_session_entry(
@@ -1118,10 +1149,14 @@ fn serialize_session_entry(
     scope: &ResourceScope,
 ) -> Result<Entry, CredentialBrokerError> {
     let body = serialize_credential(stored)?;
-    Ok(tag_entry_with_tenant(
-        Entry::bytes(body).with_content_type(ContentType::json()),
-        scope,
-    ))
+    let kind = RecordKind::new(CREDENTIAL_SESSION_KIND).map_err(|error| {
+        CredentialBrokerError::BrokerUnavailable {
+            reason: format!("invalid credential session record kind: {error}"),
+        }
+    })?;
+    let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
+    base_entry.kind = Some(kind);
+    Ok(tag_entry_with_tenant(base_entry, scope))
 }
 
 fn unknown_lease(scope: &ResourceScope, lease_id: SecretLeaseId) -> SecretStoreError {

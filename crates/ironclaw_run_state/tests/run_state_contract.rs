@@ -6,8 +6,8 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    DirEntry, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend, RootFilesystem,
-    ScopedFilesystem,
+    DirEntry, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend, LocalFilesystem,
+    RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::*;
 use ironclaw_run_state::*;
@@ -1013,6 +1013,38 @@ async fn filesystem_run_state_store_isolates_two_tenants_with_same_user_project_
         approvals_b.approve(&scope_b, request_id).await.unwrap_err(),
         RunStateError::UnknownApprovalRequest { .. }
     ));
+}
+
+/// Regression: `record_entry` must produce a record-shaped entry (`entry.kind =
+/// Some(...)`) so byte-only backends (those that reject `put` when `kind` is
+/// set) surface `CasUnsupported` via `cas_update` rather than silently
+/// succeeding on a blind `CasExpectation::Absent` write.
+///
+/// `LocalFilesystem` is used here because it is the canonical byte-only
+/// `RootFilesystem`: its `put` impl returns `Unsupported{WriteFile}` when
+/// `entry.kind.is_some()`, which `cas_update` maps to `CasUnsupported`,
+/// which `map_cas_error` surfaces as `RunStateError::Backend(...)`.
+#[tokio::test]
+async fn filesystem_approval_store_fails_closed_on_byte_only_backend() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut local_fs = LocalFilesystem::new();
+    local_fs
+        .mount_local(
+            VirtualPath::new("/engine").expect("virtual root"),
+            HostPath::from_path_buf(dir.path().to_path_buf()),
+        )
+        .expect("mount /engine at temp dir");
+    let scoped = scoped_run_state_fs(Arc::new(local_fs));
+    let store = FilesystemApprovalRequestStore::new(scoped);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "test-tenant", "test-user");
+    let approval = approval_request(invocation_id);
+
+    let err = store.save_pending(scope, approval).await.unwrap_err();
+    assert!(
+        matches!(&err, RunStateError::Backend(msg) if msg.contains("compare-and-swap")),
+        "expected Backend(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
+    );
 }
 
 /// A `RootFilesystem` decorator that, when armed, fires a concurrent

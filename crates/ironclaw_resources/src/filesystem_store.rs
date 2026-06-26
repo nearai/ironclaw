@@ -331,6 +331,8 @@ impl BudgetGateSnapshot {
 }
 
 impl Snapshot for BudgetGateSnapshot {
+    const RECORD_KIND: &'static str = "budget_gate_snapshot";
+
     fn fresh() -> Self {
         Self {
             schema_version: Self::CURRENT_SCHEMA,
