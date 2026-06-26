@@ -2308,6 +2308,103 @@ test("useChat.send: accepted run blocks another submit until settlement", async 
   assert.equal(sendCalls, 2);
 });
 
+test("useChat.send: a send to another thread is not blocked by an unsettled run (submitBusyRef deadlock #5256)", async () => {
+  // The deadlock that hand-rolled unit fixtures missed: `submitBusyRef` is set
+  // on send and was only released in `onRunSettled` (delivered over the *open*
+  // thread's SSE). When the user starts a chat and then addresses a different
+  // thread — the new-chat case — before the first run settles, that settle
+  // event may never reach this hook (its SSE is gone), so the guard stays held
+  // and every later send is silently dropped. A send whose destination is NOT
+  // the running thread must go through; only the per-destination
+  // `activeRunBlocksSend` guard may stop a resubmit into the busy thread.
+  const viewedThread = "thread-a";
+  let sendCalls = 0;
+  let renderedMessages = [];
+  const seededByThread = new Map();
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("threads already exist in this scenario");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async ({ threadId }) => {
+      sendCalls += 1;
+      return {
+        accepted_message_ref: `msg:message-${sendCalls}`,
+        run_id: `run-${sendCalls}`,
+        status: "queued",
+        thread_id: threadId,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    // onRunSettled is deliberately NEVER fired: the first run stays in flight
+    // exactly as it would after navigating away from the running thread.
+    useChatEvents: (args) => {
+      context.chatEventsArgs = args;
+      return () => {};
+    },
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: (threadId, updater) => {
+        const prev = seededByThread.get(threadId) || [];
+        seededByThread.set(threadId, typeof updater === "function" ? updater(prev) : updater);
+      },
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(viewedThread);
+  // 1) Start a run on the viewed thread. This sets submitBusyRef = true.
+  const first = await chat.send("kick off a run on thread-a");
+  assert.equal(first.run_id, "run-1");
+  // 2) Without the run ever settling, send to a DIFFERENT thread (the new-chat
+  //    case). With the deadlock, submitBusyRef is still held and this returns
+  //    null; with the fix it is released when the POST settled, so it goes
+  //    through.
+  const second = await chat.send("hi how are you", { threadId: "thread-b" });
+  assert.ok(second, "send to another thread must not be blocked by the unsettled run");
+  assert.equal(second.run_id, "run-2");
+  assert.equal(sendCalls, 2, "sendMessage must be called for the second, different-thread send");
+});
+
 test("useChat.send: connectable channel fetch failures submit the prompt", async () => {
   let createThreadCalled = false;
   let sentContent = null;

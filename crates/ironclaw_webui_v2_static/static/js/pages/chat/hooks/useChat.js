@@ -602,6 +602,16 @@ export function useChat(threadId) {
         submitBusyRef.current = false;
         throw err;
       } finally {
+        // Release the re-entrancy guard once the send POST settles — that is
+        // the window it exists to protect (one in-flight submit at a time).
+        // It must NOT stay held until the run settles: clearing it only in
+        // `onRunSettled` (delivered over the *current* thread's SSE) deadlocks
+        // the moment the user navigates to a new chat while a run is in
+        // flight — that thread's SSE is torn down, its settle event never
+        // arrives, the guard stays `true`, and every later send is silently
+        // dropped. Blocking a resubmit into a still-running thread is the job
+        // of the per-destination `activeRunBlocksSend` guard above, not this.
+        submitBusyRef.current = false;
         // Drop the optimistic from the pending ref unconditionally:
         // on success the confirmed row arrives via /timeline, and on
         // failure we mark the optimistic with `status: "error"` in
