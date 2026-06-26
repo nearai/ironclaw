@@ -454,6 +454,12 @@ where
                         .await;
                 }
                 let account_id = CredentialAccountId::from_uuid(flow_id.as_uuid());
+                // TODO(#5261 identity-provisioning): tag SharedAdminManaged from
+                // policy (via `ownership_for_identity`) once the durable flow
+                // carries capability+resolver. This OAuth-callback creation path
+                // is keyed by (scope, provider, flow) and has neither a
+                // CapabilityId nor a PolicyResolver in scope, so an AdminKeyed
+                // capability stays unavailable until that handle is threaded here.
                 let request = NewCredentialAccount {
                     scope: callback.scope,
                     provider: exchange.provider.clone(),

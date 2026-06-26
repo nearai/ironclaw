@@ -1262,12 +1262,25 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             }
         }
     };
-    services = services.with_runtime_credential_account_resolver(Arc::new(
-        ProductAuthRuntimeCredentialResolver::new_with_refresh(
-            product_auth.runtime_credential_account_selection_service(),
-            product_auth.runtime_credential_account_refresh_service(),
-        ),
-    ));
+    let runtime_credential_resolver = ProductAuthRuntimeCredentialResolver::new_with_refresh(
+        product_auth.runtime_credential_account_selection_service(),
+        product_auth.runtime_credential_account_refresh_service(),
+    );
+    // Thread the single shared capability-policy resolver (#5261 D3) so the
+    // identity dimension is enforced at credential resolution. `Some` only under
+    // the `capability-policy` feature AND `capability_policy_activated()`; when
+    // `None` the resolver keeps its pre-policy behaviour.
+    #[cfg(feature = "capability-policy")]
+    let runtime_credential_resolver = match store_graph
+        .local_runtime
+        .capability_policy_resolver
+        .as_ref()
+    {
+        Some(policy) => runtime_credential_resolver.with_policy_resolver(Arc::clone(policy)),
+        None => runtime_credential_resolver,
+    };
+    services =
+        services.with_runtime_credential_account_resolver(Arc::new(runtime_credential_resolver));
     let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
         filesystem.as_ref(),
         &VirtualPath::new("/system/extensions")?,

@@ -44,6 +44,10 @@ pub(crate) const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from
 #[derive(Debug)]
 pub struct RuntimeCredentialAccountRequest<'a> {
     pub scope: &'a ResourceScope,
+    /// Capability driving this credential injection. Carried so the resolver can
+    /// key the capability-policy identity dimension (`EffectivePolicy.identity`)
+    /// by (capability, acting subject) — see #5261 identity enforcement.
+    pub capability_id: &'a CapabilityId,
     pub provider: &'a RuntimeCredentialAccountProviderId,
     pub setup: &'a RuntimeCredentialAccountSetup,
     pub provider_scopes: &'a [String],
@@ -1313,6 +1317,7 @@ impl BuiltinObligationHandler {
             let access_secret = resolver
                 .resolve_access_secret(RuntimeCredentialAccountRequest {
                     scope: &request.context.resource_scope,
+                    capability_id: request.capability_id,
                     provider: obligation.provider,
                     setup: obligation.setup,
                     provider_scopes: obligation.provider_scopes,

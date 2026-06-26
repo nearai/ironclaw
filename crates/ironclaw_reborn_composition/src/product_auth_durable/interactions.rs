@@ -137,6 +137,12 @@ where
             .unwrap_or_else(|| CredentialAccountId::from_uuid(pending.id.as_uuid()));
         let access_secret = manual_token_secret_handle(account_id, pending.id)?;
 
+        // TODO(#5261 identity-provisioning): tag SharedAdminManaged from policy
+        // (via `ownership_for_identity`) once the durable flow carries
+        // capability+resolver. This manual-token submit path is keyed by
+        // (scope, provider, flow) and has neither a CapabilityId nor a
+        // PolicyResolver in scope, so an AdminKeyed capability stays unavailable
+        // until that handle is threaded here.
         let (ownership, owner_extension, granted_extensions) = pending
             .update_binding
             .as_ref()

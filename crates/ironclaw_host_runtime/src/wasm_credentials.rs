@@ -160,6 +160,7 @@ impl RuntimeCredentialRestager {
             .account_resolver
             .resolve_access_secret(RuntimeCredentialAccountRequest {
                 scope: &request.scope,
+                capability_id: &request.capability_id,
                 provider,
                 setup,
                 provider_scopes: &credential.provider_scopes,

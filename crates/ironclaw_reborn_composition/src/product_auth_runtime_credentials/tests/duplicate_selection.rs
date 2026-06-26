@@ -21,6 +21,7 @@ async fn resolver_uses_latest_duplicate_user_reusable_account() {
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
@@ -64,6 +65,7 @@ async fn resolver_resolves_google_capability_labeled_duplicates() {
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
@@ -101,6 +103,7 @@ async fn resolver_does_not_auto_select_mixed_reusable_and_extension_owned_accoun
 
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
@@ -138,6 +141,7 @@ async fn resolver_does_not_auto_select_mixed_reusable_and_shared_admin_accounts(
 
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
