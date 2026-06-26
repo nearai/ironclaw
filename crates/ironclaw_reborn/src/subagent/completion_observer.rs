@@ -519,43 +519,60 @@ where
     /// `docs/plans/2026-06-25-run-wait-class.md`. Until then this cancel is the
     /// minimal correct lock/gate release.
     ///
-    /// Best-effort: the parent is already resumed by the time this runs, so a
-    /// cancel failure must not fail the observer (it would only re-run this
-    /// idempotent path). The bound error is logged rather than discarded.
+    /// Error policy: only convergence races (`Conflict` / `InvalidTransition`,
+    /// and an already-terminal run, which `cancel_run` reports as `Ok`) are
+    /// ignored — another actor already moved the run, so the lock is released by
+    /// that transition. A real backend/state failure is propagated so the
+    /// observer retries (the whole path is idempotent: gate-store terminal is
+    /// first-write-wins, parent resume is idempotency-keyed, and this cancel is
+    /// idempotency-keyed) rather than silently leaving the child `Blocked*` with
+    /// a held lock and a still-resolvable gate.
     async fn cancel_parked_child_run(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
         actor: Option<TurnActor>,
-    ) {
-        let Some(actor) = actor else {
-            tracing::debug!(
-                run_id = %run_id,
-                "parked child cancel skipped: no actor available to authorize the cancel; \
-                 active lock not released this pass"
-            );
-            return;
-        };
+    ) -> Result<(), TurnError> {
         let Some(coordinator) = self.coordinator.get() else {
             tracing::debug!(
                 run_id = %run_id,
                 "parked child cancel skipped: coordinator not bound; active lock not released"
             );
-            return;
+            return Ok(());
         };
-        let idempotency_key = match IdempotencyKey::new(format!("subagent-parked-cancel:{run_id}"))
-        {
-            Ok(key) => key,
-            Err(reason) => {
-                tracing::debug!(
-                    run_id = %run_id,
-                    reason = %reason,
-                    "parked child cancel skipped: could not build idempotency key"
-                );
-                return;
-            }
+        // Prefer the actor carried by the observed state/event. When it is absent
+        // (the ownerless event/state cases `handle_terminal` recovers internally
+        // before resuming the parent), recover the authoritative actor from the
+        // child run's own state so the cancel is authorized in exactly those
+        // cases too — otherwise the orphaned child would stay lock-held.
+        let actor = match actor {
+            Some(actor) => actor,
+            None => match self
+                .turn_state_store
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await
+            {
+                Ok(state) => match state.actor {
+                    Some(actor) => actor,
+                    None => {
+                        tracing::debug!(
+                            run_id = %run_id,
+                            "parked child cancel skipped: run state carries no actor to authorize the cancel"
+                        );
+                        return Ok(());
+                    }
+                },
+                // Run record already gone — nothing left to cancel.
+                Err(TurnError::ScopeNotFound) => return Ok(()),
+                Err(error) => return Err(error),
+            },
         };
-        if let Err(error) = coordinator
+        let idempotency_key = IdempotencyKey::new(format!("subagent-parked-cancel:{run_id}"))
+            .map_err(|reason| TurnError::InvalidRequest { reason })?;
+        match coordinator
             .cancel_run(CancelRunRequest {
                 scope: scope.clone(),
                 actor,
@@ -565,11 +582,16 @@ where
             })
             .await
         {
-            tracing::debug!(
-                run_id = %run_id,
-                error = %error,
-                "parked child cancel failed; active lock not released this pass"
-            );
+            Ok(_) => Ok(()),
+            Err(error @ (TurnError::Conflict { .. } | TurnError::InvalidTransition { .. })) => {
+                tracing::debug!(
+                    run_id = %run_id,
+                    error = %error,
+                    "parked child cancel raced a concurrent transition; lock released by that transition"
+                );
+                Ok(())
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -760,7 +782,7 @@ where
             // see `cancel_parked_child_run`. Runs after `handle_terminal` so the
             // parent keeps the descriptive synthetic failure.
             self.cancel_parked_child_run(&state.scope, state.run_id, state.actor.clone())
-                .await;
+                .await?;
             return Ok(());
         }
         let event = terminal_event_from_state(&state)?;
@@ -776,7 +798,7 @@ where
                 event.run_id,
                 event.owner_user_id.clone().map(TurnActor::new),
             )
-            .await;
+            .await?;
             return Ok(());
         }
         self.handle_terminal(&event).await
@@ -1303,6 +1325,10 @@ mod tests {
     struct RecordingCoordinator {
         resumed: Mutex<Vec<ResumeTurnRequest>>,
         cancelled: Mutex<Vec<CancelRunRequest>>,
+        // When set, `cancel_run` returns a non-race backend error instead of
+        // recording the request, to drive the propagation path in
+        // `cancel_parked_child_run`.
+        fail_cancel: bool,
     }
 
     impl RecordingCoordinator {
@@ -1346,6 +1372,11 @@ mod tests {
             &self,
             request: CancelRunRequest,
         ) -> Result<CancelRunResponse, TurnError> {
+            if self.fail_cancel {
+                return Err(TurnError::Unavailable {
+                    reason: "injected cancel failure".to_string(),
+                });
+            }
             let run_id = request.run_id;
             let actor = request.actor.clone();
             self.cancelled.lock().unwrap().push(request);
@@ -3263,6 +3294,150 @@ mod tests {
             "a child parked on a gate must have its real run cancelled to free the active lock"
         );
         assert_eq!(cancels[0].run_id, child_run_id);
+    }
+
+    /// A real (non-race) `cancel_run` failure on the parked-child cleanup must
+    /// propagate out of the observer — not be swallowed — so the path retries
+    /// instead of silently leaving the child `Blocked*` with a held lock and a
+    /// still-resolvable gate. (Convergence races are covered by the production
+    /// match arm; this drives the backend-error arm.)
+    #[tokio::test]
+    async fn parked_child_cancel_backend_failure_propagates() {
+        let tenant = TenantId::new("tenant").unwrap();
+        let agent = AgentId::new("agent").unwrap();
+        let owner = UserId::new("owner").unwrap();
+        let scope = TurnScope::new(
+            tenant,
+            Some(agent),
+            None,
+            ThreadId::new("child-thread-cancel-fail").unwrap(),
+        );
+        let run_id = TurnRunId::new();
+
+        // Empty stores: handle_terminal short-circuits (no gate/child record), so
+        // the parent-resume side never runs and the test isolates the cancel arm.
+        let observer = SubagentCompletionObserver::new(
+            Arc::new(BoundedSubagentGateResolutionStore::new()),
+            Arc::new(InMemoryBoundedSubagentGoalStore::new()),
+            Arc::new(RecordingTurnStateStore::default()),
+            Arc::new(RecordingResultWriter::new(
+                LoopResultRef::new("result:cancel-fail").unwrap(),
+            )),
+            Arc::new(RecordingCoordinator {
+                fail_cancel: true,
+                ..Default::default()
+            }),
+            Arc::new(InMemorySessionThreadService::default()),
+        )
+        .unwrap();
+
+        let event = TurnLifecycleEvent {
+            cursor: EventCursor(7),
+            scope,
+            occurred_at: None,
+            owner_user_id: Some(owner),
+            run_id,
+            status: TurnStatus::BlockedApproval,
+            kind: TurnEventKind::Blocked,
+            blocked_gate: None,
+            sanitized_reason: None,
+        };
+
+        let result = observer.observe_committed_event(event).await;
+        assert!(
+            matches!(result, Err(TurnError::Unavailable { .. })),
+            "a non-race cancel failure must propagate out of the observer, got {result:?}"
+        );
+    }
+
+    /// When the observed event carries no actor (an ownerless delivery that
+    /// `handle_terminal` would recover internally), the parked-child cancel must
+    /// still fire by recovering the authoritative actor from the child run's own
+    /// state — otherwise the orphaned child stays lock-held in exactly the
+    /// ownerless cases.
+    #[tokio::test]
+    async fn parked_child_cancel_recovers_actor_when_event_owner_missing() {
+        let tenant = TenantId::new("tenant").unwrap();
+        let agent = AgentId::new("agent").unwrap();
+        let owner = UserId::new("owner").unwrap();
+        let scope = TurnScope::new(
+            tenant,
+            Some(agent),
+            None,
+            ThreadId::new("child-thread-recover-actor").unwrap(),
+        );
+        let run_id = TurnRunId::new();
+
+        let turn_state_store = Arc::new(RecordingTurnStateStore::default());
+        // The child run's own state carries the authoritative actor. handle_terminal
+        // short-circuits on the empty gate store / missing run record, so the only
+        // actor source for the cancel is this state via get_run_state.
+        turn_state_store.add_state(TurnRunState {
+            scope: scope.clone(),
+            actor: Some(TurnActor::new(owner.clone())),
+            turn_id: ironclaw_turns::TurnId::new(),
+            run_id,
+            status: TurnStatus::BlockedApproval,
+            accepted_message_ref: AcceptedMessageRef::new("msg:recover").unwrap(),
+            source_binding_ref: SourceBindingRef::new("source:recover").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:recover").unwrap(),
+            resolved_run_profile_id: RunProfileId::new("default").unwrap(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            resolved_model_route: None,
+            received_at: chrono::Utc::now(),
+            checkpoint_id: None,
+            gate_ref: None,
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: EventCursor(7),
+            product_context: None,
+            resume_disposition: None,
+        });
+
+        let coordinator = Arc::new(RecordingCoordinator::default());
+        let observer = SubagentCompletionObserver::new(
+            Arc::new(BoundedSubagentGateResolutionStore::new()),
+            Arc::new(InMemoryBoundedSubagentGoalStore::new()),
+            turn_state_store,
+            Arc::new(RecordingResultWriter::new(
+                LoopResultRef::new("result:recover").unwrap(),
+            )),
+            coordinator.clone(),
+            Arc::new(InMemorySessionThreadService::default()),
+        )
+        .unwrap();
+
+        // Event carries NO owner — the cancel must recover the actor from state.
+        let event = TurnLifecycleEvent {
+            cursor: EventCursor(7),
+            scope,
+            occurred_at: None,
+            owner_user_id: None,
+            run_id,
+            status: TurnStatus::BlockedApproval,
+            kind: TurnEventKind::Blocked,
+            blocked_gate: None,
+            sanitized_reason: None,
+        };
+
+        observer
+            .observe_committed_event(event)
+            .await
+            .expect("ownerless parked child must still cancel via recovered actor");
+
+        let cancels = coordinator.cancels();
+        assert_eq!(
+            cancels.len(),
+            1,
+            "the cancel must fire for an ownerless parked child by recovering the actor from state"
+        );
+        assert_eq!(cancels[0].run_id, run_id);
+        assert_eq!(
+            cancels[0].actor,
+            TurnActor::new(owner),
+            "the recovered actor must be the child run's own actor"
+        );
     }
 
     #[test]
