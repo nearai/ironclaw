@@ -36,4 +36,5 @@
 
 - Keep edits inside this crate unless a contract explicitly requires a neighboring crate change.
 - Prefer caller-level tests when a helper gates dispatch, persistence, network, secrets, approvals, resources, events, or process side effects.
+- In `turn_scheduler.rs`, treat heartbeat errors against an already-terminal run as stale scheduler observations, not new executor failures. Preserve strict turn-state transitions in `ironclaw_turns`; do not relax the store to mask scheduler races.
 - If the contract and code disagree, stop and treat the task as a contract-change request instead of silently changing ownership.

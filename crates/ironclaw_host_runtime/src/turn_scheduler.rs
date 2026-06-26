@@ -7,7 +7,7 @@ use chrono::Utc;
 use futures_util::FutureExt;
 use ironclaw_turns::{
     SanitizedFailure, TurnError, TurnLeaseToken, TurnRunId, TurnRunWake, TurnRunWakeNotifier,
-    TurnRunWakeNotifyError, TurnRunnerId, TurnScope,
+    TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStatus,
     runner::{
         ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordRunnerFailureRequest,
         RecoverExpiredLeasesRequest, RelinquishRunRequest, TurnRunTransitionPort,
@@ -595,6 +595,12 @@ enum ExecutorTaskOutcome {
     TerminalFailure(Option<SanitizedFailure>),
 }
 
+enum HeartbeatOutcome {
+    Renewed,
+    RunAlreadyTerminal,
+    Failed,
+}
+
 fn spawn_executor_task(
     claimed: ClaimedTurnRun,
     transitions: Arc<dyn TurnRunTransitionPort>,
@@ -668,10 +674,16 @@ fn spawn_executor_task(
                         );
                     }
                     Some(heartbeat) = heartbeats.join(), if heartbeats.is_running() => {
-                        if !heartbeat_succeeded(heartbeat) {
-                            break ExecutorTaskOutcome::TerminalFailure(scheduler_failure(
-                                "scheduler_heartbeat_failed",
-                            ));
+                        match heartbeat_outcome(heartbeat) {
+                            HeartbeatOutcome::Renewed => {}
+                            HeartbeatOutcome::RunAlreadyTerminal => {
+                                break ExecutorTaskOutcome::Completed;
+                            }
+                            HeartbeatOutcome::Failed => {
+                                break ExecutorTaskOutcome::TerminalFailure(scheduler_failure(
+                                    "scheduler_heartbeat_failed",
+                                ));
+                            }
                         }
                     }
                 }
@@ -706,7 +718,7 @@ fn spawn_executor_task(
 }
 
 struct InFlightHeartbeat {
-    task: Option<JoinHandle<bool>>,
+    task: Option<JoinHandle<HeartbeatOutcome>>,
 }
 
 impl InFlightHeartbeat {
@@ -738,7 +750,7 @@ impl InFlightHeartbeat {
         }));
     }
 
-    async fn join(&mut self) -> Option<Result<bool, tokio::task::JoinError>> {
+    async fn join(&mut self) -> Option<Result<HeartbeatOutcome, tokio::task::JoinError>> {
         let task = self.task.as_mut()?;
         let result = task.await;
         self.task = None;
@@ -752,8 +764,14 @@ impl InFlightHeartbeat {
     }
 }
 
-fn heartbeat_succeeded(result: Result<bool, tokio::task::JoinError>) -> bool {
-    matches!(result, Ok(true))
+fn heartbeat_outcome(result: Result<HeartbeatOutcome, tokio::task::JoinError>) -> HeartbeatOutcome {
+    match result {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            debug!(error = %error, "turn run scheduler heartbeat task failed");
+            HeartbeatOutcome::Failed
+        }
+    }
 }
 
 async fn heartbeat_claimed_run(
@@ -762,7 +780,7 @@ async fn heartbeat_claimed_run(
     runner_id: ironclaw_turns::TurnRunnerId,
     lease_token: ironclaw_turns::TurnLeaseToken,
     timeout_after: Duration,
-) -> bool {
+) -> HeartbeatOutcome {
     let heartbeat = transitions.heartbeat(HeartbeatRequest {
         run_id,
         runner_id,
@@ -770,10 +788,20 @@ async fn heartbeat_claimed_run(
     });
     let result = tokio::time::timeout(timeout_after, heartbeat).await;
     match result {
-        Ok(Ok(_)) => true,
+        Ok(Ok(_)) => HeartbeatOutcome::Renewed,
+        Ok(Err(TurnError::InvalidTransition { from, to }))
+            if from.is_terminal() && to == TurnStatus::Running =>
+        {
+            debug!(
+                run_id = %run_id,
+                from = ?from,
+                "turn run scheduler heartbeat observed terminal run"
+            );
+            HeartbeatOutcome::RunAlreadyTerminal
+        }
         Ok(Err(error)) => {
             debug!(error = %error, "turn run scheduler heartbeat failed");
-            false
+            HeartbeatOutcome::Failed
         }
         Err(_) => {
             debug!(
@@ -781,7 +809,7 @@ async fn heartbeat_claimed_run(
                 timeout_after = ?timeout_after,
                 "turn run scheduler heartbeat timed out"
             );
-            false
+            HeartbeatOutcome::Failed
         }
     }
 }
