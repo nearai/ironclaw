@@ -52,6 +52,12 @@ struct State {
     event_logs: HashMap<String, Vec<EventRecord>>,
 }
 
+/// Upper bound on the number of legs a single [`put_batch`] may carry. Guards
+/// against an unbounded batch holding the single `Mutex<State>` for an
+/// arbitrarily long validate-then-apply pass. Mirrors the cap the SQL backends
+/// enforce on their native multi-key path.
+const MAX_BATCH_PUTS: usize = 64;
+
 /// In-memory backend serving the full unified [`RootFilesystem`] surface.
 pub struct InMemoryBackend {
     state: Mutex<State>,
@@ -78,7 +84,14 @@ impl Default for InMemoryBackend {
 #[async_trait]
 impl RootFilesystem for InMemoryBackend {
     fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities::in_memory_full()
+        // PR-4: the native `put_batch` override below holds the single
+        // `Mutex<State>` across every leg, so an N>1 batch is genuinely
+        // all-or-nothing. Advertise [`Capability::BatchPut`] so callers can
+        // gate on it instead of falling back to per-key CAS. We widen here
+        // rather than in `in_memory_full()` because that constructor is also
+        // used by `CompositeRootFilesystem` mount descriptors that should not
+        // be forced to claim BatchPut.
+        BackendCapabilities::in_memory_full().with(crate::Capability::BatchPut)
     }
 
     async fn put(
@@ -88,36 +101,55 @@ impl RootFilesystem for InMemoryBackend {
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
         let mut state = self.state.lock().await;
-        // PR #3679 review fix: the SQL backends reject `put(/a)` when `/a/b`
-        // already exists. Mirror the SQL contract so cross-backend tests
-        // can't pass against impossible production state.
-        let prefix = with_trailing_slash(path.as_str());
-        if state
-            .entries
-            .keys()
-            .any(|k| k.as_str().starts_with(&prefix))
-        {
-            return Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::WriteFile,
-                reason: "cannot overwrite a directory".to_string(),
+        apply_put(&mut state.entries, path, entry, cas)
+    }
+
+    async fn put_batch(
+        &self,
+        puts: Vec<crate::BatchPut>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        if puts.is_empty() {
+            return Err(FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::PutBatch,
+                reason: "empty put_batch".to_string(),
             });
         }
-        let current_version = state.entries.get(path).map(|stored| stored.version);
-        check_cas(path, cas, current_version)?;
-
-        let next_version = current_version
-            .map(|v| v.next())
-            .unwrap_or_else(|| RecordVersion::from_backend(1));
-        state.entries.insert(
-            path.clone(),
-            StoredEntry {
-                entry,
-                version: next_version,
-                modified: SystemTime::now(),
-            },
-        );
-        Ok(next_version)
+        if puts.len() > MAX_BATCH_PUTS {
+            return Err(FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::PutBatch,
+                reason: format!(
+                    "put_batch has {} legs, exceeding MAX_BATCH_PUTS ({MAX_BATCH_PUTS})",
+                    puts.len()
+                ),
+            });
+        }
+        // Mirror the default impl + native SQL backends: an N>1 batch must
+        // share a common directory prefix (the same-mount precondition the
+        // composite enforces upstream). Keeps the native override observably
+        // equivalent to the default fallback for every input.
+        if puts.len() > 1 && crate::common_dir_prefix(puts.iter().map(|p| &p.path)).is_none() {
+            return Err(FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::PutBatch,
+                reason: "put_batch entries share no common directory prefix".to_string(),
+            });
+        }
+        // Native atomic multi-key batch. Hold the single `Mutex<State>` for the
+        // whole pass — there is no `.await` between acquiring the lock and
+        // releasing it, so no other writer can interleave. We apply every leg
+        // to a scratch clone of the entry map; a mid-batch CAS/conflict failure
+        // returns early via `?` BEFORE the scratch is swapped back, leaving the
+        // live `State` byte-for-byte unchanged. Applying to the scratch (rather
+        // than validate-then-apply) also lets later legs observe earlier legs
+        // in the same batch (e.g. `put(/a, Absent)` then `put(/a, Version(1))`).
+        let mut state = self.state.lock().await;
+        let mut scratch = state.entries.clone();
+        let mut versions = Vec::with_capacity(puts.len());
+        for crate::BatchPut { path, entry, cas } in puts {
+            versions.push(apply_put(&mut scratch, &path, entry, cas)?);
+        }
+        // All legs validated and applied to the scratch — commit atomically.
+        state.entries = scratch;
+        Ok(versions)
     }
 
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
@@ -465,6 +497,49 @@ impl RootFilesystem for InMemoryBackend {
         );
         Ok(())
     }
+}
+
+/// Apply a single put against an entry map, returning the new version.
+///
+/// Shared by [`InMemoryBackend::put`] (operating directly on the live map under
+/// the held lock) and [`InMemoryBackend::put_batch`] (operating on a scratch
+/// clone so a mid-batch failure leaves the live map untouched). Both callers
+/// hold the single `Mutex<State>`, so this never races. The body mirrors the
+/// SQL backends' contract exactly: reject `put(/a)` when `/a/b` already exists
+/// (no overwriting a directory), CAS-check against the current version, then
+/// insert at `current.next()` (or version 1 when absent).
+fn apply_put(
+    entries: &mut HashMap<VirtualPath, StoredEntry>,
+    path: &VirtualPath,
+    entry: Entry,
+    cas: CasExpectation,
+) -> Result<RecordVersion, FilesystemError> {
+    // PR #3679 review fix: the SQL backends reject `put(/a)` when `/a/b`
+    // already exists. Mirror the SQL contract so cross-backend tests can't
+    // pass against impossible production state.
+    let prefix = with_trailing_slash(path.as_str());
+    if entries.keys().any(|k| k.as_str().starts_with(&prefix)) {
+        return Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::WriteFile,
+            reason: "cannot overwrite a directory".to_string(),
+        });
+    }
+    let current_version = entries.get(path).map(|stored| stored.version);
+    check_cas(path, cas, current_version)?;
+
+    let next_version = current_version
+        .map(|v| v.next())
+        .unwrap_or_else(|| RecordVersion::from_backend(1));
+    entries.insert(
+        path.clone(),
+        StoredEntry {
+            entry,
+            version: next_version,
+            modified: SystemTime::now(),
+        },
+    );
+    Ok(next_version)
 }
 
 fn check_cas(
@@ -1204,15 +1279,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_batch_multi_surfaces_unsupported_begin_txn() {
-        // The in-memory backend supports CAS only (`begin` is Unsupported),
-        // so an N>1 put_batch surfaces the typed `Unsupported{BeginTxn}`
-        // from the default trait impl today. PR-4 adds a native multi-key
-        // override that flips this leg to all-or-nothing atomic.
+    async fn put_batch_multi_is_atomic_all_or_nothing() {
+        // PR-4: the in-memory backend now serves N>1 `put_batch` natively by
+        // holding its single `Mutex<State>` across every leg, so the batch is
+        // genuinely all-or-nothing. A successful batch lands every leg with the
+        // correct version; a batch with a stale `Version` leg fails with
+        // `VersionMismatch` and leaves State completely unchanged.
         let fs = InMemoryBackend::new();
+        // Pre-seed two paths at version 1 so the batch can mix `Absent` (new)
+        // and `Version` (update) legs.
+        let x = vpath("/secrets/leases/batch_multi/X");
+        let y = vpath("/secrets/leases/batch_multi/Y");
+        let vx1 = fs
+            .put(&x, Entry::bytes(vec![10]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        let vy1 = fs
+            .put(&y, Entry::bytes(vec![20]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
         let a = vpath("/secrets/leases/batch_multi/A");
         let b = vpath("/secrets/leases/batch_multi/B");
-        let err = fs
+        // 4 mixed legs: two fresh `Absent` writes + two `Version` updates.
+        let versions = fs
             .put_batch(vec![
                 crate::BatchPut {
                     path: a.clone(),
@@ -1224,22 +1314,152 @@ mod tests {
                     entry: Entry::bytes(vec![2]),
                     cas: CasExpectation::Absent,
                 },
+                crate::BatchPut {
+                    path: x.clone(),
+                    entry: Entry::bytes(vec![11]),
+                    cas: CasExpectation::Version(vx1),
+                },
+                crate::BatchPut {
+                    path: y.clone(),
+                    entry: Entry::bytes(vec![21]),
+                    cas: CasExpectation::Version(vy1),
+                },
+            ])
+            .await
+            .unwrap();
+        // All four legs landed, in input order, with the correct versions:
+        // fresh writes start at 1, the two updates bump to 2.
+        assert_eq!(versions.len(), 4);
+        assert_eq!(versions[0].get(), 1);
+        assert_eq!(versions[1].get(), 1);
+        assert_eq!(versions[2], vx1.next());
+        assert_eq!(versions[3], vy1.next());
+        assert_eq!(fs.get(&a).await.unwrap().unwrap().entry.body, vec![1]);
+        assert_eq!(fs.get(&b).await.unwrap().unwrap().entry.body, vec![2]);
+        let gx = fs.get(&x).await.unwrap().unwrap();
+        assert_eq!(gx.entry.body, vec![11]);
+        assert_eq!(gx.version, vx1.next());
+        let gy = fs.get(&y).await.unwrap().unwrap();
+        assert_eq!(gy.entry.body, vec![21]);
+        assert_eq!(gy.version, vy1.next());
+
+        // Now a batch whose second leg carries a stale `Version` (X is at v2
+        // after the batch above, so `Version(vx1)` is stale). The whole batch
+        // must fail and the sibling `Absent` write to C must NOT land.
+        let c = vpath("/secrets/leases/batch_multi/C");
+        let err = fs
+            .put_batch(vec![
+                crate::BatchPut {
+                    path: c.clone(),
+                    entry: Entry::bytes(vec![3]),
+                    cas: CasExpectation::Absent,
+                },
+                crate::BatchPut {
+                    path: x.clone(),
+                    entry: Entry::bytes(vec![99]),
+                    cas: CasExpectation::Version(vx1), // stale: X is now v2
+                },
             ])
             .await
             .unwrap_err();
         assert!(
+            matches!(err, FilesystemError::VersionMismatch { .. }),
+            "stale Version leg must surface VersionMismatch, got {err:?}"
+        );
+        // State UNCHANGED: C never landed, and X keeps its v2 value/version.
+        assert!(
+            fs.get(&c).await.unwrap().is_none(),
+            "sibling write C must not land when a later leg fails its CAS"
+        );
+        let gx_after = fs.get(&x).await.unwrap().unwrap();
+        assert_eq!(gx_after.entry.body, vec![11]);
+        assert_eq!(gx_after.version, vx1.next());
+    }
+
+    #[tokio::test]
+    async fn put_batch_mid_batch_failure_leaves_state_unchanged() {
+        // Explicit mid-batch failure check: a pre-seeded row at version 1, then
+        // a batch of [valid new write A, stale-version write to the seeded row].
+        // The batch must error and the valid write A must NOT be present.
+        let fs = InMemoryBackend::new();
+        let seeded = vpath("/secrets/leases/mid_fail/seeded");
+        let seeded_v1 = fs
+            .put(&seeded, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        // Bump the seeded row to v2 so the batch's `Version(seeded_v1)` is stale.
+        let seeded_v2 = fs
+            .put(
+                &seeded,
+                Entry::bytes(vec![2]),
+                CasExpectation::Version(seeded_v1),
+            )
+            .await
+            .unwrap();
+
+        let a = vpath("/secrets/leases/mid_fail/A");
+        let err = fs
+            .put_batch(vec![
+                crate::BatchPut {
+                    path: a.clone(),
+                    entry: Entry::bytes(vec![7]),
+                    cas: CasExpectation::Absent,
+                },
+                crate::BatchPut {
+                    path: seeded.clone(),
+                    entry: Entry::bytes(vec![8]),
+                    cas: CasExpectation::Version(seeded_v1), // stale
+                },
+            ])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, FilesystemError::VersionMismatch { .. }),
+            "mid-batch stale Version must error VersionMismatch, got {err:?}"
+        );
+        // The valid leg A must NOT have landed — all-or-nothing.
+        assert!(
+            fs.get(&a).await.unwrap().is_none(),
+            "valid leg A must not land when a sibling leg fails"
+        );
+        // The seeded row is untouched: still v2 with its v2 body.
+        let after = fs.get(&seeded).await.unwrap().unwrap();
+        assert_eq!(after.entry.body, vec![2]);
+        assert_eq!(after.version, seeded_v2);
+    }
+
+    #[tokio::test]
+    async fn put_batch_exceeds_max_is_rejected_state_unchanged() {
+        // A batch larger than `MAX_BATCH_PUTS` is rejected with a typed
+        // infrastructure error before any leg is applied.
+        let fs = InMemoryBackend::new();
+        let over = MAX_BATCH_PUTS + 1;
+        let puts: Vec<crate::BatchPut> = (0..over)
+            .map(|i| crate::BatchPut {
+                path: vpath(&format!("/secrets/leases/too_many/{i}")),
+                entry: Entry::bytes(vec![i as u8]),
+                cas: CasExpectation::Absent,
+            })
+            .collect();
+        let err = fs.put_batch(puts).await.unwrap_err();
+        assert!(
             matches!(
                 err,
-                FilesystemError::Unsupported {
-                    operation: FilesystemOperation::BeginTxn,
+                FilesystemError::BackendInfrastructure {
+                    operation: FilesystemOperation::PutBatch,
                     ..
                 }
             ),
-            "in-memory N>1 put_batch must be Unsupported until PR-4, got {err:?}"
+            "over-limit put_batch must be a typed PutBatch infrastructure error, got {err:?}"
         );
-        // begin() failed before any write, so nothing landed.
-        assert!(fs.get(&a).await.unwrap().is_none());
-        assert!(fs.get(&b).await.unwrap().is_none());
+        // Nothing landed: the first would-be path is absent.
+        assert!(
+            fs.get(&vpath("/secrets/leases/too_many/0"))
+                .await
+                .unwrap()
+                .is_none(),
+            "an over-limit batch must apply nothing"
+        );
     }
 
     #[tokio::test]
@@ -1286,7 +1506,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_batch_divergent_roots_rejected_by_default_impl() {
+    async fn put_batch_divergent_roots_rejected() {
         // When N>1 legs share no leading path component, the default impl
         // cannot derive a transaction prefix and surfaces a typed
         // BackendInfrastructure error (nothing written).
