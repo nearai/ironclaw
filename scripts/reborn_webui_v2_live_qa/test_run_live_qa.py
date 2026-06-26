@@ -196,19 +196,18 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             if spec.default_enabled
         ]
         self.assertIn("qa_4b_github_connect", default_cases)
-        self.assertIn("webui_mobile_live_llm_chat", default_cases)
-        self.assertEqual(
-            run_live_qa.CASES["webui_mobile_live_llm_chat"].qa_matrix_test_ids,
-            ["REBCLI-065-TC-20", "REBCLI-065-TC-21"],
+        self.assertTrue(
+            set(default_cases).issubset(run_live_qa.QA_SHEET_CASES),
+            f"default cases must come from the QA spreadsheet: {default_cases}",
         )
 
     def test_case_manifest_distinguishes_targeted_from_placeholder_gates(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
-            matrix_path = output_dir / "ironclaw_reborn_cli_qa_matrix.xlsx"
+            sheet_url = "https://docs.google.com/spreadsheets/d/test-spreadsheet/edit"
             with patch.dict(
                 os.environ,
-                {"REBORN_WEBUI_V2_LIVE_QA_MATRIX_PATH": str(matrix_path)},
+                {"REBORN_WEBUI_V2_LIVE_QA_SHEET_URL": sheet_url},
                 clear=False,
             ):
                 manifest_path = run_live_qa.write_case_manifest(
@@ -220,21 +219,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 )
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-        self.assertNotIn("qa_sheet", manifest)
-        self.assertEqual(manifest["qa_matrix"]["source"], "local_xlsx")
-        self.assertEqual(manifest["qa_matrix"]["path"], str(matrix_path))
-        self.assertIn(
-            "REBCLI-065-TC-20",
-            manifest["qa_matrix"]["represented_test_ids"],
-        )
-        self.assertIn(
-            "REBCLI-065-TC-21",
-            manifest["qa_matrix"]["represented_test_ids"],
-        )
+        self.assertNotIn("qa_matrix", manifest)
+        self.assertEqual(manifest["qa_sheet"]["source"], "google_sheets")
+        self.assertEqual(manifest["qa_sheet"]["url"], sheet_url)
+        self.assertEqual(manifest["qa_sheet"]["tab"], "Automated")
         cases = {case["case"]: case for case in manifest["cases"]}
-        self.assertEqual(
-            cases["webui_mobile_live_llm_chat"]["qa_matrix_test_ids"],
-            ["REBCLI-065-TC-20", "REBCLI-065-TC-21"],
+        self.assertTrue(
+            set(cases).issubset(run_live_qa.QA_SHEET_CASES),
+            f"manifest cases must come from the QA spreadsheet: {sorted(cases)}",
         )
         self.assertTrue(cases["qa_2d_calendar_prep_live_chat"]["implemented"])
         self.assertEqual(
@@ -492,6 +484,43 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
 
         self.assertEqual(required, ["IRONCLAW_REBORN_GOOGLE_CLIENT_ID"])
+
+    def test_google_credential_action_for_invalid_grant_requires_token_rotation(self):
+        action = run_live_qa._google_credential_action_for_block(
+            {
+                "accounts": [
+                    {
+                        "refresh_probe": {
+                            "ok": False,
+                            "oauth_error_code": "invalid_grant",
+                        },
+                    },
+                ],
+            },
+        )
+
+        self.assertIsNotNone(action)
+        self.assertIn("AUTH_LIVE_GOOGLE_ACCESS_TOKEN", action)
+        self.assertIn("AUTH_LIVE_GOOGLE_REFRESH_TOKEN", action)
+        self.assertIn("IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET", action)
+
+    def test_google_credential_action_for_missing_client_secret_names_secret(self):
+        action = run_live_qa._google_credential_action_for_block(
+            {
+                "accounts": [
+                    {
+                        "refresh_probe": {
+                            "ok": False,
+                            "error": "google_oauth_refresh_request_failed",
+                            "client_secret_present": False,
+                        },
+                    },
+                ],
+            },
+        )
+
+        self.assertIsNotNone(action)
+        self.assertIn("IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET", action)
 
     def test_slack_delivery_observed_is_status_agnostic_after_gate_resume(self):
         self.assertTrue(

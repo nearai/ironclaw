@@ -109,6 +109,16 @@ Without that matching client secret, Reborn WebUI v2 live QA records
 `missing_google_ready` before executing the Google runtime rows `2D`, `2F`,
 `4E`, `5C`, `5D`, `6C`, `6E`, and `7E`.
 
+If the preflight artifact reports `Google OAuth refresh probe failed:
+invalid_grant` with `client_secret_present: true`, the client secret is wired
+but the stored refresh token is invalid for that OAuth client. Re-authorize the
+live Google QA account with the same Google Cloud OAuth client configured by
+`IRONCLAW_REBORN_GOOGLE_CLIENT_ID` and `IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET`,
+then rotate these repo-scoped GitHub Actions secrets together:
+
+- `AUTH_LIVE_GOOGLE_ACCESS_TOKEN`
+- `AUTH_LIVE_GOOGLE_REFRESH_TOKEN`
+
 Slack workflow cases require bot-level Slack credentials for the Reborn Slack
 adapter. `SLACK_WEBHOOK_URL` is only for canary reporting and is not sufficient
 for WebUI Slack workflow coverage.

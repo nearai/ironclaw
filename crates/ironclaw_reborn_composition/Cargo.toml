@@ -29,7 +29,7 @@ root-llm-provider = [
 # budget pipeline end-to-end. Enable with `cargo test --features
 # test-support` (plus whatever feature surface the test crate also
 # requires, e.g. `webui-v2-beta`).
-test-support = []
+test-support = ["ironclaw_host_runtime/test-support"]
 # Compose the Reborn WebChat v2 HTTP gateway in this crate. Off by
 # default; turning this on pulls in the v2 route crate plus the axum /
 # tower-http middleware stack used by the `webui_serve` module. The

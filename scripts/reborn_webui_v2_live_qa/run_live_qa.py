@@ -49,6 +49,11 @@ AUTH_TOKEN = "reborn-webui-v2-live-qa-token-0123456789abcdef"
 DEFAULT_USER_ID = "reborn-webui-v2-live-qa-user"
 PROVIDER = "reborn-webui-v2"
 MODE = "live"
+QA_SHEET_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1IpioaRFnDw8cW4fj9vxg1pBRWN7swVQLRq1FqVlJAls/edit?gid=0#gid=0"
+)
+QA_SHEET_TAB = "Automated"
 HN_KEYWORD_SEARCH_URL = (
     "https://hn.algolia.com/api/v1/search_by_date"
     "?query=NEAR%20AI&tags=story&hitsPerPage=1"
@@ -1041,6 +1046,56 @@ def _google_required_env_for_block(
     return required
 
 
+def _google_refresh_probe_error(preflight: dict[str, object]) -> str | None:
+    accounts = preflight.get("accounts")
+    if not isinstance(accounts, list):
+        return None
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        refresh_probe = account.get("refresh_probe")
+        if not isinstance(refresh_probe, dict) or refresh_probe.get("ok"):
+            continue
+        error = refresh_probe.get("oauth_error_code") or refresh_probe.get("error")
+        if error:
+            return str(error)
+    return None
+
+
+def _google_refresh_probe_missing_client_secret(preflight: dict[str, object]) -> bool:
+    accounts = preflight.get("accounts")
+    if not isinstance(accounts, list):
+        return False
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        refresh_probe = account.get("refresh_probe")
+        if not isinstance(refresh_probe, dict) or refresh_probe.get("ok"):
+            continue
+        if refresh_probe.get("client_secret_present") is False:
+            return True
+    return False
+
+
+def _google_credential_action_for_block(preflight: dict[str, object]) -> str | None:
+    if _google_refresh_probe_error(preflight) == "invalid_grant":
+        return (
+            "Rotate AUTH_LIVE_GOOGLE_ACCESS_TOKEN and AUTH_LIVE_GOOGLE_REFRESH_TOKEN "
+            "from the live Google QA account using the same OAuth client configured "
+            "by IRONCLAW_REBORN_GOOGLE_CLIENT_ID and "
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET."
+        )
+    if (
+        preflight.get("missing_google_client_secret")
+        or _google_refresh_probe_missing_client_secret(preflight)
+    ):
+        return (
+            "Set IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET to the Google Cloud OAuth "
+            "client secret matching IRONCLAW_REBORN_GOOGLE_CLIENT_ID."
+        )
+    return None
+
+
 def _first_env_value(
     names: list[str],
     extra_env: dict[str, str] | None = None,
@@ -1553,7 +1608,7 @@ def _google_product_auth_preflight(
         if refresh_probe_failures:
             probe = refresh_probe_failures[0]
             error = probe.get("oauth_error_code") or probe.get("error") or "unknown"
-            if error == "invalid_request" and not probe.get("client_secret_present"):
+            if not probe.get("client_secret_present"):
                 preflight["reason"] = (
                     "Google OAuth refresh client secret is missing for the copied "
                     "expired access token"
@@ -2407,152 +2462,6 @@ def _result(case_name: str, success: bool, started: float, details: dict[str, ob
         latency_ms=int((time.monotonic() - started) * 1000),
         details=details,
     )
-
-
-async def case_webui_auth_gate(ctx: LiveQaContext) -> ProbeResult:
-    from playwright.async_api import expect
-
-    started = time.monotonic()
-    case_name = "webui_auth_gate"
-
-    async def action(page: object) -> None:
-        await page.goto(f"{ctx.base_url}/v2/", wait_until="domcontentloaded")  # type: ignore[attr-defined]
-        await expect(page.locator("#v2-token")).to_be_visible(timeout=15000)  # type: ignore[attr-defined]
-
-    try:
-        await _with_page(ctx.output_dir, case_name, action)
-        return _result(case_name, True, started, {"checked": "/v2/ without token"})
-    except Exception as exc:
-        return _result(case_name, False, started, {"error": str(exc)})
-
-
-async def case_webui_live_llm_chat(ctx: LiveQaContext) -> ProbeResult:
-    from playwright.async_api import expect
-
-    started = time.monotonic()
-    case_name = "webui_live_llm_chat"
-    marker = "REBORN_WEBUI_V2_LIVE_QA_OK"
-
-    async def action(page: object) -> None:
-        await page.goto(
-            f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
-            wait_until="domcontentloaded",
-        )  # type: ignore[attr-defined]
-        composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
-        await expect(composer).to_be_visible(timeout=15000)
-        prompt = (
-            "Live QA verification. Reply with exactly this token and no extra words: "
-            f"{marker}"
-        )
-        await composer.fill(prompt)
-        await composer.press("Enter")
-        await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
-            "Live QA verification",
-            timeout=15000,
-        )
-        await expect(page.locator("[data-testid='msg-assistant']").last).to_contain_text(  # type: ignore[attr-defined]
-            marker,
-            timeout=120000,
-        )
-
-    try:
-        await _with_page(ctx.output_dir, case_name, action)
-        return _result(case_name, True, started, {"marker": marker})
-    except Exception as exc:
-        return _result(case_name, False, started, {"error": str(exc), "marker": marker})
-
-
-async def case_webui_mobile_live_llm_chat(ctx: LiveQaContext) -> ProbeResult:
-    from playwright.async_api import expect
-
-    started = time.monotonic()
-    case_name = "webui_mobile_live_llm_chat"
-    marker = "REBORN_WEBUI_V2_MOBILE_LIVE_QA_OK"
-
-    async def action(page: object) -> None:
-        await page.set_viewport_size({"width": 390, "height": 844})  # type: ignore[attr-defined]
-        await page.goto(
-            f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
-            wait_until="domcontentloaded",
-        )  # type: ignore[attr-defined]
-        composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
-        await expect(composer).to_be_visible(timeout=15000)
-        prompt = (
-            "Mobile live QA verification. Reply with exactly this token and no extra words: "
-            f"{marker}"
-        )
-        await composer.fill(prompt)
-        await composer.press("Enter")
-        await expect(page.locator("[data-testid='msg-assistant']").last).to_contain_text(  # type: ignore[attr-defined]
-            marker,
-            timeout=120000,
-        )
-        await expect(composer).to_be_visible(timeout=15000)
-        has_horizontal_overflow = await page.evaluate(  # type: ignore[attr-defined]
-            "() => document.documentElement.scrollWidth > document.documentElement.clientWidth"
-        )
-        if has_horizontal_overflow:
-            raise LiveQaError("mobile viewport has document-level horizontal overflow")
-
-    try:
-        await _with_page(ctx.output_dir, case_name, action)
-        return _result(
-            case_name,
-            True,
-            started,
-            {
-                "marker": marker,
-                "viewport": {"width": 390, "height": 844},
-                "qa_matrix_test_ids": ["REBCLI-065-TC-20", "REBCLI-065-TC-21"],
-            },
-        )
-    except Exception as exc:
-        return _result(
-            case_name,
-            False,
-            started,
-            {
-                "error": str(exc),
-                "marker": marker,
-                "viewport": {"width": 390, "height": 844},
-                "qa_matrix_test_ids": ["REBCLI-065-TC-20", "REBCLI-065-TC-21"],
-            },
-        )
-
-
-async def case_webui_core_routes(ctx: LiveQaContext) -> ProbeResult:
-    from playwright.async_api import expect
-
-    started = time.monotonic()
-    case_name = "webui_core_routes"
-    routes = [
-        ("/v2/workspace", "Workspace"),
-        ("/v2/automations", "Automations"),
-        ("/v2/extensions/registry", "Extensions"),
-        ("/v2/settings/inference", "Settings"),
-    ]
-
-    async def action(page: object) -> None:
-        for path, expected_text in routes:
-            await page.goto(
-                f"{ctx.base_url}{path}?token={AUTH_TOKEN}",
-                wait_until="domcontentloaded",
-            )  # type: ignore[attr-defined]
-            await expect(page.locator("body")).to_contain_text(  # type: ignore[attr-defined]
-                expected_text,
-                timeout=15000,
-            )
-
-    try:
-        await _with_page(ctx.output_dir, case_name, action)
-        return _result(
-            case_name,
-            True,
-            started,
-            {"routes": [path for path, _ in routes]},
-        )
-    except Exception as exc:
-        return _result(case_name, False, started, {"error": str(exc)})
 
 
 async def _live_chat_case(
@@ -4835,7 +4744,6 @@ class CaseSpec:
         requires_github_auth: bool = False,
         default_enabled: bool = True,
         implemented: bool = True,
-        qa_matrix_test_ids: list[str] | None = None,
     ) -> None:
         self.fn = fn
         self.requires_slack = requires_slack
@@ -4846,7 +4754,6 @@ class CaseSpec:
         self.requires_github_auth = requires_github_auth
         self.default_enabled = default_enabled
         self.implemented = implemented
-        self.qa_matrix_test_ids = qa_matrix_test_ids or []
 
 
 CASES: dict[str, CaseSpec] = {
@@ -4899,22 +4806,6 @@ CASES: dict[str, CaseSpec] = {
     "qa_3a_slack_connect": CaseSpec(
         case_qa_3a_slack_connect,
         requires_slack=True,
-    ),
-    "webui_auth_gate": CaseSpec(
-        case_webui_auth_gate,
-        qa_matrix_test_ids=["REBCLI-055-TC-02", "REBCLI-055-TC-05"],
-    ),
-    "webui_live_llm_chat": CaseSpec(
-        case_webui_live_llm_chat,
-        qa_matrix_test_ids=["REBCLI-065-TC-21"],
-    ),
-    "webui_mobile_live_llm_chat": CaseSpec(
-        case_webui_mobile_live_llm_chat,
-        qa_matrix_test_ids=["REBCLI-065-TC-20", "REBCLI-065-TC-21"],
-    ),
-    "webui_core_routes": CaseSpec(
-        case_webui_core_routes,
-        qa_matrix_test_ids=["REBCLI-063-TC-01"],
     ),
     "qa_3b_endpoint_status_live_chat": CaseSpec(case_qa_3b_endpoint_status_live_chat),
     "qa_3c_endpoint_status_slack_routine": CaseSpec(
@@ -5039,7 +4930,7 @@ CASES: dict[str, CaseSpec] = {
 
 
 def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
-    qa_matrix_path = os.environ.get("REBORN_WEBUI_V2_LIVE_QA_MATRIX_PATH", "").strip()
+    qa_sheet_url = os.environ.get("REBORN_WEBUI_V2_LIVE_QA_SHEET_URL", "").strip()
     represented_rows = sorted(
         {
             row
@@ -5049,33 +4940,23 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
         },
         key=_qa_row_sort_key,
     )
-    represented_test_ids = sorted(
-        {
-            test_id
-            for spec in CASES.values()
-            for test_id in spec.qa_matrix_test_ids
-            if test_id
-        }
-    )
     manifest = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "selected_cases": selected_cases,
         "default_cases": [
             name for name, spec in CASES.items() if spec.default_enabled
         ],
-        "qa_matrix": {
-            "source": "local_xlsx",
-            "path": qa_matrix_path or None,
+        "qa_sheet": {
+            "source": "google_sheets",
+            "url": qa_sheet_url or QA_SHEET_URL,
+            "tab": QA_SHEET_TAB,
             "represented_rows": represented_rows,
             "represented_row_count": len(represented_rows),
-            "represented_test_ids": represented_test_ids,
-            "represented_test_id_count": len(represented_test_ids),
         },
         "cases": [
             {
                 "case": name,
                 "qa_rows": QA_SHEET_CASES.get(name, {}).get("rows", []),
-                "qa_matrix_test_ids": spec.qa_matrix_test_ids,
                 "feature": QA_SHEET_CASES.get(name, {}).get("feature"),
                 "gate": QA_SHEET_CASES.get(name, {}).get("gate"),
                 "default_enabled": spec.default_enabled,
@@ -5229,30 +5110,34 @@ async def run_cases(args: argparse.Namespace) -> int:
             and not google_preflight.get(google_ready_key)
         ):
             started = time.monotonic()
+            details = {
+                "blocked": True,
+                "error": (
+                    google_preflight.get("reason")
+                    or (
+                        "live Google runtime access is not ready"
+                        if case_spec.requires_google_runtime_access
+                        else "live Google product-auth account is not configured"
+                    )
+                ),
+                "required_env": _google_required_env_for_block(
+                    google_preflight,
+                    requires_runtime_access=case_spec.requires_google_runtime_access,
+                ),
+                "legacy_required_env": [
+                    "GOOGLE_CLIENT_ID",
+                    "GOOGLE_OAUTH_CLIENT_ID",
+                ],
+                "preflight": google_preflight,
+            }
+            credential_action = _google_credential_action_for_block(google_preflight)
+            if credential_action:
+                details["credential_action"] = credential_action
             result = _result(
                 name,
                 False,
                 started,
-                {
-                    "blocked": True,
-                    "error": (
-                        google_preflight.get("reason")
-                        or (
-                            "live Google runtime access is not ready"
-                            if case_spec.requires_google_runtime_access
-                            else "live Google product-auth account is not configured"
-                        )
-                    ),
-                    "required_env": _google_required_env_for_block(
-                        google_preflight,
-                        requires_runtime_access=case_spec.requires_google_runtime_access,
-                    ),
-                    "legacy_required_env": [
-                        "GOOGLE_CLIENT_ID",
-                        "GOOGLE_OAUTH_CLIENT_ID",
-                    ],
-                    "preflight": google_preflight,
-                },
+                details,
             )
             results.append(result)
             print(
