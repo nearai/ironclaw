@@ -7,7 +7,6 @@
 //! - submission normalization
 //! - pending challenge bookkeeping
 
-use rand::RngExt as _;
 use serde::{Deserialize, Serialize};
 
 /// User-facing payload for a code-based verification flow.
@@ -93,11 +92,18 @@ pub fn generate_code(len: usize, alphabet: &[u8]) -> String {
         return String::new();
     }
 
-    let mut rng = rand::rng();
-    (0..len)
-        .map(|_| {
-            let idx = rng.random_range(0..alphabet.len());
-            alphabet[idx] as char
-        })
+    let mut bytes = vec![0u8; len];
+    fill_secure_random(&mut bytes);
+    bytes
+        .into_iter()
+        .map(|byte| alphabet[byte as usize % alphabet.len()] as char)
         .collect()
+}
+
+fn fill_secure_random(bytes: &mut [u8]) {
+    use rand::{RngExt as _, TryRng as _};
+
+    if rand::rngs::SysRng.try_fill_bytes(bytes).is_err() {
+        rand::rng().fill(bytes);
+    }
 }

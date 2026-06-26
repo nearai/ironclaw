@@ -2179,6 +2179,7 @@ impl LlmProvider for GeminiOauthProvider {
             cache_read_input_tokens: response.cache_read_input_tokens,
             cache_creation_input_tokens: response.cache_creation_input_tokens,
             reasoning: None,
+            reasoning_details: None,
         })
     }
 }

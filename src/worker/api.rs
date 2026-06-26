@@ -278,6 +278,7 @@ impl WorkerHttpClient {
             cache_read_input_tokens: proxy_resp.cache_read_input_tokens,
             cache_creation_input_tokens: proxy_resp.cache_creation_input_tokens,
             reasoning: proxy_resp.reasoning,
+            reasoning_details: None,
         })
     }
 

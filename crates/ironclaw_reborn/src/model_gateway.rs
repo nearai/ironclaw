@@ -970,6 +970,7 @@ fn recover_textual_tool_calls_from_tool_response(
         cache_read_input_tokens: response.cache_read_input_tokens,
         cache_creation_input_tokens: response.cache_creation_input_tokens,
         reasoning: response.reasoning,
+        reasoning_details: response.reasoning_details,
     })
 }
 
@@ -1262,6 +1263,7 @@ fn provider_tool_repair_messages(
             .map(provider_tool_call_for_repair)
             .collect(),
     )
+    .with_reasoning_details(response.reasoning_details.clone())
     .with_reasoning(response.reasoning.clone());
     std::iter::once(assistant)
         .chain(response.tool_calls.iter().map(|tool_call| {

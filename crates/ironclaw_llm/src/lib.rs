@@ -80,8 +80,9 @@ pub use openai_codex_session::{DeviceCodeStart, OpenAiCodexSessionManager};
 pub use provider::sanitize_tool_messages;
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
-    LlmProvider, ModelMetadata, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition, ToolResult, generate_tool_call_id, normalized_model_override,
+    LlmProvider, ModelMetadata, ReasoningDetail, ReasoningDetails, Role, ToolCall,
+    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
+    generate_tool_call_id, normalized_model_override,
 };
 pub use reasoning::{
     ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, ResponseAnomaly,

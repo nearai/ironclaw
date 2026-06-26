@@ -6,7 +6,7 @@
 //! verifier itself — so nothing here logs or retains secret material.
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::RngExt as _;
+use rand::{RngExt as _, TryRng as _};
 use sha2::{Digest, Sha256};
 
 /// RFC 7636 §4.1 unreserved characters: ALPHA / DIGIT / "-" / "." / "_" / "~".
@@ -19,15 +19,20 @@ const VERIFIER_LEN: usize = 64;
 
 /// Generate a 64-character URL-safe PKCE code verifier (RFC 7636 §4.1).
 ///
-/// Draws from rand's thread-local CSPRNG, seeded from system entropy.
+/// Draws directly from the operating system's CSPRNG.
 pub fn generate_code_verifier() -> String {
-    let mut rng = rand::rng();
-    (0..VERIFIER_LEN)
-        .map(|_| {
-            let idx = rng.random_range(0..VERIFIER_CHARSET.len());
-            VERIFIER_CHARSET[idx] as char
-        })
+    let mut bytes = [0u8; VERIFIER_LEN];
+    fill_secure_random(&mut bytes);
+    bytes
+        .into_iter()
+        .map(|byte| VERIFIER_CHARSET[byte as usize % VERIFIER_CHARSET.len()] as char)
         .collect()
+}
+
+fn fill_secure_random(bytes: &mut [u8]) {
+    if rand::rngs::SysRng.try_fill_bytes(bytes).is_err() {
+        rand::rng().fill(bytes);
+    }
 }
 
 /// Compute the S256 code challenge for a verifier: `base64url-nopad(SHA-256(verifier))`

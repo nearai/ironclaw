@@ -34,10 +34,12 @@ const MASTER_KEY_ACCOUNT: &str = "master_key";
 
 /// Generate a random 32-byte master key.
 pub fn generate_master_key() -> Vec<u8> {
-    use rand::RngExt as _;
+    use rand::{RngExt as _, TryRng as _};
 
     let mut key = vec![0u8; 32];
-    rand::rng().fill(&mut key);
+    if rand::rngs::SysRng.try_fill_bytes(&mut key).is_err() {
+        rand::rng().fill(&mut key);
+    }
     key
 }
 
