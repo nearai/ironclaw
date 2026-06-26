@@ -999,13 +999,27 @@ async fn always_allow_persists_provider_grantee_when_resolver_supplies_one() {
     );
     let (service, _resolver, _coordinator, run_id, gate_ref) = service_fixture_for_request(request);
     let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let overrides = Arc::new(InMemoryToolPermissionOverrideStore::new());
+    let override_key =
+        ToolPermissionOverrideKey::new(&settings_scope(&policy_scope), capability.clone());
+    overrides
+        .set(ToolPermissionOverrideInput {
+            scope: settings_scope(&policy_scope),
+            capability_id: capability.clone(),
+            state: ToolPermissionOverride::AskEachTime,
+            updated_by: Principal::User(UserId::new("user-alpha").expect("user")),
+        })
+        .await
+        .expect("override set");
     let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
+    let override_store: Arc<dyn ToolPermissionOverrideStore> = overrides.clone();
     let service = service
         .with_persistent_policy_store(policy_store)
         .with_persistent_grantee_resolver(Arc::new(StaticPersistentApprovalGranteeResolver {
             capability_id: capability,
             grantee: Principal::Extension(provider),
-        }));
+        }))
+        .with_tool_permission_override_store(override_store);
 
     service
         .resolve(ResolveApprovalInteractionRequest {
@@ -1025,6 +1039,14 @@ async fn always_allow_persists_provider_grantee_when_resolver_supplies_one() {
         .expect("persistent policy lookup")
         .expect("provider-grantee persistent policy");
     assert!(policy.active_grant().is_some());
+    assert!(
+        overrides
+            .get(&override_key)
+            .await
+            .expect("override lookup")
+            .is_none(),
+        "Approve & always allow should remove an older explicit per-tool override"
+    );
 }
 
 /// Drives the real `resolve(AlwaysAllow)` path: builds a service whose pending

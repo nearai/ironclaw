@@ -3954,25 +3954,37 @@ mod tests {
     }
 
     #[test]
-    fn persistent_grantee_resolver_reads_shared_registry_capability_provider() {
+    fn persistent_grantee_resolver_reads_shared_registry_capability_providers() {
         let registry = Arc::new(ironclaw_extensions::SharedExtensionRegistry::new(
             ironclaw_extensions::ExtensionRegistry::new(),
         ));
-        registry
-            .insert(test_extension_package("nearai", &["web_search"]))
-            .expect("insert nearai package");
+        for (extension_id, capabilities) in [
+            ("nearai", &["web_search"][..]),
+            ("github", &["get_repo"][..]),
+            ("google-calendar", &["list_events"][..]),
+        ] {
+            registry
+                .insert(test_extension_package(extension_id, capabilities))
+                .expect("insert test package");
+        }
         let resolver = super::RegistryPersistentApprovalGranteeResolver::new(Arc::clone(&registry))
             .expect("resolver builds");
 
-        assert_eq!(
-            ironclaw_product_workflow::PersistentApprovalGranteeResolver::persistent_approval_grantee(
-                &resolver,
-                &CapabilityId::new("nearai.web_search").expect("capability id")
-            ),
-            Some(Principal::Extension(
-                ExtensionId::new("nearai").expect("extension id")
-            ))
-        );
+        for (capability_id, extension_id) in [
+            ("nearai.web_search", "nearai"),
+            ("github.get_repo", "github"),
+            ("google-calendar.list_events", "google-calendar"),
+        ] {
+            assert_eq!(
+                ironclaw_product_workflow::PersistentApprovalGranteeResolver::persistent_approval_grantee(
+                    &resolver,
+                    &CapabilityId::new(capability_id).expect("capability id")
+                ),
+                Some(Principal::Extension(
+                    ExtensionId::new(extension_id).expect("extension id")
+                ))
+            );
+        }
     }
 
     fn test_extension_package(

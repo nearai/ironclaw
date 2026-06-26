@@ -17,17 +17,19 @@
 //! exists only to bridge a parked external-tool call to its client-supplied
 //! result for the lifetime of the run.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use ironclaw_host_api::ProviderToolName;
-use serde::{Deserialize, Serialize};
+use ironclaw_host_api::CapabilityId;
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::TurnRunId;
 
 /// Maximum accepted external tool name length, in bytes.
-const MAX_EXTERNAL_TOOL_NAME_BYTES: usize = ProviderToolName::MAX_BYTES;
+const MAX_EXTERNAL_TOOL_NAME_BYTES: usize = 64;
 /// Maximum accepted external tool description length, in bytes.
 const MAX_EXTERNAL_TOOL_DESCRIPTION_BYTES: usize = 8 * 1024;
 /// Maximum accepted serialized parameters-schema length, in bytes.
@@ -36,14 +38,14 @@ const MAX_EXTERNAL_TOOL_SCHEMA_BYTES: usize = 64 * 1024;
 const MAX_EXTERNAL_TOOLS_PER_RUN: usize = 256;
 
 /// Reason an [`ExternalToolSpec`] failed validation. Stable, user-safe strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalToolSpecError {
-    pub reason: &'static str,
+    pub reason: Cow<'static, str>,
 }
 
 impl std::fmt::Display for ExternalToolSpecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.reason)
+        f.write_str(self.reason.as_ref())
     }
 }
 
@@ -51,9 +53,10 @@ impl std::error::Error for ExternalToolSpecError {}
 
 /// A client-declared tool the model may call. The host never executes it: a call
 /// parks the run and returns control to the API client.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExternalToolSpec {
-    name: ProviderToolName,
+    name: String,
+    capability_id: CapabilityId,
     description: String,
     parameters_schema: serde_json::Value,
 }
@@ -70,16 +73,15 @@ impl ExternalToolSpec {
         let name = name.into();
         if name.len() > MAX_EXTERNAL_TOOL_NAME_BYTES {
             return Err(ExternalToolSpecError {
-                reason: "external tool name is too long",
+                reason: Cow::Borrowed("external tool name is too long"),
             });
         }
-        let name = ProviderToolName::new(name).map_err(|_| ExternalToolSpecError {
-            reason: "external tool name cannot be represented as a provider tool name",
-        })?;
+        validate_external_tool_name(&name)?;
+        let capability_id = external_tool_capability_id(&name)?;
         let description = description.into();
         if description.len() > MAX_EXTERNAL_TOOL_DESCRIPTION_BYTES {
             return Err(ExternalToolSpecError {
-                reason: "external tool description is too long",
+                reason: Cow::Borrowed("external tool description is too long"),
             });
         }
         let schema_len = serde_json::to_string(&parameters_schema)
@@ -87,22 +89,23 @@ impl ExternalToolSpec {
             .unwrap_or(usize::MAX);
         if schema_len > MAX_EXTERNAL_TOOL_SCHEMA_BYTES {
             return Err(ExternalToolSpecError {
-                reason: "external tool parameters schema is too large",
+                reason: Cow::Borrowed("external tool parameters schema is too large"),
             });
         }
         Ok(Self {
             name,
+            capability_id,
             description,
             parameters_schema,
         })
     }
 
     pub fn name(&self) -> &str {
-        self.name.as_str()
+        &self.name
     }
 
-    pub fn provider_tool_name(&self) -> &ProviderToolName {
-        &self.name
+    pub fn capability_id(&self) -> &CapabilityId {
+        &self.capability_id
     }
 
     pub fn description(&self) -> &str {
@@ -111,6 +114,81 @@ impl ExternalToolSpec {
 
     pub fn parameters_schema(&self) -> &serde_json::Value {
         &self.parameters_schema
+    }
+}
+
+impl Serialize for ExternalToolSpec {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("ExternalToolSpec", 3)?;
+        state.serialize_field("name", &self.name)?;
+        state.serialize_field("description", &self.description)?;
+        state.serialize_field("parameters_schema", &self.parameters_schema)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ExternalToolSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct ExternalToolSpecWire {
+            name: String,
+            description: String,
+            parameters_schema: serde_json::Value,
+        }
+
+        let wire = ExternalToolSpecWire::deserialize(deserializer)?;
+        Self::new(wire.name, wire.description, wire.parameters_schema)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Synthetic capability id for an external tool. Keep this validation at the
+/// registration boundary so accepted specs do not fail later during
+/// capability-id construction.
+fn external_tool_capability_id(name: &str) -> Result<CapabilityId, ExternalToolSpecError> {
+    let Some(first_byte) = name.as_bytes().first() else {
+        return Err(ExternalToolSpecError {
+            reason: Cow::Borrowed("external tool name cannot be represented as a capability id"),
+        });
+    };
+    if !first_byte.is_ascii_alphanumeric() {
+        return Err(ExternalToolSpecError {
+            reason: Cow::Borrowed("external tool name cannot be represented as a capability id"),
+        });
+    }
+    CapabilityId::new(format!("external_tool.{}", name.to_ascii_lowercase())).map_err(|_| {
+        ExternalToolSpecError {
+            reason: Cow::Borrowed("external tool name cannot be represented as a capability id"),
+        }
+    })
+}
+
+fn validate_external_tool_name(name: &str) -> Result<(), ExternalToolSpecError> {
+    if name.is_empty() {
+        return Err(external_tool_name_error("must not be empty"));
+    }
+    if !name
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return Err(external_tool_name_error(
+            "only ASCII letters, digits, '_', and '-' are allowed",
+        ));
+    }
+    Ok(())
+}
+
+fn external_tool_name_error(reason: &'static str) -> ExternalToolSpecError {
+    ExternalToolSpecError {
+        reason: Cow::Owned(format!(
+            "external tool name cannot be represented as a provider tool name: invalid provider tool name id: {reason}"
+        )),
     }
 }
 
@@ -241,10 +319,16 @@ impl ExternalToolCatalog for InMemoryExternalToolCatalog {
             });
         }
         let mut seen = std::collections::HashSet::with_capacity(specs.len());
+        let mut seen_capability_ids = std::collections::HashSet::with_capacity(specs.len());
         for spec in &specs {
             if !seen.insert(spec.name()) {
                 return Err(ExternalToolCatalogError::InvalidRegistration {
                     reason: "duplicate external tool name",
+                });
+            }
+            if !seen_capability_ids.insert(spec.capability_id()) {
+                return Err(ExternalToolCatalogError::InvalidRegistration {
+                    reason: "duplicate external tool capability id",
                 });
             }
         }
@@ -359,12 +443,28 @@ mod tests {
     fn spec_validation_rejects_bad_names_and_oversized_fields() {
         assert!(ExternalToolSpec::new("", "d", serde_json::json!({})).is_err());
         assert!(ExternalToolSpec::new(" x", "d", serde_json::json!({})).is_err());
-        assert!(ExternalToolSpec::new("client.tool", "d", serde_json::json!({})).is_err());
+        assert!(ExternalToolSpec::new("_hidden", "d", serde_json::json!({})).is_err());
+        assert!(ExternalToolSpec::new("-hidden", "d", serde_json::json!({})).is_err());
+        let provider_name_error =
+            ExternalToolSpec::new("client.tool", "d", serde_json::json!({})).unwrap_err();
+        assert!(
+            provider_name_error
+                .to_string()
+                .contains("only ASCII letters, digits, '_', and '-' are allowed")
+        );
         assert!(ExternalToolSpec::new("x\u{0000}", "d", serde_json::json!({})).is_err());
         let long_name = "n".repeat(MAX_EXTERNAL_TOOL_NAME_BYTES + 1);
         assert!(ExternalToolSpec::new(long_name, "d", serde_json::json!({})).is_err());
         let big_desc = "d".repeat(MAX_EXTERNAL_TOOL_DESCRIPTION_BYTES + 1);
         assert!(ExternalToolSpec::new("ok", big_desc, serde_json::json!({})).is_err());
+        let uppercase =
+            ExternalToolSpec::new("ClientTool", "d", serde_json::json!({"type": "object"}))
+                .expect("uppercase provider-safe name is normalized for capability id");
+        assert_eq!(uppercase.name(), "ClientTool");
+        assert_eq!(
+            uppercase.capability_id().as_str(),
+            "external_tool.clienttool"
+        );
         assert!(ExternalToolSpec::new("ok", "d", serde_json::json!({"type": "object"})).is_ok());
     }
 
@@ -405,6 +505,22 @@ mod tests {
             .map(|i| spec(&format!("tool{i}")))
             .collect();
         assert!(catalog.register(run, too_many).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn register_rejects_case_folded_capability_id_collision() {
+        let catalog = InMemoryExternalToolCatalog::new();
+        let run = TurnRunId::new();
+        let err = catalog
+            .register(run, vec![spec("Search"), spec("search")])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ExternalToolCatalogError::InvalidRegistration {
+                reason: "duplicate external tool capability id",
+            }
+        );
     }
 
     #[tokio::test]
