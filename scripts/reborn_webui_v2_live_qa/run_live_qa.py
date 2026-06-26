@@ -2424,16 +2424,89 @@ async def case_webui_auth_gate(ctx: LiveQaContext) -> ProbeResult:
 
     started = time.monotonic()
     case_name = "webui_auth_gate"
+    observed: dict[str, object] = {}
 
     async def action(page: object) -> None:
         await page.goto(f"{ctx.base_url}/v2/", wait_until="domcontentloaded")  # type: ignore[attr-defined]
         await expect(page.locator("#v2-token")).to_be_visible(timeout=15000)  # type: ignore[attr-defined]
+        await page.get_by_role("button", name="Connect").click()  # type: ignore[attr-defined]
+        await expect(page.locator("body")).to_contain_text("Gateway token is required")  # type: ignore[attr-defined]
+
+        await page.locator("#v2-token").fill("invalid-live-qa-token")  # type: ignore[attr-defined]
+        await page.get_by_role("button", name="Connect").click()  # type: ignore[attr-defined]
+        await expect(page.locator("#v2-token")).to_be_visible(timeout=15000)  # type: ignore[attr-defined]
+        await expect(page.locator("body")).to_contain_text("Your session expired")  # type: ignore[attr-defined]
+        invalid_stored = await page.evaluate(  # type: ignore[attr-defined]
+            "() => sessionStorage.getItem('ironclaw_token') || ''"
+        )
+        if invalid_stored:
+            raise AssertionError("invalid bearer remained in sessionStorage")
+
+        await page.goto(  # type: ignore[attr-defined]
+            f"{ctx.base_url}/v2/?token=query-token#token={AUTH_TOKEN}",
+            wait_until="domcontentloaded",
+        )
+        await expect(page.locator("[data-testid='chat-composer']")).to_be_visible(timeout=15000)  # type: ignore[attr-defined]
+        stored = await page.evaluate("() => sessionStorage.getItem('ironclaw_token') || ''")  # type: ignore[attr-defined]
+        if stored != AUTH_TOKEN:
+            raise AssertionError("fragment token did not win over query token in sessionStorage")
+        href_after_token = await page.evaluate("() => window.location.href")  # type: ignore[attr-defined]
+        if "token=" in href_after_token:
+            raise AssertionError(f"token was not scrubbed from URL: {href_after_token}")
+
+        await page.goto(f"{ctx.base_url}/v2/#token=bad-overwrite-token", wait_until="domcontentloaded")  # type: ignore[attr-defined]
+        await expect(page.locator("[data-testid='chat-composer']")).to_be_visible(timeout=15000)  # type: ignore[attr-defined]
+        stored_after_overwrite_attempt = await page.evaluate(  # type: ignore[attr-defined]
+            "() => sessionStorage.getItem('ironclaw_token') || ''"
+        )
+        if stored_after_overwrite_attempt != AUTH_TOKEN:
+            raise AssertionError("stored token was overwritten by a later URL token")
+        href_after_overwrite = await page.evaluate("() => window.location.href")  # type: ignore[attr-defined]
+        if "token=" in href_after_overwrite:
+            raise AssertionError(
+                f"overwrite-attempt token was not scrubbed from URL: {href_after_overwrite}"
+            )
+
+        session_probe = await page.evaluate(  # type: ignore[attr-defined]
+            """async () => {
+                const token = sessionStorage.getItem('ironclaw_token') || '';
+                const response = await fetch('/api/webchat/v2/session', {
+                    headers: { Authorization: `Bearer ${token}` },
+                });
+                const body = await response.json().catch(() => ({}));
+                return { status: response.status, body };
+            }"""
+        )
+        if session_probe.get("status") != 200:
+            raise AssertionError(f"session endpoint returned {session_probe!r}")
+        session_body = session_probe.get("body") or {}
+        if session_body.get("user_id") != _auth_user_id():
+            raise AssertionError(f"session user_id mismatch: {session_body!r}")
+
+        await page.get_by_title("Sign out").click()  # type: ignore[attr-defined]
+        await expect(page.locator("#v2-token")).to_be_visible(timeout=15000)  # type: ignore[attr-defined]
+        signed_out_stored = await page.evaluate(  # type: ignore[attr-defined]
+            "() => sessionStorage.getItem('ironclaw_token') || ''"
+        )
+        if signed_out_stored:
+            raise AssertionError("sign out did not clear sessionStorage token")
+
+        observed.update(
+            {
+                "invalid_token_cleared": True,
+                "fragment_precedence": True,
+                "token_url_scrubbed": True,
+                "existing_session_not_overwritten": True,
+                "session_user_id": session_body.get("user_id"),
+                "sign_out_cleared_token": True,
+            }
+        )
 
     try:
         await _with_page(ctx.output_dir, case_name, action)
-        return _result(case_name, True, started, {"checked": "/v2/ without token"})
+        return _result(case_name, True, started, {"checked": "/v2/ login/session", **observed})
     except Exception as exc:
-        return _result(case_name, False, started, {"error": str(exc)})
+        return _result(case_name, False, started, {"error": str(exc), **observed})
 
 
 async def case_webui_api_auth_security_headers(ctx: LiveQaContext) -> ProbeResult:
@@ -6014,7 +6087,16 @@ CASES: dict[str, CaseSpec] = {
     ),
     "webui_auth_gate": CaseSpec(
         case_webui_auth_gate,
-        qa_matrix_test_ids=["REBCLI-055-TC-02", "REBCLI-055-TC-05"],
+        qa_matrix_test_ids=[
+            "REBCLI-055-TC-02",
+            "REBCLI-055-TC-05",
+            "REBCLI-064-TC-01",
+            "REBCLI-064-TC-02",
+            "REBCLI-064-TC-03",
+            "REBCLI-064-TC-04",
+            "REBCLI-064-TC-05",
+            "REBCLI-064-TC-06",
+        ],
     ),
     "webui_api_auth_security_headers": CaseSpec(
         case_webui_api_auth_security_headers,
