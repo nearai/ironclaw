@@ -286,6 +286,28 @@ WEBUI_V2_FS_HANDLER_COMMAND = CommandSpec(
     ],
 )
 
+COMPOSITION_PROJECT_FS_COMMAND = CommandSpec(
+    name="composition_project_filesystem_reader",
+    description=(
+        "Composition project filesystem reader scoping, path, hidden-file, "
+        "oversize, MIME, and not-found contracts."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "project_filesystem_reader",
+        "--lib",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 COMPOSITION_MOUNT_FS_COMMAND = CommandSpec(
     name="composition_mount_filesystem_reader",
     description="Composition mount filesystem reader traversal and policy contracts.",
@@ -651,6 +673,31 @@ CASES: dict[str, CaseSpec] = {
         notes=(
             "Runs the focused WebUI v2 filesystem handler slice, composition "
             "mount filesystem reader policy tests, and full handler contract file."
+        ),
+    ),
+    "webui_v2_project_files_api_regression": CaseSpec(
+        name="webui_v2_project_files_api_regression",
+        feature="WebUI v2 project file and filesystem browser APIs",
+        category="Hermetic Project Filesystem API Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-049-TC-01",
+            "REBCLI-049-TC-02",
+            "REBCLI-049-TC-03",
+            "REBCLI-049-TC-04",
+            "REBCLI-049-TC-05",
+            "REBCLI-049-TC-06",
+        ],
+        commands=[
+            WEBUI_V2_FS_HANDLER_COMMAND,
+            COMPOSITION_PROJECT_FS_COMMAND,
+            COMPOSITION_MOUNT_FS_COMMAND,
+        ],
+        notes=(
+            "Covers project-file and read-only filesystem API rows: fs route "
+            "mount/list/stat/read handlers, project-scoped reader confinement, "
+            "hidden/sensitive path denial, oversize and missing-file handling, "
+            "mount-relative traversal rejection, and attachment download "
+            "headers without duplicating browser file-tree smoke coverage."
         ),
     ),
     "webui_v2_rust_static_regression": CaseSpec(
