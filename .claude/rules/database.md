@@ -3,6 +3,7 @@ paths:
   - "src/db/**"
   - "src/history/**"
   - "migrations/**"
+  - "src/workspace/**"
 ---
 # Database Rules
 

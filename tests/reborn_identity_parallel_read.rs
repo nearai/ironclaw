@@ -53,7 +53,7 @@ use ironclaw::workspace::{
     ChunkWrite, DocumentVersion, MemoryChunk, MemoryDocument, SearchConfig, SearchResult,
     VersionSummary, Workspace, WorkspaceEntry, WorkspaceIdentityContextSource, paths,
 };
-use ironclaw_loop_support::HostIdentityContextSource;
+use ironclaw_loop_support::{HostIdentityContextBuildError, HostIdentityContextSource};
 use ironclaw_turns::run_profile::{LoopRunContext, PersonalContextPolicy, PromptMode};
 
 // ---------------------------------------------------------------------------
@@ -62,10 +62,16 @@ use ironclaw_turns::run_profile::{LoopRunContext, PersonalContextPolicy, PromptM
 
 /// Wraps any `Arc<dyn Database>`, adding a 40 ms sleep + in-flight counter
 /// to `get_document_by_path`. All other methods forward directly.
+///
+/// `fail_path` optionally forces `get_document_by_path` to return a
+/// non-`DocumentNotFound` `WorkspaceError` for a single path, used to prove
+/// that an underlying read failure still propagates out of the concurrent
+/// `try_join_all` in `load_identity_candidates`.
 struct ConcurrencyProbeDb {
     inner: Arc<dyn Database>,
     current: Arc<AtomicUsize>,
     max: Arc<AtomicUsize>,
+    fail_path: Option<String>,
 }
 
 impl ConcurrencyProbeDb {
@@ -74,6 +80,16 @@ impl ConcurrencyProbeDb {
             inner,
             current,
             max,
+            fail_path: None,
+        }
+    }
+
+    fn new_failing(inner: Arc<dyn Database>, fail_path: &str) -> Self {
+        Self {
+            inner,
+            current: Arc::new(AtomicUsize::new(0)),
+            max: Arc::new(AtomicUsize::new(0)),
+            fail_path: Some(fail_path.to_string()),
         }
     }
 }
@@ -99,6 +115,14 @@ impl WorkspaceStore for ConcurrencyProbeDb {
         tokio::time::sleep(Duration::from_millis(40)).await;
         // No longer in-flight
         self.current.fetch_sub(1, Ordering::SeqCst);
+        if self.fail_path.as_deref() == Some(path) {
+            // A non-DocumentNotFound failure: `read_identity_content` maps this
+            // to `Err`, which `candidate_for_path` turns into
+            // `HostIdentityContextBuildError::SourceUnavailable`.
+            return Err(WorkspaceError::SearchFailed {
+                reason: format!("injected read failure for {path}"),
+            });
+        }
         self.inner
             .get_document_by_path(user_id, agent_id, path)
             .await
@@ -1276,5 +1300,44 @@ async fn load_identity_candidates_is_parallel() {
         "load_identity_candidates is serial: only {max_observed} concurrent \
          get_document_by_path call(s) observed; expected >= 2. \
          Fix: run all candidate_for_path calls in parallel (e.g. futures::future::join_all)."
+    );
+}
+
+/// Concurrency must not swallow read failures. `try_join_all` short-circuits on
+/// the first erroring future (cancelling the rest), which is distinct from the
+/// old serial loop — but the observable contract is unchanged: a real store
+/// read failure (anything other than `DocumentNotFound`) must still surface as
+/// `HostIdentityContextBuildError::SourceUnavailable`, never be hidden by the
+/// concurrent fan-out.
+#[tokio::test]
+async fn load_identity_candidates_propagates_read_failure() {
+    let (raw_db, _dir) = make_test_db().await;
+    seed_all_identity_files(&raw_db).await;
+
+    // Force the AGENTS.md read to fail with a non-DocumentNotFound error while
+    // every other read succeeds.
+    let probe = Arc::new(ConcurrencyProbeDb::new_failing(
+        Arc::clone(&raw_db),
+        paths::AGENTS,
+    ));
+    let ws = Arc::new(Workspace::new_with_db(
+        "primary",
+        probe as Arc<dyn Database>,
+    ));
+    let source = WorkspaceIdentityContextSource::new(ws);
+
+    let mut ctx = make_run_context().await;
+    ctx.resolved_run_profile.personal_context_policy = PersonalContextPolicy::Allowed;
+
+    let result = source
+        .load_identity_candidates(&ctx, PromptMode::TextOnly)
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(HostIdentityContextBuildError::SourceUnavailable)
+        ),
+        "a failed identity read must propagate as SourceUnavailable, got {result:?}"
     );
 }
