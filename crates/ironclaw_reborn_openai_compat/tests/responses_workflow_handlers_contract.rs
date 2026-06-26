@@ -879,13 +879,22 @@ async fn responses_rejects_excessive_input_items_before_product_workflow() {
 }
 
 #[tokio::test]
-async fn responses_rejects_empty_input_items_and_malformed_json_before_side_effects() {
+async fn responses_rejects_empty_input_and_malformed_json_before_side_effects() {
     let workflow = Arc::new(FakeProductWorkflow::new());
     let router = test_router(
         workflow.clone(),
         Arc::new(StaticResponsesReader::completed("unused")),
     );
 
+    let empty_text = router
+        .clone()
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            json!({"model": "gpt-reborn", "input": ""}),
+            None,
+        ))
+        .await
+        .expect("empty text");
     let empty_items = router
         .clone()
         .oneshot(response_create_request(
@@ -900,8 +909,10 @@ async fn responses_rejects_empty_input_items_and_malformed_json_before_side_effe
         .await
         .expect("malformed");
 
+    assert_eq!(empty_text.status(), http::StatusCode::BAD_REQUEST);
     assert_eq!(empty_items.status(), http::StatusCode::BAD_REQUEST);
     assert_eq!(malformed.status(), http::StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(empty_text).await["error"]["param"], "input");
     assert_eq!(workflow.accepted_count(), 0);
 }
 

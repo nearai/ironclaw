@@ -881,7 +881,8 @@ standalone Reborn OpenAI-compatible route mount:
   /api/v1/responses/{id}` retrieves the resulting response;
 - streaming requests return an SSE lifecycle on the Reborn projection stream;
 - unauthenticated requests are rejected before side effects;
-- invalid empty input-item arrays return a field-scoped `400` error.
+- invalid empty text input and empty input-item arrays return field-scoped
+  `400` errors.
 
 Behavior adjustment:
 
@@ -2325,6 +2326,25 @@ Issue fixed:
   typed Responses item shape. That left clients using the older
   role/content-only message form with a `400` even though legacy IronClaw
   accepted it.
+
+### Step 75: Legacy Responses Empty Text Rejection Port
+
+Extended `test_reborn_webui_v2_legacy_responses_api.py` and fixed the Reborn
+OpenAI-compatible Responses workflow validation.
+
+Ported the legacy empty-input error from `test_responses_api.py`:
+
+- rejected `input: ""` and whitespace-only text with a field-scoped
+  `400 invalid_request` before any product-workflow side effect;
+- kept the existing empty input-item array rejection;
+- covered the validation at the Rust route-handler boundary and in the migrated
+  Python E2E Responses scenario.
+
+Issue fixed:
+
+- Reborn previously normalized an empty text input into a product-workflow
+  message payload instead of rejecting it at the Responses route boundary. That
+  diverged from legacy `/v1/responses`, which rejected empty input directly.
 
 ## Open Migration Buckets
 

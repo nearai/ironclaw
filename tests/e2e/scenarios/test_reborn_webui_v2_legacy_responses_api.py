@@ -236,3 +236,16 @@ async def test_reborn_legacy_responses_rejects_empty_input_items(
     assert response.status_code == 400
     body = response.json()
     assert body["error"]["param"] == "input"
+
+
+async def test_reborn_legacy_responses_rejects_empty_text_input(
+    reborn_responses_client,
+):
+    response = await reborn_responses_client.post(
+        "/v1/responses",
+        json={"model": "default", "input": ""},
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["param"] == "input"

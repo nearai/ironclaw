@@ -1036,6 +1036,11 @@ fn responses_input_to_product_text(
 ) -> Result<String, OpenAiCompatHttpError> {
     let input = match &request.input {
         OpenAiResponsesInput::Text(text) => {
+            if text.trim().is_empty() {
+                return Err(OpenAiCompatHttpError::invalid_request(Some(
+                    "input".to_string(),
+                )));
+            }
             vec![serde_json::json!({
                 "type": "message",
                 "role": "user",
