@@ -283,37 +283,57 @@ const CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES: usize = 5;
 /// preview's own `CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES` (2 KiB) cap.
 const CAPABILITY_FAILURE_PREVIEW_MAX_BYTES: usize = 1024;
 
-/// Render a bounded, host-authored display summary for a failed capability.
+/// Generic placeholder summaries assigned when a failure carries no
+/// host-authored message. Surfacing these adds nothing over the bare error
+/// kind, so they are filtered out (`runtime_failure_to_loop` /
+/// `runtime_model_visible_failure_to_loop`).
+const GENERIC_CAPABILITY_FAILURE_SUMMARIES: [&str; 2] = [
+    "capability invocation failed",
+    "capability authorization denied",
+];
+
+/// Render a bounded, host-authored display summary for a failed capability so
+/// the per-tool UI preview shows the actual reason instead of the bare error
+/// kind.
 ///
-/// Returns `Some(..)` only for `InvalidInput` failures, where the per-field
-/// `issues` carry actionable detail the model-visible observation already
-/// surfaces to the LLM but which never reached the UI's per-tool preview.
-/// Other failure kinds return `None` so the projection keeps its existing
-/// `tool failed: <kind>` fallback.
+/// Preference order:
+/// 1. Structured `InvalidInput` field issues, when present — these carry the
+///    most actionable per-field detail. Only schema-derived fields (`path`,
+///    `code`, `expected`) are interpolated; `received` echoes raw tool input
+///    and is deliberately omitted from any display surface.
+/// 2. Otherwise the failure's host-authored `safe_summary` (e.g. a builtin's
+///    `"invalid JSON: ..."` message), unless it is one of the generic
+///    placeholders that say nothing the kind doesn't.
 ///
-/// Only schema-derived fields (`path`, `code`, `expected`) are interpolated.
-/// The `received` value is deliberately omitted: it echoes raw tool input and
-/// must not be rendered into a display surface.
+/// Returns `None` when neither is available, so the projection keeps its
+/// existing `tool failed: <kind>` fallback.
 fn capability_failure_display_summary(failure: &CapabilityFailure) -> Option<String> {
-    let Some(CapabilityFailureDetail::InvalidInput { issues }) = failure.detail.as_ref() else {
-        return None;
-    };
-    if issues.is_empty() {
-        return None;
+    if let Some(CapabilityFailureDetail::InvalidInput { issues }) = failure.detail.as_ref()
+        && !issues.is_empty()
+    {
+        let rendered = issues
+            .iter()
+            .take(CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES)
+            .map(render_capability_input_issue)
+            .collect::<Vec<_>>()
+            .join("; ");
+        let mut summary = format!("Invalid input: {rendered}");
+        if issues.len() > CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES {
+            let extra = issues.len() - CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES;
+            summary.push_str(&format!(" (+{extra} more)"));
+        }
+        return Some(truncate_on_char_boundary(
+            summary,
+            CAPABILITY_FAILURE_PREVIEW_MAX_BYTES,
+        ));
     }
-    let rendered = issues
-        .iter()
-        .take(CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES)
-        .map(render_capability_input_issue)
-        .collect::<Vec<_>>()
-        .join("; ");
-    let mut summary = format!("Invalid input: {rendered}");
-    if issues.len() > CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES {
-        let extra = issues.len() - CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES;
-        summary.push_str(&format!(" (+{extra} more)"));
+
+    let summary = failure.safe_summary.trim();
+    if summary.is_empty() || GENERIC_CAPABILITY_FAILURE_SUMMARIES.contains(&summary) {
+        return None;
     }
     Some(truncate_on_char_boundary(
-        summary,
+        summary.to_string(),
         CAPABILITY_FAILURE_PREVIEW_MAX_BYTES,
     ))
 }
@@ -3275,10 +3295,25 @@ mod tests {
     }
 
     #[test]
-    fn capability_failure_display_summary_is_none_for_non_invalid_input() {
+    fn capability_failure_display_summary_uses_safe_summary_without_issues() {
+        // The `json` builtin reports invalid_input with a descriptive message
+        // but no structured issues; that message must reach the preview.
+        let failure = CapabilityFailure {
+            error_kind: CapabilityFailureKind::InvalidInput,
+            safe_summary: "invalid JSON: expected value at line 1 column 1".to_string(),
+            detail: None,
+        };
+        assert_eq!(
+            capability_failure_display_summary(&failure).as_deref(),
+            Some("invalid JSON: expected value at line 1 column 1")
+        );
+    }
+
+    #[test]
+    fn capability_failure_display_summary_is_none_for_generic_placeholder() {
         let failure = CapabilityFailure {
             error_kind: CapabilityFailureKind::Backend,
-            safe_summary: "capability backend failed".to_string(),
+            safe_summary: "capability invocation failed".to_string(),
             detail: None,
         };
         assert!(capability_failure_display_summary(&failure).is_none());
