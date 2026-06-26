@@ -816,6 +816,7 @@ fn request_for_caller(method: &str, body: &str, tenant_id: &str, user_id: &str) 
             agent_id: None,
             project_id: None,
             operator_webui_config: true,
+            role: ironclaw_host_api::UserRole::Member,
         });
     if method == "GET" {
         builder = builder.header("content-length", "0");

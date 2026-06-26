@@ -145,6 +145,11 @@ pub trait WebuiAuthenticator: Send + Sync + 'static {
 pub struct WebuiAuthentication {
     pub user_id: UserId,
     pub capabilities: WebUiV2Capabilities,
+    /// Resolved role of the authenticated caller. Defaults to the
+    /// least-privilege `Member`; the env-bearer operator authenticates as
+    /// `Owner`. Session/OIDC authenticators populate this from the persisted
+    /// user record once per-user role reads land.
+    pub role: ironclaw_reborn_identity::UserRole,
 }
 
 impl WebuiAuthentication {
@@ -152,7 +157,16 @@ impl WebuiAuthentication {
         Self {
             user_id,
             capabilities,
+            role: ironclaw_reborn_identity::UserRole::Member,
         }
+    }
+
+    /// Override the caller's role (the default from [`Self::new`] is the
+    /// least-privilege `Member`).
+    #[must_use]
+    pub fn with_role(mut self, role: ironclaw_reborn_identity::UserRole) -> Self {
+        self.role = role;
+        self
     }
 
     pub fn user(user_id: UserId) -> Self {
@@ -166,6 +180,7 @@ impl WebuiAuthentication {
                 operator_webui_config: true,
             },
         )
+        .with_role(ironclaw_reborn_identity::UserRole::Owner)
     }
 }
 
@@ -907,7 +922,8 @@ async fn authenticate_request(
         state.default_agent_id.clone(),
         state.default_project_id.clone(),
     )
-    .with_operator_webui_config(auth.capabilities.operator_webui_config);
+    .with_operator_webui_config(auth.capabilities.operator_webui_config)
+    .with_role(auth.role);
     request.extensions_mut().insert(caller);
     request.extensions_mut().insert(auth.capabilities);
     #[cfg(feature = "openai-compat-beta")]
