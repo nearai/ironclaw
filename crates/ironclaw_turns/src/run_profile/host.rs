@@ -146,17 +146,40 @@ fn validate_loop_safe_identifier(
     Ok(value)
 }
 
+/// Maximum byte length for an inline prompt-message body.
+///
+/// Inline message bodies (subagent goals, direction markdown, control nudges)
+/// are full prompt *bodies*, not short result *summaries*, so they use this
+/// larger ceiling instead of the 512-byte summary cap. It mirrors the
+/// model-safe-summary surface cap enforced downstream during instruction-bundle
+/// materialization (`prompt_text::MODEL_SAFE_SUMMARY_MAX_BYTES`); raising it past
+/// that bound would only move the rejection to a later layer.
+const LOOP_INLINE_MESSAGE_BODY_MAX_BYTES: usize = 4096;
+
 fn validate_loop_safe_summary(value: String) -> Result<String, String> {
-    let value = validate_bounded_loop_string(value, "loop safe summary", 512)?;
+    validate_loop_safe_text(value, "loop safe summary", 512)
+}
+
+/// Shared delimiter/marker/control safety scan for sanitized loop strings.
+///
+/// `max_bytes` is the only axis that differs between the 512-byte result-summary
+/// cap and the larger inline-message-body cap — the redaction policy is
+/// identical so the two surfaces cannot drift.
+fn validate_loop_safe_text(
+    value: String,
+    label: &'static str,
+    max_bytes: usize,
+) -> Result<String, String> {
+    let value = validate_bounded_loop_string(value, label, max_bytes)?;
     if value.chars().any(|character| {
         matches!(
             character,
             '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
         )
     }) {
-        return Err(
-            "loop safe summary must not contain raw payload or path delimiters".to_string(),
-        );
+        return Err(format!(
+            "{label} must not contain raw payload or path delimiters"
+        ));
     }
 
     let lower = value.to_ascii_lowercase();
@@ -182,7 +205,7 @@ fn validate_loop_safe_summary(value: String) -> Result<String, String> {
     ] {
         if lower.contains(forbidden) {
             return Err(format!(
-                "loop safe summary must not contain sensitive marker `{forbidden}`"
+                "{label} must not contain sensitive marker `{forbidden}`"
             ));
         }
     }
@@ -190,7 +213,7 @@ fn validate_loop_safe_summary(value: String) -> Result<String, String> {
         .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
         .any(|token| token.starts_with("sk-"))
     {
-        return Err("loop safe summary must not contain API-key-like tokens".to_string());
+        return Err(format!("{label} must not contain API-key-like tokens"));
     }
     Ok(value)
 }
@@ -384,6 +407,25 @@ pub struct LoopSafeSummary(String);
 impl LoopSafeSummary {
     pub fn new(value: impl Into<String>) -> Result<Self, String> {
         validate_loop_safe_summary(value.into()).map(Self)
+    }
+
+    /// Build an inline prompt-message body.
+    ///
+    /// Inline message bodies (e.g. a subagent goal) are full prompt bodies, not
+    /// short result summaries, so this applies the same delimiter/marker/control
+    /// safety scan as [`Self::new`] but with the larger
+    /// [`LOOP_INLINE_MESSAGE_BODY_MAX_BYTES`] ceiling. The 512-byte cap on
+    /// [`Self::new`] stays reserved for actual tool-result summaries. Inline
+    /// message bodies are transient, in-process prompt-construction values; they
+    /// are re-validated against the model-safe-summary surface during
+    /// instruction-bundle materialization.
+    pub fn new_inline_message_body(value: impl Into<String>) -> Result<Self, String> {
+        validate_loop_safe_text(
+            value.into(),
+            "loop inline message body",
+            LOOP_INLINE_MESSAGE_BODY_MAX_BYTES,
+        )
+        .map(Self)
     }
 
     pub fn model_gateway_failed() -> Self {

@@ -209,7 +209,11 @@ pub fn materialize_goal_message(
             ),
         ));
     }
-    let safe_body = LoopSafeSummary::new(safe_body).map_err(|reason| {
+    // The goal is a prompt *body*, not a short result *summary*, so it carries
+    // the larger inline-message-body ceiling rather than the 512-byte safe
+    // summary cap. The budget checks above already bound it; this only applies
+    // the shared delimiter/marker safety scan.
+    let safe_body = LoopSafeSummary::new_inline_message_body(safe_body).map_err(|reason| {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::Invalid,
             format!("invalid subagent goal prompt: {reason}"),
@@ -358,6 +362,28 @@ mod tests {
         .expect("collapsed goal should fit");
 
         assert_eq!(goal.safe_body.as_str(), "Subagent task: answer briefly");
+    }
+
+    #[test]
+    fn multi_kilobyte_goal_composes_past_the_safe_summary_cap() {
+        // A goal between the 512-byte safe-summary cap and the default
+        // multi-KB budget must compose: it is a prompt body, not a result
+        // summary. Regression guard for goals that passed the budget checks but
+        // were rejected by the 512-byte `LoopSafeSummary` validator.
+        let task = "a".repeat(1024);
+        assert!(task.len() > 512);
+        let goal = materialize_goal_message(
+            &SubagentPromptGoal {
+                task: task.clone(),
+                handoff: None,
+            },
+            SubagentPromptLimits::default(),
+        )
+        .expect("multi-kilobyte goal should compose");
+
+        assert_eq!(goal.role, LoopInlineMessageRole::User);
+        assert!(goal.safe_body.as_str().contains(&task));
+        assert!(goal.safe_body.as_str().len() > 512);
     }
 
     #[test]
