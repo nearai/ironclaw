@@ -141,7 +141,6 @@ test("Chat leaves the composer editable while a run is processing", () => {
       messages: [{ id: "message-1" }],
       isProcessing: true,
       pendingGate: null,
-      channelConnectAction: null,
       suggestions: [],
       sseStatus: "open",
       historyLoading: false,
@@ -157,7 +156,6 @@ test("Chat leaves the composer editable while a run is processing", () => {
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      dismissChannelConnectAction: () => {},
     },
   });
 
@@ -174,7 +172,6 @@ test("Chat refuses composer sends while a run is processing", async () => {
       messages: [{ id: "message-1" }],
       isProcessing: true,
       pendingGate: null,
-      channelConnectAction: null,
       suggestions: [],
       sseStatus: "open",
       historyLoading: false,
@@ -193,7 +190,6 @@ test("Chat refuses composer sends while a run is processing", async () => {
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      dismissChannelConnectAction: () => {},
     },
   });
 
@@ -335,7 +331,6 @@ test("Chat renders a timeline load failure as an alert instead of the empty land
       messages: [],
       isProcessing: false,
       pendingGate: null,
-      channelConnectAction: null,
       suggestions: [],
       sseStatus: "open",
       historyLoading: false,
@@ -352,7 +347,6 @@ test("Chat renders a timeline load failure as an alert instead of the empty land
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      dismissChannelConnectAction: () => {},
     },
   });
 
@@ -370,7 +364,6 @@ test("Chat does not render a duplicate logs bar while a run is active", () => {
       messages: [{ id: "message-1" }],
       isProcessing: true,
       pendingGate: null,
-      channelConnectAction: null,
       suggestions: [],
       sseStatus: "open",
       historyLoading: false,
@@ -386,7 +379,6 @@ test("Chat does not render a duplicate logs bar while a run is active", () => {
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      dismissChannelConnectAction: () => {},
     },
   });
 
