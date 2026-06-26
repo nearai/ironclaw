@@ -22,6 +22,7 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, InvocationId, PermissionMode,
     Principal, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
+use ironclaw_loop_support::{EnqueueQueuedMessageRequest, HostInputEnqueuePort};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
     ProjectionSubscriptionRequest,
@@ -33,9 +34,10 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
-    ResumeTurnRequest, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
+    AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, LoopMessageRef,
+    ResumeTurnPrecondition, ResumeTurnRequest, SanitizedCancelReason, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
+    run_profile::LoopInput,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
@@ -2345,6 +2347,7 @@ pub trait InboundAttachmentReader: Send + Sync {
 pub struct RebornServices {
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    input_enqueue: Option<Arc<dyn HostInputEnqueuePort>>,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
     project_filesystem: Option<Arc<dyn ProjectFilesystemReader>>,
     filesystem_browser: Option<Arc<dyn FilesystemBrowseReader>>,
@@ -2377,6 +2380,7 @@ impl RebornServices {
         Self {
             thread_service,
             turn_coordinator,
+            input_enqueue: None,
             inbound_attachments: None,
             project_filesystem: None,
             filesystem_browser: None,
@@ -2408,6 +2412,11 @@ impl RebornServices {
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
+        self
+    }
+
+    pub fn with_input_enqueue(mut self, input_enqueue: Arc<dyn HostInputEnqueuePort>) -> Self {
+        self.input_enqueue = Some(input_enqueue);
         self
     }
 
@@ -2951,6 +2960,25 @@ impl RebornServicesApi for RebornServices {
                         notice: NOTICE_BUSY_GENERIC.to_string(),
                     });
                 }
+                MessageStatus::Queued => {
+                    let run_id = parse_replay_run_id(replay.turn_run_id)?;
+                    let state = self
+                        .turn_coordinator
+                        .get_run_state(GetRunStateRequest {
+                            scope: scope.clone(),
+                            run_id,
+                        })
+                        .await
+                        .map_err(map_turn_error)?;
+                    return Ok(RebornSubmitTurnResponse::DeferredBusy {
+                        thread_id: replay.thread_id,
+                        accepted_message_ref: accepted_message_ref(replay.message_id.to_string())?,
+                        active_run_id: run_id,
+                        status: state.status,
+                        event_cursor: state.event_cursor,
+                        notice: rejected_busy_notice(state.status),
+                    });
+                }
                 MessageStatus::Accepted | MessageStatus::DeferredBusy => AcceptedWebUiMessage {
                     thread_id: replay.thread_id,
                     message_id: replay.message_id,
@@ -3071,20 +3099,60 @@ impl RebornServicesApi for RebornServices {
             }
             Err(TurnError::ThreadBusy(busy)) => {
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
-                mark_message_rejected_busy_or_replay(
+                let Some(input_enqueue) = &self.input_enqueue else {
+                    mark_message_rejected_busy_or_replay(
+                        &*self.thread_service,
+                        &thread_scope,
+                        &handoff,
+                        &client_action_id,
+                    )
+                    .await?;
+                    let notice = rejected_busy_notice(busy.status);
+                    return Ok(RebornSubmitTurnResponse::RejectedBusy {
+                        thread_id: handoff.thread_id,
+                        accepted_message_ref,
+                        active_run_id: Some(busy.active_run_id),
+                        status: Some(busy.status),
+                        event_cursor: Some(busy.event_cursor),
+                        notice,
+                    });
+                };
+                let active_run = self
+                    .turn_coordinator
+                    .get_run_state(GetRunStateRequest {
+                        scope: scope.clone(),
+                        run_id: busy.active_run_id,
+                    })
+                    .await
+                    .map_err(map_turn_error)?;
+                let message_ref = LoopMessageRef::new(accepted_message_ref.as_str().to_string())
+                    .map_err(|_| RebornServicesError::internal_invariant())?;
+                input_enqueue
+                    .enqueue_queued_message(EnqueueQueuedMessageRequest {
+                        run_id: busy.active_run_id,
+                        turn_id: active_run.turn_id,
+                        scope: thread_scope.clone(),
+                        thread_id: handoff.thread_id.clone(),
+                        message_id: handoff.message_id,
+                        input: LoopInput::Steering { message_ref },
+                    })
+                    .await
+                    .map_err(|_| RebornServicesError::service_unavailable(false))?;
+                mark_message_queued_or_replay(
                     &*self.thread_service,
                     &thread_scope,
                     &handoff,
                     &client_action_id,
+                    busy.active_run_id.to_string(),
                 )
                 .await?;
                 let notice = rejected_busy_notice(busy.status);
-                Ok(RebornSubmitTurnResponse::RejectedBusy {
+                Ok(RebornSubmitTurnResponse::DeferredBusy {
                     thread_id: handoff.thread_id,
                     accepted_message_ref,
-                    active_run_id: Some(busy.active_run_id),
-                    status: Some(busy.status),
-                    event_cursor: Some(busy.event_cursor),
+                    active_run_id: busy.active_run_id,
+                    status: busy.status,
+                    event_cursor: busy.event_cursor,
                     notice,
                 })
             }
@@ -4442,6 +4510,42 @@ async fn mark_message_rejected_busy_or_replay(
                 handoff,
                 client_action_id,
                 |replay| matches!(replay.status, MessageStatus::RejectedBusy),
+                error,
+            )
+            .await
+        }
+    }
+}
+
+async fn mark_message_queued_or_replay(
+    thread_service: &dyn SessionThreadService,
+    thread_scope: &ThreadScope,
+    handoff: &AcceptedWebUiMessage,
+    client_action_id: &IdempotencyKey,
+    run_id: String,
+) -> Result<(), RebornServicesError> {
+    match thread_service
+        .mark_message_queued(
+            thread_scope,
+            &handoff.thread_id,
+            handoff.message_id,
+            run_id.clone(),
+        )
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            reconcile_terminal_duplicate(
+                thread_service,
+                thread_scope,
+                handoff,
+                client_action_id,
+                |replay| {
+                    matches!(
+                        replay.status,
+                        MessageStatus::Queued | MessageStatus::Submitted
+                    ) && replay.turn_run_id == Some(run_id)
+                },
                 error,
             )
             .await

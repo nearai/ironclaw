@@ -324,6 +324,106 @@ test("useChat.send: stamps render attachments on the optimistic message", async 
   ]);
 });
 
+test("useChat.send: active run follow-up reaches backend and renders queued", async () => {
+  const threadId = "thread-1";
+  let sentBody = null;
+  let renderedMessages = [];
+  const stateUpdates = [];
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [2, { runId: "run-active", threadId, status: "running" }],
+        [4, true],
+      ]),
+      setCalls: stateUpdates,
+    }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async (body) => {
+      sentBody = body;
+      return {
+        accepted_message_ref: "msg:queued-follow-up",
+        outcome: "deferred_busy",
+        thread_id: threadId,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  const response = await chat.send("one more thing");
+
+  assert.equal(sentBody.threadId, threadId);
+  assert.equal(sentBody.content, "one more thing");
+  assert.deepEqual(Array.from(sentBody.attachments), []);
+  assert.equal(response.outcome, "deferred_busy");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(renderedMessages.map((message) => ({
+      content: message.content,
+      status: message.status,
+      isOptimistic: message.isOptimistic,
+      timelineMessageId: message.timelineMessageId,
+    })))),
+    [
+      {
+        content: "one more thing",
+        status: "queued",
+        isOptimistic: false,
+        timelineMessageId: "queued-follow-up",
+      },
+    ],
+  );
+  assert.equal(
+    stateUpdates.some((update) => update.index === 4 && update.value === false),
+    false,
+    "queuing a follow-up must not clear the active run processing state",
+  );
+});
+
 test("useChat.send: target-thread send does not append into active thread", async () => {
   const currentThreadId = "thread-current";
   const targetThreadId = "thread-target";
@@ -2153,10 +2253,14 @@ test("useChat.send: rejected_busy without notice still clears isProcessing", asy
   assert.equal(lastIsProcessing?.value, false);
 });
 
-test("useChat.send: active run refuses duplicate submit before network call", async () => {
-  const threadId = "thread-busy-local";
+test("useChat.send: in-flight submit refuses duplicate before network settles", async () => {
+  const threadId = "thread-1";
   let renderedMessages = [];
   let sendCalls = 0;
+  let resolveSend;
+  const firstSendSettled = new Promise((resolve) => {
+    resolveSend = resolve;
+  });
 
   const context = {
     AbortController,
@@ -2164,7 +2268,7 @@ test("useChat.send: active run refuses duplicate submit before network call", as
     Error,
     Map,
     Math,
-    React: createReactStub({ initialByIndex: new Map([[4, true]]) }),
+    React: createReactStub(),
     addPending,
     toRenderAttachment,
     toWireAttachment,
@@ -2175,12 +2279,12 @@ test("useChat.send: active run refuses duplicate submit before network call", as
     },
     globalThis: {},
     listConnectableChannels: async () => {
-      throw new Error("busy prompts should not fetch connectable channels");
+      throw new Error("ordinary prompts should not fetch connectable channels");
     },
     looksLikeChannelConnectCommand,
     queryClient: {
       fetchQuery: async () => {
-        throw new Error("busy prompts should not fetch connectable channels");
+        throw new Error("ordinary prompts should not fetch connectable channels");
       },
       invalidateQueries: () => {},
     },
@@ -2188,9 +2292,16 @@ test("useChat.send: active run refuses duplicate submit before network call", as
     removePending,
     resolveChannelConnectCommand,
     resolveGateRequest: async () => {},
-    sendMessage: async () => {
+    sendMessage: async ({ content }) => {
       sendCalls += 1;
-      throw new Error("busy send should not reach API");
+      await firstSendSettled;
+      return {
+        accepted_message_ref: "msg:message-1",
+        run_id: "run-1",
+        status: "queued",
+        thread_id: threadId,
+        content,
+      };
     },
     setInterval,
     setTimeout,
@@ -2213,14 +2324,23 @@ test("useChat.send: active run refuses duplicate submit before network call", as
   runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
-  const response = await chat.send("second message while first run is active");
+  const first = chat.send("first message");
+  await Promise.resolve();
+  const second = await chat.send("duplicate click");
 
-  assert.equal(response, null);
-  assert.equal(sendCalls, 0);
-  assert.deepEqual(renderedMessages, []);
+  assert.equal(second, null);
+  assert.equal(sendCalls, 1);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(renderedMessages.map((message) => message.content))),
+    ["first message"],
+  );
+
+  resolveSend();
+  const response = await first;
+  assert.equal(response.run_id, "run-1");
 });
 
-test("useChat.send: accepted run blocks another submit until settlement", async () => {
+test("useChat.send: accepted run allows follow-up submit before settlement", async () => {
   const threadId = "thread-1";
   let renderedMessages = [];
   let sendCalls = 0;
@@ -2293,10 +2413,11 @@ test("useChat.send: accepted run blocks another submit until settlement", async 
   const second = await chat.send("draft while the reply is still running");
 
   assert.equal(first.run_id, "run-1");
-  assert.equal(second, null);
-  assert.equal(sendCalls, 1);
-  assert.equal(renderedMessages.length, 1);
+  assert.equal(second.run_id, "run-2");
+  assert.equal(sendCalls, 2);
+  assert.equal(renderedMessages.length, 2);
   assert.equal(renderedMessages[0].content, "first message");
+  assert.equal(renderedMessages[1].content, "draft while the reply is still running");
 
   context.chatEventsArgs.setIsProcessing(false);
   context.chatEventsArgs.setActiveRun(null);
@@ -2304,8 +2425,8 @@ test("useChat.send: accepted run blocks another submit until settlement", async 
 
   const third = await chat.send("message after settlement");
 
-  assert.equal(third.run_id, "run-2");
-  assert.equal(sendCalls, 2);
+  assert.equal(third.run_id, "run-3");
+  assert.equal(sendCalls, 3);
 });
 
 test("useChat.send: connectable channel fetch failures submit the prompt", async () => {

@@ -82,8 +82,8 @@ function toolCardFromGate(gate, overrides = {}) {
     capabilityId: gate.toolName || gate.gateKind || null,
     toolName: toolDisplayName(displaySource) || displaySource,
     toolStatus: overrides.toolStatus || "running",
-    toolDetail: null,
-    toolParameters: null,
+    toolDetail: gate.actionLabel || null,
+    toolParameters: approvalGateParameters(gate),
     toolResultPreview: null,
     toolError: overrides.toolError || null,
     toolErrorKind: overrides.toolErrorKind || null,
@@ -97,6 +97,19 @@ function toolCardFromGate(gate, overrides = {}) {
     gateRef: gate.gateRef,
     gateActivity: true,
   };
+}
+
+function approvalGateParameters(gate) {
+  if (typeof gate?.parameters === "string" && gate.parameters.trim()) {
+    return gate.parameters.trim();
+  }
+  if (!Array.isArray(gate?.approvalDetails) || gate.approvalDetails.length === 0) {
+    return null;
+  }
+  const lines = gate.approvalDetails
+    .filter((detail) => detail?.label && detail.value != null)
+    .map((detail) => `${detail.label}: ${detail.value}`);
+  return lines.length > 0 ? lines.join("\n") : null;
 }
 
 function fallbackGateInvocationId(gate) {
@@ -147,6 +160,9 @@ function mergeToolActivity(current, incoming) {
       ? current.toolName
       : incoming.toolName || current.toolName,
     toolStatus: keepCurrentTerminal ? current.toolStatus : incoming.toolStatus,
+    toolDetail: incoming.toolDetail || current.toolDetail || null,
+    toolParameters: incoming.toolParameters || current.toolParameters || null,
+    toolResultPreview: incoming.toolResultPreview || current.toolResultPreview || null,
     toolError: incoming.toolError || current.toolError,
     toolErrorKind: incoming.toolErrorKind || current.toolErrorKind || null,
     updatedAt: keepCurrentTerminal

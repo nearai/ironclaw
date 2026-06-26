@@ -319,12 +319,20 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
                     gate_ref: projected_gate_ref,
                     invocation_id,
                     body,
+                    approval_context,
                     ..
                 } if *run_id == turn_run
                     && *gate_kind == ProductGateKind::Approval
                     && projected_gate_ref == gate_ref.as_str()
                     && *invocation_id == Some(blocked_invocation)
                     && body.as_deref() == Some("capability requires approval")
+                    && approval_context.as_ref().is_some_and(|context| {
+                        context.tool_name == "builtin.http"
+                            && context.details.iter().any(|detail| {
+                                detail.label == "Estimated network egress"
+                                    && detail.value == "4096 bytes"
+                            })
+                    })
             ))
     )));
 }

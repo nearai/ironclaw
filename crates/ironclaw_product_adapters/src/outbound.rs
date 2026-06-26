@@ -1139,6 +1139,8 @@ pub enum ProductProjectionItem {
         #[serde(default)]
         allow_always: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval_context: Option<ApprovalPromptContextView>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         auth_context: Option<AuthPromptContextView>,
     },
     SkillActivation {
@@ -1190,6 +1192,7 @@ impl ProductProjectionItem {
                 headline,
                 body,
                 auth_context,
+                approval_context,
                 ..
             } => {
                 validate_bounded_text(
@@ -1206,6 +1209,9 @@ impl ProductProjectionItem {
                     validate_bounded_text("projection_gate_body", body, PROJECTION_TEXT_MAX_BYTES)?;
                 }
                 if let Some(context) = auth_context {
+                    context.validate()?;
+                }
+                if let Some(context) = approval_context {
                     context.validate()?;
                 }
                 Ok(())
@@ -1294,6 +1300,8 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 #[serde(default)]
                 allow_always: bool,
                 #[serde(default)]
+                approval_context: Option<ApprovalPromptContextView>,
+                #[serde(default)]
                 auth_context: Option<AuthPromptContextView>,
             },
             SkillActivation {
@@ -1344,6 +1352,7 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 headline,
                 body,
                 allow_always,
+                approval_context,
                 auth_context,
             } => ProductProjectionItem::Gate {
                 run_id,
@@ -1353,6 +1362,7 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 headline,
                 body,
                 allow_always,
+                approval_context,
                 auth_context,
             },
             Wire::SkillActivation {
@@ -1690,6 +1700,7 @@ mod tests {
                 headline: "Approval required".to_string(),
                 body: Some("capability requires approval".to_string()),
                 allow_always: true,
+                approval_context: None,
                 auth_context: None,
             }],
         )
@@ -1727,6 +1738,7 @@ mod tests {
                 headline: "Authentication required".to_string(),
                 body: Some("Authenticate to continue this run.".to_string()),
                 allow_always: false,
+                approval_context: None,
                 auth_context: Some(
                     AuthPromptContextView::new(
                         AuthPromptChallengeKind::OAuthUrl,

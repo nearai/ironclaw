@@ -193,10 +193,10 @@ export function toolCardFromPreview(preview) {
       ? null
       : preview.output_preview || preview.output_summary || null,
     toolError: failed
-      ? toolErrorText(errorKind) ||
-        preview.output_summary ||
+      ? preview.output_summary ||
         preview.output_preview ||
         preview.result_ref ||
+        toolErrorText(errorKind) ||
         null
       : null,
     toolErrorKind: errorKind,
@@ -245,8 +245,32 @@ export function toolCardFromActivity(activity) {
 }
 
 function toolErrorText(errorKind) {
-  if (!errorKind) return null;
-  return errorKind;
+  const value = typeof errorKind === "string" ? errorKind.trim() : "";
+  if (!value) return null;
+  const normalized = value.toLowerCase().replaceAll("-", "_");
+  switch (normalized) {
+    case "backend":
+      return "The tool backend failed.";
+    case "security":
+    case "security_rejected":
+    case "security_rejection":
+      return "The tool response was blocked by a security check.";
+    case "cancelled":
+      return "The tool call was cancelled.";
+    case "timeout":
+      return "The tool call timed out.";
+    case "invalid_request":
+      return "The tool request was invalid.";
+    case "auth":
+    case "authentication":
+    case "authorization":
+      return "The tool needs authentication.";
+    case "permission":
+    case "approval_denied":
+      return "The tool call was not allowed.";
+    default:
+      return value.replaceAll("_", " ");
+  }
 }
 
 export function isTerminalToolStatus(status) {

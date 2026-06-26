@@ -91,7 +91,7 @@ export function Chat({
     ? "Resolve the approval request before sending another message."
     : "";
   const composerSendDisabled =
-    Boolean(pendingGate) || (isProcessing && !pendingGate) || cooldownSeconds > 0;
+    Boolean(pendingGate) || cooldownSeconds > 0;
   const composerSendBlockedRef = React.useRef(composerSendDisabled);
   composerSendBlockedRef.current = composerSendDisabled;
   const composerStatusText =
@@ -100,12 +100,17 @@ export function Chat({
   // Scope the persisted composer draft to the open thread (or the
   // shared new-conversation slot when there's no active thread yet).
   const composerDraftKey = activeThreadId || NEW_DRAFT_KEY;
+  const composerAutoFocusKey = activeThreadId || NEW_DRAFT_KEY;
   const canCancelRun = Boolean(
     activeThreadId &&
       activeRun?.runId &&
       activeRun.threadId === activeThreadId &&
       isProcessing &&
       !pendingGate
+  );
+  const pendingGateForDisplay = React.useMemo(
+    () => enrichApprovalGateWithActivityArguments(pendingGate, messages),
+    [pendingGate, messages],
   );
   const activeRunLogsPath =
     activeThreadId &&
@@ -260,6 +265,7 @@ export function Chat({
             initialText=${composerDraft}
             resetKey=${composerResetKey}
             draftKey=${composerDraftKey}
+            autoFocusKey=${composerAutoFocusKey}
             context=${runtimeContext}
             statusText=${composerStatusText}
             canCancel=${canCancelRun}
@@ -320,7 +326,7 @@ export function Chat({
                 `)
               : html`
               <${ApprovalCard}
-                gate=${pendingGate}
+                gate=${pendingGateForDisplay}
                 onApprove=${() =>
                   approve(pendingGate.requestId, "approve", pendingGate.kind)}
                 onDeny=${() =>
@@ -354,6 +360,7 @@ export function Chat({
             initialText=${composerDraft}
             resetKey=${composerResetKey}
             draftKey=${composerDraftKey}
+            autoFocusKey=${composerAutoFocusKey}
             context=${runtimeContext}
             statusText=${composerStatusText}
             canCancel=${canCancelRun}
@@ -367,4 +374,81 @@ export function Chat({
       />
     </div>
   `;
+}
+
+export function enrichApprovalGateWithActivityArguments(gate, messages) {
+  if (!gate || gate.kind !== "gate") return gate;
+  const exactActivity = gate.invocationId
+    ? findActivityForInvocation(messages, gate.invocationId)
+    : null;
+  const activity = activityHasArguments(exactActivity)
+    ? exactActivity
+    : findLatestParameterizedActivityForRun(messages, gate.runId) || exactActivity;
+  const argumentsText =
+    displayText(activity?.toolParameters) ||
+    displayText(activity?.toolDetail) ||
+    null;
+  if (!argumentsText) return gate;
+
+  const approvalDetails = Array.isArray(gate.approvalDetails)
+    ? gate.approvalDetails
+    : [];
+  if (approvalDetails.some((detail) => isArgumentsDetail(detail?.label))) {
+    return gate.parameters ? gate : { ...gate, parameters: argumentsText };
+  }
+  return {
+    ...gate,
+    approvalDetails: [
+      ...approvalDetails,
+      { label: "Arguments", value: argumentsText },
+    ],
+    parameters: gate.parameters || argumentsText,
+  };
+}
+
+function findActivityForInvocation(messages, invocationId) {
+  for (const message of messages || []) {
+    if (message?.role === "tool_activity" && message.invocationId === invocationId) {
+      return message;
+    }
+    const nested = (message?.toolCalls || []).find(
+      (tool) => tool?.invocationId === invocationId,
+    );
+    if (nested) return nested;
+  }
+  return null;
+}
+
+function findLatestParameterizedActivityForRun(messages, runId) {
+  if (!runId) return null;
+  for (let index = (messages || []).length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.turnRunId !== runId) continue;
+    if (message?.role === "tool_activity" && displayText(message.toolParameters)) {
+      return message;
+    }
+    const toolCalls = message?.toolCalls || [];
+    for (let toolIndex = toolCalls.length - 1; toolIndex >= 0; toolIndex -= 1) {
+      const tool = toolCalls[toolIndex];
+      if (tool?.turnRunId === runId && displayText(tool.toolParameters)) {
+        return tool;
+      }
+    }
+  }
+  return null;
+}
+
+function activityHasArguments(activity) {
+  return Boolean(
+    displayText(activity?.toolParameters) || displayText(activity?.toolDetail),
+  );
+}
+
+function displayText(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function isArgumentsDetail(label) {
+  const normalized = typeof label === "string" ? label.trim().toLowerCase() : "";
+  return normalized === "arguments" || normalized === "parameters";
 }

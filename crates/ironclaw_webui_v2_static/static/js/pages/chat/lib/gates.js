@@ -82,19 +82,22 @@ export function gateFromProjectionGate(gate) {
       expiresAt: authContext.expires_at || null,
     };
   }
-  return {
+  return gateWithApprovalContext({
     ...base,
     kind: "gate",
-  };
+  }, gate.approval_context || null, base.body);
 }
 
 function gateWithApprovalContext(gate, approvalContext, fallbackDescription) {
-  if (!approvalContext) return gate;
+  if (!approvalContext) {
+    const description = displayDescription(fallbackDescription);
+    return description ? { ...gate, description } : gate;
+  }
   const approvalDetails = approvalDetailsFromContext(approvalContext);
   return {
     ...gate,
     toolName: approvalContext.tool_name || null,
-    description: approvalContext.reason || fallbackDescription,
+    description: approvalContext.reason || displayDescription(fallbackDescription),
     actionLabel: approvalContext.action?.label || null,
     destination: approvalContext.destination || null,
     approvalScope: approvalContext.scope || null,
@@ -103,6 +106,10 @@ function gateWithApprovalContext(gate, approvalContext, fallbackDescription) {
       ? approvalDetails.map((detail) => `${detail.label}: ${detail.value}`).join("\n")
       : null,
   };
+}
+
+function displayDescription(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function approvalDetailsFromContext(context) {

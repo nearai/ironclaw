@@ -131,6 +131,7 @@ function ToolActivityCard({ activity, nested = false }) {
   const dotClass = DOT_STYLE[toolStatus] || DOT_STYLE.running;
   const hasDuration = toolDurationMs !== null && toolDurationMs !== undefined;
   const controlsId = React.useId();
+  const inlineDetail = toolDetail || inlineParameterSummary(toolParameters);
 
   const row = html`
     <button
@@ -147,9 +148,9 @@ function ToolActivityCard({ activity, nested = false }) {
       <span className="shrink-0 truncate font-mono text-[13px] font-medium text-iron-100"
         >${toolName}</span
       >
-      ${toolDetail &&
+      ${inlineDetail &&
       html`<span className="min-w-0 truncate font-mono text-xs text-iron-400"
-        >${toolDetail}</span
+        >${inlineDetail}</span
       >`}
       <span className="ml-auto flex shrink-0 items-center gap-2">
         ${hasDuration &&
@@ -187,6 +188,12 @@ function ToolActivityCard({ activity, nested = false }) {
       </div>
     </div>
   `;
+}
+
+function inlineParameterSummary(value) {
+  if (typeof value !== "string") return null;
+  const firstLine = value.trim().split(/\r?\n/, 1)[0]?.trim();
+  return firstLine || null;
 }
 
 /* Tabbed Panel — Details / Parameters / Result / Error. Only tabs that have

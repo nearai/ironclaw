@@ -11,6 +11,7 @@ export function EmptyState({
   initialText,
   resetKey,
   draftKey,
+  autoFocusKey,
   context,
   statusText,
   canCancel,
@@ -60,6 +61,7 @@ export function EmptyState({
           initialText=${initialText}
           resetKey=${resetKey}
           draftKey=${draftKey}
+          autoFocusKey=${autoFocusKey}
           variant="hero"
           context=${context}
           statusText=${statusText}

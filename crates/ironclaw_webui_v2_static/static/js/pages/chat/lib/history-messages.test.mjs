@@ -151,6 +151,24 @@ test("messagesFromTimeline: deferred_busy user record maps to error status with 
   );
 });
 
+test("messagesFromTimeline: queued user record stays queued", () => {
+  const messages = messagesFromTimeline([
+    {
+      message_id: "msg-q",
+      kind: "user",
+      content: "keep going",
+      sequence: 1,
+      status: "queued",
+    },
+  ]);
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].id, "msg-msg-q");
+  assert.equal(messages[0].role, "user");
+  assert.equal(messages[0].status, "queued");
+  assert.equal(messages[0].error, undefined);
+});
+
 test("messagesFromTimeline: finalized assistant records are marked as final replies", () => {
   const messages = messagesFromTimeline([
     {
@@ -219,6 +237,50 @@ test("messagesFromTimeline: tool previews use timeline sequence as activity orde
     [
       ["tool-invocation-extension-a", "extension_search", "success", 2, 10, "projection"],
       ["tool-invocation-extension-b", "extension_search", "success", 3, 11, "projection"],
+    ],
+  );
+});
+
+test("messagesFromTimeline: tool preview failures prefer backend error text", () => {
+  const messages = messagesFromTimeline([
+    {
+      message_id: "tool-preview-backend",
+      kind: "capability_display_preview",
+      sequence: 2,
+      status: "finalized",
+      content: JSON.stringify({
+        version: 1,
+        invocation_id: "invocation-backend",
+        capability_id: "nearai.web_search",
+        status: "failed",
+        error_kind: "backend",
+        output_summary: "nearai.web_search returned HTTP 502",
+      }),
+    },
+    {
+      message_id: "tool-preview-security",
+      kind: "capability_display_preview",
+      sequence: 3,
+      status: "finalized",
+      content: JSON.stringify({
+        version: 1,
+        invocation_id: "invocation-security",
+        capability_id: "nearai.web_search",
+        status: "failed",
+        error_kind: "security_rejected",
+      }),
+    },
+  ]);
+
+  assert.deepEqual(
+    messages.map((message) => [message.id, message.toolStatus, message.toolError]),
+    [
+      ["tool-invocation-backend", "error", "nearai.web_search returned HTTP 502"],
+      [
+        "tool-invocation-security",
+        "error",
+        "The tool response was blocked by a security check.",
+      ],
     ],
   );
 });

@@ -109,7 +109,8 @@ pub async fn build_openai_compat_route_mount(
         binding.clone(),
         runtime.webui_thread_service(),
         runtime.webui_turn_coordinator(),
-    );
+    )
+    .with_input_enqueue(runtime.webui_input_enqueue());
     // Lands inline image bytes (vision, #4644) through the same project-scoped
     // workspace authority the agent's file tools resolve through, so an image
     // attached to an OpenAI-compatible chat completion reaches the model.

@@ -11,11 +11,11 @@ use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
     EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostInputBatch, HostInputQueue, HostInputQueueError,
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse, JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
-    RunCancellationHandle,
+    HostIdentityContextSource, HostInputBatch, HostInputEnqueuePort, HostInputEnvelope,
+    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse, InMemoryHostInputQueue,
+    JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
@@ -52,8 +52,8 @@ use ironclaw_turns::{
     TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-        LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
-        LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
+        LoopCancelReasonKind, LoopCapabilityPort, LoopInput, LoopInputAckToken,
+        LoopInputCursorToken, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
     },
 };
 use tokio::time::{sleep, timeout};
@@ -1096,6 +1096,176 @@ async fn busy_thread_persists_second_message_as_rejected_busy() {
     assert_eq!(history.messages.len(), 2);
     assert_eq!(history.messages[1].content.as_deref(), Some("second"));
     assert_eq!(history.messages[1].status, MessageStatus::RejectedBusy);
+}
+
+#[tokio::test]
+async fn busy_thread_with_input_queue_defers_second_message_until_queue_ack() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store);
+    let input_queue = Arc::new(InMemoryHostInputQueue::with_thread_service(Arc::new(
+        thread_service.clone(),
+    )
+        as Arc<dyn SessionThreadService>));
+    let input_enqueue: Arc<dyn HostInputEnqueuePort> = input_queue.clone();
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator)
+            .with_input_enqueue(input_enqueue);
+
+    let first = sample_user_message_envelope("queue-busy1");
+    service.accept_user_message(&first).await.expect("first");
+    let second = sample_user_message_envelope_with_text("queue-busy2", "queued second");
+    let outcome = service
+        .accept_user_message(&second)
+        .await
+        .expect("second queued");
+
+    let (binding, active_run_id) = match outcome {
+        InboundTurnOutcome::DeferredBusy {
+            binding,
+            active_run_id,
+            ..
+        } => (binding, active_run_id),
+        other => panic!("expected DeferredBusy, got {other:?}"),
+    };
+    let scope = ThreadScope {
+        tenant_id: binding.tenant_id.clone(),
+        agent_id: binding.agent_id.clone().expect("agent id"),
+        project_id: binding.project_id.clone(),
+        owner_user_id: binding.subject_user_id.clone(),
+        mission_id: None,
+    };
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 2);
+    assert_eq!(
+        history.messages[1].content.as_deref(),
+        Some("queued second")
+    );
+    assert_eq!(history.messages[1].status, MessageStatus::Queued);
+    assert_eq!(
+        history.messages[1].turn_run_id.as_deref(),
+        Some(active_run_id.to_string().as_str())
+    );
+
+    let batch = input_queue
+        .next_after(
+            active_run_id,
+            LoopInputCursorToken::new("input-cursor:origin".to_string()).expect("origin cursor"),
+            8,
+        )
+        .await
+        .expect("queued input batch");
+    assert_eq!(batch.inputs.len(), 1);
+    assert!(matches!(batch.inputs[0].input, LoopInput::Steering { .. }));
+
+    input_queue
+        .ack_consumed(active_run_id, vec![batch.inputs[0].ack_token.clone()])
+        .await
+        .expect("ack queued input");
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history after ack");
+    assert_eq!(history.messages[1].status, MessageStatus::Submitted);
+    assert_eq!(
+        history.messages[1].turn_run_id.as_deref(),
+        Some(active_run_id.to_string().as_str())
+    );
+}
+
+struct AckingInputEnqueue {
+    inner: InMemoryHostInputQueue,
+}
+
+impl AckingInputEnqueue {
+    fn new(thread_service: Arc<dyn SessionThreadService>) -> Self {
+        Self {
+            inner: InMemoryHostInputQueue::with_thread_service(thread_service),
+        }
+    }
+}
+
+#[async_trait]
+impl HostInputEnqueuePort for AckingInputEnqueue {
+    async fn enqueue_input(
+        &self,
+        run_id: TurnRunId,
+        input: LoopInput,
+    ) -> Result<HostInputEnvelope, HostInputQueueError> {
+        self.inner.enqueue_input(run_id, input).await
+    }
+
+    async fn enqueue_queued_message(
+        &self,
+        request: ironclaw_loop_support::EnqueueQueuedMessageRequest,
+    ) -> Result<HostInputEnvelope, HostInputQueueError> {
+        let run_id = request.run_id;
+        let envelope = self.inner.enqueue_queued_message(request).await?;
+        self.inner
+            .ack_consumed(run_id, vec![envelope.ack_token.clone()])
+            .await?;
+        Ok(envelope)
+    }
+}
+
+#[tokio::test]
+async fn busy_thread_queue_submit_tolerates_input_ack_before_queued_mark() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store);
+    let input_enqueue: Arc<dyn HostInputEnqueuePort> =
+        Arc::new(AckingInputEnqueue::new(Arc::new(thread_service.clone())));
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator)
+            .with_input_enqueue(input_enqueue);
+
+    let first = sample_user_message_envelope("queue-race1");
+    service.accept_user_message(&first).await.expect("first");
+    let second = sample_user_message_envelope_with_text("queue-race2", "queued then acked");
+    let outcome = service
+        .accept_user_message(&second)
+        .await
+        .expect("second should not fail when input is acked before queued mark");
+
+    let (binding, active_run_id) = match outcome {
+        InboundTurnOutcome::DeferredBusy {
+            binding,
+            active_run_id,
+            ..
+        } => (binding, active_run_id),
+        other => panic!("expected DeferredBusy, got {other:?}"),
+    };
+    let scope = ThreadScope {
+        tenant_id: binding.tenant_id.clone(),
+        agent_id: binding.agent_id.clone().expect("agent id"),
+        project_id: binding.project_id.clone(),
+        owner_user_id: binding.subject_user_id.clone(),
+        mission_id: None,
+    };
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: binding.thread_id,
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 2);
+    assert_eq!(history.messages[1].status, MessageStatus::Submitted);
+    assert_eq!(
+        history.messages[1].turn_run_id.as_deref(),
+        Some(active_run_id.to_string().as_str())
+    );
 }
 
 #[tokio::test]

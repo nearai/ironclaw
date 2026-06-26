@@ -400,17 +400,7 @@ export function useChat(threadId) {
       if (pendingGate || pendingGateRef.current) {
         throw approvalGatePendingSendError();
       }
-      const activeRunForSend = activeRunRef.current;
-      const activeRunBlocksSend =
-        activeRunForSend &&
-        (!targetThreadId ||
-          activeRunForSend.threadId === targetThreadId ||
-          activeRunForSend.threadId === threadId);
-      if (
-        submitBusyRef.current ||
-        isProcessingRef.current ||
-        activeRunBlocksSend
-      ) {
+      if (submitBusyRef.current) {
         return null;
       }
 
@@ -514,11 +504,17 @@ export function useChat(threadId) {
           updateCurrentThread(markAccepted);
           updateSeededTarget(markAccepted);
         }
-        // When the thread was busy, the message is rejected (not deferred).
-        // Mark the optimistic user message as failed and display the
-        // server's notice (if present) as a system message so the user
-        // knows to resend.
-        if (response?.outcome === "rejected_busy") {
+        if (response?.outcome === "deferred_busy") {
+          const markQueued = (prev) =>
+            prev.map((m) =>
+              m.id === optimisticId
+                ? { ...m, isOptimistic: false, status: "queued" }
+                : m,
+            );
+          updateCurrentThread(markQueued);
+          updateSeededTarget(markQueued);
+          submitBusyRef.current = false;
+        } else if (response?.outcome === "rejected_busy") {
           const markRejected = (prev) =>
             prev.map((m) =>
               m.id === optimisticId
@@ -562,10 +558,8 @@ export function useChat(threadId) {
             }
           }
           updateCurrentRunState(() => setIsProcessing(false));
-          submitBusyRef.current = false;
-        } else if (!response?.run_id) {
-          submitBusyRef.current = false;
         }
+        submitBusyRef.current = false;
         return response;
       } catch (err) {
         if (err.status === 429) {

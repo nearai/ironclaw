@@ -79,7 +79,10 @@ pub use identity_context::{
     identity_message_ref,
 };
 pub use input_port::HostQueueLoopInputPort;
-pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
+pub use input_queue::{
+    EnqueueQueuedMessageRequest, HostInputBatch, HostInputEnqueuePort, HostInputEnvelope,
+    HostInputQueue, HostInputQueueError, InMemoryHostInputQueue,
+};
 pub use ironclaw_turns::run_profile::PromptContextTokenBudget;
 pub use skill_bundle_context_source::SkillBundleContextSource;
 pub use skill_bundle_source::{
@@ -1236,7 +1239,7 @@ where
                     image_parts,
                 });
             }
-            return Ok(messages);
+            return Ok(merge_consecutive_text_user_messages(messages));
         }
 
         let mut messages_by_ref = context_messages_by_ref(context.messages);
@@ -1399,7 +1402,7 @@ where
                 image_parts,
             });
         }
-        Ok(resolved)
+        Ok(merge_consecutive_text_user_messages(resolved))
     }
 
     async fn load_model_context_window(
@@ -1457,6 +1460,31 @@ where
         }
         Ok(messages)
     }
+}
+
+fn merge_consecutive_text_user_messages(
+    messages: Vec<HostManagedModelMessage>,
+) -> Vec<HostManagedModelMessage> {
+    let mut merged: Vec<HostManagedModelMessage> = Vec::with_capacity(messages.len());
+    for message in messages {
+        if can_merge_text_user_message(&message)
+            && let Some(previous) = merged.last_mut()
+            && can_merge_text_user_message(previous)
+        {
+            previous.content.push('\n');
+            previous.content.push_str(&message.content);
+            continue;
+        }
+        merged.push(message);
+    }
+    merged
+}
+
+fn can_merge_text_user_message(message: &HostManagedModelMessage) -> bool {
+    message.role == HostManagedModelMessageRole::User
+        && message.tool_result_provider_call.is_none()
+        && message.tool_result_content.is_none()
+        && message.image_parts.is_empty()
 }
 
 /// Host-managed text-only model gateway. Implementations own provider selection,

@@ -118,6 +118,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
   const bubbleWidthClass = isUser ? "max-w-[85%]" : isNotice ? "mx-auto max-w-[85%]" : "w-full max-w-[85%]";
   const contentWidthClass = isUser ? "" : "w-full min-w-0 max-w-full";
   const showRetryAction = status === "error" && onRetry;
+  const showQueuedStatus = isUser && status === "queued";
   const showMetaRow = showActions || showRetryAction || timeLabel;
 
   return html`
@@ -141,6 +142,14 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
           ${status === "error" && html`
             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-red-300">
               <span>${error}</span>
+            </div>
+          `}
+
+          ${showQueuedStatus && html`
+            <div className="mt-2 flex justify-end">
+              <span className="rounded border border-iron-600 bg-iron-900/70 px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-normal text-iron-300">
+                Queued
+              </span>
             </div>
           `}
 

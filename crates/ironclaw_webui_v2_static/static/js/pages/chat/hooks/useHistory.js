@@ -252,7 +252,43 @@ function mergeFullRefresh(fresh, current, options = {}) {
     if (isSeededOptimisticMessage(message)) return true;
     return preserveClientOnly && message.id.startsWith("err-");
   });
-  return preserved.length > 0 ? [...hydratedFresh, ...preserved] : hydratedFresh;
+  return preserved.length > 0
+    ? insertPreservedMessages(hydratedFresh, preserved)
+    : hydratedFresh;
+}
+
+function insertPreservedMessages(fresh, preserved) {
+  const merged = [...fresh];
+  for (const message of preserved) {
+    const insertAfter = insertionIndexForPreservedMessage(merged, message);
+    if (insertAfter >= 0) {
+      merged.splice(insertAfter + 1, 0, message);
+    } else {
+      merged.push(message);
+    }
+  }
+  return merged;
+}
+
+function insertionIndexForPreservedMessage(messages, message) {
+  if (!isClientRunErrorMessage(message)) return -1;
+  const turnRunId =
+    typeof message.turnRunId === "string" && message.turnRunId.trim()
+      ? message.turnRunId
+      : null;
+  if (!turnRunId) return -1;
+  for (let idx = messages.length - 1; idx >= 0; idx -= 1) {
+    if (messages[idx]?.turnRunId === turnRunId) return idx;
+  }
+  return -1;
+}
+
+function isClientRunErrorMessage(message) {
+  return (
+    message?.role === "error" &&
+    typeof message.id === "string" &&
+    message.id.startsWith("err-")
+  );
 }
 
 function isSeededOptimisticMessage(message) {
@@ -269,7 +305,7 @@ function hydrateFreshMessages(fresh, current, options = {}) {
   const currentByConfirmedId = new Map();
   const finalAssistantByRun = new Map();
   for (const message of current || []) {
-    if (!message || !message.timestamp) continue;
+    if (!message) continue;
     if (typeof message.id === "string") {
       currentByConfirmedId.set(message.id, message);
     }
@@ -289,7 +325,7 @@ function hydrateFreshMessages(fresh, current, options = {}) {
     return fresh;
   }
   return fresh.map((message) => {
-    if (!message || message.timestamp || typeof message.id !== "string") {
+    if (!message || typeof message.id !== "string") {
       return message;
     }
     const turnRunId = typeof message.turnRunId === "string" ? message.turnRunId : null;
@@ -302,15 +338,34 @@ function hydrateFreshMessages(fresh, current, options = {}) {
       isFinalAssistantMessage(message) && turnRunId
         ? finalReplyTimestampByRun?.[turnRunId]
         : null;
-    const timestamp = currentMessage?.timestamp || fallbackTimestamp;
-    return timestamp
-      ? { ...message, timestamp }
-      : message;
+    const timestamp = message.timestamp || currentMessage?.timestamp || fallbackTimestamp;
+    let hydrated = hydrateToolActivityDetails(message, currentMessage);
+    if (timestamp) {
+      hydrated = { ...hydrated, timestamp };
+    }
+    return hydrated;
   });
 }
 
 function isFinalAssistantMessage(message) {
   return message?.role === "assistant" && message?.isFinalReply === true;
+}
+
+function hydrateToolActivityDetails(message, currentMessage) {
+  if (message?.role !== "tool_activity" || currentMessage?.role !== "tool_activity") {
+    return message;
+  }
+  let hydrated = message;
+  for (const field of ["toolDetail", "toolParameters", "toolResultPreview"]) {
+    if (!hasDisplayValue(hydrated[field]) && hasDisplayValue(currentMessage[field])) {
+      hydrated = { ...hydrated, [field]: currentMessage[field] };
+    }
+  }
+  return hydrated;
+}
+
+function hasDisplayValue(value) {
+  return typeof value === "string" ? value.trim().length > 0 : value != null;
 }
 
 function isRuntimeActivityMessage(message) {

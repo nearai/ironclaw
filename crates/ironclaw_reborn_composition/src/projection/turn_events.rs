@@ -504,11 +504,24 @@ async fn approval_prompt_lookup(
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
 ) -> ApprovalPromptLookup {
-    let (store, request_id) =
-        match approval_requests.zip(approval_request_id_from_gate_ref(gate_ref).ok()) {
-            Some(value) => value,
-            None => return ApprovalPromptLookup::default(),
-        };
+    let Some(store) = approval_requests else {
+        tracing::debug!(
+            gate_ref = %gate_ref.as_str(),
+            "approval request lookup skipped during gate projection because no approval store is wired"
+        );
+        return ApprovalPromptLookup::default();
+    };
+    let request_id = match approval_request_id_from_gate_ref(gate_ref) {
+        Ok(request_id) => request_id,
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                gate_ref = %gate_ref.as_str(),
+                "approval request lookup skipped during gate projection because gate ref is not an approval request"
+            );
+            return ApprovalPromptLookup::default();
+        }
+    };
     let scope =
         ApprovalInteractionScope::from_turn(turn_scope, &TurnActor::new(owner_user_id.clone()))
             .to_resource_scope();
@@ -517,7 +530,19 @@ async fn approval_prompt_lookup(
             context: approval_context_for_request(&record.request),
             invocation_id: Some(record.scope.invocation_id),
         },
-        Ok(None) => ApprovalPromptLookup::default(),
+        Ok(None) => {
+            tracing::debug!(
+                request_id = %request_id,
+                gate_ref = %gate_ref.as_str(),
+                tenant_id = %scope.tenant_id,
+                user_id = %scope.user_id,
+                agent_id = scope.agent_id.as_ref().map(|id| id.as_str()),
+                project_id = scope.project_id.as_ref().map(|id| id.as_str()),
+                thread_id = scope.thread_id.as_ref().map(|id| id.as_str()),
+                "approval request lookup missed during gate projection"
+            );
+            ApprovalPromptLookup::default()
+        }
         Err(error) => {
             tracing::debug!(
                 %error,
@@ -730,6 +755,7 @@ struct GateProjectionPromptContext {
     headline: Option<String>,
     body: Option<String>,
     allow_always: Option<bool>,
+    approval_context: Option<ApprovalPromptContextView>,
     auth_context: Option<AuthPromptContextView>,
 }
 
@@ -742,6 +768,7 @@ fn gate_projection_prompt_context(
             headline: Some(prompt.headline.clone()),
             body: Some(prompt.body.clone()),
             allow_always: Some(prompt.allow_always),
+            approval_context: prompt.approval_context.clone(),
             auth_context: None,
         },
         Some(ProductOutboundPayload::AuthPrompt(prompt)) => GateProjectionPromptContext {
@@ -749,6 +776,7 @@ fn gate_projection_prompt_context(
             headline: Some(prompt.headline.clone()),
             body: Some(prompt.body.clone()),
             allow_always: Some(false),
+            approval_context: None,
             auth_context: AuthPromptContextView::from_auth_prompt(prompt)?,
         },
         _ => GateProjectionPromptContext::default(),
@@ -786,6 +814,7 @@ fn gate_projection_item(
             .unwrap_or_else(|| gate_projection_headline(blocked_gate.gate_kind).to_string()),
         body: Some(body),
         allow_always: prompt_context.allow_always.unwrap_or(false),
+        approval_context: prompt_context.approval_context,
         auth_context: prompt_context.auth_context,
     }))
 }

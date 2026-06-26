@@ -689,6 +689,7 @@ function appendRunFailureMessage(
         role: "error",
         content,
         timestamp: new Date().toISOString(),
+        turnRunId: runId || null,
       },
     ];
   });

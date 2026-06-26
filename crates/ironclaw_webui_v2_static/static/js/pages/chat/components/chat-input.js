@@ -24,6 +24,7 @@ export function ChatInput({
   initialText = "",
   resetKey = "",
   draftKey = NEW_DRAFT_KEY,
+  autoFocusKey = "",
   variant = "dock",
   context = {},
   statusText = "",
@@ -95,6 +96,14 @@ export function ChatInput({
   React.useEffect(() => {
     autoResize();
   }, [text, autoResize]);
+
+  React.useEffect(() => {
+    if (!autoFocusKey || disabled) return;
+    const frame = window.requestAnimationFrame(() => {
+      textareaRef.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [autoFocusKey, disabled]);
 
   // Restore the persisted draft when the active conversation changes
   // (draftKey switches). The initialText effect below runs after this
@@ -300,6 +309,7 @@ export function ChatInput({
 
   const hasPayload = text.trim();
   const isSubmitDisabled = disabled || sendDisabled;
+  const showCancelOnly = canCancel && !hasPayload;
   const placeholder = isHero
     ? t("chat.heroPlaceholder")
     : t("chat.followUpPlaceholder");
@@ -441,7 +451,7 @@ export function ChatInput({
             >
               <${Icon} name="plus" className="h-5 w-5" />
             </button>
-            ${canCancel
+            ${showCancelOnly
               ? html`
                 <${Button}
                   type="button"

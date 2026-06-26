@@ -32,7 +32,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use ironclaw_events::{DurableAuditLog, DurableEventLog, InMemoryAuditSink, RuntimeEvent};
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extensions::SharedExtensionRegistry;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_first_party_extension_ports::{
@@ -469,6 +469,7 @@ pub struct RebornRuntime {
     turn_coordinator: Arc<dyn TurnCoordinator>,
     turn_tree_store: Arc<dyn TurnSpawnTreeStateStore>,
     thread_service: Arc<dyn SessionThreadService>,
+    input_enqueue: Arc<dyn ironclaw_loop_support::HostInputEnqueuePort>,
     thread_scope: ThreadScope,
     turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
@@ -514,13 +515,14 @@ pub struct RebornRuntime {
 }
 
 struct RegistryPersistentApprovalGranteeResolver {
-    registry: Arc<ExtensionRegistry>,
+    registry: Arc<SharedExtensionRegistry>,
     outbound_delivery_target_set_provider: ExtensionId,
 }
 
 impl PersistentApprovalGranteeResolver for RegistryPersistentApprovalGranteeResolver {
     fn persistent_approval_grantee(&self, capability_id: &CapabilityId) -> Option<Principal> {
-        if let Some(descriptor) = self.registry.get_capability(capability_id) {
+        let snapshot = self.registry.snapshot();
+        if let Some(descriptor) = snapshot.get_capability(capability_id) {
             return Some(Principal::Extension(descriptor.provider.clone()));
         }
         if capability_id.as_str() == OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID {
@@ -533,7 +535,7 @@ impl PersistentApprovalGranteeResolver for RegistryPersistentApprovalGranteeReso
 }
 
 impl RegistryPersistentApprovalGranteeResolver {
-    fn new(registry: Arc<ExtensionRegistry>) -> Result<Self, RebornRuntimeError> {
+    fn new(registry: Arc<SharedExtensionRegistry>) -> Result<Self, RebornRuntimeError> {
         let outbound_delivery_target_set_provider = outbound_delivery_synthetic_provider()
             .map_err(|error| RebornRuntimeError::InvalidArgument {
                 reason: format!("outbound delivery synthetic provider id is invalid: {error}"),
@@ -1241,6 +1243,12 @@ impl RebornRuntime {
 
     pub(crate) fn webui_turn_coordinator(&self) -> Arc<dyn TurnCoordinator> {
         self.turn_coordinator.clone()
+    }
+
+    pub(crate) fn webui_input_enqueue(
+        &self,
+    ) -> Arc<dyn ironclaw_loop_support::HostInputEnqueuePort> {
+        Arc::clone(&self.input_enqueue)
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -2991,6 +2999,16 @@ pub async fn build_reborn_runtime(
         _ => None,
     };
 
+    let host_input_queue = Arc::new(
+        ironclaw_loop_support::InMemoryHostInputQueue::with_thread_service(Arc::clone(
+            &thread_service,
+        )),
+    );
+    let host_input_queue_reader: Arc<dyn ironclaw_loop_support::HostInputQueue> =
+        host_input_queue.clone();
+    let host_input_enqueue: Arc<dyn ironclaw_loop_support::HostInputEnqueuePort> =
+        host_input_queue.clone();
+
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
@@ -3032,7 +3050,7 @@ pub async fn build_reborn_runtime(
         model_route_resolver: None,
         cancellation_factory: None,
         skill_context_source,
-        input_queue: None,
+        input_queue: Some(host_input_queue_reader),
         identity_context_source: match local_runtime {
             Some(local_runtime) => Arc::new(
                 // Local-dev seeding validates the prompt path first, so non-file prompt paths fail
@@ -3158,9 +3176,16 @@ pub async fn build_reborn_runtime(
                 )
                 .with_persistent_policy_store(local_runtime.persistent_approval_policies.clone())
                 .with_persistent_grantee_resolver(Arc::new(
-                    RegistryPersistentApprovalGranteeResolver::new(Arc::clone(
-                        &local_runtime.extension_registry,
-                    ))?,
+                    RegistryPersistentApprovalGranteeResolver::new(
+                        local_runtime
+                            .shared_extension_registry
+                            .clone()
+                            .unwrap_or_else(|| {
+                                Arc::new(SharedExtensionRegistry::new(
+                                    local_runtime.extension_registry.as_ref().clone(),
+                                ))
+                            }),
+                    )?,
                 ))
                 .with_tool_permission_override_store(
                     local_runtime.tool_permission_overrides.clone(),
@@ -3331,6 +3356,7 @@ pub async fn build_reborn_runtime(
         turn_coordinator,
         turn_tree_store: turn_state_store,
         thread_service,
+        input_enqueue: host_input_enqueue,
         thread_scope,
         turn_scheduler: RuntimeTurnScheduler::new(composition.scheduler_handle, scheduler_notifier),
         trigger_poller_handle,
@@ -3902,11 +3928,15 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
+    use ironclaw_extensions::{
+        ExtensionManifest, ExtensionPackage, ManifestSource, SharedExtensionRegistry,
+    };
+    use ironclaw_host_api::{ExtensionId, HostPortCatalog, VirtualPath};
 
     #[test]
     fn persistent_grantee_resolver_maps_outbound_delivery_target_set_to_synthetic_provider() {
-        let registry = Arc::new(ironclaw_extensions::ExtensionRegistry::new());
-        let resolver = super::RegistryPersistentApprovalGranteeResolver::new(registry)
+        let registry = Arc::new(SharedExtensionRegistry::default());
+        let resolver = super::RegistryPersistentApprovalGranteeResolver::new(Arc::clone(&registry))
             .expect("resolver builds");
         let capability_id = CapabilityId::new(
             crate::outbound_delivery_capability_surface::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
@@ -3923,6 +3953,63 @@ mod tests {
             ),
             Some(Principal::Extension(expected_provider))
         );
+    }
+
+    #[test]
+    fn persistent_grantee_resolver_uses_shared_registry_capability_provider() {
+        let registry = Arc::new(SharedExtensionRegistry::default());
+        registry
+            .upsert(test_extension_package("nearai", "nearai.web_search"))
+            .expect("insert shared capability");
+        let resolver = super::RegistryPersistentApprovalGranteeResolver::new(registry)
+            .expect("resolver builds");
+        let capability_id = CapabilityId::new("nearai.web_search").expect("capability id");
+        let expected_provider = ExtensionId::new("nearai").expect("extension id");
+
+        assert_eq!(
+            ironclaw_product_workflow::PersistentApprovalGranteeResolver::persistent_approval_grantee(
+                &resolver,
+                &capability_id
+            ),
+            Some(Principal::Extension(expected_provider))
+        );
+    }
+
+    fn test_extension_package(extension_id: &str, capability_id: &str) -> ExtensionPackage {
+        let manifest = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{extension_id}"
+name = "{extension_id}"
+version = "0.1.0"
+description = "test extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/{extension_id}.wasm"
+
+[[capabilities]]
+id = "{capability_id}"
+description = "test capability"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/input.json"
+output_schema_ref = "schemas/output.json"
+"#
+        );
+        let manifest = ExtensionManifest::parse(
+            &manifest,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+        )
+        .expect("manifest parses");
+        ExtensionPackage::from_manifest(
+            manifest,
+            VirtualPath::new(format!("/system/extensions/{extension_id}")).expect("root"),
+        )
+        .expect("package builds")
     }
 
     /// Wiring guard: the `regex_skill_activation_enabled` flag from
@@ -9057,17 +9144,26 @@ mod tests {
             )
             .await
             .expect("approval gate event stream");
-        assert!(
-            streamed.events.iter().any(|event| {
-                matches!(
-                    event.payload(),
-                    ProductOutboundPayload::GatePrompt(prompt)
-                        if prompt.turn_run_id == run_id
-                            && prompt.gate_ref == gate_ref.as_str()
-                            && prompt.headline == "Approval required"
-                )
-            }),
-            "blocked approval run should be visible as a gate prompt on the product event stream"
+        let prompt = streamed
+            .events
+            .iter()
+            .find_map(|event| match event.payload() {
+                ProductOutboundPayload::GatePrompt(prompt)
+                    if prompt.turn_run_id == run_id && prompt.gate_ref == gate_ref.as_str() =>
+                {
+                    Some(prompt)
+                }
+                _ => None,
+            })
+            .expect("blocked approval run should be visible as a gate prompt on the product event stream");
+        assert_eq!(prompt.headline, "Approval required");
+        assert_eq!(
+            prompt
+                .approval_context
+                .as_ref()
+                .expect("approval gate prompt should include tool context")
+                .tool_name,
+            "demo.echo"
         );
 
         bundle

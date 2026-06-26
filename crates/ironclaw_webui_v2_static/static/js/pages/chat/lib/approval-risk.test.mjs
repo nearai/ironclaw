@@ -23,3 +23,10 @@ test("classifyRisk: write-like tool name is danger", () => {
     { tone: "danger", key: "tool.riskWrite" },
   );
 });
+
+test("classifyRisk: generic gate continuation copy is not command execution", () => {
+  assert.deepEqual(
+    classifyRisk(null, "Resolve this gate to continue the run.", null),
+    { tone: "muted", key: "tool.riskRead" },
+  );
+});

@@ -16,7 +16,10 @@
 #![cfg(all(feature = "webui-v2-beta", feature = "test-support"))]
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{
+    Arc, Mutex as StdMutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -48,6 +51,7 @@ use ironclaw_turns::run_profile::{
     CapabilityCallCandidate, LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 use tower::ServiceExt;
 
 // ─── identities ───────────────────────────────────────────────────────
@@ -205,6 +209,302 @@ impl HostManagedModelGateway for ToolCallingGateway {
                 signature: None,
                 },
             ))
+            .await
+            .map_err(|err| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("register_provider_tool_call failed: {err}"),
+                )
+            })?;
+
+        Ok(HostManagedModelResponse::capability_calls(
+            vec![candidate],
+            "",
+        ))
+    }
+}
+
+/// Tool gateway for active-run steering: holds the first model call open so the
+/// test can submit a second WebUI message while the run is definitely busy.
+struct QueuedSteeringGateway {
+    call_count: StdMutex<usize>,
+    first_model_started_flag: AtomicBool,
+    first_model_started: Notify,
+    release_first_model: Notify,
+}
+
+impl QueuedSteeringGateway {
+    fn new() -> Self {
+        Self {
+            call_count: StdMutex::new(0),
+            first_model_started_flag: AtomicBool::new(false),
+            first_model_started: Notify::new(),
+            release_first_model: Notify::new(),
+        }
+    }
+
+    async fn wait_for_first_model_call(&self) {
+        if self.first_model_started_flag.load(Ordering::Acquire) {
+            return;
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if self.first_model_started_flag.load(Ordering::Acquire) {
+                    return;
+                }
+                self.first_model_started.notified().await;
+            }
+        })
+        .await
+        .expect("first model call must start while run is active");
+    }
+
+    fn release_first_model_call(&self) {
+        self.release_first_model.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl HostManagedModelGateway for QueuedSteeringGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "QueuedSteeringGateway requires the capability-aware model path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call_index = {
+            let mut count = self
+                .call_count
+                .lock()
+                .expect("queued steering gateway call lock poisoned");
+            let index = *count;
+            *count += 1;
+            index
+        };
+
+        if call_index > 0 {
+            let tool_result = request
+                .messages
+                .iter()
+                .find(|m| m.role == HostManagedModelMessageRole::ToolResult)
+                .expect("reply model call must include a tool_result message");
+            assert!(
+                tool_result.content.contains("hello before steering"),
+                "reply model call should see hydrated echo output, got: {}",
+                tool_result.content,
+            );
+            assert!(
+                request.messages.iter().any(|message| {
+                    message.role == HostManagedModelMessageRole::User
+                        && message.content.contains("download as csv")
+                }),
+                "reply model call must include queued WebUI follow-up before final reply, got: {:#?}",
+                request.messages
+            );
+            return Ok(HostManagedModelResponse::assistant_reply(
+                "csv follow-up honored",
+            ));
+        }
+
+        self.first_model_started_flag.store(true, Ordering::Release);
+        self.first_model_started.notify_waiters();
+        self.release_first_model.notified().await;
+
+        let echo_id = CapabilityId::new("builtin.echo").expect("echo capability id");
+        let echo_tool = capabilities
+            .tool_definitions()
+            .map_err(|err| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("tool_definitions failed: {err}"),
+                )
+            })?
+            .into_iter()
+            .find(|def| def.capability_id == echo_id)
+            .expect("builtin.echo must be visible in local-dev capability surface");
+
+        let candidate = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "e2e-provider".to_string(),
+                provider_model_id: "e2e-model".to_string(),
+                turn_id: Some("e2e-steering-turn".to_string()),
+                id: "e2e-steering-call-1".to_string(),
+                name: echo_tool.name,
+                arguments: json!({"message": "hello before steering"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .map_err(|err| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("register_provider_tool_call failed: {err}"),
+                )
+            })?;
+
+        Ok(HostManagedModelResponse::capability_calls(
+            vec![candidate],
+            "",
+        ))
+    }
+}
+
+/// Reproduces a queued follow-up that arrives after tool execution, while the
+/// model is already producing a reply-only turn. The loop must drain that
+/// queued steering before accepting the reply as terminal.
+struct QueuedDuringReplyGateway {
+    call_count: StdMutex<usize>,
+    reply_model_started_flag: AtomicBool,
+    reply_model_started: Notify,
+    release_reply_model: Notify,
+}
+
+impl QueuedDuringReplyGateway {
+    fn new() -> Self {
+        Self {
+            call_count: StdMutex::new(0),
+            reply_model_started_flag: AtomicBool::new(false),
+            reply_model_started: Notify::new(),
+            release_reply_model: Notify::new(),
+        }
+    }
+
+    async fn wait_for_reply_model_call(&self) {
+        if self.reply_model_started_flag.load(Ordering::Acquire) {
+            return;
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if self.reply_model_started_flag.load(Ordering::Acquire) {
+                    return;
+                }
+                self.reply_model_started.notified().await;
+            }
+        })
+        .await
+        .expect("reply model call must start while run is active");
+    }
+
+    fn release_reply_model_call(&self) {
+        self.release_reply_model.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl HostManagedModelGateway for QueuedDuringReplyGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "QueuedDuringReplyGateway requires the capability-aware model path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call_index = {
+            let mut count = self
+                .call_count
+                .lock()
+                .expect("queued during reply gateway call lock poisoned");
+            let index = *count;
+            *count += 1;
+            index
+        };
+
+        if call_index == 1 {
+            let tool_result = request
+                .messages
+                .iter()
+                .find(|m| m.role == HostManagedModelMessageRole::ToolResult)
+                .expect("reply model call must include a tool_result message");
+            assert!(
+                tool_result.content.contains("market cap source"),
+                "reply model call should see hydrated echo output, got: {}",
+                tool_result.content,
+            );
+            self.reply_model_started_flag.store(true, Ordering::Release);
+            self.reply_model_started.notify_waiters();
+            self.release_reply_model.notified().await;
+            return Ok(HostManagedModelResponse::assistant_reply(
+                "Let me try to get the data via the API format.",
+            ));
+        }
+
+        if call_index > 1 {
+            let assistant_index = request
+                .messages
+                .iter()
+                .position(|message| {
+                    message.role == HostManagedModelMessageRole::Assistant
+                        && message
+                            .content
+                            .contains("Let me try to get the data via the API format.")
+                })
+                .expect("post-reply model call must preserve the prior assistant reply");
+            let followup_messages = request
+                .messages
+                .iter()
+                .enumerate()
+                .filter_map(|(index, message)| {
+                    (index > assistant_index && message.role == HostManagedModelMessageRole::User)
+                        .then_some(message)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                followup_messages.len(),
+                1,
+                "queued WebUI follow-ups must be merged into one user prompt after the preserved assistant reply, got: {:#?}",
+                request.messages
+            );
+            assert_eq!(followup_messages[0].content, "save to csv\ninclude headers");
+            return Ok(HostManagedModelResponse::assistant_reply(
+                "I picked up the merged save-to-csv follow-ups.",
+            ));
+        }
+
+        let echo_id = CapabilityId::new("builtin.echo").expect("echo capability id");
+        let echo_tool = capabilities
+            .tool_definitions()
+            .map_err(|err| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("tool_definitions failed: {err}"),
+                )
+            })?
+            .into_iter()
+            .find(|def| def.capability_id == echo_id)
+            .expect("builtin.echo must be visible in local-dev capability surface");
+
+        let candidate = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "e2e-provider".to_string(),
+                provider_model_id: "e2e-model".to_string(),
+                turn_id: Some("e2e-reply-queue-turn".to_string()),
+                id: "e2e-reply-queue-call-1".to_string(),
+                name: echo_tool.name,
+                arguments: json!({"message": "market cap source"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
             .await
             .map_err(|err| {
                 HostManagedModelError::safe(
@@ -599,13 +899,28 @@ async fn create_thread(router: &axum::Router, client_action_id: &str) -> String 
 }
 
 async fn send_message(router: &axum::Router, thread_id: &str, client_action_id: &str) {
+    send_message_with_content(
+        router,
+        thread_id,
+        client_action_id,
+        "please call the echo tool",
+    )
+    .await;
+}
+
+async fn send_message_with_content(
+    router: &axum::Router,
+    thread_id: &str,
+    client_action_id: &str,
+    content: &str,
+) {
     let send = router
         .clone()
         .oneshot(bearer_post(
             &format!("/api/webchat/v2/threads/{thread_id}/messages"),
             json!({
                 "client_action_id": client_action_id,
-                "content": "please call the echo tool",
+                "content": content,
             }),
         ))
         .await
@@ -618,7 +933,16 @@ async fn send_message(router: &axum::Router, thread_id: &str, client_action_id: 
 }
 
 async fn wait_for_final_timeline(router: &axum::Router, thread_id: &str) -> Value {
+    wait_for_timeline_with_assistant_text(router, thread_id, "e2e tool ok").await
+}
+
+async fn wait_for_timeline_with_assistant_text(
+    router: &axum::Router,
+    thread_id: &str,
+    needle: &str,
+) -> Value {
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last_timeline = None;
     while Instant::now() < deadline {
         let response = router
             .clone()
@@ -627,19 +951,27 @@ async fn wait_for_final_timeline(router: &axum::Router, thread_id: &str) -> Valu
             )))
             .await
             .expect("timeline oneshot");
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        }
         assert_eq!(response.status(), StatusCode::OK);
         let timeline = read_json(response).await;
         let messages = timeline["messages"]
             .as_array()
             .expect("timeline.messages must be an array");
         if messages.iter().any(|message| {
-            extract_assistant_text(message).is_some_and(|text| text.contains("e2e tool ok"))
+            extract_assistant_text(message).is_some_and(|text| text.contains(needle))
         }) {
             return timeline;
         }
+        last_timeline = Some(timeline);
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("timeline never surfaced an assistant message containing 'e2e tool ok' within 10s");
+    panic!(
+        "timeline never surfaced an assistant message containing {needle:?} within 10s; last timeline: {}",
+        serde_json::to_string_pretty(&last_timeline).expect("timeline debug json")
+    );
 }
 
 fn assert_timeline_has_tool_result_reference(timeline: &Value) {
@@ -853,6 +1185,131 @@ async fn webui_v2_timeline_persists_display_preview_under_authenticated_owner() 
 
     let timeline = wait_for_final_timeline(&harness.router, &thread_id).await;
     assert_timeline_has_capability_display_preview(&timeline);
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
+}
+
+#[tokio::test]
+async fn webui_v2_queued_followup_is_steered_into_post_tool_reply() {
+    let gateway = Arc::new(QueuedSteeringGateway::new());
+    let harness = build_harness_with_gateway(gateway.clone()).await;
+
+    let thread_id = create_thread(&harness.router, "e2e-queued-steering-create").await;
+    send_message_with_content(
+        &harness.router,
+        &thread_id,
+        "e2e-queued-steering-first",
+        "start with a tool call",
+    )
+    .await;
+    gateway.wait_for_first_model_call().await;
+
+    send_message_with_content(
+        &harness.router,
+        &thread_id,
+        "e2e-queued-steering-followup",
+        "download as csv",
+    )
+    .await;
+    gateway.release_first_model_call();
+
+    let timeline =
+        wait_for_timeline_with_assistant_text(&harness.router, &thread_id, "csv follow-up honored")
+            .await;
+    assert_timeline_has_tool_result_reference(&timeline);
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
+}
+
+#[tokio::test]
+async fn webui_v2_queued_followup_during_reply_continues_after_reply_only_turn() {
+    let gateway = Arc::new(QueuedDuringReplyGateway::new());
+    let harness = build_harness_with_gateway(gateway.clone()).await;
+
+    let thread_id = create_thread(&harness.router, "e2e-queued-during-reply-create").await;
+    send_message_with_content(
+        &harness.router,
+        &thread_id,
+        "e2e-queued-during-reply-first",
+        "what is total market cap of companies that IPOed in 2025?",
+    )
+    .await;
+    gateway.wait_for_reply_model_call().await;
+
+    send_message_with_content(
+        &harness.router,
+        &thread_id,
+        "e2e-queued-during-reply-followup",
+        "save to csv",
+    )
+    .await;
+    send_message_with_content(
+        &harness.router,
+        &thread_id,
+        "e2e-queued-during-reply-followup-2",
+        "include headers",
+    )
+    .await;
+    gateway.release_reply_model_call();
+
+    let timeline = wait_for_timeline_with_assistant_text(
+        &harness.router,
+        &thread_id,
+        "I picked up the merged save-to-csv follow-ups.",
+    )
+    .await;
+    let messages = timeline["messages"]
+        .as_array()
+        .expect("timeline.messages must be an array");
+    let first_reply_index = messages
+        .iter()
+        .position(|message| {
+            extract_assistant_text(message)
+                .is_some_and(|text| text.contains("Let me try to get the data via the API format."))
+        })
+        .expect("initial post-tool assistant reply must be finalized");
+    let followup_index = messages
+        .iter()
+        .position(|message| {
+            message.get("kind").and_then(Value::as_str) == Some("user")
+                && message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.contains("save to csv"))
+        })
+        .expect("queued follow-up user message must be visible in the timeline");
+    let second_followup_index = messages
+        .iter()
+        .position(|message| {
+            message.get("kind").and_then(Value::as_str) == Some("user")
+                && message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.contains("include headers"))
+        })
+        .expect("second queued follow-up user message must be visible in the timeline");
+    let final_reply_index = messages
+        .iter()
+        .position(|message| {
+            extract_assistant_text(message)
+                .is_some_and(|text| text.contains("I picked up the merged save-to-csv follow-ups."))
+        })
+        .expect("follow-up assistant reply must be finalized");
+    assert!(
+        first_reply_index < followup_index
+            && followup_index < second_followup_index
+            && second_followup_index < final_reply_index,
+        "timeline must preserve assistant -> queued users -> assistant ordering, got: {messages:#?}"
+    );
+    assert_timeline_has_tool_result_reference(&timeline);
 
     harness
         .runtime

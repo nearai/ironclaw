@@ -51,8 +51,10 @@ pub use signed_session_login::{
 pub use session::InMemorySessionStore;
 
 use std::convert::Infallible;
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::{
@@ -69,7 +71,7 @@ use serde::Serialize;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tower::ServiceExt;
 
 /// Errors raised while running the host serve loop.
@@ -100,6 +102,8 @@ pub struct RebornWebuiServeOptions {
     pub shutdown: tokio::sync::oneshot::Receiver<()>,
     pub bound_addr_tx: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
 }
+
+const WEBUI_GRACEFUL_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Handle used by host startup code to publish the real WebUI router
 /// after runtime assembly finishes.
@@ -207,7 +211,9 @@ pub async fn serve_webui_v2(opts: RebornWebuiServeOptions) -> Result<(), RebornW
         let _ = tx.send(bound);
     }
 
-    axum::serve(
+    let shutdown_observed = Arc::new(Notify::new());
+    let shutdown_observed_for_signal = Arc::clone(&shutdown_observed);
+    let serve = axum::serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
@@ -220,9 +226,25 @@ pub async fn serve_webui_v2(opts: RebornWebuiServeOptions) -> Result<(), RebornW
             target = "ironclaw::reborn::webui_ingress",
             "WebChat v2 graceful shutdown signal received",
         );
+        shutdown_observed_for_signal.notify_waiters();
     })
-    .await
-    .map_err(RebornWebuiServeError::Serve)
+    .into_future();
+    tokio::pin!(serve);
+
+    tokio::select! {
+        result = &mut serve => result.map_err(RebornWebuiServeError::Serve),
+        () = async {
+            shutdown_observed.notified().await;
+            tokio::time::sleep(WEBUI_GRACEFUL_SHUTDOWN_DRAIN_TIMEOUT).await;
+        } => {
+            tracing::warn!(
+                target = "ironclaw::reborn::webui_ingress",
+                timeout_ms = WEBUI_GRACEFUL_SHUTDOWN_DRAIN_TIMEOUT.as_millis() as u64,
+                "WebChat v2 graceful shutdown drain timed out; closing listener with active connections",
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Authenticator that compares the bearer token from the request

@@ -285,7 +285,7 @@ test("tool activity cards map gate-declined lifecycle frames to declined status"
   });
 
   assert.equal(card.toolStatus, "declined");
-  assert.equal(card.toolError, "gate_declined");
+  assert.equal(card.toolError, "gate declined");
   assert.equal(card.toolErrorKind, "gate_declined");
 });
 
@@ -420,6 +420,80 @@ test("tool activity state applies durable projection order to live activity", ()
   assert.equal(messages.length, 1);
   assert.equal(messages[0].activityOrder, 42);
   assert.equal(messages[0].activityOrderSource, "projection");
+});
+
+test("tool activity state does not erase parameters from later sparse frames", () => {
+  const runId = "run-params";
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+
+  upsertToolActivityMessage(
+    setMessages,
+    toolCardFromActivity({
+      invocation_id: "invocation-web",
+      turn_run_id: runId,
+      capability_id: "nearai.web_search",
+      status: "running",
+      subtitle: "deploy status",
+      input_summary: "query: deploy status",
+    }),
+    stateRef,
+  );
+  upsertToolActivityMessage(
+    setMessages,
+    toolCardFromPreview({
+      invocation_id: "invocation-web",
+      turn_run_id: runId,
+      capability_id: "nearai.web_search",
+      title: "nearai.web_search",
+      status: "completed",
+      output_summary: "2 results",
+    }),
+    stateRef,
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].toolStatus, "success");
+  assert.equal(messages[0].toolDetail, "deploy status");
+  assert.equal(messages[0].toolParameters, "query: deploy status");
+  assert.equal(messages[0].toolResultPreview, "2 results");
+});
+
+test("tool activity state shows approval gate parameters on synthetic activity", () => {
+  const runId = "run-gate-params";
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+
+  ensureGateToolActivity(
+    setMessages,
+    {
+      kind: "gate",
+      runId,
+      gateRef: "gate:http",
+      invocationId: "invocation-http",
+      toolName: "builtin.http",
+      actionLabel: "Network request",
+      approvalDetails: [
+        { label: "Method", value: "GET" },
+        { label: "Destination", value: "https://example.com" },
+      ],
+    },
+    stateRef,
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].toolName, "http");
+  assert.equal(messages[0].toolDetail, "Network request");
+  assert.equal(
+    messages[0].toolParameters,
+    "Method: GET\nDestination: https://example.com",
+  );
 });
 
 test("tool activity state applies durable projection order to gate activity", () => {

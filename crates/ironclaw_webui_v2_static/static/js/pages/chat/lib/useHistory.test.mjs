@@ -327,20 +327,33 @@ test("useHistory full refresh preserves unnumbered live gate activity after time
   );
 });
 
-test("mergeFullRefresh keeps requested client-only bubbles and lets the timeline win otherwise", () => {
+test("mergeFullRefresh keeps run errors next to their run and lets the timeline win otherwise", () => {
   const context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
 
   const timeline = [
-    { id: "msg-user-1", role: "user" },
-    { id: "tool-abc", role: "tool_activity", toolParameters: "{}", toolResultPreview: "ok" },
-    { id: "msg-assistant-1", role: "assistant" },
+    { id: "msg-user-1", role: "user", turnRunId: "run-1" },
+    {
+      id: "tool-abc",
+      role: "tool_activity",
+      toolParameters: "{}",
+      toolResultPreview: "ok",
+      turnRunId: "run-1",
+    },
+    { id: "msg-user-2", role: "user", turnRunId: "run-2" },
+    { id: "msg-assistant-2", role: "assistant", turnRunId: "run-2" },
   ];
   const current = [
-    { id: "msg-user-1", role: "user" },
-    { id: "tool-abc", role: "tool_activity", toolParameters: null, toolResultPreview: null },
-    { id: "err-run-1", role: "error", content: "run failed" },
+    { id: "msg-user-1", role: "user", turnRunId: "run-1" },
+    {
+      id: "tool-abc",
+      role: "tool_activity",
+      toolParameters: null,
+      toolResultPreview: null,
+      turnRunId: "run-1",
+    },
+    { id: "err-run-1", role: "error", content: "run failed", turnRunId: "run-1" },
   ];
 
   const merged = mergeFullRefresh(timeline, current, {
@@ -348,14 +361,68 @@ test("mergeFullRefresh keeps requested client-only bubbles and lets the timeline
   });
 
   // Timeline order is authoritative and the rich tool card replaces the
-  // sparse live one; the client-only err-* bubble is preserved at the end.
+  // sparse live one; the client-only err-* bubble stays with its failed run
+  // instead of drifting below newer successful turns.
   assert.equal(
     merged.map((m) => m.id).join(","),
-    "msg-user-1,tool-abc,msg-assistant-1,err-run-1",
+    "msg-user-1,tool-abc,err-run-1,msg-user-2,msg-assistant-2",
   );
   const toolCard = merged.find((m) => m.id === "tool-abc");
   assert.equal(toolCard.toolParameters, "{}");
   assert.equal(toolCard.toolResultPreview, "ok");
+});
+
+test("mergeFullRefresh appends client-only run errors without a matching run", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [{ id: "msg-user-1", role: "user", turnRunId: "run-1" }],
+    [{ id: "err-run-unknown", role: "error", content: "run failed" }],
+    { preserveClientOnly: true },
+  );
+
+  assert.equal(merged.map((m) => m.id).join(","), "msg-user-1,err-run-unknown");
+});
+
+test("mergeFullRefresh keeps live tool parameters when refreshed preview is sparse", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      {
+        id: "tool-invocation-web",
+        role: "tool_activity",
+        invocationId: "invocation-web",
+        toolName: "web_search",
+        toolStatus: "success",
+        toolParameters: null,
+        toolResultPreview: "2 results",
+        turnRunId: "run-params",
+      },
+    ],
+    [
+      {
+        id: "tool-invocation-web",
+        role: "tool_activity",
+        invocationId: "invocation-web",
+        toolName: "web_search",
+        toolStatus: "running",
+        toolDetail: "deploy status",
+        toolParameters: "query: deploy status",
+        turnRunId: "run-params",
+      },
+    ],
+  );
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].toolStatus, "success");
+  assert.equal(merged[0].toolDetail, "deploy status");
+  assert.equal(merged[0].toolParameters, "query: deploy status");
+  assert.equal(merged[0].toolResultPreview, "2 results");
 });
 
 test("mergeFullRefresh carries optimistic timestamps onto confirmed messages", () => {
