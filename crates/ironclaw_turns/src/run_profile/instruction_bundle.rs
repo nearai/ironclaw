@@ -21,11 +21,8 @@ use super::{
     skill_snippet_model_message_ref,
 };
 
-const CAPABILITY_SURFACE_USAGE_POLICY: &str = concat!(
-    "capability policy use only visible capabilities ",
-    "do not use another capability as a workaround for a disabled or unavailable capability ",
-    "requested by the user"
-);
+const CAPABILITY_SURFACE_USAGE_POLICY: &str =
+    include_str!("../../prompts/capability_surface_usage_policy.md");
 /// Stable fingerprint for an instruction bundle rebuild.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InstructionBundleFingerprint(String);
@@ -631,12 +628,16 @@ fn push_visible_surface(
     surface
         .descriptors
         .sort_by(|a, b| a.capability_id.cmp(&b.capability_id));
+    let capability_policy = CAPABILITY_SURFACE_USAGE_POLICY.trim();
     let mut summary = format!("surface {}", surface.version.as_str());
-    summary.push('|');
-    summary.push_str(CAPABILITY_SURFACE_USAGE_POLICY);
+    summary.push_str("\nPolicy: ");
+    summary.push_str(capability_policy);
+    if !surface.descriptors.is_empty() {
+        summary.push_str("\nCapabilities:");
+    }
     for descriptor in &surface.descriptors {
         validate_surface_descriptor(descriptor)?;
-        summary.push('|');
+        summary.push('\n');
         summary.push_str(descriptor.capability_id.as_str());
         summary.push('|');
         summary.push_str(&descriptor.safe_name);
@@ -656,7 +657,7 @@ fn push_visible_surface(
     feed_field(
         fingerprint,
         b"capability_policy",
-        CAPABILITY_SURFACE_USAGE_POLICY.as_bytes(),
+        capability_policy.as_bytes(),
     );
     for descriptor in &surface.descriptors {
         feed_field(

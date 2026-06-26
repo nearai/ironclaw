@@ -313,6 +313,19 @@ async def _wait_for_assistant_message(
     )
 
 
+@pytest.fixture
+async def disabled_echo_shell_ask_policy(reborn_v2_server):
+    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    async with httpx.AsyncClient(headers=headers) as client:
+        await _set_tool_permission(client, reborn_v2_server, "builtin.echo", "disabled")
+        await _set_tool_permission(client, reborn_v2_server, "builtin.shell", "ask_each_time")
+        try:
+            yield
+        finally:
+            await _set_tool_permission(client, reborn_v2_server, "builtin.echo", "default")
+            await _set_tool_permission(client, reborn_v2_server, "builtin.shell", "default")
+
+
 async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2_browser):
     """The SPA renders the authed shell with a token, and the login view without one."""
     # With a valid token the authenticated chat shell renders.
@@ -363,36 +376,29 @@ async def test_reborn_v2_text_turn_persists(reborn_v2_server):
         )
 
 
-async def test_reborn_v2_disabled_tool_does_not_route_through_shell(reborn_v2_server):
+async def test_reborn_v2_disabled_tool_does_not_route_through_shell(
+    reborn_v2_server, disabled_echo_shell_ask_policy
+):
     """Disabling echo should not make the model ask for shell as a workaround."""
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
     async with httpx.AsyncClient(headers=headers) as client:
-        try:
-            await _set_tool_permission(client, reborn_v2_server, "builtin.echo", "disabled")
-            await _set_tool_permission(
-                client, reborn_v2_server, "builtin.shell", "ask_each_time"
-            )
+        thread_id = await _create_thread(client, reborn_v2_server)
+        prompt = "issue 5197 disabled echo workaround"
+        await _send_message(client, reborn_v2_server, thread_id, prompt)
 
-            thread_id = await _create_thread(client, reborn_v2_server)
-            prompt = "issue 5197 disabled echo workaround"
-            await _send_message(client, reborn_v2_server, thread_id, prompt)
+        assistant = await _wait_for_assistant_message(
+            client,
+            reborn_v2_server,
+            thread_id,
+            timeout=45,
+        )
+        assert "will not route it through another tool" in assistant.get("content", "")
 
-            assistant = await _wait_for_assistant_message(
-                client,
-                reborn_v2_server,
-                thread_id,
-                timeout=45,
-            )
-            assert "will not route it through another tool" in assistant.get("content", "")
-
-            timeline = await _get_timeline(client, reborn_v2_server, thread_id)
-            timeline_text = json.dumps(timeline, sort_keys=True)
-            assert "builtin_shell" not in timeline_text
-            assert "builtin.shell" not in timeline_text
-            assert "issue-5197-disabled-echo-workaround" not in timeline_text
-        finally:
-            await _set_tool_permission(client, reborn_v2_server, "builtin.echo", "default")
-            await _set_tool_permission(client, reborn_v2_server, "builtin.shell", "default")
+        timeline = await _get_timeline(client, reborn_v2_server, thread_id)
+        timeline_text = json.dumps(timeline, sort_keys=True)
+        assert "builtin_shell" not in timeline_text
+        assert "builtin.shell" not in timeline_text
+        assert "issue-5197-disabled-echo-workaround" not in timeline_text
 
 
 async def test_reborn_v2_ui_send_renders_reply(reborn_v2_page, reborn_v2_server):

@@ -114,9 +114,7 @@ ISSUE_5197_DISABLED_TOOL_WORKAROUND_TRIGGER = re.compile(
     r"issue 5197 disabled echo workaround",
     re.IGNORECASE,
 )
-DISABLED_TOOL_WORKAROUND_POLICY_TEXT = (
-    "do not use another capability as a workaround for a disabled or unavailable capability"
-)
+DISABLED_TOOL_WORKAROUND_POLICY_TEXT = "disabled or unavailable capability"
 
 # Lifecycle canary triggers for write+cleanup flows against real provider APIs.
 GITHUB_ISSUE_LIFECYCLE_TRIGGER = re.compile(

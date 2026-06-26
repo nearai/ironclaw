@@ -2088,10 +2088,24 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
         .expect("surface message ref lookup should succeed")
         .expect("surface message should be materialized");
     assert!(
-        surface_materialized.model_content.contains(
-            "do not use another capability as a workaround for a disabled or unavailable capability"
-        ),
+        surface_materialized
+            .model_content
+            .contains("Policy: Use only visible capabilities."),
+        "surface prompt must render the capability policy separately: {:?}",
+        surface_materialized.model_content
+    );
+    assert!(
+        surface_materialized
+            .model_content
+            .contains("disabled or unavailable capability"),
         "surface prompt must tell the model not to route disabled tools through alternatives: {:?}",
+        surface_materialized.model_content
+    );
+    assert!(
+        surface_materialized
+            .model_content
+            .contains("\nCapabilities:\ndemo.echo|Echo|Echo safe input"),
+        "surface prompt must preserve capability descriptor tuple alignment: {:?}",
         surface_materialized.model_content
     );
     assert!(bundle.instruction_fingerprint.is_some());
