@@ -71,6 +71,14 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-097-TC-01",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "REBCLI-097-TC-06",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "openai_responses_api_workflow_regression",
                 {case["case"] for case in manifest["cases"]},
             )
@@ -92,6 +100,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             )
             self.assertIn(
                 "support_substrate_product_workflow_regression",
+                {case["case"] for case in manifest["cases"]},
+            )
+            self.assertIn(
+                "webui_v2_provider_login_api_regression",
                 {case["case"] for case in manifest["cases"]},
             )
 
@@ -299,6 +311,51 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn(
                 "--test chat_workflow_handlers_contract",
                 commands[0]["command"],
+            )
+
+    def test_provider_login_case_dry_run_maps_api_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "webui_v2_provider_login_api_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-097-TC-01",
+                    "REBCLI-097-TC-02",
+                    "REBCLI-097-TC-03",
+                    "REBCLI-097-TC-04",
+                    "REBCLI-097-TC-05",
+                    "REBCLI-097-TC-06",
+                ],
+            )
+            self.assertEqual(
+                [command["name"] for command in results["results"][0]["details"]["commands"]],
+                [
+                    "webui_v2_llm_provider_routes",
+                    "webui_v2_nearai_login_state_contracts",
+                    "webui_v2_provider_login_multi_user_mount_policy",
+                ],
+            )
+            self.assertIn(
+                "--test webui_v2_handlers_contract",
+                results["results"][0]["details"]["commands"][0]["command"],
+            )
+            self.assertIn(
+                "operator_routes_are_not_mounted_for_multi_user_authenticator",
+                results["results"][0]["details"]["commands"][2]["command"],
             )
 
     def test_failed_command_stops_later_commands_in_case(self):

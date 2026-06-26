@@ -359,6 +359,76 @@ WEBUI_V2_COMPOSITION_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_LLM_PROVIDER_ROUTE_COMMAND = CommandSpec(
+    name="webui_v2_llm_provider_routes",
+    description=(
+        "Focused WebUI v2 LLM provider route contracts for provider CRUD, "
+        "test/list-model dispatch, NEAR AI login/wallet routes, Codex login, "
+        "and operator-capability enforcement."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_handlers_contract",
+        "llm_provider_routes",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_NEARAI_LOGIN_STATE_COMMAND = CommandSpec(
+    name="webui_v2_nearai_login_state_contracts",
+    description=(
+        "NEAR AI login one-time state, origin sanitization, and public "
+        "callback descriptor policy contracts."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support,root-llm-provider",
+        "nearai_login",
+        "--lib",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_PROVIDER_LOGIN_MOUNT_COMMAND = CommandSpec(
+    name="webui_v2_provider_login_multi_user_mount_policy",
+    description=(
+        "Composition-level policy that operator-only LLM provider and "
+        "provider-login routes are not mounted for multi-user authenticators."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "--test",
+        "webui_v2_serve",
+        "operator_routes_are_not_mounted_for_multi_user_authenticator",
+        "--",
+        "--exact",
+        "--format",
+        "terse",
+    ],
+)
+
 CASES: dict[str, CaseSpec] = {
     "openai_compat_owner_crate_regression": CaseSpec(
         name="openai_compat_owner_crate_regression",
@@ -512,6 +582,31 @@ CASES: dict[str, CaseSpec] = {
             "Matches the QA matrix composition command for REBCLI-055-TC-09; "
             "this validates the Rust gateway composition layer rather than "
             "duplicating browser coverage from PR #5348."
+        ),
+    ),
+    "webui_v2_provider_login_api_regression": CaseSpec(
+        name="webui_v2_provider_login_api_regression",
+        feature="WebUI v2 NEAR AI and Codex provider login APIs",
+        category="Hermetic Provider Login API Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-097-TC-01",
+            "REBCLI-097-TC-02",
+            "REBCLI-097-TC-03",
+            "REBCLI-097-TC-04",
+            "REBCLI-097-TC-05",
+            "REBCLI-097-TC-06",
+        ],
+        commands=[
+            WEBUI_V2_LLM_PROVIDER_ROUTE_COMMAND,
+            WEBUI_V2_NEARAI_LOGIN_STATE_COMMAND,
+            WEBUI_V2_PROVIDER_LOGIN_MOUNT_COMMAND,
+        ],
+        notes=(
+            "Covers the API/runtime provider-login rows without duplicating "
+            "PR #5348 browser settings coverage: route dispatch, operator "
+            "authorization, NEAR AI login origin/state/callback policy, Codex "
+            "login route protection, wallet route protection, and multi-user "
+            "route suppression."
         ),
     ),
 }
