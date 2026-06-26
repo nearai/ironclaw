@@ -616,7 +616,7 @@ pub(crate) struct ApprovalRequest {
 }
 
 /// Trait implemented by all TUI widgets.
-pub(crate) trait TuiWidget: Send + Sync {
+pub(crate) trait TuiWidget: Send {
     /// Unique widget identifier.
     fn id(&self) -> &str;
 

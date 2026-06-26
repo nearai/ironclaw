@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
-use tui_textarea::TextArea;
+use ratatui_textarea::TextArea;
 
 use crate::layout::TuiSlot;
 use crate::theme::Theme;
@@ -58,8 +58,9 @@ impl InputBoxWidget {
 
     /// Move the cursor to the very top of the input (row 0, col 0).
     pub(crate) fn move_cursor_to_start(&mut self) {
-        self.textarea.move_cursor(tui_textarea::CursorMove::Top);
-        self.textarea.move_cursor(tui_textarea::CursorMove::Head);
+        self.textarea.move_cursor(ratatui_textarea::CursorMove::Top);
+        self.textarea
+            .move_cursor(ratatui_textarea::CursorMove::Head);
     }
 
     /// Peek at the current text content without consuming it.
@@ -69,7 +70,8 @@ impl InputBoxWidget {
 
     /// Return the current cursor position as (row, column).
     pub(crate) fn cursor(&self) -> (usize, usize) {
-        self.textarea.cursor()
+        let ratatui_textarea::DataCursor(row, col) = self.textarea.cursor();
+        (row, col)
     }
 
     /// Returns true when the cursor is on the first input line.
