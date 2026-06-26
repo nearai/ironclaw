@@ -452,7 +452,12 @@ fn http_error(error: RuntimeHttpEgressError) -> FirstPartyCapabilityError {
         // Host credential injection failures are backend/client integration faults;
         // production maps RuntimeDispatchErrorKind::Client to RuntimeFailureKind::Backend.
         RuntimeHttpEgressReasonCode::CredentialUnavailable => RuntimeDispatchErrorKind::Client,
-        RuntimeHttpEgressReasonCode::RequestDenied => RuntimeDispatchErrorKind::InputEncode,
+        // RequestDenied is a request-guard denial (blocked host, SSRF/private-IP
+        // guard, credential-shaped URL/header, manual-credential rejection,
+        // unauthorized network-egress policy). It is NOT malformed input, so it
+        // must not reach the model as InputEncode — that label invites a retry
+        // with reformatted args against a request policy will deny again.
+        RuntimeHttpEgressReasonCode::RequestDenied => RuntimeDispatchErrorKind::PolicyDenied,
         RuntimeHttpEgressReasonCode::PolicyDenied => RuntimeDispatchErrorKind::PolicyDenied,
         RuntimeHttpEgressReasonCode::NetworkError => RuntimeDispatchErrorKind::NetworkDenied,
         RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OperationFailed,
@@ -540,5 +545,26 @@ mod body_tests {
     fn json_object_body_is_serialized() {
         let input = json!({ "method": "post", "body": { "k": "v" } });
         assert_eq!(body(&input).expect("json body"), br#"{"k":"v"}"#.to_vec());
+    }
+}
+
+#[cfg(test)]
+mod http_error_tests {
+    use super::{RuntimeDispatchErrorKind, RuntimeHttpEgressError, http_error};
+
+    #[test]
+    fn request_denied_maps_to_policy_denied_not_input_encode() {
+        // A request-guard denial (e.g. a blocked host or credential-shaped URL)
+        // surfaces as RuntimeHttpEgressError::Request. The model must see this as
+        // PolicyDenied so it abandons rather than retrying with reformatted args.
+        let error = RuntimeHttpEgressError::Request {
+            reason: "manual_credentials_denied".to_string(),
+            request_bytes: 0,
+            response_bytes: 0,
+        };
+        assert_eq!(
+            http_error(error).kind(),
+            Some(RuntimeDispatchErrorKind::PolicyDenied)
+        );
     }
 }
