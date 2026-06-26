@@ -132,7 +132,10 @@ Reducer rules:
   carry product-safe auth context, such as challenge kind, provider, account
   label, authorization URL, and expiry, when that context is needed to rebuild
   OAuth/manual-token affordances. Clients must not infer gate run identity from
-  the latest active run or from tool name/order heuristics.
+  the latest active run or from tool name/order heuristics. Projection
+  producers must suppress stale gate rows before emitting product projection
+  items; client-side stale/local-resolved checks are defensive and are not the
+  primary gate lifecycle source of truth.
   Product adapters may additionally emit rich `GatePrompt`/`AuthPrompt`
   payloads for immediate UI affordances such as OAuth URLs or approval context,
   but those prompt payloads are enrichments. Approval request details remain
