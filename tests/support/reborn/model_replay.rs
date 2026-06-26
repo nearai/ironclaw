@@ -5,7 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::{CapabilityId, ProviderToolName};
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
@@ -31,6 +31,8 @@ pub enum RebornTraceReplayError {
     InvalidSurfaceVersion(String),
     #[error("invalid trace capability id for {name}: {reason}")]
     InvalidCapabilityId { name: String, reason: String },
+    #[error("invalid trace provider tool name for {name}: {reason}")]
+    InvalidProviderToolName { name: String, reason: String },
     #[error("invalid trace capability input ref for {id}: {reason}")]
     InvalidInputRef { id: String, reason: String },
 }
@@ -586,6 +588,7 @@ pub(crate) fn capability_call_from_trace_with_surface(
             reason: error.to_string(),
         }
     })?;
+    let provider_tool_name = trace_provider_tool_name(&call.name)?;
     let input_ref =
         CapabilityInputRef::new(format!("input:trace-{}", call.id)).map_err(|reason| {
             RebornTraceReplayError::InvalidInputRef {
@@ -604,12 +607,22 @@ pub(crate) fn capability_call_from_trace_with_surface(
             provider_model_id: "trace_replay".to_string(),
             provider_turn_id: "trace-turn".to_string(),
             provider_call_id: call.id,
-            provider_tool_name: call.name,
+            provider_tool_name,
             arguments: call.arguments,
             response_reasoning: None,
             reasoning: None,
             signature: None,
         }),
+    })
+}
+
+fn trace_provider_tool_name(name: &str) -> Result<ProviderToolName, RebornTraceReplayError> {
+    let provider_name = name.replace('.', "__");
+    ProviderToolName::new(provider_name).map_err(|error| {
+        RebornTraceReplayError::InvalidProviderToolName {
+            name: name.to_string(),
+            reason: error.to_string(),
+        }
     })
 }
 
@@ -626,7 +639,7 @@ fn validate_expected_tool_results(
                     .as_ref()
                     .is_some_and(|provider_call| {
                         provider_call.provider_call_id == expected_result.tool_call_id
-                            && provider_call.provider_tool_name == expected_result.name
+                            && provider_call.provider_tool_name.as_str() == expected_result.name
                     })
         });
         if !matched {

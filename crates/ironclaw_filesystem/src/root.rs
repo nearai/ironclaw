@@ -185,6 +185,34 @@ pub trait RootFilesystem: Send + Sync {
         unsupported(path, FilesystemOperation::Append)
     }
 
+    /// Append multiple `payloads` to the event log at `path` in one backend
+    /// round-trip, returning the assigned monotonic [`SeqNo`]s in payload
+    /// order. All payloads target the **same** `path`.
+    ///
+    /// The return type promises atomic all-or-nothing semantics: on success all
+    /// seqs are assigned; on error none are. A per-item loop cannot honor this
+    /// contract — if the loop commits some payloads and then fails, earlier
+    /// writes are already durable but the caller only sees an `Err` with no
+    /// record of which seqs committed. Retrying the whole batch then duplicates
+    /// the committed prefix, a silent correctness bug.
+    ///
+    /// Therefore the default is [`Unsupported`](FilesystemError::Unsupported).
+    /// Backends that can write a batch atomically (Postgres/libSQL multi-row
+    /// INSERT, in-memory) **must** override this method. Ordering is preserved:
+    /// the assigned seqs must be monotonic in payload order.
+    ///
+    /// [`CompositeRootFilesystem`](crate::CompositeRootFilesystem) overrides
+    /// this to forward to the resolved mount's `append_batch`, so callers
+    /// going through the composite dispatcher will reach the backend override.
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        let _ = payloads;
+        unsupported(path, FilesystemOperation::Append)
+    }
+
     /// Read events at `path` starting at `from` (exclusive). Returns at most
     /// one page of records; consumers loop with the latest seq to drain the
     /// log. Streaming support will replace this Vec return shape in a later

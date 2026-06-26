@@ -104,6 +104,7 @@ fn terminal_run_history_status(status: TurnStatus) -> TriggerRunHistoryStatus {
         | TurnStatus::BlockedAuth
         | TurnStatus::BlockedResource
         | TurnStatus::BlockedDependentRun
+        | TurnStatus::BlockedExternalTool
         | TurnStatus::CancelRequested => TriggerRunHistoryStatus::Error,
     }
 }

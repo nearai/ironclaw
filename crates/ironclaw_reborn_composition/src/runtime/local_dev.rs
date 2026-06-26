@@ -31,7 +31,7 @@ use ironclaw_threads::{
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
-    LoopResultRef,
+    ExternalToolCatalog, LoopResultRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopCapabilityPort,
         LoopHostMilestoneSink, LoopRunContext, ProviderToolCall, sanitize_model_visible_text,
@@ -51,6 +51,7 @@ use crate::{
 };
 
 pub(super) mod extension_surface;
+mod external_tool_capability;
 mod outbound_delivery;
 mod project_create;
 mod refreshing_capability_port;
@@ -135,6 +136,11 @@ pub(super) fn capability_wiring(
     );
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+    // Shared per-runtime catalog (owned by local_runtime services) so the
+    // OpenAI-compatible Responses surface and this loop host see the same
+    // run-scoped external-tool state.
+    let external_tool_catalog: Arc<dyn ExternalToolCatalog> =
+        Arc::clone(&local_runtime.external_tool_catalog);
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(LocalDevLoopCapabilityPortFactory {
             runtime,
@@ -155,6 +161,7 @@ pub(super) fn capability_wiring(
             approval_settings,
             approval_requests,
             capability_leases,
+            external_tool_catalog,
         });
     let model_gateway: Arc<dyn HostManagedModelGateway> = Arc::new(
         LocalDevResultHydratingModelGateway::new(model_gateway, capability_io),
@@ -189,6 +196,10 @@ struct LocalDevLoopCapabilityPortFactory {
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
+    /// Per-runtime catalog of client-supplied ("external") tools. Shared across
+    /// all runs in this runtime so a parked external-tool call and its later
+    /// client-submitted output (across a pause/resume) hit the same store.
+    external_tool_catalog: Arc<dyn ExternalToolCatalog>,
 }
 
 #[async_trait::async_trait]
@@ -227,6 +238,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             approval_settings: Arc::clone(&self.approval_settings),
             approval_requests: Arc::clone(&self.approval_requests),
             capability_leases: Arc::clone(&self.capability_leases),
+            external_tool_catalog: Arc::clone(&self.external_tool_catalog),
         })
         .await
     }
@@ -524,7 +536,7 @@ impl LoopCapabilityInputResolver for LocalDevCapabilityIo {
         self.display_previews.record_input(
             &run_context.run_id.to_string(),
             &input_ref,
-            &tool_call.name,
+            tool_call.name.as_str(),
             &tool_call.arguments,
         );
         Ok(input_ref)
