@@ -475,6 +475,8 @@ Ported the caller-visible pending-message intent from legacy
   duplicating the user message;
 - an unconfirmed optimistic message survives switching away from the thread and
   back through the real sidebar while the refreshed timeline is still empty;
+- an unconfirmed optimistic message with a staged attachment preserves its
+  attachment card across the same thread switch and timeline reload path;
 - Reborn projection run-status events mark the active thread as `Running` in
   the app sidebar and clear that marker after a terminal run event reloads the
   timeline;
@@ -494,6 +496,10 @@ Behavior adjustment:
   intact and does not refetch by itself, so the functional port uses the real
   sidebar thread switch and timeline reload path to protect the same invariant:
   an unconfirmed optimistic message is not erased by a history refresh.
+- Legacy `test_in_progress_attachment_turn_survives_reload` used durable v1
+  in-progress history state. Reborn's equivalent user-visible risk is the
+  optimistic pending message cache dropping staged attachment render metadata
+  during a route/timeline reload before the v2 send resolves.
 - Legacy background-thread processing indicators relied on v1 thread metadata
   and unread badges. Reborn's current standalone browser only receives
   per-active-thread run status through the v2 EventSource; the port asserts the

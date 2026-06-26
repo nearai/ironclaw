@@ -384,6 +384,85 @@ async def test_reborn_legacy_pending_message_survives_thread_reload(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_pending_attachment_message_survives_thread_reload(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Port legacy in-progress attachment reload to Reborn pending messages."""
+    release_send = asyncio.Event()
+
+    async def handle_delayed_send(route, _payload, fulfill_json):
+        await release_send.wait()
+        await fulfill_json(route, _submitted_response(), status=202)
+
+    harness = await _open_mocked_pending_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        threads=[
+            {
+                "thread_id": THREAD_ID,
+                "title": "Pending attachment regression",
+                "created_at": "2026-06-25T00:00:00Z",
+                "updated_at": "2026-06-25T00:00:00Z",
+            },
+            {
+                "thread_id": OTHER_THREAD_ID,
+                "title": "Other thread",
+                "created_at": "2026-06-25T00:01:00Z",
+                "updated_at": "2026-06-25T00:01:00Z",
+            },
+        ],
+        timeline_by_thread={
+            THREAD_ID: [],
+            OTHER_THREAD_ID: [_user_record("other-user", "Other thread seed")],
+        },
+        send_handler=handle_delayed_send,
+    )
+    try:
+        page = harness["page"]
+        await page.set_input_files(
+            "input[type=file][multiple]",
+            files=[
+                {
+                    "name": "pending-note.txt",
+                    "mimeType": "text/plain",
+                    "buffer": b"Attachment survives Reborn pending reload.",
+                }
+            ],
+        )
+        await expect(page.get_by_text("pending-note.txt")).to_be_visible(timeout=15000)
+
+        composer = page.locator(SEL_V2["chat_composer"])
+        await composer.fill("Pending attachment reload test")
+        await composer.press("Enter")
+
+        pending_message = page.locator(SEL_V2["msg_user"]).filter(
+            has_text="Pending attachment reload test"
+        )
+        await expect(pending_message).to_have_count(1, timeout=5000)
+        await expect(pending_message).to_contain_text("pending-note.txt")
+        assert harness["send_requests"][0]["content"] == "Pending attachment reload test"
+        assert harness["send_requests"][0]["attachments"][0]["filename"] == (
+            "pending-note.txt"
+        )
+
+        await page.locator("#gateway-sidebar button").filter(
+            has_text="Other thread"
+        ).first.click()
+        await expect(
+            page.locator(SEL_V2["msg_user"]).filter(has_text="Other thread seed")
+        ).to_be_visible(timeout=15000)
+
+        await page.locator("#gateway-sidebar button").filter(
+            has_text="Pending attachment regression"
+        ).first.click()
+        await expect(pending_message).to_have_count(1, timeout=15000)
+        await expect(pending_message).to_contain_text("Pending attachment reload test")
+        await expect(pending_message).to_contain_text("pending-note.txt")
+    finally:
+        release_send.set()
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_sidebar_refresh_keeps_active_thread_outside_summary_window(
     reborn_v2_server, reborn_v2_browser
 ):
