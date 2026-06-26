@@ -1198,10 +1198,10 @@ fn push_capability_token(token: &str, ids: &mut Vec<CapabilityId>) {
     if !token.contains('.') {
         return;
     }
-    if let Ok(capability_id) = CapabilityId::new(token) {
-        if !ids.iter().any(|existing| existing == &capability_id) {
-            ids.push(capability_id);
-        }
+    if let Ok(capability_id) = CapabilityId::new(token)
+        && !ids.iter().any(|existing| existing == &capability_id)
+    {
+        ids.push(capability_id);
     }
 }
 
