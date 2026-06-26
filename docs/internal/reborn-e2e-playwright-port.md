@@ -1100,6 +1100,44 @@ Behavior adjustment:
   exposes matching v2 generic pairing list/approve endpoints. Current Reborn
   coverage remains scoped to the Slack proof-code redeem contract that exists.
 
+### Step 31: Legacy Plan Mode and Portfolio Review
+
+Reviewed legacy `test_plan_mode.py` and `test_portfolio.py` against the current
+Reborn WebChat v2, Projects, Settings, and Skills surfaces.
+
+Already-covered functional Reborn behavior:
+
+- Reborn chat send/reply, message rendering, reload persistence, and transcript
+  safety are covered by the migrated chat-core, rendering, attachment, and SSE
+  history scenarios;
+- generic skill visibility and usage-hint searchability are covered by
+  `test_reborn_webui_v2_legacy_skills.py` and Settings search coverage;
+- real project entity list/detail/create/update/delete and membership behavior
+  is covered by the Reborn project overview port.
+
+Current blocker:
+
+- legacy plan-mode tests assert visible checklist cards, approval/status/list
+  behavior, and `/plan` command parsing through the legacy chat UI. Reborn
+  still has lower-level `/plan` parsing code in the shared agent path, but the
+  WebChat v2 browser surface does not expose a plan checklist/card renderer or
+  matching plan interaction controls;
+- legacy portfolio tests assert a portfolio-specific tab/widget, widget
+  positions, and share-modal behavior. Reborn Projects is the closest current
+  product surface, but `pages/projects/lib/projects-api.js` still marks
+  per-project missions, threads, and widgets as TODO stubs until v2 endpoints
+  land. There is no Reborn browser widget/share-modal contract to assert today.
+
+Behavior adjustment:
+
+- Legacy plan-mode browser tests are not direct Reborn ports until standalone
+  Reborn exposes a WebChat v2 plan projection and user controls for checklist
+  approval/status/list behavior.
+- Legacy portfolio widget/share tests are not direct Reborn ports until the
+  Reborn project/widget contract exists. Current Reborn coverage remains scoped
+  to project overview behavior and generic skill visibility rather than the
+  legacy portfolio-specific widget UI.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -1137,6 +1175,11 @@ Not yet ported:
 - legacy project mission/thread/widget drill-in parity, because the current
   Reborn project page maps real project entities but still uses TODO client
   stubs for per-project missions, threads, widgets, and detail actions;
+- legacy plan-mode browser parity, because the current Reborn WebChat v2 UI has
+  no visible plan checklist/card surface or matching plan interaction controls;
+- legacy portfolio widget/share parity, because current Reborn project widgets
+  are TODO client stubs and no portfolio-specific widget/share-modal contract
+  exists in WebUI v2;
 - legacy Responses API context-injection parity for
   `x_context.notification_response`, because the Reborn OpenAI-compatible
   Responses DTO does not currently expose a matching context field;
