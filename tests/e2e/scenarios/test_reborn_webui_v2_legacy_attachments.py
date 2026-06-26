@@ -59,3 +59,91 @@ async def test_reborn_legacy_attachment_flow_renders_and_reaches_model(
     reloaded_user_message = page.locator(SEL_V2["msg_user"]).filter(has_text="marker.txt").last
     await expect(reloaded_user_message).to_contain_text("marker.txt", timeout=15000)
     await expect(reloaded_user_message).to_contain_text("tiny.png", timeout=15000)
+
+
+async def test_reborn_legacy_attachment_count_limit_blocks_extra_files(
+    reborn_v2_page,
+):
+    """Port of legacy batch count validation to Reborn's staging alert UI."""
+    page = reborn_v2_page
+    await page.set_input_files(
+        "input[type=file][multiple]",
+        files=[
+            {
+                "name": f"limit-{index}.txt",
+                "mimeType": "text/plain",
+                "buffer": f"file {index}".encode(),
+            }
+            for index in range(1, 12)
+        ],
+    )
+
+    await expect(page.get_by_text("limit-10.txt")).to_be_visible(timeout=15000)
+    await expect(page.get_by_text("limit-11.txt")).to_have_count(0, timeout=5000)
+    await expect(page.get_by_role("alert")).to_contain_text(
+        "at most 10 files", timeout=15000
+    )
+
+
+async def test_reborn_legacy_attachment_size_limits_block_invalid_files(
+    reborn_v2_page,
+):
+    """Port of legacy per-file and total attachment budget validation."""
+    page = reborn_v2_page
+
+    await page.set_input_files(
+        "input[type=file][multiple]",
+        files=[
+            {
+                "name": "too-large.txt",
+                "mimeType": "text/plain",
+                "buffer": b"x" * (6 * 1024 * 1024),
+            }
+        ],
+    )
+    await expect(page.get_by_role("alert")).to_contain_text(
+        "max 5 MB per file", timeout=15000
+    )
+    await expect(page.get_by_label("Remove attachment")).to_have_count(0, timeout=5000)
+
+    await page.get_by_label("Dismiss").click()
+    await page.set_input_files(
+        "input[type=file][multiple]",
+        files=[
+            {
+                "name": f"chunk-{index}.txt",
+                "mimeType": "text/plain",
+                "buffer": b"x" * (4 * 1024 * 1024),
+            }
+            for index in range(1, 4)
+        ],
+    )
+    await expect(page.get_by_text("chunk-1.txt")).to_be_visible(timeout=15000)
+    await expect(page.get_by_text("chunk-2.txt")).to_be_visible(timeout=15000)
+    await expect(page.get_by_text("chunk-3.txt")).to_have_count(0, timeout=5000)
+    await expect(page.get_by_label("Remove attachment")).to_have_count(2, timeout=5000)
+    await expect(page.get_by_role("alert")).to_contain_text(
+        "10 MB total limit", timeout=15000
+    )
+
+
+async def test_reborn_legacy_attachment_unsupported_type_is_rejected(
+    reborn_v2_page,
+):
+    """Port of legacy attachment type rejection through Reborn's accept contract."""
+    page = reborn_v2_page
+    await page.set_input_files(
+        "input[type=file][multiple]",
+        files=[
+            {
+                "name": "unsupported.bin",
+                "mimeType": "application/octet-stream",
+                "buffer": b"binary",
+            }
+        ],
+    )
+
+    await expect(page.get_by_role("alert")).to_contain_text(
+        "unsupported.bin is not a supported file type", timeout=15000
+    )
+    await expect(page.get_by_label("Remove attachment")).to_have_count(0, timeout=5000)

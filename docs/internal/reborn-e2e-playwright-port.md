@@ -148,6 +148,27 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the attachment browser port
   in the Reborn WebUI v2 Playwright job.
 
+### Step 4b: Legacy Attachment Validation Port
+
+Extended `test_reborn_webui_v2_legacy_attachments.py`.
+
+Ported the legacy attachment batch-validation intent to Reborn's staging alert
+UI and server-advertised attachment limits:
+
+- count limit rejects the 11th staged file and keeps the first 10;
+- per-file limit rejects files larger than 5 MB;
+- total-message limit keeps files that fit and rejects the file that would push
+  the batch over 10 MB;
+- unsupported MIME types are rejected before send.
+
+Legacy-only / non-1:1 case:
+
+- The legacy gateway allowed files-only sends through `/api/chat/send`.
+  Reborn's v2 browser and DTO contract require non-empty message text, so that
+  behavior is intentionally not copied as a browser affordance. Attachment-only
+  storage/model projection remains covered at lower contract layers and the
+  Reborn browser port verifies text-plus-attachment send/reload.
+
 ### Step 5: Legacy Chat Action Port
 
 Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_chat_actions.py`.
@@ -180,8 +201,8 @@ CI update:
 
 Not yet ported:
 
-- deeper legacy attachment variants: PDF/PPTX extraction, files-only reload,
-  unextractable placeholders, and budget/limit browser assertions;
+- deeper legacy attachment variants: PDF/PPTX extraction and unextractable
+  placeholder assertions;
 - remaining legacy chat UI affordances that have Reborn equivalents;
 - legacy SSE reconnect/history-reload edge cases;
 - DOM pruning/resource-limit scenarios;
