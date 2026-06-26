@@ -1,6 +1,9 @@
 mod child_io;
 mod progress;
 mod redaction;
+mod summary;
+mod synthetic;
+mod user_turn;
 
 use std::{
     any::Any,
@@ -19,12 +22,18 @@ use crate::{
     child_io::{join_child_stderr_reader, spawn_child_stderr_reader},
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
     redaction::{redact_libsql_path, redact_postgres_url},
+    summary::{LatencySummary, latency_summary, summarize_user_turn_stages},
+    synthetic::SyntheticIds,
+    user_turn::{
+        UserTurnStageDurations, UserTurnStageLatencySummary, build_user_turn_workload,
+        run_user_turn_tasks,
+    },
 };
 use clap::{Parser, ValueEnum};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceEstimate,
-    ResourceScope, ResourceUsage, TenantId, UserId, VirtualPath,
+    MountAlias, MountGrant, MountPermissions, MountView, ResourceEstimate, ResourceUsage, TenantId,
+    VirtualPath,
 };
 use ironclaw_resources::{
     FilesystemResourceGovernorStore, PersistentResourceGovernor, ResourceAccount, ResourceError,
@@ -38,67 +47,67 @@ use serde::{Deserialize, Serialize};
     name = "ironclaw_storage_stress",
     about = "Stress current filesystem-backed resource governor storage"
 )]
-struct Args {
+pub(crate) struct Args {
     #[arg(long, value_enum)]
-    backend: Backend,
+    pub(crate) backend: Backend,
 
     /// OS processes to run against the same snapshot path. Use >1 to exercise
     /// cross-process CAS contention that the in-process lock cannot serialize.
     #[arg(long, default_value_t = 1)]
-    processes: usize,
+    pub(crate) processes: usize,
 
     /// Threads per process.
     #[arg(long, default_value_t = 8)]
-    concurrency: usize,
+    pub(crate) concurrency: usize,
 
     /// Operations per thread.
     #[arg(long, default_value_t = 200)]
-    operations: usize,
+    pub(crate) operations: usize,
 
     /// Synthetic users distributed across operations.
     #[arg(long, default_value_t = 50)]
-    users: usize,
+    pub(crate) users: usize,
 
     /// Synthetic tenants distributed across users.
     #[arg(long, default_value_t = 1)]
-    tenants: usize,
+    pub(crate) tenants: usize,
 
     #[arg(long, value_enum, default_value_t = Scenario::ReserveRelease)]
-    scenario: Scenario,
+    pub(crate) scenario: Scenario,
 
     /// Shared run id. Defaults to a fresh UUID.
     #[arg(long)]
-    run_id: Option<String>,
+    pub(crate) run_id: Option<String>,
 
     /// libSQL database path. Defaults to a temp-file path printed in output.
     #[arg(long)]
-    libsql_path: Option<PathBuf>,
+    pub(crate) libsql_path: Option<PathBuf>,
 
     /// Postgres URL. Defaults to IRONCLAW_FILESYSTEM_POSTGRES_URL, then DATABASE_URL.
     #[arg(long)]
-    postgres_url: Option<String>,
+    pub(crate) postgres_url: Option<String>,
 
     /// Postgres pool size per process.
     #[arg(long, default_value_t = 4)]
-    postgres_pool_size: usize,
+    pub(crate) postgres_pool_size: usize,
 
     /// Emit live progress to stderr every N seconds. Set to 0 to disable.
     #[arg(long, default_value_t = 1)]
-    progress_interval_seconds: u64,
+    pub(crate) progress_interval_seconds: u64,
 
     #[arg(long, hide = true)]
-    child_index: Option<usize>,
+    pub(crate) child_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-enum Backend {
+pub(crate) enum Backend {
     Libsql,
     Postgres,
 }
 
 impl Backend {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Libsql => "libsql",
             Self::Postgres => "postgres",
@@ -108,17 +117,23 @@ impl Backend {
 
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-enum Scenario {
+pub(crate) enum Scenario {
     ReserveRelease,
     ReserveReconcile,
+    ChatTurn,
 }
 
 impl Scenario {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::ReserveRelease => "reserve-release",
             Self::ReserveReconcile => "reserve-reconcile",
+            Self::ChatTurn => "chat-turn",
         }
+    }
+
+    pub(crate) fn is_resource_governor(self) -> bool {
+        matches!(self, Self::ReserveRelease | Self::ReserveReconcile)
     }
 }
 
@@ -128,18 +143,10 @@ struct BackendHandle {
 }
 
 #[derive(Debug, Clone)]
-struct Sample {
-    latency: Duration,
-    error: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct LatencySummary {
-    min_us: u128,
-    p50_us: u128,
-    p95_us: u128,
-    p99_us: u128,
-    max_us: u128,
+pub(crate) struct Sample {
+    pub(crate) latency: Duration,
+    pub(crate) error: Option<String>,
+    pub(crate) stages: Option<UserTurnStageDurations>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -160,6 +167,8 @@ struct RunSummary {
     duration_ms: u128,
     throughput_ops_sec: f64,
     latency: LatencySummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stage_latency: Option<UserTurnStageLatencySummary>,
     errors: BTreeMap<String, u64>,
 }
 
@@ -232,6 +241,9 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if args.postgres_pool_size == 0 {
         return Err("--postgres-pool-size must be greater than 0".to_string());
     }
+    if matches!(args.scenario, Scenario::ChatTurn) && args.processes > 1 {
+        return Err("--scenario chat-turn requires --processes 1".to_string());
+    }
     Ok(())
 }
 
@@ -243,12 +255,22 @@ async fn prewarm(args: &Args, run_id: &str) -> Result<(), String> {
         args.scenario.as_str(),
         run_id
     );
-    let backend = build_backend(args, run_id).await?;
-    let account = ResourceAccount::tenant(TenantId::new("stress-prewarm").map_err(display_err)?);
-    backend
-        .governor
-        .account_snapshot(&account)
-        .map_err(|error| format!("prewarm failed: {error:?}"))?;
+    if args.scenario.is_resource_governor() {
+        let backend = build_backend(args, run_id).await?;
+        let account =
+            ResourceAccount::tenant(TenantId::new("stress-prewarm").map_err(display_err)?);
+        backend
+            .governor
+            .account_snapshot(&account)
+            .map_err(|error| format!("prewarm failed: {error:?}"))?;
+    } else {
+        let workload = build_user_turn_workload(args, run_id).await?;
+        eprintln!(
+            "{} prewarmed target={}",
+            log_prefix(args),
+            workload.target()
+        );
+    }
     Ok(())
 }
 
@@ -365,8 +387,23 @@ async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, String>
         args.scenario.as_str(),
         run_id
     );
-    let backend = build_backend(args, run_id).await?;
     let total_operations = args.concurrency.saturating_mul(args.operations);
+    let identities = Arc::new(SyntheticIds::new(args)?);
+
+    if args.scenario.is_resource_governor() {
+        return run_resource_governor_in_process(args, run_id, total_operations, identities).await;
+    }
+
+    run_user_turn_in_process(args, run_id, total_operations, identities).await
+}
+
+async fn run_resource_governor_in_process(
+    args: &Args,
+    run_id: &str,
+    total_operations: usize,
+    identities: Arc<SyntheticIds>,
+) -> Result<RunSummary, String> {
+    let backend = build_backend(args, run_id).await?;
     eprintln!(
         "{} running target={} concurrency={} operations_per_thread={} total_operations={} users={} tenants={} progress_interval_seconds={}",
         log_prefix(args),
@@ -378,7 +415,6 @@ async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, String>
         args.tenants,
         args.progress_interval_seconds
     );
-    let identities = Arc::new(SyntheticIds::new(args)?);
     let started = Instant::now();
     let governor = Arc::clone(&backend.governor);
     let args_clone = args.clone();
@@ -396,6 +432,41 @@ async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, String>
             })??;
     let elapsed = started.elapsed();
     let summary = summarize(args, run_id, backend.target, elapsed, samples);
+    eprintln!(
+        "{} finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
+        log_prefix(args),
+        summary.attempted,
+        summary.succeeded,
+        summary.failed,
+        summary.duration_ms,
+        summary.throughput_ops_sec
+    );
+    Ok(summary)
+}
+
+async fn run_user_turn_in_process(
+    args: &Args,
+    run_id: &str,
+    total_operations: usize,
+    identities: Arc<SyntheticIds>,
+) -> Result<RunSummary, String> {
+    let workload = Arc::new(build_user_turn_workload(args, run_id).await?);
+    eprintln!(
+        "{} running target={} concurrency={} operations_per_task={} total_operations={} users={} tenants={} progress_interval_seconds={}",
+        log_prefix(args),
+        workload.target(),
+        args.concurrency,
+        args.operations,
+        total_operations,
+        args.users,
+        args.tenants,
+        args.progress_interval_seconds
+    );
+    let started = Instant::now();
+    let target = workload.target().to_string();
+    let samples = run_user_turn_tasks(workload, args, identities).await?;
+    let elapsed = started.elapsed();
+    let summary = summarize(args, run_id, target, elapsed, samples);
     eprintln!(
         "{} finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
         log_prefix(args),
@@ -523,11 +594,13 @@ fn run_one_operation(
         Scenario::ReserveReconcile => governor
             .reserve(scope, estimate)
             .and_then(|reservation| governor.reconcile(reservation.id, usage).map(|_| ())),
+        Scenario::ChatTurn => unreachable!("chat-turn uses the async user-turn workload"),
     };
     let latency = started.elapsed();
     Sample {
         latency,
         error: outcome.err().map(|error| classify_error(&error)),
+        stages: None,
     }
 }
 
@@ -572,33 +645,9 @@ fn summarize(
         duration_ms: elapsed.as_millis(),
         throughput_ops_sec: attempted as f64 / elapsed_secs,
         latency: latency_summary(&latencies),
+        stage_latency: summarize_user_turn_stages(&samples),
         errors,
     }
-}
-
-fn latency_summary(latencies: &[u128]) -> LatencySummary {
-    if latencies.is_empty() {
-        return LatencySummary {
-            min_us: 0,
-            p50_us: 0,
-            p95_us: 0,
-            p99_us: 0,
-            max_us: 0,
-        };
-    }
-    LatencySummary {
-        min_us: latencies[0],
-        p50_us: percentile(latencies, 50),
-        p95_us: percentile(latencies, 95),
-        p99_us: percentile(latencies, 99),
-        max_us: latencies[latencies.len() - 1],
-    }
-}
-
-fn percentile(sorted: &[u128], percentile: usize) -> u128 {
-    let last = sorted.len().saturating_sub(1);
-    let index = (last * percentile).div_ceil(100);
-    sorted[index.min(last)]
 }
 
 fn print_parent_summary(args: &Args, run_id: &str, summaries: &[RunSummary]) -> Result<(), String> {
@@ -674,7 +723,7 @@ fn classify_error(error: &ResourceError) -> String {
     }
 }
 
-fn log_prefix(args: &Args) -> String {
+pub(crate) fn log_prefix(args: &Args) -> String {
     match args.child_index {
         Some(child_index) => format!("[storage-stress child={child_index}]"),
         None => "[storage-stress]".to_string(),
@@ -690,6 +739,17 @@ async fn build_backend(args: &Args, run_id: &str) -> Result<BackendHandle, Strin
 
 #[cfg(feature = "libsql")]
 async fn build_libsql_backend(args: &Args, run_id: &str) -> Result<BackendHandle, String> {
+    let (filesystem, target) = build_libsql_root(args).await?;
+    Ok(BackendHandle {
+        governor: governor_from_root(filesystem, run_id)?,
+        target,
+    })
+}
+
+#[cfg(feature = "libsql")]
+pub(crate) async fn build_libsql_root(
+    args: &Args,
+) -> Result<(Arc<ironclaw_filesystem::LibSqlRootFilesystem>, String), String> {
     use ironclaw_filesystem::LibSqlRootFilesystem;
 
     let path = args.libsql_path.clone().unwrap_or_else(default_libsql_path);
@@ -706,10 +766,7 @@ async fn build_libsql_backend(args: &Args, run_id: &str) -> Result<BackendHandle
     );
     let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
     filesystem.run_migrations().await.map_err(display_err)?;
-    Ok(BackendHandle {
-        governor: governor_from_root(filesystem, run_id)?,
-        target: redact_libsql_path(&path),
-    })
+    Ok((filesystem, redact_libsql_path(&path)))
 }
 
 #[cfg(not(feature = "libsql"))]
@@ -719,6 +776,17 @@ async fn build_libsql_backend(_args: &Args, _run_id: &str) -> Result<BackendHand
 
 #[cfg(feature = "postgres")]
 async fn build_postgres_backend(args: &Args, run_id: &str) -> Result<BackendHandle, String> {
+    let (filesystem, target) = build_postgres_root(args).await?;
+    Ok(BackendHandle {
+        governor: governor_from_root(filesystem, run_id)?,
+        target,
+    })
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) async fn build_postgres_root(
+    args: &Args,
+) -> Result<(Arc<ironclaw_filesystem::PostgresRootFilesystem>, String), String> {
     use ironclaw_filesystem::PostgresRootFilesystem;
 
     let url = resolve_postgres_url(args)?;
@@ -732,10 +800,7 @@ async fn build_postgres_backend(args: &Args, run_id: &str) -> Result<BackendHand
         .map_err(display_err)?;
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool));
     filesystem.run_migrations().await.map_err(display_err)?;
-    Ok(BackendHandle {
-        governor: governor_from_root(filesystem, run_id)?,
-        target: redact_postgres_url(&url),
-    })
+    Ok((filesystem, redact_postgres_url(&url)))
 }
 
 #[cfg(not(feature = "postgres"))]
@@ -821,46 +886,6 @@ fn panic_payload_to_string(payload: &Box<dyn Any + Send + 'static>) -> String {
     "non-string panic payload".to_string()
 }
 
-struct SyntheticIds {
-    tenants: Vec<TenantId>,
-    users: Vec<UserId>,
-}
-
-impl SyntheticIds {
-    fn new(args: &Args) -> Result<Self, String> {
-        let tenants = (0..args.tenants)
-            .map(|tenant_index| {
-                TenantId::new(format!("tenant-{tenant_index:04}"))
-                    .map_err(|error| format!("build synthetic tenant id: {error}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let users = (0..args.users)
-            .map(|user_index| {
-                UserId::new(format!("user-{user_index:06}"))
-                    .map_err(|error| format!("build synthetic user id: {error}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { tenants, users })
-    }
-
-    fn scope(&self, args: &Args, worker_index: usize, operation_index: usize) -> ResourceScope {
-        let global_index = worker_index
-            .saturating_mul(args.operations)
-            .saturating_add(operation_index);
-        let user_index = global_index % self.users.len();
-        let tenant_index = user_index % self.tenants.len();
-        ResourceScope {
-            tenant_id: self.tenants[tenant_index].clone(),
-            user_id: self.users[user_index].clone(),
-            agent_id: None,
-            project_id: None,
-            mission_id: None,
-            thread_id: None,
-            invocation_id: InvocationId::new(),
-        }
-    }
-}
-
 fn resolve_postgres_url(args: &Args) -> Result<String, String> {
     if let Some(url) = args.postgres_url.clone() {
         return Ok(url);
@@ -939,8 +964,19 @@ mod tests {
         let args = test_args();
         let ids = SyntheticIds::new(&args).expect("synthetic ids build");
 
-        assert_eq!(ids.tenants.len(), args.tenants);
-        assert_eq!(ids.users.len(), args.users);
+        assert_eq!(ids.tenant_count(), args.tenants);
+        assert_eq!(ids.user_count(), args.users);
+    }
+
+    #[test]
+    fn chat_turn_rejects_multi_process_runs() {
+        let mut args = test_args();
+        args.scenario = Scenario::ChatTurn;
+        args.processes = 2;
+
+        let error = validate_args(&args).expect_err("chat-turn is single-process only");
+
+        assert!(error.contains("--scenario chat-turn requires --processes 1"));
     }
 
     fn test_args() -> Args {

@@ -5458,11 +5458,14 @@ dependencies = [
 name = "ironclaw_storage_stress"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "clap",
  "deadpool-postgres",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_resources",
+ "ironclaw_threads",
+ "ironclaw_turns",
  "libsql",
  "rust_decimal",
  "rust_decimal_macros",
