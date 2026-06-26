@@ -5,10 +5,29 @@ use ironclaw_approvals::{ToolPermissionOverride, permission_mode_allows_persiste
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant,
-    CapabilityId, Decision, DenyReason, EffectKind, ExecutionContext, Principal, ResourceEstimate,
-    ResourceScope, Timestamp, runtime_policy::ApprovalPolicy,
+    CapabilityId, Decision, DenyReason, EffectKind, ExecutionContext, PermissionMode, Principal,
+    ResourceEstimate, ResourceScope, Timestamp, runtime_policy::ApprovalPolicy,
 };
 use ironclaw_trust::TrustDecision;
+
+/// Optional admin (org-wide) approval opinion for a capability, keyed by the
+/// dispatch resource scope (#5261 D6).
+///
+/// Deliberately local so this dep-light module never imports
+/// `ironclaw_capability_policy`: the seam is a trait, and composition supplies
+/// the concrete adapter over the shared `PolicyResolver` (see
+/// `crate::capability_surface_policy::PolicyResolverAdminApprovalSource`). A
+/// `None` return (no admin row, `Ask`, or a resolver fault) means "no admin
+/// opinion" and the dispatch falls through to the existing user/profile chain
+/// (fail-SAFE, #5261 D5 approval — never auto-approve on error).
+#[async_trait]
+pub(crate) trait AdminApprovalSource: Send + Sync {
+    async fn admin_approval(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+    ) -> Option<PermissionMode>;
+}
 
 pub(crate) trait ProfileApprovalGatePolicy: Send + Sync {
     fn capability_exempt_from_approval(&self, _capability: &CapabilityId) -> bool {
@@ -85,15 +104,34 @@ impl ApprovalSettingsProvider for EmptyApprovalSettingsProvider {
     }
 }
 
+/// Thin wrapper passing no admin-approval source. Retained so the existing
+/// tests construct the authorizer with the pre-#5261 3-arg shape; production
+/// wiring goes through [`profile_approval_authorizer_with_admin_policy`] so it
+/// can supply the admin source when the capability-policy resolver is active.
+#[cfg(test)]
 pub(crate) fn profile_approval_authorizer(
     approval_policy: ApprovalPolicy,
     gate_policy: Arc<dyn ProfileApprovalGatePolicy>,
     settings: Arc<dyn ApprovalSettingsProvider>,
 ) -> Arc<dyn TrustAwareCapabilityDispatchAuthorizer> {
+    profile_approval_authorizer_with_admin_policy(approval_policy, gate_policy, settings, None)
+}
+
+/// As `profile_approval_authorizer`, but carrying the optional admin-approval
+/// source (#5261 D6). `admin_policy` is `Some` only under the
+/// `capability-policy` feature AND `capability_policy_activated()`; `None`
+/// preserves the pre-policy behaviour exactly.
+pub(crate) fn profile_approval_authorizer_with_admin_policy(
+    approval_policy: ApprovalPolicy,
+    gate_policy: Arc<dyn ProfileApprovalGatePolicy>,
+    settings: Arc<dyn ApprovalSettingsProvider>,
+    admin_policy: Option<Arc<dyn AdminApprovalSource>>,
+) -> Arc<dyn TrustAwareCapabilityDispatchAuthorizer> {
     Arc::new(ProfileApprovalPolicyAuthorizer::new(
         approval_policy,
         gate_policy,
         settings,
+        admin_policy,
     ))
 }
 
@@ -102,6 +140,7 @@ struct ProfileApprovalPolicyAuthorizer {
     approval_policy: ApprovalPolicy,
     gate_policy: Arc<dyn ProfileApprovalGatePolicy>,
     settings: Arc<dyn ApprovalSettingsProvider>,
+    admin_policy: Option<Arc<dyn AdminApprovalSource>>,
 }
 
 impl ProfileApprovalPolicyAuthorizer {
@@ -109,12 +148,14 @@ impl ProfileApprovalPolicyAuthorizer {
         approval_policy: ApprovalPolicy,
         gate_policy: Arc<dyn ProfileApprovalGatePolicy>,
         settings: Arc<dyn ApprovalSettingsProvider>,
+        admin_policy: Option<Arc<dyn AdminApprovalSource>>,
     ) -> Self {
         Self {
             inner: GrantAuthorizer::new(),
             approval_policy,
             gate_policy,
             settings,
+            admin_policy,
         }
     }
 }
@@ -141,6 +182,7 @@ impl TrustAwareCapabilityDispatchAuthorizer for ProfileApprovalPolicyAuthorizer 
             self.approval_policy,
             self.gate_policy.as_ref(),
             self.settings.as_ref(),
+            self.admin_policy.as_deref(),
         )
         .await
     }
@@ -165,6 +207,7 @@ impl TrustAwareCapabilityDispatchAuthorizer for ProfileApprovalPolicyAuthorizer 
             self.approval_policy,
             self.gate_policy.as_ref(),
             self.settings.as_ref(),
+            self.admin_policy.as_deref(),
         )
         .await
     }
@@ -176,8 +219,8 @@ enum ProfileApprovalActionKind {
     SpawnCapability,
 }
 
+// arch-exempt: too_many_args, gate decision needs context+descriptor+estimate+policy+gate+settings+admin approval source, plan #5261
 #[allow(clippy::too_many_arguments)]
-// arch-exempt: too_many_args, gate decision needs context+descriptor+estimate+policy+gate+settings, plan #4776
 async fn require_approval_for_profile_policy(
     decision: Decision,
     context: &ExecutionContext,
@@ -187,6 +230,7 @@ async fn require_approval_for_profile_policy(
     approval_policy: ApprovalPolicy,
     gate_policy: &dyn ProfileApprovalGatePolicy,
     settings: &dyn ApprovalSettingsProvider,
+    admin_policy: Option<&dyn AdminApprovalSource>,
 ) -> Decision {
     // The profile approval gate only ever upgrades an underlying `Allow`; a
     // `Deny` / `RequireApproval` from the grant authorizer passes through
@@ -208,6 +252,46 @@ async fn require_approval_for_profile_policy(
         request: approval_request(context, descriptor, estimate, action_kind),
     };
 
+    // Admin (org-wide) precedence (#5261 D6), evaluated at the TOP of the chain
+    // — before the user/profile steps below. The admin opinion is keyed by the
+    // dispatch resource scope's `(tenant_id, user_id)`. The chain head is:
+    //   [admin Deny] → [hard floor] → [admin Allow] → [step 1 user Disabled] →
+    //   [step 3 ask_each_time] → … existing steps 4–9.
+    // A `None` opinion (no admin row, admin `Ask`, or a resolver fault inside
+    // the source) means "no admin opinion" and falls through to the existing
+    // user/profile chain unchanged (fail-SAFE, #5261 D5 approval — never
+    // auto-approve on error; privilege escalation otherwise).
+    let admin_approval = match admin_policy {
+        Some(source) => {
+            source
+                .admin_approval(&context.resource_scope, &descriptor.id)
+                .await
+        }
+        None => None,
+    };
+    // A. admin `Deny` → absolute deny. Sits ABOVE the user `Disabled` deny
+    //    (step 1) AND above the hard floor: admin Deny is the strongest org
+    //    intent and nothing downstream may relax it.
+    if matches!(admin_approval, Some(PermissionMode::Deny)) {
+        return Decision::Deny {
+            reason: DenyReason::PolicyDenied,
+        };
+    }
+    // 2. Hard floor (#4776/#4959): forced-gate effects (Financial, …) ALWAYS
+    //    require an explicit approval and can NEVER be auto-approved — not by a
+    //    stored grant, not by the global switch, and NOT by an admin `Allow`.
+    //    Pulled to the chain head so it runs BEFORE the admin `Allow`
+    //    short-circuit below (the #4776/#4959 contract preserved verbatim).
+    if gate_policy.effects_force_approval(&gate_effects) {
+        return require_approval();
+    }
+    // B. admin `Allow` → auto-approve. Sits ABOVE the user `Disabled` deny
+    //    (step 1) and the rest of the user/profile chain (an admin opt-in
+    //    overrides a user opt-out), but BELOW the hard floor above.
+    if matches!(admin_approval, Some(PermissionMode::Allow)) {
+        return decision;
+    }
+
     // Decision precedence (high → low), #4776:
     // 1. Explicit per-tool `disabled` → deny outright (strongest user intent).
     let tool_override = settings
@@ -217,10 +301,6 @@ async fn require_approval_for_profile_policy(
         return Decision::Deny {
             reason: DenyReason::PolicyDenied,
         };
-    }
-    // 2. Hard floor: never auto-approve / never satisfiable by a stored grant.
-    if gate_policy.effects_force_approval(&gate_effects) {
-        return require_approval();
     }
     // 3. Explicit per-tool `ask_each_time` → always gate, ignoring the global
     //    auto-approve setting and any stored always-allow grant.
@@ -473,6 +553,184 @@ mod tests {
         )
         .authorize_dispatch_with_trust(&ctx, &descriptor, &ResourceEstimate::default(), &trust)
         .await
+    }
+
+    /// Fixed admin (org-wide) approval opinion for the dispatch chain (#5261 D6).
+    /// `None` models "no admin row / admin Ask / resolver fault" (fail-SAFE).
+    struct StubAdminApprovalSource {
+        approval: Option<PermissionMode>,
+    }
+
+    #[async_trait]
+    impl AdminApprovalSource for StubAdminApprovalSource {
+        async fn admin_approval(
+            &self,
+            _scope: &ResourceScope,
+            _capability_id: &CapabilityId,
+        ) -> Option<PermissionMode> {
+            self.approval
+        }
+    }
+
+    /// As [`dispatch_decision`], but threading a fixed admin-approval opinion in
+    /// through the `AdminApprovalSource` seam so the #5261 D6 precedence head can
+    /// be exercised. Mirrors the `dispatch_decision` `Allow`-base harness.
+    async fn dispatch_decision_with_admin(
+        approval_policy: ApprovalPolicy,
+        effects: Vec<EffectKind>,
+        settings: StubSettingsProvider,
+        admin_approval: Option<PermissionMode>,
+    ) -> Decision {
+        let shell_id = CapabilityId::new("builtin.shell").unwrap();
+        let descriptor = test_descriptor_with_id(shell_id.clone(), effects.clone());
+        let ctx = test_context(CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: shell_id,
+                grantee: Principal::Extension(ExtensionId::new("builtin").unwrap()),
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: effects.clone(),
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+            }],
+        });
+        let trust = TrustDecision {
+            effective_trust: EffectiveTrustClass::user_trusted(),
+            authority_ceiling: AuthorityCeiling {
+                allowed_effects: effects,
+                max_resource_ceiling: None,
+            },
+            provenance: TrustProvenance::AdminConfig,
+            evaluated_at: chrono::Utc::now(),
+        };
+        profile_approval_authorizer_with_admin_policy(
+            approval_policy,
+            Arc::new(TestGatePolicy),
+            Arc::new(settings),
+            Some(Arc::new(StubAdminApprovalSource {
+                approval: admin_approval,
+            })),
+        )
+        .authorize_dispatch_with_trust(&ctx, &descriptor, &ResourceEstimate::default(), &trust)
+        .await
+    }
+
+    #[tokio::test]
+    async fn admin_deny_overrides_user_always_allow_and_global_auto_approve() {
+        // admin Deny is the strongest org intent: it must deny even when the
+        // user has every opt-in switched on (always-allow + global auto-approve).
+        let decision = dispatch_decision_with_admin(
+            ApprovalPolicy::AskDestructive,
+            vec![EffectKind::SpawnProcess],
+            StubSettingsProvider {
+                tool_override: None,
+                global_auto_approve: true,
+                tool_always_allow: true,
+            },
+            Some(PermissionMode::Deny),
+        )
+        .await;
+        assert!(
+            matches!(
+                decision,
+                Decision::Deny {
+                    reason: DenyReason::PolicyDenied
+                }
+            ),
+            "admin Deny must override user always-allow + global auto-approve, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_allow_auto_approves_otherwise_gated_default_allow_tool() {
+        // A SpawnProcess tool under AskDestructive with global auto-approve OFF
+        // would otherwise gate (RequireApproval); admin Allow auto-approves it.
+        let decision = dispatch_decision_with_admin(
+            ApprovalPolicy::AskDestructive,
+            vec![EffectKind::SpawnProcess],
+            StubSettingsProvider {
+                tool_override: None,
+                global_auto_approve: false,
+                tool_always_allow: false,
+            },
+            Some(PermissionMode::Allow),
+        )
+        .await;
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "admin Allow must auto-approve an otherwise-gated default-allow tool, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_allow_does_not_bypass_financial_hard_floor() {
+        // The hard floor (#4776/#4959) sits ABOVE admin Allow: a forced-gate
+        // effect (Financial) can NEVER be admin-auto-approved.
+        let decision = dispatch_decision_with_admin(
+            ApprovalPolicy::AskDestructive,
+            vec![EffectKind::Financial],
+            StubSettingsProvider {
+                tool_override: None,
+                global_auto_approve: true,
+                tool_always_allow: true,
+            },
+            Some(PermissionMode::Allow),
+        )
+        .await;
+        assert!(
+            matches!(decision, Decision::RequireApproval { .. }),
+            "admin Allow must NOT bypass the Financial hard floor, got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_ask_leaves_existing_global_auto_approve_behaviour_unchanged() {
+        // admin Ask == "no admin opinion": the existing user/profile chain runs
+        // unchanged, so global auto-approve still skips the gate for an eligible
+        // tool (matching `global_auto_approve_skips_gate_for_eligible_tool`).
+        let decision = dispatch_decision_with_admin(
+            ApprovalPolicy::AskDestructive,
+            vec![EffectKind::SpawnProcess],
+            StubSettingsProvider {
+                tool_override: None,
+                global_auto_approve: true,
+                tool_always_allow: false,
+            },
+            Some(PermissionMode::Ask),
+        )
+        .await;
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "admin Ask must defer to the existing chain (global auto-approve allows), got {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_none_leaves_existing_gate_behaviour_unchanged() {
+        // No admin row (None) must also defer: under AskDestructive with global
+        // auto-approve OFF, an eligible SpawnProcess tool still gates exactly as
+        // it did before the admin layer existed.
+        let decision = dispatch_decision_with_admin(
+            ApprovalPolicy::AskDestructive,
+            vec![EffectKind::SpawnProcess],
+            StubSettingsProvider {
+                tool_override: None,
+                global_auto_approve: false,
+                tool_always_allow: false,
+            },
+            None,
+        )
+        .await;
+        assert!(
+            matches!(decision, Decision::RequireApproval { .. }),
+            "admin None must leave the existing gate behaviour unchanged, got {decision:?}"
+        );
     }
 
     #[tokio::test]

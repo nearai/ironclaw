@@ -176,6 +176,58 @@ impl ironclaw_loop_support::LoopCapabilityConfigSource for PolicyResolverConfigS
     }
 }
 
+/// Adapts the shared [`PolicyResolver`] into the dep-light approval module's
+/// host-owned [`AdminApprovalSource`] (#5261 D6 approval dimension). Supplies
+/// the admin (org-wide) approval opinion (`EffectivePolicy.approval`) so the
+/// dispatch approval chain can apply admin Deny/Allow precedence.
+///
+/// Holds the SAME resolver `Arc` the availability and config seams read, so all
+/// three dimensions stay consistent for a turn.
+#[cfg(feature = "capability-policy")]
+pub(crate) struct PolicyResolverAdminApprovalSource {
+    policy: Arc<dyn PolicyResolver>,
+}
+
+#[cfg(feature = "capability-policy")]
+impl PolicyResolverAdminApprovalSource {
+    pub(crate) fn new(policy: Arc<dyn PolicyResolver>) -> Self {
+        Self { policy }
+    }
+}
+
+#[cfg(feature = "capability-policy")]
+#[async_trait]
+impl crate::profile_approval_authorization::AdminApprovalSource
+    for PolicyResolverAdminApprovalSource
+{
+    async fn admin_approval(
+        &self,
+        scope: &ironclaw_host_api::ResourceScope,
+        capability_id: &CapabilityId,
+    ) -> Option<ironclaw_host_api::PermissionMode> {
+        let subject = PolicySubject {
+            tenant_id: scope.tenant_id.clone(),
+            user_id: scope.user_id.clone(),
+        };
+        match self.policy.resolve(&subject, capability_id).await {
+            Ok(effective) => Some(effective.approval),
+            Err(error) => {
+                // Fail-SAFE (#5261 D5 approval): a resolver fault must NOT
+                // auto-approve (privilege escalation). Returning `None` makes
+                // the dispatch chain treat this as "no admin opinion" and fall
+                // through to the existing user/profile steps. Logged at debug so
+                // it never corrupts the REPL/TUI surface (see CLAUDE.md).
+                tracing::debug!(
+                    %error,
+                    capability = %capability_id.as_str(),
+                    "capability policy approval resolution failed; deferring to user/profile chain"
+                );
+                None
+            }
+        }
+    }
+}
+
 /// Whether the per-`(tenant, user)` capability policy resolver (#5267 / #5261)
 /// is active for this runtime. Compiled in by the `capability-policy` feature,
 /// but OFF unless `IRONCLAW_REBORN_CAPABILITY_POLICY` is set truthy

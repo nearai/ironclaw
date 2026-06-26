@@ -1132,10 +1132,34 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             .persistent_approval_policies
             .clone(),
     ));
+    // Admin (org-wide) approval precedence (#5261 D6): when the shared
+    // capability-policy resolver is active, wrap it in the dep-light approval
+    // module's `AdminApprovalSource` seam so the dispatch chain can apply admin
+    // Deny/Allow precedence. `None` (feature off or `capability_policy_activated()`
+    // false) preserves the pre-policy authorizer behaviour exactly.
+    #[cfg(not(feature = "capability-policy"))]
+    let admin_approval_policy: Option<
+        Arc<dyn crate::profile_approval_authorization::AdminApprovalSource>,
+    > = None;
+    #[cfg(feature = "capability-policy")]
+    let admin_approval_policy: Option<
+        Arc<dyn crate::profile_approval_authorization::AdminApprovalSource>,
+    > = store_graph
+        .local_runtime
+        .capability_policy_resolver
+        .as_ref()
+        .map(|policy| {
+            Arc::new(
+                crate::capability_surface_policy::PolicyResolverAdminApprovalSource::new(
+                    Arc::clone(policy),
+                ),
+            ) as Arc<dyn crate::profile_approval_authorization::AdminApprovalSource>
+        });
     let authorizer = local_dev_authorizer(
         runtime_policy.as_ref(),
         Arc::clone(&store_graph.local_runtime.capability_policy),
         approval_settings_provider,
+        admin_approval_policy,
     );
     let services = HostRuntimeServices::new(
         Arc::clone(&extension_registry),
