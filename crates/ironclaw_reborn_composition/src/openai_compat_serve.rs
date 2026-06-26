@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
@@ -36,11 +37,11 @@ use ironclaw_reborn_openai_compat::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
     OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
     OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow,
-    OpenAiChatProjectionStreamRequest, OpenAiCompatErrorKind, OpenAiCompatHttpError,
-    OpenAiCompatInboundAttachmentSubmit, OpenAiCompatProjectionStreamer, OpenAiCompatRefStore,
-    OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouterState,
-    OpenAiResponseErrorObject, OpenAiResponseId, OpenAiResponseObject, OpenAiResponseOutputItem,
-    OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
+    OpenAiChatProjectionStreamRequest, OpenAiCompatActorScope, OpenAiCompatErrorKind,
+    OpenAiCompatHttpError, OpenAiCompatInboundAttachmentSubmit, OpenAiCompatProjectionStreamer,
+    OpenAiCompatRefStore, OpenAiCompatResourceBinding, OpenAiCompatResourceMapping,
+    OpenAiCompatRouterState, OpenAiResponseErrorObject, OpenAiResponseId, OpenAiResponseObject,
+    OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
     OpenAiResponseProjectionStreamRequest, OpenAiResponseReadRequest, OpenAiResponseStatus,
     OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
     OpenAiResponsesWorkflow, openai_compat_router_with_state, openai_compat_routes,
@@ -59,10 +60,11 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::{
-    ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, GetRunStateRequest,
+    ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, GateRef, GetRunStateRequest,
     IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnError,
     TurnErrorCategory, TurnRunId, TurnScope, TurnStatus,
 };
+use sha2::{Digest, Sha256};
 
 use crate::RebornBuildError;
 use crate::RebornRuntime;
@@ -1131,15 +1133,7 @@ impl OpenAiCompatExternalToolResume for OpenAiCompatRuntimeExternalToolResume {
         } = request;
         let run_id = parse_turn_run_id(run_ref.as_str())?;
         let thread_id = ThreadId::new(thread_id).map_err(|_| OpenAiCompatHttpError::internal())?;
-        // Mirror the inbound submit's scope (owner = caller user) so the
-        // coordinator's exact-scope run-state lookup resolves.
-        let scope = TurnScope::new_with_owner(
-            actor_scope.tenant_id().clone(),
-            actor_scope.agent_id().cloned(),
-            actor_scope.project_id().cloned(),
-            thread_id,
-            Some(actor_scope.user_id().clone()),
-        );
+        let scope = openai_compat_resume_turn_scope(&actor_scope, thread_id);
         let state = match self
             .coordinator
             .get_run_state(GetRunStateRequest { scope, run_id })
@@ -1160,16 +1154,20 @@ impl OpenAiCompatExternalToolResume for OpenAiCompatRuntimeExternalToolResume {
             return Ok(());
         }
         let Some(gate_ref) = state.gate_ref.clone() else {
+            tracing::error!(
+                turn_run_id = %run_id,
+                "openai compat external-tool resume found blocked run without gate ref"
+            );
             return Err(OpenAiCompatHttpError::internal());
         };
         let Some(actor) = state.actor.clone() else {
+            tracing::error!(
+                turn_run_id = %run_id,
+                "openai compat external-tool resume found blocked run without actor"
+            );
             return Err(OpenAiCompatHttpError::internal());
         };
-        // Key idempotency by the parked gate: replaying the same resolution
-        // dedups, while a later parked call (different gate) resumes afresh.
-        let idempotency_key =
-            IdempotencyKey::new(format!("openai-compat-ext-resume:{}", gate_ref.as_str()))
-                .map_err(|_| OpenAiCompatHttpError::internal())?;
+        let idempotency_key = openai_compat_external_tool_resume_idempotency_key(&gate_ref)?;
         self.coordinator
             .resume_turn(ResumeTurnRequest {
                 scope: state.scope.clone(),
@@ -1186,6 +1184,46 @@ impl OpenAiCompatExternalToolResume for OpenAiCompatRuntimeExternalToolResume {
             .map(|_| ())
             .map_err(map_resume_turn_error)
     }
+}
+
+fn openai_compat_resume_turn_scope(
+    actor_scope: &OpenAiCompatActorScope,
+    thread_id: ThreadId,
+) -> TurnScope {
+    // Mirror the inbound submit's scope (owner = caller user) so the
+    // coordinator's exact-scope run-state lookup resolves.
+    TurnScope::new_with_owner(
+        actor_scope.tenant_id().clone(),
+        actor_scope.agent_id().cloned(),
+        actor_scope.project_id().cloned(),
+        thread_id,
+        Some(actor_scope.user_id().clone()),
+    )
+}
+
+fn openai_compat_external_tool_resume_idempotency_key(
+    gate_ref: &GateRef,
+) -> Result<IdempotencyKey, OpenAiCompatHttpError> {
+    const PREFIX: &str = "openai-compat-ext-resume-v1";
+
+    // Key by structured, length-framed fields rather than raw concatenation so
+    // later field additions cannot collide with an existing gate string.
+    let digest = digest_idempotency_parts(&[
+        b"openai-compat",
+        b"external-tool-resume",
+        b"v1",
+        gate_ref.as_str().as_bytes(),
+    ]);
+    IdempotencyKey::new(format!("{PREFIX}-{digest}")).map_err(|_| OpenAiCompatHttpError::internal())
+}
+
+fn digest_idempotency_parts(parts: &[&[u8]]) -> String {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    URL_SAFE_NO_PAD.encode(hasher.finalize())
 }
 
 fn response_object(

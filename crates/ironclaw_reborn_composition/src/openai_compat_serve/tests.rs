@@ -284,6 +284,50 @@ async fn openai_responses_wait_surfaces_parked_external_tool_call() {
     }
 }
 
+#[test]
+fn openai_compat_resume_scope_preserves_actor_owner_boundary() {
+    let tenant_id = TenantId::new("tenant-resume").expect("tenant");
+    let user_id = UserId::new("user-resume").expect("user");
+    let agent_id = AgentId::new("agent-resume").expect("agent");
+    let project_id = ProjectId::new("project-resume").expect("project");
+    let thread_id = ThreadId::new("thread-resume").expect("thread");
+    let actor_scope = OpenAiCompatActorScope::new(
+        tenant_id.clone(),
+        user_id.clone(),
+        Some(agent_id.clone()),
+        Some(project_id.clone()),
+    );
+
+    let scope = openai_compat_resume_turn_scope(&actor_scope, thread_id.clone());
+
+    assert_eq!(scope.tenant_id, tenant_id);
+    assert_eq!(scope.agent_id, Some(agent_id));
+    assert_eq!(scope.project_id, Some(project_id));
+    assert_eq!(scope.thread_id, thread_id);
+    assert_eq!(scope.explicit_owner_user_id(), Some(&user_id));
+}
+
+#[test]
+fn external_tool_resume_idempotency_key_is_stable_and_gate_scoped() {
+    let gate_ref = ironclaw_turns::GateRef::new("gate:external_tool-call-a").expect("gate ref");
+    let same_gate_ref =
+        ironclaw_turns::GateRef::new("gate:external_tool-call-a").expect("gate ref");
+    let other_gate_ref =
+        ironclaw_turns::GateRef::new("gate:external_tool-call-b").expect("gate ref");
+
+    let first =
+        openai_compat_external_tool_resume_idempotency_key(&gate_ref).expect("idempotency key");
+    let second = openai_compat_external_tool_resume_idempotency_key(&same_gate_ref)
+        .expect("idempotency key");
+    let other = openai_compat_external_tool_resume_idempotency_key(&other_gate_ref)
+        .expect("idempotency key");
+
+    assert_eq!(first.as_str(), second.as_str());
+    assert_ne!(first.as_str(), other.as_str());
+    assert!(first.as_str().starts_with("openai-compat-ext-resume-v1-"));
+    assert!(!first.as_str().contains(gate_ref.as_str()));
+}
+
 struct ResponseReaderFixture {
     threads: Arc<InMemorySessionThreadService>,
     actor_scope: OpenAiCompatActorScope,
