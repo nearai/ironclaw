@@ -1,3 +1,4 @@
+use futures_util::{StreamExt, TryStreamExt, stream};
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_extensions::{CapabilityVisibility, ExtensionPackage, ExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
@@ -14,6 +15,18 @@ use crate::{
     first_party_tools::{BUILTIN_FIRST_PARTY_PROVIDER, resolve_builtin_input_schema_ref},
     plan_capability,
 };
+
+/// Bounded fan-out for the per-capability authorization probe in
+/// [`CapabilityCatalog::visible_capabilities`].
+///
+/// Each probe is I/O-bound — it runs the dispatch authorizer, whose production
+/// implementation issues uncached, often cross-region settings reads. Evaluating
+/// them serially makes pre-model surface latency scale as `N * RTT`; a single
+/// turn rebuilds the surface several times, multiplying that cost. Fanning the
+/// probes out collapses it to `ceil(N / concurrency) * RTT`. The bound keeps the
+/// burst within a typical database connection pool rather than opening one
+/// connection per capability.
+const SURFACE_AUTHORIZATION_CONCURRENCY: usize = 16;
 
 const ALL_RUNTIME_KINDS: &[RuntimeKind] = &[
     RuntimeKind::Wasm,
@@ -115,6 +128,14 @@ pub struct VisibleCapability {
     pub estimated_resources: ResourceEstimate,
 }
 
+/// A registry capability that passed the cheap synchronous surface filters and
+/// is ready for the I/O-bound authorization probe.
+struct Candidate<'a> {
+    descriptor: &'a CapabilityDescriptor,
+    trust_decision: &'a TrustDecision,
+    estimate: ResourceEstimate,
+}
+
 pub(crate) struct CapabilityCatalog<'a> {
     registry: &'a ExtensionRegistry,
     authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
@@ -153,49 +174,66 @@ impl<'a> CapabilityCatalog<'a> {
         })?;
 
         let max_capabilities = request.policy.max_capabilities.unwrap_or(usize::MAX);
-        let mut capabilities = Vec::new();
-        let mut context = request.context.clone();
-        for descriptor in self.registry.capabilities() {
-            if capabilities.len() >= max_capabilities {
-                break;
-            }
-            if !self.is_model_visible(descriptor)
-                || !request.policy.allows_runtime(descriptor.runtime)
-                || !request.policy.allows_effects(&descriptor.effects)
-            {
-                continue;
-            }
-            if plan_capability(descriptor, self.runtime_policy).is_err() {
-                continue;
-            }
-            let Some(trust_decision) = request.provider_trust.get(&descriptor.provider) else {
-                continue;
-            };
-            let estimate = descriptor
-                .resource_profile
-                .as_ref()
-                .map(|profile| profile.default_estimate.clone())
-                .unwrap_or_default();
-            context.trust = trust_decision.effective_trust.class();
 
-            let access = match self
-                .authorizer
-                .authorize_dispatch_with_trust(&context, descriptor, &estimate, trust_decision)
-                .await
-            {
-                Decision::Allow { .. } => VisibleCapabilityAccess::Available,
-                Decision::RequireApproval { .. } if request.policy.include_requires_approval => {
-                    VisibleCapabilityAccess::RequiresApproval
+        // The model-visibility, runtime/effect-policy, plan, and provider-trust
+        // checks are cheap and synchronous, so apply them up front in registry
+        // order. Only the dispatch-authorization probe (and the schema-ref
+        // resolution it gates) does I/O, so that is the part worth fanning out.
+        let candidates: Vec<Candidate<'_>> = self
+            .registry
+            .capabilities()
+            .filter(|descriptor| {
+                self.is_model_visible(descriptor)
+                    && request.policy.allows_runtime(descriptor.runtime)
+                    && request.policy.allows_effects(&descriptor.effects)
+                    && plan_capability(descriptor, self.runtime_policy).is_ok()
+            })
+            .filter_map(|descriptor| {
+                let trust_decision = request.provider_trust.get(&descriptor.provider)?;
+                let estimate = descriptor
+                    .resource_profile
+                    .as_ref()
+                    .map(|profile| profile.default_estimate.clone())
+                    .unwrap_or_default();
+                Some(Candidate {
+                    descriptor,
+                    trust_decision,
+                    estimate,
+                })
+            })
+            .collect();
+
+        let capabilities = if max_capabilities >= candidates.len() {
+            // Unbounded (the production hot path): authorize every candidate
+            // concurrently with bounded fan-out. `buffered` preserves registry
+            // order, and every probe still runs against live authority — no
+            // result is cached or skipped, only de-serialized.
+            let evaluations = candidates
+                .into_iter()
+                .map(|candidate| self.evaluate_candidate(&request, candidate))
+                .collect::<Vec<_>>();
+            stream::iter(evaluations)
+                .buffered(SURFACE_AUTHORIZATION_CONCURRENCY)
+                .try_collect::<Vec<_>>()
+                .await?
+                .into_iter()
+                .flatten()
+                .collect()
+        } else {
+            // A real `max_capabilities` ceiling keeps the serial early-stop
+            // contract: authorization stops once the visible limit is reached,
+            // so a tightened surface never spends probes it will discard.
+            let mut capabilities = Vec::new();
+            for candidate in candidates {
+                if capabilities.len() >= max_capabilities {
+                    break;
                 }
-                Decision::RequireApproval { .. } | Decision::Deny { .. } => continue,
-            };
-
-            capabilities.push(VisibleCapability {
-                descriptor: self.surface_descriptor(descriptor).await?,
-                access,
-                estimated_resources: estimate,
-            });
-        }
+                if let Some(capability) = self.evaluate_candidate(&request, candidate).await? {
+                    capabilities.push(capability);
+                }
+            }
+            capabilities
+        };
 
         let version = surface_version(
             self.base_version,
@@ -207,6 +245,42 @@ impl<'a> CapabilityCatalog<'a> {
             version,
             capabilities,
         })
+    }
+
+    /// Run the dispatch-authorization probe for one pre-filtered candidate and,
+    /// when it is visible, resolve its surface descriptor. Returns `Ok(None)`
+    /// when the candidate is denied (or requires approval and the policy hides
+    /// askable capabilities).
+    async fn evaluate_candidate(
+        &self,
+        request: &VisibleCapabilityRequest,
+        candidate: Candidate<'_>,
+    ) -> Result<Option<VisibleCapability>, HostRuntimeError> {
+        let Candidate {
+            descriptor,
+            trust_decision,
+            estimate,
+        } = candidate;
+        let mut context = request.context.clone();
+        context.trust = trust_decision.effective_trust.class();
+
+        let access = match self
+            .authorizer
+            .authorize_dispatch_with_trust(&context, descriptor, &estimate, trust_decision)
+            .await
+        {
+            Decision::Allow { .. } => VisibleCapabilityAccess::Available,
+            Decision::RequireApproval { .. } if request.policy.include_requires_approval => {
+                VisibleCapabilityAccess::RequiresApproval
+            }
+            Decision::RequireApproval { .. } | Decision::Deny { .. } => return Ok(None),
+        };
+
+        Ok(Some(VisibleCapability {
+            descriptor: self.surface_descriptor(descriptor).await?,
+            access,
+            estimated_resources: estimate,
+        }))
     }
 
     fn is_model_visible(&self, descriptor: &CapabilityDescriptor) -> bool {
