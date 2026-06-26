@@ -331,7 +331,12 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
                     "external tool name shadows a host capability",
                 ));
             }
-            let tool_name = spec.provider_tool_name().clone();
+            let tool_name = ProviderToolName::new(spec.name()).map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "external tool name cannot be represented on the provider surface",
+                )
+            })?;
             let capability_id = spec.capability_id().clone();
             if surface
                 .descriptors
