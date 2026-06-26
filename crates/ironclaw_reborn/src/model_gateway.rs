@@ -1152,25 +1152,14 @@ fn unavailable_requested_capability_guard(
         .iter()
         .map(|definition| definition.capability_id.as_str())
         .collect::<HashSet<_>>();
-    let visible_namespaces = tool_definitions
-        .iter()
-        .filter_map(|definition| definition.capability_id.as_str().split('.').next())
-        .collect::<HashSet<_>>();
 
-    extract_explicit_capability_ids(&latest_user.content)
+    extract_explicit_capability_request_ids(&latest_user.content)
         .into_iter()
-        .find(|capability_id| {
-            !visible_capability_ids.contains(capability_id.as_str())
-                && capability_id
-                    .as_str()
-                    .split('.')
-                    .next()
-                    .is_some_and(|namespace| visible_namespaces.contains(namespace))
-        })
+        .find(|capability_id| !visible_capability_ids.contains(capability_id.as_str()))
         .map(|capability_id| UnavailableCapabilityGuard { capability_id })
 }
 
-fn extract_explicit_capability_ids(content: &str) -> Vec<CapabilityId> {
+fn extract_explicit_capability_request_ids(content: &str) -> Vec<CapabilityId> {
     let mut ids = Vec::new();
     let mut token_start = None;
     for (index, character) in content.char_indices() {
@@ -1179,11 +1168,11 @@ fn extract_explicit_capability_ids(content: &str) -> Vec<CapabilityId> {
             continue;
         }
         if let Some(start) = token_start.take() {
-            push_capability_token(&content[start..index], &mut ids);
+            push_explicit_capability_request_token(content, start, index, &mut ids);
         }
     }
     if let Some(start) = token_start {
-        push_capability_token(&content[start..], &mut ids);
+        push_explicit_capability_request_token(content, start, content.len(), &mut ids);
     }
     ids
 }
@@ -1194,8 +1183,16 @@ fn is_capability_token_char(character: char) -> bool {
         || matches!(character, '_' | '-' | '.')
 }
 
-fn push_capability_token(token: &str, ids: &mut Vec<CapabilityId>) {
-    if !token.contains('.') {
+fn push_explicit_capability_request_token(
+    content: &str,
+    start: usize,
+    end: usize,
+    ids: &mut Vec<CapabilityId>,
+) {
+    let token = &content[start..end];
+    if !is_likely_capability_reference(token)
+        || !is_explicit_capability_request_token(content, start, end)
+    {
         return;
     }
     if let Ok(capability_id) = CapabilityId::new(token)
@@ -1203,6 +1200,42 @@ fn push_capability_token(token: &str, ids: &mut Vec<CapabilityId>) {
     {
         ids.push(capability_id);
     }
+}
+
+fn is_likely_capability_reference(token: &str) -> bool {
+    token.starts_with("builtin.") || token.split('.').count() == 2
+}
+
+fn is_explicit_capability_request_token(content: &str, start: usize, end: usize) -> bool {
+    let previous_word = content[..start]
+        .trim_end()
+        .rsplit(|character: char| !is_capability_request_word_char(character))
+        .find(|word| !word.is_empty());
+    if previous_word.is_some_and(is_capability_request_verb) {
+        return true;
+    }
+
+    let next_word = content[end..]
+        .trim_start()
+        .split(|character: char| !is_capability_request_word_char(character))
+        .find(|word| !word.is_empty());
+    previous_word.is_some_and(is_capability_request_noun)
+        || next_word.is_some_and(is_capability_request_noun)
+}
+
+fn is_capability_request_word_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+}
+
+fn is_capability_request_verb(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "use" | "using" | "call" | "run" | "execute" | "invoke"
+    )
+}
+
+fn is_capability_request_noun(word: &str) -> bool {
+    matches!(word.to_ascii_lowercase().as_str(), "tool" | "capability")
 }
 
 fn provider_tool_call_from_llm(

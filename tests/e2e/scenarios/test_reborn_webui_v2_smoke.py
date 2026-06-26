@@ -410,8 +410,9 @@ async def test_reborn_v2_text_turn_persists(reborn_v2_server):
         )
 
 
+@pytest.mark.usefixtures("disabled_echo_shell_ask_policy")
 async def test_reborn_v2_disabled_tool_does_not_route_through_shell(
-    reborn_v2_server, disabled_echo_shell_ask_policy
+    reborn_v2_server,
 ):
     """A named unavailable tool request should not route through another tool."""
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}

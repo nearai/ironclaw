@@ -1321,6 +1321,8 @@ def match_tool_call(
     lower = content.lower()
     recent_tool_results = _find_tool_results(messages)
     if REQUESTED_UNAVAILABLE_TOOL_TRIGGER.search(content):
+        if any(tr["name"] == "builtin_shell" for tr in recent_tool_results):
+            return None
         return [{
             "tool_name": "builtin_shell",
             "arguments": {

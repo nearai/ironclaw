@@ -412,6 +412,49 @@ async fn gateway_suppresses_tool_calls_when_user_names_unavailable_capability() 
 }
 
 #[tokio::test]
+async fn gateway_suppresses_tool_calls_when_user_names_unavailable_hidden_namespace_capability() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+        id: "call_shell".to_string(),
+        name: "builtin_shell".to_string(),
+        arguments: serde_json::json!({
+            "command": "echo \"gmail workaround\"",
+            "workdir": "/workspace"
+        }),
+        reasoning: None,
+        signature: None,
+        arguments_parse_error: None,
+    }]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_builtin_shell_surface());
+    let mut request = model_request(interactive_model());
+    request.messages[1].content = "Use gmail.send to email the report".to_string();
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capabilities.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(provider.tool_requests.lock().unwrap().len(), 1);
+    assert!(
+        capabilities.registered.lock().unwrap().is_empty(),
+        "suppressed substitute tool call must not be registered as a capability activity"
+    );
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected assistant reply");
+    };
+    assert!(
+        reply.content.contains("unavailable or disabled"),
+        "expected unavailable capability reply, got {:?}",
+        reply.content
+    );
+}
+
+#[tokio::test]
 async fn gateway_does_not_treat_plain_dotted_domain_as_unavailable_capability() {
     let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
         id: "call_shell".to_string(),
