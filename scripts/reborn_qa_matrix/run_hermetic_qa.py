@@ -180,6 +180,23 @@ WEBUI_V2_ROUTE_CONTRACT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_STATIC_JS_COMMAND = CommandSpec(
+    name="webui_v2_static_js_suite",
+    description=(
+        "Full WebUI v2 static JavaScript node:test discovery suite for "
+        "browser-facing SPA modules and client-side API contracts."
+    ),
+    argv=[
+        "bash",
+        "-lc",
+        (
+            "find crates/ironclaw_webui_v2_static/static/js -type f "
+            "\\( -name '*test.mjs' -o -name '*test.js' \\) -print0 "
+            "| xargs -0 node --test"
+        ),
+    ],
+)
+
 WEBUI_V2_SEND_MULTILINE_COMMAND = CommandSpec(
     name="webui_v2_send_multiline_contract",
     description="Focused send-message route contract for preserving multiline content.",
@@ -397,6 +414,22 @@ CASES: dict[str, CaseSpec] = {
         notes=(
             "Runs the three focused WebUI v2 chat route contracts from the QA "
             "matrix, then the full native ironclaw_webui_v2 package check."
+        ),
+    ),
+    "webui_v2_static_js_regression": CaseSpec(
+        name="webui_v2_static_js_regression",
+        feature="WebUI v2 static browser-facing SPA modules",
+        category="WebUI Static JavaScript Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-055-TC-07",
+            "REBCLI-055-TC-12",
+        ],
+        commands=[WEBUI_V2_STATIC_JS_COMMAND],
+        notes=(
+            "Runs the full discovered static/js node:test suite for the "
+            "committed WebUI v2 SPA modules. This complements Rust route and "
+            "composition checks without duplicating PR #5348's legacy "
+            "Playwright browser port."
         ),
     ),
     "webui_v2_filesystem_api_regression": CaseSpec(

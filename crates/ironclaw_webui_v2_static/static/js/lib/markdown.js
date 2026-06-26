@@ -6,6 +6,7 @@ let linkHookInstalled = false;
 // on every sanitize pass after attributes are processed.
 function ensureLinkTargetHook() {
   if (linkHookInstalled || !window.DOMPurify) return;
+  if (typeof window.DOMPurify.addHook !== "function") return;
   window.DOMPurify.addHook("afterSanitizeAttributes", (node) => {
     if (node.tagName === "A" && node.getAttribute("href")) {
       node.setAttribute("target", "_blank");
