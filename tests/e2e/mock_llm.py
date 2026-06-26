@@ -110,11 +110,11 @@ TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
 EMPTY_REPLY_TRIGGER = re.compile(r"issue 1780 empty reply", re.IGNORECASE)
 LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
 MULTI_STEP_TRIGGER = re.compile(r"multi step echo then time", re.IGNORECASE)
-ISSUE_5197_DISABLED_TOOL_WORKAROUND_TRIGGER = re.compile(
-    r"issue 5197 disabled echo workaround",
+REQUESTED_UNAVAILABLE_TOOL_TRIGGER = re.compile(
+    r"issue 5197 disabled echo workaround|use\s+[a-z0-9_-]+\.[a-z0-9_.-]+\s+to\b",
     re.IGNORECASE,
 )
-DISABLED_TOOL_WORKAROUND_POLICY_TEXT = "disabled or unavailable capability"
+UNAVAILABLE_CAPABILITY_POLICY_TEXT = "not listed under Capabilities"
 
 # Lifecycle canary triggers for write+cleanup flows against real provider APIs.
 GITHUB_ISSUE_LIFECYCLE_TRIGGER = re.compile(
@@ -881,8 +881,8 @@ def _last_user_message(messages: list[dict]) -> dict:
     return {}
 
 
-def _conversation_has_disabled_tool_workaround_policy(messages: list[dict]) -> bool:
-    needle = DISABLED_TOOL_WORKAROUND_POLICY_TEXT.lower()
+def _conversation_has_unavailable_capability_policy(messages: list[dict]) -> bool:
+    needle = UNAVAILABLE_CAPABILITY_POLICY_TEXT.lower()
     return any(needle in _message_text(msg).lower() for msg in messages)
 
 
@@ -1129,12 +1129,12 @@ def match_response(messages: list[dict]) -> str:
     if resumed:
         return resumed
     if (
-        ISSUE_5197_DISABLED_TOOL_WORKAROUND_TRIGGER.search(content)
-        and _conversation_has_disabled_tool_workaround_policy(messages)
+        REQUESTED_UNAVAILABLE_TOOL_TRIGGER.search(content)
+        and _conversation_has_unavailable_capability_policy(messages)
     ):
         return (
-            "Echo is disabled for this request, so I will not route it through "
-            "another tool."
+            "That capability is unavailable or disabled for this request, so I "
+            "will not route it through another tool."
         )
     denial_text = f"{content}\n{payload_text}"
     if DENIAL_PATTERN.search(denial_text):
@@ -1330,13 +1330,13 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
         return None
     lower = content.lower()
     recent_tool_results = _find_tool_results(messages)
-    if ISSUE_5197_DISABLED_TOOL_WORKAROUND_TRIGGER.search(content):
-        if _conversation_has_disabled_tool_workaround_policy(messages):
+    if REQUESTED_UNAVAILABLE_TOOL_TRIGGER.search(content):
+        if _conversation_has_unavailable_capability_policy(messages):
             return None
         return [{
             "tool_name": "builtin_shell",
             "arguments": {
-                "command": "printf '%s' issue-5197-disabled-echo-workaround",
+                "command": "echo \"disabled-test\"",
                 "workdir": "/workspace",
             },
         }]

@@ -2097,8 +2097,15 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
     assert!(
         surface_materialized
             .model_content
-            .contains("disabled or unavailable capability"),
-        "surface prompt must tell the model not to route disabled tools through alternatives: {:?}",
+            .contains("not listed under Capabilities"),
+        "surface prompt must tell the model to refuse unavailable named capabilities: {:?}",
+        surface_materialized.model_content
+    );
+    assert!(
+        surface_materialized
+            .model_content
+            .contains("do not call another capability as a substitute or workaround"),
+        "surface prompt must tell the model not to route unavailable tools through alternatives: {:?}",
         surface_materialized.model_content
     );
     assert!(

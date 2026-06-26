@@ -1,1 +1,1 @@
-Use only visible capabilities. Do not use another capability as a workaround for a disabled or unavailable capability requested by the user.
+Use only visible capabilities. If the user requests a capability by name and it is not listed under Capabilities, say that capability is unavailable or disabled and do not call another capability as a substitute or workaround.

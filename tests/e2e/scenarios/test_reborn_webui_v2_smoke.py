@@ -388,11 +388,11 @@ async def test_reborn_v2_text_turn_persists(reborn_v2_server):
 async def test_reborn_v2_disabled_tool_does_not_route_through_shell(
     reborn_v2_server, disabled_echo_shell_ask_policy
 ):
-    """Disabling echo should not make the model ask for shell as a workaround."""
+    """A named unavailable tool request should not route through another tool."""
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
     async with httpx.AsyncClient(headers=headers) as client:
         thread_id = await _create_thread(client, reborn_v2_server)
-        prompt = "issue 5197 disabled echo workaround"
+        prompt = "Use builtin.echo to print: disabled-test"
         await _send_message(client, reborn_v2_server, thread_id, prompt)
 
         assistant = await _wait_for_assistant_message(
@@ -407,7 +407,7 @@ async def test_reborn_v2_disabled_tool_does_not_route_through_shell(
         timeline_text = json.dumps(timeline, sort_keys=True)
         assert "builtin_shell" not in timeline_text
         assert "builtin.shell" not in timeline_text
-        assert "issue-5197-disabled-echo-workaround" not in timeline_text
+        assert "echo \\\"disabled-test\\\"" not in timeline_text
 
 
 async def test_reborn_v2_ui_send_renders_reply(reborn_v2_page, reborn_v2_server):
