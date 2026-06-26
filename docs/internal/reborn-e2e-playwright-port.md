@@ -606,6 +606,8 @@ Reborn's Tools settings surface:
   select;
 - the global auto-approve switch posts to
   `/api/webchat/v2/settings/tools`;
+- the real v2 global auto-approve setting persists across a fresh browser
+  context and renders the switch as enabled on `/v2/settings/tools`;
 - a real Reborn server API check reads the authoritative tool catalog, updates
   a mutable tool to `disabled`, resets it to `default`, and verifies locked
   tools reject writes when the catalog exposes one.

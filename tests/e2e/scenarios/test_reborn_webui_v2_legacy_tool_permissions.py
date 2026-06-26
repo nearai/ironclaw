@@ -173,6 +173,18 @@ def _tool_row(page, name: str):
     return page.locator(f'[data-testid="settings-tool-row"][data-tool-name="{name}"]')
 
 
+async def _set_real_auto_approve(reborn_v2_server: str, enabled: bool):
+    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    async with httpx.AsyncClient(headers=headers) as client:
+        response = await client.post(
+            f"{reborn_v2_server}/api/webchat/v2/settings/tools",
+            json={"enabled": enabled},
+            timeout=15,
+        )
+        response.raise_for_status()
+        return response.json()
+
+
 async def test_reborn_legacy_tool_permissions_tab_visible(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -248,6 +260,28 @@ async def test_reborn_legacy_auto_approve_switch_persists(
         assert harness["auto_approve_requests"] == [{"enabled": True}]
     finally:
         await harness["context"].close()
+
+
+async def test_reborn_legacy_auto_approve_real_api_persists_across_browser_contexts(
+    reborn_v2_server,
+    reborn_v2_browser,
+):
+    await _set_real_auto_approve(reborn_v2_server, False)
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    try:
+        update = await _set_real_auto_approve(reborn_v2_server, True)
+        assert update["entry"]["key"] == "agent.auto_approve_tools"
+        assert update["entry"]["value"] is True
+
+        await page.goto(f"{reborn_v2_server}/v2/settings/tools?token={REBORN_V2_AUTH_TOKEN}")
+        await expect(page.get_by_placeholder("Search settings...")).to_be_visible(timeout=15000)
+        switch = page.get_by_role("switch", name="Always allow eligible tools")
+        await expect(switch).to_have_attribute("aria-checked", "true", timeout=5000)
+    finally:
+        await context.close()
+        await _set_real_auto_approve(reborn_v2_server, False)
 
 
 async def test_reborn_legacy_tool_permission_real_api_persists_and_rejects_locked(
