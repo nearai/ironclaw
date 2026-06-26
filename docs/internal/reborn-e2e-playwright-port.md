@@ -1660,6 +1660,35 @@ Behavior adjustment:
   distinct `package_ref` install requests for two extension kinds instead of
   legacy names.
 
+### Step 48: Legacy Project Search Empty-State Recovery Port
+
+Extended `test_reborn_webui_v2_legacy_projects.py` and fixed the Reborn
+Projects grid.
+
+Ported the project explorer filtering recovery intent from legacy
+`test_project_detail.py` to the current Reborn `/v2/projects` surface:
+
+- project search can narrow the visible workspace cards to zero matches;
+- Reborn shows the no-match empty state for the filtered result;
+- the search input remains visible while the no-match state is rendered;
+- clearing the same input restores the project cards without a page reload.
+
+Real issue fixed:
+
+- `ProjectsGrid` previously returned the no-match empty panel before rendering
+  the explorer shell. That removed the search box as soon as a query had zero
+  matches, trapping the user in the filtered-empty state. The component now only
+  uses the top-level empty panel for a true empty project list; filtered-empty
+  results keep the search controls mounted and render the no-match panel inside
+  the explorer body.
+
+Behavior adjustment:
+
+- Legacy `test_project_detail.py` drills through old engine project cards into
+  mission/thread/widget detail panes. Those detail panes remain legacy
+  engine-specific, so this port targets Reborn's real v2 project overview/search
+  contract and documents the remaining drill-in parity separately.
+
 ## Open Migration Buckets
 
 Not yet ported:

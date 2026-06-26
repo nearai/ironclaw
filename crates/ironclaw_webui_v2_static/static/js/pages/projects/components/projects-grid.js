@@ -146,16 +146,7 @@ export function ProjectsGrid({
   const defaultProject = projects.find((project) => project.name === "default");
   const scopedProjects = projects.filter((project) => project.name !== "default");
 
-  if (!projects.length && totalProjects > 0) {
-    return html`
-      <${EmptyPanel}
-        title=${t("projects.empty.noMatchTitle")}
-        description=${t("projects.empty.noMatchDesc")}
-      />
-    `;
-  }
-
-  if (!projects.length) {
+  if (!totalProjects) {
     return html`
       <${EmptyPanel}
         title=${t("projects.empty.noneTitle")}
@@ -196,6 +187,13 @@ export function ProjectsGrid({
         ? html`<div className="grid gap-4 xl:grid-cols-2 2xl:grid-cols-3">
             ${scopedProjects.map((project) => html`<${ProjectCard} key=${project.id} project=${project} onOpen=${onOpenProject} t=${t} />`)}
           </div>`
+        : !projects.length
+          ? html`
+              <${EmptyPanel}
+                title=${t("projects.empty.noMatchTitle")}
+                description=${t("projects.empty.noMatchDesc")}
+              />
+            `
         : html`
             <${EmptyPanel}
               title=${t("projects.scoped.onlyGeneralTitle")}

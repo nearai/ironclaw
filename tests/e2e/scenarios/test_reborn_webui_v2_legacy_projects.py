@@ -163,3 +163,31 @@ async def test_reborn_legacy_projects_overview_search_and_open_workspace(
         assert f"/api/webchat/v2/projects/{MOCK_PROJECT_ID}" in project_requests
     finally:
         await harness["context"].close()
+
+
+async def test_reborn_legacy_projects_search_no_match_can_be_cleared(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser)
+    try:
+        page = harness["page"]
+        search = page.locator(SEL_V2["projects_search_input"])
+
+        await search.fill("no-project-matches-this")
+        await expect(
+            page.get_by_text("No projects match the current search")
+        ).to_be_visible(timeout=5000)
+        await expect(search).to_be_visible()
+        await expect(
+            page.locator(SEL_V2["project_card_for"].format(id=MOCK_PROJECT_ID))
+        ).to_have_count(0)
+
+        await search.fill("")
+        await expect(
+            page.locator(SEL_V2["project_card_for"].format(id=MOCK_PROJECT_ID))
+        ).to_be_visible(timeout=5000)
+        await expect(
+            page.locator(SEL_V2["project_card_for"].format(id=PRODUCT_PROJECT_ID))
+        ).to_be_visible()
+    finally:
+        await harness["context"].close()

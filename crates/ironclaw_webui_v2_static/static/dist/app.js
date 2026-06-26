@@ -2719,12 +2719,7 @@ ${_e}`;if(Ue.current.gateKey!==_&&(Ue.current={gateKey:_,credentialRef:null,inFl
         </div>
       </div>
     <//>
-  `}function kS({projects:e,totalProjects:t,search:a,onSearchChange:n,onOpenProject:r,onCreateProject:s,isPreparingChat:i}){let o=R(),l=e.find(d=>d.name==="default"),c=e.filter(d=>d.name!=="default");return!e.length&&t>0?u`
-      <${xe}
-        title=${o("projects.empty.noMatchTitle")}
-        description=${o("projects.empty.noMatchDesc")}
-      />
-    `:e.length?u`
+  `}function kS({projects:e,totalProjects:t,search:a,onSearchChange:n,onOpenProject:r,onCreateProject:s,isPreparingChat:i}){let o=R(),l=e.find(d=>d.name==="default"),c=e.filter(d=>d.name!=="default");return t?u`
     <div data-testid="projects-grid" className="space-y-5">
       ${l&&u`<${eD} project=${l} onOpen=${r} t=${o} />`}
 
@@ -2752,14 +2747,19 @@ ${_e}`;if(Ue.current.gateKey!==_&&(Ue.current={gateKey:_,credentialRef:null,inFl
 
       ${c.length?u`<div className="grid gap-4 xl:grid-cols-2 2xl:grid-cols-3">
             ${c.map(d=>u`<${W5} key=${d.id} project=${d} onOpen=${r} t=${o} />`)}
-          </div>`:u`
+          </div>`:e.length?u`
             <${xe}
               title=${o("projects.scoped.onlyGeneralTitle")}
               description=${o("projects.scoped.onlyGeneralDesc")}
             >
               <${A} onClick=${s}>${o(i?"projects.preparingChat":"projects.startProject")}<//>
             <//>
-          `}
+          `:u`
+              <${xe}
+                title=${o("projects.empty.noMatchTitle")}
+                description=${o("projects.empty.noMatchDesc")}
+              />
+            `}
     </div>
   `:u`
       <${xe}
