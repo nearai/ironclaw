@@ -135,6 +135,15 @@ pub trait LocalUserDirectoryStore: Send + Sync {
         tenant_id: &TenantId,
         token_hash: &str,
     ) -> Result<Option<LocalUserRecord>, LocalUserDirectoryError>;
+
+    /// Resolve a user by id to its current record (role), or `None` if unknown.
+    /// Used by the admin guards to compare the caller's rank against the
+    /// target's before a destructive mutation.
+    async fn resolve_user(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+    ) -> Result<Option<LocalUserRecord>, LocalUserDirectoryError>;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -366,6 +375,19 @@ impl LocalUserDirectoryStore for FilesystemLocalUserDirectoryStore {
         if user.token_hash != token_hash {
             return Ok(None);
         }
+        Ok(Some(local_user_record(user)?))
+    }
+
+    async fn resolve_user(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+    ) -> Result<Option<LocalUserRecord>, LocalUserDirectoryError> {
+        let Some(user): Option<StoredUser> =
+            self.get_json(&self.user_path(tenant_id, user_id)?).await?
+        else {
+            return Ok(None);
+        };
         Ok(Some(local_user_record(user)?))
     }
 }
@@ -600,6 +622,50 @@ async fn delete_user_handler(
 ) -> Result<StatusCode, LocalUserAdminError> {
     ensure_admin(&config, &caller)?;
     let user_id = UserId::new(&user_id).map_err(|_| LocalUserAdminError::BadRequest)?;
+
+    // (a) SELF-DELETE: nobody deletes themselves through this route. Checked
+    // FIRST and named explicitly so an Owner's self-delete 403s as self-delete
+    // (not as last-owner) regardless of owner count, and an Admin's self-delete
+    // 403s here rather than falling through to the rank check (a role never
+    // strictly outranks itself, so the rank arm would also reject — but the
+    // self-delete guard is the clearer, intended reason).
+    if caller.user_id == user_id {
+        return Err(LocalUserAdminError::Forbidden);
+    }
+
+    // (b) Resolve the target so we can compare ranks and count owners. A missing
+    // target maps to NotFound (→ 404), preserving the existing
+    // 404-for-missing-user contract (see `delete_missing_user_is_not_found`).
+    let target = config
+        .store
+        .resolve_user(&config.tenant_id, &user_id)
+        .await?
+        .ok_or(LocalUserAdminError::NotFound)?;
+
+    // (c) RANK: a caller may delete a target only if it STRICTLY outranks it.
+    // This makes Admin→Owner and Admin→peer-Admin both 403, and Owner→Admin a
+    // 204.
+    if !caller.role.outranks(target.role) {
+        return Err(LocalUserAdminError::Forbidden);
+    }
+
+    // (d) LAST-OWNER: deleting the sole remaining Owner is refused so a tenant
+    // can never be left ownerless. The owner count via `list_users` is a
+    // read-then-write that could race two concurrent owner-deletes in theory;
+    // acceptable for the local-dev single-operator profile.
+    if target.role.is_owner() {
+        let owner_count = config
+            .store
+            .list_users(&config.tenant_id)
+            .await?
+            .into_iter()
+            .filter(|user| user.role.is_owner())
+            .count();
+        if owner_count <= 1 {
+            return Err(LocalUserAdminError::Forbidden);
+        }
+    }
+
     config
         .store
         .delete_user(&config.tenant_id, &user_id)
@@ -761,7 +827,8 @@ mod tests {
         let set_role = body_json(set_role).await;
         assert_eq!(set_role["role"], "admin");
 
-        // delete → 204.
+        // delete → 204. The caller must strictly outrank the target: user:bob
+        // was just promoted to Admin, so an Owner (not a peer Admin) deletes it.
         let deleted = mount
             .router
             .oneshot(request(
@@ -769,7 +836,7 @@ mod tests {
                 "/api/webchat/v2/admin/users/user:bob",
                 TENANT,
                 "user:director",
-                UserRole::Admin,
+                UserRole::Owner,
             ))
             .await
             .expect("delete responds");
@@ -831,6 +898,127 @@ mod tests {
             .await
             .expect("delete responds");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Seed a user directly through the store (the admin handlers mint their
+    /// own tokens; the delete-guard matrix only needs the user records to
+    /// exist with the right roles).
+    async fn seed_user(store: &Arc<dyn LocalUserDirectoryStore>, user: &str, role: UserRole) {
+        let tenant = TenantId::new(TENANT).expect("tenant");
+        let user_id = UserId::new(user).expect("user");
+        store
+            .create_user(&tenant, &user_id, role, &hash_user_token(user))
+            .await
+            .expect("seed user");
+    }
+
+    async fn delete(
+        mount: &ProtectedRouteMount,
+        target: &str,
+        caller: &str,
+        caller_role: UserRole,
+    ) -> StatusCode {
+        mount
+            .router
+            .clone()
+            .oneshot(request(
+                "DELETE",
+                &format!("/api/webchat/v2/admin/users/{target}"),
+                TENANT,
+                caller,
+                caller_role,
+            ))
+            .await
+            .expect("delete responds")
+            .status()
+    }
+
+    async fn assert_present(store: &Arc<dyn LocalUserDirectoryStore>, user: &str) {
+        let tenant = TenantId::new(TENANT).expect("tenant");
+        let user_id = UserId::new(user).expect("user");
+        assert!(
+            store
+                .resolve_user(&tenant, &user_id)
+                .await
+                .expect("resolve")
+                .is_some(),
+            "{user} must still exist after a refused delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_user_handler_enforces_step12_guard_matrix() {
+        // The full step-12 deletion matrix, driven through the handler (not
+        // `UserRole::outranks` alone) per .claude/rules/testing.md — the guards
+        // gate the destructive `store.delete_user` side effect.
+        let (mount, store) = mount();
+        seed_user(&store, "user:director", UserRole::Owner).await; // sole owner
+        seed_user(&store, "user:officer", UserRole::Admin).await;
+        seed_user(&store, "user:peeradmin", UserRole::Admin).await;
+        seed_user(&store, "user:member", UserRole::Member).await;
+
+        // officer(Admin) -> director(Owner): rank guard → 403.
+        assert_eq!(
+            delete(&mount, "user:director", "user:officer", UserRole::Admin).await,
+            StatusCode::FORBIDDEN,
+            "admin must not delete the owner"
+        );
+        assert_present(&store, "user:director").await;
+
+        // officer(Admin) -> peeradmin(Admin): rank guard (no peer-admin) → 403.
+        assert_eq!(
+            delete(&mount, "user:peeradmin", "user:officer", UserRole::Admin).await,
+            StatusCode::FORBIDDEN,
+            "admin must not delete a peer admin"
+        );
+        assert_present(&store, "user:peeradmin").await;
+
+        // officer(Admin) -> self: self-delete guard → 403.
+        assert_eq!(
+            delete(&mount, "user:officer", "user:officer", UserRole::Admin).await,
+            StatusCode::FORBIDDEN,
+            "admin must not delete themselves"
+        );
+        assert_present(&store, "user:officer").await;
+
+        // director(Owner) -> self: self-delete guard (sole owner) → 403.
+        assert_eq!(
+            delete(&mount, "user:director", "user:director", UserRole::Owner).await,
+            StatusCode::FORBIDDEN,
+            "the owner must not delete themselves"
+        );
+        assert_present(&store, "user:director").await;
+
+        // director(Owner) -> officer(Admin): strictly outranks → 204, gone.
+        assert_eq!(
+            delete(&mount, "user:officer", "user:director", UserRole::Owner).await,
+            StatusCode::NO_CONTENT,
+            "the owner may delete an admin"
+        );
+        let tenant = TenantId::new(TENANT).expect("tenant");
+        assert!(
+            store
+                .resolve_user(&tenant, &UserId::new("user:officer").expect("user"))
+                .await
+                .expect("resolve")
+                .is_none(),
+            "officer must be gone after the owner deletes them"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_missing_target_is_not_found_with_admin_caller() {
+        // The 404-for-missing-target contract holds after the new guards: a
+        // privileged caller deleting a non-existent (non-self) user still gets
+        // NotFound, sourced from `resolve_user` returning `None` rather than
+        // from the inner `delete_user`.
+        let (mount, store) = mount();
+        seed_user(&store, "user:director", UserRole::Owner).await;
+        assert_eq!(
+            delete(&mount, "user:ghost", "user:director", UserRole::Owner).await,
+            StatusCode::NOT_FOUND,
+            "deleting a missing user is a 404"
+        );
     }
 
     #[tokio::test]

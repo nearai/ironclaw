@@ -585,6 +585,26 @@ mod tests {
                 }
                 Ok(self.users.get(token_hash).cloned())
             }
+
+            async fn resolve_user(
+                &self,
+                _tenant_id: &TenantId,
+                user_id: &UserId,
+            ) -> Result<Option<LocalUserRecord>, ironclaw_reborn_composition::LocalUserDirectoryError>
+            {
+                if self.fail {
+                    return Err(
+                        ironclaw_reborn_composition::LocalUserDirectoryError::Backend(
+                            "synthetic backend failure".to_string(),
+                        ),
+                    );
+                }
+                Ok(self
+                    .users
+                    .values()
+                    .find(|record| &record.user_id == user_id)
+                    .cloned())
+            }
         }
 
         fn directory_authenticator(
