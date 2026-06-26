@@ -703,17 +703,22 @@ fn map_model_route_error(error: ModelRouteError) -> HostManagedModelError {
 fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGatewayError {
     let diagnostic_ref = error.diagnostic_ref;
     let reason_kind = error.reason_kind;
+    let gate_ref = error.gate_ref;
     let mut converted = match LoopModelGatewayError::new(error.kind, error.safe_summary) {
         Ok(error) => error,
         Err(_) => LoopModelGatewayError {
             kind: error.kind,
             safe_summary: LoopSafeSummary::model_gateway_failed(),
             reason_kind: None,
+            gate_ref: None,
             diagnostic_ref: None,
         },
     };
     if let Some(reason_kind) = reason_kind {
         converted = converted.with_reason_kind(reason_kind);
+    }
+    if let Some(gate_ref) = gate_ref {
+        converted = converted.with_gate_ref(gate_ref);
     }
     if let Some(diagnostic_ref) = diagnostic_ref {
         converted = converted.with_diagnostic_ref(diagnostic_ref);
@@ -1201,10 +1206,11 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         AgentLoopHostErrorKind::Unauthorized | AgentLoopHostErrorKind::PolicyDenied => {
             HostManagedModelErrorKind::PolicyDenied
         }
-        AgentLoopHostErrorKind::BudgetExceeded
-        | AgentLoopHostErrorKind::BudgetApprovalRequired
-        | AgentLoopHostErrorKind::BudgetAccountingFailed => {
+        AgentLoopHostErrorKind::BudgetExceeded | AgentLoopHostErrorKind::BudgetAccountingFailed => {
             HostManagedModelErrorKind::BudgetExceeded
+        }
+        AgentLoopHostErrorKind::BudgetApprovalRequired => {
+            HostManagedModelErrorKind::BudgetApprovalRequired
         }
         AgentLoopHostErrorKind::Cancelled => HostManagedModelErrorKind::Cancelled,
         AgentLoopHostErrorKind::Invalid
@@ -1216,7 +1222,11 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         | AgentLoopHostErrorKind::TranscriptWriteFailed
         | AgentLoopHostErrorKind::Internal => HostManagedModelErrorKind::Unavailable,
     };
-    HostManagedModelError::safe(kind, error.safe_summary)
+    let mut converted = HostManagedModelError::safe(kind, error.safe_summary);
+    if let Some(gate_ref) = error.gate_ref {
+        converted = converted.with_gate_ref(gate_ref);
+    }
+    converted
 }
 
 fn map_provider_tool_output_error(error: AgentLoopHostError) -> HostManagedModelError {
