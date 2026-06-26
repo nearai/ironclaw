@@ -248,6 +248,34 @@ impl CapabilityDefaultPolicy {
             config: Value::Null,
         }
     }
+
+    /// The capability-policy *milestone* default (#5261): installed capabilities
+    /// are available unless an admin delta hides them, with no admin opinion on
+    /// the other three dimensions.
+    ///
+    /// - `availability: Available` — the policy view does not hide anything by
+    ///   default; the installation view (#4544 / #5267) decides what is
+    ///   installed, and the enforcement layer intersects the two (a capability
+    ///   is available iff installed **and** not hidden by a delta).
+    /// - `identity: None` — no credential mandate unless a delta sets
+    ///   `UserKeyed` / `AdminKeyed`.
+    /// - `approval: Ask` — "no admin opinion"; approval **defers** to the
+    ///   existing user/profile chain unless a delta sets `Allow` / `Deny`.
+    /// - `config: Null` — no injected configuration unless a delta carries a
+    ///   `config_patch`.
+    ///
+    /// Distinct from [`conservative_fallback`](Self::conservative_fallback)
+    /// (which is `Hidden` and would empty the availability intersection). Use
+    /// this as the default source for the milestone resolver so installed ==
+    /// available until an admin delta says otherwise.
+    pub fn available_default() -> Self {
+        Self {
+            availability: Availability::Available,
+            identity: IdentityMode::None,
+            approval: PermissionMode::Ask,
+            config: Value::Null,
+        }
+    }
 }
 
 /// Source of per-capability default policy (architecture doc §7).
@@ -365,6 +393,19 @@ mod tests {
         assert_eq!(fallback.availability, Availability::Hidden);
         assert_eq!(fallback.approval, PermissionMode::Ask);
         assert_eq!(fallback.identity, IdentityMode::None);
+    }
+
+    #[test]
+    fn available_default_is_available_with_no_admin_opinion() {
+        let default = CapabilityDefaultPolicy::available_default();
+        assert_eq!(default.availability, Availability::Available);
+        assert_eq!(default.identity, IdentityMode::None);
+        assert_eq!(default.approval, PermissionMode::Ask);
+        assert_eq!(default.config, Value::Null);
+        // With no deltas the milestone default resolves to available — the
+        // intersection with the installation view is what restricts it.
+        let eff = resolve_effective_policy(&default, &[]);
+        assert!(eff.available);
     }
 
     #[test]

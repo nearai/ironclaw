@@ -32,6 +32,14 @@ use ironclaw_product_workflow_storage::FilesystemScopedLifecycleInstallationStor
 use ironclaw_turns::run_profile::LoopRunContext;
 use ironclaw_turns::scope::{TurnActor, TurnScope};
 
+#[cfg(feature = "capability-policy")]
+use ironclaw_capability_policy::{
+    CapabilityPolicyDeltaStore, PolicyResolver, PolicySubject, StaticCapabilityDefaultPolicySource,
+    StoreBackedPolicyResolver,
+};
+#[cfg(feature = "capability-policy")]
+use ironclaw_product_workflow_storage::FilesystemCapabilityPolicyDeltaStore;
+
 use crate::available_extensions::{AvailableExtensionCatalog, visible_capability_ids};
 
 /// Durable virtual root for the local-dev scoped-lifecycle installation store.
@@ -59,6 +67,65 @@ pub(crate) fn local_dev_scoped_lifecycle_store(
     Arc::new(FilesystemScopedLifecycleInstallationStore::with_root(
         filesystem, root,
     ))
+}
+
+/// Durable virtual root for the local-dev capability-policy **delta** store
+/// (#5273). Sits under the SAME mounted prefix as the installation store
+/// (`/tenants/capability_policy`, the durable libSQL mount) but in a sibling
+/// subtree (`/policy_deltas`) so delta leaves never collide with the lifecycle
+/// store's `/installations` / `/installation_ids` leaves.
+#[cfg(feature = "capability-policy")]
+pub(crate) const LOCAL_DEV_CAPABILITY_POLICY_DELTA_ROOT: &str =
+    "/tenants/capability_policy/policy_deltas";
+
+/// Construct the local-dev capability-policy delta store over the durable
+/// `/tenants` mount. This is the SINGLE delta-store the runtime builds — the
+/// dispatch `PolicyResolver` reads it and the admin REST write surface (#5268 /
+/// #5273) writes it. Both share this backing so writes are visible to reads.
+#[cfg(feature = "capability-policy")]
+pub(crate) fn local_dev_capability_policy_delta_store(
+    filesystem: Arc<dyn ironclaw_filesystem::RootFilesystem>,
+) -> Arc<dyn CapabilityPolicyDeltaStore> {
+    let root = VirtualPath::new(LOCAL_DEV_CAPABILITY_POLICY_DELTA_ROOT)
+        .expect("LOCAL_DEV_CAPABILITY_POLICY_DELTA_ROOT is a valid virtual path");
+    Arc::new(FilesystemCapabilityPolicyDeltaStore::with_root(
+        filesystem, root,
+    ))
+}
+
+/// Build the milestone `PolicyResolver` over the shared delta store (#5261 D3).
+///
+/// The default source uses the milestone default
+/// ([`CapabilityDefaultPolicy::available_default`](ironclaw_capability_policy::CapabilityDefaultPolicy::available_default)):
+/// installed == available unless an admin delta hides it, with no admin opinion
+/// on identity/approval/config. The resolver is the read path for every
+/// dimension; it shares the SAME delta-store `Arc` the admin write surface
+/// holds — never construct a second.
+#[cfg(feature = "capability-policy")]
+pub(crate) fn build_capability_policy_resolver(
+    delta_store: Arc<dyn CapabilityPolicyDeltaStore>,
+) -> Arc<dyn PolicyResolver> {
+    let defaults = StaticCapabilityDefaultPolicySource::new(
+        ironclaw_capability_policy::CapabilityDefaultPolicy::available_default(),
+    );
+    Arc::new(StoreBackedPolicyResolver::new(defaults, delta_store))
+}
+
+/// Whether the per-`(tenant, user)` capability policy resolver (#5267 / #5261)
+/// is active for this runtime. Compiled in by the `capability-policy` feature,
+/// but OFF unless `IRONCLAW_REBORN_CAPABILITY_POLICY` is set truthy
+/// (`1` / `true` / `yes` / `on`). Enabling the feature alone therefore never
+/// changes local-dev behaviour — the operator opts in. Mirrors the
+/// `HooksActivationConfig` master-flag-default-off shape with an env toggle.
+///
+/// Lives here (shared `pub(crate)`) so both `runtime.rs` (availability seam
+/// construction) and `factory.rs` (shared delta-store / resolver handle
+/// construction) gate on the same switch.
+#[cfg(feature = "capability-policy")]
+pub(crate) fn capability_policy_activated() -> bool {
+    std::env::var("IRONCLAW_REBORN_CAPABILITY_POLICY")
+        .map(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 /// Maps an installed package to the capability ids it makes visible to the
@@ -131,16 +198,25 @@ impl PackageCapabilitySource for StaticPackageCapabilitySource {
 pub(crate) struct ScopedLifecyclePolicyCapabilitySurfaceResolver {
     installations: Arc<dyn ScopedLifecycleInstallationStore>,
     packages: Arc<dyn PackageCapabilitySource>,
+    /// Policy view (#5273): the installed allow-set is intersected with the
+    /// capabilities whose [`EffectivePolicy.available`] is `true`. Required (not
+    /// `Option`) under the feature — the only construction site always supplies
+    /// the shared resolver — so there is no production-always-Some optional Arc.
+    #[cfg(feature = "capability-policy")]
+    policy: Arc<dyn PolicyResolver>,
 }
 
 impl ScopedLifecyclePolicyCapabilitySurfaceResolver {
     pub(crate) fn new(
         installations: Arc<dyn ScopedLifecycleInstallationStore>,
         packages: Arc<dyn PackageCapabilitySource>,
+        #[cfg(feature = "capability-policy")] policy: Arc<dyn PolicyResolver>,
     ) -> Self {
         Self {
             installations,
             packages,
+            #[cfg(feature = "capability-policy")]
+            policy,
         }
     }
 
@@ -187,6 +263,39 @@ impl ScopedLifecyclePolicyCapabilitySurfaceResolver {
         for installation in effective.installations {
             allowed.extend(self.packages.capabilities_for(&installation.package_ref));
         }
+        // Availability = installed AND not hidden by policy. Off-feature this is
+        // the installed-only set (unchanged). On-feature it is the intersection
+        // of the installed set with `{capability : EffectivePolicy.available}`.
+        #[cfg(feature = "capability-policy")]
+        let allowed = {
+            let subject = PolicySubject {
+                tenant_id: tenant_id.clone(),
+                user_id: user_id.clone(),
+            };
+            let mut available = BTreeSet::new();
+            for capability in allowed {
+                match self.policy.resolve(&subject, &capability).await {
+                    Ok(effective) if effective.available => {
+                        available.insert(capability);
+                    }
+                    // Policy hid this capability → drop it (intersection excludes).
+                    Ok(_) => {}
+                    Err(error) => {
+                        // Fail-closed: a policy fault denies THIS capability for
+                        // the turn. Never propagate `Err` — `resolve()` runs at
+                        // host construction and an `Err` would abort the whole
+                        // turn. Logged at debug so it never corrupts the
+                        // REPL/TUI surface (see CLAUDE.md logging guidance).
+                        tracing::debug!(
+                            %error,
+                            capability = %capability.as_str(),
+                            "capability policy resolution failed; denying this capability for the turn"
+                        );
+                    }
+                }
+            }
+            available
+        };
         Ok(CapabilityAllowSet::Allowlist(allowed))
     }
 }
@@ -362,7 +471,50 @@ mod tests {
         ScopedLifecyclePolicyCapabilitySurfaceResolver::new(
             Arc::new(FakeStore { installations }),
             static_source(),
+            // The default-source default is `available_default()` (Available),
+            // with no deltas, so the policy intersection is a no-op and the
+            // existing installed-only assertions still hold.
+            #[cfg(feature = "capability-policy")]
+            available_default_policy(),
         )
+    }
+
+    /// A policy resolver whose default is `available_default()` (Available) and
+    /// that holds the given deltas. With no deltas the intersection is a no-op.
+    #[cfg(feature = "capability-policy")]
+    fn policy_with_deltas(
+        deltas: Vec<ironclaw_capability_policy::CapabilityPolicyDelta>,
+    ) -> Arc<dyn PolicyResolver> {
+        let store = ironclaw_capability_policy::InMemoryCapabilityPolicyDeltaStore::new();
+        for delta in deltas {
+            // The InMemory store's upsert is synchronous enough to drive on a
+            // local runtime; block on it for the test fixture.
+            futures::executor::block_on(store.upsert_delta(&tenant(), delta))
+                .expect("seed policy delta");
+        }
+        build_capability_policy_resolver(Arc::new(store))
+    }
+
+    #[cfg(feature = "capability-policy")]
+    fn available_default_policy() -> Arc<dyn PolicyResolver> {
+        policy_with_deltas(Vec::new())
+    }
+
+    #[cfg(feature = "capability-policy")]
+    fn hide_user_delta(
+        cap_id: &str,
+        user_id: &str,
+    ) -> ironclaw_capability_policy::CapabilityPolicyDelta {
+        ironclaw_capability_policy::CapabilityPolicyDelta {
+            scope: ironclaw_capability_policy::PolicyScope::User {
+                user_id: user(user_id),
+            },
+            capability: cap(cap_id),
+            availability: Some(ironclaw_capability_policy::Availability::Hidden),
+            identity: None,
+            approval: None,
+            config_patch: None,
+        }
     }
 
     fn allow_ids(set: &CapabilityAllowSet) -> BTreeSet<CapabilityId> {
@@ -432,6 +584,8 @@ mod tests {
         let resolver = ScopedLifecyclePolicyCapabilitySurfaceResolver::new(
             Arc::new(FailingStore),
             static_source(),
+            #[cfg(feature = "capability-policy")]
+            available_default_policy(),
         );
 
         let set = resolver
@@ -474,6 +628,109 @@ mod tests {
         let ids = allow_ids(&set);
         assert_eq!(ids.len(), 1, "only the mapped package contributes");
         assert!(ids.contains(&cap("nearai.web_search")));
+    }
+
+    /// A policy resolver that always errors — models a delta-store fault. The
+    /// availability seam must deny the capability (drop it), never propagate.
+    #[cfg(feature = "capability-policy")]
+    struct FailingPolicyResolver;
+
+    #[cfg(feature = "capability-policy")]
+    #[async_trait]
+    impl PolicyResolver for FailingPolicyResolver {
+        async fn resolve(
+            &self,
+            _subject: &PolicySubject,
+            _capability: &CapabilityId,
+        ) -> Result<
+            ironclaw_capability_policy::EffectivePolicy,
+            ironclaw_capability_policy::PolicyError,
+        > {
+            Err(ironclaw_capability_policy::PolicyError::Unavailable {
+                reason: "policy store down".to_string(),
+            })
+        }
+    }
+
+    /// Installed but policy-Hidden (a User-scope `Hidden` delta) → dropped from
+    /// the allow-set even though the package is installed.
+    #[cfg(feature = "capability-policy")]
+    #[tokio::test]
+    async fn installed_but_policy_hidden_is_dropped() {
+        let resolver = ScopedLifecyclePolicyCapabilitySurfaceResolver::new(
+            Arc::new(FakeStore {
+                installations: vec![admin_shared("install-web", "web-access")],
+            }),
+            static_source(),
+            policy_with_deltas(vec![hide_user_delta("nearai.web_search", "user:bob")]),
+        );
+
+        let bob = resolver
+            .resolve_allow_set(&tenant(), Some(&user("user:bob")))
+            .await
+            .expect("resolve");
+        assert!(
+            allow_ids(&bob).is_empty(),
+            "a policy-Hidden capability is removed even though installed"
+        );
+
+        // Carol has no hide delta → the same install stays available to her.
+        let carol = resolver
+            .resolve_allow_set(&tenant(), Some(&user("user:carol")))
+            .await
+            .expect("resolve");
+        assert!(
+            allow_ids(&carol).contains(&cap("nearai.web_search")),
+            "the hide delta is per-user; Carol still sees the install"
+        );
+    }
+
+    /// A policy resolver `Err` denies that capability for the turn (fail-closed)
+    /// and never surfaces as `Err` (which would kill the turn).
+    #[cfg(feature = "capability-policy")]
+    #[tokio::test]
+    async fn policy_error_deny_closes_without_erroring() {
+        let resolver = ScopedLifecyclePolicyCapabilitySurfaceResolver::new(
+            Arc::new(FakeStore {
+                installations: vec![admin_shared("install-web", "web-access")],
+            }),
+            static_source(),
+            Arc::new(FailingPolicyResolver),
+        );
+
+        let set = resolver
+            .resolve_allow_set(&tenant(), Some(&user("user:bob")))
+            .await
+            .expect("a policy fault must not surface as Err — that would kill the turn");
+        assert!(
+            allow_ids(&set).is_empty(),
+            "policy resolver Err → deny that capability (empty allowlist), graceful fail-closed"
+        );
+    }
+
+    /// A capability that policy would make available but that is NOT installed
+    /// never appears — the intersection only narrows the installed set.
+    #[cfg(feature = "capability-policy")]
+    #[tokio::test]
+    async fn policy_available_but_not_installed_never_appears() {
+        // No installations at all; the default policy is Available for every
+        // capability, but with nothing installed the allow-set is empty.
+        let resolver = ScopedLifecyclePolicyCapabilitySurfaceResolver::new(
+            Arc::new(FakeStore {
+                installations: Vec::new(),
+            }),
+            static_source(),
+            available_default_policy(),
+        );
+
+        let set = resolver
+            .resolve_allow_set(&tenant(), Some(&user("user:bob")))
+            .await
+            .expect("resolve");
+        assert!(
+            allow_ids(&set).is_empty(),
+            "policy-available but not installed → never in the allow-set"
+        );
     }
 
     #[test]
