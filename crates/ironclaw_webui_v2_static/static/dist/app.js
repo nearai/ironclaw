@@ -874,13 +874,17 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
         <//>
       </div>
     </div>
-  `}function ii({icon:e="lock",headline:t,provider:a,accountLabel:n,body:r,expiresAt:s,pillHint:i,defaultExpanded:o=!0,children:l}){let c=C(),[d,m]=p.default.useState(o),f=p.default.useId(),h=n||a||"";return u`
-    <div className="mx-auto w-full max-w-lg rounded-xl border border-[rgba(76,167,230,0.34)] bg-[rgba(76,167,230,0.08)]">
+  `}function ii({icon:e="lock",headline:t,provider:a,accountLabel:n,body:r,expiresAt:s,pillHint:i,defaultExpanded:o=!0,testId:l="auth-gate",challengeKind:c="",children:d}){let m=C(),[f,h]=p.default.useState(o),x=p.default.useId(),y=n||a||"";return u`
+    <div
+      data-testid=${l}
+      data-auth-challenge=${c||void 0}
+      className="mx-auto w-full max-w-lg rounded-xl border border-[rgba(76,167,230,0.34)] bg-[rgba(76,167,230,0.08)]"
+    >
       <button
         type="button"
-        onClick=${()=>m(x=>!x)}
-        aria-expanded=${d?"true":"false"}
-        aria-controls=${f}
+        onClick=${()=>h($=>!$)}
+        aria-expanded=${f?"true":"false"}
+        aria-controls=${x}
         className="flex w-full items-center gap-3 rounded-xl border-0 bg-transparent px-4 py-3 text-left"
       >
         <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-[rgba(76,167,230,0.28)] bg-[rgba(76,167,230,0.1)] text-[#8fc8f2]">
@@ -888,29 +892,29 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
         </span>
         <span className="min-w-0 flex-1">
           <span className="block truncate font-semibold text-white">
-            ${t||c("authGate.title")}
+            ${t||m("authGate.title")}
           </span>
-          ${h&&u`<span className="block truncate text-xs text-iron-300">${h}</span>`}
+          ${y&&u`<span className="block truncate text-xs text-iron-300">${y}</span>`}
         </span>
         <span className="ml-auto flex shrink-0 items-center gap-1.5 text-xs font-medium text-[#8fc8f2]">
           ${i&&u`<span className="hidden sm:inline">${i}</span>`}
           <${D}
             name="chevron"
-            className=${["h-4 w-4",d?"rotate-180":""].join(" ")}
+            className=${["h-4 w-4",f?"rotate-180":""].join(" ")}
           />
         </span>
       </button>
 
-      ${d&&u`
+      ${f&&u`
         <div
-          id=${f}
+          id=${x}
           className="border-t border-[rgba(76,167,230,0.2)] px-4 pb-4 pt-3"
         >
           ${r&&u`<div className="mb-3 text-sm text-iron-200">${r}</div>`}
-          ${l}
+          ${d}
           ${s&&u`
             <p className="mt-2 text-xs text-iron-300">
-              ${c("authGate.expiresAt")}: ${new Date(s).toLocaleString()}
+              ${m("authGate.expiresAt")}: ${new Date(s).toLocaleString()}
             </p>
           `}
         </div>
@@ -921,6 +925,7 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
       icon="lock"
       headline=${e?.headline||a("authGate.title")}
       body=${e?.body||""}
+      challengeKind="other"
     >
       <form onSubmit=${n=>n.preventDefault()}>
         <div className="mb-3 text-sm text-iron-200">
@@ -942,6 +947,7 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
       body=${e?.body||""}
       expiresAt=${e?.expiresAt||""}
       pillHint=${a("authGate.pillAuthorize")}
+      challengeKind="oauth_url"
     >
       <div className="flex flex-wrap gap-2">
         <${A}
@@ -950,6 +956,7 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
           target="_blank"
           rel="noopener noreferrer"
           className="auth-oauth"
+          data-testid="auth-oauth-open"
           variant="primary"
           onClick=${m=>{m.preventDefault(),c()}}
         >
@@ -985,6 +992,7 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
       accountLabel=${e?.accountLabel||""}
       body=${e?.body||""}
       pillHint=${n("authGate.pillEnterToken")}
+      challengeKind="manual_token"
     >
       <form onSubmit=${d}>
         <div className="mb-3">
@@ -996,6 +1004,7 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
             disabled=${l}
             placeholder=${n("authGate.tokenPlaceholder")}
             aria-label=${n("authGate.tokenLabel")}
+            data-testid="auth-token-input"
             error=${!!i}
             onInput=${m=>s(m.currentTarget.value)}
           />

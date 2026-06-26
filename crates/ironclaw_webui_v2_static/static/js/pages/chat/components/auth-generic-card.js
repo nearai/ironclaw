@@ -17,6 +17,7 @@ export function AuthGenericCard({ gate, onCancel }) {
       icon="lock"
       headline=${gate?.headline || t("authGate.title")}
       body=${gate?.body || ""}
+      challengeKind="other"
     >
       <form onSubmit=${(event) => event.preventDefault()}>
         <div className="mb-3 text-sm text-iron-200">

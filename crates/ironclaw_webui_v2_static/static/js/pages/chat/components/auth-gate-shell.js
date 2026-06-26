@@ -31,6 +31,8 @@ export function AuthGateShell({
   expiresAt,
   pillHint,
   defaultExpanded = true,
+  testId = "auth-gate",
+  challengeKind = "",
   children,
 }) {
   const t = useT();
@@ -39,7 +41,11 @@ export function AuthGateShell({
   const subtitle = accountLabel || provider || "";
 
   return html`
-    <div className="mx-auto w-full max-w-lg rounded-xl border border-[rgba(76,167,230,0.34)] bg-[rgba(76,167,230,0.08)]">
+    <div
+      data-testid=${testId}
+      data-auth-challenge=${challengeKind || undefined}
+      className="mx-auto w-full max-w-lg rounded-xl border border-[rgba(76,167,230,0.34)] bg-[rgba(76,167,230,0.08)]"
+    >
       <button
         type="button"
         onClick=${() => setExpanded((v) => !v)}

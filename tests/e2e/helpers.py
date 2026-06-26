@@ -239,6 +239,10 @@ SEL_V2 = {
     "message_list_scroll": "[data-testid='message-list-scroll']",
     "message_list_content": "[data-testid='message-list-content']",
     "message_list_load_older": "[data-testid='message-list-load-older']",
+    "auth_gate":      "[data-testid='auth-gate']",
+    "auth_gate_for":  "[data-testid='auth-gate'][data-auth-challenge='{kind}']",
+    "auth_token_input": "[data-testid='auth-token-input']",
+    "auth_oauth_open": "[data-testid='auth-oauth-open']",
     "approval_card":  "[data-testid='approval-card']",  # approval gate card
     "busy_gate_notice": "[data-testid='busy-gate-notice']",  # gate busy notice
     "activity_run":   "[data-testid='activity-run']",

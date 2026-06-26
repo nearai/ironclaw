@@ -73,6 +73,7 @@ export function AuthOauthCard({ gate, onCancel }) {
       body=${gate?.body || ""}
       expiresAt=${gate?.expiresAt || ""}
       pillHint=${t("authGate.pillAuthorize")}
+      challengeKind="oauth_url"
     >
       <div className="flex flex-wrap gap-2">
         <${Button}
@@ -81,6 +82,7 @@ export function AuthOauthCard({ gate, onCancel }) {
           target="_blank"
           rel="noopener noreferrer"
           className="auth-oauth"
+          data-testid="auth-oauth-open"
           variant="primary"
           onClick=${(event) => {
             event.preventDefault();

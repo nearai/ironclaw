@@ -659,6 +659,45 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the DOM resource-limit port
   in the Reborn WebUI v2 Playwright job.
 
+### Step 19: Legacy Product Auth Prompt Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_auth_flows.py`.
+
+Ported the browser-visible auth prompt intent from legacy OAuth/MCP/skill auth
+flows to Reborn's WebUI v2 chat gate model:
+
+- an `auth_required` SSE prompt with `challenge_kind=manual_token` renders the
+  manual token card, rejects empty submit, trims the entered token, calls
+  `/api/reborn/product-auth/manual-token/submit`, and resolves the paused run
+  with `credential_provided`;
+- an `auth_required` SSE prompt with `challenge_kind=oauth_url` renders the
+  OAuth authorization card, opens only HTTPS authorization URLs with
+  `noopener,noreferrer`, shows the waiting state after opening, and lets Cancel
+  resolve the gate as `cancelled`;
+- non-HTTPS authorization URLs are not written as clickable `href`s and do not
+  call `window.open`.
+
+Behavior adjustment:
+
+- Legacy auth tests exercised v1 extension setup endpoints, MCP install/activate
+  flows, and chat-mode token capture. Reborn WebUI v2 exposes auth prompts as
+  typed run gates over `/api/webchat/v2/*`, with token storage handled by the
+  product-auth endpoint and run continuation handled by gate resolution. The
+  Reborn port therefore tests the browser caller contract at the SSE prompt,
+  product-auth submit, and gate-resolution boundaries rather than the legacy
+  `/api/extensions/*` chat-auth mode.
+
+Frontend harness adjustment:
+
+- Added stable Reborn auth-gate selectors for the shared auth shell, manual
+  token input, and OAuth authorization action. These hooks are presentation
+  neutral and preserve the component-owned security checks.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the product-auth prompt port
+  in the Reborn WebUI v2 Playwright job.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -675,7 +714,9 @@ Not yet ported:
 - remaining settings/extension lifecycle scenarios beyond Settings search,
   Skills, tool permissions, channel label regressions, and the top-level extension
   install/manage surface;
-- OAuth/product-auth flows;
+- deeper OAuth/product-auth install/callback flows beyond browser prompt
+  handling, including hosted callback replay/removal and provider-backed
+  extension/MCP setup where standalone Reborn has matching endpoints;
 - Slack/Telegram/channel pairing scenarios;
 - admin/operator flows, including Reborn Settings Users search once the v2
   users endpoints replace the current TODO client stubs;
@@ -733,6 +774,11 @@ coverage can assert the real row without depending on incidental DOM ancestry.
 The CSP/browser-safety port did not require a Reborn product fix. Initial
 focused failures were selector mismatches in the port (`New` is a scoped
 sidebar button in Reborn, not a legacy `New thread` link).
+
+The product-auth prompt port added stable auth-gate hooks but did not require a
+behavior fix. The existing Reborn OAuth card already rejected non-HTTPS
+authorization URLs before opening a popup, and the manual-token path already
+trimmed the submitted token before calling the product-auth endpoint.
 
 The tool-activity history port did not require a Reborn product behavior fix:
 durable `capability_display_preview` records already rehydrated the activity
