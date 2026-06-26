@@ -263,6 +263,14 @@ SEL_V2 = {
     "tool_activity_card_for": "[data-testid='tool-activity-card'][data-tool-name='{name}']",
     "tool_activity_toggle": "[data-testid='tool-activity-toggle']",
     "tool_activity_detail": "[data-testid='tool-activity-detail']",
+    "projects_grid": "[data-testid='projects-grid']",
+    "projects_search_input": "[data-testid='projects-search-input']",
+    "project_card": "[data-testid='project-card']",
+    "project_card_for": "[data-testid='project-card'][data-project-id='{id}']",
+    "project_open_workspace": "[data-testid='project-open-workspace']",
+    "project_workspace": "[data-testid='project-workspace']",
+    "project_workspace_for": "[data-testid='project-workspace'][data-project-id='{id}']",
+    "project_workspace_title": "[data-testid='project-workspace-title']",
     # Download chip for an agent-produced workspace file; `{path}` selects one.
     # Clicking a chip opens the shared attachment preview modal, whose footer
     # carries the Download action.

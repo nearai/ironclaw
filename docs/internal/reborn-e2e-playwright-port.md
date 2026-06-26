@@ -741,6 +741,43 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the channel connect/pairing
   port in the Reborn WebUI v2 Playwright job.
 
+### Step 21: Legacy Project Overview Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_projects.py`.
+
+Ported the project overview and drill-in intent from legacy
+`test_project_detail.py` to the current Reborn Projects surface:
+
+- the `/v2/projects` page loads project cards from
+  `/api/webchat/v2/projects`;
+- project metadata goals are surfaced in the scoped project cards;
+- the Projects search input filters by project name, description, and goals;
+- opening a project workspace routes to `/v2/projects/{project_id}` and reads
+  the selected project through `/api/webchat/v2/projects/{project_id}`;
+- the test runs against the real Reborn shell and route-mocks only the v2
+  project endpoints.
+
+Behavior adjustment:
+
+- Legacy project detail tests used `/api/engine/projects/overview`,
+  `/api/engine/missions`, `/api/engine/threads`, and project widget endpoints.
+  Reborn currently has real v2 project list/create/read/update/delete and
+  membership ACL endpoints, but project missions, project threads, and widgets
+  still return TODO stubs in the client adapter. This port covers the
+  implemented Reborn project contract and leaves the deeper mission/thread/widget
+  drill-in behavior as a product parity gap.
+
+Frontend harness adjustment:
+
+- Added stable Projects selectors for project cards, project search, workspace
+  shells, and open-workspace actions. The hooks carry `data-project-id` so tests
+  can assert the Reborn project boundary without depending on visual layout.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the project overview port in
+  the Reborn WebUI v2 Playwright job.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -767,6 +804,9 @@ Not yet ported:
   users endpoints replace the current TODO client stubs;
 - legacy `/v2/routines` parity, because the current Reborn routines page still
   uses TODO client stubs instead of real v2 endpoints;
+- legacy project mission/thread/widget drill-in parity, because the current
+  Reborn project page maps real project entities but still uses TODO client
+  stubs for per-project missions, threads, widgets, and detail actions;
 - Emulate provider full-path scenarios against standalone Reborn where the
   current test still routes through legacy `/api/chat/*`.
 
@@ -840,3 +880,10 @@ The same settings inspection confirmed an admin parity gap: Reborn Settings
 Users client methods still return TODO stub responses instead of calling real
 v2 users endpoints. Legacy Users search is left open until those endpoints are
 implemented.
+
+The project overview port confirmed a project-detail parity gap: Reborn's
+Projects page now uses the real `/api/webchat/v2/projects` surface for project
+entities, but its missions, threads, widgets, mission detail, and thread detail
+client functions still return TODO stubs. The migrated test therefore covers
+list/search/open-workspace behavior and leaves the legacy engine-v2 drill-in
+tests open until matching Reborn endpoints land.
