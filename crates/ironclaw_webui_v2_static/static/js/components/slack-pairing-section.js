@@ -19,7 +19,7 @@ export function SlackPairingSection({ action }) {
   const copy = slackPairingCopy(action, t);
 
   const submit = () => {
-    const code = manualCode.trim();
+    const code = manualCode.trim().toUpperCase();
     if (!code) return;
     redeemMutation.mutate({ code });
     setManualCode("");

@@ -2485,6 +2485,30 @@ Issue found and fixed:
   uppercase. Reborn now applies the same normalization for both click-submit
   and Enter-submit paths.
 
+### Step 82: Legacy Slack Pairing Enter-Key Submit Port
+
+Extended `test_reborn_webui_v2_legacy_channel_connect.py`.
+
+Ported the same keyboard pairing affordance to Reborn's Slack connect command
+card:
+
+- loaded the Reborn connectable-channels response with a Slack
+  `inbound_proof_code` action;
+- entered `connect slack` in the chat composer and asserted no normal chat send
+  is required;
+- filled the Slack proof-code input with padded lowercase text;
+- pressed Enter inside the input;
+- asserted the pairing redeem endpoint receives the trimmed uppercase code and
+  the success state renders.
+
+Issue found and fixed:
+
+- Slack connect cards use the shared `SlackPairingSection`, not the generic
+  Extensions `PairingSection` fixed in Step 81. That component also only
+  trimmed manual codes before redeeming. It now uppercases codes before both
+  click and Enter submission so Slack proof-code redemption matches the legacy
+  normalization contract.
+
 ## Open Migration Buckets
 
 Not yet ported:
