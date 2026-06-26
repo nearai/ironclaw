@@ -103,6 +103,23 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now runs the new legacy-core Reborn
   Playwright port with the existing WebUI v2 smoke scenario.
 
+### Step 3: Legacy Rendering Safety Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_rendering.py`.
+
+Ported behavior from legacy `test_html_injection.py` through the real Reborn
+WebUI v2 chat caller path:
+
+- assistant markdown containing script, iframe, and event-handler payloads is
+  sanitized before rendering;
+- user-supplied HTML-shaped text remains plain text and is escaped in the DOM;
+- assistant messages do not create script DOM nodes.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the rendering-safety port in
+  the Reborn WebUI v2 Playwright job.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -110,7 +127,6 @@ Not yet ported:
 - legacy attachment upload/PDF/PPTX extraction assertions;
 - legacy SSE reconnect/history-reload edge cases;
 - DOM pruning/resource-limit scenarios;
-- HTML injection and markdown sanitization scenarios;
 - tool approval scenarios;
 - skills/settings/extension lifecycle scenarios;
 - OAuth/product-auth flows;
