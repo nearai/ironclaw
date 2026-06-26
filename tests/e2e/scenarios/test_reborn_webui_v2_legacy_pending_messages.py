@@ -650,6 +650,85 @@ async def test_reborn_legacy_background_thread_shows_processing_indicator(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_processing_indicator_does_not_leak_after_thread_switch(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Port stale in-progress indicator coverage to Reborn's thread switch path."""
+
+    async def handle_successful_send(route, _payload, fulfill_json):
+        await fulfill_json(route, _submitted_response(), status=202)
+
+    harness = await _open_mocked_pending_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        initial_thread_id=THREAD_ID,
+        threads=[
+            {
+                "thread_id": THREAD_ID,
+                "title": "Running source thread",
+                "turn_count": 1,
+                "created_at": "2026-06-25T00:00:00Z",
+                "updated_at": "2026-06-25T00:02:00Z",
+            },
+            {
+                "thread_id": OTHER_THREAD_ID,
+                "title": "Quiet destination thread",
+                "turn_count": 1,
+                "created_at": "2026-06-25T00:01:00Z",
+                "updated_at": "2026-06-25T00:03:00Z",
+            },
+        ],
+        timeline_by_thread={
+            THREAD_ID: [_user_record("running-seed", "Running thread seed")],
+            OTHER_THREAD_ID: [_user_record("quiet-seed", "Quiet thread seed")],
+        },
+        send_handler=handle_successful_send,
+    )
+    try:
+        page = harness["page"]
+        sidebar = page.locator("#gateway-sidebar")
+        running_thread = sidebar.get_by_role("button").filter(
+            has_text="Running source thread"
+        ).first
+        quiet_thread = sidebar.get_by_role("button").filter(
+            has_text="Quiet destination thread"
+        ).first
+
+        await expect(
+            page.locator(SEL_V2["msg_user"]).filter(has_text="Running thread seed")
+        ).to_be_visible(timeout=15000)
+
+        await page.evaluate(
+            f"""
+            () => window.__emitV2Sse("projection_update", {{
+              state: {{
+                items: [
+                  {{ run_status: {{ run_id: {RUN_ID!r}, status: "running" }} }}
+                ]
+              }}
+            }})
+            """
+        )
+        await expect(page.locator(SEL_V2["typing_indicator"])).to_be_visible(
+            timeout=5000
+        )
+        await expect(running_thread).to_contain_text("Running", timeout=5000)
+
+        await quiet_thread.click()
+        await page.wait_for_function(
+            "(threadId) => location.pathname === `/v2/chat/${threadId}`",
+            arg=OTHER_THREAD_ID,
+            timeout=10000,
+        )
+        await expect(
+            page.locator(SEL_V2["msg_user"]).filter(has_text="Quiet thread seed")
+        ).to_be_visible(timeout=15000)
+        await expect(page.locator(SEL_V2["typing_indicator"])).to_have_count(0)
+        await expect(quiet_thread.get_by_label("Running")).to_have_count(0)
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_failed_send_marks_single_error_message(
     reborn_v2_server, reborn_v2_browser
 ):

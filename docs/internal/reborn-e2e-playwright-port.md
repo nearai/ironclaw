@@ -482,6 +482,9 @@ Ported the caller-visible pending-message intent from legacy
   timeline;
 - a failed v2 send renders one error-state optimistic user message and exposes
   the Retry affordance.
+- active-thread `Running` and typing-indicator state is reset when switching
+  through the real sidebar to a quiet thread, so stale in-progress UI does not
+  leak across Reborn thread routes.
 
 Behavior adjustment:
 
@@ -506,6 +509,11 @@ Behavior adjustment:
   supported sidebar state-store behavior for the active thread and leaves
   background-thread fan-out to the existing user-scoped stream/list enrichment
   follow-up.
+- Legacy stale/in-progress reload tests used v1 history state to prove that a
+  completed or different thread did not keep rendering `Processing...`.
+  Reborn's equivalent risk is route-scoped transient state leaking across
+  `useChat` thread switches, so the port drives a running projection on one
+  thread and switches to another through the sidebar.
 
 CI update:
 
