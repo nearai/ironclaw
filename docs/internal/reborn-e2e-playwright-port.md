@@ -1689,6 +1689,27 @@ Behavior adjustment:
   engine-specific, so this port targets Reborn's real v2 project overview/search
   contract and documents the remaining drill-in parity separately.
 
+### Step 49: Legacy Logs Control Wiring Port
+
+Extended `test_reborn_webui_v2_legacy_csp.py`.
+
+Ported the logs-button portion of legacy
+`test_buttons_still_functional_after_csp_migration` to Reborn's `/v2/logs`
+surface:
+
+- route-mocked the Reborn operator logs API with a scoped log entry;
+- verified the Logs page renders the entry through the real toolbar and list;
+- clicked the Reborn `Pause` control and verified polling stops while paused;
+- accepted the clear confirmation, clicked `Clear`, and verified the rendered
+  log entries are removed.
+
+Behavior adjustment:
+
+- Legacy checked fixed DOM IDs (`logs-pause-btn`, `logs-clear-btn`) on the old
+  gateway shell. Reborn has React toolbar buttons with accessible names instead
+  of stable element IDs, so the port drives the visible controls by role/name
+  and asserts their observable behavior.
+
 ## Open Migration Buckets
 
 Not yet ported:

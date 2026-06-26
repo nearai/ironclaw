@@ -6,6 +6,7 @@ controls, so this port exercises equivalent visible behavior on the real
 ``ironclaw-reborn serve`` surface.
 """
 
+import json
 import re
 
 from playwright.async_api import expect
@@ -122,3 +123,61 @@ async def test_reborn_legacy_csp_core_controls_remain_functional(reborn_v2_page)
     await sidebar.get_by_role("button", name=re.compile("^New$")).click()
     await expect(reborn_v2_page).to_have_url(re.compile(".*/chat.*"), timeout=10000)
     await expect(composer).to_be_visible(timeout=15000)
+
+
+async def test_reborn_legacy_csp_logs_controls_remain_functional(
+    reborn_v2_page, reborn_v2_server
+):
+    """Port the legacy logs pause/clear button wiring check to Reborn logs."""
+    request_count = 0
+
+    async def handle_operator_logs(route):
+        nonlocal request_count
+        request_count += 1
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "status": "available",
+                    "logs": {
+                        "source": "in_memory_tracing",
+                        "entries": [
+                            {
+                                "id": "csp-log-control",
+                                "timestamp": "2026-06-12T10:11:12.123Z",
+                                "level": "info",
+                                "target": "ironclaw::ui::logs",
+                                "message": "log entry for CSP control wiring",
+                                "thread_id": "thread-csp-controls",
+                            }
+                        ],
+                        "next_cursor": None,
+                        "tail_supported": True,
+                        "follow_supported": False,
+                    },
+                }
+            ),
+        )
+
+    await reborn_v2_page.route("**/api/webchat/v2/operator/logs**", handle_operator_logs)
+    await reborn_v2_page.goto(
+        f"{reborn_v2_server}/v2/logs?thread_id=thread-csp-controls"
+    )
+
+    entry = reborn_v2_page.locator(SEL_V2["logs_entry"]).first
+    await expect(entry.locator(SEL_V2["logs_entry_message"])).to_contain_text(
+        "log entry for CSP control wiring",
+        timeout=10000,
+    )
+
+    await reborn_v2_page.get_by_role("button", name="Pause").click()
+    await expect(reborn_v2_page.get_by_role("button", name="Resume")).to_be_visible()
+    paused_request_count = request_count
+    await reborn_v2_page.wait_for_timeout(2200)
+    assert request_count == paused_request_count
+
+    reborn_v2_page.on("dialog", lambda dialog: dialog.accept())
+    await reborn_v2_page.get_by_role("button", name="Clear").click()
+    await expect(reborn_v2_page.locator(SEL_V2["logs_entry"])).to_have_count(0)
+    await expect(reborn_v2_page.get_by_text("Waiting for log entries")).to_be_visible()
