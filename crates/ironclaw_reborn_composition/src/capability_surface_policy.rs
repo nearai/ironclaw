@@ -33,6 +33,8 @@ use ironclaw_turns::run_profile::LoopRunContext;
 
 #[cfg(feature = "capability-policy")]
 use ironclaw_capability_policy::{PolicyResolver, PolicySubject};
+#[cfg(feature = "capability-policy")]
+use ironclaw_host_api::UserRole;
 
 use crate::available_extensions::{AvailableExtensionCatalog, visible_capability_ids};
 use crate::capability_policy_engine::principal_user_id;
@@ -140,6 +142,19 @@ pub(crate) struct ScopedLifecyclePolicyCapabilitySurfaceResolver {
     /// the shared resolver — so there is no production-always-Some optional Arc.
     #[cfg(feature = "capability-policy")]
     policy: Arc<dyn PolicyResolver>,
+    /// Built-in capability governance (#5261 D4). Built-in capabilities
+    /// (`builtin.shell`, `builtin.web_fetch`, …) are NOT contributed by any
+    /// installable extension package — they ship with the host — so seeding the
+    /// allow-set only from `effective.installations` would drop them and the
+    /// on-policy `apply_capability_filter` would deny `builtin.shell` for every
+    /// user. These ids are folded into the base `allowed` set unconditionally
+    /// (treated as always-installed), then the per-member policy intersection
+    /// can still hide them via a User-scope `Hidden` delta. Populated at
+    /// construction from the registry snapshot minus the installable-package
+    /// caps (see the construction site in `runtime.rs`). Feature-gated so the
+    /// feature-off build is byte-unchanged.
+    #[cfg(feature = "capability-policy")]
+    builtins: Vec<CapabilityId>,
 }
 
 impl ScopedLifecyclePolicyCapabilitySurfaceResolver {
@@ -147,12 +162,15 @@ impl ScopedLifecyclePolicyCapabilitySurfaceResolver {
         installations: Arc<dyn ScopedLifecycleInstallationStore>,
         packages: Arc<dyn PackageCapabilitySource>,
         #[cfg(feature = "capability-policy")] policy: Arc<dyn PolicyResolver>,
+        #[cfg(feature = "capability-policy")] builtins: Vec<CapabilityId>,
     ) -> Self {
         Self {
             installations,
             packages,
             #[cfg(feature = "capability-policy")]
             policy,
+            #[cfg(feature = "capability-policy")]
+            builtins,
         }
     }
 
@@ -172,6 +190,10 @@ impl ScopedLifecyclePolicyCapabilitySurfaceResolver {
         &self,
         tenant_id: &TenantId,
         user_id: Option<&UserId>,
+        // The acting user's role (#5261 D3). Feature-gated to keep the
+        // feature-off build byte-unchanged: it is only consulted by the
+        // on-feature admin bypass + per-member policy intersection below.
+        #[cfg(feature = "capability-policy")] role: UserRole,
     ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
         let Some(user_id) = user_id else {
             return Ok(CapabilityAllowSet::Allowlist(BTreeSet::new()));
@@ -199,11 +221,33 @@ impl ScopedLifecyclePolicyCapabilitySurfaceResolver {
         for installation in effective.installations {
             allowed.extend(self.packages.capabilities_for(&installation.package_ref));
         }
+        // Built-in governance (#5261 D4): builtins ship with the host and are
+        // never contributed by an installable extension package, so they would
+        // otherwise be absent from `allowed` and dropped by the on-policy
+        // filter. Seed them unconditionally (always-installed); the per-member
+        // policy intersection below can still hide an individual builtin via a
+        // User-scope `Hidden` delta, and admins bypass that intersection. Empty
+        // when the registry exposed no builtins (or feature-off, where this
+        // block is compiled out and the set stays installed-only as before).
+        #[cfg(feature = "capability-policy")]
+        allowed.extend(self.builtins.iter().cloned());
         // Availability = installed AND not hidden by policy. Off-feature this is
         // the installed-only set (unchanged). On-feature it is the intersection
-        // of the installed set with `{capability : EffectivePolicy.available}`.
+        // of the installed set with `{capability : EffectivePolicy.available}`,
+        // EXCEPT for admins/owner who bypass the intersection entirely.
         #[cfg(feature = "capability-policy")]
         let allowed = {
+            // Role-aware availability (#5261 D3). Owner/Admin intentionally see
+            // the FULL installed+builtin surface: the per-capability policy
+            // intersection is skipped BEFORE any `self.policy.resolve(...)` call,
+            // so neither a per-user User-scope `Hidden` delta NOR a tenant-scope
+            // `Hidden` delta (which `scope_applies_to_subject` would apply to
+            // everyone) can cap them. This is a deliberate read-time bypass — not
+            // a clear-on-promote — so demoting an admin back to Member instantly
+            // re-applies their still-stored hide deltas on the next turn.
+            if role.is_admin() {
+                return Ok(CapabilityAllowSet::Allowlist(allowed));
+            }
             let subject = PolicySubject {
                 tenant_id: tenant_id.clone(),
                 user_id: user_id.clone(),
@@ -236,6 +280,32 @@ impl ScopedLifecyclePolicyCapabilitySurfaceResolver {
     }
 }
 
+#[cfg(test)]
+impl ScopedLifecyclePolicyCapabilitySurfaceResolver {
+    /// Test-only shim that drives [`resolve_allow_set`] with an explicit role.
+    ///
+    /// `resolve_allow_set`'s `role` parameter only exists under the
+    /// `capability-policy` feature (so the feature-off build is byte-unchanged),
+    /// which would force every test call site to feature-gate the argument. This
+    /// shim takes `role` unconditionally (`UserRole` is always in scope) and
+    /// forwards it only on-feature, keeping the test call sites uniform.
+    async fn resolve_allow_set_as(
+        &self,
+        tenant_id: &TenantId,
+        user_id: Option<&UserId>,
+        #[cfg_attr(not(feature = "capability-policy"), allow(unused_variables))]
+        role: ironclaw_host_api::UserRole,
+    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+        self.resolve_allow_set(
+            tenant_id,
+            user_id,
+            #[cfg(feature = "capability-policy")]
+            role,
+        )
+        .await
+    }
+}
+
 #[async_trait]
 impl CapabilitySurfaceProfileResolver for ScopedLifecyclePolicyCapabilitySurfaceResolver {
     async fn resolve(
@@ -243,8 +313,24 @@ impl CapabilitySurfaceProfileResolver for ScopedLifecyclePolicyCapabilitySurface
         run_context: &LoopRunContext,
     ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
         let user_id = principal_user_id(&run_context.scope, run_context.actor.as_ref());
-        self.resolve_allow_set(&run_context.scope.tenant_id, user_id)
-            .await
+        // Role-aware availability (#5261 D3): the acting user's role rides on the
+        // `TurnActor` (carried from `WebUiAuthenticatedCaller::actor()`). Absent
+        // an actor (ownerless / channel-bound turns) fall back to the
+        // least-privilege default so a non-WebUI caller is never treated as an
+        // admin. Only consulted on-feature.
+        #[cfg(feature = "capability-policy")]
+        let role = run_context
+            .actor
+            .as_ref()
+            .map(|actor| actor.role)
+            .unwrap_or(UserRole::Member);
+        self.resolve_allow_set(
+            &run_context.scope.tenant_id,
+            user_id,
+            #[cfg(feature = "capability-policy")]
+            role,
+        )
+        .await
     }
 }
 
@@ -253,7 +339,10 @@ mod tests {
     use super::*;
 
     use chrono::Utc;
-    use ironclaw_host_api::ThreadId;
+    // `UserRole` is imported explicitly (not via `super::*`, where it is
+    // feature-gated) so the `resolve_allow_set_as` role argument compiles in
+    // both feature configurations.
+    use ironclaw_host_api::{ThreadId, UserRole};
     // `principal_user_id` moved to `capability_policy_engine`; the test below
     // still exercises it here (alongside the resolver test helpers).
     use ironclaw_product_workflow::{
@@ -404,6 +493,27 @@ mod tests {
             // existing installed-only assertions still hold.
             #[cfg(feature = "capability-policy")]
             available_default_policy(),
+            // No builtins by default — keeps the existing installed-only
+            // assertions exact (the D4 builtin seeding is exercised by the
+            // dedicated builtin tests below via `resolver_with_builtins`).
+            #[cfg(feature = "capability-policy")]
+            Vec::new(),
+        )
+    }
+
+    /// Like [`resolver`] but seeds the always-available builtin capability ids
+    /// (#5261 D4). `builtin.shell` is the canonical builtin in these tests.
+    #[cfg(feature = "capability-policy")]
+    fn resolver_with_builtins(
+        installations: Vec<ScopedLifecycleInstallation>,
+        policy: Arc<dyn PolicyResolver>,
+        builtins: Vec<CapabilityId>,
+    ) -> ScopedLifecyclePolicyCapabilitySurfaceResolver {
+        ScopedLifecyclePolicyCapabilitySurfaceResolver::new(
+            Arc::new(FakeStore { installations }),
+            static_source(),
+            policy,
+            builtins,
         )
     }
 
@@ -446,6 +556,20 @@ mod tests {
         }
     }
 
+    /// A tenant-scope `Hidden` delta — `scope_applies_to_subject` applies it to
+    /// every user, so it would cap a member; an admin/owner must bypass it.
+    #[cfg(feature = "capability-policy")]
+    fn hide_tenant_delta(cap_id: &str) -> ironclaw_capability_policy::CapabilityPolicyDelta {
+        ironclaw_capability_policy::CapabilityPolicyDelta {
+            scope: ironclaw_capability_policy::PolicyScope::Tenant,
+            capability: cap(cap_id),
+            availability: Some(ironclaw_capability_policy::Availability::Hidden),
+            identity: None,
+            approval: None,
+            config_patch: None,
+        }
+    }
+
     fn allow_ids(set: &CapabilityAllowSet) -> BTreeSet<CapabilityId> {
         match set {
             CapabilityAllowSet::Allowlist(ids) => ids.clone(),
@@ -459,7 +583,7 @@ mod tests {
 
         for who in ["user:bob", "user:carol", "user:director"] {
             let set = resolver
-                .resolve_allow_set(&tenant(), Some(&user(who)))
+                .resolve_allow_set_as(&tenant(), Some(&user(who)), UserRole::Member)
                 .await
                 .expect("resolve");
             assert!(
@@ -474,7 +598,7 @@ mod tests {
         let resolver = resolver(vec![user_private("install-gmail", "gmail", "user:bob")]);
 
         let bob = resolver
-            .resolve_allow_set(&tenant(), Some(&user("user:bob")))
+            .resolve_allow_set_as(&tenant(), Some(&user("user:bob")), UserRole::Member)
             .await
             .expect("resolve");
         assert!(
@@ -483,7 +607,7 @@ mod tests {
         );
 
         let carol = resolver
-            .resolve_allow_set(&tenant(), Some(&user("user:carol")))
+            .resolve_allow_set_as(&tenant(), Some(&user("user:carol")), UserRole::Member)
             .await
             .expect("resolve");
         assert!(
@@ -499,7 +623,7 @@ mod tests {
         let resolver = resolver(vec![disabled]);
 
         let set = resolver
-            .resolve_allow_set(&tenant(), Some(&user("user:bob")))
+            .resolve_allow_set_as(&tenant(), Some(&user("user:bob")), UserRole::Member)
             .await
             .expect("resolve");
         assert!(
@@ -515,10 +639,12 @@ mod tests {
             static_source(),
             #[cfg(feature = "capability-policy")]
             available_default_policy(),
+            #[cfg(feature = "capability-policy")]
+            Vec::new(),
         );
 
         let set = resolver
-            .resolve_allow_set(&tenant(), Some(&user("user:bob")))
+            .resolve_allow_set_as(&tenant(), Some(&user("user:bob")), UserRole::Member)
             .await
             .expect("a store failure must not surface as Err — that would kill the turn");
         assert!(
@@ -532,7 +658,7 @@ mod tests {
         let resolver = resolver(vec![admin_shared("install-web", "web-access")]);
 
         let set = resolver
-            .resolve_allow_set(&tenant(), None)
+            .resolve_allow_set_as(&tenant(), None, UserRole::Member)
             .await
             .expect("resolve");
         assert!(
@@ -551,7 +677,7 @@ mod tests {
         ]);
 
         let set = resolver
-            .resolve_allow_set(&tenant(), Some(&user("user:bob")))
+            .resolve_allow_set_as(&tenant(), Some(&user("user:bob")), UserRole::Member)
             .await
             .expect("resolve");
         let ids = allow_ids(&set);
@@ -592,10 +718,11 @@ mod tests {
             }),
             static_source(),
             policy_with_deltas(vec![hide_user_delta("nearai.web_search", "user:bob")]),
+            Vec::new(),
         );
 
         let bob = resolver
-            .resolve_allow_set(&tenant(), Some(&user("user:bob")))
+            .resolve_allow_set_as(&tenant(), Some(&user("user:bob")), UserRole::Member)
             .await
             .expect("resolve");
         assert!(
@@ -605,7 +732,7 @@ mod tests {
 
         // Carol has no hide delta → the same install stays available to her.
         let carol = resolver
-            .resolve_allow_set(&tenant(), Some(&user("user:carol")))
+            .resolve_allow_set_as(&tenant(), Some(&user("user:carol")), UserRole::Member)
             .await
             .expect("resolve");
         assert!(
@@ -625,10 +752,11 @@ mod tests {
             }),
             static_source(),
             Arc::new(FailingPolicyResolver),
+            Vec::new(),
         );
 
         let set = resolver
-            .resolve_allow_set(&tenant(), Some(&user("user:bob")))
+            .resolve_allow_set_as(&tenant(), Some(&user("user:bob")), UserRole::Member)
             .await
             .expect("a policy fault must not surface as Err — that would kill the turn");
         assert!(
@@ -650,16 +778,186 @@ mod tests {
             }),
             static_source(),
             available_default_policy(),
+            Vec::new(),
         );
 
         let set = resolver
-            .resolve_allow_set(&tenant(), Some(&user("user:bob")))
+            .resolve_allow_set_as(&tenant(), Some(&user("user:bob")), UserRole::Member)
             .await
             .expect("resolve");
         assert!(
             allow_ids(&set).is_empty(),
             "policy-available but not installed → never in the allow-set"
         );
+    }
+
+    // --- #5261 D3 role-aware availability + D4 builtin governance ---
+
+    /// (a) An Admin (and an Owner) get the FULL installed+builtin surface even
+    /// when a User-scope `Hidden` delta is present for them — the bypass skips
+    /// the per-capability policy intersection entirely.
+    #[cfg(feature = "capability-policy")]
+    #[tokio::test]
+    async fn admin_bypasses_user_scope_hide_and_sees_full_surface() {
+        let shell = cap("builtin.shell");
+        let resolver = resolver_with_builtins(
+            vec![admin_shared("install-web", "web-access")],
+            // Hide BOTH the installed cap and the builtin for this user.
+            policy_with_deltas(vec![
+                hide_user_delta("nearai.web_search", "user:officer"),
+                hide_user_delta("builtin.shell", "user:officer"),
+            ]),
+            vec![shell.clone()],
+        );
+
+        for role in [UserRole::Admin, UserRole::Owner] {
+            let set = resolver
+                .resolve_allow_set_as(&tenant(), Some(&user("user:officer")), role)
+                .await
+                .expect("resolve");
+            let ids = allow_ids(&set);
+            assert!(
+                ids.contains(&cap("nearai.web_search")),
+                "{role:?} must see the installed cap despite a User-scope hide (bypass)"
+            );
+            assert!(
+                ids.contains(&shell),
+                "{role:?} must see the builtin despite a User-scope hide (bypass)"
+            );
+        }
+
+        // Same deltas DO cap a member — proves the bypass is role-gated.
+        let member = resolver
+            .resolve_allow_set_as(&tenant(), Some(&user("user:officer")), UserRole::Member)
+            .await
+            .expect("resolve");
+        assert!(
+            allow_ids(&member).is_empty(),
+            "a member with both caps hidden sees nothing — the bypass is admin-only"
+        );
+    }
+
+    /// (b) A tenant-scope `Hidden` delta (which `scope_applies_to_subject`
+    /// applies to everyone) also does NOT cap an admin/owner.
+    #[cfg(feature = "capability-policy")]
+    #[tokio::test]
+    async fn admin_bypasses_tenant_scope_hide() {
+        let resolver = resolver_with_builtins(
+            vec![admin_shared("install-web", "web-access")],
+            policy_with_deltas(vec![hide_tenant_delta("nearai.web_search")]),
+            Vec::new(),
+        );
+
+        let officer = resolver
+            .resolve_allow_set_as(&tenant(), Some(&user("user:officer")), UserRole::Admin)
+            .await
+            .expect("resolve");
+        assert!(
+            allow_ids(&officer).contains(&cap("nearai.web_search")),
+            "an admin must not be capped by a tenant-scope hide"
+        );
+
+        // The same tenant-scope hide DOES cap a member.
+        let member = resolver
+            .resolve_allow_set_as(&tenant(), Some(&user("user:alice")), UserRole::Member)
+            .await
+            .expect("resolve");
+        assert!(
+            !allow_ids(&member).contains(&cap("nearai.web_search")),
+            "a member IS capped by the tenant-scope hide"
+        );
+    }
+
+    /// (c) A builtin (`builtin.shell`) is available-by-default to a member even
+    /// though no installable package contributes it.
+    #[cfg(feature = "capability-policy")]
+    #[tokio::test]
+    async fn builtin_is_available_by_default_to_member() {
+        let shell = cap("builtin.shell");
+        let resolver = resolver_with_builtins(
+            // No installations at all — the builtin must still surface.
+            Vec::new(),
+            available_default_policy(),
+            vec![shell.clone()],
+        );
+
+        let set = resolver
+            .resolve_allow_set_as(&tenant(), Some(&user("user:alice")), UserRole::Member)
+            .await
+            .expect("resolve");
+        assert!(
+            allow_ids(&set).contains(&shell),
+            "builtin.shell is always-available (seeded) to a member by default"
+        );
+    }
+
+    /// (d) A member's User-scope `Hidden` delta on `builtin.shell` drops it —
+    /// builtins are governable per-user just like installed caps.
+    #[cfg(feature = "capability-policy")]
+    #[tokio::test]
+    async fn member_user_scope_hide_drops_builtin() {
+        let shell = cap("builtin.shell");
+        let resolver = resolver_with_builtins(
+            Vec::new(),
+            policy_with_deltas(vec![hide_user_delta("builtin.shell", "user:alice")]),
+            vec![shell.clone()],
+        );
+
+        let alice = resolver
+            .resolve_allow_set_as(&tenant(), Some(&user("user:alice")), UserRole::Member)
+            .await
+            .expect("resolve");
+        assert!(
+            !allow_ids(&alice).contains(&shell),
+            "a member's User-scope hide on builtin.shell drops the builtin"
+        );
+
+        // A different member with no hide still sees the builtin (per-user).
+        let bob = resolver
+            .resolve_allow_set_as(&tenant(), Some(&user("user:bob")), UserRole::Member)
+            .await
+            .expect("resolve");
+        assert!(
+            allow_ids(&bob).contains(&shell),
+            "the hide is per-user; an unhidden member still sees builtin.shell"
+        );
+    }
+
+    /// (e) Existing member `installed ∩ policy` behavior still holds with the
+    /// builtin seeding present: a member sees the installed cap AND the builtin,
+    /// but a User-scope hide on the installed cap drops only that one.
+    #[cfg(feature = "capability-policy")]
+    #[tokio::test]
+    async fn member_installed_intersect_policy_holds_with_builtins() {
+        let shell = cap("builtin.shell");
+        let resolver = resolver_with_builtins(
+            vec![admin_shared("install-web", "web-access")],
+            policy_with_deltas(vec![hide_user_delta("nearai.web_search", "user:alice")]),
+            vec![shell.clone()],
+        );
+
+        let alice = resolver
+            .resolve_allow_set_as(&tenant(), Some(&user("user:alice")), UserRole::Member)
+            .await
+            .expect("resolve");
+        let ids = allow_ids(&alice);
+        assert!(
+            !ids.contains(&cap("nearai.web_search")),
+            "the installed cap is hidden for alice (intersection still applies to members)"
+        );
+        assert!(
+            ids.contains(&shell),
+            "the builtin (not hidden) remains available to the member"
+        );
+
+        // bob has no hide → sees both the installed cap and the builtin.
+        let bob = resolver
+            .resolve_allow_set_as(&tenant(), Some(&user("user:bob")), UserRole::Member)
+            .await
+            .expect("resolve");
+        let bob_ids = allow_ids(&bob);
+        assert!(bob_ids.contains(&cap("nearai.web_search")));
+        assert!(bob_ids.contains(&shell));
     }
 
     #[test]
