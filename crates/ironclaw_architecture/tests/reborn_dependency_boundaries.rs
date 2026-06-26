@@ -709,6 +709,7 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         // Composition-local protocol surfaces that reconstruct provider-shaped
         // output or local-dev synthetic provider tools.
         "crates/ironclaw_reborn_composition/src/openai_compat_serve.rs",
+        "crates/ironclaw_reborn_composition/src/runtime/local_dev/external_tool_capability.rs",
         "crates/ironclaw_reborn_composition/src/runtime/local_dev/synthetic_capability.rs",
         "crates/ironclaw_reborn_composition/src/trace_capture.rs",
     ]);

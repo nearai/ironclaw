@@ -132,6 +132,17 @@ fn external_tool_capability_id(tool_name: &str) -> Result<CapabilityId, AgentLoo
     })
 }
 
+fn provider_tool_name_for_external_tool(
+    tool_name: &str,
+) -> Result<ProviderToolName, AgentLoopHostError> {
+    ProviderToolName::new(tool_name).map_err(|_| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "external tool name cannot be represented as a provider tool name",
+        )
+    })
+}
+
 impl ExternalToolCapabilityPort {
     fn surface_version(&self) -> Result<CapabilitySurfaceVersion, AgentLoopHostError> {
         self.surface
@@ -352,12 +363,7 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
                     "external tool name shadows a host capability",
                 ));
             }
-            let provider_tool_name = ProviderToolName::new(spec.name()).map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "external tool name is not a valid provider tool name",
-                )
-            })?;
+            let provider_tool_name = provider_tool_name_for_external_tool(spec.name())?;
             let capability_id = external_tool_capability_id(provider_tool_name.as_str())?;
             if surface
                 .descriptors
@@ -449,4 +455,187 @@ fn catalog_error(_error: ironclaw_turns::ExternalToolCatalogError) -> AgentLoopH
         AgentLoopHostErrorKind::Unavailable,
         "external tool catalog is unavailable",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use ironclaw_host_api::{TenantId, ThreadId};
+    use ironclaw_loop_support::CapabilityWriteResult;
+    use ironclaw_turns::{
+        ExternalToolSpec, InMemoryExternalToolCatalog, RunProfileResolutionRequest,
+        RunProfileResolver, TurnId, TurnScope,
+        run_profile::{CapabilityInputRef, InMemoryRunProfileResolver},
+    };
+
+    struct EmptyInnerPort;
+
+    #[async_trait]
+    impl LoopCapabilityPort for EmptyInnerPort {
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+            Ok(VisibleCapabilitySurface {
+                version: CapabilitySurfaceVersion::new("test.surface.v1").expect("surface version"),
+                descriptors: Vec::new(),
+            })
+        }
+
+        async fn invoke_capability(
+            &self,
+            _request: CapabilityInvocation,
+        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "test inner port does not execute capabilities",
+            ))
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            _request: CapabilityBatchInvocation,
+        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "test inner port does not execute capability batches",
+            ))
+        }
+    }
+
+    struct TestInputResolver;
+
+    #[async_trait]
+    impl LoopCapabilityInputResolver for TestInputResolver {
+        async fn resolve_capability_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
+        ) -> Result<serde_json::Value, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "test input resolver does not resolve inputs",
+            ))
+        }
+    }
+
+    struct TestResultWriter;
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for TestResultWriter {
+        async fn write_capability_result(
+            &self,
+            _write: CapabilityResultWrite<'_>,
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "test result writer does not write results",
+            ))
+        }
+    }
+
+    async fn run_context() -> LoopRunContext {
+        let resolved = InMemoryRunProfileResolver::default()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("profile resolves");
+        LoopRunContext::new(
+            TurnScope::new(
+                TenantId::new("tenant-external-tools").expect("tenant id"),
+                None,
+                None,
+                ThreadId::new("thread-external-tools").expect("thread id"),
+            ),
+            TurnId::new(),
+            TurnRunId::new(),
+            resolved,
+        )
+    }
+
+    fn external_tool_spec(name: &str) -> ExternalToolSpec {
+        ExternalToolSpec::new(
+            name,
+            "client-side external tool",
+            serde_json::json!({"type": "object"}),
+        )
+        .expect("external tool spec")
+    }
+
+    async fn wrapped_port_with_specs(
+        specs: Vec<ExternalToolSpec>,
+    ) -> (Arc<dyn LoopCapabilityPort>, LoopRunContext) {
+        let run_context = run_context().await;
+        let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+        catalog
+            .register(run_context.run_id, specs)
+            .await
+            .expect("register external tools");
+        let catalog: Arc<dyn ExternalToolCatalog> = catalog;
+        (
+            wrap_local_dev_external_tools(
+                Arc::new(EmptyInnerPort),
+                run_context.clone(),
+                Arc::new(TestInputResolver),
+                Arc::new(TestResultWriter),
+                catalog,
+            ),
+            run_context,
+        )
+    }
+
+    #[tokio::test]
+    async fn external_tool_surface_maps_provider_name_to_capability_id() {
+        let (port, _run_context) =
+            wrapped_port_with_specs(vec![external_tool_spec("client_tool")]).await;
+
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible capabilities");
+        assert_eq!(surface.descriptors.len(), 1);
+        assert_eq!(
+            surface.descriptors[0].capability_id.as_str(),
+            "external_tool.client_tool"
+        );
+        assert_eq!(surface.descriptors[0].safe_name, "client_tool");
+
+        let definitions = port.tool_definitions().expect("tool definitions");
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].name.as_str(), "client_tool");
+
+        let ids = port
+            .provider_tool_call_capability_ids(&ProviderToolCall {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                id: "call-1".to_string(),
+                name: ProviderToolName::new("client_tool").expect("provider tool name"),
+                arguments: serde_json::json!({}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            })
+            .expect("capability ids");
+        assert_eq!(
+            ids.provider_capability_id.as_str(),
+            "external_tool.client_tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_tool_surface_rejects_names_that_are_not_provider_safe() {
+        let (port, _run_context) =
+            wrapped_port_with_specs(vec![external_tool_spec("client.tool")]).await;
+
+        let error = port
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect_err("invalid external tool name should fail closed");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert_eq!(
+            error.safe_summary,
+            "external tool name cannot be represented as a provider tool name"
+        );
+    }
 }
