@@ -355,6 +355,39 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the extension lifecycle port
   in the Reborn WebUI v2 Playwright job.
 
+### Step 10: Legacy Routine/Automation Management Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_automations.py`.
+
+Ported the user-visible management intent from legacy routine/automation
+coverage to the standalone Reborn Automations page:
+
+- scheduled automations render from `/api/webchat/v2/automations`;
+- the browser passes the expected `limit=50` and `run_limit=25` list query;
+- completed automations are hidden from the default list and fetched through
+  `include_completed=true` when the Completed filter is selected;
+- filters for Failures, Running, Paused, and Completed show the matching rows;
+- the scheduler-disabled response flag surfaces the visible warning;
+- outbound delivery defaults render current/available targets and save the
+  selected final-reply target through `/api/webchat/v2/outbound/preferences`;
+- pause, resume, and delete actions post to the v2 mutation endpoints, with
+  delete protected by the native confirm dialog.
+
+Behavior adjustment:
+
+- Legacy v1 routines used `/api/routines/*`, in-page upgrade globals, and the
+  legacy chat/routines shell. Reborn has a hidden `/v2/routines` page, but its
+  client API is currently a TODO stub around v1 endpoints. The functional
+  Reborn successor for scheduled work management is `/v2/automations`, backed
+  by `/api/webchat/v2/automations` and the outbound delivery defaults API.
+  This step ports the behavior there and records the routines page stub as a
+  remaining product parity gap.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the automations port in the
+  Reborn WebUI v2 Playwright job.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -370,7 +403,9 @@ Not yet ported:
   top-level extension install/manage surface;
 - OAuth/product-auth flows;
 - Slack/Telegram/channel pairing scenarios;
-- routines/automations/admin/operator flows;
+- admin/operator flows;
+- legacy `/v2/routines` parity, because the current Reborn routines page still
+  uses TODO client stubs instead of real v2 endpoints;
 - Emulate provider full-path scenarios against standalone Reborn where the
   current test still routes through legacy `/api/chat/*`.
 
@@ -387,3 +422,9 @@ The attachment browser port initially failed with the mock response
 test mock's slash-skill detector treating generated attachment storage paths as
 explicit slash skills. Reborn's attachment projection was behaving as intended;
 the mock heuristic was fixed.
+
+The routine/automation inspection found a product parity gap: the Reborn
+`/v2/routines` page imports a client API whose operations still return TODO
+stub responses and reference legacy v1 routine endpoints. The migrated tests
+therefore target Reborn's real `/v2/automations` surface for scheduled-work
+management, while leaving dedicated routines-page parity as open work.
