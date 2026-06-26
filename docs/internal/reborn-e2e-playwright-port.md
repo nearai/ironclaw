@@ -1639,6 +1639,27 @@ Behavior adjustment:
   `/api/webchat/v2/extensions/{package_id}/setup` projection instead of
   pinning legacy `client_id` / `client_secret` auto-resolution internals.
 
+### Step 47: Legacy Multi-Extension Isolation Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the browser-visible list/isolation invariant from legacy
+`test_install_gmail`, `test_gmail_fields`, and `test_both_extensions_listed`:
+
+- installing one registry extension does not hide or clobber another available
+  extension;
+- installing a second registry extension records a distinct v2 `package_ref`
+  request;
+- both extensions remain visible in the installed registry group;
+- installed registry entries no longer expose the `Install` action.
+
+Behavior adjustment:
+
+- The legacy test asserted backend `/api/extensions` names and Gmail-specific
+  `has_auth` fields. Reborn's port asserts the v2 Registry tab projection and
+  distinct `package_ref` install requests for two extension kinds instead of
+  legacy names.
+
 ## Open Migration Buckets
 
 Not yet ported:

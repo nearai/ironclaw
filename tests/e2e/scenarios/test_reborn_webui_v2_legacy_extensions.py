@@ -509,6 +509,52 @@ async def test_reborn_legacy_extensions_registry_search_no_match(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_extensions_multiple_installs_remain_listed(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        registry=[REGISTRY_TOOL, REGISTRY_MCP],
+    )
+    try:
+        page = harness["page"]
+        await expect(page.get_by_text("Registry Tool")).to_be_visible(timeout=5000)
+        await expect(page.get_by_text("Registry MCP Server")).to_be_visible()
+
+        registry_tool_card = _card_by_title(page, "Registry Tool")
+        await registry_tool_card.get_by_role("button", name="Install").click()
+        await expect(page.get_by_text("Registry Tool installed")).to_be_visible(
+            timeout=5000
+        )
+
+        registry_mcp_card = _card_by_title(page, "Registry MCP Server")
+        await registry_mcp_card.get_by_role("button", name="Install").click()
+        await expect(page.get_by_text("Registry MCP Server installed")).to_be_visible(
+            timeout=5000
+        )
+
+        assert harness["install_requests"] == [
+            {"package_ref": _package_ref("registry-tool")},
+            {"package_ref": _package_ref("registry-mcp")},
+        ]
+
+        installed_tool = _card_by_title(page, "Registry Tool")
+        installed_mcp = _card_by_title(page, "Registry MCP Server")
+        await expect(installed_tool.get_by_text("installed", exact=True)).to_be_visible(
+            timeout=5000
+        )
+        await expect(installed_mcp.get_by_text("installed", exact=True)).to_be_visible()
+        await expect(
+            installed_tool.get_by_role("button", name="Install")
+        ).to_have_count(0)
+        await expect(installed_mcp.get_by_role("button", name="Install")).to_have_count(
+            0
+        )
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_extensions_install_failure_keeps_registry_entry_available(
     reborn_v2_server, reborn_v2_browser
 ):
