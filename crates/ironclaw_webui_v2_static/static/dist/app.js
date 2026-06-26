@@ -1030,7 +1030,10 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
       </form>
     <//>
   `}var GA="/api/webchat/v2/extensions/pairing/redeem";function C1(e){return H(GA,{method:"POST",body:JSON.stringify({channel:"slack",code:e})}).then(t=>({success:!0,provider:t.provider,provider_user_id:t.provider_user_id,message:"Slack account connected."}))}function Oc({action:e}){let t=C(),a=J(),n=Q({mutationFn:({code:l})=>C1(l),onSuccess:()=>{a.invalidateQueries({queryKey:["extensions"]}),a.invalidateQueries({queryKey:["connectable-channels"]}),a.invalidateQueries({queryKey:["pairing","slack"]})}}),[r,s]=p.default.useState(""),i=YA(e,t),o=()=>{let l=r.trim();l&&(n.mutate({code:l}),s(""))};return u`
-    <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+    <div
+      data-testid="slack-pairing-section"
+      className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4"
+    >
       <h4 className="mb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
         ${i.title}
       </h4>
@@ -1045,11 +1048,13 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
           onChange=${l=>s(l.target.value)}
           onKeyDown=${l=>l.key==="Enter"&&o()}
           placeholder=${i.codePlaceholder}
+          data-testid="slack-pairing-code-input"
           className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
         />
         <${A}
           variant="secondary"
           className="h-9 shrink-0 px-3 text-xs"
+          data-testid="slack-pairing-submit"
           onClick=${o}
           disabled=${n.isPending||!r.trim()}
         >
@@ -1057,15 +1062,20 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
         <//>
       </div>
 
-      ${n.isSuccess&&u`<p className="text-xs text-emerald-300">
+      ${n.isSuccess&&u`<p data-testid="slack-pairing-success" className="text-xs text-emerald-300">
         ${n.data?.message||i.successMessage}
       </p>`}
-      ${n.isError&&u`<p className="text-xs text-red-300">
+      ${n.isError&&u`<p data-testid="slack-pairing-error" className="text-xs text-red-300">
         ${JA(n.error,i.errorMessage)}
       </p>`}
     </div>
   `}function YA(e,t){return{title:e?.title||t("pairing.slackTitle"),instructions:e?.instructions||t("pairing.slackInstructions"),codePlaceholder:e?.input_placeholder||e?.code_placeholder||t("pairing.slackPlaceholder"),submitLabel:e?.submit_label||t("pairing.connect"),successMessage:e?.success_message||t("pairing.slackSuccess"),errorMessage:e?.error_message||t("pairing.slackError")}}function JA(e,t){return e?.payload?.error||e?.payload?.message||e?.message||t}function XA(e,t){return e?.channel==="slack"&&e.strategy===t}function E1({connectAction:e,onDismiss:t}){if(!e)return null;let a=e.channel;return u`
-    <div className="rounded-[16px] border border-white/[0.06] bg-white/[0.02] p-3">
+    <div
+      data-testid="channel-connect-card"
+      data-channel=${a||""}
+      data-strategy=${e.strategy||""}
+      className="rounded-[16px] border border-white/[0.06] bg-white/[0.02] p-3"
+    >
       <div className="mb-2 flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
@@ -1076,6 +1086,7 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
           <button
             type="button"
             aria-label="Dismiss connect action"
+            data-testid="channel-connect-dismiss"
             onClick=${t}
             className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-iron-400 hover:bg-white/[0.04] hover:text-iron-100"
           >

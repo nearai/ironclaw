@@ -243,6 +243,17 @@ SEL_V2 = {
     "auth_gate_for":  "[data-testid='auth-gate'][data-auth-challenge='{kind}']",
     "auth_token_input": "[data-testid='auth-token-input']",
     "auth_oauth_open": "[data-testid='auth-oauth-open']",
+    "channel_connect_card": "[data-testid='channel-connect-card']",
+    "channel_connect_card_for": (
+        "[data-testid='channel-connect-card'][data-channel='{channel}']"
+        "[data-strategy='{strategy}']"
+    ),
+    "channel_connect_dismiss": "[data-testid='channel-connect-dismiss']",
+    "slack_pairing_section": "[data-testid='slack-pairing-section']",
+    "slack_pairing_code_input": "[data-testid='slack-pairing-code-input']",
+    "slack_pairing_submit": "[data-testid='slack-pairing-submit']",
+    "slack_pairing_success": "[data-testid='slack-pairing-success']",
+    "slack_pairing_error": "[data-testid='slack-pairing-error']",
     "approval_card":  "[data-testid='approval-card']",  # approval gate card
     "busy_gate_notice": "[data-testid='busy-gate-notice']",  # gate busy notice
     "activity_run":   "[data-testid='activity-run']",

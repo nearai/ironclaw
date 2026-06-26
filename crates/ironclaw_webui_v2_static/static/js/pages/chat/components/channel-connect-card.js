@@ -11,7 +11,12 @@ export function ChannelConnectCard({ connectAction, onDismiss }) {
   const channel = connectAction.channel;
 
   return html`
-    <div className="rounded-[16px] border border-white/[0.06] bg-white/[0.02] p-3">
+    <div
+      data-testid="channel-connect-card"
+      data-channel=${channel || ""}
+      data-strategy=${connectAction.strategy || ""}
+      className="rounded-[16px] border border-white/[0.06] bg-white/[0.02] p-3"
+    >
       <div className="mb-2 flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
@@ -23,6 +28,7 @@ export function ChannelConnectCard({ connectAction, onDismiss }) {
           <button
             type="button"
             aria-label="Dismiss connect action"
+            data-testid="channel-connect-dismiss"
             onClick=${onDismiss}
             className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-iron-400 hover:bg-white/[0.04] hover:text-iron-100"
           >

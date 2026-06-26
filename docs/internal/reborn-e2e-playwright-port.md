@@ -698,6 +698,42 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the product-auth prompt port
   in the Reborn WebUI v2 Playwright job.
 
+### Step 20: Legacy Channel Connect / Pairing Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_channel_connect.py`.
+
+Ported the browser-visible pairing-card intent from legacy
+`test_channel_pairing_flow.py` to Reborn's chat-owned channel connect flow:
+
+- a `connect slack` chat command queries
+  `/api/webchat/v2/channels/connectable`;
+- a Slack `inbound_proof_code` connect action renders the Slack pairing card
+  instead of sending a normal chat turn;
+- the proof code input trims whitespace and redeems through
+  `/api/webchat/v2/extensions/pairing/redeem`;
+- the card displays the success message and can be dismissed;
+- the test blocks `/api/webchat/v2/threads/*/messages` to prove the connect
+  command does not fall through to normal message submission.
+
+Behavior adjustment:
+
+- Legacy pairing tests used v1 `handleOnboardingState(...)` globals and
+  `/api/pairing/{channel}/approve`. Reborn's browser path resolves connect
+  commands through typed connectable-channel metadata and redeems Slack pairing
+  codes through the v2 extensions pairing endpoint. Lower-level pairing
+  authorization, invalid-code, and admin/member access checks remain legacy API
+  coverage until Reborn exposes a matching operator/member pairing API.
+
+Frontend harness adjustment:
+
+- Added stable selectors for the Reborn channel-connect card and Slack pairing
+  section so pairing assertions do not depend on layout classes.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the channel connect/pairing
+  port in the Reborn WebUI v2 Playwright job.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -717,7 +753,9 @@ Not yet ported:
 - deeper OAuth/product-auth install/callback flows beyond browser prompt
   handling, including hosted callback replay/removal and provider-backed
   extension/MCP setup where standalone Reborn has matching endpoints;
-- Slack/Telegram/channel pairing scenarios;
+- remaining Slack/Telegram/channel pairing scenarios beyond the Reborn Slack
+  proof-code connect card, especially lower-level member/admin pairing APIs and
+  Telegram-specific pairing once standalone Reborn exposes matching surfaces;
 - admin/operator flows, including Reborn Settings Users search once the v2
   users endpoints replace the current TODO client stubs;
 - legacy `/v2/routines` parity, because the current Reborn routines page still
