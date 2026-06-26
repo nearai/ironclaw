@@ -447,6 +447,9 @@ Ported the caller-visible pending-message intent from legacy
   duplicating the user message;
 - an unconfirmed optimistic message survives switching away from the thread and
   back through the real sidebar while the refreshed timeline is still empty;
+- Reborn projection run-status events mark the active thread as `Running` in
+  the app sidebar and clear that marker after a terminal run event reloads the
+  timeline;
 - a failed v2 send renders one error-state optimistic user message and exposes
   the Retry affordance.
 
@@ -463,6 +466,12 @@ Behavior adjustment:
   intact and does not refetch by itself, so the functional port uses the real
   sidebar thread switch and timeline reload path to protect the same invariant:
   an unconfirmed optimistic message is not erased by a history refresh.
+- Legacy background-thread processing indicators relied on v1 thread metadata
+  and unread badges. Reborn's current standalone browser only receives
+  per-active-thread run status through the v2 EventSource; the port asserts the
+  supported sidebar state-store behavior for the active thread and leaves
+  background-thread fan-out to the existing user-scoped stream/list enrichment
+  follow-up.
 
 CI update:
 

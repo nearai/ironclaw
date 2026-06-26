@@ -339,6 +339,67 @@ async def test_reborn_legacy_pending_message_survives_thread_reload(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_sidebar_running_indicator_clears_on_terminal_run(
+    reborn_v2_server, reborn_v2_browser
+):
+    async def handle_successful_send(route, _payload, fulfill_json):
+        await fulfill_json(route, _submitted_response(), status=202)
+
+    harness = await _open_mocked_pending_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        threads=[
+            {
+                "thread_id": THREAD_ID,
+                "title": "Processing thread",
+                "created_at": "2026-06-25T00:00:00Z",
+                "updated_at": "2026-06-25T00:00:00Z",
+            }
+        ],
+        send_handler=handle_successful_send,
+    )
+    try:
+        page = harness["page"]
+        sidebar_thread = page.locator("#gateway-sidebar").get_by_role("button").filter(
+            has_text="Processing thread"
+        ).first
+        await expect(sidebar_thread).to_be_visible(timeout=5000)
+
+        await page.evaluate(
+            f"""
+            () => window.__emitV2Sse("projection_update", {{
+              state: {{
+                items: [
+                  {{ run_status: {{ run_id: {RUN_ID!r}, status: "running" }} }}
+                ]
+              }}
+            }})
+            """
+        )
+        await expect(sidebar_thread).to_contain_text("Running", timeout=5000)
+        await expect(page.locator(SEL_V2["typing_indicator"])).to_be_visible(
+            timeout=5000
+        )
+
+        before_terminal_requests = len(harness["timeline_requests"])
+        await page.evaluate(
+            f"""
+            () => window.__emitV2Sse("projection_update", {{
+              state: {{
+                items: [
+                  {{ run_status: {{ run_id: {RUN_ID!r}, status: "completed" }} }}
+                ]
+              }}
+            }})
+            """
+        )
+        await _wait_for_request_count(harness["timeline_requests"], before_terminal_requests)
+        await expect(sidebar_thread).not_to_contain_text("Running", timeout=5000)
+        await expect(page.locator(SEL_V2["typing_indicator"])).to_have_count(0)
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_failed_send_marks_single_error_message(
     reborn_v2_server, reborn_v2_browser
 ):
