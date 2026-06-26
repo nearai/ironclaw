@@ -12,10 +12,15 @@ use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_events::AuditSink;
-use ironclaw_filesystem::RootFilesystem;
+use ironclaw_filesystem::{
+    BackendCapabilities, CasExpectation, DirEntry, Entry, EventRecord, FileStat, FilesystemError,
+    FilesystemOperation, Filter, IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo, StorageTxn,
+    VersionedEntry,
+};
 use ironclaw_host_api::{
-    MountView, ResourceScope, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    MountPermissions, MountView, ResourceScope, RuntimeDispatchErrorKind, RuntimeHttpEgress,
+    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, ScopedPath,
+    VirtualPath,
     runtime_policy::{
         DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind, SecretMode,
     },
@@ -193,22 +198,14 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
         request: InvocationServicesResolutionRequest<'_>,
     ) -> Result<InvocationServices, InvocationServicesError> {
         let plan = request.plan;
-        if !matches!(plan.deployment, DeploymentMode::LocalSingleUser) {
-            return Err(unsupported_non_local_plan(plan));
-        }
-        if plan.requires_filesystem
-            && !matches!(
-                plan.filesystem_backend,
-                FilesystemBackendKind::HostWorkspace | FilesystemBackendKind::HostWorkspaceAndHome
-            )
-        {
-            return Err(InvocationServicesError::UnsupportedFilesystemBackend {
-                backend: plan.filesystem_backend,
-            });
-        }
+        let filesystem = self.filesystem_for_plan(plan, request.mounts)?;
         let process = if plan.requires_process {
             match plan.process_backend {
-                ProcessBackendKind::LocalHost => Arc::clone(&self.process),
+                ProcessBackendKind::LocalHost
+                    if matches!(plan.deployment, DeploymentMode::LocalSingleUser) =>
+                {
+                    Arc::clone(&self.process)
+                }
                 ProcessBackendKind::TenantSandbox => self.tenant_sandbox_process.clone().ok_or(
                     InvocationServicesError::UnsupportedProcessBackend {
                         backend: plan.process_backend,
@@ -223,36 +220,18 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
         } else {
             Arc::clone(&self.process)
         };
-        if plan.requires_network
-            && !matches!(
-                plan.network_mode,
-                NetworkMode::Brokered | NetworkMode::DirectLogged | NetworkMode::Direct
-            )
-        {
-            return Err(InvocationServicesError::UnsupportedNetworkMode {
-                mode: plan.network_mode,
-            });
-        }
+        validate_network_plan(plan)?;
         if plan.requires_network && self.runtime_http_egress.is_none() {
             return Err(InvocationServicesError::UnsupportedNetworkMode {
                 mode: plan.network_mode,
             });
         }
-        if plan.requires_secret
-            && !matches!(
-                plan.secret_mode,
-                SecretMode::ScrubbedEnv | SecretMode::InheritedEnv
-            )
-        {
-            return Err(InvocationServicesError::UnsupportedSecretMode {
-                mode: plan.secret_mode,
-            });
-        }
+        validate_secret_plan(plan)?;
         if plan.requires_secret && self.secret_store.is_none() {
             return Err(InvocationServicesError::SecretAccessRequired);
         }
         Ok(InvocationServices {
-            filesystem: Arc::clone(&self.filesystem),
+            filesystem,
             runtime_http_egress: plan
                 .requires_network
                 .then(|| self.runtime_http_egress.clone())
@@ -276,675 +255,291 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
     }
 }
 
-fn unsupported_non_local_plan(plan: &ExecutionPlan) -> InvocationServicesError {
-    if plan.requires_filesystem {
-        return InvocationServicesError::UnsupportedFilesystemBackend {
-            backend: plan.filesystem_backend,
-        };
+impl LocalInvocationServicesResolver {
+    fn filesystem_for_plan(
+        &self,
+        plan: &ExecutionPlan,
+        mounts: Option<&MountView>,
+    ) -> Result<Arc<dyn RootFilesystem>, InvocationServicesError> {
+        if !plan.requires_filesystem {
+            return Ok(Arc::new(MountScopedRootFilesystem::new(
+                Arc::clone(&self.filesystem),
+                MountView::default(),
+            )));
+        }
+        match plan.filesystem_backend {
+            FilesystemBackendKind::HostWorkspace | FilesystemBackendKind::HostWorkspaceAndHome
+                if matches!(plan.deployment, DeploymentMode::LocalSingleUser) =>
+            {
+                Ok(Arc::clone(&self.filesystem))
+            }
+            FilesystemBackendKind::ScopedVirtual => {
+                let mounts =
+                    mounts.ok_or(InvocationServicesError::UnsupportedFilesystemBackend {
+                        backend: plan.filesystem_backend,
+                    })?;
+                Ok(Arc::new(MountScopedRootFilesystem::new(
+                    Arc::clone(&self.filesystem),
+                    mounts.clone(),
+                )))
+            }
+            _ => Err(InvocationServicesError::UnsupportedFilesystemBackend {
+                backend: plan.filesystem_backend,
+            }),
+        }
     }
-    if plan.requires_process {
-        return InvocationServicesError::UnsupportedProcessBackend {
-            backend: plan.process_backend,
-        };
+}
+
+struct MountScopedRootFilesystem {
+    root: Arc<dyn RootFilesystem>,
+    mounts: MountView,
+}
+
+impl MountScopedRootFilesystem {
+    fn new(root: Arc<dyn RootFilesystem>, mounts: MountView) -> Self {
+        Self { root, mounts }
     }
-    if plan.requires_network {
-        return InvocationServicesError::UnsupportedNetworkMode {
+
+    fn resolve(
+        &self,
+        path: &VirtualPath,
+        operation: FilesystemOperation,
+    ) -> Result<VirtualPath, FilesystemError> {
+        let Some(grant) = self
+            .mounts
+            .mounts
+            .iter()
+            .filter(|grant| virtual_path_in_mount(&grant.target, path))
+            .max_by_key(|grant| grant.target.as_str().len())
+        else {
+            return Err(permission_denied(path, operation));
+        };
+        if !operation_allowed(&grant.permissions, operation) {
+            return Err(permission_denied(path, operation));
+        }
+        Ok(path.clone())
+    }
+}
+
+fn permission_denied(path: &VirtualPath, operation: FilesystemOperation) -> FilesystemError {
+    match ScopedPath::new(path.as_str().to_string())
+        .or_else(|_| ScopedPath::new("/unauthorized".to_string()))
+    {
+        Ok(path) => FilesystemError::PermissionDenied { path, operation },
+        Err(error) => FilesystemError::Contract(error),
+    }
+}
+
+fn virtual_path_in_mount(mount_root: &VirtualPath, path: &VirtualPath) -> bool {
+    let mount_root = mount_root.as_str();
+    let path = path.as_str();
+    mount_root == "/"
+        || path == mount_root
+        || path
+            .strip_prefix(mount_root)
+            .is_some_and(|tail| tail.starts_with('/'))
+}
+
+fn operation_allowed(permissions: &MountPermissions, operation: FilesystemOperation) -> bool {
+    match operation {
+        FilesystemOperation::ReadFile => permissions.read,
+        FilesystemOperation::WriteFile
+        | FilesystemOperation::AppendFile
+        | FilesystemOperation::CreateDirAll
+        | FilesystemOperation::EnsureIndex
+        | FilesystemOperation::BeginTxn
+        | FilesystemOperation::Append => permissions.write,
+        FilesystemOperation::ListDir => permissions.list,
+        FilesystemOperation::Stat => permissions.read || permissions.list,
+        FilesystemOperation::Delete => permissions.delete,
+        FilesystemOperation::MountLocal | FilesystemOperation::Connect => false,
+        FilesystemOperation::Query => permissions.read && permissions.list,
+        FilesystemOperation::Tail | FilesystemOperation::HeadSeq => permissions.read,
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for MountScopedRootFilesystem {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.root.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::WriteFile)?;
+        self.root.put(&path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::ReadFile)?;
+        self.root.get(&path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::ListDir)?;
+        self.root.list_dir(&path).await
+    }
+
+    async fn list_dir_bounded(
+        &self,
+        path: &VirtualPath,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::ListDir)?;
+        self.root.list_dir_bounded(&path, max_entries).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::Query)?;
+        self.root.query(&path, filter, page).await
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::EnsureIndex)?;
+        self.root.ensure_index(&path, spec).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::Stat)?;
+        self.root.stat(&path).await
+    }
+
+    async fn read_file_bounded(
+        &self,
+        path: &VirtualPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::ReadFile)?;
+        self.root.read_file_bounded(&path, max_bytes).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::Delete)?;
+        self.root.delete(&path).await
+    }
+
+    async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::BeginTxn)?;
+        self.root.begin(&path).await
+    }
+
+    async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::Append)?;
+        self.root.append(&path, payload).await
+    }
+
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::Append)?;
+        self.root.append_batch(&path, payloads).await
+    }
+
+    async fn tail(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::Tail)?;
+        self.root.tail(&path, from).await
+    }
+
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::Tail)?;
+        self.root.tail_bounded(&path, from, max_records).await
+    }
+
+    async fn head_seq(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Option<SeqNo>, FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::HeadSeq)?;
+        self.root.head_seq(&path, from).await
+    }
+
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::ReadFile)?;
+        self.root.read_file(&path).await
+    }
+
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::WriteFile)?;
+        self.root.write_file(&path, bytes).await
+    }
+
+    async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::AppendFile)?;
+        self.root.append_file(&path, bytes).await
+    }
+
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        let path = self.resolve(path, FilesystemOperation::CreateDirAll)?;
+        self.root.create_dir_all(&path).await
+    }
+}
+
+fn validate_network_plan(plan: &ExecutionPlan) -> Result<(), InvocationServicesError> {
+    if !plan.requires_network {
+        return Ok(());
+    }
+    match plan.network_mode {
+        NetworkMode::Brokered => Ok(()),
+        NetworkMode::Allowlist
+            if matches!(
+                plan.deployment,
+                DeploymentMode::HostedMultiTenant | DeploymentMode::EnterpriseDedicated
+            ) =>
+        {
+            Ok(())
+        }
+        NetworkMode::DirectLogged | NetworkMode::Direct
+            if matches!(plan.deployment, DeploymentMode::LocalSingleUser) =>
+        {
+            Ok(())
+        }
+        _ => Err(InvocationServicesError::UnsupportedNetworkMode {
             mode: plan.network_mode,
-        };
+        }),
     }
-    if plan.requires_secret {
-        return InvocationServicesError::UnsupportedSecretMode {
+}
+
+fn validate_secret_plan(plan: &ExecutionPlan) -> Result<(), InvocationServicesError> {
+    if !plan.requires_secret {
+        return Ok(());
+    }
+    match plan.secret_mode {
+        SecretMode::BrokeredHandles | SecretMode::TenantBroker | SecretMode::OrgBroker => Ok(()),
+        SecretMode::ScrubbedEnv | SecretMode::InheritedEnv
+            if matches!(plan.deployment, DeploymentMode::LocalSingleUser) =>
+        {
+            Ok(())
+        }
+        _ => Err(InvocationServicesError::UnsupportedSecretMode {
             mode: plan.secret_mode,
-        };
-    }
-    InvocationServicesError::UnsupportedProcessBackend {
-        backend: plan.process_backend,
+        }),
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use async_trait::async_trait;
-    use ironclaw_filesystem::LocalFilesystem;
-    use ironclaw_host_api::{
-        CapabilityId, ResourceScope,
-        runtime_policy::{RuntimeProfile, SecretMode},
-    };
-    use ironclaw_secrets::InMemorySecretStore;
-
-    use crate::{
-        CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, RuntimeProcessPort,
-    };
-
-    #[derive(Debug)]
-    struct NoopProcessPort;
-
-    #[derive(Debug)]
-    struct NamedProcessPort(&'static str);
-
-    #[async_trait]
-    impl RuntimeProcessPort for NoopProcessPort {
-        async fn run_command(
-            &self,
-            _request: CommandExecutionRequest,
-        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-            unreachable!("resolver tests must not execute commands")
-        }
-    }
-
-    struct NoopRuntimeHttpEgress;
-
-    #[async_trait]
-    impl ironclaw_host_api::RuntimeHttpEgress for NoopRuntimeHttpEgress {
-        async fn execute(
-            &self,
-            _request: ironclaw_host_api::RuntimeHttpEgressRequest,
-        ) -> Result<
-            ironclaw_host_api::RuntimeHttpEgressResponse,
-            ironclaw_host_api::RuntimeHttpEgressError,
-        > {
-            unreachable!("resolver tests must not execute HTTP requests")
-        }
-    }
-
-    #[async_trait]
-    impl RuntimeProcessPort for NamedProcessPort {
-        async fn run_command(
-            &self,
-            _request: CommandExecutionRequest,
-        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-            Ok(CommandExecutionOutput {
-                output: self.0.to_string(),
-                saved_output: None,
-                exit_code: 0,
-                sandboxed: false,
-                duration: std::time::Duration::ZERO,
-            })
-        }
-    }
-
-    #[test]
-    fn local_resolver_accepts_local_required_process_backend() {
-        let resolver = resolver_without_http();
-        let plan = plan(
-            ProcessBackendKind::LocalHost,
-            true,
-            false,
-            NetworkMode::DirectLogged,
-            false,
-        );
-
-        let services = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap();
-
-        assert!(services.runtime_http_egress.is_none());
-    }
-
-    #[test]
-    fn local_resolver_rejects_sandbox_process_backend_without_local_fallback() {
-        let resolver = resolver_without_http();
-        let plan = plan(
-            ProcessBackendKind::TenantSandbox,
-            true,
-            false,
-            NetworkMode::Allowlist,
-            false,
-        );
-
-        let error = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap_err();
-
-        assert_eq!(error.kind(), RuntimeDispatchErrorKind::UnsupportedRunner);
-        assert!(matches!(
-            error,
-            InvocationServicesError::UnsupportedProcessBackend {
-                backend: ProcessBackendKind::TenantSandbox
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn local_resolver_uses_configured_sandbox_process_backend() {
-        let resolver = resolver_without_http()
-            .with_tenant_sandbox_process_port(Arc::new(NamedProcessPort("sandbox")));
-        let plan = plan(
-            ProcessBackendKind::TenantSandbox,
-            true,
-            false,
-            NetworkMode::Allowlist,
-            false,
-        );
-
-        let services = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap();
-
-        let output = services
-            .process
-            .run_command(CommandExecutionRequest {
-                scope: ResourceScope::system(),
-                mounts: None,
-                command: "echo hi".to_string(),
-                workdir: None,
-                timeout_secs: None,
-                extra_env: Default::default(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(output.output, "sandbox");
-    }
-
-    #[test]
-    fn local_resolver_rejects_unsupported_required_process_backend() {
-        let resolver = resolver_without_http();
-        let plan = plan(
-            ProcessBackendKind::Docker,
-            true,
-            false,
-            NetworkMode::Deny,
-            false,
-        );
-
-        let error = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap_err();
-
-        assert_eq!(error.kind(), RuntimeDispatchErrorKind::UnsupportedRunner);
-        assert!(matches!(
-            error,
-            InvocationServicesError::UnsupportedProcessBackend {
-                backend: ProcessBackendKind::Docker
-            }
-        ));
-    }
-
-    #[test]
-    fn local_resolver_does_not_require_process_for_pure_plan() {
-        let resolver = resolver_without_http();
-        let plan = plan(
-            ProcessBackendKind::None,
-            false,
-            false,
-            NetworkMode::Deny,
-            false,
-        );
-
-        resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn local_resolver_rejects_unsupported_filesystem_backend() {
-        let resolver = resolver_without_http();
-        let mut plan = plan(
-            ProcessBackendKind::None,
-            false,
-            false,
-            NetworkMode::Deny,
-            false,
-        );
-        plan.requires_filesystem = true;
-        plan.filesystem_backend = FilesystemBackendKind::TenantWorkspace;
-
-        let error = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap_err();
-
-        assert_eq!(error.kind(), RuntimeDispatchErrorKind::FilesystemDenied);
-        assert!(matches!(
-            error,
-            InvocationServicesError::UnsupportedFilesystemBackend {
-                backend: FilesystemBackendKind::TenantWorkspace
-            }
-        ));
-    }
-
-    #[test]
-    fn local_resolver_accepts_host_workspace_and_home_when_filesystem_required() {
-        let resolver = resolver_without_http();
-        let mut plan = plan(
-            ProcessBackendKind::None,
-            false,
-            false,
-            NetworkMode::Deny,
-            false,
-        );
-        plan.requires_filesystem = true;
-        plan.filesystem_backend = FilesystemBackendKind::HostWorkspaceAndHome;
-
-        let services = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .expect("local-yolo filesystem backend should resolve");
-
-        assert!(services.runtime_http_egress.is_none());
-    }
-
-    #[test]
-    fn local_resolver_ignores_unsupported_filesystem_backend_when_not_required() {
-        let resolver = resolver_without_http();
-        let mut plan = plan(
-            ProcessBackendKind::None,
-            false,
-            false,
-            NetworkMode::Deny,
-            false,
-        );
-        plan.filesystem_backend = FilesystemBackendKind::TenantWorkspace;
-
-        resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .expect("unused filesystem backend must not block pure invocations");
-    }
-
-    #[test]
-    fn local_resolver_rejects_denied_required_network() {
-        let resolver = resolver_without_http();
-        let plan = plan(
-            ProcessBackendKind::None,
-            false,
-            true,
-            NetworkMode::Deny,
-            false,
-        );
-
-        let error = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap_err();
-
-        assert_eq!(error.kind(), RuntimeDispatchErrorKind::NetworkDenied);
-        assert!(matches!(
-            error,
-            InvocationServicesError::UnsupportedNetworkMode {
-                mode: NetworkMode::Deny
-            }
-        ));
-    }
-
-    #[test]
-    fn local_resolver_rejects_required_network_when_egress_service_is_absent() {
-        let resolver = resolver_without_http();
-        let plan = plan(
-            ProcessBackendKind::None,
-            false,
-            true,
-            NetworkMode::DirectLogged,
-            false,
-        );
-
-        let error = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap_err();
-
-        assert_eq!(error.kind(), RuntimeDispatchErrorKind::NetworkDenied);
-        assert!(matches!(
-            error,
-            InvocationServicesError::UnsupportedNetworkMode {
-                mode: NetworkMode::DirectLogged
-            }
-        ));
-    }
-
-    #[test]
-    fn local_resolver_accepts_brokered_required_network_with_egress_service() {
-        let resolver = LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
-            Some(Arc::new(NoopRuntimeHttpEgress)),
-            Arc::new(NoopProcessPort),
-            None,
-        );
-        let plan = plan(
-            ProcessBackendKind::None,
-            false,
-            true,
-            NetworkMode::Brokered,
-            false,
-        );
-
-        let services = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap();
-
-        assert!(services.runtime_http_egress.is_some());
-    }
-
-    #[test]
-    fn local_resolver_rejects_hosted_brokered_required_network() {
-        let resolver = LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
-            Some(Arc::new(NoopRuntimeHttpEgress)),
-            Arc::new(NoopProcessPort),
-            None,
-        );
-        let mut plan = plan(
-            ProcessBackendKind::None,
-            false,
-            true,
-            NetworkMode::Brokered,
-            false,
-        );
-        plan.deployment = DeploymentMode::HostedMultiTenant;
-        plan.resolved_profile = RuntimeProfile::HostedSafe;
-
-        let error = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap_err();
-
-        assert_eq!(error.kind(), RuntimeDispatchErrorKind::NetworkDenied);
-        assert!(matches!(
-            error,
-            InvocationServicesError::UnsupportedNetworkMode {
-                mode: NetworkMode::Brokered
-            }
-        ));
-    }
-
-    #[test]
-    fn local_resolver_accepts_direct_required_network_with_egress_service() {
-        let resolver = LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
-            Some(Arc::new(NoopRuntimeHttpEgress)),
-            Arc::new(NoopProcessPort),
-            None,
-        );
-        let plan = plan(
-            ProcessBackendKind::None,
-            false,
-            true,
-            NetworkMode::Direct,
-            false,
-        );
-
-        let services = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap();
-
-        assert!(services.runtime_http_egress.is_some());
-    }
-
-    #[test]
-    fn local_resolver_allows_raw_diagnostics_only_for_local_dev_and_yolo() {
-        let resolver = LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
-            Some(Arc::new(NoopRuntimeHttpEgress)),
-            Arc::new(NoopProcessPort),
-            None,
-        );
-        let mut plan = plan(
-            ProcessBackendKind::None,
-            false,
-            true,
-            NetworkMode::Direct,
-            false,
-        );
-
-        plan.resolved_profile = RuntimeProfile::LocalSafe;
-        let services = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap();
-        assert!(!services.unsafe_raw_diagnostics_allowed);
-
-        plan.resolved_profile = RuntimeProfile::LocalDev;
-        let services = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap();
-        assert!(services.unsafe_raw_diagnostics_allowed);
-
-        plan.resolved_profile = RuntimeProfile::LocalYolo;
-        let services = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap();
-        assert!(services.unsafe_raw_diagnostics_allowed);
-    }
-
-    #[test]
-    fn local_resolver_hides_runtime_http_egress_when_network_is_not_required() {
-        let resolver = LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
-            Some(Arc::new(NoopRuntimeHttpEgress)),
-            Arc::new(NoopProcessPort),
-            None,
-        );
-        let plan = plan(
-            ProcessBackendKind::None,
-            false,
-            false,
-            NetworkMode::DirectLogged,
-            false,
-        );
-
-        let services = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap();
-
-        assert!(services.runtime_http_egress.is_none());
-    }
-
-    #[test]
-    fn local_resolver_hides_secret_store_when_secret_is_not_required() {
-        let resolver = LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
-            None,
-            Arc::new(NoopProcessPort),
-            Some(Arc::new(InMemorySecretStore::new())),
-        );
-        let plan = plan(
-            ProcessBackendKind::None,
-            false,
-            false,
-            NetworkMode::Deny,
-            false,
-        );
-
-        let services = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap();
-
-        assert!(services.secret_store.is_none());
-    }
-
-    #[test]
-    fn local_resolver_rejects_required_secret_when_secret_store_is_absent() {
-        let resolver = resolver_without_http();
-        let plan = plan(
-            ProcessBackendKind::None,
-            false,
-            false,
-            NetworkMode::Deny,
-            true,
-        );
-
-        let error = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap_err();
-
-        assert_eq!(error.kind(), RuntimeDispatchErrorKind::SecretDenied);
-        assert!(matches!(
-            error,
-            InvocationServicesError::SecretAccessRequired
-        ));
-    }
-
-    #[test]
-    fn local_resolver_rejects_brokered_required_secret_even_with_secret_store() {
-        let resolver = LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
-            None,
-            Arc::new(NoopProcessPort),
-            Some(Arc::new(InMemorySecretStore::new())),
-        );
-        let mut plan = plan(
-            ProcessBackendKind::None,
-            false,
-            false,
-            NetworkMode::Deny,
-            true,
-        );
-        plan.secret_mode = SecretMode::BrokeredHandles;
-
-        let error = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap_err();
-
-        assert_eq!(error.kind(), RuntimeDispatchErrorKind::SecretDenied);
-        assert!(matches!(
-            error,
-            InvocationServicesError::UnsupportedSecretMode {
-                mode: SecretMode::BrokeredHandles
-            }
-        ));
-    }
-
-    #[test]
-    fn local_resolver_accepts_required_secret_when_secret_store_is_available() {
-        let resolver = LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
-            None,
-            Arc::new(NoopProcessPort),
-            Some(Arc::new(InMemorySecretStore::new())),
-        );
-        let plan = plan(
-            ProcessBackendKind::None,
-            false,
-            false,
-            NetworkMode::Deny,
-            true,
-        );
-
-        let services = resolver
-            .resolve(InvocationServicesResolutionRequest {
-                plan: &plan,
-                scope: &ResourceScope::system(),
-                mounts: None,
-            })
-            .unwrap();
-
-        assert!(services.secret_store.is_some());
-    }
-
-    #[test]
-    fn first_party_tools_do_not_select_process_backends() {
-        let sources = [
-            include_str!("first_party_tools/shell.rs"),
-            include_str!("first_party_tools/http.rs"),
-        ];
-        for source in sources {
-            assert!(!source.contains("ProcessBackendKind"));
-            assert!(!source.contains("FilesystemBackendKind"));
-        }
-    }
-
-    fn resolver_without_http() -> LocalInvocationServicesResolver {
-        LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
-            None,
-            Arc::new(NoopProcessPort),
-            None,
-        )
-    }
-
-    fn plan(
-        process_backend: ProcessBackendKind,
-        requires_process: bool,
-        requires_network: bool,
-        network_mode: NetworkMode,
-        requires_secret: bool,
-    ) -> ExecutionPlan {
-        ExecutionPlan {
-            capability: CapabilityId::new("test.capability".to_string()).unwrap(),
-            deployment: DeploymentMode::LocalSingleUser,
-            resolved_profile: RuntimeProfile::LocalDev,
-            filesystem_backend: FilesystemBackendKind::HostWorkspace,
-            process_backend,
-            network_mode,
-            secret_mode: SecretMode::ScrubbedEnv,
-            requires_filesystem: false,
-            requires_process,
-            requires_network,
-            requires_secret,
-        }
-    }
-}
+mod tests;
