@@ -19,6 +19,7 @@ use ironclaw_turns::{
 use tracing::{debug, error};
 
 use crate::{
+    after_turn_memory::AfterTurnMemoryRecorder,
     driver_registry::{DriverRegistry, LoopDriverRegistryKey},
     loop_exit_applier::LoopExitApplier,
     turn_runner::{HostFactory, sanitized_driver_failure, sanitized_failure},
@@ -68,6 +69,11 @@ pub struct RebornTurnRunExecutor {
     loop_exit_applier: Arc<LoopExitApplier>,
     driver_registry: Arc<DriverRegistry>,
     host_factory: Arc<dyn HostFactory>,
+    /// After-turn interaction recorder (mem0 `add` seam). Genuinely optional:
+    /// only compositions that resolve a memory document-store provider wire it;
+    /// the production graph currently degrades to `None` (issue #5013), the same
+    /// optionality as `memory_context_service` on `DefaultPlannedRuntimeParts`.
+    after_turn_memory_recorder: Option<Arc<AfterTurnMemoryRecorder>>,
 }
 
 impl RebornTurnRunExecutor {
@@ -80,7 +86,19 @@ impl RebornTurnRunExecutor {
             loop_exit_applier,
             driver_registry,
             host_factory,
+            after_turn_memory_recorder: None,
         }
+    }
+
+    /// Attach the after-turn memory recorder. Called by the runtime composition
+    /// only when a memory provider is resolved; tests construct one over a real
+    /// in-memory provider.
+    pub fn with_after_turn_memory_recorder(
+        mut self,
+        recorder: Arc<AfterTurnMemoryRecorder>,
+    ) -> Self {
+        self.after_turn_memory_recorder = Some(recorder);
+        self
     }
 }
 
@@ -267,6 +285,16 @@ impl RebornTurnRunExecutor {
                     status = ?state.status,
                     "loop exit applied successfully"
                 );
+                // After-turn memory recording (mem0 `add` seam): hand the
+                // just-finished exchange to the memory provider. This is a
+                // post-terminal, best-effort side effect — the run is ALREADY
+                // Completed, so the recorder never fails it (every error inside is
+                // `debug!`-only, never `info!`/`warn!`).
+                if state.status == TurnStatus::Completed
+                    && let Some(recorder) = self.after_turn_memory_recorder.as_ref()
+                {
+                    recorder.record_completed_run(&state).await;
+                }
                 Ok(())
             }
             Err(err) => {

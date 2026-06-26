@@ -40,6 +40,65 @@ impl ProductionMemoryPromptContextService {
     pub fn new(memory_service: Arc<dyn MemoryService>) -> Self {
         Self { memory_service }
     }
+
+    /// Fetch a single surfacing lane, degrading a retrieval failure to an empty
+    /// lane rather than erroring the whole call. Memory is best-effort: a lane
+    /// outage must never break the turn, so the error is swallowed here (logged
+    /// at `debug!`, never `info!`/`warn!` in this background path) and the caller
+    /// continues with the other lane.
+    async fn retrieve_lane(
+        &self,
+        invocation: MemoryInvocation,
+        query: String,
+        max_snippets: usize,
+        context_profile_id: MemoryContextProfileId,
+        lane: MemoryLane,
+    ) -> Vec<MemoryServiceContextSnippet> {
+        match self
+            .memory_service
+            .retrieve_context(
+                invocation,
+                MemoryServiceContextRequest {
+                    query,
+                    max_snippets,
+                    context_profile_id,
+                },
+            )
+            .await
+        {
+            Ok(snippets) => snippets,
+            // silent-ok: a single lane's retrieval outage degrades that lane to
+            // empty so proactive memory never breaks a turn; only the sanitized
+            // error kind is logged for diagnosis.
+            Err(error) => {
+                tracing::debug!(
+                    lane = lane.as_str(),
+                    kind = ?error.kind(),
+                    "memory context lane retrieval failed; degrading lane to empty"
+                );
+                Vec::new()
+            }
+        }
+    }
+}
+
+/// Which surfacing lane a `retrieve_context` call serves. Carried only so a lane
+/// degradation log line names the lane that failed.
+#[derive(Debug, Clone, Copy)]
+enum MemoryLane {
+    /// Active-thread scratch memory (invocation keeps the thread).
+    ShortTerm,
+    /// User-general memory (invocation clears the thread).
+    LongTerm,
+}
+
+impl MemoryLane {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ShortTerm => "short_term",
+            Self::LongTerm => "long_term",
+        }
+    }
 }
 
 #[async_trait]
@@ -58,7 +117,6 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
         if memory_context_disabled(request.context_profile_id.as_str()) {
             return Ok(Vec::new());
         }
-        let invocation = invocation_for_context_request(&request);
         // Capture the request scope up front (before `request.query` is moved
         // below) so admission can reject any snippet a provider returns outside
         // the requested tenant/user/agent/project.
@@ -67,29 +125,50 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
         // construction won't fail in practice — but propagate rather than unwrap.
         let context_profile_id = MemoryContextProfileId::new(request.context_profile_id.as_str())
             .map_err(map_memory_service_error)?;
-        let snippets = self
-            .memory_service
-            .retrieve_context(
-                invocation,
-                MemoryServiceContextRequest {
-                    query: request.query,
-                    max_snippets: request.max_snippets,
-                    context_profile_id,
-                },
-            )
-            .await
-            .map_err(map_memory_service_error)?;
 
-        // Host-owned admission: hash the reference, sanitize, and wrap each raw
-        // candidate, then enforce the per-snippet + aggregate budgets here so the
-        // provider can never shape model-visible content. The aggregate budget
-        // mirrors the pre-lift provider's `collect_context_snippets`: stop
-        // collecting once the next snippet would exceed the ceiling (break, not
-        // skip), keeping the model-visible output byte-identical for the native
-        // provider.
+        // Two lanes, fetched once each (mem0 `on_run_start` shape):
+        //   short-term: the active thread's scratch memory — invocation keeps the
+        //               thread, so the native provider restricts to `threads/<T>/`.
+        //   long-term : the user's general memory — invocation clears the thread,
+        //               so the native provider excludes any `threads/*` scratch.
+        // Concatenate short-term BEFORE long-term so the active conversation wins
+        // under the shared aggregate budget enforced over the combined block below.
+        let short_term_invocation = invocation_for_context_request(&request);
+        let long_term_invocation = MemoryInvocation {
+            scope: short_term_invocation.scope.without_thread_and_mission(),
+            correlation_id: CorrelationId::new(),
+        };
+
+        let mut combined = self
+            .retrieve_lane(
+                short_term_invocation,
+                request.query.clone(),
+                request.max_snippets,
+                context_profile_id.clone(),
+                MemoryLane::ShortTerm,
+            )
+            .await;
+        combined.extend(
+            self.retrieve_lane(
+                long_term_invocation,
+                request.query,
+                request.max_snippets,
+                context_profile_id,
+                MemoryLane::LongTerm,
+            )
+            .await,
+        );
+
+        // Host-owned admission over the COMBINED list (short-term first): hash the
+        // reference, sanitize, and wrap each raw candidate, then enforce the
+        // per-snippet + aggregate budgets here so the provider can never shape
+        // model-visible content. The aggregate budget mirrors the pre-lift
+        // provider's `collect_context_snippets`: stop collecting once the next
+        // snippet would exceed the ceiling (break, not skip). The total aggregate
+        // byte budget applies to the combined two-lane block.
         let mut admitted = Vec::new();
         let mut total_bytes = 0usize;
-        for snippet in snippets {
+        for snippet in combined {
             if admitted.len() >= request.max_snippets {
                 break;
             }

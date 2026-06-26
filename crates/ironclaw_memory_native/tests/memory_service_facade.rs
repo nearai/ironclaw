@@ -3,14 +3,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
-use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, UserId, VirtualPath};
+use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, ThreadId, UserId, VirtualPath};
 use ironclaw_memory_native::{
     MemoryBackend, MemoryBackendCapabilities, MemoryContext, MemoryDocumentPath,
     MemorySearchRequest, MemorySearchResult, MemoryServiceErrorKind, MemoryWriteOutcome,
 };
 use ironclaw_memory_native::{
-    MemoryContextProfileId, MemoryInvocation, MemoryService, MemoryServiceContextRequest,
-    MemoryServiceProfileSetRequest, MemoryServiceReadRequest, MemoryServiceSearchRequest,
+    MemoryContextProfileId, MemoryInteractionMessage, MemoryInteractionRole, MemoryInvocation,
+    MemoryService, MemoryServiceContextRequest, MemoryServiceProfileSetRequest,
+    MemoryServiceReadRequest, MemoryServiceRecordRequest, MemoryServiceSearchRequest,
     MemoryServiceTreeRequest, MemoryServiceWriteRequest, NativeMemoryService,
 };
 use serde_json::{Value, json};
@@ -215,6 +216,107 @@ async fn native_context_retrieve_filters_out_of_scope_tenant_user_agent_and_proj
 }
 
 #[tokio::test]
+async fn native_context_retrieve_scopes_short_term_to_active_thread() {
+    // Short-term ("run-local") memory is scoped to the active conversation/thread.
+    // The backend returns two in-scope, same-user docs under two different thread
+    // prefixes. With `thread_id = Some(thread-a)` on the trusted invocation scope,
+    // the provider must retain ONLY the active thread's doc. The long-term lane
+    // (thread_id = None, the default `invocation()`) stays unfiltered and is
+    // covered by the existing scope-isolation tests above.
+    let service = NativeMemoryService::new(Arc::new(MockSearchBackend {
+        results: vec![
+            search_result(
+                "tenant-native-memory",
+                "user-native-memory",
+                "threads/thread-a/note.md",
+                1.0,
+                "active thread planning note",
+            ),
+            search_result(
+                "tenant-native-memory",
+                "user-native-memory",
+                "threads/thread-b/note.md",
+                0.9,
+                "other thread planning note",
+            ),
+        ],
+        fail: false,
+    }));
+
+    let mut scoped = invocation();
+    scoped.scope.thread_id = Some(ThreadId::new("thread-a").expect("valid thread"));
+
+    let snippets = service
+        .retrieve_context(
+            scoped,
+            MemoryServiceContextRequest {
+                query: "planning".to_string(),
+                max_snippets: 10,
+                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            },
+        )
+        .await
+        .expect("short-term context retrieval");
+
+    assert_eq!(
+        snippets.len(),
+        1,
+        "short-term retrieval must scope to the active thread"
+    );
+    assert_eq!(snippets[0].relative_path, "threads/thread-a/note.md");
+    assert_eq!(snippets[0].text, "active thread planning note");
+}
+
+#[tokio::test]
+async fn native_context_retrieve_excludes_thread_scratch_from_long_term() {
+    // Long-term retrieval (no `thread_id` on the invocation scope) is the user's
+    // general/durable memory; it must EXCLUDE per-thread short-term scratch
+    // (anything under a `threads/<id>/` prefix). With `thread_id = None`, only the
+    // general doc survives — the thread-scoped doc is dropped — so the long-term
+    // and short-term lanes stay disjoint (no duplicate snippet when the run-level
+    // fetch concatenates both lanes).
+    let service = NativeMemoryService::new(Arc::new(MockSearchBackend {
+        results: vec![
+            search_result(
+                "tenant-native-memory",
+                "user-native-memory",
+                "MEMORY.md",
+                1.0,
+                "durable planning fact",
+            ),
+            search_result(
+                "tenant-native-memory",
+                "user-native-memory",
+                "threads/thread-a/note.md",
+                0.9,
+                "ephemeral thread planning note",
+            ),
+        ],
+        fail: false,
+    }));
+
+    // `invocation()` carries `thread_id: None` — the long-term lane.
+    let snippets = service
+        .retrieve_context(
+            invocation(),
+            MemoryServiceContextRequest {
+                query: "planning".to_string(),
+                max_snippets: 10,
+                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            },
+        )
+        .await
+        .expect("long-term context retrieval");
+
+    assert_eq!(
+        snippets.len(),
+        1,
+        "long-term retrieval must exclude per-thread short-term scratch"
+    );
+    assert_eq!(snippets[0].relative_path, "MEMORY.md");
+}
+
+#[tokio::test]
 async fn native_context_retrieve_filters_non_finite_scores_before_ordering() {
     // The backend returns three in-scope results: two with non-finite scores
     // (NaN and +inf) and one finite. The provider-side `retain` in
@@ -398,6 +500,117 @@ async fn native_context_retrieve_returns_candidates_without_aggregate_byte_budge
     // byte budget trims them.
     assert_eq!(snippets.len(), 20);
     assert!(snippets.iter().all(|snippet| snippet.text == long_text));
+}
+
+#[tokio::test]
+async fn native_record_interaction_writes_thread_log_and_feeds_short_term_lane() {
+    // The native provider STORES the full turn history: `record_interaction`
+    // appends the exchange to the thread-scoped short-term doc at
+    // `threads/<thread_id>/log.md` (the SAME `threads/<T>/` convention the
+    // short-term retrieval lane filters on). A real backend (InMemoryBackend +
+    // chunking indexer + FTS) proves the write feeds the read lane end to end.
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+
+    let mut scoped = invocation();
+    scoped.scope.thread_id = Some(ThreadId::new("thread-record").expect("valid thread"));
+
+    let response = service
+        .record_interaction(
+            scoped.clone(),
+            MemoryServiceRecordRequest {
+                messages: vec![
+                    MemoryInteractionMessage {
+                        role: MemoryInteractionRole::User,
+                        content: "remember my favorite planning color is teal".to_string(),
+                    },
+                    MemoryInteractionMessage {
+                        role: MemoryInteractionRole::Assistant,
+                        content: "noted, your favorite planning color is teal".to_string(),
+                    },
+                ],
+                run_id: Some("run-record-1".to_string()),
+                metadata: json!({}),
+            },
+        )
+        .await
+        .expect("record_interaction persists the exchange");
+    assert!(
+        response.recorded,
+        "a thread-scoped interaction must be recorded by the native provider"
+    );
+
+    // (a) A direct read of the thread log contains BOTH messages verbatim.
+    let read = service
+        .read(
+            scoped.clone(),
+            MemoryServiceReadRequest {
+                path: "threads/thread-record/log.md".to_string(),
+            },
+        )
+        .await
+        .expect("the recorded thread log reads back");
+    assert!(
+        read.content
+            .contains("remember my favorite planning color is teal"),
+        "thread log must contain the user message: {:?}",
+        read.content
+    );
+    assert!(
+        read.content
+            .contains("noted, your favorite planning color is teal"),
+        "thread log must contain the assistant reply: {:?}",
+        read.content
+    );
+
+    // (b) The short-term retrieval lane (thread_id kept) surfaces the recorded
+    //     doc — proving the write feeds the short-term read lane inside the
+    //     provider, not just a raw file write.
+    let snippets = service
+        .retrieve_context(
+            scoped,
+            MemoryServiceContextRequest {
+                query: "favorite planning color".to_string(),
+                max_snippets: 10,
+                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            },
+        )
+        .await
+        .expect("short-term context retrieval after record");
+    assert!(
+        snippets.iter().any(
+            |snippet| snippet.relative_path == "threads/thread-record/log.md"
+                && !snippet.text.is_empty()
+        ),
+        "short-term lane must surface the recorded thread log: {snippets:?}"
+    );
+}
+
+#[tokio::test]
+async fn native_record_interaction_without_thread_is_noop() {
+    // With no `thread_id` on the invocation scope there is no short-term thread
+    // subtree to record under, so the native provider degrades to a no-op
+    // (recorded=false) rather than erroring or writing to an unscoped path.
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+
+    // `invocation()` carries `thread_id: None`.
+    let response = service
+        .record_interaction(
+            invocation(),
+            MemoryServiceRecordRequest {
+                messages: vec![MemoryInteractionMessage {
+                    role: MemoryInteractionRole::User,
+                    content: "no thread to record under".to_string(),
+                }],
+                run_id: None,
+                metadata: json!({}),
+            },
+        )
+        .await
+        .expect("threadless record_interaction must degrade, not error");
+    assert!(
+        !response.recorded,
+        "a threadless interaction must not be recorded"
+    );
 }
 
 #[tokio::test]

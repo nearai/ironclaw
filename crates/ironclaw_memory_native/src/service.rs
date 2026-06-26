@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use chrono_tz::Tz;
 use ironclaw_filesystem::RootFilesystem;
+use ironclaw_host_api::ThreadId;
 use serde_json::{Map, Value, json};
 
 // The host-facing operation shapes + the `MemoryService` trait moved to
@@ -25,13 +26,15 @@ use serde_json::{Map, Value, json};
 // public API stay unchanged while `NativeMemoryService` (below) keeps the native
 // adapter behavior here.
 pub use ironclaw_memory::{
-    MemoryContextProfileId, MemoryInvocation, MemoryProfileSetStatus, MemoryService,
-    MemoryServiceContextRequest, MemoryServiceContextSnippet, MemoryServiceError,
-    MemoryServiceErrorKind, MemoryServiceProfileReadResponse, MemoryServiceProfileSetRequest,
+    MemoryContextProfileId, MemoryInteractionMessage, MemoryInteractionRole, MemoryInvocation,
+    MemoryProfileSetStatus, MemoryService, MemoryServiceContextRequest,
+    MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceErrorKind,
+    MemoryServiceProfileReadResponse, MemoryServiceProfileSetRequest,
     MemoryServiceProfileSetResponse, MemoryServiceReadRequest, MemoryServiceReadResponse,
-    MemoryServiceSearchRequest, MemoryServiceSearchResponse, MemoryServiceSearchResult,
-    MemoryServiceTreeRequest, MemoryServiceTreeResponse, MemoryServiceWriteRequest,
-    MemoryServiceWriteResponse, MemoryWriteStatus, memory_context_disabled,
+    MemoryServiceRecordRequest, MemoryServiceRecordResponse, MemoryServiceSearchRequest,
+    MemoryServiceSearchResponse, MemoryServiceSearchResult, MemoryServiceTreeRequest,
+    MemoryServiceTreeResponse, MemoryServiceWriteRequest, MemoryServiceWriteResponse,
+    MemoryWriteStatus, memory_context_disabled,
 };
 
 const MEMORY_PATH: &str = "MEMORY.md";
@@ -360,6 +363,22 @@ impl MemoryService for NativeMemoryService {
             .await
             .map_err(MemoryServiceError::unavailable_from)?;
         results.retain(|result| result.path.scope() == context.scope() && result.score.is_finite());
+        // Thread-aware lane selection. The `thread_id` is supplied by the trusted
+        // host run context on the invocation scope, never by the model.
+        match invocation.scope.thread_id.as_ref() {
+            // Short-term ("run-local") lane: restrict to the active thread's
+            // memory subtree.
+            Some(thread_id) => {
+                let prefix = thread_memory_prefix(thread_id);
+                results.retain(|result| result.path.relative_path().starts_with(&prefix));
+            }
+            // Long-term lane: the user's general/durable memory — exclude every
+            // per-thread short-term scratch subtree so the two lanes stay disjoint
+            // when the host concatenates them into one memory block.
+            None => {
+                results.retain(|result| !is_thread_scoped_path(result.path.relative_path()));
+            }
+        }
         results.sort_by(compare_memory_search_results);
 
         // Return raw, ranked, in-scope candidates. The host sanitizes the text,
@@ -373,6 +392,46 @@ impl MemoryService for NativeMemoryService {
             .into_iter()
             .map(map_search_result_to_snippet)
             .collect())
+    }
+
+    async fn record_interaction(
+        &self,
+        invocation: MemoryInvocation,
+        request: MemoryServiceRecordRequest,
+    ) -> Result<MemoryServiceRecordResponse, MemoryServiceError> {
+        // The native provider stores the FULL turn history verbatim. Short-term
+        // memory is thread-scoped: with no active thread there is no
+        // `threads/<thread_id>/` subtree to record under, so degrade to a no-op
+        // (not an error) — the host's after-turn seam stays best-effort.
+        let Some(thread_id) = invocation.scope.thread_id.clone() else {
+            tracing::debug!("record_interaction skipped: no thread_id on invocation scope");
+            return Ok(MemoryServiceRecordResponse { recorded: false });
+        };
+        if request.messages.is_empty() {
+            return Ok(MemoryServiceRecordResponse { recorded: false });
+        }
+        // Append to the thread's short-term log under the SAME `threads/<T>/`
+        // convention `retrieve_context`'s short-term lane filters on (reusing
+        // `thread_memory_prefix`, not a second prefix). Route through the existing
+        // append write flow (`MemoryServiceWriteRequest { append: true }`), which
+        // builds the `MemoryDocumentScope`/`MemoryContext` via `scoped_context`.
+        let target = format!("{}log.md", thread_memory_prefix(&thread_id));
+        let content = format_interaction(&request.messages);
+        self.write(
+            invocation,
+            MemoryServiceWriteRequest {
+                target,
+                content,
+                append: true,
+                old_string: None,
+                new_string: None,
+                replace_all: false,
+                metadata: None,
+                timezone: None,
+            },
+        )
+        .await?;
+        Ok(MemoryServiceRecordResponse { recorded: true })
     }
 }
 
@@ -590,6 +649,26 @@ fn tree_for_paths(paths: &[String], root: &str, max_depth: usize) -> Vec<Value> 
     output
 }
 
+/// Top-level virtual-path namespace reserved for per-thread short-term
+/// ("run-local") memory. Documents under `threads/<thread_id>/` belong to the
+/// short-term lane: included by thread-scoped retrieval, excluded from long-term
+/// (general) retrieval. Reserved — general user memory does not use this prefix.
+const THREAD_MEMORY_ROOT: &str = "threads/";
+
+/// Virtual-path prefix under which a specific thread's short-term memory lives.
+/// Short-term retrieval (an invocation scope carrying a `thread_id`) restricts to
+/// this prefix; the `thread_id` arrives on the trusted `MemoryInvocation` scope
+/// from the host run context, never from the model.
+fn thread_memory_prefix(thread_id: &ThreadId) -> String {
+    format!("{THREAD_MEMORY_ROOT}{}/", thread_id.as_str())
+}
+
+/// Whether a relative memory path is per-thread short-term scratch (and so is
+/// excluded from the long-term lane).
+fn is_thread_scoped_path(relative_path: &str) -> bool {
+    relative_path.starts_with(THREAD_MEMORY_ROOT)
+}
+
 fn compare_memory_search_results(
     left: &MemorySearchResult,
     right: &MemorySearchResult,
@@ -598,6 +677,16 @@ fn compare_memory_search_results(
         .score
         .total_cmp(&left.score)
         .then_with(|| left.path.relative_path().cmp(right.path.relative_path()))
+}
+
+/// Render an interaction exchange into the short-term thread log body. Each
+/// message becomes a `## {role}` heading followed by its content, so an appended
+/// turn reads as a simple Markdown transcript.
+fn format_interaction(messages: &[MemoryInteractionMessage]) -> String {
+    messages
+        .iter()
+        .map(|message| format!("## {}\n{}\n", message.role.as_str(), message.content))
+        .collect()
 }
 
 fn map_search_result_to_snippet(result: MemorySearchResult) -> MemoryServiceContextSnippet {

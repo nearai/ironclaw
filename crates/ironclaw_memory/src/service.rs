@@ -447,6 +447,64 @@ impl MemoryServiceError {
     }
 }
 
+/// Role of a single message in an interaction exchange handed to a provider's
+/// [`MemoryService::record_interaction`]. Typed (not a raw `String`) so a caller
+/// cannot pass an unknown role; serializes snake_case for any provider that
+/// forwards the `{role, content}` shape on the wire (mirrors mem0's message
+/// shape).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryInteractionRole {
+    User,
+    Assistant,
+    System,
+    Tool,
+}
+
+impl MemoryInteractionRole {
+    /// Stable string form, matching the serde snake_case wire output.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MemoryInteractionRole::User => "user",
+            MemoryInteractionRole::Assistant => "assistant",
+            MemoryInteractionRole::System => "system",
+            MemoryInteractionRole::Tool => "tool",
+        }
+    }
+}
+
+/// One message in an interaction exchange passed to
+/// [`MemoryService::record_interaction`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryInteractionMessage {
+    pub role: MemoryInteractionRole,
+    pub content: String,
+}
+
+/// Request for [`MemoryService::record_interaction`]: the raw interaction DATA.
+///
+/// Mirrors `mem0.add(messages=[...], run_id, metadata)`. The host passes the
+/// messages, run id, and metadata and lets the *provider* decide what to record
+/// (store verbatim, run LLM extraction, or nothing) — the host makes no
+/// verbatim-vs-extract / provenance / TTL decision. `user_id`/`agent_id`/
+/// `thread_id` ride the invocation's [`ResourceScope`], not this request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryServiceRecordRequest {
+    pub messages: Vec<MemoryInteractionMessage>,
+    pub run_id: Option<String>,
+    pub metadata: Value,
+}
+
+/// Outcome of a [`MemoryService::record_interaction`] call.
+///
+/// `recorded` is `false` when the provider does not implement interaction
+/// recording (the trait default) or degraded to a no-op because the request
+/// lacked the scope it needs to record under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryServiceRecordResponse {
+    pub recorded: bool,
+}
+
 #[async_trait]
 pub trait MemoryService: Send + Sync {
     async fn search(
@@ -513,6 +571,29 @@ pub trait MemoryService: Send + Sync {
     ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
         let _ = (invocation, request);
         Err(MemoryServiceError::unavailable())
+    }
+
+    /// Record a completed interaction exchange (the after-turn `add` seam).
+    ///
+    /// The host passes the raw interaction DATA — the `[user, assistant]`
+    /// messages, the `run_id`, and free-form `metadata` — and lets the *provider*
+    /// decide what to do with it (store verbatim, run LLM extraction, or nothing).
+    /// `user_id`/`agent_id`/`thread_id` ride `invocation.scope`. Name-aligned with
+    /// the reserved `memory.interaction.record.v1` op; this is a host-driven trait
+    /// method, not a model-facing capability.
+    ///
+    /// Default: the provider does not record interactions — an infallible no-op
+    /// returning `recorded: false`. A provider opts in by overriding. Unlike the
+    /// other defaults (which fail closed as `unavailable`), the default here is
+    /// `Ok` so the host's after-turn seam completes cleanly against any provider.
+    async fn record_interaction(
+        &self,
+        invocation: MemoryInvocation,
+        request: MemoryServiceRecordRequest,
+    ) -> Result<MemoryServiceRecordResponse, MemoryServiceError> {
+        let _ = (invocation, request);
+        tracing::debug!("memory provider does not implement record_interaction; skipping");
+        Ok(MemoryServiceRecordResponse { recorded: false })
     }
 }
 
@@ -585,4 +666,52 @@ fn validate_locale(value: &str) -> Result<(), MemoryServiceError> {
         return Err(MemoryServiceError::input());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::ResourceScope;
+
+    /// A provider that overrides NOTHING — every `MemoryService` method (including
+    /// `record_interaction`) is inherited from the trait default.
+    struct NonRecordingProvider;
+    impl MemoryService for NonRecordingProvider {}
+
+    /// The default `record_interaction` is a host-driven no-op: it must NOT error
+    /// (unlike the other default methods, which fail closed as `unavailable`) and
+    /// must report `recorded: false` so a provider that does not opt in still lets
+    /// the host's after-turn recording seam complete cleanly.
+    #[tokio::test]
+    async fn record_interaction_default_is_noop_returning_not_recorded() {
+        let provider = NonRecordingProvider;
+        let invocation = MemoryInvocation {
+            scope: ResourceScope::system(),
+            correlation_id: CorrelationId::new(),
+        };
+        let request = MemoryServiceRecordRequest {
+            messages: vec![
+                MemoryInteractionMessage {
+                    role: MemoryInteractionRole::User,
+                    content: "hello".to_string(),
+                },
+                MemoryInteractionMessage {
+                    role: MemoryInteractionRole::Assistant,
+                    content: "hi there".to_string(),
+                },
+            ],
+            run_id: Some("run-1".to_string()),
+            metadata: json!({}),
+        };
+
+        let response = provider
+            .record_interaction(invocation, request)
+            .await
+            .expect("default record_interaction must be an infallible no-op");
+
+        assert!(
+            !response.recorded,
+            "a provider that does not override record_interaction must report recorded=false"
+        );
+    }
 }

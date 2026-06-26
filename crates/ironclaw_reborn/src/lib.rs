@@ -16,6 +16,7 @@
 //! `pub use` re-exports — that was the noisy "speculative public API" pattern
 //! the boundary tests are designed to prevent.
 
+pub mod after_turn_memory;
 pub mod app_loop_family;
 pub mod driver_registry;
 pub mod failure_categories;

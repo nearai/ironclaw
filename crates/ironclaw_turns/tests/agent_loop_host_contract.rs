@@ -578,6 +578,56 @@ async fn instruction_bundle_renders_runtime_context_section() {
     );
 }
 
+/// Tier 1 (rendering): a `LoopContextBundle` carrying a non-empty
+/// `memory_snippets` must render a model-visible "memory" section (`msg:memory.*`)
+/// in the instruction bundle. This is the surface that makes proactive memory
+/// reach the model, so it must materialize from the bundle just like the
+/// instruction and runtime sections.
+#[tokio::test]
+async fn instruction_bundle_renders_memory_section_from_memory_snippets() {
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+    let request = InstructionBundleRequest {
+        context_bundle: LoopContextBundle {
+            identity_messages: Vec::new(),
+            messages: Vec::new(),
+            compaction_message_index: Vec::new(),
+            instruction_snippets: Vec::new(),
+            memory_snippets: vec![LoopContextSnippet {
+                snippet_ref: "memory:run-note".to_string(),
+                model_content: "Untrusted memory content: remembered project plan".to_string(),
+                safe_summary: "Untrusted memory content: remembered project plan".to_string(),
+                metadata: None,
+            }],
+        },
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: None,
+    };
+
+    let bundle = builder.build(request).unwrap();
+
+    let memory_idx = bundle
+        .materialized_messages
+        .iter()
+        .position(|m| m.content_ref.as_str().starts_with("msg:memory."))
+        .expect("memory section message must exist when memory_snippets is non-empty");
+    assert_eq!(bundle.materialized_messages[memory_idx].role, "system");
+    assert_eq!(
+        bundle.materialized_messages[memory_idx].model_content,
+        "Untrusted memory content: remembered project plan",
+        "the memory section must carry the snippet's model content verbatim"
+    );
+    assert!(
+        bundle
+            .messages
+            .iter()
+            .any(|m| m.content_ref.as_str().starts_with("msg:memory.")),
+        "the memory section must appear in the model-visible messages list"
+    );
+}
+
 #[tokio::test]
 async fn instruction_bundle_runtime_fingerprint_stable_within_minute() {
     // Two requests that differ only in the seconds component within the same

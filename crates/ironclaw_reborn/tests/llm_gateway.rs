@@ -1,6 +1,9 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -27,17 +30,19 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope, ToolResultSafeSummary,
 };
 use ironclaw_turns::{
-    LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
+    LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor, TurnId, TurnRunId,
+    TurnScope,
     run_profile::{
-        AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind, CapabilitySurfaceVersion,
-        HostManagedLoopModelPort, HostManagedLoopPromptPort,
+        AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
+        CapabilitySurfaceVersion, HostManagedLoopModelPort, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InMemoryRunProfileResolver, InstructionMaterializationStore, InstructionSafetyContext,
-        LoopCapabilityPort, LoopHostMilestoneKind, LoopModelGateway, LoopModelGatewayRequest,
-        LoopModelMessage, LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopRuntimeContext, ModelProfileId, ParentLoopOutput, PromptMode,
-        ProviderToolCall, ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        LoopCapabilityPort, LoopContextPort, LoopContextRequest, LoopContextSnippet,
+        LoopHostMilestoneKind, LoopModelGateway, LoopModelGatewayRequest, LoopModelMessage,
+        LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopRuntimeContext, MemoryPromptContextRequest, MemoryPromptContextService, ModelProfileId,
+        ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallReplay,
+        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use rust_decimal::Decimal;
@@ -2450,6 +2455,117 @@ impl ThreadFixture {
             run_context,
         }
     }
+}
+
+/// Fake memory source that counts fetches and echoes the request query, so a
+/// caller-level test can prove (a) memory reaches the bundle and (b) it is
+/// fetched exactly once per run (the rest of the run reuses the cache).
+#[derive(Default)]
+struct CountingMemoryContextService {
+    fetches: AtomicUsize,
+    last_query: Mutex<Option<String>>,
+}
+
+#[async_trait]
+impl MemoryPromptContextService for CountingMemoryContextService {
+    async fn load_memory_snippets(
+        &self,
+        request: MemoryPromptContextRequest,
+    ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
+        self.fetches.fetch_add(1, Ordering::SeqCst);
+        *self.last_query.lock().unwrap() = Some(request.query.clone());
+        let content = format!("Untrusted memory content: {}", request.query);
+        Ok(vec![LoopContextSnippet {
+            snippet_ref: "memory-snippet:caller-test".to_string(),
+            model_content: content.clone(),
+            safe_summary: content,
+            metadata: None,
+        }])
+    }
+}
+
+/// Caller-level coverage (`.claude/rules/testing.md` — `load_loop_context` gates
+/// whether memory reaches the model): a `ThreadBackedLoopContextPort` wired with
+/// a memory source must return NON-empty `memory_snippets`, derive the query from
+/// the latest user message, and fetch exactly once per run — a second
+/// `load_loop_context` reuses the per-run cache (fetch count stays 1).
+#[tokio::test]
+async fn load_loop_context_surfaces_memory_and_fetches_once_per_run() {
+    let fixture = ThreadFixture::new().await;
+    let memory_service = Arc::new(CountingMemoryContextService::default());
+    // Production run contexts carry the authenticated actor; memory is keyed to
+    // that user, so the port needs an actor to scope a request.
+    let run_context = fixture.run_context.clone().with_actor(TurnActor::new(
+        UserId::new("user-production-gateway").unwrap(),
+    ));
+    let context_port =
+        ThreadBackedLoopContextPort::new(
+            Arc::clone(&fixture.thread_service),
+            fixture.thread_scope.clone(),
+            run_context,
+            16,
+        )
+        .with_memory_context_service(
+            Arc::clone(&memory_service) as Arc<dyn MemoryPromptContextService>
+        );
+
+    let request = LoopContextRequest {
+        after: None,
+        limit: 16,
+        mode: PromptMode::TextOnly,
+    };
+
+    let first = context_port
+        .load_loop_context(request.clone())
+        .await
+        .expect("first prompt build should succeed");
+    assert!(
+        !first.memory_snippets.is_empty(),
+        "memory must reach the loop context bundle when a service is wired"
+    );
+    assert_eq!(memory_service.fetches.load(Ordering::SeqCst), 1);
+    // The query is the seeded latest user message ("hello production gateway").
+    assert_eq!(
+        memory_service.last_query.lock().unwrap().as_deref(),
+        Some("hello production gateway"),
+        "the memory query must derive from the latest user message"
+    );
+
+    // A second prompt build within the same run reuses the cached snippets and
+    // must NOT issue another fetch.
+    let second = context_port
+        .load_loop_context(request)
+        .await
+        .expect("second prompt build should succeed");
+    assert_eq!(second.memory_snippets, first.memory_snippets);
+    assert_eq!(
+        memory_service.fetches.load(Ordering::SeqCst),
+        1,
+        "memory is fetched once per run; later prompt builds reuse the cache"
+    );
+}
+
+/// Without a memory source wired, `load_loop_context` returns empty
+/// `memory_snippets` (graceful default — no memory backend, no memory).
+#[tokio::test]
+async fn load_loop_context_without_memory_service_returns_empty_memory() {
+    let fixture = ThreadFixture::new().await;
+    let context_port = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    );
+
+    let bundle = context_port
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .expect("prompt build should succeed without a memory service");
+    assert!(bundle.memory_snippets.is_empty());
 }
 
 async fn production_loop_request(

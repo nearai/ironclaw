@@ -92,12 +92,13 @@ use ironclaw_turns::{
 };
 
 use ironclaw_host_runtime::MemoryBackedUserProfileSource;
+use ironclaw_host_runtime::memory_context::ProductionMemoryPromptContextService;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_workflow::{
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetSummary, RebornServicesError, WebUiAuthenticatedCaller,
 };
-use ironclaw_turns::run_profile::UserProfileContext;
+use ironclaw_turns::run_profile::{MemoryPromptContextService, UserProfileContext};
 
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
@@ -3092,6 +3093,42 @@ pub async fn build_reborn_runtime(
                 as Arc<dyn HostUserProfileSource>,
             None => Arc::new(EmptyUserProfileSource) as Arc<dyn HostUserProfileSource>,
         },
+        // Proactive memory (#3537 / mem0 flow): resolve the SAME document-store
+        // provider the memory tools use (via `memory_service_resolver`), wrap it
+        // in the host's prompt-context adapter, and let the loop surface both
+        // lanes into the prompt once per run. A disabled or
+        // third-party-without-a-provider binding resolves to `None` — degrading to
+        // no memory rather than silently reading native — keeping memory reads and
+        // tools consistent, from one construction point (mirrors the
+        // `user_profile_source` guard directly above; both degrade to Empty/None
+        // on the production-graph path today, see issue #5013).
+        memory_context_service: local_runtime
+            .and_then(|local_runtime| {
+                local_runtime
+                    .memory_service_resolver
+                    .resolve_document_store(
+                        Arc::clone(&local_runtime.extension_filesystem)
+                            as Arc<dyn ironclaw_filesystem::RootFilesystem>,
+                        None,
+                    )
+                    .map(ProductionMemoryPromptContextService::new)
+            })
+            .map(|service| Arc::new(service) as Arc<dyn MemoryPromptContextService>),
+        // After-turn memory recording (#3537 / mem0 `add`): the RAW document-store
+        // provider — the SAME `memory_service_resolver` the memory tools and the
+        // prompt-context lane use, NOT wrapped in `ProductionMemoryPromptContextService`.
+        // The executor records each Completed run's `[user, assistant]` exchange
+        // through `record_interaction`. `None` degrades to no after-turn recording,
+        // the same production-graph deferral as `memory_context_service` (issue #5013).
+        after_turn_memory_writer: local_runtime.and_then(|local_runtime| {
+            local_runtime
+                .memory_service_resolver
+                .resolve_document_store(
+                    Arc::clone(&local_runtime.extension_filesystem)
+                        as Arc<dyn ironclaw_filesystem::RootFilesystem>,
+                    None,
+                )
+        }),
         model_policy_guard: None,
         model_budget_accountant,
         safety_context: None,

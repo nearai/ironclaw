@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem};
 use ironclaw_hooks::{
     HookId, HookLocalId, HookRegistrar, HookRegistry, HookVersion,
     dispatch::HookDispatcherBuilder,
@@ -21,10 +21,10 @@ use ironclaw_hooks::{
 };
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
-    CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, GrantConstraints,
-    HostPath, HostPortCatalog, MountView, NetworkPolicy, PackageId, PermissionMode, Principal,
-    ProcessId, ProjectId, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId,
-    ThreadId, TrustClass, UserId, VirtualPath,
+    CapabilityId, CapabilitySet, CorrelationId, EffectKind, ExecutionContext, ExtensionId,
+    GrantConstraints, HostPath, HostPortCatalog, InvocationId, MountView, NetworkPolicy, PackageId,
+    PermissionMode, Principal, ProcessId, ProjectId, ResourceEstimate, ResourceScope,
+    ResourceUsage, RuntimeKind, SecretHandle, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, HostRuntime,
@@ -49,7 +49,10 @@ use ironclaw_loop_support::{
     ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
     identity_message_ref, loop_driver_execution_extension_id,
 };
+use ironclaw_memory::{MemoryInvocation, MemoryService, MemoryServiceReadRequest};
+use ironclaw_memory_native::NativeMemoryService;
 use ironclaw_processes::ProcessServices;
+use ironclaw_reborn::after_turn_memory::AfterTurnMemoryRecorder;
 use ironclaw_reborn::driver_registry::{
     DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey,
 };
@@ -1599,6 +1602,130 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
     }));
 }
 
+/// Caller-level coverage for Phase 2 after-turn interaction recording: a real
+/// `NativeMemoryService` (over `InMemoryBackend`) is wired into an
+/// `AfterTurnMemoryRecorder` on the executor. Once the turn-runner worker drives
+/// a queued run to `Completed`, the executor's run-end seam must record the
+/// `[user, assistant]` exchange — so the memory store's
+/// `threads/<thread_id>/log.md` ends up containing BOTH the user message and the
+/// assistant reply ("model says hi"). This drives the production call site
+/// (`apply_exit`), not the recorder in isolation (testing.md "test through the
+/// caller").
+#[tokio::test]
+async fn turn_runner_worker_records_after_turn_memory_on_completed_run() {
+    let fixture = HostFixture::new_unsubmitted(
+        "thread-after-turn-memory",
+        "remember the launch is on friday",
+    )
+    .await;
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let resolver = InMemoryRunProfileResolver::default();
+    let resolved = resolver
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    let descriptor = resolved.loop_driver.clone();
+    let run_id = queue_fixture_turn(
+        &fixture,
+        turn_store.as_ref(),
+        &resolver,
+        "idem-after-turn-memory",
+    )
+    .await;
+
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            Arc::new(TextOnlyFinalReplyDriver { descriptor }),
+            DriverRequirements::all_required(),
+            DriverKind::Reference,
+        )
+        .unwrap();
+
+    // Real native memory provider over an in-memory filesystem backend.
+    let memory_writer: Arc<dyn MemoryService> = Arc::new(NativeMemoryService::from_filesystem(
+        Arc::new(InMemoryBackend::new()) as Arc<dyn RootFilesystem>,
+        None,
+    ));
+    let recorder = Arc::new(AfterTurnMemoryRecorder::new(
+        fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
+        Arc::clone(&memory_writer),
+        fixture.thread_scope.clone(),
+    ));
+
+    let executor = Arc::new(
+        RebornTurnRunExecutor::new(
+            loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
+            Arc::new(registry),
+            Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone()))
+                as Arc<dyn HostFactory>,
+        )
+        .with_after_turn_memory_recorder(recorder),
+    );
+    let scheduler_handle = TurnRunScheduler::new(
+        turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        TurnRunSchedulerConfig::default()
+            .with_runner_heartbeat_interval(std::time::Duration::from_millis(20))
+            .with_poll_interval(std::time::Duration::from_millis(10)),
+    )
+    .start();
+
+    wait_for_run_status(
+        turn_store.as_ref(),
+        &fixture.context.scope,
+        run_id,
+        TurnStatus::Completed,
+        "turn runner should complete queued run for after-turn memory recording",
+    )
+    .await;
+    scheduler_handle.shutdown().await;
+
+    // The recorder runs inside the worker's `apply_exit`, just after the run
+    // flips to Completed. Poll the memory store (same scope the recorder writes
+    // under: actor user + turn agent/project) until the thread log appears.
+    let read_invocation = MemoryInvocation {
+        scope: ResourceScope {
+            tenant_id: TenantId::new("tenant-text-host").unwrap(),
+            user_id: UserId::new("user-text-host").unwrap(),
+            agent_id: Some(AgentId::new("agent-text-host").unwrap()),
+            project_id: Some(ProjectId::new("project-text-host").unwrap()),
+            mission_id: None,
+            thread_id: Some(fixture.thread_id.clone()),
+            invocation_id: InvocationId::new(),
+        },
+        correlation_id: CorrelationId::new(),
+    };
+    let log_path = format!("threads/{}/log.md", fixture.thread_id);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let content = loop {
+        match memory_writer
+            .read(
+                read_invocation.clone(),
+                MemoryServiceReadRequest {
+                    path: log_path.clone(),
+                },
+            )
+            .await
+        {
+            Ok(read) => break read.content,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("after-turn memory thread log was never written: {error:?}"),
+        }
+    };
+
+    assert!(
+        content.contains("remember the launch is on friday"),
+        "after-turn memory must record the user message: {content:?}"
+    );
+    assert!(
+        content.contains("model says hi"),
+        "after-turn memory must record the assistant reply: {content:?}"
+    );
+}
+
 /// Verifies that `TurnRunScheduler` emits a "turn run started" debug event with
 /// `thread_id` and `run_id` correlation fields so the operator Logs panel can
 /// scope entries to a specific run.
@@ -2999,6 +3126,8 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         input_queue: None,
         identity_context_source: Arc::new(StaticIdentityContextSource::new(Vec::new())),
         user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_service: None,
+        after_turn_memory_writer: None,
         model_policy_guard: None,
         model_budget_accountant: None,
         safety_context: None,
@@ -3155,6 +3284,8 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
         input_queue: None,
         identity_context_source: Arc::new(StaticIdentityContextSource::new(Vec::new())),
         user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_service: None,
+        after_turn_memory_writer: None,
         model_policy_guard: None,
         model_budget_accountant: None,
         safety_context: None,
@@ -3316,6 +3447,8 @@ async fn build_runtime_host_with_optional_hooks(
         input_queue: None,
         identity_context_source: Arc::new(StaticIdentityContextSource::new(Vec::new())),
         user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_service: None,
+        after_turn_memory_writer: None,
         model_policy_guard: None,
         model_budget_accountant: None,
         safety_context: None,
@@ -3665,6 +3798,8 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         input_queue: Some(Arc::new(EmptyHostInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_service: None,
+        after_turn_memory_writer: None,
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
@@ -3781,6 +3916,8 @@ async fn product_live_parts_for_gate_test(
         input_queue: Some(Arc::new(EmptyHostInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_service: None,
+        after_turn_memory_writer: None,
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),

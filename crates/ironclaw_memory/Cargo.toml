@@ -24,3 +24,7 @@ sha2 = "0.10"
 # Required only by `DocumentMetadata::from_value`, which logs a diagnostic on
 # deserialize failure; preserved to keep behavior identical to the impl crate.
 tracing = "0.1"
+
+[dev-dependencies]
+# Test substrate only: drives the async `MemoryService` default-impl unit test.
+tokio = { version = "1", features = ["macros", "rt"] }
