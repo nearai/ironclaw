@@ -6,6 +6,7 @@ surface rather than the legacy ``ironclaw`` gateway, so assertions use Reborn's
 sidebar routes, token login view, and ``data-testid`` selectors.
 """
 
+import json
 import re
 
 import httpx
@@ -62,6 +63,110 @@ async def test_reborn_legacy_core_auth_rejection(reborn_v2_server, reborn_v2_bro
     try:
         await page.goto(f"{reborn_v2_server}/v2/")
         await expect(page.locator(SEL_V2["login_token"])).to_be_visible(timeout=15000)
+    finally:
+        await context.close()
+
+
+async def test_reborn_legacy_session_switch_does_not_restore_previous_user_draft(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Port multi-user content isolation to Reborn's auth/session/composer boundary."""
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    session_requests: list[str] = []
+
+    await page.add_init_script(
+        """
+        (() => {
+          class FakeEventSource extends EventTarget {
+            constructor(url) {
+              super();
+              this.url = url;
+              this.readyState = 0;
+              setTimeout(() => {
+                this.readyState = 1;
+                if (typeof this.onopen === "function") this.onopen(new Event("open"));
+              }, 0);
+            }
+            close() {
+              this.readyState = 2;
+            }
+          }
+          window.EventSource = FakeEventSource;
+        })();
+        """
+    )
+
+    async def fulfill_json(route, body, status=200):
+        await route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route):
+        auth_header = route.request.headers.get("authorization", "")
+        session_requests.append(auth_header)
+        if auth_header == "Bearer token-user-a":
+            user_id = "user-A"
+        elif auth_header == "Bearer token-user-b":
+            user_id = "user-B"
+        else:
+            await fulfill_json(route, {"error": "unauthorized"}, status=401)
+            return
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "tenant-draft-isolation",
+                "user_id": user_id,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_count": 4,
+                    "max_file_bytes": 1048576,
+                    "max_total_bytes": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route):
+        await fulfill_json(route, {"threads": [], "next_cursor": None})
+
+    async def handle_logout(route):
+        await fulfill_json(route, {"status": "logged_out"})
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads", handle_threads)
+    await page.route("**/api/webchat/v2/threads?**", handle_threads)
+    await page.route("**/auth/logout", handle_logout)
+
+    try:
+        await page.goto(f"{reborn_v2_server}/v2/chat?token=token-user-a")
+        composer = page.locator(SEL_V2["chat_composer"])
+        await expect(composer).to_be_visible(timeout=15000)
+        await composer.fill("user A private draft")
+        await page.wait_for_function(
+            """() => Object.entries(window.localStorage)
+              .some(([key, value]) => key.includes('ironclaw:v2-draft:')
+                && value === 'user A private draft')""",
+                timeout=5000,
+            )
+
+        await page.locator("button[title='Sign out']").click()
+        await expect(page.locator(SEL_V2["login_token"])).to_be_visible(timeout=15000)
+        await page.locator(SEL_V2["login_token"]).fill("token-user-b")
+        await page.get_by_role("button", name="Connect").click()
+        await expect(composer).to_be_visible(timeout=15000)
+        await expect(composer).to_have_value("", timeout=5000)
+
+        storage_state = await page.evaluate(
+            """() => Object.fromEntries(Object.entries(window.localStorage)
+              .filter(([key]) => key.includes('ironclaw:v2-draft:')))"""
+        )
+        assert "user A private draft" not in json.dumps(storage_state), storage_state
+        assert "Bearer token-user-a" in session_requests
+        assert "Bearer token-user-b" in session_requests
     finally:
         await context.close()
 

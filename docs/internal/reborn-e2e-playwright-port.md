@@ -3065,6 +3065,52 @@ Behavior mapping:
   channel-route/personal-binding endpoints, not a direct copy of the legacy
   `/api/chat/*` or webhook tests.
 
+### Step 102: Multi-User Composer Draft Isolation Port
+
+Extended `tests/e2e/scenarios/test_reborn_webui_v2_legacy_core.py`.
+
+Ported the browser-visible part of legacy owner/multi-tenant content isolation
+to Reborn's actual auth/session boundary:
+
+- opened the WebUI v2 app as one bearer-authenticated session;
+- typed an unsent composer draft and waited for the scoped draft store to
+  persist it;
+- signed out through the visible sidebar control;
+- signed in as a second user through the login form; and
+- asserted the second user sees an empty composer and no persisted copy of the
+  first user's draft.
+
+Issue found and fixed:
+
+- Reborn already namespaced persisted draft storage by
+  `(tenant_id, user_id)`, but the mounted composer only re-read stored text and
+  staged attachments when the thread key changed. A session replacement could
+  therefore keep another user's unsent draft in component state even after
+  auth/session state changed. `ChatInput` now treats the authenticated storage
+  scope as part of the draft and staged-attachment restore key, so a mounted
+  composer refreshes its local text/files when the resolved user changes.
+
+Behavior mapping:
+
+- Legacy multi-tenant greeting and owner-scope tests use `/api/admin/users`,
+  old gateway assistant threads, owner HTTP webhooks, and routines. Those
+  remain old gateway/admin/routine contracts. This port covers the matching
+  current Reborn browser invariant: user-authenticated client content must not
+  leak across sessions in one browser context.
+
+Validation:
+
+- `cd crates/ironclaw_webui_v2_static/frontend && bash build.sh --no-vendor`
+  -> passed with the existing Node 18/react-router engine warning
+- `cargo build -p ironclaw_reborn_cli --features webui-v2-beta`
+  -> passed
+- `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_core.py::test_reborn_legacy_session_switch_does_not_restore_previous_user_draft -q`
+  -> `1 passed`
+- `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_core.py -q`
+  -> `9 passed`
+- `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_*.py -q`
+  -> `155 passed`
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -3132,8 +3178,9 @@ Not yet ported:
   are TODO client stubs and no portfolio-specific widget/share-modal contract
   exists in WebUI v2;
 - remaining legacy owner-scope, multi-tenant greeting, and engine-v2 visibility
-  parity beyond the Reborn session/auth API coverage, because those tests target
-  old gateway/admin/routine/engine endpoints rather than current standalone
+  parity beyond Reborn session/auth API and browser draft-isolation coverage,
+  because the unported portions target old gateway admin/routine/engine,
+  assistant-greeting, and HTTP-webhook endpoints rather than current standalone
   Reborn WebUI v2 product surfaces;
 - legacy empty-model-reply durable assistant-transcript parity remains
   intentionally unported because Reborn treats model `InvalidOutput` as a
@@ -3288,3 +3335,10 @@ empty item arrays, while legacy coverage used an untyped message list and empty
 text input. The migrated test follows Reborn's DTO and leaves legacy
 `x_context.notification_response` context-injection behavior to the dedicated
 Step 73 coverage.
+
+The multi-user draft-isolation port found a Reborn browser defect: a mounted
+composer refreshed persisted drafts on thread-key changes but not on
+authenticated identity changes. A session replacement could keep the previous
+user's unsent text in component state even after scoped localStorage was
+cleared or re-keyed. `ChatInput` now includes the authenticated storage scope
+when restoring text drafts and staged attachment drafts.

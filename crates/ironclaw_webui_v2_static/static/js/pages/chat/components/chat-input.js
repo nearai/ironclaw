@@ -31,6 +31,7 @@ export function ChatInput({
   statusText = "",
 }) {
   const t = useT();
+  const storageScope = authScope();
   const isHero = variant === "hero";
   const limits = useAttachmentConfig();
   const [text, setText] = React.useState(() => getDraft(draftKey));
@@ -105,9 +106,11 @@ export function ChatInput({
   React.useEffect(() => {
     setText(getDraft(draftKey));
     // Flush any queued write (for the previous key) before this key changes
-    // or the composer unmounts, so a debounced draft is never lost.
+    // or the composer unmounts, so a debounced draft is never lost. The
+    // authenticated scope is part of the dependency list because the same
+    // composer can stay mounted across a token/session switch.
     return () => flushDraft();
-  }, [draftKey, flushDraft]);
+  }, [draftKey, storageScope, flushDraft]);
 
   // Keep the in-memory staged-attachment store in sync so files survive
   // navigating away from (and back to) this composer, the same way the text
@@ -116,17 +119,22 @@ export function ChatInput({
   // key, so persisting it here would leak the previous conversation's files
   // into the new one.
   const stagedDraftKeyRef = React.useRef(draftKey);
+  const stagedDraftScopeRef = React.useRef(storageScope);
   React.useEffect(() => {
-    if (stagedDraftKeyRef.current !== draftKey) {
+    if (
+      stagedDraftKeyRef.current !== draftKey ||
+      stagedDraftScopeRef.current !== storageScope
+    ) {
       stagedDraftKeyRef.current = draftKey;
+      stagedDraftScopeRef.current = storageScope;
       setAttachments(getStagedAttachments(draftKey));
       // The composer stays mounted across conversation switches, so a stale
-      // staging error would otherwise persist into every other thread.
+      // staging error would otherwise persist into every other thread or user.
       setAttachmentError("");
       return;
     }
     setStagedAttachments(draftKey, attachments);
-  }, [draftKey, attachments]);
+  }, [draftKey, storageScope, attachments]);
 
   React.useEffect(() => {
     if (!initialText) return;
