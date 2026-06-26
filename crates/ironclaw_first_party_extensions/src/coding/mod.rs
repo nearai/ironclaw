@@ -360,6 +360,59 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn read_file_limit_zero_returns_whole_file() {
+        let temp_root = tempfile::TempDir::new().expect("temp root");
+        let mut local_filesystem = LocalFilesystem::new();
+        local_filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("virtual path"),
+                HostPath::from_path_buf(temp_root.path().to_path_buf()),
+            )
+            .expect("projects mount");
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(local_filesystem);
+        let mounts = workspace_mounts();
+        let scope = ResourceScope::local_default(
+            UserId::new("limit-zero-user").expect("user id"),
+            InvocationId::new(),
+        )
+        .expect("resource scope");
+        let state = super::CodingCapabilityState::default();
+
+        let write_input = json!({
+            "path": "workspace/demo/lines.txt",
+            "content": "alpha\nbeta\ngamma"
+        });
+        let write_request = super::CodingCapabilityRequest::new(
+            super::CodingCapabilityKind::WriteFile,
+            &scope,
+            Some(&mounts),
+            Arc::clone(&filesystem),
+            &write_input,
+        );
+        state.dispatch(&write_request).await.expect("write file");
+
+        // `limit: 0` must read the whole file, not select zero lines. Regression
+        // for the empty-body / misleading lines-limit notice bug.
+        let read_input = json!({ "path": "workspace/demo/lines.txt", "limit": 0 });
+        let read_request = super::CodingCapabilityRequest::new(
+            super::CodingCapabilityKind::ReadFile,
+            &scope,
+            Some(&mounts),
+            Arc::clone(&filesystem),
+            &read_input,
+        );
+        let read_output = state.dispatch(&read_request).await.expect("read file");
+
+        assert_eq!(read_output.output["total_lines"].as_u64(), Some(3));
+        assert_eq!(read_output.output["lines_shown"].as_u64(), Some(3));
+        assert_eq!(read_output.output["truncated"].as_bool(), Some(false));
+        assert_eq!(
+            read_output.output["content"].as_str(),
+            Some("     1│ alpha\n     2│ beta\n     3│ gamma")
+        );
+    }
+
     fn workspace_mounts() -> MountView {
         MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").expect("mount alias"),

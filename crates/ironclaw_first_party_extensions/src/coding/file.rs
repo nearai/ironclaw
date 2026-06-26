@@ -38,7 +38,10 @@ pub(super) async fn read_file(
 ) -> Result<Value, CodingCapabilityError> {
     let resolved = resolve_required_path(request, "path", FilesystemOperation::ReadFile)?;
     let offset = optional_usize(request.input, "offset")?.unwrap_or(0);
-    let limit = optional_usize(request.input, "limit")?;
+    // `limit: 0` is a natural way to ask for "the whole file"; treat it as no
+    // explicit limit rather than selecting zero lines, which would otherwise
+    // return an empty body with a misleading lines-limit notice.
+    let limit = optional_usize(request.input, "limit")?.filter(|&n| n > 0);
     let has_explicit_range = offset > 0 || limit.is_some();
     let stat = request
         .filesystem
@@ -250,9 +253,9 @@ fn read_file_text_output(
     let lines_shown = rendered.len();
     let last_line_shown = start_line + lines_shown;
     // A continuation notice only makes sense once at least one line was rendered.
-    // An explicit `limit: 0` selects no lines, so there is nothing to continue
-    // from and "[Showing lines 1-0 ...]" would be a nonsensical inverted range.
-    // Suppressing the notice here keeps the zero-value path byte-for-byte v1.
+    // An empty selection (an `offset` past EOF, or an empty file) has nothing to
+    // continue from, and "[Showing lines 1-0 ...]" would be a nonsensical
+    // inverted range, so suppress the notice in that case.
     let has_more = lines_shown > 0 && last_line_shown < total_lines;
     let next_offset = has_more.then_some(last_line_shown + 1);
     let truncated_by = if truncated_by_bytes {
