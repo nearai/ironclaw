@@ -280,6 +280,16 @@ async def _get_timeline(
     return response.json()
 
 
+async def _restore_disabled_tool_policy(client: httpx.AsyncClient, base_url: str) -> None:
+    errors = []
+    for capability_id in ("builtin.echo", "builtin.shell"):
+        try:
+            await _set_tool_permission(client, base_url, capability_id, "default")
+        except Exception as error:
+            errors.append(f"{capability_id}: {error}")
+    assert not errors, "Failed to restore tool permission defaults: " + "; ".join(errors)
+
+
 async def _wait_for_assistant_message(
     client: httpx.AsyncClient,
     base_url: str,
@@ -317,13 +327,12 @@ async def _wait_for_assistant_message(
 async def disabled_echo_shell_ask_policy(reborn_v2_server):
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
     async with httpx.AsyncClient(headers=headers) as client:
-        await _set_tool_permission(client, reborn_v2_server, "builtin.echo", "disabled")
-        await _set_tool_permission(client, reborn_v2_server, "builtin.shell", "ask_each_time")
         try:
+            await _set_tool_permission(client, reborn_v2_server, "builtin.echo", "disabled")
+            await _set_tool_permission(client, reborn_v2_server, "builtin.shell", "ask_each_time")
             yield
         finally:
-            await _set_tool_permission(client, reborn_v2_server, "builtin.echo", "default")
-            await _set_tool_permission(client, reborn_v2_server, "builtin.shell", "default")
+            await _restore_disabled_tool_policy(client, reborn_v2_server)
 
 
 async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2_browser):
