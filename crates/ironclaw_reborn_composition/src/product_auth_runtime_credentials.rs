@@ -2,12 +2,18 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+#[cfg(feature = "capability-policy")]
+use ironclaw_auth::CredentialOwnership;
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
     CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountStatus,
     CredentialRefreshReport, CredentialRefreshRequest, ProviderScope,
     select_latest_duplicate_user_reusable_account,
 };
+#[cfg(feature = "capability-policy")]
+use ironclaw_capability_policy::{IdentityMode, PolicyResolver, PolicySubject};
+#[cfg(feature = "capability-policy")]
+use ironclaw_host_api::CapabilityId;
 use ironclaw_host_api::{
     CredentialStageError, ExtensionId, ResourceScope, RuntimeCredentialAccountProviderId,
     RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
@@ -27,6 +33,13 @@ pub(crate) const DEFAULT_ACCESS_REFRESH_MARGIN: std::time::Duration =
 pub(crate) struct ProductAuthRuntimeCredentialResolver {
     accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
     refresher: Arc<dyn RuntimeCredentialAccountRefreshService>,
+    /// Capability-policy resolver for the identity dimension (#5261). Genuinely
+    /// optional: `Some` only when the `capability-policy` feature is compiled AND
+    /// `capability_policy_activated()` wires the shared resolver in. When `None`
+    /// (feature off, env off, or production backend path) `resolve_access_secret`
+    /// is byte-identical to the pre-policy behaviour.
+    #[cfg(feature = "capability-policy")]
+    policy: Option<Arc<dyn PolicyResolver>>,
 }
 
 impl ProductAuthRuntimeCredentialResolver {
@@ -35,6 +48,8 @@ impl ProductAuthRuntimeCredentialResolver {
         Self {
             accounts,
             refresher: Arc::new(NoopRuntimeCredentialAccountRefresher),
+            #[cfg(feature = "capability-policy")]
+            policy: None,
         }
     }
 
@@ -45,6 +60,53 @@ impl ProductAuthRuntimeCredentialResolver {
         Self {
             accounts,
             refresher,
+            #[cfg(feature = "capability-policy")]
+            policy: None,
+        }
+    }
+
+    /// Attach the shared capability-policy resolver so the identity dimension is
+    /// enforced at credential resolution. Called from composition only under
+    /// feature + `capability_policy_activated()`; the production wiring passes
+    /// the single shared `Arc<dyn PolicyResolver>` (D3) held on
+    /// `RebornLocalRuntimeServices`.
+    #[cfg(feature = "capability-policy")]
+    #[must_use]
+    pub(crate) fn with_policy_resolver(mut self, policy: Arc<dyn PolicyResolver>) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    /// Resolve the capability-policy identity mandate for `(capability, acting
+    /// subject)`. Returns `Ok(None)` when no policy handle is attached (feature
+    /// off / env off / production backend path), leaving the resolver byte-
+    /// identical to the pre-policy path. On a resolver fault the typed
+    /// `PolicyError` is logged at debug (never dropped per error-handling.md),
+    /// then surfaced as `CredentialStageError::Backend` (unavailable, no re-auth
+    /// gate) per #5261 D5.
+    #[cfg(feature = "capability-policy")]
+    async fn resolve_identity_mandate(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+    ) -> Result<Option<IdentityMode>, CredentialStageError> {
+        let Some(policy) = self.policy.as_ref() else {
+            return Ok(None);
+        };
+        let subject = PolicySubject {
+            tenant_id: scope.tenant_id.clone(),
+            user_id: scope.user_id.clone(),
+        };
+        match policy.resolve(&subject, capability_id).await {
+            Ok(effective) => Ok(Some(effective.identity)),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    capability = %capability_id.as_str(),
+                    "capability policy identity resolution failed; treating credential as unavailable"
+                );
+                Err(CredentialStageError::Backend)
+            }
         }
     }
 }
@@ -483,18 +545,87 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             request.provider_scopes,
             request.requester_extension,
         )?;
+        // Capability-policy identity mandate (#5261). Resolved BEFORE selection so
+        // a missing/unmatched account is failed in the direction the mandate
+        // requires: AdminKeyed -> Backend (unavailable, admin must provision; no
+        // re-auth gate), UserKeyed -> AuthRequired (the user can re-authenticate).
+        // `None` when the feature is off, the env gate is off, or the resolver
+        // has no policy handle, leaving the path byte-identical to the prior
+        // behaviour.
+        #[cfg(feature = "capability-policy")]
+        let identity_mandate = self
+            .resolve_identity_mandate(request.scope, request.capability_id)
+            .await?;
         let account = self
             .accounts
             .select_unique_configured_runtime_account(selection_request.clone())
             .await
-            .map_err(map_account_error)?;
+            .map_err(|error| {
+                #[cfg(feature = "capability-policy")]
+                if matches!(identity_mandate, Some(IdentityMode::AdminKeyed)) {
+                    // Never drop the cause (error-handling.md): the typed
+                    // AuthProductError is logged at debug before we substitute
+                    // the sanitized Backend (admin-keyed → unavailable, no
+                    // re-auth gate), mirroring `resolve_identity_mandate`.
+                    tracing::debug!(
+                        %error,
+                        capability = %request.capability_id.as_str(),
+                        "admin-keyed capability account selection failed; treating credential as unavailable"
+                    );
+                    return CredentialStageError::Backend;
+                }
+                map_account_error(error)
+            })?;
         let account = self
             .refresher
             .refresh_configured_runtime_account(selection_request, account, self.accounts.as_ref())
             .await
-            .map_err(map_account_error)?;
+            .map_err(|error| {
+                #[cfg(feature = "capability-policy")]
+                if matches!(identity_mandate, Some(IdentityMode::AdminKeyed)) {
+                    // Never drop the cause (error-handling.md): log the typed
+                    // AuthProductError at debug before substituting the
+                    // sanitized Backend, mirroring `resolve_identity_mandate`.
+                    tracing::debug!(
+                        %error,
+                        capability = %request.capability_id.as_str(),
+                        "admin-keyed capability account refresh failed; treating credential as unavailable"
+                    );
+                    return CredentialStageError::Backend;
+                }
+                map_account_error(error)
+            })?;
         if account.status != CredentialAccountStatus::Configured {
             return Err(CredentialStageError::AuthRequired);
+        }
+        // Ownership assertion: the selected account's ownership class must match
+        // the ownership mandated by the identity mode. This is an ADDITIONAL gate
+        // layered on top of the existing `is_authorized_for_requester` visibility
+        // check, never a relaxation of it. The same `ownership_for_identity`
+        // mapping that admin provisioning tags accounts with is used here to
+        // assert them.
+        #[cfg(feature = "capability-policy")]
+        match identity_mandate {
+            Some(IdentityMode::UserKeyed)
+                if account.ownership != ownership_for_identity(IdentityMode::UserKeyed) =>
+            {
+                tracing::debug!(
+                    capability = %request.capability_id.as_str(),
+                    "user-keyed capability resolved a non-user-reusable account; requiring re-auth"
+                );
+                return Err(CredentialStageError::AuthRequired);
+            }
+            Some(IdentityMode::AdminKeyed)
+                if account.ownership != ownership_for_identity(IdentityMode::AdminKeyed) =>
+            {
+                tracing::debug!(
+                    capability = %request.capability_id.as_str(),
+                    "admin-keyed capability resolved a non-shared-admin account; unavailable"
+                );
+                return Err(CredentialStageError::Backend);
+            }
+            // None / matched mode -> unchanged.
+            _ => {}
         }
         // A Configured account missing access_secret indicates data corruption,
         // not a re-auth prompt. The durable product-auth store (#4234) preserves
@@ -507,6 +638,21 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             scope: account.scope.resource,
             handle,
         })
+    }
+}
+
+/// Map a capability-policy identity mode to the credential ownership class an
+/// account must carry to satisfy it (#5261 D7). `AdminKeyed` requires an
+/// admin-provisioned shared account; `UserKeyed`/`None` map to a user-owned
+/// reusable account (the back-compat default). This is the single source of
+/// truth shared by the resolver's ownership assertion and (once the durable
+/// credential-creation flows carry the capability + policy handle) the
+/// provisioning sites in `product_auth_durable/`.
+#[cfg(feature = "capability-policy")]
+pub(crate) fn ownership_for_identity(mode: IdentityMode) -> CredentialOwnership {
+    match mode {
+        IdentityMode::AdminKeyed => CredentialOwnership::SharedAdminManaged,
+        IdentityMode::UserKeyed | IdentityMode::None => CredentialOwnership::UserReusable,
     }
 }
 

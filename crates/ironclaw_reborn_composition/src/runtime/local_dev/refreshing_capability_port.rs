@@ -53,6 +53,9 @@ pub(super) struct RefreshingLocalDevCapabilityPortConfig {
     pub(super) approval_settings: Arc<dyn ApprovalSettingsProvider>,
     pub(super) approval_requests: Arc<dyn ApprovalRequestStore>,
     pub(super) capability_leases: Arc<dyn CapabilityLeaseStore>,
+    #[cfg(feature = "capability-policy")]
+    pub(super) policy_config_source:
+        Option<Arc<dyn ironclaw_loop_support::LoopCapabilityConfigSource>>,
 }
 
 pub(super) async fn create_refreshing_local_dev_capability_port(
@@ -80,6 +83,8 @@ pub(super) async fn create_refreshing_local_dev_capability_port(
         approval_settings: config.approval_settings,
         approval_requests: config.approval_requests,
         capability_leases: config.capability_leases,
+        #[cfg(feature = "capability-policy")]
+        policy_config_source: config.policy_config_source,
         current: StdMutex::new(None),
         refresh_lock: AsyncMutex::new(()),
     });
@@ -111,6 +116,8 @@ struct RefreshingLocalDevCapabilityPort {
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
+    #[cfg(feature = "capability-policy")]
+    policy_config_source: Option<Arc<dyn ironclaw_loop_support::LoopCapabilityConfigSource>>,
     current: StdMutex<Option<Arc<dyn LoopCapabilityPort>>>,
     refresh_lock: AsyncMutex<()>,
 }
@@ -150,6 +157,12 @@ impl RefreshingLocalDevCapabilityPort {
                 .clone()
                 .map(crate::trajectory_observer::as_capability_observer),
         );
+        // Admin policy config deep-merge at dispatch (#5261). `None` off-feature
+        // / when the policy is inactive, so the model input dispatches verbatim.
+        #[cfg(feature = "capability-policy")]
+        {
+            factory = factory.with_policy_config_source(self.policy_config_source.clone());
+        }
         for capability_id in self.policy.skill_management_capability_ids() {
             factory = factory
                 .with_capability_execution_mount(capability_id.clone(), self.skill_mounts.clone());

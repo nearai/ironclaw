@@ -188,6 +188,19 @@ pub fn resolve_effective_policy(
     }
 }
 
+/// Deep-merge `patch` into `base` with the SAME semantics the policy fold uses
+/// ([`resolve_effective_policy`]): objects merge key-by-key (recursively); any
+/// non-object value (including arrays and `null`) in `patch` replaces the
+/// corresponding slot in `base`, so `patch` keys win on conflict.
+///
+/// Exposed so the capability-invocation seam (#5261 configuration dimension) can
+/// overlay an admin `EffectivePolicy.config` onto the model-supplied input with
+/// admin keys winning, matching this crate's fold byte-for-byte rather than
+/// re-implementing the merge. Delegates to the private [`deep_merge`].
+pub fn deep_merge_into(base: &mut Value, patch: &Value) {
+    deep_merge(base, patch);
+}
+
 /// Deep-merge `patch` into `base`: objects merge key-by-key (recursively); any
 /// non-object value (including arrays and `null`) replaces. Mirrors the
 /// "admin owns the keys, lower scopes tweak" semantics (architecture doc §6).
@@ -243,6 +256,34 @@ impl CapabilityDefaultPolicy {
     pub fn conservative_fallback() -> Self {
         Self {
             availability: Availability::Hidden,
+            identity: IdentityMode::None,
+            approval: PermissionMode::Ask,
+            config: Value::Null,
+        }
+    }
+
+    /// The capability-policy *milestone* default (#5261): installed capabilities
+    /// are available unless an admin delta hides them, with no admin opinion on
+    /// the other three dimensions.
+    ///
+    /// - `availability: Available` — the policy view does not hide anything by
+    ///   default; the installation view (#4544 / #5267) decides what is
+    ///   installed, and the enforcement layer intersects the two (a capability
+    ///   is available iff installed **and** not hidden by a delta).
+    /// - `identity: None` — no credential mandate unless a delta sets
+    ///   `UserKeyed` / `AdminKeyed`.
+    /// - `approval: Ask` — "no admin opinion"; approval **defers** to the
+    ///   existing user/profile chain unless a delta sets `Allow` / `Deny`.
+    /// - `config: Null` — no injected configuration unless a delta carries a
+    ///   `config_patch`.
+    ///
+    /// Distinct from [`conservative_fallback`](Self::conservative_fallback)
+    /// (which is `Hidden` and would empty the availability intersection). Use
+    /// this as the default source for the milestone resolver so installed ==
+    /// available until an admin delta says otherwise.
+    pub fn available_default() -> Self {
+        Self {
+            availability: Availability::Available,
             identity: IdentityMode::None,
             approval: PermissionMode::Ask,
             config: Value::Null,
@@ -365,6 +406,19 @@ mod tests {
         assert_eq!(fallback.availability, Availability::Hidden);
         assert_eq!(fallback.approval, PermissionMode::Ask);
         assert_eq!(fallback.identity, IdentityMode::None);
+    }
+
+    #[test]
+    fn available_default_is_available_with_no_admin_opinion() {
+        let default = CapabilityDefaultPolicy::available_default();
+        assert_eq!(default.availability, Availability::Available);
+        assert_eq!(default.identity, IdentityMode::None);
+        assert_eq!(default.approval, PermissionMode::Ask);
+        assert_eq!(default.config, Value::Null);
+        // With no deltas the milestone default resolves to available — the
+        // intersection with the installation view is what restricts it.
+        let eff = resolve_effective_policy(&default, &[]);
+        assert!(eff.available);
     }
 
     #[test]

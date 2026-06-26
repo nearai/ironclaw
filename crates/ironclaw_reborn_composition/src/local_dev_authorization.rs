@@ -18,7 +18,8 @@ use ironclaw_host_api::{
 use crate::{
     local_dev_capability_policy::LocalDevCapabilityPolicy,
     profile_approval_authorization::{
-        ApprovalSettingsProvider, ProfileApprovalGatePolicy, profile_approval_authorizer,
+        AdminApprovalSource, ApprovalSettingsProvider, ProfileApprovalGatePolicy,
+        profile_approval_authorizer_with_admin_policy,
     },
     runtime_profile_approval_policy::RuntimeProfileApprovalGatePolicy,
 };
@@ -27,6 +28,7 @@ pub(crate) fn local_dev_authorizer(
     runtime_policy: Option<&EffectiveRuntimePolicy>,
     capability_policy: Arc<LocalDevCapabilityPolicy>,
     settings: Arc<dyn ApprovalSettingsProvider>,
+    admin_policy: Option<Arc<dyn AdminApprovalSource>>,
 ) -> Arc<dyn TrustAwareCapabilityDispatchAuthorizer> {
     let (approval_policy, resolved_profile) = local_dev_approval_policy(runtime_policy);
     let gate_effects = capability_policy.approval_gate_effects();
@@ -35,7 +37,12 @@ pub(crate) fn local_dev_authorizer(
         RuntimeProfileApprovalGatePolicy::new(resolved_profile, gate_effects)
             .with_exempt_capabilities(exempt_capabilities),
     );
-    profile_approval_authorizer(approval_policy, gate_policy, settings)
+    profile_approval_authorizer_with_admin_policy(
+        approval_policy,
+        gate_policy,
+        settings,
+        admin_policy,
+    )
 }
 
 const AUTO_APPROVE_INVOCATION_CACHE_MAX_ENTRIES: usize = 512;
@@ -512,6 +519,7 @@ mod tests {
             None,
             policy,
             Arc::new(crate::profile_approval_authorization::EmptyApprovalSettingsProvider),
+            None,
         );
         authorizer
             .authorize_dispatch_with_trust(
@@ -604,7 +612,7 @@ mod tests {
             Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
         ));
         let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
-        let authorizer = local_dev_authorizer(None, policy, settings);
+        let authorizer = local_dev_authorizer(None, policy, settings, None);
 
         let before = local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
         assert!(
@@ -643,7 +651,7 @@ mod tests {
             Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
         ));
         let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
-        let authorizer = local_dev_authorizer(None, policy, settings);
+        let authorizer = local_dev_authorizer(None, policy, settings, None);
         let (descriptor, context, trust_decision) = local_dev_shell_authorization_inputs(&user_id);
 
         for _ in 0..2 {
@@ -712,7 +720,7 @@ mod tests {
             Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
         ));
         let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
-        let authorizer = local_dev_authorizer(None, policy, settings);
+        let authorizer = local_dev_authorizer(None, policy, settings, None);
 
         let decision =
             local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
@@ -739,7 +747,7 @@ mod tests {
             Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
         ));
         let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
-        let authorizer = local_dev_authorizer(None, policy, settings);
+        let authorizer = local_dev_authorizer(None, policy, settings, None);
 
         let decision =
             local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
@@ -763,7 +771,7 @@ mod tests {
             Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
         ));
         let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
-        let authorizer = local_dev_authorizer(None, policy, settings);
+        let authorizer = local_dev_authorizer(None, policy, settings, None);
 
         let decision =
             local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
@@ -788,7 +796,7 @@ mod tests {
             Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
         ));
         let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
-        let authorizer = local_dev_authorizer(None, policy, settings);
+        let authorizer = local_dev_authorizer(None, policy, settings, None);
 
         // `Deny` manifest permission is not durable-approval eligible, so the
         // global switch must not bypass the gate (the #f14b04d34 manifest-gate

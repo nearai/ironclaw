@@ -72,6 +72,47 @@ pub trait CapabilityPolicyDeltaStore: Send + Sync {
     ) -> Result<Vec<CapabilityPolicyDelta>, PolicyError>;
 }
 
+/// Forward the store contract through a shared `Arc` so a single
+/// `Arc<dyn CapabilityPolicyDeltaStore>` (the one the admin REST surface writes)
+/// can also back a [`StoreBackedPolicyResolver`] without cloning the store —
+/// the resolver's `S: CapabilityPolicyDeltaStore` bound is satisfied by the
+/// `Arc` itself. There is exactly one delta-store instance per runtime (#5261
+/// D2/D3); this impl keeps it that way.
+#[async_trait]
+impl CapabilityPolicyDeltaStore for std::sync::Arc<dyn CapabilityPolicyDeltaStore> {
+    async fn upsert_delta(
+        &self,
+        tenant_id: &TenantId,
+        delta: CapabilityPolicyDelta,
+    ) -> Result<(), PolicyError> {
+        (**self).upsert_delta(tenant_id, delta).await
+    }
+
+    async fn delete_delta(
+        &self,
+        tenant_id: &TenantId,
+        scope: &PolicyScope,
+        capability: &CapabilityId,
+    ) -> Result<(), PolicyError> {
+        (**self).delete_delta(tenant_id, scope, capability).await
+    }
+
+    async fn deltas_for(
+        &self,
+        subject: &PolicySubject,
+        capability: &CapabilityId,
+    ) -> Result<Vec<CapabilityPolicyDelta>, PolicyError> {
+        (**self).deltas_for(subject, capability).await
+    }
+
+    async fn list_subject_deltas(
+        &self,
+        subject: &PolicySubject,
+    ) -> Result<Vec<CapabilityPolicyDelta>, PolicyError> {
+        (**self).list_subject_deltas(subject).await
+    }
+}
+
 /// Stable per-row key component for a scope: `tenant` / `project:<id>` /
 /// `user:<id>`. Matches the store's `(tenant, scope, capability)` keying so an
 /// upsert replaces the delta at the same scope+capability.

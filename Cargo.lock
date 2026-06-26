@@ -4218,6 +4218,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -4685,6 +4686,7 @@ dependencies = [
  "dashmap",
  "futures",
  "hex",
+ "ironclaw_capability_policy",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
@@ -4936,6 +4938,8 @@ dependencies = [
  "chrono",
  "deadpool-postgres",
  "futures-util",
+ "hex",
+ "ironclaw_capability_policy",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_product_adapters",
@@ -5064,6 +5068,7 @@ dependencies = [
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_capabilities",
+ "ironclaw_capability_policy",
  "ironclaw_common",
  "ironclaw_conversations",
  "ironclaw_event_projections",

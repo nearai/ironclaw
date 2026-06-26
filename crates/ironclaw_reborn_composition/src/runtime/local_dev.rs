@@ -135,6 +135,24 @@ pub(super) fn capability_wiring(
     );
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+    // Configuration dimension (#5261 D3/D5): wrap the SINGLE shared policy
+    // resolver in the loop's host-owned config source so admin policy config is
+    // deep-merged into capability inputs at dispatch. `Some` only under the
+    // `capability-policy` feature AND `capability_policy_activated()`; `None`
+    // otherwise, so existing flows are byte-identical (no merge attempted).
+    #[cfg(feature = "capability-policy")]
+    let policy_config_source: Option<
+        Arc<dyn ironclaw_loop_support::LoopCapabilityConfigSource>,
+    > = local_runtime
+        .capability_policy_resolver
+        .as_ref()
+        .map(|resolver| {
+            Arc::new(
+                crate::capability_policy_engine::PolicyResolverConfigSource::new(Arc::clone(
+                    resolver,
+                )),
+            ) as Arc<dyn ironclaw_loop_support::LoopCapabilityConfigSource>
+        });
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(LocalDevLoopCapabilityPortFactory {
             runtime,
@@ -155,6 +173,8 @@ pub(super) fn capability_wiring(
             approval_settings,
             approval_requests,
             capability_leases,
+            #[cfg(feature = "capability-policy")]
+            policy_config_source,
         });
     let model_gateway: Arc<dyn HostManagedModelGateway> = Arc::new(
         LocalDevResultHydratingModelGateway::new(model_gateway, capability_io),
@@ -189,6 +209,8 @@ struct LocalDevLoopCapabilityPortFactory {
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
+    #[cfg(feature = "capability-policy")]
+    policy_config_source: Option<Arc<dyn ironclaw_loop_support::LoopCapabilityConfigSource>>,
 }
 
 #[async_trait::async_trait]
@@ -227,6 +249,8 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             approval_settings: Arc::clone(&self.approval_settings),
             approval_requests: Arc::clone(&self.approval_requests),
             capability_leases: Arc::clone(&self.capability_leases),
+            #[cfg(feature = "capability-policy")]
+            policy_config_source: self.policy_config_source.clone(),
         })
         .await
     }

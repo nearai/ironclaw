@@ -1229,6 +1229,8 @@ mod tests {
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            #[cfg(feature = "capability-policy")]
+            policy_config_source: None,
         };
         let port = factory
             .create_capability_port(&run_context)
@@ -1398,6 +1400,8 @@ mod tests {
             ),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            #[cfg(feature = "capability-policy")]
+            policy_config_source: None,
         };
 
         let tenant_id = TenantId::new("tenant-project-create").expect("tenant id");
@@ -1582,6 +1586,8 @@ mod tests {
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            #[cfg(feature = "capability-policy")]
+            policy_config_source: None,
         };
 
         let owner_user_id = UserId::new("outbound-delivery-owner").expect("user id");
@@ -2127,6 +2133,8 @@ mod tests {
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            #[cfg(feature = "capability-policy")]
+            policy_config_source: None,
         };
         let run_context = run_context("outbound-delivery-hidden")
             .await
@@ -2231,6 +2239,8 @@ mod tests {
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            #[cfg(feature = "capability-policy")]
+            policy_config_source: None,
         };
         let run_context = run_context("host-mount-read").await;
         enable_global_auto_approve_for_run(
@@ -2473,6 +2483,8 @@ mod tests {
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            #[cfg(feature = "capability-policy")]
+            policy_config_source: None,
         };
         let run_context = run_context("skill-install-write").await;
         enable_global_auto_approve_for_run(
@@ -2584,6 +2596,8 @@ mod tests {
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            #[cfg(feature = "capability-policy")]
+            policy_config_source: None,
         };
         let run_context = run_context("no-host-disclosure").await;
         enable_global_auto_approve_for_run(

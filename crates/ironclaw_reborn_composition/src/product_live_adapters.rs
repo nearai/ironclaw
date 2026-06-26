@@ -710,6 +710,13 @@ pub struct ProductLivePlannedRuntimeAdapterConfig {
     pub safety_context: InstructionSafetyContext,
     /// Sink for capability invocation milestones.
     pub milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+    /// Admin policy config source (#5261). Every port built by the capability
+    /// factory consults it to deep-merge admin policy config into a capability's
+    /// resolved input before dispatch. `None` (the production-live default until
+    /// the shared resolver is threaded here) dispatches the model input
+    /// verbatim, preserving current behaviour.
+    #[cfg(feature = "capability-policy")]
+    pub policy_config_source: Option<Arc<dyn ironclaw_loop_support::LoopCapabilityConfigSource>>,
 }
 
 /// Adapter bundle consumed by `build_product_live_planned_runtime`.
@@ -758,6 +765,8 @@ impl ProductLivePlannedRuntimeAdapters {
             Arc::clone(&config.capability_input_resolver),
             Arc::clone(&config.capability_result_writer),
             config.milestone_sink,
+            #[cfg(feature = "capability-policy")]
+            config.policy_config_source,
         );
         let model_route_resolver: Arc<dyn ModelRouteResolver> =
             Arc::new(config.model_routes.into_resolver());
@@ -787,6 +796,8 @@ struct ProductLiveLoopCapabilityPortFactory {
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+    #[cfg(feature = "capability-policy")]
+    policy_config_source: Option<Arc<dyn ironclaw_loop_support::LoopCapabilityConfigSource>>,
 }
 
 impl ProductLiveLoopCapabilityPortFactory {
@@ -796,6 +807,9 @@ impl ProductLiveLoopCapabilityPortFactory {
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+        #[cfg(feature = "capability-policy")] policy_config_source: Option<
+            Arc<dyn ironclaw_loop_support::LoopCapabilityConfigSource>,
+        >,
     ) -> Self {
         Self {
             runtime,
@@ -803,6 +817,8 @@ impl ProductLiveLoopCapabilityPortFactory {
             input_resolver,
             result_writer,
             milestone_sink,
+            #[cfg(feature = "capability-policy")]
+            policy_config_source,
         }
     }
 }
@@ -829,6 +845,8 @@ impl LoopCapabilityPortFactory for ProductLiveLoopCapabilityPortFactory {
             Arc::clone(&self.milestone_sink),
         )
         .with_execution_mounts(execution_mounts);
+        #[cfg(feature = "capability-policy")]
+        let factory = factory.with_policy_config_source(self.policy_config_source.clone());
         Ok(factory.for_run_context(run_context.clone()))
     }
 }

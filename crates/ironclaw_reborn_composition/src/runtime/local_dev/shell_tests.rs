@@ -109,6 +109,8 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         ),
         approval_requests: local_runtime.approval_requests.clone(),
         capability_leases: local_runtime.capability_leases.clone(),
+        #[cfg(feature = "capability-policy")]
+        policy_config_source: None,
     };
     let run_context = run_context("shell-workdir").await;
     // Turn on the global auto-approve switch for this run's actor scope so the

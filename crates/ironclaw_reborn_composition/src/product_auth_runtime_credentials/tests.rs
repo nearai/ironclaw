@@ -4,9 +4,9 @@ use ironclaw_auth::{
     InMemoryAuthProductServices, NewCredentialAccount,
 };
 use ironclaw_host_api::{
-    ExtensionId, InvocationId, MissionId, ResourceScope, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, SecretHandle, ThreadId,
-    UserId,
+    CapabilityId, ExtensionId, InvocationId, MissionId, ResourceScope,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+    RuntimeCredentialAuthRequirement, SecretHandle, ThreadId, UserId,
 };
 use ironclaw_secrets::{InMemorySecretStore, SecretStore};
 
@@ -404,6 +404,7 @@ async fn resolver_resolves_shared_admin_account_from_new_thread() {
     thread_b.resource.thread_id = Some(ThreadId::new("thread-b").unwrap());
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &thread_b.resource,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
@@ -431,6 +432,7 @@ async fn resolver_returns_configured_product_auth_access_secret() {
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
@@ -462,6 +464,7 @@ async fn resolver_refreshes_oauth_account_before_staging_access_secret() {
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
@@ -502,6 +505,7 @@ async fn resolver_refreshes_gsuite_owned_account_with_owner_authority_for_siblin
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
@@ -541,6 +545,7 @@ async fn resolver_refreshes_oauth_account_for_each_runtime_staging() {
 
     let first = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &provider,
             setup: &setup,
@@ -551,6 +556,7 @@ async fn resolver_refreshes_oauth_account_for_each_runtime_staging() {
         .expect("first OAuth staging refreshes");
     let second = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &provider,
             setup: &setup,
@@ -580,6 +586,7 @@ async fn resolver_stages_oauth_access_secret_when_refresh_secret_is_absent() {
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
@@ -612,6 +619,7 @@ async fn resolver_stages_oauth_access_secret_when_proactive_refresh_backend_is_u
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
@@ -643,6 +651,7 @@ async fn resolver_maps_oauth_refresh_failure_to_auth_required() {
 
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
@@ -671,6 +680,7 @@ async fn resolver_accepts_unscoped_github_manual_token_for_scoped_runtime_reques
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
@@ -702,6 +712,7 @@ async fn resolver_does_not_use_reusable_account_from_different_user() {
 
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &admin_scope,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
@@ -734,6 +745,7 @@ async fn resolver_matches_callback_setup_account_from_runtime_invocation() {
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &runtime_scope,
             provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
@@ -768,6 +780,7 @@ async fn resolver_matches_reusable_setup_account_from_new_thread() {
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &runtime_scope,
             provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
@@ -802,6 +815,7 @@ async fn resolver_matches_reusable_setup_account_from_new_mission() {
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &runtime_scope,
             provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
@@ -845,6 +859,7 @@ async fn resolver_resolves_extension_owned_account_from_new_thread() {
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &runtime_scope,
             provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
@@ -866,6 +881,7 @@ async fn resolver_maps_missing_account_to_auth_required() {
 
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
@@ -894,6 +910,7 @@ async fn resolver_requires_requested_provider_scopes() {
 
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
@@ -921,6 +938,7 @@ async fn resolver_does_not_treat_unscoped_google_account_as_scoped() {
 
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth {
@@ -955,6 +973,7 @@ async fn resolver_reuses_gsuite_owned_google_account_for_gsuite_requester() {
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
@@ -984,6 +1003,7 @@ async fn resolver_does_not_share_unbound_google_account_with_third_party_request
 
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
@@ -1017,6 +1037,7 @@ async fn resolver_allows_google_account_explicitly_granted_to_third_party_reques
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
@@ -1044,6 +1065,7 @@ async fn resolver_maps_unconfigured_account_status_to_auth_required() {
 
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
@@ -1071,6 +1093,7 @@ async fn resolver_maps_configured_account_without_access_secret_to_backend() {
 
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
@@ -1144,6 +1167,7 @@ async fn resolver_uses_most_recent_account_across_multiple_reusable_logins() {
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
@@ -1208,6 +1232,7 @@ async fn resolver_skips_inline_refresh_when_access_token_is_fresh() {
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
@@ -1254,6 +1279,7 @@ async fn resolver_refreshes_when_access_token_is_within_margin() {
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
+            capability_id: &CapabilityId::new("test.capability").unwrap(),
             scope: &scope,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
@@ -1271,4 +1297,321 @@ async fn resolver_refreshes_when_access_token_is_within_margin() {
             .as_str()
             .starts_with("oauth-refreshed-access")
     );
+}
+
+/// Identity-dimension enforcement (#5261 D7). Drives `resolve_access_secret`
+/// through the public seam with the capability-policy resolver attached, one
+/// case per `IdentityMode` plus the resolver-fault and policy-`None` paths.
+#[cfg(feature = "capability-policy")]
+mod identity_policy {
+    use super::*;
+    use ironclaw_capability_policy::{
+        EffectivePolicy, IdentityMode, PolicyError, PolicyResolver, PolicySubject,
+    };
+    use ironclaw_host_api::PermissionMode;
+
+    /// A `PolicyResolver` test double that returns a fixed identity mode for
+    /// every `(subject, capability)`, or a fixed error.
+    struct FakePolicyResolver {
+        outcome: Result<IdentityMode, PolicyError>,
+    }
+
+    impl FakePolicyResolver {
+        fn identity(mode: IdentityMode) -> Arc<dyn PolicyResolver> {
+            Arc::new(Self { outcome: Ok(mode) })
+        }
+
+        fn failing() -> Arc<dyn PolicyResolver> {
+            Arc::new(Self {
+                outcome: Err(PolicyError::Unavailable {
+                    reason: "test backend down".to_string(),
+                }),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PolicyResolver for FakePolicyResolver {
+        async fn resolve(
+            &self,
+            _subject: &PolicySubject,
+            _capability: &CapabilityId,
+        ) -> Result<EffectivePolicy, PolicyError> {
+            match &self.outcome {
+                Ok(identity) => Ok(EffectivePolicy {
+                    available: true,
+                    identity: *identity,
+                    approval: PermissionMode::Ask,
+                    config: serde_json::Value::Null,
+                }),
+                Err(PolicyError::Unavailable { reason }) => Err(PolicyError::Unavailable {
+                    reason: reason.clone(),
+                }),
+                Err(PolicyError::Internal { reason }) => Err(PolicyError::Internal {
+                    reason: reason.clone(),
+                }),
+            }
+        }
+    }
+
+    fn resolver_with_policy(
+        accounts: Arc<InMemoryAuthProductServices>,
+        policy: Arc<dyn PolicyResolver>,
+    ) -> ProductAuthRuntimeCredentialResolver {
+        resolver_with_accounts(accounts).with_policy_resolver(policy)
+    }
+
+    fn manual_token_request<'a>(
+        capability: &'a CapabilityId,
+        scope: &'a ResourceScope,
+        provider: &'a RuntimeCredentialAccountProviderId,
+        requester: &'a ExtensionId,
+    ) -> RuntimeCredentialAccountRequest<'a> {
+        RuntimeCredentialAccountRequest {
+            capability_id: capability,
+            scope,
+            provider,
+            setup: &RuntimeCredentialAccountSetup::ManualToken,
+            provider_scopes: &[],
+            requester_extension: requester,
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_keyed_with_only_user_reusable_account_is_backend_unavailable() {
+        // AdminKeyed mandates a SharedAdminManaged account. A UserReusable
+        // account does not satisfy it, and the user cannot fix it, so the
+        // failure must be Backend (no re-auth gate).
+        let accounts = Arc::new(InMemoryAuthProductServices::new());
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        ConfiguredAccount::new(auth_scope, "github")
+            .ownership(CredentialOwnership::UserReusable)
+            .create(&accounts)
+            .await;
+        let resolver = resolver_with_policy(
+            accounts,
+            FakePolicyResolver::identity(IdentityMode::AdminKeyed),
+        );
+
+        let capability = CapabilityId::new("test.capability").unwrap();
+        let provider = RuntimeCredentialAccountProviderId::new("github").unwrap();
+        let requester = ExtensionId::new("github").unwrap();
+        let error = resolver
+            .resolve_access_secret(manual_token_request(
+                &capability,
+                &scope,
+                &provider,
+                &requester,
+            ))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, CredentialStageError::Backend);
+    }
+
+    #[tokio::test]
+    async fn admin_keyed_with_shared_admin_account_resolves() {
+        // AdminKeyed + a SharedAdminManaged account granted to the requester
+        // resolves the secret as normal.
+        let accounts = Arc::new(InMemoryAuthProductServices::new());
+        let requester = ExtensionId::new("gmail").unwrap();
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let access_secret = SecretHandle::new("shared-admin-access").unwrap();
+        ConfiguredAccount::new(auth_scope, "google")
+            .ownership(CredentialOwnership::SharedAdminManaged)
+            .granted_extensions(vec![requester.clone()])
+            .access_secret(Some(access_secret.clone()))
+            .create(&accounts)
+            .await;
+        let resolver = resolver_with_policy(
+            accounts,
+            FakePolicyResolver::identity(IdentityMode::AdminKeyed),
+        );
+
+        let capability = CapabilityId::new("test.capability").unwrap();
+        let provider = RuntimeCredentialAccountProviderId::new("google").unwrap();
+        let resolved = resolver
+            .resolve_access_secret(manual_token_request(
+                &capability,
+                &scope,
+                &provider,
+                &requester,
+            ))
+            .await
+            .expect("admin-keyed capability with a shared-admin account must resolve");
+
+        assert_eq!(resolved.handle, access_secret);
+    }
+
+    #[tokio::test]
+    async fn user_keyed_with_missing_account_requires_auth() {
+        // UserKeyed + no account: the user can re-authenticate, so the failure
+        // is AuthRequired (a re-auth gate), not Backend.
+        let accounts = Arc::new(InMemoryAuthProductServices::new());
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let resolver = resolver_with_policy(
+            accounts,
+            FakePolicyResolver::identity(IdentityMode::UserKeyed),
+        );
+
+        let capability = CapabilityId::new("test.capability").unwrap();
+        let provider = RuntimeCredentialAccountProviderId::new("github").unwrap();
+        let requester = ExtensionId::new("github").unwrap();
+        let error = resolver
+            .resolve_access_secret(manual_token_request(
+                &capability,
+                &scope,
+                &provider,
+                &requester,
+            ))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, CredentialStageError::AuthRequired);
+    }
+
+    #[tokio::test]
+    async fn user_keyed_with_user_reusable_account_resolves() {
+        // UserKeyed + a UserReusable account resolves normally.
+        let accounts = Arc::new(InMemoryAuthProductServices::new());
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let access_secret = SecretHandle::new("user-access").unwrap();
+        ConfiguredAccount::new(auth_scope, "github")
+            .ownership(CredentialOwnership::UserReusable)
+            .access_secret(Some(access_secret.clone()))
+            .create(&accounts)
+            .await;
+        let resolver = resolver_with_policy(
+            accounts,
+            FakePolicyResolver::identity(IdentityMode::UserKeyed),
+        );
+
+        let capability = CapabilityId::new("test.capability").unwrap();
+        let provider = RuntimeCredentialAccountProviderId::new("github").unwrap();
+        let requester = ExtensionId::new("github").unwrap();
+        let resolved = resolver
+            .resolve_access_secret(manual_token_request(
+                &capability,
+                &scope,
+                &provider,
+                &requester,
+            ))
+            .await
+            .expect("user-keyed capability with a user-reusable account must resolve");
+
+        assert_eq!(resolved.handle, access_secret);
+    }
+
+    #[tokio::test]
+    async fn identity_none_leaves_resolution_unchanged() {
+        // IdentityMode::None imposes no ownership mandate; a UserReusable
+        // account resolves exactly as it would without any policy.
+        let accounts = Arc::new(InMemoryAuthProductServices::new());
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let access_secret = SecretHandle::new("user-access").unwrap();
+        ConfiguredAccount::new(auth_scope, "github")
+            .access_secret(Some(access_secret.clone()))
+            .create(&accounts)
+            .await;
+        let resolver =
+            resolver_with_policy(accounts, FakePolicyResolver::identity(IdentityMode::None));
+
+        let capability = CapabilityId::new("test.capability").unwrap();
+        let provider = RuntimeCredentialAccountProviderId::new("github").unwrap();
+        let requester = ExtensionId::new("github").unwrap();
+        let resolved = resolver
+            .resolve_access_secret(manual_token_request(
+                &capability,
+                &scope,
+                &provider,
+                &requester,
+            ))
+            .await
+            .expect("identity:none must resolve like the no-policy path");
+
+        assert_eq!(resolved.handle, access_secret);
+    }
+
+    #[tokio::test]
+    async fn resolver_fault_is_backend_unavailable() {
+        // A PolicyResolver error must fail closed as Backend (unavailable, no
+        // gate) — never AuthRequired or a propagated PolicyError.
+        let accounts = Arc::new(InMemoryAuthProductServices::new());
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        ConfiguredAccount::new(auth_scope, "github")
+            .access_secret(Some(SecretHandle::new("user-access").unwrap()))
+            .create(&accounts)
+            .await;
+        let resolver = resolver_with_policy(accounts, FakePolicyResolver::failing());
+
+        let capability = CapabilityId::new("test.capability").unwrap();
+        let provider = RuntimeCredentialAccountProviderId::new("github").unwrap();
+        let requester = ExtensionId::new("github").unwrap();
+        let error = resolver
+            .resolve_access_secret(manual_token_request(
+                &capability,
+                &scope,
+                &provider,
+                &requester,
+            ))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, CredentialStageError::Backend);
+    }
+
+    #[tokio::test]
+    async fn policy_none_is_unchanged_admin_account_resolves_without_mandate() {
+        // With no policy handle attached (feature on but resolver not wired),
+        // behaviour is byte-identical to the pre-policy path: a SharedAdminManaged
+        // account that was previously resolvable still resolves, with no identity
+        // mandate applied. Mirrors `resolver_resolves_shared_admin_account_from_new_thread`
+        // but asserts the policy-None resolver does not change the outcome.
+        let accounts = Arc::new(InMemoryAuthProductServices::new());
+        let requester = ExtensionId::new("gmail").unwrap();
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let access_secret = SecretHandle::new("shared-admin-access").unwrap();
+        ConfiguredAccount::new(auth_scope, "google")
+            .ownership(CredentialOwnership::SharedAdminManaged)
+            .granted_extensions(vec![requester.clone()])
+            .access_secret(Some(access_secret.clone()))
+            .create(&accounts)
+            .await;
+        // resolver_with_accounts attaches NO policy (policy: None).
+        let resolver = resolver_with_accounts(accounts);
+
+        let capability = CapabilityId::new("test.capability").unwrap();
+        let provider = RuntimeCredentialAccountProviderId::new("google").unwrap();
+        let resolved = resolver
+            .resolve_access_secret(manual_token_request(
+                &capability,
+                &scope,
+                &provider,
+                &requester,
+            ))
+            .await
+            .expect("policy:None must resolve like the pre-policy path");
+
+        assert_eq!(resolved.handle, access_secret);
+    }
 }

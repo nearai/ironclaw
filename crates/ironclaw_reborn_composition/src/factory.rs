@@ -513,6 +513,34 @@ pub struct RebornLocalDevApprovalTestParts {
     pub capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore>,
 }
 
+/// The shared capability-policy handles (#5261 D3): the single delta store and
+/// the resolver folded over it.
+#[cfg(feature = "capability-policy")]
+type CapabilityPolicyHandles = (
+    Option<Arc<dyn ironclaw_capability_policy::CapabilityPolicyDeltaStore>>,
+    Option<Arc<dyn ironclaw_capability_policy::PolicyResolver>>,
+);
+
+/// Construct the shared capability-policy handles ONCE per runtime from the
+/// durable extension filesystem; both `None` unless the `capability-policy`
+/// feature is compiled in AND `capability_policy_activated()` is true. The same
+/// delta-store `Arc` later reaches the admin REST mount, so writes and reads
+/// share backing.
+#[cfg(feature = "capability-policy")]
+fn build_capability_policy_handles(
+    filesystem: &Arc<LocalDevRootFilesystem>,
+) -> CapabilityPolicyHandles {
+    if !crate::capability_policy_engine::capability_policy_activated() {
+        return (None, None);
+    }
+    let delta_store = crate::capability_policy_engine::local_dev_capability_policy_delta_store(
+        Arc::clone(filesystem) as Arc<dyn ironclaw_filesystem::RootFilesystem>,
+    );
+    let resolver =
+        crate::capability_policy_engine::build_capability_policy_resolver(Arc::clone(&delta_store));
+    (Some(delta_store), Some(resolver))
+}
+
 pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
     pub(crate) owner_user_id: UserId,
@@ -630,6 +658,24 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// Canonical registry shared by capability dispatch and hook activation.
     pub(crate) extension_registry: Arc<ExtensionRegistry>,
     pub(crate) shared_extension_registry: Option<Arc<SharedExtensionRegistry>>,
+    /// The SINGLE capability-policy delta store (#5261 D3 / #5273). `Some` only
+    /// under the `capability-policy` feature AND `capability_policy_activated()`;
+    /// `None` otherwise. The admin REST write surface (#5268) and the dispatch
+    /// `PolicyResolver` (`capability_policy_resolver`) read/write the SAME `Arc`
+    /// — never construct a second. Held here so the admin REST mount (a later
+    /// seam, #5268) can share it via `runtime.services().local_runtime`;
+    /// `dead_code` until that mount lands.
+    #[cfg(feature = "capability-policy")]
+    #[allow(dead_code)]
+    pub(crate) capability_policy_delta_store:
+        Option<Arc<dyn ironclaw_capability_policy::CapabilityPolicyDeltaStore>>,
+    /// The SINGLE shared capability-policy resolver (#5261 D3), folding the
+    /// milestone default with the deltas from `capability_policy_delta_store`.
+    /// Consumed by the availability seam (runtime.rs) and the later
+    /// identity/config/approval seams. `Some` only under feature + activation.
+    #[cfg(feature = "capability-policy")]
+    pub(crate) capability_policy_resolver:
+        Option<Arc<dyn ironclaw_capability_policy::PolicyResolver>>,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1085,10 +1131,34 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             .persistent_approval_policies
             .clone(),
     ));
+    // Admin (org-wide) approval precedence (#5261 D6): when the shared
+    // capability-policy resolver is active, wrap it in the dep-light approval
+    // module's `AdminApprovalSource` seam so the dispatch chain can apply admin
+    // Deny/Allow precedence. `None` (feature off or `capability_policy_activated()`
+    // false) preserves the pre-policy authorizer behaviour exactly.
+    #[cfg(not(feature = "capability-policy"))]
+    let admin_approval_policy: Option<
+        Arc<dyn crate::profile_approval_authorization::AdminApprovalSource>,
+    > = None;
+    #[cfg(feature = "capability-policy")]
+    let admin_approval_policy: Option<
+        Arc<dyn crate::profile_approval_authorization::AdminApprovalSource>,
+    > = store_graph
+        .local_runtime
+        .capability_policy_resolver
+        .as_ref()
+        .map(|policy| {
+            Arc::new(
+                crate::capability_policy_engine::PolicyResolverAdminApprovalSource::new(
+                    Arc::clone(policy),
+                ),
+            ) as Arc<dyn crate::profile_approval_authorization::AdminApprovalSource>
+        });
     let authorizer = local_dev_authorizer(
         runtime_policy.as_ref(),
         Arc::clone(&store_graph.local_runtime.capability_policy),
         approval_settings_provider,
+        admin_approval_policy,
     );
     let services = HostRuntimeServices::new(
         Arc::clone(&extension_registry),
@@ -1215,12 +1285,25 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             }
         }
     };
-    services = services.with_runtime_credential_account_resolver(Arc::new(
-        ProductAuthRuntimeCredentialResolver::new_with_refresh(
-            product_auth.runtime_credential_account_selection_service(),
-            product_auth.runtime_credential_account_refresh_service(),
-        ),
-    ));
+    let runtime_credential_resolver = ProductAuthRuntimeCredentialResolver::new_with_refresh(
+        product_auth.runtime_credential_account_selection_service(),
+        product_auth.runtime_credential_account_refresh_service(),
+    );
+    // Thread the single shared capability-policy resolver (#5261 D3) so the
+    // identity dimension is enforced at credential resolution. `Some` only under
+    // the `capability-policy` feature AND `capability_policy_activated()`; when
+    // `None` the resolver keeps its pre-policy behaviour.
+    #[cfg(feature = "capability-policy")]
+    let runtime_credential_resolver = match store_graph
+        .local_runtime
+        .capability_policy_resolver
+        .as_ref()
+    {
+        Some(policy) => runtime_credential_resolver.with_policy_resolver(Arc::clone(policy)),
+        None => runtime_credential_resolver,
+    };
+    services =
+        services.with_runtime_credential_account_resolver(Arc::new(runtime_credential_resolver));
     let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
         filesystem.as_ref(),
         &VirtualPath::new("/system/extensions")?,
@@ -1741,6 +1824,12 @@ fn build_local_dev_store_graph(
     let skill_management =
         build_local_skill_management_port(owner_user_id.clone(), Arc::clone(&filesystem))?;
     let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
+    // The single shared capability-policy handles (#5261 D3), constructed once
+    // over the durable extension filesystem; both `None` unless the feature is
+    // on and the env activation gate is set.
+    #[cfg(feature = "capability-policy")]
+    let (capability_policy_delta_store_handle, capability_policy_resolver_handle) =
+        build_capability_policy_handles(&filesystem);
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         extension_lifecycle_surface_context,
         owner_user_id: owner_user_id.clone(),
@@ -1800,6 +1889,10 @@ fn build_local_dev_store_graph(
         audit_log,
         extension_registry: Arc::new(ExtensionRegistry::new()),
         shared_extension_registry: None,
+        #[cfg(feature = "capability-policy")]
+        capability_policy_delta_store: capability_policy_delta_store_handle,
+        #[cfg(feature = "capability-policy")]
+        capability_policy_resolver: capability_policy_resolver_handle,
     });
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
 
@@ -1890,6 +1983,12 @@ fn build_local_dev_store_graph(
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let trigger_conversation_services = local_dev_trigger_conversation_services();
     let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
+    // The single shared capability-policy handles (#5261 D3), constructed once
+    // over the durable extension filesystem; both `None` unless the feature is
+    // on and the env activation gate is set.
+    #[cfg(feature = "capability-policy")]
+    let (capability_policy_delta_store_handle, capability_policy_resolver_handle) =
+        build_capability_policy_handles(&filesystem);
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         extension_lifecycle_surface_context,
         owner_user_id: owner_user_id.clone(),
@@ -1943,6 +2042,10 @@ fn build_local_dev_store_graph(
         audit_log,
         extension_registry: Arc::new(ExtensionRegistry::new()),
         shared_extension_registry: None,
+        #[cfg(feature = "capability-policy")]
+        capability_policy_delta_store: capability_policy_delta_store_handle,
+        #[cfg(feature = "capability-policy")]
+        capability_policy_resolver: capability_policy_resolver_handle,
     });
     let process_services = ProcessServices::in_memory();
 
@@ -4262,6 +4365,10 @@ mod tests {
             audit_log: Arc::clone(&base_runtime.audit_log),
             extension_registry: Arc::clone(&base_runtime.extension_registry),
             shared_extension_registry: base_runtime.shared_extension_registry.clone(),
+            #[cfg(feature = "capability-policy")]
+            capability_policy_delta_store: base_runtime.capability_policy_delta_store.clone(),
+            #[cfg(feature = "capability-policy")]
+            capability_policy_resolver: base_runtime.capability_policy_resolver.clone(),
         })
     }
 
@@ -5045,6 +5152,10 @@ mod tests {
         )
     }
 
+    // Only used by the libsql/postgres-gated NEAR AI MCP bootstrap tests below;
+    // gate the helper to match so the feature-off `--tests` build has no dead
+    // code (pre-existing latent warning, surfaced under `-D warnings`).
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     fn nearai_bootstrap_input(owner: &str, root: PathBuf, api_key: &str) -> RebornBuildInput {
         nearai_bootstrap_input_with_base(owner, root, "https://private.near.ai", api_key)
     }

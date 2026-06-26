@@ -1436,6 +1436,8 @@ fn adapter_config() -> ProductLivePlannedRuntimeAdapterConfig {
         )
         .unwrap(),
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        #[cfg(feature = "capability-policy")]
+        policy_config_source: None,
     }
 }
 
