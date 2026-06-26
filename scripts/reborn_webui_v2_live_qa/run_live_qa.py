@@ -3740,6 +3740,160 @@ async def case_webui_core_routes(ctx: LiveQaContext) -> ProbeResult:
         return _result(case_name, False, started, {"error": str(exc)})
 
 
+async def case_webui_projects_browser(ctx: LiveQaContext) -> ProbeResult:
+    from playwright.async_api import expect
+
+    started = time.monotonic()
+    case_name = "webui_projects_browser"
+    project_name = f"Live QA Project {uuid.uuid4().hex[:8]}"
+    project_description = "Created by the Reborn WebUIv2 live QA matrix runner."
+    project_id: str | None = None
+    legacy_requests: list[str] = []
+    observed: dict[str, object] = {}
+
+    async def action(page: object) -> None:
+        nonlocal project_id
+
+        def record_request(request: object) -> None:
+            url = getattr(request, "url", "")
+            path = urllib.parse.urlparse(url).path
+            if path.startswith(("/api/chat", "/api/engine", "/api/profile", "/api/v1")):
+                legacy_requests.append(path)
+
+        page.on("request", record_request)  # type: ignore[attr-defined]
+
+        try:
+            await page.goto(  # type: ignore[attr-defined]
+                f"{ctx.base_url}/v2/projects?token={AUTH_TOKEN}",
+                wait_until="domcontentloaded",
+            )
+            await expect(page.locator("body")).to_contain_text("Projects", timeout=15000)  # type: ignore[attr-defined]
+
+            project_probe = await page.evaluate(  # type: ignore[attr-defined]
+                """async ({ token, name, description }) => {
+                    const headers = {
+                        Accept: "application/json",
+                        Authorization: `Bearer ${token}`,
+                        "Content-Type": "application/json",
+                    };
+                    const before = await fetch("/api/webchat/v2/projects?limit=200", { headers });
+                    const beforeBody = await before.json().catch(() => ({}));
+                    const create = await fetch("/api/webchat/v2/projects", {
+                        method: "POST",
+                        headers,
+                        body: JSON.stringify({
+                            name,
+                            description,
+                            metadata: { goals: ["qa-live-project-browser"] },
+                        }),
+                    });
+                    const createBody = await create.json().catch(() => ({}));
+                    const projectId = createBody?.project?.project_id || "";
+                    let detailStatus = null;
+                    let detailName = null;
+                    if (projectId) {
+                        const detail = await fetch(
+                            `/api/webchat/v2/projects/${encodeURIComponent(projectId)}`,
+                            { headers },
+                        );
+                        detailStatus = detail.status;
+                        const detailBody = await detail.json().catch(() => ({}));
+                        detailName = detailBody?.project?.name || null;
+                    }
+                    return {
+                        listStatus: before.status,
+                        listCount: Array.isArray(beforeBody?.projects) ? beforeBody.projects.length : null,
+                        createStatus: create.status,
+                        createBody,
+                        projectId,
+                        detailStatus,
+                        detailName,
+                    };
+                }""",
+                {
+                    "token": AUTH_TOKEN,
+                    "name": project_name,
+                    "description": project_description,
+                },
+            )
+            if project_probe.get("listStatus") != 200:
+                raise AssertionError(f"project list failed: {project_probe!r}")
+            if project_probe.get("createStatus") != 200:
+                raise AssertionError(f"project create failed: {project_probe!r}")
+            project_id = str(project_probe.get("projectId") or "")
+            if not project_id:
+                raise AssertionError(f"project create did not return an id: {project_probe!r}")
+            if project_probe.get("detailStatus") != 200 or project_probe.get("detailName") != project_name:
+                raise AssertionError(f"project detail read failed: {project_probe!r}")
+
+            await page.goto(f"{ctx.base_url}/v2/projects", wait_until="domcontentloaded")  # type: ignore[attr-defined]
+            await expect(page.get_by_text(project_name, exact=True)).to_be_visible(timeout=15000)  # type: ignore[attr-defined]
+
+            search = page.get_by_placeholder("Search projects")  # type: ignore[attr-defined]
+            await search.fill(project_name)
+            await expect(page.get_by_text(project_name, exact=True)).to_be_visible(timeout=15000)  # type: ignore[attr-defined]
+            await search.fill(f"{project_name}-missing")
+            await expect(page.locator("body")).to_contain_text("No projects match", timeout=15000)  # type: ignore[attr-defined]
+            await page.goto(f"{ctx.base_url}/v2/projects", wait_until="domcontentloaded")  # type: ignore[attr-defined]
+            await expect(page.get_by_text(project_name, exact=True)).to_be_visible(timeout=15000)  # type: ignore[attr-defined]
+            await page.get_by_text(project_name, exact=True).click()  # type: ignore[attr-defined]
+            await expect(page).to_have_url(re.compile(r"/v2/projects/[^/]+$"), timeout=15000)
+            await expect(page.locator("body")).to_contain_text(project_name, timeout=15000)  # type: ignore[attr-defined]
+
+            missing_id = f"reborn-live-qa-missing-{uuid.uuid4().hex[:8]}"
+            await page.goto(  # type: ignore[attr-defined]
+                f"{ctx.base_url}/v2/projects/{urllib.parse.quote(missing_id, safe='')}",
+                wait_until="domcontentloaded",
+            )
+            await expect(page.locator("body")).to_contain_text("Project unavailable", timeout=15000)  # type: ignore[attr-defined]
+            await page.get_by_role("button", name="Return to projects").click()  # type: ignore[attr-defined]
+            await expect(page.locator("body")).to_contain_text("Scoped projects", timeout=15000)  # type: ignore[attr-defined]
+
+            if legacy_requests:
+                raise AssertionError(f"project route called legacy APIs: {legacy_requests}")
+
+            observed.update(
+                {
+                    "project_created": True,
+                    "project_deleted": False,
+                    "project_id": project_id,
+                    "project_name": project_name,
+                    "list_count_before": project_probe.get("listCount"),
+                    "search_filter_checked": True,
+                    "detail_route_checked": True,
+                    "unavailable_route_checked": True,
+                    "legacy_api_requests": legacy_requests,
+                }
+            )
+        finally:
+            if project_id:
+                delete_probe = await page.evaluate(  # type: ignore[attr-defined]
+                    """async ({ token, projectId }) => {
+                        const response = await fetch(
+                            `/api/webchat/v2/projects/${encodeURIComponent(projectId)}`,
+                            {
+                                method: "DELETE",
+                                headers: {
+                                    Accept: "application/json",
+                                    Authorization: `Bearer ${token}`,
+                                },
+                            },
+                        );
+                        return { status: response.status };
+                    }""",
+                    {"token": AUTH_TOKEN, "projectId": project_id},
+                )
+                if delete_probe.get("status") != 204:
+                    raise AssertionError(f"project cleanup failed: {delete_probe!r}")
+                observed["project_deleted"] = True
+
+    try:
+        await _with_page(ctx.output_dir, case_name, action)
+        return _result(case_name, True, started, observed)
+    except Exception as exc:
+        return _result(case_name, False, started, {"error": str(exc), **observed})
+
+
 async def _live_chat_case(
     ctx: LiveQaContext,
     *,
@@ -6188,6 +6342,16 @@ CASES: dict[str, CaseSpec] = {
     "webui_core_routes": CaseSpec(
         case_webui_core_routes,
         qa_matrix_test_ids=["REBCLI-063-TC-01"],
+    ),
+    "webui_projects_browser": CaseSpec(
+        case_webui_projects_browser,
+        qa_matrix_test_ids=[
+            "REBCLI-066-TC-01",
+            "REBCLI-066-TC-02",
+            "REBCLI-066-TC-03",
+            "REBCLI-066-TC-05",
+            "REBCLI-066-TC-20",
+        ],
     ),
     "qa_3b_endpoint_status_live_chat": CaseSpec(case_qa_3b_endpoint_status_live_chat),
     "qa_3c_endpoint_status_slack_routine": CaseSpec(
