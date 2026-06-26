@@ -2623,20 +2623,38 @@ async def case_webui_static_shell_csp_nonce(ctx: LiveQaContext) -> ProbeResult:
 
     started = time.monotonic()
     case_name = "webui_static_shell_csp_nonce"
+    latency_budget_ms = 5_000
 
     try:
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
             first = await client.get(f"{ctx.base_url}/v2/")
             second = await client.get(f"{ctx.base_url}/v2/")
+            direct_chat = await client.get(f"{ctx.base_url}/v2/chat/live-qa-thread")
+            js_asset = await client.get(f"{ctx.base_url}/v2/js/main.js")
+            css_asset = await client.get(f"{ctx.base_url}/v2/styles/app.css")
+            wallet_connect = await client.get(f"{ctx.base_url}/v2/wallet/connect")
+            missing_asset = await client.get(f"{ctx.base_url}/v2/missing-asset.bin")
+            traversal_asset = await client.get(
+                f"{ctx.base_url}/v2/js/%2e%2e/%2e%2e/etc/passwd"
+            )
 
-        for label, response in (("first", first), ("second", second)):
+        shell_responses = {
+            "first": first,
+            "second": second,
+            "direct_chat": direct_chat,
+        }
+        for label, response in shell_responses.items():
             if response.status_code != 200:
-                raise AssertionError(f"{label} /v2/ returned HTTP {response.status_code}")
+                raise AssertionError(f"{label} static shell returned HTTP {response.status_code}")
             content_type = response.headers.get("content-type", "")
             if "text/html" not in content_type:
-                raise AssertionError(f"{label} /v2/ content-type was {content_type!r}")
+                raise AssertionError(f"{label} static shell content-type was {content_type!r}")
             if "__IRONCLAW_CSP_NONCE__" in response.text:
-                raise AssertionError(f"{label} /v2/ leaked the CSP nonce placeholder")
+                raise AssertionError(f"{label} static shell leaked the CSP nonce placeholder")
+            if "v2-root" not in response.text:
+                raise AssertionError(f"{label} static shell did not render the React mount")
+            if AUTH_TOKEN in response.text:
+                raise AssertionError(f"{label} static shell echoed the bearer token")
 
         first_nonce = _html_nonce(first.text)
         second_nonce = _html_nonce(second.text)
@@ -2656,16 +2674,82 @@ async def case_webui_static_shell_csp_nonce(ctx: LiveQaContext) -> ProbeResult:
             raise AssertionError(
                 "SPA shell cache-control must be no-store when nonce changes per request"
             )
+        if js_asset.status_code != 200:
+            raise AssertionError(f"/v2/js/main.js returned HTTP {js_asset.status_code}")
+        js_content_type = js_asset.headers.get("content-type", "")
+        if not js_content_type.startswith("text/javascript"):
+            raise AssertionError(f"/v2/js/main.js content-type was {js_content_type!r}")
+        if css_asset.status_code != 200:
+            raise AssertionError(f"/v2/styles/app.css returned HTTP {css_asset.status_code}")
+        css_content_type = css_asset.headers.get("content-type", "")
+        if not css_content_type.startswith("text/css"):
+            raise AssertionError(f"/v2/styles/app.css content-type was {css_content_type!r}")
+        if wallet_connect.status_code != 200:
+            raise AssertionError(
+                f"/v2/wallet/connect returned HTTP {wallet_connect.status_code}"
+            )
+        wallet_csp = wallet_connect.headers.get("content-security-policy", "")
+        if "'unsafe-inline'" not in wallet_csp or "connect-src 'self' https:" not in wallet_csp:
+            raise AssertionError(
+                "wallet connect popup did not carry the isolated relaxed CSP: "
+                f"{wallet_csp!r}"
+            )
+        if wallet_connect.headers.get("cache-control") != "no-store":
+            raise AssertionError("wallet connect popup cache-control must be no-store")
+        if AUTH_TOKEN in wallet_connect.text:
+            raise AssertionError("wallet connect popup echoed the bearer token")
+        if missing_asset.status_code != 404:
+            raise AssertionError(
+                f"/v2/missing-asset.bin returned HTTP {missing_asset.status_code}, expected 404"
+            )
+        if traversal_asset.status_code != 404:
+            raise AssertionError(
+                "path traversal-looking static request returned "
+                f"HTTP {traversal_asset.status_code}, expected 404"
+            )
+
+        probe_latencies_ms = {
+            "first": round(first.elapsed.total_seconds() * 1000),
+            "second": round(second.elapsed.total_seconds() * 1000),
+            "direct_chat": round(direct_chat.elapsed.total_seconds() * 1000),
+            "js_asset": round(js_asset.elapsed.total_seconds() * 1000),
+            "css_asset": round(css_asset.elapsed.total_seconds() * 1000),
+            "wallet_connect": round(wallet_connect.elapsed.total_seconds() * 1000),
+            "missing_asset": round(missing_asset.elapsed.total_seconds() * 1000),
+            "traversal_asset": round(traversal_asset.elapsed.total_seconds() * 1000),
+        }
+        slow_probe = max(probe_latencies_ms.items(), key=lambda item: item[1])
+        if slow_probe[1] > latency_budget_ms:
+            raise AssertionError(
+                f"{slow_probe[0]} probe took {slow_probe[1]}ms, "
+                f"expected <= {latency_budget_ms}ms"
+            )
 
         return _result(
             case_name,
             True,
             started,
             {
-                "path": "/v2/",
+                "checked_paths": [
+                    "/v2/",
+                    "/v2/chat/live-qa-thread",
+                    "/v2/js/main.js",
+                    "/v2/styles/app.css",
+                    "/v2/wallet/connect",
+                    "/v2/missing-asset.bin",
+                    "/v2/js/%2e%2e/%2e%2e/etc/passwd",
+                ],
                 "first_nonce_len": len(first_nonce),
                 "second_nonce_len": len(second_nonce),
                 "cache_control": first.headers.get("cache-control"),
+                "direct_chat_status": direct_chat.status_code,
+                "js_asset_content_type": js_content_type,
+                "css_asset_content_type": css_content_type,
+                "wallet_connect_status": wallet_connect.status_code,
+                "missing_asset_status": missing_asset.status_code,
+                "traversal_asset_status": traversal_asset.status_code,
+                "latency_budget_ms": latency_budget_ms,
+                "probe_latencies_ms": probe_latencies_ms,
             },
         )
     except Exception as exc:
@@ -5945,7 +6029,14 @@ CASES: dict[str, CaseSpec] = {
     ),
     "webui_static_shell_csp_nonce": CaseSpec(
         case_webui_static_shell_csp_nonce,
-        qa_matrix_test_ids=["REBCLI-063-TC-01"],
+        qa_matrix_test_ids=[
+            "REBCLI-063-TC-01",
+            "REBCLI-063-TC-02",
+            "REBCLI-063-TC-03",
+            "REBCLI-063-TC-04",
+            "REBCLI-063-TC-05",
+            "REBCLI-063-TC-06",
+        ],
     ),
     "chat_completions_live_llm_contract": CaseSpec(
         case_chat_completions_live_llm_contract,

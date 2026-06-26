@@ -223,7 +223,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             run_live_qa.CASES["webui_static_shell_csp_nonce"].qa_matrix_test_ids,
-            ["REBCLI-063-TC-01"],
+            [
+                "REBCLI-063-TC-01",
+                "REBCLI-063-TC-02",
+                "REBCLI-063-TC-03",
+                "REBCLI-063-TC-04",
+                "REBCLI-063-TC-05",
+                "REBCLI-063-TC-06",
+            ],
         )
         self.assertEqual(
             run_live_qa.CASES["chat_completions_live_llm_contract"].qa_matrix_test_ids,
@@ -322,6 +329,26 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             manifest["qa_matrix"]["represented_test_ids"],
         )
         self.assertIn(
+            "REBCLI-063-TC-02",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
+        self.assertIn(
+            "REBCLI-063-TC-03",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
+        self.assertIn(
+            "REBCLI-063-TC-04",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
+        self.assertIn(
+            "REBCLI-063-TC-05",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
+        self.assertIn(
+            "REBCLI-063-TC-06",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
+        self.assertIn(
             "REBCLI-056-TC-01",
             manifest["qa_matrix"]["represented_test_ids"],
         )
@@ -411,7 +438,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             cases["webui_static_shell_csp_nonce"]["qa_matrix_test_ids"],
-            ["REBCLI-063-TC-01"],
+            [
+                "REBCLI-063-TC-01",
+                "REBCLI-063-TC-02",
+                "REBCLI-063-TC-03",
+                "REBCLI-063-TC-04",
+                "REBCLI-063-TC-05",
+                "REBCLI-063-TC-06",
+            ],
         )
         self.assertEqual(
             cases["chat_completions_live_llm_contract"]["qa_matrix_test_ids"],
