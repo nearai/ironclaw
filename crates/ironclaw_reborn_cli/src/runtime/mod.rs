@@ -1324,7 +1324,7 @@ mod tests {
         let message = no_assistant_text_message(&reply);
 
         assert!(
-            message.contains("The run failed because the execution driver stopped unexpectedly."),
+            message.contains("The agent runtime stopped unexpectedly."),
             "{message}"
         );
         assert!(
