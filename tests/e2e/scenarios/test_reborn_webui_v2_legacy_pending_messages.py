@@ -104,6 +104,7 @@ async def _open_mocked_pending_page(
     reborn_v2_server,
     reborn_v2_browser,
     *,
+    initial_thread_id=THREAD_ID,
     timeline_messages=None,
     timeline_by_thread=None,
     threads=None,
@@ -187,7 +188,9 @@ async def _open_mocked_pending_page(
     await page.route("**/api/webchat/v2/threads/*/timeline**", handle_timeline)
     await page.route(f"**/api/webchat/v2/threads/{THREAD_ID}/messages", handle_send)
 
-    await page.goto(f"{reborn_v2_server}/v2/chat/{THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}")
+    await page.goto(
+        f"{reborn_v2_server}/v2/chat/{initial_thread_id}?token={REBORN_V2_AUTH_TOKEN}"
+    )
     await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
 
     return {
@@ -507,6 +510,62 @@ async def test_reborn_legacy_sidebar_running_indicator_clears_on_terminal_run(
         )
         await _wait_for_request_count(harness["timeline_requests"], before_terminal_requests)
         await expect(sidebar_thread).not_to_contain_text("Running", timeout=5000)
+        await expect(page.locator(SEL_V2["typing_indicator"])).to_have_count(0)
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_background_thread_shows_processing_indicator(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Port background-thread processing affordance to Reborn's thread summary state."""
+
+    async def handle_successful_send(route, _payload, fulfill_json):
+        await fulfill_json(route, _submitted_response(), status=202)
+
+    harness = await _open_mocked_pending_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        initial_thread_id=OTHER_THREAD_ID,
+        threads=[
+            {
+                "thread_id": THREAD_ID,
+                "title": "Background processing thread",
+                "state": "Processing",
+                "turn_count": 2,
+                "created_at": "2026-06-25T00:00:00Z",
+                "updated_at": "2026-06-25T00:02:00Z",
+            },
+            {
+                "thread_id": OTHER_THREAD_ID,
+                "title": "Active quiet thread",
+                "turn_count": 1,
+                "created_at": "2026-06-25T00:01:00Z",
+                "updated_at": "2026-06-25T00:03:00Z",
+            },
+        ],
+        timeline_by_thread={
+            THREAD_ID: [_user_record("background-user", "Background thread seed")],
+            OTHER_THREAD_ID: [_user_record("active-user", "Active thread seed")],
+        },
+        send_handler=handle_successful_send,
+    )
+    try:
+        page = harness["page"]
+        active_thread = page.locator("#gateway-sidebar").get_by_role("button").filter(
+            has_text="Active quiet thread"
+        ).first
+        background_thread = page.locator("#gateway-sidebar").get_by_role(
+            "button"
+        ).filter(has_text="Background processing thread").first
+
+        await expect(
+            page.locator(SEL_V2["msg_user"]).filter(has_text="Active thread seed")
+        ).to_be_visible(timeout=15000)
+        await expect(active_thread).to_be_visible(timeout=5000)
+        await expect(background_thread).to_be_visible(timeout=5000)
+        await expect(background_thread.get_by_label("Running")).to_have_count(1)
+        await expect(active_thread.get_by_label("Running")).to_have_count(0)
         await expect(page.locator(SEL_V2["typing_indicator"])).to_have_count(0)
     finally:
         await harness["context"].close()

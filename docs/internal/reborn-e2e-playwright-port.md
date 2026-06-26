@@ -2663,6 +2663,30 @@ Behavior mapping:
   Reborn-equivalent risk is stale auth gate state leaking across thread changes,
   so the port asserts that boundary directly.
 
+### Step 90: Legacy Background Thread Processing Indicator Port
+
+Extended `test_reborn_webui_v2_legacy_pending_messages.py` and fixed the
+Reborn sidebar thread presenter.
+
+Ported the user-visible affordance behind legacy
+`test_background_thread_shows_processing_indicator`:
+
+- opened a Reborn chat route on one active quiet thread;
+- returned another thread in the v2 thread list with `state: "Processing"`;
+- asserted the background row renders the existing `Running` sidebar indicator;
+- asserted the active quiet thread does not inherit that state and does not
+  show the in-thread typing indicator.
+
+Issue found and fixed:
+
+- The live Reborn sidebar (`components/sidebar-threads.js`) read only the
+  browser-local thread-state store. It ignored server-provided thread summary
+  states, so background processing threads could lose their sidebar indicator
+  after a thread-list refresh or page load. The presenter now maps summary
+  `Processing`/`Running` to the existing running presentation,
+  `AwaitingApproval` to needs-attention, and failed/interrupted states to the
+  failed presentation, while local live state still takes precedence.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -2679,7 +2703,8 @@ Not yet ported:
   covered;
 - remaining DOM/resource-limit scenarios for any future capped long-running
   activity stores beyond the current timeline paging, near-cap response
-  projection, and SSE reconnect-timeout cleanup coverage;
+  projection, background-thread processing summary, and SSE reconnect-timeout
+  cleanup coverage;
 - deeper tool approval scenarios that need real Reborn runtime/tool execution,
   persistence, or recovery beyond the browser approval-card, denied activity,
   local send-blocking, cross-thread isolation, and persisted activity-card
@@ -2829,6 +2854,12 @@ The foreign-thread auth prompt isolation port did not require a Reborn product
 fix: pending auth gate state is already scoped to the active thread route, and
 normal message sends on a different thread continue through the v2 `/messages`
 endpoint.
+
+The background-thread processing port found a Reborn browser defect: the live
+sidebar ignored server-provided thread summary states and only rendered
+locally-observed active-thread state. `SidebarThreads` now maps summary states
+onto the existing per-thread presentation so background processing,
+needs-attention, and failed indicators survive thread-list refreshes.
 
 The tool-activity history port did not require a Reborn product behavior fix:
 durable `capability_display_preview` records already rehydrated the activity
