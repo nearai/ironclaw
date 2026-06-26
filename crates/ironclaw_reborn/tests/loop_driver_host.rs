@@ -8652,8 +8652,11 @@ fn assert_serialized_value_omits<T: serde::Serialize>(label: &str, value: &T, fo
 }
 
 fn assert_string_omits(label: &str, wire: &str, forbidden: &[&str]) {
-    for raw in forbidden {
-        assert!(!wire.contains(raw), "{label} leaked {raw}: {wire}");
+    for (index, raw) in forbidden.iter().enumerate() {
+        assert!(
+            !wire.contains(raw),
+            "{label} leaked forbidden raw payload marker at index {index}"
+        );
     }
 }
 

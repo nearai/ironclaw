@@ -1873,7 +1873,7 @@ async fn chaos_scheduler_relinquishes_run_when_terminal_failure_recording_is_exh
     assert_eq!(chaos.call_count(ChaosOperation::RecordRunnerFailure), 3);
     assert_eq!(chaos.call_count(ChaosOperation::RelinquishRun), 1);
 
-    relinquish_gate.notify_waiters();
+    relinquish_gate.notify_one();
     handle.shutdown().await;
 }
 
