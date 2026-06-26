@@ -201,6 +201,38 @@ async fn chat_stream_completes_on_final_reply_payload() {
 }
 
 #[tokio::test]
+async fn chat_stream_waits_for_text_after_early_completed_status() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    streamer.push_chat(vec![run_status_envelope("chat-empty-done", "completed")]);
+    streamer.push_chat(vec![final_reply_envelope(
+        "chat-final-after-done",
+        "hello final",
+    )]);
+    let router = router(streamer);
+
+    let response = router
+        .oneshot(post_json(
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-reborn",
+                "stream": true,
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let raw = read_until(response, "[DONE]").await;
+    assert!(
+        raw.contains("\"content\":\"hello final\""),
+        "raw SSE: {raw}"
+    );
+    assert!(raw.contains("\"finish_reason\":\"stop\""), "raw SSE: {raw}");
+    assert!(raw.contains("[DONE]"), "raw SSE: {raw}");
+}
+
+#[tokio::test]
 async fn chat_stream_errors_on_failed_run_status() {
     let streamer = Arc::new(QueuedStreamer::new());
     streamer.push_chat(vec![run_status_envelope("chat-failed", "failed")]);

@@ -171,6 +171,9 @@ fn chat_sse_stream(
                         match payload_view.terminal_status {
                             TerminalStatus::None => {}
                             TerminalStatus::Completed => {
+                                if state.is_empty() {
+                                    continue;
+                                }
                                 yield Ok(chat_finish_event(&public_id, created, &model));
                                 yield Ok(Event::default().data("[DONE]"));
                                 return;

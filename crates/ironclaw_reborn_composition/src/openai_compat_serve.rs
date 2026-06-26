@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use chrono::Utc;
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
@@ -22,6 +23,7 @@ use ironclaw_product_adapters::{
     ProductProjectionState, ProductWorkflow, ProjectionCursor, ProjectionReadRequest,
     ProjectionStream, ProjectionSubscriptionRequest,
 };
+use ironclaw_product_adapters::{ExternalActorRef, ExternalConversationRef, FinalReplyView};
 use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, InboundAttachmentLander,
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
@@ -61,8 +63,8 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, GateRef, GetRunStateRequest,
-    IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnRunId, TurnScope, TurnStatus,
+    IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
+    TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnScope, TurnStatus,
 };
 use sha2::{Digest, Sha256};
 
@@ -194,6 +196,7 @@ pub async fn build_openai_compat_route_mount(
     );
     let projection_streamer = Arc::new(OpenAiCompatRuntimeProjectionStreamer::new(
         projection_stream,
+        runtime.webui_thread_service(),
     ));
     let chat_workflow = Arc::new(
         OpenAiChatCompletionsWorkflow::new(
@@ -343,11 +346,111 @@ impl OpenAiCompatInboundAttachmentSubmit for OpenAiCompatAttachmentSubmitAdapter
 
 struct OpenAiCompatRuntimeProjectionStreamer {
     projection_stream: Arc<dyn ProjectionStream>,
+    thread_service: Arc<dyn SessionThreadService>,
 }
 
 impl OpenAiCompatRuntimeProjectionStreamer {
-    fn new(projection_stream: Arc<dyn ProjectionStream>) -> Self {
-        Self { projection_stream }
+    fn new(
+        projection_stream: Arc<dyn ProjectionStream>,
+        thread_service: Arc<dyn SessionThreadService>,
+    ) -> Self {
+        Self {
+            projection_stream,
+            thread_service,
+        }
+    }
+
+    async fn finalized_response_envelope(
+        &self,
+        request: &OpenAiResponseProjectionStreamRequest,
+        submitted_run_id: &str,
+    ) -> Result<Option<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
+        self.finalized_stream_envelope(
+            "response",
+            request.public_id.as_str(),
+            &request.actor_scope,
+            &request.projection_subscription,
+            request.after_cursor.as_ref(),
+            submitted_run_id,
+        )
+        .await
+    }
+
+    async fn finalized_chat_envelope(
+        &self,
+        request: &OpenAiChatProjectionStreamRequest,
+        submitted_run_id: &str,
+    ) -> Result<Option<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
+        self.finalized_stream_envelope(
+            "chat",
+            request.public_id.as_str(),
+            &request.actor_scope,
+            &request.projection_subscription,
+            request.after_cursor.as_ref(),
+            submitted_run_id,
+        )
+        .await
+    }
+
+    async fn finalized_stream_envelope(
+        &self,
+        surface: &str,
+        public_id: &str,
+        actor_scope: &ironclaw_reborn_openai_compat::OpenAiCompatActorScope,
+        projection_subscription: &ProjectionSubscriptionRequest,
+        after_cursor: Option<&ProjectionCursor>,
+        submitted_run_id: &str,
+    ) -> Result<Option<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
+        let final_cursor =
+            ProjectionCursor::new(format!("openai-compat:{surface}:{public_id}:final"))?;
+        if after_cursor == Some(&final_cursor) {
+            return Ok(None);
+        }
+
+        let thread_scope = thread_scope_from_projection_subscription(projection_subscription)?;
+        let Some(message) = self
+            .thread_service
+            .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+                scope: thread_scope,
+                thread_id: projection_subscription.scope.thread_id.clone(),
+                turn_run_id: submitted_run_id.to_string(),
+            })
+            .await
+            .map_err(map_thread_read_error)?
+        else {
+            return Ok(None);
+        };
+
+        let turn_run_id =
+            TurnRunId::parse(submitted_run_id).map_err(|_| OpenAiCompatHttpError::internal())?;
+        let adapter_id = ProductAdapterId::new(OPENAI_COMPAT_ADAPTER_ID)?;
+        let installation_id = AdapterInstallationId::new(OPENAI_COMPAT_INSTALLATION_ID)?;
+        let target = ProductOutboundTarget::new(
+            ReplyTargetBindingRef::new(format!("reply:openai-compat:{public_id}"))
+                .map_err(|_| OpenAiCompatHttpError::internal())?,
+            ExternalConversationRef::new(
+                None,
+                projection_subscription.scope.thread_id.to_string(),
+                None,
+                None,
+            )?,
+            Some(ExternalActorRef::new(
+                OPENAI_COMPAT_ACTOR_KIND,
+                actor_scope.user_id().as_str(),
+                None::<String>,
+            )?),
+        );
+        Ok(Some(ProductOutboundEnvelope::new(
+            adapter_id,
+            installation_id,
+            target,
+            final_cursor,
+            ProductOutboundPayload::FinalReply(FinalReplyView {
+                turn_run_id,
+                text: message.content.unwrap_or_default(),
+                generated_at: Utc::now(),
+            }),
+        )))
     }
 }
 
@@ -357,24 +460,68 @@ impl OpenAiCompatProjectionStreamer for OpenAiCompatRuntimeProjectionStreamer {
         &self,
         request: OpenAiChatProjectionStreamRequest,
     ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
-        let mut subscription = request.projection_subscription;
-        subscription.after_cursor = request.after_cursor;
-        self.projection_stream
+        let submitted_run_id = turn_run_ref_from_openai_mapping(&request.mapping)?;
+        let mut subscription = request.projection_subscription.clone();
+        subscription.after_cursor = request.after_cursor.clone();
+        let mut events = self
+            .projection_stream
             .drain(subscription)
             .await
-            .map_err(Into::into)
+            .map_err(OpenAiCompatHttpError::from)?;
+        let already_has_final = events.iter().any(|event| match event.payload() {
+            ProductOutboundPayload::FinalReply(view) => {
+                view.turn_run_id.to_string() == submitted_run_id
+            }
+            _ => false,
+        });
+        let terminal_status = response_status_from_projection_events(&events, &submitted_run_id);
+        let should_append_final = !already_has_final
+            && !matches!(
+                terminal_status,
+                Some(OpenAiResponseStatus::Failed | OpenAiResponseStatus::Cancelled)
+            );
+        if should_append_final
+            && let Some(envelope) = self
+                .finalized_chat_envelope(&request, &submitted_run_id)
+                .await?
+        {
+            events.push(envelope);
+        }
+        Ok(events)
     }
 
     async fn drain_response(
         &self,
         request: OpenAiResponseProjectionStreamRequest,
     ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
-        let mut subscription = request.projection_subscription;
-        subscription.after_cursor = request.after_cursor;
-        self.projection_stream
+        let submitted_run_id = turn_run_ref_from_openai_mapping(&request.mapping)?;
+        let mut subscription = request.projection_subscription.clone();
+        subscription.after_cursor = request.after_cursor.clone();
+        let mut events = self
+            .projection_stream
             .drain(subscription)
             .await
-            .map_err(Into::into)
+            .map_err(OpenAiCompatHttpError::from)?;
+        let already_has_final = events.iter().any(|event| match event.payload() {
+            ProductOutboundPayload::FinalReply(view) => {
+                view.turn_run_id.to_string() == submitted_run_id
+            }
+            _ => false,
+        });
+        let terminal_status = response_status_from_projection_events(&events, &submitted_run_id);
+        let should_append_final = !already_has_final
+            && !matches!(
+                terminal_status,
+                Some(OpenAiResponseStatus::Failed | OpenAiResponseStatus::Cancelled)
+            );
+        if should_append_final
+            && let Some(envelope) = self
+                .finalized_response_envelope(&request, &submitted_run_id)
+                .await?
+        {
+            events.push(envelope);
+        }
+        Ok(events)
     }
 }
 
@@ -870,7 +1017,7 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
         // The run id is read from the response's bound refs (the mapping is
         // bound before the wait). A create carries the accepted ack too, but an
         // external-tool resume reuses the parked run with no new ack.
-        let submitted_run_id = turn_run_ref_from_binding(&request.mapping)?;
+        let submitted_run_id = turn_run_ref_from_openai_mapping(&request.mapping)?;
         let mut projection_after_cursor = request.projection_read.after_cursor.clone();
         let pending_external_tool_fallback_at =
             tokio::time::Instant::now() + OPENAI_COMPAT_PENDING_EXTERNAL_TOOL_FALLBACK_DELAY;
@@ -983,7 +1130,7 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
         &self,
         request: OpenAiResponseReadRequest,
     ) -> Result<OpenAiResponseObject, OpenAiCompatHttpError> {
-        let submitted_run_id = turn_run_ref_from_binding(&request.mapping)?;
+        let submitted_run_id = turn_run_ref_from_openai_mapping(&request.mapping)?;
         let mut projection = self
             .read_run_output(
                 &request.projection_read,
@@ -1057,7 +1204,7 @@ struct ProjectedResponseStatusRead {
     next_cursor: Option<ProjectionCursor>,
 }
 
-fn turn_run_ref_from_binding(
+fn turn_run_ref_from_openai_mapping(
     mapping: &OpenAiCompatResourceMapping,
 ) -> Result<String, OpenAiCompatHttpError> {
     let OpenAiCompatResourceBinding::Bound { internal_refs } = &mapping.binding else {

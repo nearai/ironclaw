@@ -2663,7 +2663,9 @@ async def _read_sse_until(response: object, terminal_events: set[str]) -> list[d
             except json.JSONDecodeError as exc:
                 raise AssertionError(f"SSE data was not JSON: {data[:300]!r}") from exc
         events.append({"event": current_event, "data": payload})
-        terminal = current_event in terminal_events
+        terminal = current_event in terminal_events or (
+            isinstance(payload, str) and payload in terminal_events
+        )
         current_event = "message"
         data_lines = []
         return terminal
@@ -2695,7 +2697,7 @@ def _sse_output_text(events: list[dict[str, object]]) -> str:
                 collect(item)
         elif isinstance(value, dict):
             for key, item in value.items():
-                if key in {"delta", "text"} and isinstance(item, str):
+                if key in {"content", "delta", "text"} and isinstance(item, str):
                     parts.append(item)
                 else:
                     collect(item)
@@ -2703,6 +2705,282 @@ def _sse_output_text(events: list[dict[str, object]]) -> str:
     for event in events:
         collect(event.get("data"))
     return "".join(parts)
+
+
+def _chat_completion_text(payload: dict[str, object]) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise AssertionError(f"chat completion response missing choices: {payload!r}")
+    first = choices[0]
+    if not isinstance(first, dict):
+        raise AssertionError(f"chat completion choice was not an object: {first!r}")
+    message = first.get("message")
+    if not isinstance(message, dict):
+        raise AssertionError(f"chat completion choice missing message: {first!r}")
+    if message.get("role") != "assistant":
+        raise AssertionError(f"chat completion role={message.get('role')!r}, expected assistant")
+    content = message.get("content")
+    if not isinstance(content, str):
+        raise AssertionError(f"chat completion content was not a string: {content!r}")
+    return content
+
+
+def _assert_chat_completed(
+    payload: dict[str, object],
+    *,
+    marker: str,
+    expected_id: str | None = None,
+) -> str:
+    completion_id = payload.get("id")
+    if not isinstance(completion_id, str) or not completion_id.startswith("chatcmpl-"):
+        raise AssertionError(f"chat completion id is not a chatcmpl-* string: {completion_id!r}")
+    if expected_id is not None and completion_id != expected_id:
+        raise AssertionError(f"chat completion id {completion_id!r} did not match {expected_id!r}")
+    if payload.get("object") != "chat.completion":
+        raise AssertionError(
+            f"chat completion object={payload.get('object')!r}, expected 'chat.completion'"
+        )
+    text = _chat_completion_text(payload)
+    if marker not in text:
+        raise AssertionError(
+            f"chat completion output did not contain marker {marker!r}: {text[:500]!r}"
+        )
+    return completion_id
+
+
+async def case_chat_completions_live_llm_contract(ctx: LiveQaContext) -> ProbeResult:
+    import httpx
+
+    started = time.monotonic()
+    case_name = "chat_completions_live_llm_contract"
+    marker = f"CHAT_COMPLETIONS_LIVE_QA_OK_{uuid.uuid4().hex[:8].upper()}"
+    request_body = {
+        "model": "gpt-reborn",
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "Live Chat Completions API QA verification. Reply with exactly "
+                    f"this token and no extra words: {marker}"
+                ),
+            }
+        ],
+    }
+    idempotency_key = f"chat-completions-live-qa-{uuid.uuid4().hex}"
+    observed: dict[str, object] = {
+        "marker": marker,
+        "path": "/v1/chat/completions",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=180.0, follow_redirects=False) as client:
+            created = await client.post(
+                f"{ctx.base_url}/v1/chat/completions",
+                json=request_body,
+                headers={**_auth_json_headers(), "idempotency-key": idempotency_key},
+            )
+            _assert_status(created, 200, "live POST /v1/chat/completions")
+            created_body = await _response_json(created)
+            completion_id = _assert_chat_completed(created_body, marker=marker)
+            observed["completion_id"] = completion_id
+            observed["create_status"] = created.status_code
+
+            replayed = await client.post(
+                f"{ctx.base_url}/v1/chat/completions",
+                json=request_body,
+                headers={**_auth_json_headers(), "idempotency-key": idempotency_key},
+            )
+            _assert_status(replayed, 200, "idempotent replay POST /v1/chat/completions")
+            replayed_body = await _response_json(replayed)
+            _assert_chat_completed(
+                replayed_body,
+                marker=marker,
+                expected_id=completion_id,
+            )
+            observed["replay_status"] = replayed.status_code
+
+            conflict = await client.post(
+                f"{ctx.base_url}/v1/chat/completions",
+                json={
+                    **request_body,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": f"different chat completion input for {marker}",
+                        }
+                    ],
+                },
+                headers={**_auth_json_headers(), "idempotency-key": idempotency_key},
+            )
+            _assert_status(conflict, 409, "idempotency conflict POST /v1/chat/completions")
+            conflict_body = await _response_json(conflict)
+            _assert_openai_error(conflict_body, code="conflict")
+            observed["conflict_status"] = conflict.status_code
+
+        return _result(case_name, True, started, observed)
+    except Exception as exc:
+        return _result(case_name, False, started, {"error": str(exc), **observed})
+
+
+async def case_chat_completions_stream_live_llm_contract(ctx: LiveQaContext) -> ProbeResult:
+    import httpx
+
+    started = time.monotonic()
+    case_name = "chat_completions_stream_live_llm_contract"
+    marker = f"CHAT_COMPLETIONS_STREAM_LIVE_QA_OK_{uuid.uuid4().hex[:8].upper()}"
+    observed: dict[str, object] = {
+        "marker": marker,
+        "path": "/v1/chat/completions",
+    }
+    request_body = {
+        "model": "gpt-reborn",
+        "stream": True,
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "Live Chat Completions streaming QA verification. Reply with exactly "
+                    f"this token and no extra words: {marker}"
+                ),
+            }
+        ],
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=180.0, follow_redirects=False) as client:
+            async with client.stream(
+                "POST",
+                f"{ctx.base_url}/v1/chat/completions",
+                json=request_body,
+                headers=_auth_json_headers(),
+            ) as response:
+                _assert_status(response, 200, "live streaming POST /v1/chat/completions")
+                content_type = response.headers.get("content-type", "")
+                if "text/event-stream" not in content_type:
+                    raise AssertionError(
+                        f"chat streaming response content-type was {content_type!r}"
+                    )
+                events = await asyncio.wait_for(
+                    _read_sse_until(response, {"[DONE]", "error"}),
+                    timeout=90.0,
+                )
+
+        event_names = [str(event.get("event")) for event in events]
+        text = _sse_output_text(events)
+        observed.update(
+            {
+                "event_names": event_names,
+                "event_count": len(events),
+                "text_excerpt": text[:500],
+            }
+        )
+        if not events or events[-1].get("data") != "[DONE]":
+            raise AssertionError(f"chat SSE stream did not terminate with [DONE]: {events!r}")
+        if "error" in event_names:
+            raise AssertionError(f"chat SSE stream emitted error event: {event_names!r}")
+        if marker not in text:
+            raise AssertionError(
+                f"chat SSE output did not contain marker {marker!r}: {text[:500]!r}"
+            )
+        raw_events = json.dumps(events, sort_keys=True)
+        for forbidden in ("ProjectionCursor", "cursor:", "SECRET_TOKEN"):
+            if forbidden in raw_events:
+                raise AssertionError(f"chat SSE output leaked forbidden token {forbidden!r}")
+
+        return _result(case_name, True, started, observed)
+    except asyncio.CancelledError as exc:
+        return _result(
+            case_name,
+            False,
+            started,
+            {
+                "error": f"stream read was cancelled while waiting for [DONE]: {exc}",
+                **observed,
+            },
+        )
+    except Exception as exc:
+        return _result(case_name, False, started, {"error": str(exc), **observed})
+
+
+async def case_chat_completions_live_http_contract(ctx: LiveQaContext) -> ProbeResult:
+    import httpx
+
+    started = time.monotonic()
+    case_name = "chat_completions_live_http_contract"
+    path = "/v1/chat/completions"
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
+            unauthorized = await client.post(
+                f"{ctx.base_url}{path}",
+                json={
+                    "model": "gpt-reborn",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+            _assert_status(unauthorized, 401, f"unauthenticated POST {path}")
+
+            malformed = await client.post(
+                f"{ctx.base_url}{path}",
+                content="{",
+                headers=_auth_json_headers(),
+            )
+            _assert_status(malformed, 400, f"malformed POST {path}")
+            malformed_body = await _response_json(malformed)
+            _assert_openai_error(malformed_body, code="invalid_request", param="body")
+
+            empty_messages = await client.post(
+                f"{ctx.base_url}{path}",
+                json={"model": "gpt-reborn", "messages": []},
+                headers=_auth_json_headers(),
+            )
+            _assert_status(empty_messages, 400, f"empty messages POST {path}")
+            empty_body = await _response_json(empty_messages)
+            _assert_openai_error(empty_body, code="invalid_request", param="messages")
+
+            invalid_model = await client.post(
+                f"{ctx.base_url}{path}",
+                json={
+                    "model": " gpt-reborn",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+                headers=_auth_json_headers(),
+            )
+            _assert_status(invalid_model, 400, f"invalid model POST {path}")
+            invalid_model_body = await _response_json(invalid_model)
+            _assert_openai_error(invalid_model_body, code="invalid_request", param="model")
+
+            invalid_idempotency = await client.post(
+                f"{ctx.base_url}{path}",
+                json={
+                    "model": "gpt-reborn",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+                headers={**_auth_json_headers(), "idempotency-key": "i" * 257},
+            )
+            _assert_status(invalid_idempotency, 400, f"invalid idempotency-key POST {path}")
+            invalid_idempotency_body = await _response_json(invalid_idempotency)
+            _assert_openai_error(
+                invalid_idempotency_body,
+                code="invalid_request",
+                param="idempotency_key",
+            )
+
+        return _result(
+            case_name,
+            True,
+            started,
+            {
+                "path": path,
+                "unauthorized_status": unauthorized.status_code,
+                "malformed_status": malformed.status_code,
+                "empty_messages_status": empty_messages.status_code,
+                "invalid_model_status": invalid_model.status_code,
+                "invalid_idempotency_status": invalid_idempotency.status_code,
+            },
+        )
+    except Exception as exc:
+        return _result(case_name, False, started, {"error": str(exc), "path": path})
 
 
 async def case_responses_create_retrieve_live_llm_contract(ctx: LiveQaContext) -> ProbeResult:
@@ -5508,6 +5786,29 @@ CASES: dict[str, CaseSpec] = {
     "webui_static_shell_csp_nonce": CaseSpec(
         case_webui_static_shell_csp_nonce,
         qa_matrix_test_ids=["REBCLI-063-TC-01"],
+    ),
+    "chat_completions_live_llm_contract": CaseSpec(
+        case_chat_completions_live_llm_contract,
+        qa_matrix_test_ids=[
+            "REBCLI-056-TC-01",
+            "REBCLI-056-TC-03",
+        ],
+    ),
+    "chat_completions_stream_live_llm_contract": CaseSpec(
+        case_chat_completions_stream_live_llm_contract,
+        qa_matrix_test_ids=[
+            "REBCLI-056-TC-01",
+            "REBCLI-056-TC-03",
+            "REBCLI-056-TC-06",
+        ],
+    ),
+    "chat_completions_live_http_contract": CaseSpec(
+        case_chat_completions_live_http_contract,
+        qa_matrix_test_ids=[
+            "REBCLI-056-TC-02",
+            "REBCLI-056-TC-04",
+            "REBCLI-056-TC-05",
+        ],
     ),
     "responses_create_retrieve_live_llm_contract": CaseSpec(
         case_responses_create_retrieve_live_llm_contract,
