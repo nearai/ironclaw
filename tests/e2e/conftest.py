@@ -382,6 +382,47 @@ def ironclaw_reborn_binary():
 
 
 @pytest.fixture(scope="session")
+def ironclaw_reborn_openai_compat_binary():
+    """Ensure `ironclaw-reborn` is built with the OpenAI-compatible routes.
+
+    `openai-compat-beta` is a strict superset of `webui-v2-beta`, but it is not
+    enabled by the generic Reborn WebUI fixture. Keep this separate so the
+    OpenAI-compatible E2E explicitly proves the route-bearing binary.
+    """
+    target_dir = _cargo_target_dir()
+    binary = target_dir / "debug" / "ironclaw-reborn"
+    stamp = target_dir / "debug" / ".ironclaw-reborn-openai-compat-beta.stamp"
+    input_mtime = max(
+        _latest_mtime(ROOT / "Cargo.toml"),
+        _latest_mtime(ROOT / "Cargo.lock"),
+        _latest_mtime(ROOT / "crates"),
+    )
+    if (
+        _binary_needs_rebuild(binary)
+        or not stamp.exists()
+        or stamp.stat().st_mtime < input_mtime
+    ):
+        print("Building ironclaw-reborn (openai-compat-beta; this may take a while)...")
+        subprocess.run(
+            [
+                "cargo", "build",
+                "-p", "ironclaw_reborn_cli",
+                "--features", "openai-compat-beta",
+            ],
+            cwd=ROOT,
+            check=True,
+            timeout=600,
+        )
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+    assert binary.exists(), (
+        f"Binary not found at {binary}. "
+        f"Cargo target dir resolved to: {target_dir}"
+    )
+    return str(binary)
+
+
+@pytest.fixture(scope="session")
 def server_ports():
     """Reserve dynamic ports for the gateway and HTTP webhook channel."""
     reserved = _reserve_loopback_sockets(2)
@@ -558,6 +599,10 @@ async def reset_mock_llm_state(mock_llm_server):
         )
         await client.post(
             f"{mock_llm_server}/__mock/oauth/reset",
+            timeout=10,
+        )
+        await client.post(
+            f"{mock_llm_server}/__mock/chat_requests/reset",
             timeout=10,
         )
 

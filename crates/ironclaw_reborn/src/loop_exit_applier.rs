@@ -330,7 +330,7 @@ where
         request: BlockedEvidenceRequest<'_>,
     ) -> Result<bool, TurnError> {
         match request.blocked.kind {
-            LoopBlockedKind::Auth => {}
+            LoopBlockedKind::Auth | LoopBlockedKind::ExternalTool => {}
             LoopBlockedKind::Approval => {
                 if !self.verify_pending_approval_gate(&request).await? {
                     return Ok(false);

@@ -395,10 +395,9 @@ impl ExternalToolCatalog for InMemoryExternalToolCatalog {
             .runs
             .lock()
             .map_err(|_| ExternalToolCatalogError::Unavailable)?;
-        runs.entry(run_id)
-            .or_default()
-            .outputs
-            .insert(call_id, output);
+        let entry = runs.entry(run_id).or_default();
+        entry.pending_calls.retain(|call| call.call_id() != call_id);
+        entry.outputs.insert(call_id, output);
         Ok(())
     }
 
@@ -656,14 +655,33 @@ mod tests {
         assert_eq!(pending[0].call_id(), "call_1");
         assert_eq!(pending[0].arguments(), &serde_json::json!({"city": "NYC"}));
 
+        catalog
+            .submit_output(run, "call_2".to_string(), serde_json::json!("ok"))
+            .await
+            .expect("submit output");
+        let pending = catalog.pending_calls(run).await.expect("pending");
+        assert_eq!(
+            pending
+                .iter()
+                .map(PendingExternalCall::call_id)
+                .collect::<Vec<_>>(),
+            vec!["call_1"]
+        );
+        assert_eq!(
+            catalog
+                .take_output(run, "call_2")
+                .await
+                .expect("take output"),
+            Some(serde_json::json!("ok"))
+        );
+
         // Clearing one leaves the rest.
         catalog
             .clear_pending_call(run, "call_1")
             .await
             .expect("clear one");
         let pending = catalog.pending_calls(run).await.expect("pending");
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].call_id(), "call_2");
+        assert!(pending.is_empty());
 
         // Unknown run yields no pending calls.
         assert!(
