@@ -386,6 +386,25 @@ impl LoopSafeSummary {
         validate_loop_safe_summary(value.into()).map(Self)
     }
 
+    /// Construct a body carrying inline prompt-message content.
+    ///
+    /// Inline message bodies ([`LoopInlineMessage::safe_body`]) are model-visible
+    /// prompt *content* (goal/direction/framing text), not host-authored display
+    /// summaries. They must not be forced through the strict 512-byte,
+    /// delimiter-banned [`validate_loop_safe_summary`] guard that [`Self::new`]
+    /// applies — ordinary prompts legitimately exceed 512 bytes and contain
+    /// markdown/path delimiters. Instead this applies exactly the model-safe
+    /// validation that [`super::instruction_bundle`] re-runs (`validate_model_safe_text`:
+    /// the 4 KB model-safe budget, control-character and credential-marker
+    /// rejection, delimiters permitted) when the inline message is materialized
+    /// into a model message — so it matches the contract the consumption boundary
+    /// already enforces. Reserve [`Self::new`] for genuine short display summaries.
+    pub fn new_inline_prompt_body(value: impl Into<String>) -> Result<Self, String> {
+        super::prompt_text::validate_model_safe_text(value.into(), "inline prompt body")
+            .map(Self)
+            .map_err(|error| error.safe_summary)
+    }
+
     pub fn model_gateway_failed() -> Self {
         Self("model gateway failed".to_string())
     }
