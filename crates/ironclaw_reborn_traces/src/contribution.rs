@@ -4156,6 +4156,62 @@ pub fn resolve_trace_credentials(
     )
 }
 
+/// The effective enrollment a scope contributes under during an autonomous
+/// flush: the policy to gate/submit with, the directory that holds the device
+/// key, and the per-user subject (if any) to attribute the upload to.
+///
+/// This consolidates the flush gate and per-user subject derivation into a
+/// single policy-read/path-resolution pass so the two cannot drift — earlier
+/// the gate and the subject derivation re-read the same policies independently.
+struct EffectiveFlushTarget {
+    policy: StandingTraceContributionPolicy,
+    device_key_dir: PathBuf,
+    subject: Option<String>,
+}
+
+/// Inner implementation that reads policies relative to an explicit base dir.
+/// Used by `resolve_effective_flush_target` (real base) and by tests (tempdir).
+fn resolve_effective_flush_target_at(
+    base: &std::path::Path,
+    scope: Option<&str>,
+) -> anyhow::Result<Option<EffectiveFlushTarget>> {
+    // Personal-invite enrollment: the per-scope policy is enabled and its device
+    // key is already 1:1 with the user, so no explicit subject is needed.
+    let personal = read_trace_policy_for_scope_at(base, scope)
+        .map_err(|e| anyhow::anyhow!("failed to read personal trace policy: {e}"))?;
+    if personal.enabled {
+        return Ok(Some(EffectiveFlushTarget {
+            policy: personal,
+            device_key_dir: trace_contribution_dir_for_scope_at(base, scope),
+            subject: None,
+        }));
+    }
+
+    // Instance enrollment: no enabled per-scope policy, but the admin-provisioned
+    // instance policy (scope None) is enabled. The device key lives at the shared
+    // instance dir and uploads are attributed via a per-user pseudonymous subject.
+    let instance = read_trace_policy_for_scope_at(base, None)
+        .map_err(|e| anyhow::anyhow!("failed to read instance trace policy: {e}"))?;
+    if instance.enabled {
+        return Ok(Some(EffectiveFlushTarget {
+            policy: instance,
+            device_key_dir: trace_contribution_dir_for_scope_at(base, None),
+            subject: scope.map(local_pseudonymous_contributor_id),
+        }));
+    }
+
+    Ok(None)
+}
+
+/// Resolve the enrollment a scope contributes under for the autonomous flush
+/// path. See [`resolve_effective_flush_target_at`]. Returns `Ok(None)` when the
+/// scope is enrolled in neither a personal-invite nor an instance enrollment.
+fn resolve_effective_flush_target(
+    scope: Option<&str>,
+) -> anyhow::Result<Option<EffectiveFlushTarget>> {
+    resolve_effective_flush_target_at(&ironclaw_common::paths::ironclaw_base_dir(), scope)
+}
+
 pub fn mark_trace_credit_notice_due_for_scope(
     scope: Option<&str>,
 ) -> anyhow::Result<Option<CreditSummary>> {
@@ -6388,38 +6444,6 @@ fn trace_remote_http_client() -> Result<reqwest::Client, TraceRemoteRequestFailu
         })
 }
 
-/// Derive the per-user pseudonymous subject from a trace scope string.
-///
-/// Returns `Some(local_pseudonymous_contributor_id(scope))` when the user is enrolled
-/// via the shared instance policy (scope-level personal policy absent/disabled), so the
-/// issuer can attribute this user under the shared tenant device key.
-///
-/// Returns `None` when:
-/// - `scope` is `None` (CLI / no-user-context paths) — preserves today's behavior.
-/// - The user's personal-invite policy is enabled — the device key is already 1:1 with
-///   the user, so no explicit subject is required.
-/// - Neither policy is enabled — no contribution is happening.
-fn subject_for_scope(scope: Option<&str>) -> Option<String> {
-    let s = scope?;
-    // Personal-invite enrollment: scope-level policy is enabled, device key already 1:1.
-    let personal_enabled = read_trace_policy_for_scope(Some(s))
-        .ok()
-        .map(|p| p.enabled)
-        .unwrap_or(false);
-    if personal_enabled {
-        return None;
-    }
-    // Instance enrollment: no scope-level policy but the global instance policy is enabled.
-    let instance_enabled = read_trace_policy_for_scope(None)
-        .ok()
-        .map(|p| p.enabled)
-        .unwrap_or(false);
-    if instance_enabled {
-        return Some(local_pseudonymous_contributor_id(s));
-    }
-    None
-}
-
 pub async fn submit_trace_envelope_to_endpoint(
     envelope: &TraceContributionEnvelope,
     endpoint: &str,
@@ -6597,39 +6621,35 @@ async fn flush_trace_contribution_queue_for_scope_with_credential_provider(
     let flush_started_at = Utc::now();
     record_trace_queue_flush_attempt_for_scope_unlocked(scope, flush_started_at)?;
 
-    // Compute the scope's base directory once; passed into contexts so that
-    // DeviceKey auth mode can locate the per-tenant keypair.
-    let scope_dir = trace_contribution_dir_for_scope(scope);
-
-    let policy = match read_trace_policy_for_scope(scope) {
-        Ok(policy) => policy,
+    // Resolve which enrollment this scope contributes under in a single
+    // policy-read/path pass. A personal-invite enrollment uses the per-scope
+    // policy + per-scope device-key dir + no subject; an instance enrollment
+    // (no enabled per-scope policy, but the admin-provisioned instance policy at
+    // scope None is enabled) uses the instance policy + instance device-key dir
+    // + a per-user pseudonymous subject. `Ok(None)` means unenrolled and the
+    // flush aborts, exactly as before.
+    let target = match resolve_effective_flush_target(scope) {
+        Ok(target) => target,
         Err(error) => {
             record_trace_queue_flush_failure_for_scope_unlocked(scope, &error, flush_started_at)?;
             return Err(error);
         }
     };
-    // NOTE: This gates on the PER-SCOPE (personal-invite) policy only. An
-    // instance-enrolled user (enrolled at scope None via admin instance
-    // enrollment) has no enabled per-scope policy and therefore aborts here —
-    // instance-enrolled contribution is NOT yet wired into the autonomous flush
-    // path. A resolver-aware flush gate (use resolve_trace_credentials, fall back
-    // to the instance policy) is the planned follow-up. Until then, `subject_for_scope`
-    // below is effectively inert in this path. Tracking: <flush-gate follow-up>.
-    if !policy.enabled {
+    let Some(EffectiveFlushTarget {
+        policy,
+        device_key_dir: scope_dir,
+        subject,
+    }) = target
+    else {
         let error = anyhow::anyhow!("trace contribution opt-in is disabled");
         record_trace_queue_flush_failure_for_scope_unlocked(scope, &error, flush_started_at)?;
         return Err(error);
-    }
+    };
     let Some(endpoint) = policy.ingestion_endpoint.as_deref() else {
         let error = anyhow::anyhow!("trace contribution endpoint is not configured");
         record_trace_queue_flush_failure_for_scope_unlocked(scope, &error, flush_started_at)?;
         return Err(error);
     };
-
-    // Derive the per-user pseudonymous subject so instance-enrolled users are attributed
-    // individually under the shared tenant device key. Personal-invite enrollments and
-    // paths with no scope resolve to `None`, preserving today's behavior.
-    let subject = subject_for_scope(scope);
 
     let compaction = match compact_trace_queue_for_scope_unlocked(scope) {
         Ok(report) => report,
@@ -15071,6 +15091,76 @@ mod tests {
             resolve_trace_credentials_at(dir.path(), "tenant-a", "alice")
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    // --- resolve_effective_flush_target tests ---
+    // Same isolation contract as the resolver tests: each uses its own tempdir
+    // passed to the private `_at` core, so they never touch the global
+    // IRONCLAW_BASE_DIR. These prove the autonomous flush gate is resolver-aware:
+    // an instance-only enrollment resolves to a contributing target (so the gate
+    // no longer aborts) carrying the per-user pseudonymous subject and the
+    // INSTANCE device-key dir.
+
+    #[test]
+    fn effective_flush_target_personal_enabled_uses_scope_dir_and_no_subject() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = trace_scope_key("tenant-a", "alice");
+        let personal = StandingTraceContributionPolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        write_policy_at(dir.path(), Some(scope.as_str()), &personal);
+
+        let target = resolve_effective_flush_target_at(dir.path(), Some(scope.as_str()))
+            .unwrap()
+            .expect("personal-enabled scope is a contributing target");
+        assert!(target.policy.enabled);
+        assert_eq!(target.subject, None, "personal invite carries no subject");
+        assert_eq!(
+            target.device_key_dir,
+            trace_contribution_dir_for_scope_at(dir.path(), Some(scope.as_str())),
+            "personal enrollment loads its device key from the per-scope dir"
+        );
+    }
+
+    #[test]
+    fn effective_flush_target_instance_only_uses_instance_dir_and_subject() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = trace_scope_key("tenant-a", "alice");
+        // No personal policy for the scope; only the instance-level (None) policy.
+        let instance = StandingTraceContributionPolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        write_policy_at(dir.path(), None, &instance);
+
+        let target = resolve_effective_flush_target_at(dir.path(), Some(scope.as_str()))
+            .unwrap()
+            .expect("instance-enrolled scope is a contributing target (gate must not abort)");
+        assert!(target.policy.enabled);
+        assert_eq!(
+            target.subject,
+            Some(local_pseudonymous_contributor_id(&scope)),
+            "instance enrollment attributes the user via a per-user pseudonymous subject"
+        );
+        assert_eq!(
+            target.device_key_dir,
+            trace_contribution_dir_for_scope_at(dir.path(), None),
+            "instance enrollment loads the shared device key from the instance (None) dir"
+        );
+    }
+
+    #[test]
+    fn effective_flush_target_none_when_unenrolled() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = trace_scope_key("tenant-a", "alice");
+        // Empty dir — neither a personal nor an instance policy is enabled.
+        assert!(
+            resolve_effective_flush_target_at(dir.path(), Some(scope.as_str()))
+                .unwrap()
+                .is_none(),
+            "unenrolled scope has no contributing target"
         );
     }
 
