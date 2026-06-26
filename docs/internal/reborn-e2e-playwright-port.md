@@ -387,6 +387,8 @@ standalone Reborn WebUI v2 Extensions surface:
   without submitting setup;
 - pressing Enter in a manual configuration input submits the same v2 setup
   payload as the Save button;
+- Telegram channel configuration accepts and preserves bot tokens with the
+  colon, underscore, and hyphen characters used by real Telegram bot tokens;
 - failed setup responses keep the configure modal open and show the server
   message so the user can correct the credential;
 - activation responses that include legacy-style `auth_url` values reject

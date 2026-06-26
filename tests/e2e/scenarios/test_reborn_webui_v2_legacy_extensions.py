@@ -75,6 +75,20 @@ CHANNEL_READY = {
     "onboarding_state": "ready",
 }
 
+TELEGRAM_CHANNEL_SETUP = {
+    "package_ref": _package_ref("telegram"),
+    "display_name": "Telegram",
+    "kind": "wasm_channel",
+    "description": "Telegram bot channel",
+    "active": False,
+    "authenticated": False,
+    "has_auth": True,
+    "needs_setup": True,
+    "tools": [],
+    "activation_status": "setup_required",
+    "onboarding_state": "setup_required",
+}
+
 AVAILABLE_CHANNEL = {
     "package_ref": _package_ref("slack-channel"),
     "display_name": "Slack Channel",
@@ -922,6 +936,65 @@ async def test_reborn_legacy_configure_modal_enter_key_submits(
                     "action": "submit",
                     "payload": {
                         "secrets": {"API_TOKEN": "enter-token"},
+                        "fields": {},
+                    },
+                },
+            }
+        ]
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_telegram_token_configure_preserves_token_characters(
+    reborn_v2_server, reborn_v2_browser
+):
+    token = "123456789:ABCdef_GHI-jkl_mnop-QRSTuvwxyz"
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[TELEGRAM_CHANNEL_SETUP],
+        setup_payloads={
+            "telegram": {
+                "name": "telegram",
+                "kind": "wasm_channel",
+                "secrets": [
+                    {
+                        "name": "telegram_bot_token",
+                        "prompt": "Telegram Bot Token",
+                        "provided": False,
+                        "optional": False,
+                        "auto_generate": False,
+                    }
+                ],
+                "fields": [],
+                "onboarding": None,
+            }
+        },
+        tab="channels",
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, "Telegram")
+        await expect(card).to_be_visible(timeout=5000)
+        await card.get_by_role("button", name="Configure").click()
+
+        await expect(
+            page.get_by_role("heading", name="Configure Telegram")
+        ).to_be_visible(timeout=5000)
+        await expect(page.get_by_text("Telegram Bot Token")).to_be_visible()
+        await page.locator('input[type="password"]').first.fill(token)
+        await page.get_by_role("button", name="Save").click()
+
+        await expect(
+            page.get_by_role("heading", name="Configure Telegram")
+        ).to_have_count(0)
+        assert harness["setup_submit_requests"] == [
+            {
+                "package_id": "telegram",
+                "body": {
+                    "action": "submit",
+                    "payload": {
+                        "secrets": {"telegram_bot_token": token},
                         "fields": {},
                     },
                 },
