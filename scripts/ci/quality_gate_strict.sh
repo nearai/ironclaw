@@ -13,13 +13,25 @@ require_command() {
     fi
 }
 
+require_node_22() {
+    require_command node "install Node.js 22"
+    local node_version
+    node_version="$(node --version)"
+    local node_major="${node_version#v}"
+    node_major="${node_major%%.*}"
+    if [ "$node_major" != "22" ]; then
+        echo "ERROR: Node.js 22.x required for WebUI bundle builds; found $node_version" >&2
+        exit 1
+    fi
+    echo "$node_version"
+}
+
 echo "==> fmt check"
 cargo fmt --all -- --check
 
 echo "==> WebUI bundle toolchain"
-require_command node "install Node.js 22+"
+require_node_22
 require_command npm "install npm with Node.js"
-node --version
 npm --version
 
 echo "==> clippy (all warnings)"
