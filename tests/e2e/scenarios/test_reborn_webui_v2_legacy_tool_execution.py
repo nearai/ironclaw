@@ -2,17 +2,27 @@
 
 import asyncio
 import json
+from urllib.parse import unquote, urlparse
 
 import httpx
+from playwright.async_api import expect
 
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
+    USER_ID,
     create_thread,
     fetch_timeline,
     reborn_bearer_headers,
+    reborn_v2_browser,  # noqa: F401 - imported fixture
+    reborn_v2_server,  # noqa: F401 - imported fixture
     reborn_v2_yolo_server,  # noqa: F401 - imported fixture
     send_message,
     wait_for_assistant_message,
 )
+
+
+EMPTY_REPLY_THREAD_ID = "thread-legacy-empty-reply"
+EMPTY_REPLY_RUN_ID = "22222222-3333-4444-5555-666666666666"
 
 
 def _preview_payload(message: dict) -> dict | None:
@@ -55,6 +65,150 @@ async def _wait_for_capability_preview(
         f"Timed out waiting for {capability_id!r} preview in thread {thread_id}. "
         f"Last timeline: {last_timeline}"
     )
+
+
+async def _install_fake_event_source(page):
+    await page.add_init_script(
+        """
+        (() => {
+          const streams = [];
+          class FakeEventSource extends EventTarget {
+            constructor(url) {
+              super();
+              this.url = url;
+              this.readyState = 0;
+              streams.push(this);
+              setTimeout(() => {
+                this.readyState = 1;
+                if (typeof this.onopen === "function") this.onopen(new Event("open"));
+              }, 0);
+            }
+            close() {
+              this.readyState = 2;
+            }
+          }
+          window.EventSource = FakeEventSource;
+          window.__emitV2Sse = (type, frame, id = "cursor-1") => {
+            const stream = streams[streams.length - 1];
+            if (!stream) throw new Error("no EventSource stream is open");
+            const event = new MessageEvent(type, {
+              data: JSON.stringify({ type, ...frame }),
+              lastEventId: id,
+            });
+            stream.dispatchEvent(event);
+          };
+        })();
+        """
+    )
+
+
+async def _wait_for_request_count(
+    requests: list,
+    count: int,
+    *,
+    timeout: float = 5.0,
+) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if len(requests) > count:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(
+        f"Timed out waiting for request count > {count}; got {len(requests)}"
+    )
+
+
+def _empty_reply_user_record() -> dict:
+    return {
+        "message_id": "legacy-empty-reply-user",
+        "kind": "user",
+        "content": "issue 1780 empty reply",
+        "sequence": 1,
+        "status": "accepted",
+        "created_at": "2026-06-25T12:00:00Z",
+        "turn_run_id": EMPTY_REPLY_RUN_ID,
+    }
+
+
+async def _open_mocked_empty_reply_page(reborn_v2_server, reborn_v2_browser):
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 720}
+    )
+    page = await context.new_page()
+    await _install_fake_event_source(page)
+    timeline_requests: list[dict] = []
+
+    async def fulfill_json(route, body, status=200):
+        await route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(body),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def handle_session(route):
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route):
+        await fulfill_json(
+            route,
+            {
+                "threads": [
+                    {
+                        "thread_id": EMPTY_REPLY_THREAD_ID,
+                        "title": "Empty reply recovery",
+                        "created_at": "2026-06-25T00:00:00Z",
+                        "updated_at": "2026-06-25T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_timeline(route):
+        parsed = urlparse(route.request.url)
+        timeline_requests.append(dict(parsed._asdict()))
+        thread_id = unquote(
+            parsed.path.split("/threads/", 1)[1].split("/timeline", 1)[0]
+        )
+        messages = (
+            [_empty_reply_user_record()]
+            if thread_id == EMPTY_REPLY_THREAD_ID
+            else []
+        )
+        await fulfill_json(route, {"messages": messages, "next_cursor": None})
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads", handle_threads)
+    await page.route("**/api/webchat/v2/threads/*/timeline**", handle_timeline)
+
+    await page.goto(
+        f"{reborn_v2_server}/v2/chat/{EMPTY_REPLY_THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
+    await expect(page.locator(SEL_V2["msg_user"]).last).to_contain_text(
+        "issue 1780 empty reply", timeout=5000
+    )
+
+    return {
+        "context": context,
+        "page": page,
+        "timeline_requests": timeline_requests,
+    }
 
 
 async def test_reborn_legacy_builtin_echo_tool_executes(reborn_v2_yolo_server):
@@ -180,3 +334,47 @@ async def test_reborn_legacy_truncated_tool_call_recovers_without_activity_card(
         for message in timeline.get("messages", [])
         if message.get("kind") == "capability_display_preview"
     ] == []
+
+
+async def test_reborn_legacy_empty_reply_failure_projection_is_visible(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Port legacy empty-reply recovery to Reborn's visible failed-run bubble."""
+    harness = await _open_mocked_empty_reply_page(reborn_v2_server, reborn_v2_browser)
+    try:
+        page = harness["page"]
+        before_terminal_requests = len(harness["timeline_requests"])
+
+        await page.evaluate(
+            f"""
+            () => window.__emitV2Sse("projection_update", {{
+              state: {{
+                items: [
+                  {{
+                    run_status: {{
+                      run_id: {EMPTY_REPLY_RUN_ID!r},
+                      status: "failed",
+                      failure_category: "invalid_output",
+                      failure_summary: "The run failed because the model returned an empty assistant response."
+                    }}
+                  }}
+                ]
+              }}
+            }})
+            """
+        )
+
+        error_message = page.locator("[data-testid='msg-error']").filter(
+            has_text="empty assistant response"
+        )
+        await expect(error_message).to_be_visible(timeout=5000)
+        await _wait_for_request_count(
+            harness["timeline_requests"], before_terminal_requests
+        )
+        await expect(error_message).to_be_visible(timeout=5000)
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_enabled()
+        await expect(
+            page.locator(SEL_V2["msg_assistant"]).filter(has_text="empty assistant response")
+        ).to_have_count(0)
+    finally:
+        await harness["context"].close()

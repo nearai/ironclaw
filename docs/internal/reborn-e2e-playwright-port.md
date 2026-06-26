@@ -1762,6 +1762,29 @@ Behavior adjustment:
   Reborn's port exercises the v2 Configure modal and OAuth-start endpoint
   projection because that is the current operator-visible setup flow.
 
+### Step 52: Legacy Empty-Reply Visible Failure Port
+
+Extended `test_reborn_webui_v2_legacy_tool_execution.py`.
+
+Ported the user-visible terminal behavior behind legacy
+`test_empty_reply_uses_chat_fallback`:
+
+- a failed Reborn run-status projection with `invalid_output` and an empty-reply
+  summary renders a visible error bubble;
+- the composer unlocks after the terminal failure;
+- the client-only `err-*` failure bubble survives the terminal-status timeline
+  refresh;
+- Reborn does not fabricate a durable assistant transcript row for invalid
+  model output.
+
+Behavior adjustment:
+
+- Legacy asserted an assistant fallback message containing "error" and "empty".
+  Reborn's runner rejects empty model output as `InvalidOutput` and does not
+  write an assistant transcript for that failed run. The Reborn port protects
+  the equivalent WebUI contract: operators see a terminal failure bubble with a
+  sanitized summary and can continue the conversation.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -1822,9 +1845,10 @@ Not yet ported:
 - legacy owner-scope, multi-tenant greeting, and engine-v2 visibility parity,
   because those tests target old gateway/admin/routine/engine endpoints rather
   than current standalone Reborn WebUI v2 product surfaces;
-- legacy empty-model-reply visible-error parity, because Reborn currently treats
-  model `InvalidOutput` as a failed run without writing an assistant transcript
-  row;
+- legacy empty-model-reply durable assistant-transcript parity remains
+  intentionally unported because Reborn treats model `InvalidOutput` as a
+  failed run without writing an assistant transcript row; browser-visible
+  failure parity is covered by Step 52;
 - legacy `ENGINE_V2=true` gateway contract parity for old `/api/chat/*`,
   `/api/engine/*`, `/api/chat/approval`, `/api/chat/gate/resolve`, and
   `/oauth/callback` scenarios. These should be replaced with Reborn-native
