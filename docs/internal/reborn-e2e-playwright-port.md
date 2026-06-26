@@ -239,6 +239,9 @@ Ported the browser-visible approval-card behavior from legacy
   `/api/webchat/v2/threads/{thread}/runs/{run}/gates/{gate}/resolve` endpoint;
 - the always-allow checkbox changes the primary button action from normal
   approve to approve-and-always.
+- bare approval keywords (`yes`, `no`, `always`) sent while no approval gate is
+  pending create ordinary chat turns instead of being treated as hidden approval
+  responses.
 
 Behavior adjustment:
 
@@ -250,6 +253,10 @@ Behavior adjustment:
 - Reborn's v1-compatible `approve(requestId, action, kind)` wrapper always
   includes `always: false` for normal approve/deny and `always: true` only for
   approve-and-always. The browser port records that shape explicitly.
+- Legacy had a text-alias interception path for pending approval cards. Reborn
+  blocks arbitrary sends while a gate is pending, so the migrated text-keyword
+  regression focuses on the no-pending-gate contract that those words remain
+  normal chat content.
 
 CI update:
 

@@ -8,6 +8,7 @@ from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
     USER_ID,
     reborn_v2_browser,  # noqa: F401 - imported fixture
+    reborn_v2_page,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
 )
 
@@ -251,3 +252,30 @@ async def test_reborn_legacy_approval_buttons_resolve_gate(
         assert resolve_requests[2]["body"]["always"] is False
     finally:
         await context.close()
+
+
+async def test_reborn_legacy_bare_approval_keywords_send_as_chat_without_gate(
+    reborn_v2_page,
+):
+    """Port of the no-pending-gate approval-keyword regression to Reborn."""
+    composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
+
+    for keyword in ("yes", "no", "always"):
+        user_count = await reborn_v2_page.locator(SEL_V2["msg_user"]).count()
+        assistant_count = await reborn_v2_page.locator(SEL_V2["msg_assistant"]).count()
+
+        await composer.fill(keyword)
+        await composer.press("Enter")
+
+        await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(
+            user_count + 1,
+            timeout=10000,
+        )
+        await expect(reborn_v2_page.locator(SEL_V2["msg_user"]).last).to_contain_text(
+            keyword
+        )
+        await expect(reborn_v2_page.locator(SEL_V2["msg_assistant"])).to_have_count(
+            assistant_count + 1,
+            timeout=15000,
+        )
+        await expect(reborn_v2_page.locator(SEL_V2["approval_card"])).to_have_count(0)
