@@ -2024,6 +2024,36 @@ Behavior adjustment:
   messages increase `messages.length`, so the empty landing is replaced by the
   message list without relying on v1 globals.
 
+### Step 62: Legacy Approval Resolve In-Flight Disable Port
+
+Extended `test_reborn_webui_v2_legacy_approval.py`.
+
+Ported the actionable part of legacy
+`test_approval_approve_disables_buttons` to Reborn's gate-resolution card:
+
+- emitted a Reborn approval gate through the WebChat v2 event stream;
+- held the `/api/webchat/v2/threads/{thread}/runs/{run}/gates/{gate}/resolve`
+  request open so the card remained visible during resolution;
+- asserted the approve, deny, and always-allow controls are disabled while the
+  resolve request is in flight;
+- asserted the resolve payload is still the v2 gate-resolution payload and the
+  card clears after the delayed response completes.
+
+Issue fixed:
+
+- Reborn's `ApprovalCard` did not track an in-flight resolve request, so a fast
+  double click could submit duplicate gate-resolution requests before the
+  pending gate cleared. The card now keeps a local resolving state and disables
+  the primary, deny, and always-allow controls until the async resolve action
+  finishes.
+
+Behavior adjustment:
+
+- Legacy v1 left a resolved card in place with an `Approved` / `Denied` status
+  label. Reborn's v2 card clears after the run-scoped resolve endpoint accepts
+  the decision, so the port protects duplicate-submit prevention rather than
+  copying the legacy resolved-label DOM.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -2175,6 +2205,12 @@ The product-auth prompt port added stable auth-gate hooks but did not require a
 behavior fix. The existing Reborn OAuth card already rejected non-HTTPS
 authorization URLs before opening a popup, and the manual-token path already
 trimmed the submitted token before calling the product-auth endpoint.
+
+The approval in-flight port found a Reborn browser defect: approval actions did
+not disable while the run-scoped gate-resolution request was pending, allowing a
+fast double click to submit duplicate decisions. `ApprovalCard` now tracks an
+in-flight resolving state and disables the approve, deny, and always-allow
+controls until the async action finishes.
 
 The tool-activity history port did not require a Reborn product behavior fix:
 durable `capability_display_preview` records already rehydrated the activity

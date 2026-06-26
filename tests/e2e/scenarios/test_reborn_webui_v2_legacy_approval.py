@@ -1,5 +1,6 @@
 """Legacy approval-card browser coverage ported to Reborn WebChat v2."""
 
+import asyncio
 import json
 
 from playwright.async_api import expect
@@ -18,7 +19,12 @@ RUN_ID = "run-legacy-approval"
 GATE_REF = "gate-legacy-approval"
 
 
-async def _open_stubbed_approval_thread(reborn_v2_server, reborn_v2_browser):
+async def _open_stubbed_approval_thread(
+    reborn_v2_server,
+    reborn_v2_browser,
+    *,
+    resolve_release: asyncio.Event | None = None,
+):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
     resolve_requests: list[dict] = []
@@ -121,6 +127,8 @@ async def _open_stubbed_approval_thread(reborn_v2_server, reborn_v2_browser):
                 "body": json.loads(route.request.post_data or "{}"),
             }
         )
+        if resolve_release is not None:
+            await resolve_release.wait()
         await fulfill_json(
             route,
             {
@@ -251,6 +259,39 @@ async def test_reborn_legacy_approval_buttons_resolve_gate(
         assert resolve_requests[2]["body"]["resolution"] == "denied"
         assert resolve_requests[2]["body"]["always"] is False
     finally:
+        await context.close()
+
+
+async def test_reborn_legacy_approval_actions_disable_while_resolving(
+    reborn_v2_server, reborn_v2_browser
+):
+    resolve_release = asyncio.Event()
+    context, page, resolve_requests = await _open_stubbed_approval_thread(
+        reborn_v2_server,
+        reborn_v2_browser,
+        resolve_release=resolve_release,
+    )
+    try:
+        await _emit_approval_gate(page, allow_always=True, gate_ref="gate-disable")
+        card = page.locator(SEL_V2["approval_card"]).first
+
+        always = card.get_by_label("Always allow builtin.shell without asking")
+        await always.check()
+        approve = card.get_by_role("button", name="Approve & always allow")
+        deny = card.get_by_role("button", name="Deny")
+        await approve.click()
+
+        await expect(approve).to_be_disabled(timeout=5000)
+        await expect(deny).to_be_disabled()
+        await expect(always).to_be_disabled()
+        assert len(resolve_requests) == 1
+        assert resolve_requests[0]["body"]["resolution"] == "approved"
+        assert resolve_requests[0]["body"]["always"] is True
+
+        resolve_release.set()
+        await expect(card).to_be_hidden(timeout=5000)
+    finally:
+        resolve_release.set()
         await context.close()
 
 
