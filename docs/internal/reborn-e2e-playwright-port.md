@@ -2191,6 +2191,30 @@ Issue fixed:
   empty text when they also carry user attachments, so reload/history rendering
   matches the live attachments-only view.
 
+### Step 69: Legacy Failed-Send Retry Port
+
+Extended `test_reborn_webui_v2_legacy_pending_messages.py` and fixed the Reborn
+failed-message retry action.
+
+Ported the actionable retry affordance behind legacy pending-message failure
+cleanup:
+
+- forced the first Reborn message send to fail with a service-unavailable
+  response;
+- asserted the failed optimistic row renders a single visible error and retry
+  action;
+- clicked `Retry message`;
+- asserted the same message content is submitted again and the old error/retry
+  affordance is cleared from the replacement optimistic row.
+
+Issue fixed:
+
+- Reborn rendered a `Retry message` button for failed optimistic user messages,
+  but `useChat` exposed `retryMessage` as a no-op compatibility stub. The
+  handler now removes the failed row and resubmits the stored original payload
+  through the normal send path. Failed rows keep their retry content and staged
+  attachment payload so text and attachment sends can be retried consistently.
+
 ## Open Migration Buckets
 
 Not yet ported:

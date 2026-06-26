@@ -542,3 +542,46 @@ async def test_reborn_legacy_failed_send_marks_single_error_message(
         assert len(harness["send_requests"]) == 1
     finally:
         await harness["context"].close()
+
+
+async def test_reborn_legacy_failed_send_retry_resubmits_message(
+    reborn_v2_server, reborn_v2_browser
+):
+    async def handle_fail_then_success(route, _payload, fulfill_json):
+        if len(harness["send_requests"]) == 1:
+            await fulfill_json(
+                route,
+                {"error": "service_unavailable", "kind": "service_unavailable"},
+                status=503,
+            )
+            return
+        await fulfill_json(route, _submitted_response(), status=202)
+
+    harness = await _open_mocked_pending_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        send_handler=handle_fail_then_success,
+    )
+    try:
+        page = harness["page"]
+        composer = page.locator(SEL_V2["chat_composer"])
+        await composer.fill("retry failed send test")
+        await composer.press("Enter")
+
+        failed = page.locator(SEL_V2["msg_user"]).filter(
+            has_text="retry failed send test"
+        )
+        await expect(failed).to_have_count(1, timeout=5000)
+        await expect(failed).to_contain_text("Service unavailable")
+
+        await failed.get_by_label("Retry message").click()
+
+        await expect(failed).to_have_count(1, timeout=5000)
+        await expect(failed).not_to_contain_text("Service unavailable")
+        await expect(failed.get_by_label("Retry message")).to_have_count(0)
+        assert [request["content"] for request in harness["send_requests"]] == [
+            "retry failed send test",
+            "retry failed send test",
+        ]
+    finally:
+        await harness["context"].close()
