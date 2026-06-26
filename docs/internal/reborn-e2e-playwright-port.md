@@ -1817,6 +1817,41 @@ Behavior adjustment:
   `/v2/extensions` Channels tab and `/api/webchat/v2/extensions/*` setup
   contract.
 
+### Step 54: Legacy Channel Pairing Claim Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py` and fixed the generic
+Reborn channel pairing form.
+
+Ported the user-facing member pairing behavior from legacy
+`test_member_pairing_claim_submission_shows_success` and
+`test_member_pairing_claim_failure_shows_error` to Reborn's
+`/v2/extensions/channels` surface:
+
+- a channel in `pairing_required` state renders the generic pairing section;
+- no primary `Activate` button appears alongside the pairing UI;
+- submitting a code trims whitespace and posts the v2 pairing redeem request
+  with `{channel, code}`;
+- a successful redemption shows the pairing success copy and clears the input;
+- a failed redemption shows the endpoint error and keeps the entered code
+  available for retry.
+
+Real issue fixed:
+
+- `approvePairingCode` in the Reborn extensions API still returned a local
+  placeholder response (`Pairing requires a v2 pairing endpoint.`), so generic
+  channel pairing could not complete from the Channels tab even though the
+  composition layer already exposes `/api/webchat/v2/extensions/pairing/redeem`.
+  The generic pairing form now uses that v2 redeem endpoint, matching the
+  Slack proof-code flow.
+
+Behavior adjustment:
+
+- Legacy split pairing into member/admin variants and old
+  `/api/pairing/{channel}/approve` endpoints. Reborn's browser-visible port
+  covers member self-claim through the v2 redeem endpoint. Admin pending-request
+  listing remains a lower-level/non-stub Reborn surface gap until a v2 pending
+  pairing list endpoint exists.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -1845,9 +1880,9 @@ Not yet ported:
   setup only where standalone Reborn exposes matching v2 browser endpoints or
   fixtures;
 - remaining Slack/Telegram/channel pairing scenarios beyond the Reborn Slack
-  proof-code connect card, especially lower-level member/admin pairing APIs and
-  Telegram-specific/generic pairing once standalone Reborn exposes matching
-  non-stub v2 surfaces;
+  proof-code connect card and generic member self-claim form, especially
+  lower-level admin pending pairing APIs once standalone Reborn exposes a
+  matching v2 pending-list endpoint;
 - remaining Slack/Telegram/channel approval and webhook scenarios beyond
   WebChat v2 approval cards and product-workflow/adapter contracts, because the
   legacy tests target old Slack/Telegram WASM-channel controllers and text alias
