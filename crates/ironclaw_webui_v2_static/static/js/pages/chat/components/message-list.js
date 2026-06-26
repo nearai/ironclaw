@@ -5,6 +5,33 @@ import { MessageBubble } from "./message-bubble.js";
 import { Icon } from "../../../design-system/icons.js";
 import { groupMessages } from "../lib/message-groups.js";
 
+export const BOTTOM_FOLLOW_THRESHOLD_PX = 100;
+const TOP_LOAD_THRESHOLD_PX = 100;
+
+export function distanceFromBottom(el) {
+  if (!el) return Number.POSITIVE_INFINITY;
+  return el.scrollHeight - el.scrollTop - el.clientHeight;
+}
+
+export function isNearBottom(el, threshold = BOTTOM_FOLLOW_THRESHOLD_PX) {
+  return distanceFromBottom(el) <= threshold;
+}
+
+export function scrollToBottom(el) {
+  if (!el) return;
+  el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+}
+
+export function messageKey(message) {
+  if (!message?.id) return null;
+  return `${message.role || ""}:${message.id}`;
+}
+
+export function isNewUserMessage(previousKey, message) {
+  const key = messageKey(message);
+  return Boolean(key && message?.role === "user" && key !== previousKey);
+}
+
 export function MessageList({
   messages,
   isLoading,
@@ -17,44 +44,155 @@ export function MessageList({
 }) {
   const t = useT();
   const containerRef = React.useRef(null);
+  const contentRef = React.useRef(null);
   const shouldScrollRef = React.useRef(true);
+  const latestMessageKeyRef = React.useRef(null);
+  const rafRef = React.useRef(null);
+  const scrollRafRef = React.useRef(null);
+  const previousScrollTopRef = React.useRef(0);
+  const userScrollIntentRef = React.useRef(false);
   const [atBottom, setAtBottom] = React.useState(true);
+
+  const cancelFollow = React.useCallback(() => {
+    if (rafRef.current === null) return;
+    window.cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+  }, []);
+
+  const followLatest = React.useCallback((force = false) => {
+    const el = containerRef.current;
+    if (!el) return;
+    if (force) {
+      shouldScrollRef.current = true;
+      userScrollIntentRef.current = false;
+    }
+    if (!shouldScrollRef.current) return;
+
+    cancelFollow();
+    rafRef.current = window.requestAnimationFrame(() => {
+      rafRef.current = null;
+      const node = containerRef.current;
+      if (!node || (!force && !shouldScrollRef.current)) return;
+      scrollToBottom(node);
+      previousScrollTopRef.current = node.scrollTop;
+      userScrollIntentRef.current = false;
+      setAtBottom(true);
+    });
+  }, [cancelFollow]);
+
+  const cancelScrollSync = React.useCallback(() => {
+    if (scrollRafRef.current === null) return;
+    window.cancelAnimationFrame(scrollRafRef.current);
+    scrollRafRef.current = null;
+  }, []);
 
   // Keep the latest content in view. Re-runs on new messages and when the
   // run state flips — the typing indicator / streamed reply are rendered as
   // children (not in `messages`), so they wouldn't trigger this otherwise.
-  // The rAF defers the scroll until after layout so `scrollHeight` reflects
-  // the just-rendered row (markdown, code blocks).
-  React.useEffect(() => {
-    const el = containerRef.current;
-    if (!el || !shouldScrollRef.current) return;
-    const raf = window.requestAnimationFrame(() => {
-      const node = containerRef.current;
-      if (node) node.scrollTop = node.scrollHeight;
+  // useLayoutEffect avoids painting a newly streamed chunk below the viewport
+  // before the follow-scroll runs.
+  React.useLayoutEffect(() => {
+    const latestMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+    const latestKey = messageKey(latestMessage);
+    const force = isNewUserMessage(latestMessageKeyRef.current, latestMessage);
+    latestMessageKeyRef.current = latestKey;
+    followLatest(force);
+    return cancelFollow;
+  }, [messages, pending, followLatest, cancelFollow]);
+
+  React.useLayoutEffect(() => {
+    const target = contentRef.current;
+    if (!target || typeof ResizeObserver !== "function") return undefined;
+    // Some rendered content grows after message state has committed, such as
+    // markdown/code block layout. Keep following those changes without stacking
+    // multiple scroll frames.
+    const observer = new ResizeObserver(() => {
+      followLatest();
     });
-    return () => window.cancelAnimationFrame(raf);
-  }, [messages, pending]);
+    observer.observe(target);
+    return () => {
+      observer.disconnect();
+      cancelFollow();
+    };
+  }, [followLatest, cancelFollow]);
+
+  const syncScrollState = React.useCallback(() => {
+    scrollRafRef.current = null;
+    const el = containerRef.current;
+    if (!el) return;
+    const nearBottom = isNearBottom(el);
+    previousScrollTopRef.current = el.scrollTop;
+    if (nearBottom) {
+      shouldScrollRef.current = true;
+      userScrollIntentRef.current = false;
+      setAtBottom(true);
+    } else if (userScrollIntentRef.current) {
+      shouldScrollRef.current = false;
+      setAtBottom(false);
+    } else {
+      shouldScrollRef.current = true;
+      setAtBottom(true);
+      followLatest();
+    }
+
+    if (
+      hasMore &&
+      el.scrollTop < TOP_LOAD_THRESHOLD_PX &&
+      onLoadMore &&
+      !isLoading
+    ) {
+      onLoadMore();
+    }
+  }, [hasMore, onLoadMore, isLoading, followLatest]);
+
+  const markUserScrollIntent = React.useCallback(() => {
+    userScrollIntentRef.current = true;
+  }, []);
+
+  const markScrollbarDragIntent = React.useCallback((event) => {
+    const el = containerRef.current;
+    if (!el || typeof event?.clientX !== "number") return;
+    const scrollbarWidth = el.offsetWidth - el.clientWidth;
+    if (scrollbarWidth <= 0) return;
+    const rightEdge = el.getBoundingClientRect().right;
+    if (event.clientX >= rightEdge - scrollbarWidth - 2) {
+      userScrollIntentRef.current = true;
+    }
+  }, []);
 
   const onScroll = React.useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
-    const threshold = 100;
-    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-    shouldScrollRef.current = distance < threshold;
-    setAtBottom(distance < threshold);
-
-    if (hasMore && el.scrollTop < threshold && onLoadMore && !isLoading) {
-      onLoadMore();
+    const nearBottom = isNearBottom(el);
+    const isUpwardScroll = el.scrollTop < previousScrollTopRef.current;
+    previousScrollTopRef.current = el.scrollTop;
+    if (!nearBottom && isUpwardScroll) {
+      userScrollIntentRef.current = true;
     }
-  }, [hasMore, onLoadMore, isLoading]);
+    if (nearBottom) {
+      shouldScrollRef.current = true;
+      userScrollIntentRef.current = false;
+    } else if (userScrollIntentRef.current) {
+      shouldScrollRef.current = false;
+      cancelFollow();
+    } else {
+      shouldScrollRef.current = true;
+    }
+    if (scrollRafRef.current !== null) return;
+    scrollRafRef.current = window.requestAnimationFrame(syncScrollState);
+  }, [cancelFollow, syncScrollState]);
 
   const jumpToBottom = React.useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
-    el.scrollTop = el.scrollHeight;
+    scrollToBottom(el);
+    previousScrollTopRef.current = el.scrollTop;
     shouldScrollRef.current = true;
+    userScrollIntentRef.current = false;
     setAtBottom(true);
   }, []);
+
+  React.useEffect(() => cancelScrollSync, [cancelScrollSync]);
 
   const grouped = React.useMemo(() => groupMessages(messages), [messages]);
 
@@ -63,9 +201,12 @@ export function MessageList({
     <div
       ref=${containerRef}
       onScroll=${onScroll}
+      onWheel=${markUserScrollIntent}
+      onTouchMove=${markUserScrollIntent}
+      onPointerDown=${markScrollbarDragIntent}
       className="flex min-w-0 flex-1 overflow-y-auto px-4 pt-6 pb-14 sm:px-5 lg:px-8"
     >
-      <div className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-5">
+      <div ref=${contentRef} className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-5">
         ${hasMore &&
         html`
           <div className="text-center">

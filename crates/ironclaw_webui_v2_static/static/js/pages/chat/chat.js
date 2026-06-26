@@ -52,6 +52,7 @@ export function Chat({
     messages,
     isProcessing,
     pendingGate,
+    busyGateNotice,
     channelConnectAction,
     suggestions,
     sseStatus,
@@ -86,10 +87,16 @@ export function Chat({
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
   const showLanding = !historyLoading && !hasMessages && !historyLoadError;
+  const approvalSubmitWarning = pendingGate
+    ? "Resolve the approval request before sending another message."
+    : "";
   const composerSendDisabled =
-    (isProcessing && !pendingGate) || cooldownSeconds > 0;
+    Boolean(pendingGate) || (isProcessing && !pendingGate) || cooldownSeconds > 0;
+  const composerSendBlockedRef = React.useRef(composerSendDisabled);
+  composerSendBlockedRef.current = composerSendDisabled;
   const composerStatusText =
-    cooldownSeconds > 0 ? `Retry in ${cooldownSeconds}s` : undefined;
+    approvalSubmitWarning ||
+    (cooldownSeconds > 0 ? `Retry in ${cooldownSeconds}s` : undefined);
   // Scope the persisted composer draft to the open thread (or the
   // shared new-conversation slot when there's no active thread yet).
   const composerDraftKey = activeThreadId || NEW_DRAFT_KEY;
@@ -111,7 +118,10 @@ export function Chat({
       : null;
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [] } = {}) => {
-      if (composerSendDisabled) return null;
+      if (pendingGate) {
+        throw new Error(approvalSubmitWarning);
+      }
+      if (composerSendBlockedRef.current) return null;
       const response = await send(content, {
         images,
         attachments,
@@ -123,15 +133,23 @@ export function Chat({
       }
       return response;
     },
-    [activeThreadId, composerSendDisabled, onSelectThread, send]
+    [
+      activeThreadId,
+      approvalSubmitWarning,
+      composerSendDisabled,
+      onSelectThread,
+      pendingGate,
+      send,
+    ]
   );
 
   const handleSuggestion = React.useCallback(
     async (text) => {
+      if (composerSendDisabled) return;
       setSuggestions([]);
       await handleSend(text);
     },
-    [handleSend, setSuggestions]
+    [composerSendDisabled, handleSend, setSuggestions]
   );
 
   const handleCancelRun = React.useCallback(
@@ -311,11 +329,22 @@ export function Chat({
                   approve(pendingGate.requestId, "always", pendingGate.kind)}
               />
             `)}
+            ${busyGateNotice &&
+            html`
+              <div
+                data-testid="busy-gate-notice"
+                role="status"
+                className="mx-auto mt-3 max-w-lg rounded-lg border border-copper/25 bg-copper/10 px-4 py-3 text-center text-sm leading-6 text-copper"
+              >
+                ${busyGateNotice.content}
+              </div>
+            `}
           <//>
 
           <${SuggestionChips}
             suggestions=${suggestions}
             onSelect=${handleSuggestion}
+            disabled=${composerSendDisabled}
           />
 
           <${ChatInput}
