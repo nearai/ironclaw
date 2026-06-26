@@ -1013,7 +1013,7 @@ impl CapabilityStage {
         Ok(BatchStep::Exit(failed_exit(
             ctx.host,
             checked.state,
-            LoopFailureKind::DriverBug,
+            exhausted_capability_failure_kind(summary.class),
             Some(checked.checkpoint_id),
         )?))
     }
@@ -1172,6 +1172,18 @@ fn clear_matching_pending_approval_resume(
         .is_some_and(|resume| resume.capability_id == call.capability_id)
     {
         state.pending_approval_resume = None;
+    }
+}
+
+fn exhausted_capability_failure_kind(class: CapabilityErrorClass) -> LoopFailureKind {
+    match class {
+        CapabilityErrorClass::PolicyDenied => LoopFailureKind::PolicyDenied,
+        CapabilityErrorClass::InputInvalid => LoopFailureKind::ModelError,
+        CapabilityErrorClass::Transient
+        | CapabilityErrorClass::Permanent
+        | CapabilityErrorClass::OperationFailed
+        | CapabilityErrorClass::Unavailable
+        | CapabilityErrorClass::Internal => LoopFailureKind::CapabilityProtocolError,
     }
 }
 
