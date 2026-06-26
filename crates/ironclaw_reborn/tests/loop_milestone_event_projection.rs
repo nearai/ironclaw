@@ -49,7 +49,8 @@ use ironclaw_turns::{
         HookDecisionSummary, InstructionSafetyContext, LoopCheckpointKind, LoopDriverId,
         LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind,
         LoopHostMilestoneSink, LoopModelPort, LoopModelRequest, LoopPromptBundleRequest,
-        LoopPromptPort, LoopRunContext, LoopTranscriptPort, ParentLoopOutput, PromptMode,
+        LoopPromptPort, LoopRunContext, LoopSafeSummary, LoopTranscriptPort, ParentLoopOutput,
+        PromptMode,
     },
     runner::ClaimedTurnRun,
 };
@@ -1007,7 +1008,7 @@ async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events(
             provider: Some(provider_id.clone()),
             runtime: Some(RuntimeKind::FirstParty),
             reason_kind: CapabilityFailureKind::OperationFailed,
-            safe_summary: None,
+            safe_summary: LoopSafeSummary::new("json parse expected data to be a JSON string").ok(),
         },
     ] {
         sink.publish_loop_milestone(milestone_for(scope.clone(), run_id, kind))
@@ -1075,6 +1076,10 @@ async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events(
     assert_eq!(failed.provider.as_ref(), Some(&provider_id));
     assert_eq!(failed.runtime, Some(RuntimeKind::FirstParty));
     assert_eq!(failed.error_kind.as_deref(), Some("operation_failed"));
+    assert_eq!(
+        failed.error_summary.as_deref(),
+        Some("json parse expected data to be a JSON string")
+    );
 }
 
 #[tokio::test]

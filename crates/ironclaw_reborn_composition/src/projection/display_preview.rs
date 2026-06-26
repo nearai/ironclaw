@@ -391,9 +391,14 @@ fn failed_capability_display_preview(
     activity: &CapabilityActivityProjection,
 ) -> Result<CapabilityDisplayPreviewResolution, ProductAdapterError> {
     let summary = activity
-        .error_kind
-        .as_deref()
-        .map(|kind| format!("tool failed: {}", sanitize_text(kind)))
+        .error_summary
+        .clone()
+        .or_else(|| {
+            activity
+                .error_kind
+                .as_deref()
+                .map(|kind| format!("tool failed: {}", sanitize_text(kind)))
+        })
         .unwrap_or_else(|| "tool failed".to_string());
     CapabilityDisplayPreviewView::new(CapabilityDisplayPreviewViewInput {
         timeline_message_id: None,

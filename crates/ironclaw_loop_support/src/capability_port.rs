@@ -4431,6 +4431,7 @@ mod tests {
                     detail: None,
                 }),
                 CapabilityFailureKind::InvalidInput,
+                "invalid input",
             ),
             (
                 RuntimeCapabilityOutcome::Unknown(RuntimeCapabilityUnknown {
@@ -4439,10 +4440,11 @@ mod tests {
                     message: Some("custom failure".to_string()),
                 }),
                 capability_failure_kind("custom_failure").expect("valid custom failure kind"),
+                "custom failure",
             ),
         ];
 
-        for (outcome, expected_kind) in cases {
+        for (outcome, expected_kind, expected_summary) in cases {
             let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
             let provider_id = ExtensionId::new("demo").expect("valid provider id");
             let milestone_sink =
@@ -4477,8 +4479,10 @@ mod tests {
                     provider: Some(provider),
                     runtime: Some(RuntimeKind::FirstParty),
                     reason_kind,
+                    safe_summary,
                     ..
                 } if actual == &capability_id && provider == &provider_id && reason_kind == &expected_kind
+                    && safe_summary.as_ref().map(|summary| summary.as_str()) == Some(expected_summary)
             ));
         }
     }

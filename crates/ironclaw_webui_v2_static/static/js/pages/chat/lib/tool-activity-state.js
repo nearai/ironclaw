@@ -147,7 +147,7 @@ function mergeToolActivity(current, incoming) {
       ? current.toolName
       : incoming.toolName || current.toolName,
     toolStatus: keepCurrentTerminal ? current.toolStatus : incoming.toolStatus,
-    toolError: incoming.toolError || current.toolError,
+    toolError: mergedToolError(current, incoming),
     toolErrorKind: incoming.toolErrorKind || current.toolErrorKind || null,
     updatedAt: keepCurrentTerminal
       ? current.updatedAt || incoming.updatedAt
@@ -166,6 +166,13 @@ function mergeToolActivity(current, incoming) {
     merged.gateActivity = false;
   }
   return merged;
+}
+
+function mergedToolError(current, incoming) {
+  if (!incoming.toolError) return current.toolError || null;
+  if (!current.toolError) return incoming.toolError;
+  if (current.toolError === current.toolErrorKind) return incoming.toolError;
+  return current.toolError;
 }
 
 function mergedActivityOrder(current, incoming) {

@@ -240,7 +240,7 @@ impl DurableLoopHostMilestoneSink {
                 provider,
                 runtime,
                 reason_kind,
-                ..
+                safe_summary,
             } => {
                 let mut scope = scope;
                 scope.invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
@@ -253,6 +253,7 @@ impl DurableLoopHostMilestoneSink {
                 );
                 event.parent_invocation_id =
                     Some(InvocationId::from_uuid(milestone.run_id.as_uuid()));
+                event.error_summary = safe_summary.as_ref().map(|summary| summary.to_string());
                 event
             }
             LoopHostMilestoneKind::AssistantReplyFinalized { .. } => {
@@ -383,6 +384,7 @@ mod tests {
         CapabilityActivityId, TurnId, TurnScope,
         run_profile::{
             CapabilityFailureKind, HookDecisionSummary, LoopDriverId, LoopHostMilestone,
+            LoopSafeSummary,
         },
     };
 
@@ -534,7 +536,8 @@ mod tests {
                 provider: Some(provider.clone()),
                 runtime: Some(RuntimeKind::Script),
                 reason_kind: CapabilityFailureKind::OperationFailed,
-                safe_summary: None,
+                safe_summary: LoopSafeSummary::new("json parse expected data to be a JSON string")
+                    .ok(),
             });
 
         let sink = projector_for(thread_id, run_id);
@@ -556,6 +559,10 @@ mod tests {
         assert_eq!(event.provider.as_ref(), Some(&provider));
         assert_eq!(event.runtime, Some(RuntimeKind::Script));
         assert_eq!(event.error_kind.as_deref(), Some("operation_failed"));
+        assert_eq!(
+            event.error_summary.as_deref(),
+            Some("json parse expected data to be a JSON string")
+        );
     }
 
     #[tokio::test]

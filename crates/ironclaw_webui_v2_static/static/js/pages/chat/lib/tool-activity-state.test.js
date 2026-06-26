@@ -105,6 +105,34 @@ test("runtime activity adopts an earlier gate card by invocation id", () => {
   assert.equal(harness.messages[0].activityOrderSource, "projection");
 });
 
+test("detailed tool errors replace kind-only error text", () => {
+  const harness = messageHarness();
+  upsertToolActivityMessage(
+    harness.setMessages,
+    runtimeActivity({
+      toolStatus: "error",
+      toolError: "invalid_input",
+      toolErrorKind: "invalid_input",
+    }),
+    harness.stateRef,
+  );
+
+  upsertToolActivityMessage(
+    harness.setMessages,
+    runtimeActivity({
+      toolStatus: "error",
+      toolError: "json parse expected data to be a JSON string",
+      toolErrorKind: "invalid_input",
+    }),
+    harness.stateRef,
+  );
+
+  assert.equal(
+    harness.messages[0].toolError,
+    "json parse expected data to be a JSON string",
+  );
+});
+
 test("approval gate without invocation id does not synthesize an activity card", () => {
   const harness = messageHarness();
 
