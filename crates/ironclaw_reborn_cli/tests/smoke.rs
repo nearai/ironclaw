@@ -194,7 +194,7 @@ fn docker_reborn_production_config_uses_postgres_storage() {
         storage.secret_master_key_env.as_deref(),
         Some("IRONCLAW_REBORN_SECRET_MASTER_KEY")
     );
-    assert_eq!(storage.pool_max_size, Some(2));
+    assert_eq!(storage.pool_max_size, Some(16));
 
     let policy = parsed
         .policy

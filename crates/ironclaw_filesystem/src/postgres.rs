@@ -161,6 +161,14 @@ impl RootFilesystem for PostgresRootFilesystem {
             .with(Capability::Events)
             .with(Capability::IndexFts)
             .with(Capability::IndexVector)
+            // `put_batch` is served by the trait default impl, which is
+            // atomic on this backend: Postgres advertises MultiKey (below),
+            // so the default routes the whole batch through one `begin`/
+            // `StorageTxn` BEGIN…COMMIT — and `PostgresStorageTxn`'s `Drop`
+            // guard rolls back a txn abandoned by async-cancel/panic, which a
+            // hand-rolled override would have to re-implement. Advertising
+            // BatchPut lets atomic-batching callers gate on this bit.
+            .with(Capability::BatchPut)
             .with_txn(TxnCapability::MultiKey)
     }
 

@@ -53,8 +53,21 @@ mod filesystem_store;
 pub use coalescing_sink::{CoalescingEventSink, EventBatchConfig};
 pub use filesystem_store::{FilesystemDurableAuditLog, FilesystemDurableEventLog};
 
+/// Default ceiling for the shared Postgres pool used by the filesystem,
+/// triggers, event store, and keepalive subsystems.
+///
+/// Bumped from 2 to 16 to give `put_batch`'s held `BEGIN…COMMIT` headroom
+/// across the shared pool's consumers. `put_batch` (served by the
+/// `RootFilesystem` trait default on the Postgres MultiKey backend) holds one
+/// pooled connection for the span of its transaction; at a ceiling of 2, a
+/// single in-flight batch left only one connection for every other subsystem
+/// sharing this pool, which could starve the heartbeat/webui paths and wedge
+/// the runner lease (the #5081-class stall). 16 is a safer floor for concurrent
+/// holders while staying modest against a server's `max_connections`. Tune per
+/// deployment via the `IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE` env override,
+/// which takes precedence over this default.
 #[cfg(feature = "postgres")]
-pub const DEFAULT_POSTGRES_POOL_MAX_SIZE: usize = 2;
+pub const DEFAULT_POSTGRES_POOL_MAX_SIZE: usize = 16;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PostgresPoolTlsOptions {

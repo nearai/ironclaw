@@ -31,7 +31,11 @@ regex_activation_enabled = true
 backend = "postgres"
 url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
-pool_max_size = 2
+# Matches DEFAULT_POSTGRES_POOL_MAX_SIZE: all Postgres-backed subsystems share
+# this pool and put_batch holds a connection for its BEGIN…COMMIT, so a size of
+# 2 starved every other consumer. Override at runtime without a redeploy via
+# IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE (env wins over this file).
+pool_max_size = 16
 # Remote Postgres defaults to TLS. For trusted private-network deployments
 # where the provider cannot complete TLS, set both DATABASE_SSLMODE=disable
 # and IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT=true.
