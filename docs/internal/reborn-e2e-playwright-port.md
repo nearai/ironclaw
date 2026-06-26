@@ -321,6 +321,40 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the Skills settings port in
   the Reborn WebUI v2 Playwright job.
 
+### Step 9: Legacy Extension Lifecycle Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the extension lifecycle intent from legacy `test_extensions.py` to the
+standalone Reborn WebUI v2 Extensions surface:
+
+- registry entries render through `/v2/extensions/registry`;
+- registry search filters available extensions;
+- installing a registry extension posts the v2 `package_ref` payload and
+  refreshes the installed projection;
+- installed extensions render status, description, and capability disclosure;
+- activating an inactive installed extension posts to the v2 activate endpoint;
+- removing an installed extension posts to the v2 remove endpoint through the
+  card overflow menu and removes the projection;
+- channel and MCP tabs render installed and available entries from the v2
+  extension registry/list endpoints.
+
+Behavior adjustment:
+
+- Legacy v1 grouped extension lifecycle under Settings subtabs with legacy
+  `/api/extensions*`, `/api/pairing*`, and injected auth-card helpers. Reborn
+  exposes the install/manage lifecycle under the top-level `/v2/extensions/*`
+  page and talks only to `/api/webchat/v2/extensions*` plus the v2
+  connectable-channel projection.
+- Reborn cards intentionally use a compact overflow menu for secondary actions
+  such as remove. The port asserts the current card/menu behavior rather than
+  legacy always-visible action buttons.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the extension lifecycle port
+  in the Reborn WebUI v2 Playwright job.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -332,7 +366,8 @@ Not yet ported:
 - DOM pruning/resource-limit scenarios;
 - deeper tool approval scenarios that need real Reborn runtime/tool execution,
   persistence, or recovery beyond the browser approval-card contract;
-- remaining settings/extension lifecycle scenarios beyond Skills;
+- remaining settings/extension lifecycle scenarios beyond Skills and the
+  top-level extension install/manage surface;
 - OAuth/product-auth flows;
 - Slack/Telegram/channel pairing scenarios;
 - routines/automations/admin/operator flows;
