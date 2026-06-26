@@ -450,15 +450,15 @@ mod tests {
         UpdateAssistantDraftRequest, UpdateThreadGoalRequest, UpdateToolResultReferenceRequest,
     };
     use ironclaw_triggers::{
-        InMemoryTriggerRepository, ScheduleTriggerSourceProvider,
-        TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-        TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerActiveRunLookup, TriggerActiveRunState,
-        TriggerActiveRunStateRequest, TriggerError, TriggerFire, TriggerFireIdentity, TriggerId,
-        TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPollerFailureReason,
-        TriggerPollerFireOutcome, TriggerPollerWorker, TriggerPollerWorkerConfig,
-        TriggerPollerWorkerDeps, TriggerRecord, TriggerRepository, TriggerSchedule,
-        TriggerSourceKind, TriggerState, TrustedTriggerFireSubmitOutcome,
-        TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
+        InMemoryTriggerRepository, NoopTriggerFireSettlementObserver,
+        ScheduleTriggerSourceProvider, TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID,
+        TRIGGER_TRUSTED_ADAPTER_KIND, TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+        TriggerActiveRunLookup, TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerError,
+        TriggerFire, TriggerFireIdentity, TriggerId, TriggerInboundContentRef,
+        TriggerMaterializedPrompt, TriggerPollerFailureReason, TriggerPollerFireOutcome,
+        TriggerPollerWorker, TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerRecord,
+        TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
+        TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
@@ -1346,6 +1346,7 @@ mod tests {
                 }),
                 trusted_submitter,
                 active_run_lookup: Arc::new(MissingActiveRunLookup),
+                fire_settlement_observer: Arc::new(NoopTriggerFireSettlementObserver),
             },
         )
         .expect("valid worker");
@@ -1409,6 +1410,7 @@ mod tests {
                 }),
                 trusted_submitter,
                 active_run_lookup: Arc::new(MissingActiveRunLookup),
+                fire_settlement_observer: Arc::new(NoopTriggerFireSettlementObserver),
             },
         )
         .expect("valid worker");
@@ -1484,6 +1486,7 @@ mod tests {
                 }),
                 trusted_submitter,
                 active_run_lookup: Arc::new(MissingActiveRunLookup),
+                fire_settlement_observer: Arc::new(NoopTriggerFireSettlementObserver),
             },
         )
         .expect("valid worker");
@@ -1650,6 +1653,7 @@ mod tests {
                 materializer,
                 trusted_submitter,
                 active_run_lookup: Arc::new(MissingActiveRunLookup),
+                fire_settlement_observer: Arc::new(NoopTriggerFireSettlementObserver),
             },
         )
         .expect("valid worker");
@@ -1931,6 +1935,7 @@ mod tests {
                 materializer,
                 trusted_submitter: capturing_submitter,
                 active_run_lookup: Arc::new(MissingActiveRunLookup),
+                fire_settlement_observer: Arc::new(NoopTriggerFireSettlementObserver),
             },
         )
         .expect("valid worker");

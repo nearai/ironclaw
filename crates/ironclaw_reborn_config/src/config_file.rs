@@ -103,7 +103,8 @@ pub struct RebornConfigFile {
 pub struct BootSection {
     /// Composition profile name. Stringly typed; composition validates
     /// against `RebornCompositionProfile`. Examples: `"local-dev"`,
-    /// `"local-dev-yolo"`, `"hosted-single-tenant"`, `"production"`,
+    /// `"local-dev-yolo"`, `"hosted-single-tenant"`,
+    /// `"hosted-single-tenant-volume"`, `"production"`,
     /// `"migration-dry-run"`.
     pub profile: Option<String>,
 }
