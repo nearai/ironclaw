@@ -417,7 +417,7 @@ fn tool_call_capture_json(
     let mut entry = serde_json::Map::new();
     entry.insert(
         "name".to_string(),
-        serde_json::Value::String(call.provider_tool_name.clone()),
+        serde_json::Value::String(call.provider_tool_name.as_str().to_string()),
     );
     if let Some(result) = result.filter(|content| !content.trim().is_empty()) {
         entry.insert(
@@ -660,7 +660,8 @@ mod tests {
             provider_model_id: "gpt".to_string(),
             provider_turn_id: "turn-1".to_string(),
             provider_call_id: "call-1".to_string(),
-            provider_tool_name: tool_name.to_string(),
+            provider_tool_name: ironclaw_host_api::ProviderToolName::new(tool_name)
+                .expect("provider tool name"),
             capability_id: CapabilityId::new(format!("builtin.{tool_name}"))
                 .expect("capability id"),
             arguments: serde_json::json!({ "url": "https://example.com" }),

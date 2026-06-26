@@ -1,0 +1,446 @@
+//! Loop capability decorator for client-supplied ("external") tools.
+//!
+//! Mirrors [`super::synthetic_capability::LocalDevSyntheticCapabilityPort`] but,
+//! instead of executing a synthetic capability, it *parks* the run and returns
+//! control to the API client. The caller tool definitions come from the
+//! per-run [`ExternalToolCatalog`] (registered by the OpenAI-compatible
+//! Responses surface), so the model is offered the client's tools alongside the
+//! agent's own capabilities. When the model calls one:
+//!
+//! - the first invocation finds no client-submitted output in the catalog and
+//!   returns [`CapabilityOutcome::ExternalToolPending`] — the loop parks as
+//!   `BlockedExternalTool` and the client is handed the function call;
+//! - after the client submits the output (stored in the catalog by call id) and
+//!   the run resumes, the re-dispatched invocation finds the output, writes it
+//!   as the capability result, and returns [`CapabilityOutcome::Completed`] —
+//!   the loop continues without ever executing the tool host-side.
+//!
+//! A client tool whose name shadows a host capability on the resolved surface is
+//! rejected (coexistence with shadow-rejection), so a caller cannot silently
+//! override a real capability.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
+
+use async_trait::async_trait;
+use ironclaw_host_api::{CapabilityId, InvocationId, RuntimeKind};
+use ironclaw_loop_support::{
+    CapabilityResultWrite, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
+};
+use ironclaw_turns::ExternalToolCatalog;
+use ironclaw_turns::run_profile::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
+    CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome, CapabilityProgress,
+    CapabilityResultMessage, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
+    LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+    VisibleCapabilitySurface,
+};
+use ironclaw_turns::{LoopGateRef, TurnRunId};
+
+/// Wrap `inner` so the per-run external tools in `catalog` are offered to the
+/// model and parked (not executed) when called. Returns `inner` unchanged when
+/// no external-tool capability could ever apply — the decorator itself is cheap
+/// and fetches specs lazily at surface-resolution time, so it is always safe to
+/// install.
+pub(super) fn wrap_local_dev_external_tools(
+    inner: Arc<dyn LoopCapabilityPort>,
+    run_context: LoopRunContext,
+    input_resolver: Arc<dyn LoopCapabilityInputResolver>,
+    result_writer: Arc<dyn LoopCapabilityResultWriter>,
+    catalog: Arc<dyn ExternalToolCatalog>,
+) -> Arc<dyn LoopCapabilityPort> {
+    Arc::new(ExternalToolCapabilityPort {
+        inner,
+        run_id: run_context.run_id,
+        run_context,
+        input_resolver,
+        result_writer,
+        catalog,
+        surface: StdMutex::new(None),
+    })
+}
+
+struct ResolvedSurface {
+    version: CapabilitySurfaceVersion,
+    specs_by_capability_id: HashMap<CapabilityId, ToolSpec>,
+    capability_ids_by_tool_name: HashMap<String, CapabilityId>,
+}
+
+struct ToolSpec {
+    tool_name: String,
+    description: String,
+    parameters_schema: serde_json::Value,
+}
+
+impl ToolSpec {
+    fn descriptor_view(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> ironclaw_turns::run_profile::CapabilityDescriptorView {
+        ironclaw_turns::run_profile::CapabilityDescriptorView {
+            capability_id: capability_id.clone(),
+            provider: None,
+            runtime: RuntimeKind::System,
+            safe_name: self.tool_name.clone(),
+            safe_description: self.description.clone(),
+            // External tools are client-side; the host never runs them in
+            // parallel, and they always park, so mark them exclusive.
+            concurrency_hint: ConcurrencyHint::Exclusive,
+            parameters_schema: self.parameters_schema.clone(),
+        }
+    }
+
+    fn tool_definition(&self, capability_id: &CapabilityId) -> ProviderToolDefinition {
+        ProviderToolDefinition {
+            capability_id: capability_id.clone(),
+            name: self.tool_name.clone(),
+            description: self.description.clone(),
+            parameters: self.parameters_schema.clone(),
+        }
+    }
+}
+
+struct ExternalToolCapabilityPort {
+    inner: Arc<dyn LoopCapabilityPort>,
+    run_id: TurnRunId,
+    run_context: LoopRunContext,
+    input_resolver: Arc<dyn LoopCapabilityInputResolver>,
+    result_writer: Arc<dyn LoopCapabilityResultWriter>,
+    catalog: Arc<dyn ExternalToolCatalog>,
+    surface: StdMutex<Option<ResolvedSurface>>,
+}
+
+/// Synthetic capability id for an external tool. Sanitizes the client tool name
+/// into a valid id under the `external_tool.` namespace.
+fn external_tool_capability_id(tool_name: &str) -> Result<CapabilityId, AgentLoopHostError> {
+    let sanitized: String = tool_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    CapabilityId::new(format!("external_tool.{sanitized}")).map_err(|_| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "external tool name cannot be represented as a capability id",
+        )
+    })
+}
+
+impl ExternalToolCapabilityPort {
+    fn surface_version(&self) -> Result<CapabilitySurfaceVersion, AgentLoopHostError> {
+        self.surface
+            .lock()
+            .map_err(|_| surface_lock_error())?
+            .as_ref()
+            .map(|surface| surface.version.clone())
+            .ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::StaleSurface,
+                    "external tool capability surface is unavailable",
+                )
+            })
+    }
+
+    /// Whether `capability_id` is one this decorator owns (per the last resolved
+    /// surface). Returns false (delegating to inner) when no surface is cached.
+    fn owns_capability(&self, capability_id: &CapabilityId) -> bool {
+        self.surface
+            .lock()
+            .ok()
+            .and_then(|surface| {
+                surface
+                    .as_ref()
+                    .map(|surface| surface.specs_by_capability_id.contains_key(capability_id))
+            })
+            .unwrap_or(false)
+    }
+
+    fn capability_id_for_tool_name(&self, tool_name: &str) -> Option<CapabilityId> {
+        self.surface.lock().ok().and_then(|surface| {
+            surface
+                .as_ref()
+                .and_then(|surface| surface.capability_ids_by_tool_name.get(tool_name).cloned())
+        })
+    }
+
+    async fn complete_or_park(
+        &self,
+        request: CapabilityInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        if request.surface_version != self.surface_version()? {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::StaleSurface,
+                "external tool call cites a stale capability surface",
+            ));
+        }
+        let input_ref = request.input_ref.as_str().to_string();
+        let call_id = self
+            .catalog
+            .call_id_for_input_ref(self.run_id, &input_ref)
+            .await
+            .map_err(catalog_error)?
+            .unwrap_or_else(|| input_ref.clone());
+        // Client already submitted the output → complete the parked call by
+        // writing the output as the capability result (no host-side execution).
+        if let Some(output) = self
+            .catalog
+            .take_output_for_input_ref(self.run_id, &input_ref)
+            .await
+            .map_err(catalog_error)?
+        {
+            let write = self
+                .result_writer
+                .write_capability_result(CapabilityResultWrite {
+                    run_context: &self.run_context,
+                    input_ref: &request.input_ref,
+                    invocation_id: InvocationId::new(),
+                    capability_id: &request.capability_id,
+                    output,
+                    display_preview: None,
+                })
+                .await?;
+            return Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref: write.result_ref,
+                safe_summary: "external tool output".to_string(),
+                progress: CapabilityProgress::MadeProgress,
+                terminate_hint: false,
+                byte_len: write.byte_len,
+                output_digest: write.output_digest,
+            }));
+        }
+        // No output yet → park and return control to the API client.
+        Ok(CapabilityOutcome::ExternalToolPending {
+            gate_ref: external_tool_gate_ref(&call_id)?,
+            safe_summary: "awaiting client tool output".to_string(),
+        })
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPort for ExternalToolCapabilityPort {
+    fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        let mut definitions = self.inner_tool_definitions()?;
+        let surface = self.surface.lock().map_err(|_| surface_lock_error())?;
+        if let Some(surface) = surface.as_ref() {
+            for (capability_id, spec) in &surface.specs_by_capability_id {
+                if !definitions
+                    .iter()
+                    .any(|definition| &definition.capability_id == capability_id)
+                {
+                    definitions.push(spec.tool_definition(capability_id));
+                }
+            }
+            definitions.sort_by(|left, right| left.name.cmp(&right.name));
+        }
+        Ok(definitions)
+    }
+
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        if let Some(capability_id) = self.capability_id_for_tool_name(&tool_call.name) {
+            return Ok(ProviderToolCallCapabilityIds::single(capability_id));
+        }
+        self.inner.provider_tool_call_capability_ids(tool_call)
+    }
+
+    fn validate_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        if self.capability_id_for_tool_name(&tool_call.name).is_some() {
+            if tool_call.turn_id.is_none() {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "provider tool call is missing a provider turn id",
+                ));
+            }
+            return Ok(());
+        }
+        self.inner.validate_provider_tool_call(tool_call)
+    }
+
+    async fn register_provider_tool_call(
+        &self,
+        request: RegisterProviderToolCallRequest,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let RegisterProviderToolCallRequest {
+            tool_call,
+            activity_id,
+        } = request;
+        let Some(capability_id) = self.capability_id_for_tool_name(&tool_call.name) else {
+            return self
+                .inner
+                .register_provider_tool_call(RegisterProviderToolCallRequest {
+                    tool_call,
+                    activity_id,
+                })
+                .await;
+        };
+        self.validate_provider_tool_call(&tool_call)?;
+        let provider_turn_id = tool_call.turn_id.clone().ok_or_else(|| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call is missing a provider turn id",
+            )
+        })?;
+        let input_ref = self
+            .input_resolver
+            .register_provider_tool_call_input(&self.run_context, &tool_call)
+            .await?;
+        // Bind the loop input_ref to the client-facing provider call id so a
+        // submitted output (keyed by call id) can be matched to this parked
+        // invocation (keyed by input_ref) on the resume re-dispatch.
+        self.catalog
+            .bind_call(
+                self.run_id,
+                input_ref.as_str().to_string(),
+                tool_call.id.clone(),
+            )
+            .await
+            .map_err(catalog_error)?;
+        Ok(CapabilityCallCandidate {
+            activity_id: activity_id.unwrap_or_default(),
+            surface_version: self.surface_version()?,
+            capability_id: capability_id.clone(),
+            input_ref,
+            effective_capability_ids: vec![capability_id],
+            provider_replay: Some(ProviderToolCallReplay {
+                provider_id: tool_call.provider_id,
+                provider_model_id: tool_call.provider_model_id,
+                provider_turn_id,
+                provider_call_id: tool_call.id,
+                provider_tool_name: tool_call.name,
+                arguments: tool_call.arguments,
+                response_reasoning: tool_call.response_reasoning,
+                reasoning: tool_call.reasoning,
+                signature: tool_call.signature,
+            }),
+        })
+    }
+
+    async fn visible_capabilities(
+        &self,
+        request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        let mut surface = self.inner.visible_capabilities(request).await?;
+        let specs = self
+            .catalog
+            .specs(self.run_id)
+            .await
+            .map_err(catalog_error)?;
+
+        let mut specs_by_capability_id = HashMap::new();
+        let mut capability_ids_by_tool_name = HashMap::new();
+        let mut descriptors = Vec::new();
+        for spec in specs {
+            // Reject a client tool that shadows a host capability on the surface.
+            if surface
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.safe_name == spec.name())
+            {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "external tool name shadows a host capability",
+                ));
+            }
+            let capability_id = external_tool_capability_id(spec.name())?;
+            if surface
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.capability_id == capability_id)
+                || specs_by_capability_id.contains_key(&capability_id)
+            {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "external tool conflicts with another capability id",
+                ));
+            }
+            capability_ids_by_tool_name.insert(spec.name().to_string(), capability_id.clone());
+            let tool_spec = ToolSpec {
+                tool_name: spec.name().to_string(),
+                description: spec.description().to_string(),
+                parameters_schema: spec.parameters_schema().clone(),
+            };
+            descriptors.push(tool_spec.descriptor_view(&capability_id));
+            specs_by_capability_id.insert(capability_id, tool_spec);
+        }
+
+        descriptors.sort_by(|left, right| left.safe_name.cmp(&right.safe_name));
+        surface.descriptors.extend(descriptors);
+        *self.surface.lock().map_err(|_| surface_lock_error())? = Some(ResolvedSurface {
+            version: surface.version.clone(),
+            specs_by_capability_id,
+            capability_ids_by_tool_name,
+        });
+        Ok(surface)
+    }
+
+    async fn invoke_capability(
+        &self,
+        request: CapabilityInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        if !self.owns_capability(&request.capability_id) {
+            return self.inner.invoke_capability(request).await;
+        }
+        self.complete_or_park(request).await
+    }
+
+    async fn invoke_capability_batch(
+        &self,
+        request: CapabilityBatchInvocation,
+    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        let mut outcomes = Vec::new();
+        let mut stopped_on_suspension = false;
+        for invocation in request.invocations {
+            let outcome = self.invoke_capability(invocation).await?;
+            let is_suspension = outcome.is_suspension();
+            outcomes.push(outcome);
+            if request.stop_on_first_suspension && is_suspension {
+                stopped_on_suspension = true;
+                break;
+            }
+        }
+        Ok(CapabilityBatchOutcome {
+            outcomes,
+            stopped_on_suspension,
+        })
+    }
+}
+
+impl ExternalToolCapabilityPort {
+    fn inner_tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        self.inner.tool_definitions()
+    }
+}
+
+fn external_tool_gate_ref(call_id: &str) -> Result<LoopGateRef, AgentLoopHostError> {
+    LoopGateRef::new(format!("gate:external_tool-{call_id}")).map_err(|_| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            "external tool gate ref could not be represented",
+        )
+    })
+}
+
+fn surface_lock_error() -> AgentLoopHostError {
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Internal,
+        "external tool capability surface lock failed",
+    )
+}
+
+fn catalog_error(_error: ironclaw_turns::ExternalToolCatalogError) -> AgentLoopHostError {
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "external tool catalog is unavailable",
+    )
+}

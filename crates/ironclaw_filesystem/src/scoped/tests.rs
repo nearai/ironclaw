@@ -341,6 +341,42 @@ async fn ensure_index_succeeds_with_write() {
 }
 
 #[tokio::test]
+async fn append_batch_denies_when_write_missing() {
+    let scoped = scoped_in_memory(no_op(true, false, true, false));
+    let err = scoped
+        .append_batch(
+            &test_scope(),
+            &ScopedPath::new("/workspace/log").unwrap(),
+            vec![b"x".to_vec()],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::PermissionDenied {
+            operation: FilesystemOperation::Append,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn append_batch_succeeds_with_write_and_returns_seqs_in_order() {
+    let scoped = scoped_in_memory(no_op(false, true, false, false));
+    let seqs = scoped
+        .append_batch(
+            &test_scope(),
+            &ScopedPath::new("/workspace/log").unwrap(),
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(seqs.len(), 3);
+    assert!(seqs[0] < seqs[1], "seqs must be monotonically increasing");
+    assert!(seqs[1] < seqs[2], "seqs must be monotonically increasing");
+}
+
+#[tokio::test]
 async fn append_event_denies_when_write_missing() {
     let scoped = scoped_in_memory(no_op(true, false, true, false));
     let err = scoped

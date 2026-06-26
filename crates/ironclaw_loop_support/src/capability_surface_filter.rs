@@ -609,7 +609,7 @@ fn surface_profile_denied_kind() -> CapabilityDeniedReasonKind {
 mod tests {
     use std::{collections::HashMap, sync::Mutex};
 
-    use ironclaw_host_api::{CapabilityId, RuntimeKind};
+    use ironclaw_host_api::{CapabilityId, ProviderToolName, RuntimeKind};
     use ironclaw_turns::run_profile::{
         CapabilityDescriptorView, CapabilityInputRef, CapabilityResultMessage,
         CapabilitySurfaceVersion, ConcurrencyHint,
@@ -623,7 +623,8 @@ mod tests {
         surface: Mutex<Option<VisibleCapabilitySurface>>,
         batch_outcome: Mutex<Option<CapabilityBatchOutcome>>,
         tool_definitions: Mutex<Vec<ProviderToolDefinition>>,
-        provider_call_capability_ids: Mutex<HashMap<String, ProviderToolCallCapabilityIds>>,
+        provider_call_capability_ids:
+            Mutex<HashMap<ProviderToolName, ProviderToolCallCapabilityIds>>,
         registered_candidate_capability_ids: Mutex<Option<ProviderToolCallCapabilityIds>>,
         validated_provider_calls: Mutex<Vec<ProviderToolCall>>,
         provider_calls: Mutex<Vec<ProviderToolCall>>,
@@ -763,6 +764,10 @@ mod tests {
         CapabilityInputRef::new(value).expect("test input ref is valid")
     }
 
+    fn provider_name(value: &str) -> ProviderToolName {
+        ProviderToolName::new(value).expect("provider tool name")
+    }
+
     fn invocation(capability: &str, input: &str) -> CapabilityInvocation {
         CapabilityInvocation {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
@@ -789,7 +794,7 @@ mod tests {
     fn provider_definition(capability: &str, name: &str) -> ProviderToolDefinition {
         ProviderToolDefinition {
             capability_id: capability_id(capability),
-            name: name.to_string(),
+            name: ProviderToolName::new(name).expect("provider tool name"),
             description: format!("{capability} description"),
             parameters: serde_json::json!({"type":"object"}),
         }
@@ -812,7 +817,7 @@ mod tests {
             provider_model_id: "test-model".to_string(),
             turn_id: Some("turn_1".to_string()),
             id: "call_1".to_string(),
-            name: name.to_string(),
+            name: ProviderToolName::new(name).expect("provider tool name"),
             arguments: serde_json::json!({}),
             response_reasoning: None,
             reasoning: None,
@@ -1062,7 +1067,7 @@ mod tests {
             .lock()
             .expect("provider call capability ids lock")
             .insert(
-                capability_info::TOOL_NAME.to_string(),
+                provider_name(capability_info::TOOL_NAME),
                 provider_call_capability_ids(&[capability_info::CAPABILITY_ID, "demo.denied"]),
             );
         let filter = CapabilitySurfaceProfileFilter::new(
@@ -1105,7 +1110,7 @@ mod tests {
             .lock()
             .expect("provider call capability ids lock")
             .insert(
-                capability_info::TOOL_NAME.to_string(),
+                provider_name(capability_info::TOOL_NAME),
                 provider_call_capability_ids(&[capability_info::CAPABILITY_ID, "demo.allowed"]),
             );
         *inner
@@ -1181,7 +1186,7 @@ mod tests {
             .lock()
             .expect("provider call capability ids lock")
             .insert(
-                capability_info::TOOL_NAME.to_string(),
+                provider_name(capability_info::TOOL_NAME),
                 provider_call_capability_ids(&[capability_info::CAPABILITY_ID, "demo.allowed"]),
             );
         *inner
@@ -1235,7 +1240,7 @@ mod tests {
             .lock()
             .expect("provider call capability ids lock")
             .insert(
-                capability_info::TOOL_NAME.to_string(),
+                provider_name(capability_info::TOOL_NAME),
                 provider_call_capability_ids(&[capability_info::CAPABILITY_ID, "demo.allowed"]),
             );
         *inner
@@ -1300,7 +1305,7 @@ mod tests {
             .lock()
             .expect("provider call capability ids lock")
             .insert(
-                capability_info::TOOL_NAME.to_string(),
+                provider_name(capability_info::TOOL_NAME),
                 provider_call_capability_ids(&[capability_info::CAPABILITY_ID, "demo.allowed"]),
             );
         *inner
@@ -1354,7 +1359,7 @@ mod tests {
             .lock()
             .expect("provider call capability ids lock")
             .insert(
-                capability_info::TOOL_NAME.to_string(),
+                provider_name(capability_info::TOOL_NAME),
                 provider_call_capability_ids(&[capability_info::CAPABILITY_ID, "demo.denied"]),
             );
         let filter = CapabilitySurfaceProfileFilter::new(
@@ -1394,7 +1399,7 @@ mod tests {
             .lock()
             .expect("provider call capability ids lock")
             .insert(
-                capability_info::TOOL_NAME.to_string(),
+                provider_name(capability_info::TOOL_NAME),
                 provider_call_capability_ids(&[capability_info::CAPABILITY_ID, "demo.denied"]),
             );
         let filter =
@@ -1433,7 +1438,7 @@ mod tests {
             .lock()
             .expect("provider call capability ids lock")
             .insert(
-                capability_info::TOOL_NAME.to_string(),
+                provider_name(capability_info::TOOL_NAME),
                 provider_call_capability_ids(&[capability_info::CAPABILITY_ID, "demo.denied"]),
             );
         let filter =

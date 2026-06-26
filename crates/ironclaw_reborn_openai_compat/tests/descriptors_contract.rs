@@ -8,7 +8,8 @@ use ironclaw_host_api::ingress::{
 };
 use ironclaw_host_api::{IngressScopeSource, NetworkMethod};
 use ironclaw_reborn_openai_compat::{
-    OPENAI_COMPAT_ROUTE_CHAT_COMPLETIONS, OPENAI_COMPAT_ROUTE_RESPONSES_API_CANCEL,
+    OPENAI_COMPAT_ROUTE_CHAT_COMPLETIONS, OPENAI_COMPAT_ROUTE_MODELS_API_LIST,
+    OPENAI_COMPAT_ROUTE_MODELS_LIST, OPENAI_COMPAT_ROUTE_RESPONSES_API_CANCEL,
     OPENAI_COMPAT_ROUTE_RESPONSES_API_CREATE, OPENAI_COMPAT_ROUTE_RESPONSES_API_RETRIEVE,
     OPENAI_COMPAT_ROUTE_RESPONSES_V1_CANCEL, OPENAI_COMPAT_ROUTE_RESPONSES_V1_CREATE,
     OPENAI_COMPAT_ROUTE_RESPONSES_V1_RETRIEVE, openai_compat_routes,
@@ -42,6 +43,24 @@ fn expected_table() -> Vec<Expected> {
             rate_limit_max: 60,
             streaming: StreamingMode::Sse,
             effect_path: AllowedEffectPath::ProductWorkflow,
+        },
+        Expected {
+            route_id: OPENAI_COMPAT_ROUTE_MODELS_LIST,
+            method: NetworkMethod::Get,
+            pattern: "/v1/models",
+            body_limit: BodyLimitPolicy::NoBody,
+            rate_limit_max: 120,
+            streaming: StreamingMode::None,
+            effect_path: AllowedEffectPath::ProjectionOnly,
+        },
+        Expected {
+            route_id: OPENAI_COMPAT_ROUTE_MODELS_API_LIST,
+            method: NetworkMethod::Get,
+            pattern: "/api/v1/models",
+            body_limit: BodyLimitPolicy::NoBody,
+            rate_limit_max: 120,
+            streaming: StreamingMode::None,
+            effect_path: AllowedEffectPath::ProjectionOnly,
         },
         Expected {
             route_id: OPENAI_COMPAT_ROUTE_RESPONSES_API_CREATE,
@@ -103,7 +122,7 @@ fn expected_table() -> Vec<Expected> {
 #[test]
 fn route_descriptors_lock_host_owned_ingress_policy() {
     let routes = openai_compat_routes();
-    assert_eq!(routes.len(), 7);
+    assert_eq!(routes.len(), 9);
 
     let mut seen = BTreeSet::new();
     for expected in expected_table() {

@@ -343,6 +343,14 @@ impl ServeCommand {
             .map_err(anyhow::Error::from)?;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
+            // The agent loop executes a deep async dispatch chain (turn runner ->
+            // planned driver -> canonical executor -> capability stage -> host
+            // dispatch -> first-party tool); a single poll of one capability
+            // dispatch consumes ~1.9 MB of stack in debug builds, which overflows
+            // the default 2 MB worker thread. Match the 8 MB stack the codebase
+            // already uses for deep work (see ironclaw_reborn_cli traces tests and
+            // src/cli stack_size sites).
+            .thread_stack_size(8 * 1024 * 1024)
             .build()
             .context("failed to build tokio runtime for `serve`")?;
 

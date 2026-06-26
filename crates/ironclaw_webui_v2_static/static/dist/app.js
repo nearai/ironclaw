@@ -1891,6 +1891,19 @@ ${_e}`;if(Ue.current.gateKey!==N&&(Ue.current={gateKey:N,credentialRef:null,inFl
       <div className="flex min-w-0 flex-1 flex-col">
         <${D1} status=${x} />
 
+        ${c&&!d&&En&&l`
+          <div className="flex justify-end border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)] px-4 py-1.5">
+            <${Sn}
+              to=${En}
+              className="inline-flex h-8 items-center gap-1.5 rounded-[8px] px-2.5 text-xs font-semibold text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+              title=${o("nav.logs")}
+            >
+              <${M} name="list" className="h-3.5 w-3.5" />
+              ${o("nav.logs")}
+            <//>
+          </div>
+        `}
+
         ${w&&l`
           <div
             className="mx-4 mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300"
@@ -1931,19 +1944,7 @@ ${_e}`;if(Ue.current.gateKey!==N&&(Ue.current={gateKey:N,credentialRef:null,inFl
                 onRecover=${O}
               />
             `}
-            ${c&&!d&&l`
-              <div className="flex flex-wrap items-center gap-3">
-                <${d2} />
-                ${En&&l`
-                  <${Sn}
-                    to=${En}
-                    className="text-xs font-medium text-signal hover:underline"
-                  >
-                    ${o("nav.logs")}
-                  <//>
-                `}
-              </div>
-            `}
+            ${c&&!d&&l`<${d2} />`}
             ${f&&l`
               <${E1}
                 connectAction=${f}
