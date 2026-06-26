@@ -29,6 +29,33 @@
 //! - The internal channel is bounded ([`CHANNEL_CAPACITY`]). Events emitted
 //!   while the channel is full are dropped (best-effort sink contract) and
 //!   counted via [`CoalescingEventSink::dropped_count`].
+//!
+//! ## Loss semantics — best-effort by design, NOT at-least-once
+//!
+//! This sink is **lossy under stress on purpose**. It carries best-effort
+//! observability events whose returned cursor is discarded at the sink, so
+//! none of these losses can alter a runtime/control-plane outcome. There are
+//! exactly three loss modes, all bounded and observable:
+//!
+//! 1. **Overload drop** — sustained back-pressure fills the bounded channel;
+//!    `emit` drops (it must never block the caller per the [`EventSink`]
+//!    contract) and increments `dropped_count`. Back-pressure or an overflow
+//!    WAL would both violate the contract / re-introduce the unbounded-memory
+//!    failure this bound exists to prevent.
+//! 2. **Per-event reject** — a backend `append_batch` rejects some rows. The
+//!    successful rows are still durably committed (`append_batch` preserves the
+//!    successful prefix and returns per-event results); only the rejected rows
+//!    are lost. They are NOT requeued: retrying in this single serialized drain
+//!    loop would head-of-line-block every other stream and, under a flapping
+//!    backend, grow memory unboundedly — the same failure the channel bound
+//!    avoids.
+//! 3. **Drain panic** — a backend driver panics inside the spawned append; the
+//!    whole window for that flush is lost and `error!`-logged. Retrying a
+//!    panicking append is a panic loop, so the next window simply proceeds.
+//!
+//! If a stream ever needs at-least-once durability, it does not belong on this
+//! sink — the compliance audit log (`DurableAuditSink`) is a separate,
+//! synchronous, non-coalescing sink for exactly that.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -123,7 +150,9 @@ impl EventSink for CoalescingEventSink {
         // Best-effort: buffer and return immediately. The channel is bounded;
         // if it is full (drain stalled) we drop the event rather than block
         // the caller — the sink contract forbids blocking or short-circuiting
-        // the surrounding workflow.
+        // the surrounding workflow. This drop is intentional and bounded; see
+        // the module-level "Loss semantics" (overload-drop mode). Durability
+        // for streams that need it lives in the synchronous `DurableAuditSink`.
         match self.tx.try_send(DrainMessage::Event(Box::new(event))) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -243,6 +272,14 @@ async fn flush_batch(
     // the process. A panic here is logged and the next window still drains.
     // Awaiting the handle keeps flushes serialized → global append order is
     // preserved.
+    //
+    // No retry/requeue on failure — deliberate, see the module-level "Loss
+    // semantics". `append_batch` durably commits the successful prefix and
+    // returns per-event results, so only backend-rejected rows are lost (not
+    // the window). Requeuing them in this single serialized loop would
+    // head-of-line-block every other stream and grow memory unboundedly under
+    // a flapping backend. These are best-effort observability events; the
+    // first error is surfaced so `flush()` can fail loud, nothing is replayed.
     let log = Arc::clone(log);
     match tokio::spawn(async move { log.append_batch(batch).await }).await {
         Ok(results) => {

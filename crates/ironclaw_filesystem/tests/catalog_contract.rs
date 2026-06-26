@@ -285,7 +285,7 @@ async fn composite_routes_append_batch_to_matching_backend() {
     // 2. Ordered seqs: returned SeqNos are strictly monotonic in payload order.
     assert!(seqs[0] < seqs[1] && seqs[1] < seqs[2]);
 
-    // The /a/b backend holds all three records in payload order.
+    // The /events/engine backend holds all three records in payload order.
     let records = specific.tail(&log, SeqNo::ZERO).await.unwrap();
     assert_eq!(records.len(), 3);
     for (i, payload) in payloads.iter().enumerate() {
