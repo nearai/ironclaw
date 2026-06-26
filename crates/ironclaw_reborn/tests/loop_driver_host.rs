@@ -1,6 +1,9 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -131,9 +134,15 @@ use ironclaw_turns::{
         StageCheckpointPayloadRequest, SystemInferenceTaskId, UserProfileContext,
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
-    runner::{ClaimRunRequest, ClaimedTurnRun, TurnRunTransitionPort},
+    runner::{
+        ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
+        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
+        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
+        RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+    },
 };
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 
 fn driver_requirements_for(
     descriptor: &AgentLoopDriverDescriptor,
@@ -2202,6 +2211,84 @@ async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_off
     );
     assert_no_assistant_message(&fixture).await;
     assert_public_milestones_hide_raw_payloads(&fixture.milestones());
+}
+
+#[tokio::test]
+async fn turn_runner_worker_full_reborn_completes_while_postgres_heartbeats_are_slow() {
+    let fixture =
+        HostFixture::new_unsubmitted("thread-full-reborn-slow-postgres", "hello slow postgres")
+            .await;
+    fixture
+        .gateway
+        .set_response_delay(std::time::Duration::from_millis(150));
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let transitions = Arc::new(
+        SlowHeartbeatTransitionPort::new(turn_store.clone())
+            .with_heartbeat_delay(std::time::Duration::from_millis(50)),
+    );
+    let resolver = default_planned_run_profile_resolver().expect("planned profile resolver");
+    let run_id = queue_fixture_turn(
+        &fixture,
+        turn_store.as_ref(),
+        &resolver,
+        "idem-full-reborn-slow-postgres",
+    )
+    .await;
+    let driver = planned_driver_for_full_reborn_test();
+    let descriptor = driver.descriptor();
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            driver,
+            planned_requirements_without_capabilities(),
+            DriverKind::Reference,
+        )
+        .unwrap();
+    let factory = fixture
+        .factory_with_loop_checkpoint_store(turn_store.clone())
+        .with_driver_requirements(driver_requirements_for(
+            &descriptor,
+            planned_requirements_without_capabilities(),
+        ));
+    let executor = Arc::new(RebornTurnRunExecutor::new(
+        loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
+        Arc::new(registry),
+        Arc::new(factory) as Arc<dyn HostFactory>,
+    ));
+    let scheduler_handle = TurnRunScheduler::new(
+        transitions.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        full_reborn_chaos_scheduler_config()
+            .with_runner_heartbeat_interval(std::time::Duration::from_millis(5))
+            .with_max_consecutive_heartbeat_failures(2),
+    )
+    .start();
+
+    transitions.wait_for_heartbeat_attempts(3).await;
+    let completed = wait_for_run_status(
+        turn_store.as_ref(),
+        &fixture.context.scope,
+        run_id,
+        TurnStatus::Completed,
+        "full reborn run should not be killed while postgres heartbeats are slow",
+    )
+    .await;
+    scheduler_handle.shutdown().await;
+
+    assert!(completed.failure.is_none());
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(history.messages.iter().any(|message| {
+        message.kind == MessageKind::Assistant
+            && message.status == MessageStatus::Finalized
+            && message.content.as_deref() == Some("model says hi")
+    }));
 }
 
 #[tokio::test]
@@ -8611,10 +8698,108 @@ impl CheckpointStateStore for DiskFullCheckpointStateStore {
     }
 }
 
+struct SlowHeartbeatTransitionPort {
+    store: Arc<InMemoryTurnStateStore>,
+    heartbeat_delay: std::time::Duration,
+    heartbeat_attempts: AtomicUsize,
+    notify_heartbeat_attempt: Notify,
+}
+
+impl SlowHeartbeatTransitionPort {
+    fn new(store: Arc<InMemoryTurnStateStore>) -> Self {
+        Self {
+            store,
+            heartbeat_delay: std::time::Duration::ZERO,
+            heartbeat_attempts: AtomicUsize::new(0),
+            notify_heartbeat_attempt: Notify::new(),
+        }
+    }
+
+    fn with_heartbeat_delay(mut self, delay: std::time::Duration) -> Self {
+        self.heartbeat_delay = delay;
+        self
+    }
+
+    async fn wait_for_heartbeat_attempts(&self, expected: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while self.heartbeat_attempts.load(Ordering::SeqCst) < expected {
+                self.notify_heartbeat_attempt.notified().await;
+            }
+        })
+        .await
+        .expect("scheduler did not attempt expected slow heartbeats");
+    }
+}
+
+#[async_trait]
+impl TurnRunTransitionPort for SlowHeartbeatTransitionPort {
+    async fn claim_next_run(
+        &self,
+        request: ClaimRunRequest,
+    ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+        self.store.claim_next_run(request).await
+    }
+
+    async fn heartbeat(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
+        self.heartbeat_attempts.fetch_add(1, Ordering::SeqCst);
+        self.notify_heartbeat_attempt.notify_waiters();
+        tokio::time::sleep(self.heartbeat_delay).await;
+        self.store.heartbeat(request).await
+    }
+
+    async fn recover_expired_leases(
+        &self,
+        request: RecoverExpiredLeasesRequest,
+    ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
+        self.store.recover_expired_leases(request).await
+    }
+
+    async fn record_model_route_snapshot(
+        &self,
+        request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.store.record_model_route_snapshot(request).await
+    }
+
+    async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
+        self.store.block_run(request).await
+    }
+
+    async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
+        self.store.complete_run(request).await
+    }
+
+    async fn cancel_run(
+        &self,
+        request: CancelRunCompletionRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.store.cancel_run(request).await
+    }
+
+    async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
+        self.store.fail_run(request).await
+    }
+
+    async fn record_runner_failure(
+        &self,
+        request: RecordRunnerFailureRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.store.record_runner_failure(request).await
+    }
+
+    async fn apply_validated_loop_exit(
+        &self,
+        request: ApplyValidatedLoopExitRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.store.apply_validated_loop_exit(request).await
+    }
+}
+
 struct RecordingGateway {
     requests: Mutex<Vec<HostManagedModelRequest>>,
     response: Mutex<Result<HostManagedModelResponse, HostManagedModelError>>,
     queued_responses: Mutex<VecDeque<Result<HostManagedModelResponse, HostManagedModelError>>>,
+    response_delay: Mutex<Option<std::time::Duration>>,
 }
 
 impl RecordingGateway {
@@ -8623,6 +8808,7 @@ impl RecordingGateway {
             requests: Mutex::new(Vec::new()),
             response: Mutex::new(Ok(HostManagedModelResponse::assistant_reply(content))),
             queued_responses: Mutex::new(VecDeque::new()),
+            response_delay: Mutex::new(None),
         }
     }
 
@@ -8636,6 +8822,10 @@ impl RecordingGateway {
         raw_detail: impl Into<String>,
     ) {
         *self.response.lock().unwrap() = Err(HostManagedModelError::new(kind, raw_detail));
+    }
+
+    fn set_response_delay(&self, delay: std::time::Duration) {
+        *self.response_delay.lock().unwrap() = Some(delay);
     }
 
     fn respond_with_capability_calls(&self) {
@@ -8693,6 +8883,10 @@ impl HostManagedModelGateway for RecordingGateway {
         request: HostManagedModelRequest,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         self.requests.lock().unwrap().push(request);
+        let delay = *self.response_delay.lock().unwrap();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         if let Some(response) = self.queued_responses.lock().unwrap().pop_front() {
             return response;
         }

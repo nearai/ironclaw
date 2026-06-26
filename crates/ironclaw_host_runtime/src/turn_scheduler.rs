@@ -717,17 +717,28 @@ fn spawn_executor_task(
                         );
                     }
                     Some(heartbeat) = heartbeats.join(), if heartbeats.is_running() => {
-                        if heartbeat_succeeded(heartbeat) {
-                            consecutive_heartbeat_failures = 0;
-                        } else {
-                            consecutive_heartbeat_failures =
-                                consecutive_heartbeat_failures.saturating_add(1);
-                            debug!(
-                                run_id = %recovery_run_id,
-                                consecutive_heartbeat_failures,
-                                max_consecutive_heartbeat_failures,
-                                "turn run scheduler heartbeat miss"
-                            );
+                        match heartbeat_outcome(heartbeat) {
+                            HeartbeatOutcome::Succeeded => {
+                                consecutive_heartbeat_failures = 0;
+                            }
+                            HeartbeatOutcome::Failed => {
+                                consecutive_heartbeat_failures =
+                                    consecutive_heartbeat_failures.saturating_add(1);
+                                debug!(
+                                    run_id = %recovery_run_id,
+                                    consecutive_heartbeat_failures,
+                                    max_consecutive_heartbeat_failures,
+                                    "turn run scheduler heartbeat failed"
+                                );
+                            }
+                            HeartbeatOutcome::TimedOut => {
+                                debug!(
+                                    run_id = %recovery_run_id,
+                                    consecutive_heartbeat_failures,
+                                    max_consecutive_heartbeat_failures,
+                                    "turn run scheduler heartbeat timed out; preserving executor while store is slow"
+                                );
+                            }
                         }
                         if consecutive_heartbeat_failures >= max_consecutive_heartbeat_failures {
                             break ExecutorTaskOutcome::TerminalFailure(scheduler_failure(
@@ -769,7 +780,7 @@ fn spawn_executor_task(
 }
 
 struct InFlightHeartbeat {
-    task: Option<JoinHandle<bool>>,
+    task: Option<JoinHandle<HeartbeatOutcome>>,
 }
 
 impl InFlightHeartbeat {
@@ -801,7 +812,7 @@ impl InFlightHeartbeat {
         }));
     }
 
-    async fn join(&mut self) -> Option<Result<bool, tokio::task::JoinError>> {
+    async fn join(&mut self) -> Option<Result<HeartbeatOutcome, tokio::task::JoinError>> {
         let task = self.task.as_mut()?;
         let result = task.await;
         self.task = None;
@@ -815,8 +826,18 @@ impl InFlightHeartbeat {
     }
 }
 
-fn heartbeat_succeeded(result: Result<bool, tokio::task::JoinError>) -> bool {
-    matches!(result, Ok(true))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeartbeatOutcome {
+    Succeeded,
+    Failed,
+    TimedOut,
+}
+
+fn heartbeat_outcome(result: Result<HeartbeatOutcome, tokio::task::JoinError>) -> HeartbeatOutcome {
+    match result {
+        Ok(outcome) => outcome,
+        Err(_) => HeartbeatOutcome::Failed,
+    }
 }
 
 async fn heartbeat_claimed_run(
@@ -825,7 +846,7 @@ async fn heartbeat_claimed_run(
     runner_id: ironclaw_turns::TurnRunnerId,
     lease_token: ironclaw_turns::TurnLeaseToken,
     timeout_after: Duration,
-) -> bool {
+) -> HeartbeatOutcome {
     let heartbeat = transitions.heartbeat(HeartbeatRequest {
         run_id,
         runner_id,
@@ -833,10 +854,10 @@ async fn heartbeat_claimed_run(
     });
     let result = tokio::time::timeout(timeout_after, heartbeat).await;
     match result {
-        Ok(Ok(_)) => true,
+        Ok(Ok(_)) => HeartbeatOutcome::Succeeded,
         Ok(Err(error)) => {
             debug!(error = %error, "turn run scheduler heartbeat failed");
-            false
+            HeartbeatOutcome::Failed
         }
         Err(_) => {
             debug!(
@@ -844,7 +865,7 @@ async fn heartbeat_claimed_run(
                 timeout_after = ?timeout_after,
                 "turn run scheduler heartbeat timed out"
             );
-            false
+            HeartbeatOutcome::TimedOut
         }
     }
 }

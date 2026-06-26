@@ -542,7 +542,9 @@ impl HangingExecutor {
 
 struct HeartbeatTrackingTransitions {
     store: Arc<InMemoryTurnStateStore>,
+    heartbeat_attempts: AtomicUsize,
     heartbeats: AtomicUsize,
+    notify_heartbeat_attempt: Notify,
     notify_heartbeat: Notify,
     heartbeat_delay: Mutex<Option<Duration>>,
     one_shot_heartbeat_delay: Mutex<Option<Duration>>,
@@ -582,7 +584,9 @@ impl HeartbeatTrackingTransitions {
     fn new(store: Arc<InMemoryTurnStateStore>) -> Self {
         Self {
             store,
+            heartbeat_attempts: AtomicUsize::new(0),
             heartbeats: AtomicUsize::new(0),
+            notify_heartbeat_attempt: Notify::new(),
             notify_heartbeat: Notify::new(),
             heartbeat_delay: Mutex::new(None),
             one_shot_heartbeat_delay: Mutex::new(None),
@@ -597,6 +601,16 @@ impl HeartbeatTrackingTransitions {
     fn with_one_shot_heartbeat_delay(self, delay: Duration) -> Self {
         *self.one_shot_heartbeat_delay.lock().unwrap() = Some(delay);
         self
+    }
+
+    async fn wait_for_heartbeat_attempts(&self, expected: usize) {
+        timeout(Duration::from_secs(2), async {
+            while self.heartbeat_attempts.load(Ordering::SeqCst) < expected {
+                self.notify_heartbeat_attempt.notified().await;
+            }
+        })
+        .await
+        .expect("scheduler did not attempt expected heartbeats");
     }
 
     async fn wait_for_heartbeats(&self, expected: usize) {
@@ -700,6 +714,8 @@ impl TurnRunTransitionPort for HeartbeatTrackingTransitions {
         &self,
         request: HeartbeatRequest,
     ) -> Result<ironclaw_turns::EventCursor, TurnError> {
+        self.heartbeat_attempts.fetch_add(1, Ordering::SeqCst);
+        self.notify_heartbeat_attempt.notify_waiters();
         let delay = self
             .one_shot_heartbeat_delay
             .lock()
@@ -1796,7 +1812,7 @@ async fn chaos_scheduler_retries_terminal_failure_recording_after_transient_stor
 }
 
 #[tokio::test]
-async fn scheduler_records_failure_after_repeated_heartbeat_timeouts() {
+async fn scheduler_keeps_executor_alive_during_sustained_heartbeat_timeouts() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
         InMemoryTurnStateStoreLimits {
             runner_lease_ttl: ChronoDuration::milliseconds(500),
@@ -1807,8 +1823,9 @@ async fn scheduler_records_failure_after_repeated_heartbeat_timeouts() {
         HeartbeatTrackingTransitions::new(Arc::clone(&store))
             .with_heartbeat_delay(Duration::from_secs(60)),
     );
-    let transition_port: Arc<dyn TurnRunTransitionPort> = transitions;
-    let executor = Arc::new(HangingExecutor::default());
+    let transition_port: Arc<dyn TurnRunTransitionPort> = transitions.clone();
+    let gate = Arc::new(Notify::new());
+    let executor = Arc::new(CompletingExecutor::with_gate(Arc::clone(&gate)));
     let scheduler = TurnRunScheduler::new(
         transition_port,
         executor.clone(),
@@ -1822,6 +1839,50 @@ async fn scheduler_records_failure_after_repeated_heartbeat_timeouts() {
         DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
 
     let request = submit_turn_request("thread-heartbeat-timeout", "idem-heartbeat-timeout");
+    let scope = request.scope.clone();
+    let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+    executor.wait_for_started(1).await;
+    transitions.wait_for_heartbeat_attempts(3).await;
+
+    let state = store
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::Running);
+    gate.notify_waiters();
+    wait_for_status(&*store, scope, run_id, TurnStatus::Completed).await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn scheduler_records_failure_after_repeated_heartbeat_errors() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            runner_lease_ttl: ChronoDuration::milliseconds(500),
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let chaos = Arc::new(
+        ChaosTransitionPort::new(Arc::clone(&store)).drop_next_n(ChaosOperation::Heartbeat, 2),
+    );
+    let transition_port: Arc<dyn TurnRunTransitionPort> = chaos.clone();
+    let executor = Arc::new(HangingExecutor::default());
+    let scheduler = TurnRunScheduler::new(
+        transition_port,
+        executor.clone(),
+        fast_config()
+            .with_poll_interval(Duration::from_secs(60))
+            .with_runner_heartbeat_interval(Duration::from_millis(10))
+            .with_max_consecutive_heartbeat_failures(2),
+    );
+    let handle = scheduler.start();
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());
+
+    let request = submit_turn_request("thread-heartbeat-error", "idem-heartbeat-error");
     let scope = request.scope.clone();
     let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
     executor.wait_for_started().await;
@@ -1846,7 +1907,7 @@ async fn scheduler_records_failure_after_repeated_heartbeat_timeouts() {
         }
     })
     .await
-    .expect("run did not move to failed after heartbeat timeout");
+    .expect("run did not move to failed after heartbeat errors");
     handle.shutdown().await;
 }
 
