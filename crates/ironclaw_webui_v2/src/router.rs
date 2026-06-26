@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use ironclaw_product_workflow::RebornServicesApi;
 use serde::Serialize;
 
@@ -275,7 +275,8 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         )
         .route(
             WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION,
-            post(handlers::set_settings_tool_permission),
+            put(handlers::set_settings_tool_permission)
+                .post(handlers::set_settings_tool_permission),
         )
         .route(
             WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,

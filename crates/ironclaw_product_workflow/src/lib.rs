@@ -145,7 +145,7 @@ pub use ironclaw_product_adapters::{
 pub use reborn_services::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
-    AutomationListRequest, AutomationProductFacade, CodexLoginStart,
+    AutomationListRequest, AutomationProductFacade, CapabilityAvailabilityProbe, CodexLoginStart,
     ConnectableChannelsProductFacade, ExtensionCredentialSetupService,
     ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FilesystemBrowseReader,
     FsMount, InboundAttachmentLander, InboundAttachmentReader, LlmActiveSelection,

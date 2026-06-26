@@ -75,6 +75,57 @@ impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
     }
 }
 
+/// [`CapabilityAvailabilityProbe`] backed by the shared dispatch
+/// [`PolicyResolver`](ironclaw_capability_policy::PolicyResolver) (#5261 D7 /
+/// G5). It answers "may this `(tenant, user)` set an approval preference for
+/// this capability?" by resolving the same per-(tenant, user) policy the
+/// dispatch availability surface enforces and returning
+/// [`EffectivePolicy::available`](ironclaw_capability_policy::EffectivePolicy).
+///
+/// This is the **minimum-correct** gate: it rejects capabilities the user has
+/// a `Hidden` availability delta on — exactly what xyzorg's "allow X, hide the
+/// rest" admin grants produce. A fully-correct version would additionally
+/// intersect the user's scoped-lifecycle installation allow-set so a
+/// policy-available-but-never-installed capability is also rejected (mirroring
+/// `capability_surface_policy::resolve_allow_set`); that broader intersection
+/// is deferred and not needed for the hide-the-rest mechanism this milestone
+/// uses.
+#[cfg(feature = "capability-policy")]
+struct PolicyResolverAvailabilityProbe {
+    resolver: Arc<dyn ironclaw_capability_policy::PolicyResolver>,
+}
+
+#[cfg(feature = "capability-policy")]
+#[async_trait]
+impl ironclaw_product_workflow::CapabilityAvailabilityProbe for PolicyResolverAvailabilityProbe {
+    async fn is_available(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &ironclaw_host_api::CapabilityId,
+    ) -> Result<bool, RebornServicesError> {
+        // Subject derivation matches the caller: the preference is the user's
+        // own, so it is gated against that user's own (tenant, user) surface.
+        let subject = ironclaw_capability_policy::PolicySubject {
+            tenant_id: scope.tenant_id.clone(),
+            user_id: scope.user_id.clone(),
+        };
+        match self.resolver.resolve(&subject, capability_id).await {
+            Ok(effective) => Ok(effective.available),
+            Err(error) => {
+                // Carry the cause at debug (never drop it) and surface a
+                // sanitized error; the facade enforcement treats any probe
+                // error as fail-closed deny.
+                tracing::debug!(
+                    %error,
+                    capability_id = %capability_id,
+                    "capability policy resolve failed while probing approval-pref availability"
+                );
+                Err(RebornServicesError::internal())
+            }
+        }
+    }
+}
+
 /// WebUI-facing Reborn service bundle for host composition.
 ///
 /// This bundle deliberately exposes facade-shaped product handles consumed
@@ -232,6 +283,18 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                 synthetic_operator_tools,
             )),
         );
+        // Gate the per-tool approval-preference write on the caller's
+        // availability surface — but ONLY when the capability-policy feature is
+        // compiled in AND `capability_policy_activated()` made the shared
+        // resolver `Some`. With no resolver (feature off / not activated) we
+        // attach NO probe, so the write is byte-unchanged from today (#5261 D7).
+        #[cfg(feature = "capability-policy")]
+        if let Some(resolver) = &local_runtime.capability_policy_resolver {
+            api =
+                api.with_capability_availability_probe(Arc::new(PolicyResolverAvailabilityProbe {
+                    resolver: Arc::clone(resolver),
+                }));
+        }
         let mut lifecycle_facade =
             RebornLocalLifecycleFacade::new(local_runtime.skill_management.clone());
         if let Some(extension_management) = &local_runtime.extension_management {

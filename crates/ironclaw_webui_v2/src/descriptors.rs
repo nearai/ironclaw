@@ -55,6 +55,8 @@ pub const WEBUI_V2_ROUTE_SET_SETTINGS_TOOLS_AUTO_APPROVE: &str =
     "webui.v2.settings.set_tools_auto_approve";
 pub const WEBUI_V2_ROUTE_SET_SETTINGS_TOOL_PERMISSION: &str =
     "webui.v2.settings.set_tool_permission";
+pub const WEBUI_V2_ROUTE_PUT_SETTINGS_TOOL_PERMISSION: &str =
+    "webui.v2.settings.put_tool_permission";
 pub const WEBUI_V2_ROUTE_GET_LLM_CONFIG: &str = "webui.v2.get_llm_config";
 pub const WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER: &str = "webui.v2.upsert_llm_provider";
 pub const WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER: &str = "webui.v2.delete_llm_provider";
@@ -222,6 +224,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         list_settings_tools_descriptor(),
         set_settings_tools_auto_approve_descriptor(),
         set_settings_tool_permission_descriptor(),
+        put_settings_tool_permission_descriptor(),
         get_llm_config_descriptor(),
         upsert_llm_provider_descriptor(),
         delete_llm_provider_descriptor(),
@@ -1068,6 +1071,24 @@ fn set_settings_tool_permission_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_SET_SETTINGS_TOOL_PERMISSION,
         NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+// PUT is the canonical verb for setting a per-tool approval preference; POST is
+// retained for back-compat. Both map to the same handler and carry an identical
+// policy, so the composition (method, pattern)-keyed body-limit/rate-limit
+// middleware covers the PUT verb exactly like the POST verb.
+fn put_settings_tool_permission_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_PUT_SETTINGS_TOOL_PERMISSION,
+        NetworkMethod::Put,
         WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION,
         mutation_policy(
             body_limit_kib(4),
