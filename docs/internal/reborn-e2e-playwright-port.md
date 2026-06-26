@@ -2282,6 +2282,28 @@ Harness cleanup:
   `max_total_bytes`) instead of legacy names, so pending-message tests read the
   same session shape as production.
 
+### Step 73: Legacy Responses Context Injection Port
+
+Extended `test_reborn_webui_v2_legacy_responses_api.py` and fixed the Reborn
+OpenAI-compatible Responses workflow.
+
+Ported the legacy `x_context.notification_response` approval/rejection coverage:
+
+- accepted `x_context` on Reborn `POST /v1/responses` and `/api/v1/responses`;
+- kept the legacy `context` alias for compatibility;
+- injected a sanitized, human-readable context summary into the submitted
+  product-workflow payload before the user input reaches the Reborn turn;
+- enforced the same 10 KiB context limit before any product-workflow side
+  effect;
+- covered the handoff with Rust handler-contract tests and the browser-suite
+  API E2E approval/rejection scenarios.
+
+Issue fixed:
+
+- Reborn's Responses DTO did not carry `x_context`, so legacy clients could
+  send notification approval/rejection context and receive a normal response
+  while the structured context was silently dropped before the agent turn.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -2364,9 +2386,6 @@ Not yet ported:
 - provider-fixture full-path parity for Google/GitHub/Slack/Notion flows where
   the current tests still use old gateway chat/history endpoints or remain
   browser-skipped pending a Reborn-native `webui-v2-beta` harness;
-- legacy Responses API context-injection parity for
-  `x_context.notification_response`, because the Reborn OpenAI-compatible
-  Responses DTO does not currently expose a matching context field;
 - Emulate provider full-path scenarios against standalone Reborn where the
   current test still routes through legacy `/api/chat/*`.
 
@@ -2467,5 +2486,5 @@ The Responses API port confirmed a route-contract difference: Reborn's
 OpenAI-compatible Responses API accepts typed Responses input items and rejects
 empty item arrays, while legacy coverage used an untyped message list and empty
 text input. The migrated test follows Reborn's DTO and leaves legacy
-`x_context.notification_response` context-injection behavior open until the
-Reborn Responses surface defines an equivalent field.
+`x_context.notification_response` context-injection behavior to the dedicated
+Step 73 coverage.

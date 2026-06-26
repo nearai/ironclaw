@@ -21,6 +21,9 @@ pub struct OpenAiResponsesCreateRequest {
     pub tools: Option<Vec<serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<serde_json::Value>,
+    /// IronClaw extension: structured context injected into the submitted turn.
+    #[serde(default, alias = "context", skip_serializing_if = "Option::is_none")]
+    pub x_context: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

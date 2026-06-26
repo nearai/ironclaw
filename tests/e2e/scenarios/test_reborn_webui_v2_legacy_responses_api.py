@@ -179,6 +179,45 @@ async def test_reborn_legacy_responses_streaming_raw_sse(reborn_responses_client
     assert "response.completed" in events
 
 
+async def test_reborn_legacy_responses_context_injection_approval(
+    reborn_responses_client,
+):
+    response = await _create_response(
+        reborn_responses_client,
+        input="Go ahead with the transfer",
+        x_context={
+            "notification_response": {
+                "notification_id": "msg_456",
+                "action": "approved",
+                "original_signal": "convert_now",
+                "score": 72,
+            }
+        },
+        stream=False,
+    )
+
+    assert response["status"] == "completed"
+    assert _response_output_text(response).strip()
+
+
+async def test_reborn_legacy_responses_context_injection_rejection(
+    reborn_responses_client,
+):
+    response = await _create_response(
+        reborn_responses_client,
+        input="Cancel it",
+        x_context={
+            "notification_response": {
+                "notification_id": "msg_789",
+                "action": "rejected",
+            }
+        },
+        stream=False,
+    )
+
+    assert response["status"] == "completed"
+
+
 async def test_reborn_legacy_responses_rejects_missing_auth(
     reborn_openai_compat_server,
 ):
