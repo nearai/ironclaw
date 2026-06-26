@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from urllib.parse import unquote, urlparse
 
 from playwright.async_api import expect
 
@@ -15,6 +16,7 @@ from reborn_webui_harness import (
 
 
 THREAD_ID = "thread-legacy-approval"
+THREAD_B_ID = "thread-legacy-approval-other"
 RUN_ID = "run-legacy-approval"
 GATE_REF = "gate-legacy-approval"
 
@@ -25,10 +27,34 @@ async def _open_stubbed_approval_thread(
     *,
     resolve_release: asyncio.Event | None = None,
     resolve_response: dict | None = None,
+    thread_records: list[dict] | None = None,
+    timelines: dict[str, list[dict]] | None = None,
 ):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
     resolve_requests: list[dict] = []
+    default_thread_records = [
+        {
+            "thread_id": THREAD_ID,
+            "title": "Legacy approval port",
+            "created_at": "2026-06-25T00:00:00Z",
+            "updated_at": "2026-06-25T00:00:00Z",
+        }
+    ]
+    default_timelines = {
+        THREAD_ID: [
+            {
+                "message_id": "seed-user",
+                "kind": "user",
+                "content": "run a gated command",
+                "sequence": 1,
+                "status": "accepted",
+                "created_at": "2026-06-25T00:00:00Z",
+            }
+        ]
+    }
+    thread_records = thread_records or default_thread_records
+    timelines = timelines or default_timelines
 
     await page.add_init_script(
         """
@@ -91,32 +117,18 @@ async def _open_stubbed_approval_thread(
         await fulfill_json(
             route,
             {
-                "threads": [
-                    {
-                        "thread_id": THREAD_ID,
-                        "title": "Legacy approval port",
-                        "created_at": "2026-06-25T00:00:00Z",
-                        "updated_at": "2026-06-25T00:00:00Z",
-                    }
-                ],
+                "threads": thread_records,
                 "next_cursor": None,
             },
         )
 
     async def handle_timeline(route):
+        parsed = urlparse(route.request.url)
+        thread_id = unquote(parsed.path.split("/threads/", 1)[1].split("/timeline", 1)[0])
         await fulfill_json(
             route,
             {
-                "messages": [
-                    {
-                        "message_id": "seed-user",
-                        "kind": "user",
-                        "content": "run a gated command",
-                        "sequence": 1,
-                        "status": "accepted",
-                        "created_at": "2026-06-25T00:00:00Z",
-                    }
-                ],
+                "messages": timelines.get(thread_id, []),
                 "next_cursor": None,
             },
         )
@@ -143,7 +155,7 @@ async def _open_stubbed_approval_thread(
     await page.route("**/api/webchat/v2/session", handle_session)
     await page.route("**/api/webchat/v2/threads", handle_threads)
     await page.route("**/api/webchat/v2/threads?**", handle_threads)
-    await page.route(f"**/api/webchat/v2/threads/{THREAD_ID}/timeline**", handle_timeline)
+    await page.route("**/api/webchat/v2/threads/*/timeline**", handle_timeline)
     await page.route(
         f"**/api/webchat/v2/threads/{THREAD_ID}/runs/**/gates/**/resolve",
         handle_resolve,
@@ -394,6 +406,105 @@ async def test_reborn_legacy_pending_approval_blocks_send_without_error_message(
         await expect(page.locator(SEL_V2["msg_system"])).to_have_count(0)
         await expect(page.locator(SEL_V2["msg_assistant"])).to_have_count(0)
         assert send_requests == []
+    finally:
+        await context.close()
+
+
+async def test_reborn_legacy_pending_approval_does_not_block_other_thread(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Port other-thread approval isolation to Reborn's per-thread gate state."""
+    context, page, _resolve_requests = await _open_stubbed_approval_thread(
+        reborn_v2_server,
+        reborn_v2_browser,
+        thread_records=[
+            {
+                "thread_id": THREAD_ID,
+                "title": "Approval Thread A",
+                "created_at": "2026-06-25T00:00:00Z",
+                "updated_at": "2026-06-25T00:00:00Z",
+            },
+            {
+                "thread_id": THREAD_B_ID,
+                "title": "Approval Thread B",
+                "created_at": "2026-06-25T00:01:00Z",
+                "updated_at": "2026-06-25T00:01:00Z",
+            },
+        ],
+        timelines={
+            THREAD_ID: [
+                {
+                    "message_id": "thread-a-user",
+                    "kind": "user",
+                    "content": "run a gated command",
+                    "sequence": 1,
+                    "status": "accepted",
+                    "created_at": "2026-06-25T00:00:00Z",
+                }
+            ],
+            THREAD_B_ID: [
+                {
+                    "message_id": "thread-b-user",
+                    "kind": "user",
+                    "content": "thread b is clear",
+                    "sequence": 1,
+                    "status": "accepted",
+                    "created_at": "2026-06-25T00:01:00Z",
+                }
+            ],
+        },
+    )
+    send_requests: list[dict] = []
+
+    async def handle_send_b(route):
+        send_requests.append(json.loads(route.request.post_data or "{}"))
+        await route.fulfill(
+            status=202,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "thread_id": THREAD_B_ID,
+                    "run_id": "run-thread-b-send",
+                    "status": "queued",
+                }
+            ),
+        )
+
+    await page.route(f"**/api/webchat/v2/threads/{THREAD_B_ID}/messages", handle_send_b)
+
+    try:
+        await _emit_approval_gate(page, allow_always=False, gate_ref="gate-thread-a")
+        await expect(page.locator(SEL_V2["approval_card"]).first).to_be_visible(
+            timeout=5000
+        )
+        await expect(page.locator(SEL_V2["chat_composer"])).to_have_attribute(
+            "data-send-disabled",
+            "true",
+        )
+
+        await page.locator("#gateway-sidebar button").filter(
+            has_text="Approval Thread B"
+        ).first.click()
+        await expect(
+            page.locator(SEL_V2["msg_user"]).filter(has_text="thread b is clear")
+        ).to_be_visible(timeout=15000)
+        await expect(page.locator(SEL_V2["approval_card"])).to_have_count(0)
+
+        composer = page.locator(SEL_V2["chat_composer"])
+        await expect(composer).to_have_attribute(
+            "data-send-disabled",
+            "false",
+            timeout=5000,
+        )
+        await composer.fill("send from thread b")
+        await composer.press("Enter")
+
+        await expect(page.locator(SEL_V2["msg_user"]).last).to_contain_text(
+            "send from thread b",
+            timeout=10000,
+        )
+        assert len(send_requests) == 1
+        assert send_requests[0]["content"] == "send from thread b"
     finally:
         await context.close()
 

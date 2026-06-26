@@ -2618,6 +2618,28 @@ Behavior mapping:
   encoding of `package_ref.id` and role/text-based card selection. The port
   verifies that path.
 
+### Step 88: Legacy Other-Thread Approval Isolation Port
+
+Extended `test_reborn_webui_v2_legacy_approval.py`.
+
+Ported the isolation intent from legacy approval tests that ensured approval
+state from one thread did not intercept another thread's normal sends:
+
+- opened two mocked Reborn WebChat v2 threads in the browser;
+- emitted a pending approval gate on thread A and verified the active composer
+  is locally blocked;
+- switched through the real Reborn thread sidebar to thread B;
+- asserted thread B has no stale approval card, its composer is enabled, and a
+  normal chat message posts to thread B's v2 `/messages` endpoint.
+
+Behavior mapping:
+
+- Legacy v1 also tested slash/text approval aliases crossing thread boundaries.
+  Reborn has no hidden text-alias approval path; approval resolution is through
+  the run-scoped gate card. The Reborn-equivalent risk is stale per-thread gate
+  state leaking across route/sidebar thread changes, so the port asserts that
+  boundary directly.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -2637,9 +2659,9 @@ Not yet ported:
   projection, and SSE reconnect-timeout cleanup coverage;
 - deeper tool approval scenarios that need real Reborn runtime/tool execution,
   persistence, or recovery beyond the browser approval-card, denied activity,
-  local send-blocking, and persisted activity-card contracts; legacy text-alias
-  interception is v1 behavior superseded by Reborn's disabled-composer gate
-  flow;
+  local send-blocking, cross-thread isolation, and persisted activity-card
+  contracts; legacy text-alias interception is v1 behavior superseded by
+  Reborn's disabled-composer gate flow;
 - remaining settings/extension lifecycle scenarios beyond Settings search,
   Skills, tool permissions, channel label regressions, extension revisit
   refetch, and the top-level extension install/manage/configure surface,
@@ -2774,6 +2796,11 @@ not disable while the run-scoped gate-resolution request was pending, allowing a
 fast double click to submit duplicate decisions. `ApprovalCard` now tracks an
 in-flight resolving state and disables the approve, deny, and always-allow
 controls until the async action finishes.
+
+The other-thread approval isolation port did not require a Reborn product fix:
+the pending gate state is already scoped to the active thread route, and normal
+message sends on a different thread continue through the v2 `/messages`
+endpoint.
 
 The tool-activity history port did not require a Reborn product behavior fix:
 durable `capability_display_preview` records already rehydrated the activity
