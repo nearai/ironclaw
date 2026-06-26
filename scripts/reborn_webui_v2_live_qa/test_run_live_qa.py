@@ -248,7 +248,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             run_live_qa.CASES[
                 "responses_retrieve_cancel_live_http_contract"
             ].qa_matrix_test_ids,
-            ["REBCLI-058-TC-02", "REBCLI-058-TC-04", "REBCLI-058-TC-05"],
+            [
+                "REBCLI-058-TC-02",
+                "REBCLI-058-TC-03",
+                "REBCLI-058-TC-04",
+                "REBCLI-058-TC-05",
+                "REBCLI-058-TC-06",
+            ],
         )
 
     def test_case_manifest_distinguishes_targeted_from_placeholder_gates(self):
@@ -349,11 +355,19 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             manifest["qa_matrix"]["represented_test_ids"],
         )
         self.assertIn(
+            "REBCLI-058-TC-03",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
+        self.assertIn(
             "REBCLI-058-TC-04",
             manifest["qa_matrix"]["represented_test_ids"],
         )
         self.assertIn(
             "REBCLI-058-TC-05",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
+        self.assertIn(
+            "REBCLI-058-TC-06",
             manifest["qa_matrix"]["represented_test_ids"],
         )
         self.assertIn(
@@ -399,7 +413,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             cases["responses_retrieve_cancel_live_http_contract"]["qa_matrix_test_ids"],
-            ["REBCLI-058-TC-02", "REBCLI-058-TC-04", "REBCLI-058-TC-05"],
+            [
+                "REBCLI-058-TC-02",
+                "REBCLI-058-TC-03",
+                "REBCLI-058-TC-04",
+                "REBCLI-058-TC-05",
+                "REBCLI-058-TC-06",
+            ],
         )
         self.assertTrue(cases["qa_2d_calendar_prep_live_chat"]["implemented"])
         self.assertEqual(

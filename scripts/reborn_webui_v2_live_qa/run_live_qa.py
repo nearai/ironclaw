@@ -3262,6 +3262,42 @@ async def case_responses_retrieve_cancel_live_http_contract(ctx: LiveQaContext) 
                 "unauthenticated POST /v1/responses/{response_id}/cancel",
             )
 
+            retrieve_with_body = await client.request(
+                "GET",
+                f"{ctx.base_url}/api/v1/responses/{valid_missing_response_id}",
+                headers=_auth_json_headers(),
+                content="{}",
+            )
+            _assert_status(
+                retrieve_with_body,
+                413,
+                "GET /api/v1/responses/{response_id} with a request body",
+            )
+            if "Request body not allowed for this route." not in retrieve_with_body.text:
+                raise AssertionError(
+                    "GET /api/v1/responses/{response_id} body rejection did "
+                    f"not explain the NoBody policy: {retrieve_with_body.text[:300]}"
+                )
+
+            cancel_with_oversize_body = await client.post(
+                f"{ctx.base_url}/v1/responses/{valid_missing_response_id}/cancel",
+                headers=_auth_json_headers(),
+                content="x" * 4097,
+            )
+            _assert_status(
+                cancel_with_oversize_body,
+                413,
+                "POST /v1/responses/{response_id}/cancel with oversized body",
+            )
+            if (
+                "Request body exceeds the route's body limit."
+                not in cancel_with_oversize_body.text
+            ):
+                raise AssertionError(
+                    "POST /v1/responses/{response_id}/cancel oversized body "
+                    f"rejection did not explain the body limit: {cancel_with_oversize_body.text[:300]}"
+                )
+
             not_found_statuses: dict[str, int] = {}
             for path in checked_paths:
                 if path.endswith("/cancel"):
@@ -3288,6 +3324,10 @@ async def case_responses_retrieve_cancel_live_http_contract(ctx: LiveQaContext) 
                 "unauthenticated_statuses": {
                     "retrieve": unauth_retrieve.status_code,
                     "cancel": unauth_cancel.status_code,
+                },
+                "body_limit_statuses": {
+                    "retrieve_with_body": retrieve_with_body.status_code,
+                    "cancel_with_oversize_body": cancel_with_oversize_body.status_code,
                 },
                 "not_found_statuses": not_found_statuses,
             },
@@ -5838,8 +5878,10 @@ CASES: dict[str, CaseSpec] = {
         case_responses_retrieve_cancel_live_http_contract,
         qa_matrix_test_ids=[
             "REBCLI-058-TC-02",
+            "REBCLI-058-TC-03",
             "REBCLI-058-TC-04",
             "REBCLI-058-TC-05",
+            "REBCLI-058-TC-06",
         ],
     ),
     "webui_live_llm_chat": CaseSpec(
