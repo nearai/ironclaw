@@ -450,11 +450,19 @@ fn surface_lock_error() -> AgentLoopHostError {
     )
 }
 
-fn catalog_error(_error: ironclaw_turns::ExternalToolCatalogError) -> AgentLoopHostError {
-    AgentLoopHostError::new(
-        AgentLoopHostErrorKind::Unavailable,
-        "external tool catalog is unavailable",
-    )
+fn catalog_error(error: ironclaw_turns::ExternalToolCatalogError) -> AgentLoopHostError {
+    match error {
+        ironclaw_turns::ExternalToolCatalogError::Unavailable => AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "external tool catalog is unavailable",
+        ),
+        ironclaw_turns::ExternalToolCatalogError::InvalidRegistration { reason } => {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                format!("external tool registration is invalid: {reason}"),
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -464,8 +472,8 @@ mod tests {
     use ironclaw_host_api::{TenantId, ThreadId};
     use ironclaw_loop_support::CapabilityWriteResult;
     use ironclaw_turns::{
-        ExternalToolSpec, InMemoryExternalToolCatalog, RunProfileResolutionRequest,
-        RunProfileResolver, TurnId, TurnScope,
+        ExternalToolCatalogError, ExternalToolSpec, InMemoryExternalToolCatalog,
+        RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnScope,
         run_profile::{CapabilityInputRef, InMemoryRunProfileResolver},
     };
 
@@ -535,6 +543,66 @@ mod tests {
         }
     }
 
+    struct FailingExternalToolCatalog {
+        error: ExternalToolCatalogError,
+    }
+
+    #[async_trait]
+    impl ExternalToolCatalog for FailingExternalToolCatalog {
+        async fn register(
+            &self,
+            _run_id: TurnRunId,
+            _specs: Vec<ExternalToolSpec>,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn specs(
+            &self,
+            _run_id: TurnRunId,
+        ) -> Result<Vec<ExternalToolSpec>, ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn bind_call(
+            &self,
+            _run_id: TurnRunId,
+            _input_ref: String,
+            _call_id: String,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn call_id_for_input_ref(
+            &self,
+            _run_id: TurnRunId,
+            _input_ref: &str,
+        ) -> Result<Option<String>, ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn submit_output(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: String,
+            _output: serde_json::Value,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn take_output(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: &str,
+        ) -> Result<Option<serde_json::Value>, ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn clear(&self, _run_id: TurnRunId) -> Result<(), ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+    }
+
     async fn run_context() -> LoopRunContext {
         let resolved = InMemoryRunProfileResolver::default()
             .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -584,6 +652,22 @@ mod tests {
         )
     }
 
+    async fn wrapped_port_with_catalog(
+        catalog: Arc<dyn ExternalToolCatalog>,
+    ) -> (Arc<dyn LoopCapabilityPort>, LoopRunContext) {
+        let run_context = run_context().await;
+        (
+            wrap_local_dev_external_tools(
+                Arc::new(EmptyInnerPort),
+                run_context.clone(),
+                Arc::new(TestInputResolver),
+                Arc::new(TestResultWriter),
+                catalog,
+            ),
+            run_context,
+        )
+    }
+
     #[tokio::test]
     async fn external_tool_surface_maps_provider_name_to_capability_id() {
         let (port, _run_context) =
@@ -621,5 +705,41 @@ mod tests {
             ids.provider_capability_id.as_str(),
             "external_tool.client_tool"
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_catalog_registration_surfaces_as_invalid_invocation() {
+        let (port, _run_context) =
+            wrapped_port_with_catalog(Arc::new(FailingExternalToolCatalog {
+                error: ExternalToolCatalogError::InvalidRegistration {
+                    reason: "duplicate external tool name",
+                },
+            }))
+            .await;
+
+        let error = port
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect_err("invalid catalog registration should fail visible capabilities");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(error.safe_summary.contains("duplicate external tool name"));
+    }
+
+    #[tokio::test]
+    async fn unavailable_catalog_surfaces_as_unavailable() {
+        let (port, _run_context) =
+            wrapped_port_with_catalog(Arc::new(FailingExternalToolCatalog {
+                error: ExternalToolCatalogError::Unavailable,
+            }))
+            .await;
+
+        let error = port
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect_err("unavailable catalog should fail visible capabilities");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+        assert_eq!(error.safe_summary, "external tool catalog is unavailable");
     }
 }
