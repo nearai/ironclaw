@@ -68,6 +68,8 @@ mod local_dev_authorization;
 mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
+#[cfg(all(feature = "capability-policy", feature = "webui-v2-beta"))]
+mod local_user_directory;
 mod manual_token_flow;
 mod mcp;
 mod mcp_discovery;
@@ -232,6 +234,11 @@ pub use local_runtime_profile::{
     RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions,
     hosted_single_tenant_runtime_policy, local_dev_runtime_policy, local_dev_yolo_runtime_policy,
     local_runtime_build_input, local_runtime_build_input_with_options,
+};
+#[cfg(all(feature = "capability-policy", feature = "webui-v2-beta"))]
+pub use local_user_directory::{
+    LocalUserAdminRouteConfig, LocalUserDirectoryError, LocalUserDirectoryStore, LocalUserRecord,
+    build_local_user_directory_store, hash_user_token, local_user_admin_route_mount,
 };
 pub use nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,

@@ -59,6 +59,7 @@ openai-compat-beta = [
 # (default off, so a plain build keeps the prior `AllowAll` local-dev surface).
 capability-policy = [
     "ironclaw_reborn_composition/capability-policy",
+    "ironclaw_reborn_webui_ingress?/capability-policy",
 ]
 # Enable production PostgreSQL storage composition for `ironclaw-reborn`.
 postgres = [

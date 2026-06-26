@@ -67,7 +67,12 @@ Planned (with #5273 enforcement):
 
 - `IRONCLAW_REBORN_WEBUI_TOKEN` + `IRONCLAW_REBORN_WEBUI_USER_ID` — operator
   env-bearer (operator WebUI config + SSO signing key + runtime owner).
-- `IRONCLAW_REBORN_USER_TOKENS` — JSON `[{token,user_id,role}]` table layered
-  over the operator (#5272), so one process serves several users.
+- Multi-user local auth (#5272) is now REST-created, not env-configured: the
+  operator mints users through the admin `/api/webchat/v2/admin/users` surface
+  (gated by `capability-policy`), and `LocalUserDirectoryAuthenticator` resolves
+  the minted bearer tokens through the durable user directory, layered over the
+  operator credential so one process serves several users. (The former
+  `IRONCLAW_REBORN_USER_TOKENS` JSON env table was removed.) The `/admin/users`
+  route rows are catalogued with the per-user capability surface in #5268/A7.
 - `IRONCLAW_REBORN_CAPABILITY_POLICY` — activate the per-(tenant,user)
   availability resolver (#5267); default off keeps local-dev `AllowAll`.

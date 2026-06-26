@@ -62,7 +62,9 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{any, get},
 };
-use ironclaw_host_api::{UserId, UserRole};
+#[cfg(feature = "capability-policy")]
+use ironclaw_host_api::TenantId;
+use ironclaw_host_api::UserId;
 use ironclaw_reborn_composition::WebuiAuthenticator;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
@@ -296,127 +298,68 @@ impl WebuiAuthenticator for EnvBearerAuthenticator {
 /// avoid spelling out `Arc<dyn WebuiAuthenticator>` at every call site.
 pub type SharedWebuiAuthenticator = Arc<dyn WebuiAuthenticator>;
 
-/// Authenticator that maps several bearer **user-tokens** to distinct
-/// `(UserId, UserRole)` pairs, so one operator can act as several users — e.g.
-/// `director@` (Admin), `Bob` / `Carol` (Member), and a shared `engineering@`
-/// (Member) — by swapping the bearer token. This is the local-dev / standalone
-/// way to exercise per-user capability policy (issue #5272): unlike
-/// [`EnvBearerAuthenticator`] (single token → single operator), the resolved
-/// [`UserRole`] travels with the authentication so the role-gated admin surface
-/// and the per-(tenant, user) dispatch principal both work per token.
+/// Authenticator that resolves a bearer **user-token** to its
+/// `(UserId, UserRole)` through the durable [`LocalUserDirectoryStore`] —
+/// the REST-created local-dev user directory (issue #5272). Users are created
+/// through the `/admin/users` admin REST surface (which mints a token and
+/// stores only its hash), so one operator can act as several users by swapping
+/// the bearer token, and the resolved [`UserRole`] travels with the
+/// authentication so the role-gated admin surface and the per-(tenant, user)
+/// dispatch principal both work per token.
 ///
-/// Deliberately minimal and local-dev-oriented. It does **not** grant
-/// operator WebUI config privileges (`mounts_operator_webui_config_routes` is
-/// `false`); deployment-wide config stays with the separate operator
-/// credential. Production multi-user auth uses `SessionAuthenticator` /
-/// `OidcAuthenticator`.
-#[derive(Debug)]
-pub struct StaticUserTokenAuthenticator {
-    entries: Vec<UserTokenEntry>,
+/// Unlike [`EnvBearerAuthenticator`] (single token → single operator), this
+/// authenticator looks each candidate up by its hash and never grants operator
+/// WebUI config privileges (`mounts_operator_webui_config_routes` is `false`);
+/// deployment-wide config stays with the separate operator credential.
+/// Production multi-user auth uses `SessionAuthenticator` / `OidcAuthenticator`.
+#[cfg(feature = "capability-policy")]
+pub struct LocalUserDirectoryAuthenticator {
+    tenant_id: TenantId,
+    store: Arc<dyn ironclaw_reborn_composition::LocalUserDirectoryStore>,
 }
 
-#[derive(Debug)]
-struct UserTokenEntry {
-    /// `SecretString` so token material is redacted in `Debug` / logs.
-    token: SecretString,
-    user_id: UserId,
-    role: UserRole,
-}
-
-/// One `(token, user_id, role)` row as parsed from the
-/// `IRONCLAW_REBORN_USER_TOKENS` JSON env. `role` defaults to the
-/// least-privilege `Member` when omitted.
-#[derive(Debug, serde::Deserialize)]
-struct UserTokenConfig {
-    token: String,
-    user_id: String,
-    #[serde(default)]
-    role: UserRole,
-}
-
-impl StaticUserTokenAuthenticator {
-    /// Build from explicit `(token, user_id, role)` rows. Rejects an empty
-    /// table and any empty token (a bare `Authorization: Bearer ` would
-    /// otherwise match).
+#[cfg(feature = "capability-policy")]
+impl LocalUserDirectoryAuthenticator {
+    /// Build an authenticator that resolves bearer tokens against `store`
+    /// within `tenant_id`.
     pub fn new(
-        rows: impl IntoIterator<Item = (SecretString, UserId, UserRole)>,
-    ) -> Result<Self, UserTokenConfigError> {
-        let mut entries = Vec::new();
-        for (token, user_id, role) in rows {
-            if token.expose_secret().is_empty() {
-                return Err(UserTokenConfigError::EmptyToken);
-            }
-            entries.push(UserTokenEntry {
-                token,
-                user_id,
-                role,
-            });
-        }
-        if entries.is_empty() {
-            return Err(UserTokenConfigError::Empty);
-        }
-        Ok(Self { entries })
-    }
-
-    /// Parse a JSON array of `{ "token", "user_id", "role" }` objects, e.g.
-    /// `[{"token":"d-tok","user_id":"user:director","role":"admin"}, …]`.
-    /// `role` accepts `owner` / `admin` / `member` and defaults to `member`.
-    pub fn from_json(json: &str) -> Result<Self, UserTokenConfigError> {
-        let configs: Vec<UserTokenConfig> = serde_json::from_str(json)
-            .map_err(|error| UserTokenConfigError::Parse(error.to_string()))?;
-        let mut rows = Vec::with_capacity(configs.len());
-        for config in configs {
-            let user_id = UserId::new(&config.user_id).map_err(|error| {
-                UserTokenConfigError::InvalidUserId {
-                    value: config.user_id.clone(),
-                    reason: error.to_string(),
-                }
-            })?;
-            rows.push((SecretString::from(config.token), user_id, config.role));
-        }
-        Self::new(rows)
+        tenant_id: TenantId,
+        store: Arc<dyn ironclaw_reborn_composition::LocalUserDirectoryStore>,
+    ) -> Self {
+        Self { tenant_id, store }
     }
 }
 
-/// Errors raised when constructing [`StaticUserTokenAuthenticator`].
-#[derive(Debug, Error)]
-pub enum UserTokenConfigError {
-    #[error("user-token table must not be empty")]
-    Empty,
-    #[error("bearer token must not be empty")]
-    EmptyToken,
-    #[error("invalid user-token JSON: {0}")]
-    Parse(String),
-    #[error("user-token entry has invalid user_id `{value}`: {reason}")]
-    InvalidUserId { value: String, reason: String },
-}
-
+#[cfg(feature = "capability-policy")]
 #[async_trait]
-impl WebuiAuthenticator for StaticUserTokenAuthenticator {
+impl WebuiAuthenticator for LocalUserDirectoryAuthenticator {
     async fn authenticate(
         &self,
         candidate: &str,
     ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
-        // Compare against every entry with a constant-time equality and never
-        // short-circuit, so neither the matched token's content nor its
-        // position in the table leaks through response timing.
-        let candidate = candidate.as_bytes();
-        let mut matched: Option<&UserTokenEntry> = None;
-        for entry in &self.entries {
-            if entry
-                .token
-                .expose_secret()
-                .as_bytes()
-                .ct_eq(candidate)
-                .into()
-            {
-                matched = Some(entry);
+        // Hash the candidate token the same way the directory stores it, then
+        // resolve. The raw token is never compared against stored material.
+        let token_hash = ironclaw_reborn_composition::hash_user_token(candidate);
+        match self.store.resolve_token(&self.tenant_id, &token_hash).await {
+            Ok(Some(record)) => Some(
+                ironclaw_reborn_composition::WebuiAuthentication::user(record.user_id)
+                    .with_role(record.role),
+            ),
+            Ok(None) => None,
+            Err(error) => {
+                // A backend read failure is NOT a bad bearer; surface the cause
+                // at the auth boundary rather than letting a transient store
+                // outage masquerade as an authentication rejection (the request
+                // still fails closed — we return `None`). Per
+                // `.claude/rules/error-handling.md`, do not silently drop it.
+                tracing::warn!(
+                    target = "ironclaw::reborn::webui_ingress",
+                    %error,
+                    "local user directory token resolution failed; rejecting request",
+                );
+                None
             }
         }
-        matched.map(|entry| {
-            ironclaw_reborn_composition::WebuiAuthentication::user(entry.user_id.clone())
-                .with_role(entry.role)
-        })
     }
 
     fn mounts_operator_webui_config_routes(&self) -> bool {
@@ -426,13 +369,14 @@ impl WebuiAuthenticator for StaticUserTokenAuthenticator {
 
 /// Tries several [`WebuiAuthenticator`]s in order, returning the first match.
 ///
-/// Used by the standalone `serve` command to layer the multi-user
-/// [`StaticUserTokenAuthenticator`] *over* the single-operator
-/// [`EnvBearerAuthenticator`]: a user-token resolves to its `(UserId, role)`,
-/// and anything else falls through to the operator credential — so the operator
-/// keeps its signing key, runtime-owner pin, and operator WebUI routes while the
-/// extra users are added on top. Operator-route mounting is the OR across
-/// layers (any layer that mounts them wins).
+/// Used by the standalone `serve` command (under the `capability-policy`
+/// feature) to layer the multi-user `LocalUserDirectoryAuthenticator` *over*
+/// the single-operator [`EnvBearerAuthenticator`]: a REST-created user token
+/// resolves to its `(UserId, role)`, and anything else falls through to the
+/// operator credential — so the operator keeps its signing key, runtime-owner
+/// pin, and operator WebUI routes while the extra users are added on top.
+/// Operator-route mounting is the OR across layers (any layer that mounts them
+/// wins).
 pub struct LayeredWebuiAuthenticator {
     layers: Vec<Arc<dyn WebuiAuthenticator>>,
 }
@@ -522,105 +466,221 @@ mod tests {
         assert!(matches!(err, EnvBearerConfigError::EmptyToken));
     }
 
-    const USER_TOKENS_JSON: &str = r#"[
-        {"token":"director-token","user_id":"user:director","role":"admin"},
-        {"token":"bob-token","user_id":"user:bob","role":"member"},
-        {"token":"eng-token","user_id":"user:engineering"}
-    ]"#;
-
     #[tokio::test]
-    async fn static_user_token_authenticator_maps_token_to_user_and_role() {
-        let auth = StaticUserTokenAuthenticator::from_json(USER_TOKENS_JSON).expect("auth");
-
-        let director = auth.authenticate("director-token").await.expect("director");
-        assert_eq!(director.user_id.as_str(), "user:director");
-        assert_eq!(director.role, UserRole::Admin);
-        // A user-token authenticator never grants operator WebUI config.
-        assert!(!director.capabilities.operator_webui_config);
-
-        let bob = auth.authenticate("bob-token").await.expect("bob");
-        assert_eq!(bob.user_id.as_str(), "user:bob");
-        assert_eq!(bob.role, UserRole::Member);
-
-        // `role` omitted → least-privilege Member default.
-        let eng = auth.authenticate("eng-token").await.expect("engineering");
-        assert_eq!(eng.user_id.as_str(), "user:engineering");
-        assert_eq!(eng.role, UserRole::Member);
-    }
-
-    #[tokio::test]
-    async fn static_user_token_authenticator_rejects_unknown_and_empty_tokens() {
-        let auth = StaticUserTokenAuthenticator::from_json(USER_TOKENS_JSON).expect("auth");
-        assert!(auth.authenticate("nope").await.is_none());
-        assert!(auth.authenticate("").await.is_none());
-        // Prefix of a real token must not match.
-        assert!(auth.authenticate("director").await.is_none());
-    }
-
-    #[test]
-    fn static_user_token_authenticator_rejects_empty_table_and_empty_token() {
-        assert!(matches!(
-            StaticUserTokenAuthenticator::from_json("[]").expect_err("empty table"),
-            UserTokenConfigError::Empty
-        ));
-        assert!(matches!(
-            StaticUserTokenAuthenticator::from_json(
-                r#"[{"token":"","user_id":"user:x","role":"member"}]"#
-            )
-            .expect_err("empty token"),
-            UserTokenConfigError::EmptyToken
-        ));
-    }
-
-    #[test]
-    fn static_user_token_authenticator_rejects_invalid_user_id_and_bad_json() {
-        assert!(matches!(
-            StaticUserTokenAuthenticator::from_json(r#"[{"token":"t","user_id":""}]"#)
-                .expect_err("invalid user id"),
-            UserTokenConfigError::InvalidUserId { .. }
-        ));
-        assert!(matches!(
-            StaticUserTokenAuthenticator::from_json("not json").expect_err("bad json"),
-            UserTokenConfigError::Parse(_)
-        ));
-    }
-
-    #[tokio::test]
-    async fn static_user_token_authenticator_does_not_mount_operator_routes() {
-        let auth = StaticUserTokenAuthenticator::from_json(USER_TOKENS_JSON).expect("auth");
-        assert!(!auth.mounts_operator_webui_config_routes());
-    }
-
-    #[tokio::test]
-    async fn layered_authenticator_prefers_user_tokens_then_falls_back_to_operator() {
-        let user_tokens = StaticUserTokenAuthenticator::from_json(USER_TOKENS_JSON).expect("auth");
-        let operator = EnvBearerAuthenticator::new(
-            SecretString::from("operator-token".to_string()),
-            UserId::new("user:operator").expect("user"),
+    async fn layered_authenticator_returns_first_matching_layer() {
+        // Ungated coverage of the generic layering: two env-bearer layers,
+        // each accepting its own token; the layered authenticator returns the
+        // first match and ORs the operator-route capability across layers.
+        let first = EnvBearerAuthenticator::new(
+            SecretString::from("first-token".to_string()),
+            UserId::new("user:first").expect("user"),
         )
-        .expect("operator auth");
-        let layered =
-            LayeredWebuiAuthenticator::new(vec![Arc::new(user_tokens), Arc::new(operator)]);
+        .expect("first auth");
+        let second = EnvBearerAuthenticator::new(
+            SecretString::from("second-token".to_string()),
+            UserId::new("user:second").expect("user"),
+        )
+        .expect("second auth");
+        let layered = LayeredWebuiAuthenticator::new(vec![Arc::new(first), Arc::new(second)]);
 
-        // A user-token resolves to its own user + role (no operator caps).
-        let director = layered
-            .authenticate("director-token")
-            .await
-            .expect("director");
-        assert_eq!(director.user_id.as_str(), "user:director");
-        assert_eq!(director.role, UserRole::Admin);
-        assert!(!director.capabilities.operator_webui_config);
-
-        // The operator token falls through to the env-bearer layer.
-        let operator = layered
-            .authenticate("operator-token")
-            .await
-            .expect("operator");
-        assert_eq!(operator.user_id.as_str(), "user:operator");
-        assert!(operator.capabilities.operator_webui_config);
-
+        let first_match = layered.authenticate("first-token").await.expect("first");
+        assert_eq!(first_match.user_id.as_str(), "user:first");
+        let second_match = layered.authenticate("second-token").await.expect("second");
+        assert_eq!(second_match.user_id.as_str(), "user:second");
         assert!(layered.authenticate("nope").await.is_none());
-        // Operator routes mount because a layer (the env-bearer) provides them.
+        // Both layers mount operator routes, so the OR is true.
         assert!(layered.mounts_operator_webui_config_routes());
+    }
+
+    #[cfg(feature = "capability-policy")]
+    mod local_user_directory {
+        use super::*;
+        use ironclaw_host_api::UserRole;
+        use ironclaw_reborn_composition::{
+            LocalUserDirectoryStore, LocalUserRecord, hash_user_token,
+        };
+
+        /// In-memory fake of the durable user directory keyed by the same hashes
+        /// the production `FilesystemLocalUserDirectoryStore` persists, so the
+        /// authenticator's hash→record lookup is exercised end-to-end.
+        struct FakeUserDirectoryStore {
+            users: std::collections::HashMap<String, LocalUserRecord>,
+            fail: bool,
+        }
+
+        impl FakeUserDirectoryStore {
+            fn with_users(
+                rows: impl IntoIterator<Item = (&'static str, &'static str, UserRole)>,
+            ) -> Self {
+                let mut users = std::collections::HashMap::new();
+                for (token, user_id, role) in rows {
+                    users.insert(
+                        hash_user_token(token),
+                        LocalUserRecord {
+                            user_id: UserId::new(user_id).expect("user id"),
+                            role,
+                        },
+                    );
+                }
+                Self { users, fail: false }
+            }
+
+            fn failing() -> Self {
+                Self {
+                    users: std::collections::HashMap::new(),
+                    fail: true,
+                }
+            }
+        }
+
+        #[async_trait]
+        impl LocalUserDirectoryStore for FakeUserDirectoryStore {
+            async fn create_user(
+                &self,
+                _tenant_id: &TenantId,
+                _user_id: &UserId,
+                _role: UserRole,
+                _token_hash: &str,
+            ) -> Result<(), ironclaw_reborn_composition::LocalUserDirectoryError> {
+                unimplemented!("authenticator never writes")
+            }
+
+            async fn set_role(
+                &self,
+                _tenant_id: &TenantId,
+                _user_id: &UserId,
+                _role: UserRole,
+            ) -> Result<(), ironclaw_reborn_composition::LocalUserDirectoryError> {
+                unimplemented!("authenticator never writes")
+            }
+
+            async fn list_users(
+                &self,
+                _tenant_id: &TenantId,
+            ) -> Result<Vec<LocalUserRecord>, ironclaw_reborn_composition::LocalUserDirectoryError>
+            {
+                unimplemented!("authenticator never lists")
+            }
+
+            async fn delete_user(
+                &self,
+                _tenant_id: &TenantId,
+                _user_id: &UserId,
+            ) -> Result<(), ironclaw_reborn_composition::LocalUserDirectoryError> {
+                unimplemented!("authenticator never deletes")
+            }
+
+            async fn resolve_token(
+                &self,
+                _tenant_id: &TenantId,
+                token_hash: &str,
+            ) -> Result<Option<LocalUserRecord>, ironclaw_reborn_composition::LocalUserDirectoryError>
+            {
+                if self.fail {
+                    return Err(
+                        ironclaw_reborn_composition::LocalUserDirectoryError::Backend(
+                            "synthetic backend failure".to_string(),
+                        ),
+                    );
+                }
+                Ok(self.users.get(token_hash).cloned())
+            }
+        }
+
+        fn directory_authenticator(
+            store: FakeUserDirectoryStore,
+        ) -> LocalUserDirectoryAuthenticator {
+            LocalUserDirectoryAuthenticator::new(
+                TenantId::new("tenant-local").expect("tenant"),
+                Arc::new(store),
+            )
+        }
+
+        #[tokio::test]
+        async fn local_user_directory_authenticator_maps_token_to_user_and_role() {
+            let auth = directory_authenticator(FakeUserDirectoryStore::with_users([
+                ("director-token", "user:director", UserRole::Admin),
+                ("bob-token", "user:bob", UserRole::Member),
+            ]));
+
+            let director = auth.authenticate("director-token").await.expect("director");
+            assert_eq!(director.user_id.as_str(), "user:director");
+            assert_eq!(director.role, UserRole::Admin);
+            // A user-token authenticator never grants operator WebUI config.
+            assert!(!director.capabilities.operator_webui_config);
+
+            // Role propagation: a Member token resolves to Member, not Admin.
+            let bob = auth.authenticate("bob-token").await.expect("bob");
+            assert_eq!(bob.user_id.as_str(), "user:bob");
+            assert_eq!(bob.role, UserRole::Member);
+        }
+
+        #[tokio::test]
+        async fn local_user_directory_authenticator_rejects_unknown_token() {
+            let auth = directory_authenticator(FakeUserDirectoryStore::with_users([(
+                "director-token",
+                "user:director",
+                UserRole::Admin,
+            )]));
+            assert!(auth.authenticate("nope").await.is_none());
+            assert!(auth.authenticate("").await.is_none());
+            // A prefix of a real token hashes differently and must not match.
+            assert!(auth.authenticate("director").await.is_none());
+        }
+
+        #[tokio::test]
+        async fn local_user_directory_authenticator_rejects_on_backend_error() {
+            // A store read failure must fail closed (reject) rather than
+            // authenticate; the cause is logged at the boundary.
+            let auth = directory_authenticator(FakeUserDirectoryStore::failing());
+            assert!(auth.authenticate("director-token").await.is_none());
+        }
+
+        #[tokio::test]
+        async fn local_user_directory_authenticator_does_not_mount_operator_routes() {
+            let auth = directory_authenticator(FakeUserDirectoryStore::with_users([(
+                "director-token",
+                "user:director",
+                UserRole::Admin,
+            )]));
+            assert!(!auth.mounts_operator_webui_config_routes());
+        }
+
+        #[tokio::test]
+        async fn layered_authenticator_prefers_user_directory_then_falls_back_to_operator() {
+            let user_directory = directory_authenticator(FakeUserDirectoryStore::with_users([(
+                "director-token",
+                "user:director",
+                UserRole::Admin,
+            )]));
+            let operator = EnvBearerAuthenticator::new(
+                SecretString::from("operator-token".to_string()),
+                UserId::new("user:operator").expect("user"),
+            )
+            .expect("operator auth");
+            let layered =
+                LayeredWebuiAuthenticator::new(vec![Arc::new(user_directory), Arc::new(operator)]);
+
+            // A user-directory token resolves to its own user + role (no operator caps).
+            let director = layered
+                .authenticate("director-token")
+                .await
+                .expect("director");
+            assert_eq!(director.user_id.as_str(), "user:director");
+            assert_eq!(director.role, UserRole::Admin);
+            assert!(!director.capabilities.operator_webui_config);
+
+            // The operator token falls through to the env-bearer layer.
+            let operator = layered
+                .authenticate("operator-token")
+                .await
+                .expect("operator");
+            assert_eq!(operator.user_id.as_str(), "user:operator");
+            assert!(operator.capabilities.operator_webui_config);
+
+            assert!(layered.authenticate("nope").await.is_none());
+            // Operator routes mount because a layer (the env-bearer) provides them.
+            assert!(layered.mounts_operator_webui_config_routes());
+        }
     }
 }
