@@ -21,6 +21,16 @@ The unified `RootFilesystem` trait already exposes everything needed to split mo
 
 The one place where decomposition alone is *not* correctness-equivalent is the resource governor's **multi-account, multi-dimensional admission**, which is an all-or-nothing check across 2–6 cascade accounts (`cascade()` always emits at least tenant+user — `lib.rs:222`) and across the 8 independent `ResourceTally` dimensions. That requires a true multi-key, multi-field atomic commit. This doc provides it with **one mechanism on both backends** — `put_batch` over the touched account records — rather than forking governor behavior per backend.
 
+**The symmetric half — read-path fan-out (profiling-driven addendum, 2026-06-26).** The blob-CAS contention above is the *write* story. A per-turn latency profile of a hosted single-tenant turn (cross-region Postgres, ~100–200ms/round-trip, pool **not** exhausted, one runner — i.e. *not* a concurrency, lease, or provider-hang problem) shows the write tail is only **half** of the ~16s of per-turn DB orchestration:
+
+| Phase | Time | Plane | Addressed by |
+|---|---|---|---|
+| Post-turn persist tail (~20 serial event/run-state appends) | ~6.2s | **write** | §6.1 `put_batch` + §7/§8 decomposition |
+| Capability-surface assembly (serial per-capability schema read) | ~4.1s | **read** | §6.2 |
+| Context assembly (serial identity-file reads) | ~3.8s | **read** | §6.2 |
+
+The two read buckets (~8s combined) are **larger** than the write tail, and the write-side mechanisms of §6.1/§7/§8 do **not** touch them: they are serial **single-key `get` fan-outs over distinct keys**, not blob-CAS, so neither decomposition nor `put_batch` applies. §6.2 scopes this half. (Inference ~5.2s and queue ~1s are irreducible / out of scope. A complementary, code-free lever for *all three* buckets is co-locating the runner and DB in one region — it cuts per-round-trip **cost**; the primitives here cut round-trip **count**; the two multiply.)
+
 ---
 
 ## 2. Goals / Non-goals
@@ -30,7 +40,7 @@ The one place where decomposition alone is *not* correctness-equivalent is the r
 1. Keep `RootFilesystem` the **one contract**. No caller forks, no per-backend `cfg` in callers — the governor commit is the **same `put_batch` call shape on both backends**.
 2. Fix the governor global-contention bug **without weakening the all-or-nothing limit invariant** on either backend, across **all** tally dimensions simultaneously.
 3. Decompose turn-state, event-log, and (lightly) threads onto per-entity records / the native append plane.
-4. Add the **minimal** native primitive surface — exactly **one** new primitive (`put_batch`) with a correct default fallback on every backend.
+4. Add the **minimal** native primitive surface — exactly **one** new *write-atomicity* primitive (`put_batch`) with a correct default fallback on every backend. (§6.2 separately proposes `get_batch`, an atomicity-free *read-latency* primitive surfaced by profiling after this goal was written; being unconditionally available with no capability gate, it does not relax this write-side minimality.)
 5. Prove dual-backend parity with a CI test that asserts both backends produce identical logical records for every op.
 6. Ship each store **independently**, feature-flagged, reversible, green on **both** backends at every step.
 
@@ -106,7 +116,7 @@ Therefore: **the same Rust code calling the same trait against both backends pro
 
 ## 6. New native primitive
 
-Only **one** new primitive: `put_batch`. This section gives signature, default impl, native Postgres impl, native libSQL impl, semantic-parity argument, capability advertisement, and the `ScopedFilesystem` wrapper.
+The **write-atomicity** surface adds exactly **one** primitive: `put_batch` (§6.1) — signature, default impl, native Postgres impl, native libSQL impl, semantic-parity argument, capability advertisement, and the `ScopedFilesystem` wrapper. §6.2 adds a **read-latency** primitive, `get_batch`, proposed from the 2026-06-26 profiling addendum (§1); it carries no atomicity semantics and is unconditionally available (no capability gate), so it leaves the one-write-primitive argument of §2/§4 intact.
 
 ### 6.0 Shared capability + operation + scoped-wrapper surface
 
@@ -243,6 +253,39 @@ COMMIT;
 **Contract gotcha (sequencing).** On libSQL **before** the §6.1 native override lands (PR-1/PR-2 window), a multi-key `put_batch` returns `Unsupported` because libsql has no `begin` override yet. So PR-1 contract tests for N>1 `put_batch` run **against Postgres and in-memory**, and the single-key (N==1) path runs everywhere; an explicit test asserts N>1 on libSQL returns a typed `Unsupported` (not a panic, not a silent partial write) in that window. The libSQL N>1 path goes green in PR-3 when the native override + probe land. This is stated, not hidden.
 
 **Composite dispatcher:** override `put_batch` to verify **every** `BatchPut.path` resolves to the **same** mount (longest-prefix); else `PathOutsideMount`, nothing written (mirrors `StorageTxn` prefix scoping). Then delegate.
+
+---
+
+### 6.2 `get_batch`: single-round-trip multi-get (read-path latency)
+
+**Status: proposed (profiling-driven, post-freeze).** Addresses the *read* half of §1's profiling addendum. Unlike `put_batch`, this is **latency-only**: no CAS, no atomicity, no idempotency, no `indexed`/`body` dual-truth — so none of the three reasons `adjust_indexed` was dropped (§4) apply. It is a pure read fan-in.
+
+**The two consumers (profiled + source-verified, file:line):**
+
+1. **Capability-surface assembly — ~4.1s.** `CapabilityCatalog::visible_capabilities` loops over every registered capability (`crates/ironclaw_host_runtime/src/surface.rs:158`) and, for each that survives the visibility/policy/trust/authorizer filters, awaits `surface_descriptor()` (`surface.rs:194`). For a capability carrying a schema `$ref`, that resolves `read_json_ref` → `read_bounded` → **`fs.read_file_bounded(path, MAX_HOT_SCHEMA_BYTES).await`** (`capability_catalog.rs:171`), where `path = resolve_under_root(package.root, reference)` (`:127`) — the capability's **own** input-schema asset (a `prompt_doc_ref` adds a second such read, `:153`). N = surfaced capabilities with a schema/prompt ref (≈20–30 in a populated instance), each a **distinct key** (per-extension asset path), read **serially**, awaited one before the next. *(The per-iteration `authorizer.authorize_dispatch_with_trust().await` at `surface.rs:183` is a second serial await per capability; whether it hits storage is a separate trace, but it compounds the same N-serial shape.)*
+
+2. **Identity-file load — part of the ~3.8s context bucket.** `WorkspaceIdentityContextSource::load_identity_candidates` (`src/workspace/reborn_identity_context.rs:131-137`, plus the personal-context loop `:143-150`) iterates `stable_identity_paths()` and awaits `candidate_for_path(path).await?` **per file** — 5 stable files (`SOUL`/`AGENTS`/`IDENTITY`/`TOOLS`/`BOOTSTRAP.md`) +2 when personal-context is allowed (`USER.md`, `ASSISTANT_DIRECTIVES.md`). N = 5–7 distinct keys, serial. *(The other reads in this bucket are **not** the bottleneck: transcript history is one already-batched `load_context_window()` — `crates/ironclaw_loop_support/src/lib.rs:337`; the user profile is one concurrent `read_document()` — `crates/ironclaw_host_runtime/src/user_profile_source.rs:87`.)*
+
+**Verdict: the existing `query` does NOT collapse these.** `query`/`list_dir` filter `indexed` over a contiguous prefix; both buckets read **unrelated keys** (per-extension schema assets; fixed identity filenames) with no shared range. No `Filter` selects exactly this set without degenerating to N point reads — so §4's "decompose + `query`" lever (which fixes the *write* stores) does not apply. This is a **fan-in** problem, not a decompose problem.
+
+**Three levers, in recommended order:**
+
+1. **Cache the static reads (highest leverage, zero trait change).** Capability input-schema/prompt `$ref` files are **immutable extension assets**, and identity files change rarely; re-reading them cross-region on *every* turn is the actual waste. A process/session-scoped cache (schema keyed by `package.root + ref`, invalidated on extension install/upgrade — see `.claude/rules/safety-and-sandbox.md` "Cache Keys Must Be Complete"; identity keyed by workspace version) drops both buckets toward ~0 on steady state. **This is the recommended first move**, independent of the write-side waves.
+2. **Concurrent fan-out for the cold/uncached path (zero trait change).** Replace the serial `for … .await?` with `try_join_all` over the N point reads. Identity (N≤7) is trivially safe on pool≈30; capability cold-start (N≈20–30) bursts N connections — acceptable once, but a pool-pressure smell (the PR #5081 deadlock class, §6.1) that motivates lever 3.
+3. **`get_batch` primitive (clean substrate, optional).** Read-side sibling of `put_batch` — N distinct keys in **one** round-trip / **one** connection:
+   ```rust
+   /// Fetch many keys in one round-trip. One slot per input in request order;
+   /// None for an absent key (absence is data, not an error). Pure read — no
+   /// CAS, no version bump, no cross-key atomicity.
+   async fn get_batch(&self, paths: Vec<VirtualPath>)
+       -> Result<Vec<Option<VersionedEntry>>, FilesystemError>;
+   ```
+   - **Default impl:** `try_join_all(paths.iter().map(|p| self.get(p)))` — correct on **every** backend. **No `Unsupported` tier and no `Capability` gate** (contrast §6.1): a read fan-in needs no transaction, so it is never less available than `get`.
+   - **Native Postgres:** one `SELECT … WHERE path = ANY($1)`; reassemble into request order in Rust.
+   - **Native libSQL:** one `SELECT … WHERE path IN (?1,…)` — a **read**, so it takes no write lock and is free of the §6.1 `BEGIN IMMEDIATE` file-global blast radius.
+   - **`ScopedFilesystem`:** a new `FilesystemOperation::GetBatch` gated on `permissions.read` (mirrors `ReadFile`); the scope prefix still bounds every returned key (§3.6).
+
+**Sequencing.** Levers 1–2 are consumer-local and recover most of the ~8s with no trait-surface change; they should land first and independently of §7/§8. `get_batch` is the durable substrate — worth adding once, but **off the critical path** and explicitly secondary to caching the static schema reads. The write-side "exactly one new primitive" claim (§2 goal 4, §6) stands for the **write-atomicity** surface; `get_batch` is an atomicity-free read-latency primitive, evaluated on its own merits here.
 
 ---
 
