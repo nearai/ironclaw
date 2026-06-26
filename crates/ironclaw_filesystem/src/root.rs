@@ -5,7 +5,16 @@ use crate::backend::{EventRecord, StorageTxn};
 use crate::{
     BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
     FilesystemOperation, Filter, IndexSpec, Page, RecordVersion, SeqNo, VersionedEntry,
+    path_prefix_matches,
 };
+
+/// One entry in an atomic [`RootFilesystem::put_batch`] call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchPut {
+    pub path: VirtualPath,
+    pub entry: Entry,
+    pub cas: CasExpectation,
+}
 
 /// Unified filesystem interface over canonical virtual paths.
 ///
@@ -170,6 +179,46 @@ pub trait RootFilesystem: Send + Sync {
     /// always have a CAS-only path.
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
         unsupported(path, FilesystemOperation::BeginTxn)
+    }
+
+    /// Apply a set of puts atomically: all succeed or none do. Returns one
+    /// [`RecordVersion`] per input in request order. On any CAS failure, fails
+    /// with the first offending path's
+    /// [`FilesystemError::VersionMismatch`] and writes nothing. All paths must
+    /// share the mount that received the call; composite dispatch enforces
+    /// that before delegation.
+    async fn put_batch(&self, puts: Vec<BatchPut>) -> Result<Vec<RecordVersion>, FilesystemError> {
+        if puts.is_empty() {
+            return Err(FilesystemError::Backend {
+                path: VirtualPath::new("/")?,
+                operation: FilesystemOperation::PutBatch,
+                reason: "put_batch requires at least one entry".to_string(),
+            });
+        }
+        if puts.len() == 1 {
+            let Some(BatchPut { path, entry, cas }) = puts.into_iter().next() else {
+                return Err(FilesystemError::Backend {
+                    path: VirtualPath::new("/")?,
+                    operation: FilesystemOperation::PutBatch,
+                    reason: "put_batch requires at least one entry".to_string(),
+                });
+            };
+            return Ok(vec![self.put(&path, entry, cas).await?]);
+        }
+        let prefix = common_put_batch_prefix(&puts)?;
+        let mut txn = self.begin(&prefix).await?;
+        let mut versions = Vec::with_capacity(puts.len());
+        for BatchPut { path, entry, cas } in puts {
+            match txn.put(&path, entry, cas).await {
+                Ok(version) => versions.push(version),
+                Err(error) => {
+                    txn.rollback().await;
+                    return Err(error);
+                }
+            }
+        }
+        txn.commit().await?;
+        Ok(versions)
     }
 
     // ─── Event plane (append/tail) ────────────────────────────────────────
@@ -343,6 +392,34 @@ fn unsupported<T>(
         path: path.clone(),
         operation,
     })
+}
+
+fn common_put_batch_prefix(puts: &[BatchPut]) -> Result<VirtualPath, FilesystemError> {
+    let Some(first) = puts.first() else {
+        return Ok(VirtualPath::new("/")?);
+    };
+    let mut prefix = parent_prefix(first.path.as_str());
+    for put in &puts[1..] {
+        while !path_prefix_matches(&prefix, put.path.as_str()) {
+            let parent = parent_prefix(&prefix);
+            if parent == prefix {
+                break;
+            }
+            prefix = parent;
+        }
+    }
+    Ok(VirtualPath::new(prefix)?)
+}
+
+fn parent_prefix(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == "/" {
+        return "/".to_string();
+    }
+    match trimmed.rfind('/') {
+        Some(0) | None => "/".to_string(),
+        Some(idx) => trimmed[..idx].to_string(),
+    }
 }
 
 #[cfg(test)]

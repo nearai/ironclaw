@@ -5,9 +5,9 @@ use ironclaw_host_api::VirtualPath;
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
-    BackendCapabilities, BackendId, BackendKind, Capability, CasExpectation, ContentKind, DirEntry,
-    Entry, FileStat, FilesystemError, Filter, IndexPolicy, IndexSpec, Page, RecordVersion,
-    RootFilesystem, SeqNo, StorageClass, VersionedEntry, path_prefix_matches,
+    BackendCapabilities, BackendId, BackendKind, BatchPut, Capability, CasExpectation, ContentKind,
+    DirEntry, Entry, FileStat, FilesystemError, Filter, IndexPolicy, IndexSpec, Page,
+    RecordVersion, RootFilesystem, SeqNo, StorageClass, VersionedEntry, path_prefix_matches,
 };
 
 /// Trusted catalog record for one virtual filesystem mount.
@@ -162,6 +162,7 @@ fn validate_mount_capabilities(
         Capability::IndexFts,
         Capability::IndexVector,
         Capability::Events,
+        Capability::BatchPut,
     ];
     let mut shortfalls: Vec<Capability> = NEW_AXES
         .iter()
@@ -263,6 +264,27 @@ impl RootFilesystem for CompositeRootFilesystem {
 
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
         self.matching_mount(path)?.backend.begin(path).await
+    }
+
+    async fn put_batch(&self, puts: Vec<BatchPut>) -> Result<Vec<RecordVersion>, FilesystemError> {
+        let Some(first) = puts.first() else {
+            return Err(FilesystemError::Backend {
+                path: VirtualPath::new("/")?,
+                operation: crate::FilesystemOperation::PutBatch,
+                reason: "put_batch requires at least one entry".to_string(),
+            });
+        };
+        let mount = self.matching_mount(&first.path)?;
+        let mount_root = mount.descriptor.virtual_root.as_str();
+        for put in &puts {
+            let candidate = self.matching_mount(&put.path)?;
+            if candidate.descriptor.virtual_root.as_str() != mount_root {
+                return Err(FilesystemError::PathOutsideMount {
+                    path: put.path.clone(),
+                });
+            }
+        }
+        mount.backend.put_batch(puts).await
     }
 
     // ── Event plane ──

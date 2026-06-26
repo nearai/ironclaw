@@ -123,11 +123,14 @@ pub(super) fn operation_allowed(
         // record-plane reads as `read` and writes as `write` to stay
         // fail-closed. `Append` (event-plane append) is distinct from
         // `AppendFile` (byte-plane append onto a regular file) but both
-        // map to `permissions.write`.
+        // map to `permissions.write`. `PutBatch` (batch record write) is
+        // likewise a record-plane write — it gates on `permissions.write`,
+        // mirroring `ScopedFilesystem::operation_allowed`.
         FilesystemOperation::Query => permissions.read && permissions.list,
         FilesystemOperation::EnsureIndex
         | FilesystemOperation::BeginTxn
-        | FilesystemOperation::Append => permissions.write,
+        | FilesystemOperation::Append
+        | FilesystemOperation::PutBatch => permissions.write,
         FilesystemOperation::Tail | FilesystemOperation::HeadSeq => permissions.read,
     }
 }

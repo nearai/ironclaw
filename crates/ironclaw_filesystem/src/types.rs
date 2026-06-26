@@ -39,6 +39,7 @@ pub enum FilesystemOperation {
     /// replay/live boundary. Distinct from `Tail` (which streams records) so a
     /// head_seq failure surfaces under its own operation in logs/errors.
     HeadSeq,
+    PutBatch,
 }
 
 impl std::fmt::Display for FilesystemOperation {
@@ -59,6 +60,7 @@ impl std::fmt::Display for FilesystemOperation {
             Self::Append => "append",
             Self::Tail => "tail",
             Self::HeadSeq => "head_seq",
+            Self::PutBatch => "put_batch",
         })
     }
 }
@@ -325,6 +327,8 @@ pub enum Capability {
     IndexVector,
     // Event plane (`append`/`tail`).
     Events,
+    // Native hot-path primitives.
+    BatchPut,
 }
 
 impl Capability {
@@ -349,6 +353,7 @@ impl Capability {
             Capability::IndexFts,
             Capability::IndexVector,
             Capability::Events,
+            Capability::BatchPut,
         ]
     }
 }
@@ -467,11 +472,17 @@ impl BackendCapabilities {
             .with(Capability::IndexVector)
     }
 
+    /// Convenience: [`Self::sql_typical_full`] plus native hot-path
+    /// primitives.
+    pub const fn sql_typical_hotpath() -> Self {
+        Self::sql_typical_full().with(Capability::BatchPut)
+    }
+
     /// Convenience: every capability the in-memory reference backend
     /// implements. Includes Events, FTS, and Vector on top of
     /// `sql_typical`.
     pub const fn in_memory_full() -> Self {
-        Self::sql_typical_full()
+        Self::sql_typical_hotpath()
     }
 
     /// Convenience: read + write + append + list + stat + delete only.
@@ -536,5 +547,6 @@ mod tests {
         assert!(capabilities.has(Capability::IndexFts));
         assert!(capabilities.has(Capability::IndexVector));
         assert!(capabilities.has(Capability::Events));
+        assert!(capabilities.has(Capability::BatchPut));
     }
 }

@@ -6,8 +6,9 @@ use ironclaw_host_api::{
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
-    CasExpectation, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, Filter,
-    IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo, VersionedEntry, path_prefix_matches,
+    BatchPut, CasExpectation, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation,
+    Filter, IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
+    path_prefix_matches,
 };
 
 /// Resolver from a per-invocation [`ResourceScope`] to the [`MountView`] that
@@ -39,6 +40,14 @@ pub type MountViewResolver =
 pub struct ScopedFilesystem<F: ?Sized> {
     root: Arc<F>,
     resolver: Arc<MountViewResolver>,
+}
+
+/// Scope-relative entry in a [`ScopedFilesystem::put_batch`] call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedBatchPut {
+    pub path: ScopedPath,
+    pub entry: Entry,
+    pub cas: CasExpectation,
 }
 
 impl<F: ?Sized> std::fmt::Debug for ScopedFilesystem<F> {
@@ -107,6 +116,40 @@ where
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::WriteFile)?;
         self.root.put(&virtual_path, entry, cas).await
+    }
+
+    /// Write multiple entries atomically after resolving and permission
+    /// checking each scoped path.
+    pub async fn put_batch(
+        &self,
+        scope: &ResourceScope,
+        puts: Vec<ScopedBatchPut>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        let view = self.mount_view(scope)?;
+        let mut resolved = Vec::with_capacity(puts.len());
+        let mut mount_target: Option<VirtualPath> = None;
+        for ScopedBatchPut { path, entry, cas } in puts {
+            let (virtual_path, grant) = view.resolve_with_grant(&path)?;
+            if !operation_allowed(&grant.permissions, FilesystemOperation::PutBatch) {
+                return Err(FilesystemError::PermissionDenied {
+                    path,
+                    operation: FilesystemOperation::PutBatch,
+                });
+            }
+            match &mount_target {
+                Some(target) if target.as_str() != grant.target.as_str() => {
+                    return Err(FilesystemError::PathOutsideMount { path: virtual_path });
+                }
+                None => mount_target = Some(grant.target.clone()),
+                _ => {}
+            }
+            resolved.push(BatchPut {
+                path: virtual_path,
+                entry,
+                cas,
+            });
+        }
+        self.root.put_batch(resolved).await
     }
 
     /// Read the entry at `path`, returning `None` if absent.
@@ -437,6 +480,7 @@ fn operation_allowed(permissions: &MountPermissions, operation: FilesystemOperat
         | FilesystemOperation::CreateDirAll
         | FilesystemOperation::EnsureIndex
         | FilesystemOperation::BeginTxn
+        | FilesystemOperation::PutBatch
         | FilesystemOperation::Append => permissions.write,
         FilesystemOperation::ListDir => permissions.list,
         FilesystemOperation::Stat => permissions.read || permissions.list,

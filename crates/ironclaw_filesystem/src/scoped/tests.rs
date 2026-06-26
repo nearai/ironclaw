@@ -480,7 +480,15 @@ async fn begin_denies_when_write_missing() {
 
 #[tokio::test]
 async fn begin_with_write_propagates_backend_unsupported() {
-    let scoped = scoped_in_memory(no_op(false, true, false, false));
+    let scoped = ScopedFilesystem::with_fixed_view(
+        Arc::new(UnsupportedTxnBackend),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").unwrap(),
+            VirtualPath::new("/engine/scoped_test").unwrap(),
+            no_op(false, true, false, false),
+        )])
+        .unwrap(),
+    );
     let err = expect_err(
         scoped
             .begin(&test_scope(), &ScopedPath::new("/workspace").unwrap())
@@ -496,6 +504,137 @@ async fn begin_with_write_propagates_backend_unsupported() {
         ),
         "expected Unsupported (gate let it through), got {err:?}"
     );
+}
+
+#[tokio::test]
+async fn put_batch_requires_write_permission() {
+    let scoped = scoped_in_memory(no_op(true, false, true, false));
+    let err = expect_err(
+        scoped
+            .put_batch(
+                &test_scope(),
+                vec![ScopedBatchPut {
+                    path: ScopedPath::new("/workspace/a.txt").unwrap(),
+                    entry: Entry::bytes(b"denied".to_vec()),
+                    cas: CasExpectation::Absent,
+                }],
+            )
+            .await,
+    );
+    assert!(matches!(
+        err,
+        FilesystemError::PermissionDenied {
+            operation: FilesystemOperation::PutBatch,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn put_batch_resolves_each_scoped_path() {
+    let scoped = scoped_in_memory(MountPermissions::read_write());
+    let versions = scoped
+        .put_batch(
+            &test_scope(),
+            vec![
+                ScopedBatchPut {
+                    path: ScopedPath::new("/workspace/a.txt").unwrap(),
+                    entry: Entry::bytes(b"a".to_vec()),
+                    cas: CasExpectation::Absent,
+                },
+                ScopedBatchPut {
+                    path: ScopedPath::new("/workspace/nested/b.txt").unwrap(),
+                    entry: Entry::bytes(b"b".to_vec()),
+                    cas: CasExpectation::Absent,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(versions.len(), 2);
+
+    let got = scoped
+        .get(
+            &test_scope(),
+            &ScopedPath::new("/workspace/nested/b.txt").unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.entry.body, b"b");
+}
+
+#[tokio::test]
+async fn put_batch_rejects_scoped_paths_from_different_mounts_before_delegating() {
+    let root = Arc::new(InMemoryBackend::new());
+    let scoped = ScopedFilesystem::with_fixed_view(
+        Arc::clone(&root),
+        MountView::new(vec![
+            MountGrant::new(
+                MountAlias::new("/left").unwrap(),
+                VirtualPath::new("/engine/left").unwrap(),
+                MountPermissions::read_write(),
+            ),
+            MountGrant::new(
+                MountAlias::new("/right").unwrap(),
+                VirtualPath::new("/engine/right").unwrap(),
+                MountPermissions::read_write(),
+            ),
+        ])
+        .unwrap(),
+    );
+
+    let err = scoped
+        .put_batch(
+            &test_scope(),
+            vec![
+                ScopedBatchPut {
+                    path: ScopedPath::new("/left/a.txt").unwrap(),
+                    entry: Entry::bytes(b"a".to_vec()),
+                    cas: CasExpectation::Absent,
+                },
+                ScopedBatchPut {
+                    path: ScopedPath::new("/right/b.txt").unwrap(),
+                    entry: Entry::bytes(b"b".to_vec()),
+                    cas: CasExpectation::Absent,
+                },
+            ],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, FilesystemError::PathOutsideMount { .. }));
+    assert!(
+        root.get(&VirtualPath::new("/engine/left/a.txt").unwrap())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        root.get(&VirtualPath::new("/engine/right/b.txt").unwrap())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+struct UnsupportedTxnBackend;
+
+#[async_trait]
+impl RootFilesystem for UnsupportedTxnBackend {
+    async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<crate::DirEntry>, FilesystemError> {
+        Ok(Vec::new())
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<crate::FileStat, FilesystemError> {
+        Ok(crate::FileStat {
+            path: path.clone(),
+            file_type: crate::FileType::Directory,
+            len: 0,
+            modified: None,
+            sensitive: false,
+        })
+    }
 }
 
 #[derive(Default)]

@@ -23,14 +23,15 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
-use tokio::sync::Mutex;
+use std::sync::Arc;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
     BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FileType, FilesystemError,
     FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page,
-    RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
+    RecordVersion, RootFilesystem, SeqNo, VersionedEntry, path_prefix_matches,
 };
 
 #[derive(Clone)]
@@ -40,6 +41,7 @@ struct StoredEntry {
     modified: SystemTime,
 }
 
+#[derive(Clone)]
 struct State {
     // Audit finding F2: keying on `VirtualPath` directly removes the
     // hot-path `VirtualPath::new(...).unwrap_or_else(unreachable!)` that
@@ -54,17 +56,17 @@ struct State {
 
 /// In-memory backend serving the full unified [`RootFilesystem`] surface.
 pub struct InMemoryBackend {
-    state: Mutex<State>,
+    state: Arc<Mutex<State>>,
 }
 
 impl InMemoryBackend {
     pub fn new() -> Self {
         Self {
-            state: Mutex::new(State {
+            state: Arc::new(Mutex::new(State {
                 entries: HashMap::new(),
                 indexes: HashMap::new(),
                 event_logs: HashMap::new(),
-            }),
+            })),
         }
     }
 }
@@ -88,36 +90,7 @@ impl RootFilesystem for InMemoryBackend {
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
         let mut state = self.state.lock().await;
-        // PR #3679 review fix: the SQL backends reject `put(/a)` when `/a/b`
-        // already exists. Mirror the SQL contract so cross-backend tests
-        // can't pass against impossible production state.
-        let prefix = with_trailing_slash(path.as_str());
-        if state
-            .entries
-            .keys()
-            .any(|k| k.as_str().starts_with(&prefix))
-        {
-            return Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::WriteFile,
-                reason: "cannot overwrite a directory".to_string(),
-            });
-        }
-        let current_version = state.entries.get(path).map(|stored| stored.version);
-        check_cas(path, cas, current_version)?;
-
-        let next_version = current_version
-            .map(|v| v.next())
-            .unwrap_or_else(|| RecordVersion::from_backend(1));
-        state.entries.insert(
-            path.clone(),
-            StoredEntry {
-                entry,
-                version: next_version,
-                modified: SystemTime::now(),
-            },
-        );
-        Ok(next_version)
+        put_in_state(&mut state, path, entry, cas)
     }
 
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
@@ -131,34 +104,7 @@ impl RootFilesystem for InMemoryBackend {
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let mut state = self.state.lock().await;
-        // PR #3659 reviewer fix: delete now matches the SQL backends'
-        // subtree semantics. If an exact entry exists, remove it.
-        // Otherwise, if the path has children (i.e. `stat` would call
-        // this a directory), remove every entry under it. Returns
-        // NotFound only when neither an exact entry nor any descendants
-        // exist.
-        if state.entries.remove(path).is_some() {
-            // Also sweep any descendants under the deleted path — a
-            // record-shaped entry at /a/b plus byte entries at /a/b/c
-            // should both be cleared on `delete("/a/b")`.
-            let prefix = with_trailing_slash(path.as_str());
-            state
-                .entries
-                .retain(|key, _| !key.as_str().starts_with(&prefix));
-            return Ok(());
-        }
-        let prefix = with_trailing_slash(path.as_str());
-        let before = state.entries.len();
-        state
-            .entries
-            .retain(|key, _| !key.as_str().starts_with(&prefix));
-        if state.entries.len() == before {
-            return Err(FilesystemError::NotFound {
-                path: path.clone(),
-                operation: FilesystemOperation::Delete,
-            });
-        }
-        Ok(())
+        delete_from_state(&mut state, path)
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
@@ -352,12 +298,13 @@ impl RootFilesystem for InMemoryBackend {
     }
 
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
-        // In-memory backend supports CAS only; multi-key transactions would
-        // require a separate state snapshot. Consumers must use CAS.
-        Err(FilesystemError::Unsupported {
-            path: path.clone(),
-            operation: FilesystemOperation::BeginTxn,
-        })
+        let state = self.state.clone().lock_owned().await;
+        let snapshot = Some(state.clone());
+        Ok(Box::new(InMemoryStorageTxn {
+            state,
+            snapshot,
+            prefix: path.clone(),
+        }))
     }
 
     async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
@@ -465,6 +412,134 @@ impl RootFilesystem for InMemoryBackend {
         );
         Ok(())
     }
+}
+
+struct InMemoryStorageTxn {
+    state: OwnedMutexGuard<State>,
+    snapshot: Option<State>,
+    prefix: VirtualPath,
+}
+
+impl InMemoryStorageTxn {
+    fn check_path(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        if path_prefix_matches(self.prefix.as_str(), path.as_str()) {
+            Ok(())
+        } else {
+            Err(FilesystemError::PathOutsideMount { path: path.clone() })
+        }
+    }
+
+    fn restore_snapshot(&mut self) {
+        if let Some(snapshot) = self.snapshot.take() {
+            *self.state = snapshot;
+        }
+    }
+}
+
+#[async_trait]
+impl StorageTxn for InMemoryStorageTxn {
+    async fn put(
+        &mut self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.check_path(path)?;
+        put_in_state(&mut self.state, path, entry, cas)
+    }
+
+    async fn get(&mut self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.check_path(path)?;
+        Ok(self.state.entries.get(path).map(|stored| VersionedEntry {
+            path: path.clone(),
+            entry: stored.entry.clone(),
+            version: stored.version,
+        }))
+    }
+
+    async fn delete(&mut self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.check_path(path)?;
+        delete_from_state(&mut self.state, path)
+    }
+
+    async fn commit(mut self: Box<Self>) -> Result<(), FilesystemError> {
+        self.snapshot = None;
+        Ok(())
+    }
+
+    async fn rollback(mut self: Box<Self>) {
+        self.restore_snapshot();
+    }
+}
+
+impl Drop for InMemoryStorageTxn {
+    fn drop(&mut self) {
+        self.restore_snapshot();
+    }
+}
+
+fn put_in_state(
+    state: &mut State,
+    path: &VirtualPath,
+    entry: Entry,
+    cas: CasExpectation,
+) -> Result<RecordVersion, FilesystemError> {
+    // PR #3679 review fix: the SQL backends reject `put(/a)` when `/a/b`
+    // already exists. Mirror the SQL contract so cross-backend tests can't
+    // pass against impossible production state.
+    let prefix = with_trailing_slash(path.as_str());
+    if state
+        .entries
+        .keys()
+        .any(|key| key.as_str().starts_with(&prefix))
+    {
+        return Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::WriteFile,
+            reason: "cannot overwrite a directory".to_string(),
+        });
+    }
+    let current_version = state.entries.get(path).map(|stored| stored.version);
+    check_cas(path, cas, current_version)?;
+
+    let next_version = current_version
+        .map(|version| version.next())
+        .unwrap_or_else(|| RecordVersion::from_backend(1));
+    state.entries.insert(
+        path.clone(),
+        StoredEntry {
+            entry,
+            version: next_version,
+            modified: SystemTime::now(),
+        },
+    );
+    Ok(next_version)
+}
+
+fn delete_from_state(state: &mut State, path: &VirtualPath) -> Result<(), FilesystemError> {
+    // PR #3659 reviewer fix: delete now matches the SQL backends' subtree
+    // semantics. If an exact entry exists, remove it. Otherwise, if the path
+    // has children (i.e. `stat` would call this a directory), remove every
+    // entry under it.
+    if state.entries.remove(path).is_some() {
+        let prefix = with_trailing_slash(path.as_str());
+        state
+            .entries
+            .retain(|key, _| !key.as_str().starts_with(&prefix));
+        return Ok(());
+    }
+    let prefix = with_trailing_slash(path.as_str());
+    let before = state.entries.len();
+    state
+        .entries
+        .retain(|key, _| !key.as_str().starts_with(&prefix));
+    if state.entries.len() == before {
+        return Err(FilesystemError::NotFound {
+            path: path.clone(),
+            operation: FilesystemOperation::Delete,
+        });
+    }
+    Ok(())
 }
 
 fn check_cas(
