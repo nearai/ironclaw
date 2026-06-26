@@ -13,6 +13,7 @@ from reborn_webui_harness import (
     reborn_v2_browser,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
     send_and_settle as _send_and_settle,
+    send_message as _send_message,
 )
 
 
@@ -362,5 +363,42 @@ async def test_reborn_legacy_sse_thread_switch_drops_prior_thread_cursor(
         assert parsed.path.endswith(f"/api/webchat/v2/threads/{THREAD_B_ID}/events")
         assert query.get("token") == [REBORN_V2_AUTH_TOKEN]
         assert "after_cursor" not in query
+    finally:
+        await context.close()
+
+
+async def test_reborn_legacy_multiple_tabs_receive_same_response(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Port of legacy multi-tab SSE delivery to Reborn's per-thread event stream."""
+    prompt = "hello multi tab reborn response check"
+    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    async with httpx.AsyncClient(headers=headers) as client:
+        thread_id = await _create_thread(client, reborn_v2_server)
+
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page_a = await context.new_page()
+    page_b = await context.new_page()
+    try:
+        url = f"{reborn_v2_server}/v2/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}"
+        await page_a.goto(url)
+        await page_b.goto(url)
+        await expect(page_a.locator(SEL_V2["chat_composer"])).to_be_visible(
+            timeout=15000
+        )
+        await expect(page_b.locator(SEL_V2["chat_composer"])).to_be_visible(
+            timeout=15000
+        )
+
+        async with httpx.AsyncClient(headers=headers) as client:
+            await _send_message(client, reborn_v2_server, thread_id, prompt)
+
+        for page in (page_a, page_b):
+            await expect(page.locator(SEL_V2["msg_user"]).filter(has_text=prompt)).to_be_visible(
+                timeout=30000
+            )
+            await expect(page.locator(SEL_V2["msg_assistant"]).filter(has_text="Hello")).to_be_visible(
+                timeout=45000
+            )
     finally:
         await context.close()

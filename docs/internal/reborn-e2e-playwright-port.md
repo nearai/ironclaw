@@ -301,6 +301,8 @@ Ported the durable-history and reconnect intent from legacy
   message DOM when no terminal run event occurred.
 - an in-app sidebar switch from one thread to another opens the second thread's
   SSE stream without carrying the first thread's `after_cursor`.
+- two browser tabs open to the same Reborn thread both receive the same
+  terminal run update and reload the v2 timeline to render the assistant reply.
 
 Behavior adjustment:
 
