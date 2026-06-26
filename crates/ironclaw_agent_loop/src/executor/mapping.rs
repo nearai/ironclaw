@@ -1,8 +1,8 @@
 use ironclaw_turns::{
     LoopBlockedKind, LoopFailureKind,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind,
-        CapabilityOutcome, LoopCheckpointKind, LoopGateKind,
+        AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind, BatchPolicyKind,
+        CapabilityFailureKind, CapabilityOutcome, LoopCheckpointKind, LoopGateKind,
     },
 };
 
@@ -103,13 +103,14 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         AgentLoopHostErrorKind::BudgetApprovalRequired => None,
         AgentLoopHostErrorKind::Cancelled => None,
         AgentLoopHostErrorKind::CredentialUnavailable => None,
-        // The model gateway uses InvalidInvocation for provider-emitted tool
-        // calls that fail capability schema validation. That is invalid model
-        // output, not a host transport/protocol outage, so surface it as
-        // model_error. Other InvalidInvocation cases are request/driver bugs
-        // and should keep the diagnostic host-unavailable path.
+        // Provider-emitted tool calls that fail capability schema validation
+        // are invalid model output, not host transport/protocol outages, so
+        // surface them as model_error. Other InvalidInvocation cases are
+        // request/driver bugs and should keep the diagnostic host-unavailable
+        // path.
         AgentLoopHostErrorKind::InvalidInvocation
-            if is_provider_tool_schema_validation_error(&error.safe_summary) =>
+            if error.reason_kind
+                == Some(AgentLoopHostErrorReasonKind::ToolInputSchemaValidation) =>
         {
             Some(ModelErrorClass::ContentFiltered)
         }
@@ -122,15 +123,6 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         | AgentLoopHostErrorKind::CheckpointRejected
         | AgentLoopHostErrorKind::TranscriptWriteFailed => None,
     }
-}
-
-fn is_provider_tool_schema_validation_error(summary: &str) -> bool {
-    let summary = summary.to_ascii_lowercase();
-    summary.contains("schema validation")
-        && (summary.contains("provider")
-            || summary.contains("tool")
-            || summary.contains("capability")
-            || summary.contains("arguments"))
 }
 
 pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecutorError {
@@ -244,7 +236,8 @@ mod tests {
         let error = AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             "provider tool call failed schema validation",
-        );
+        )
+        .with_reason_kind(AgentLoopHostErrorReasonKind::ToolInputSchemaValidation);
 
         assert_eq!(
             model_error_class(&error),

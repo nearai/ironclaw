@@ -217,7 +217,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
         let failure_kind = state
             .recent_failure_kinds
             .iter()
-            .next_back()
+            .last()
             .copied()
             .unwrap_or(LoopFailureKind::DriverBug);
         let checked = CheckpointStage

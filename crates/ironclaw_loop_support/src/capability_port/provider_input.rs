@@ -1,6 +1,6 @@
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputIssue,
-    CapabilityInputIssueCode,
+    AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
+    CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputIssueCode,
 };
 
 pub(super) const MAX_PROVIDER_NORMALIZATION_DEPTH: usize = 32;
@@ -166,7 +166,8 @@ fn validate_provider_arguments_schema(
                 format!(
                     "{label} failed schema validation at instance path {instance_path} against schema path {schema_path}"
                 ),
-            ),
+            )
+            .with_reason_kind(AgentLoopHostErrorReasonKind::ToolInputSchemaValidation),
             detail: Some(CapabilityFailureDetail::InvalidInput { issues }),
         });
     }
@@ -606,4 +607,33 @@ fn provider_coercion_error(label: &'static str, expected: &'static str) -> Agent
         AgentLoopHostErrorKind::InvalidInvocation,
         format!("{label} could not be coerced to schema-declared {expected}"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn schema_validation_error_carries_typed_reason_kind() {
+        let arguments = json!({});
+        let schema = json!({
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+                "path": { "type": "string" }
+            }
+        });
+
+        let error =
+            prepare_provider_arguments_with_detail(&arguments, &schema, "provider arguments")
+                .expect_err("missing required field should fail schema validation")
+                .error;
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert_eq!(
+            error.reason_kind,
+            Some(AgentLoopHostErrorReasonKind::ToolInputSchemaValidation)
+        );
+    }
 }

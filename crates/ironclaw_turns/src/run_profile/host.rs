@@ -672,12 +672,14 @@ impl AgentLoopHostErrorKind {
 #[serde(rename_all = "snake_case")]
 pub enum AgentLoopHostErrorReasonKind {
     ModelCreditsExhausted,
+    ToolInputSchemaValidation,
 }
 
 impl AgentLoopHostErrorReasonKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ModelCreditsExhausted => "model_credits_exhausted",
+            Self::ToolInputSchemaValidation => "tool_input_schema_validation",
         }
     }
 }
