@@ -1,5 +1,7 @@
 use std::io::{IsTerminal, Write};
-use std::path::{Path, PathBuf};
+#[cfg(feature = "webui-v2-beta")]
+use std::path::Path;
+use std::path::PathBuf;
 #[cfg(feature = "webui-v2-beta")]
 use std::sync::Arc;
 use std::time::Duration;
@@ -1307,7 +1309,7 @@ mod tests {
         let message = no_assistant_text_message(&reply);
 
         assert!(
-            message.contains("The run failed because the execution driver stopped unexpectedly."),
+            message.contains("The agent runtime stopped unexpectedly."),
             "{message}"
         );
         assert!(
