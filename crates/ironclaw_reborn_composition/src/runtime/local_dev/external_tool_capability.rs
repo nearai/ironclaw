@@ -435,8 +435,10 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
         for invocation in request.invocations {
             let outcome = self.invoke_capability(invocation).await?;
             let is_suspension = outcome.is_suspension();
+            let is_external_tool_pending =
+                matches!(outcome, CapabilityOutcome::ExternalToolPending { .. });
             outcomes.push(outcome);
-            if request.stop_on_first_suspension && is_suspension {
+            if is_suspension && (request.stop_on_first_suspension || is_external_tool_pending) {
                 stopped_on_suspension = true;
                 break;
             }

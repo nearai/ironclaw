@@ -114,6 +114,14 @@ REBORN_EXTERNAL_TOOL_LOOP_TRIGGER = re.compile(
     r"reborn external tool loop",
     re.IGNORECASE,
 )
+REBORN_EXTERNAL_TOOL_FAILURE_TRIGGER = re.compile(
+    r"reborn external tool failure",
+    re.IGNORECASE,
+)
+REBORN_MIXED_INTERNAL_EXTERNAL_TRIGGER = re.compile(
+    r"reborn mixed internal external tools",
+    re.IGNORECASE,
+)
 
 # Lifecycle canary triggers for write+cleanup flows against real provider APIs.
 GITHUB_ISSUE_LIFECYCLE_TRIGGER = re.compile(
@@ -1533,6 +1541,93 @@ def match_reborn_external_tool_response(messages: list[dict], has_tools: bool) -
     }
 
 
+def match_reborn_external_tool_failure_response(
+    messages: list[dict],
+    has_tools: bool,
+) -> dict | None:
+    """Script an external tool call whose caller-supplied output is an error."""
+    if not _conversation_has_user_trigger(messages, REBORN_EXTERNAL_TOOL_FAILURE_TRIGGER):
+        return None
+
+    results = _find_tool_results(messages)
+    result_by_name = {result["name"]: result["content"] for result in results}
+
+    if "lookup_weather" not in result_by_name:
+        if not has_tools:
+            return {"type": "text", "text": "Reborn external tool failure missing tool definitions."}
+        return {
+            "type": "tool_call",
+            "tool_call": {
+                "tool_name": "lookup_weather",
+                "arguments": {"city": "Boston"},
+            },
+        }
+
+    return {
+        "type": "text",
+        "text": (
+            "Reborn external tool failure observed: "
+            f"lookup_weather={result_by_name['lookup_weather']}"
+        ),
+    }
+
+
+def match_reborn_mixed_internal_external_response(
+    messages: list[dict],
+    has_tools: bool,
+) -> dict | None:
+    """Emit an internal tool and a caller-supplied external tool in one response."""
+    if not _conversation_has_user_trigger(messages, REBORN_MIXED_INTERNAL_EXTERNAL_TRIGGER):
+        return None
+
+    results = _find_tool_results(messages)
+    result_by_name = {result["name"]: result["content"] for result in results}
+
+    if "builtin__echo" not in result_by_name and "lookup_weather" not in result_by_name:
+        if not has_tools:
+            return {"type": "text", "text": "Reborn mixed tool run missing tool definitions."}
+        return {
+            "type": "tool_call",
+            "tool_call": [
+                {
+                    "tool_name": "builtin__echo",
+                    "arguments": {"message": "mixed-internal-echo"},
+                },
+                {
+                    "tool_name": "lookup_weather",
+                    "arguments": {"city": "Boston"},
+                },
+            ],
+        }
+
+    if "lookup_weather" not in result_by_name:
+        return {
+            "type": "tool_call",
+            "tool_call": {
+                "tool_name": "lookup_weather",
+                "arguments": {"city": "Boston"},
+            },
+        }
+
+    if "builtin__echo" not in result_by_name:
+        return {
+            "type": "tool_call",
+            "tool_call": {
+                "tool_name": "builtin__echo",
+                "arguments": {"message": "mixed-internal-echo"},
+            },
+        }
+
+    return {
+        "type": "text",
+        "text": (
+            "Reborn mixed tool run complete: "
+            f"builtin__echo={result_by_name['builtin__echo']}; "
+            f"lookup_weather={result_by_name['lookup_weather']}"
+        ),
+    }
+
+
 def _tool_results_include_denial(tool_results: list[dict]) -> bool:
     return any(DENIAL_PATTERN.search(tr.get("content", "")) for tr in tool_results)
 
@@ -2127,6 +2222,17 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     reborn_external_tool = match_reborn_external_tool_response(messages, has_tools)
     if reborn_external_tool:
         return await _dispatch_special_response(request, cid, stream, reborn_external_tool)
+    reborn_external_tool_failure = match_reborn_external_tool_failure_response(messages, has_tools)
+    if reborn_external_tool_failure:
+        return await _dispatch_special_response(
+            request,
+            cid,
+            stream,
+            reborn_external_tool_failure,
+        )
+    reborn_mixed_tool = match_reborn_mixed_internal_external_response(messages, has_tools)
+    if reborn_mixed_tool:
+        return await _dispatch_special_response(request, cid, stream, reborn_mixed_tool)
     if (
         not tool_results
         and _conversation_uses_codeact(messages)

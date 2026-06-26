@@ -395,6 +395,10 @@ def ironclaw_reborn_openai_compat_binary():
     input_mtime = max(
         _latest_mtime(ROOT / "Cargo.toml"),
         _latest_mtime(ROOT / "Cargo.lock"),
+        _latest_mtime(ROOT / "build.rs"),
+        _latest_mtime(ROOT / "providers.json"),
+        _latest_mtime(ROOT / "src"),
+        _latest_mtime(ROOT / "channels-src"),
         _latest_mtime(ROOT / "crates"),
     )
     if (

@@ -176,6 +176,14 @@ def _function_calls(response: dict) -> list[dict]:
     return [item for item in response.get("output", []) if item.get("type") == "function_call"]
 
 
+def _function_call_outputs(response: dict) -> list[dict]:
+    return [
+        item
+        for item in response.get("output", [])
+        if item.get("type") == "function_call_output"
+    ]
+
+
 def _output_json(response: dict) -> str:
     return json.dumps(response.get("output", []), sort_keys=True)
 
@@ -202,6 +210,19 @@ async def _reset_mock_chat_requests(mock_llm_server: str) -> None:
     async with httpx.AsyncClient(timeout=10) as client:
         response = await client.post(f"{mock_llm_server}/__mock/chat_requests/reset")
     response.raise_for_status()
+
+
+def _lookup_weather_tool() -> dict:
+    return {
+        "type": "function",
+        "name": "lookup_weather",
+        "description": "Look up weather for a city.",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    }
 
 
 async def test_reborn_responses_non_streaming_text_input(reborn_responses_client):
@@ -294,16 +315,7 @@ async def test_reborn_responses_repeated_external_tools_round_trip(
     await _reset_mock_chat_requests(mock_llm_server)
 
     tools = [
-        {
-            "type": "function",
-            "name": "lookup_weather",
-            "description": "Look up weather for a city.",
-            "parameters": {
-                "type": "object",
-                "properties": {"city": {"type": "string"}},
-                "required": ["city"],
-            },
-        },
+        _lookup_weather_tool(),
         {
             "type": "function",
             "name": "lookup_time",
@@ -391,3 +403,115 @@ async def test_reborn_responses_repeated_external_tools_round_trip(
     assert "Run reborn external tool loop for Boston." in forwarded_messages
     for tool_output in outputs.values():
         assert tool_output in forwarded_messages
+
+
+async def test_reborn_responses_external_tool_failure_output_reaches_llm(
+    reborn_responses_client, mock_llm_server
+):
+    await _reset_mock_chat_requests(mock_llm_server)
+
+    response = await create_response(
+        reborn_responses_client,
+        input="Run reborn external tool failure for Boston.",
+        tools=[_lookup_weather_tool()],
+    )
+    calls = _function_calls(response)
+    assert len(calls) == 1, response
+    call = calls[0]
+    assert call["name"] == "lookup_weather"
+    assert json.loads(call["arguments"]) == {"city": "Boston"}
+
+    failure_output = "ERROR: upstream weather service timed out"
+    final = await create_response(
+        reborn_responses_client,
+        previous_response_id=response["id"],
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": call["call_id"],
+                "output": failure_output,
+            }
+        ],
+    )
+
+    assert final["status"] == "completed"
+    rendered_output = _output_json(final)
+    assert "Reborn external tool failure observed" in rendered_output
+    assert failure_output in rendered_output
+
+    chat_requests = await _mock_chat_requests(mock_llm_server)
+    forwarded_messages = json.dumps(
+        [request.get("messages", []) for request in chat_requests],
+        sort_keys=True,
+    )
+    assert failure_output in forwarded_messages
+
+
+async def test_reborn_responses_rejects_wrong_external_tool_call_id(
+    reborn_responses_client,
+):
+    response = await create_response(
+        reborn_responses_client,
+        input="Run reborn external tool failure for Boston.",
+        tools=[_lookup_weather_tool()],
+    )
+    calls = _function_calls(response)
+    assert len(calls) == 1, response
+    assert calls[0]["call_id"] != "call_not_pending"
+
+    rejected = await reborn_responses_client.post(
+        "/v1/responses",
+        json={
+            "model": "mock-model",
+            "previous_response_id": response["id"],
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_not_pending",
+                    "output": "weather:sunny 72F",
+                }
+            ],
+        },
+    )
+
+    assert rejected.status_code == 400
+    body = rejected.json()
+    assert body["error"]["param"] == "input.call_id"
+    assert body["error"]["code"] == "invalid_request"
+
+
+async def test_reborn_responses_mixed_internal_and_external_tools_same_assistant_response(
+    reborn_responses_client,
+    mock_llm_server,
+):
+    await _reset_mock_chat_requests(mock_llm_server)
+
+    response = await create_response(
+        reborn_responses_client,
+        input="Run reborn mixed internal external tools for Boston.",
+        tools=[_lookup_weather_tool()],
+    )
+
+    calls = _function_calls(response)
+    call_names = [call["name"] for call in calls]
+    assert "lookup_weather" in call_names, response
+
+    weather_call = next(call for call in calls if call["name"] == "lookup_weather")
+    assert json.loads(weather_call["arguments"]) == {"city": "Boston"}
+
+    output_items = _function_call_outputs(response)
+    assert not any(
+        item.get("call_id") == weather_call["call_id"] for item in output_items
+    ), response
+
+    chat_requests = await _mock_chat_requests(mock_llm_server)
+    assert len(chat_requests) >= 1
+    initial_tools = _request_tool_names(chat_requests[0])
+    assert "builtin__echo" in initial_tools
+    assert "lookup_weather" in initial_tools
+
+    forwarded_messages = json.dumps(
+        [request.get("messages", []) for request in chat_requests],
+        sort_keys=True,
+    )
+    assert "Run reborn mixed internal external tools for Boston." in forwarded_messages

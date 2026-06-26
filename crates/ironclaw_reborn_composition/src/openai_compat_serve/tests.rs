@@ -3,6 +3,7 @@ use super::*;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
+use chrono::Utc;
 use ironclaw_host_api::{CapabilityId, ProviderToolName, ThreadId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
@@ -18,8 +19,9 @@ use ironclaw_threads::{
     InMemorySessionThreadService, MessageContent, ToolResultSafeSummary,
 };
 use ironclaw_turns::{
-    ExternalToolCatalog, InMemoryExternalToolCatalog, PendingExternalCall, ReplyTargetBindingRef,
-    TurnActor, TurnRunId, TurnScope,
+    AcceptedMessageRef, EventCursor, ExternalToolCatalog, InMemoryExternalToolCatalog,
+    PendingExternalCall, ReplyTargetBindingRef, ResumeTurnResponse, RunProfileId,
+    RunProfileVersion, SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnRunState, TurnScope,
 };
 
 #[tokio::test]
@@ -284,6 +286,187 @@ async fn openai_responses_wait_surfaces_parked_external_tool_call() {
     }
 }
 
+#[tokio::test]
+async fn openai_responses_wait_surfaces_parked_external_tool_call_from_run_state() {
+    let fixture = ResponseReaderFixture::new("blocked-ext-state").await;
+    let run_id = TurnRunId::new();
+    let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+    catalog
+        .record_pending_call(
+            run_id,
+            PendingExternalCall::new("call_state", "lookup", serde_json::json!({"q": "rust"})),
+        )
+        .await
+        .expect("record pending call");
+    let mut reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![])),
+        catalog,
+    )
+    .with_turn_coordinator(Arc::new(StaticTurnCoordinator::new(turn_run_state(
+        &fixture.projection_read,
+        run_id,
+        TurnStatus::BlockedExternalTool,
+    ))));
+    reader.poll_interval = Duration::from_millis(1);
+
+    let projection = reader
+        .wait_for_response_completion(fixture.wait_request(run_id))
+        .await
+        .expect("wait response");
+
+    assert_eq!(projection.response.status, OpenAiResponseStatus::Completed);
+    assert_eq!(projection.response.output.len(), 1);
+    match &projection.response.output[0] {
+        OpenAiResponseOutputItem::FunctionCall { call_id, name, .. } => {
+            assert_eq!(call_id, "call_state");
+            assert_eq!(name, "lookup");
+        }
+        other => panic!("expected a function_call item, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn openai_responses_wait_surfaces_pending_external_call_with_sibling_tool_output() {
+    let fixture = ResponseReaderFixture::new("blocked-ext-sibling-output").await;
+    let run_id = TurnRunId::new();
+    append_run_output_tool_result_for_run(
+        &fixture.threads,
+        &fixture.thread_scope,
+        &fixture.thread_id,
+        &run_id.to_string(),
+    )
+    .await;
+    let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+    catalog
+        .record_pending_call(
+            run_id,
+            PendingExternalCall::new(
+                "call_pending",
+                "lookup_weather",
+                serde_json::json!({"city": "Boston"}),
+            ),
+        )
+        .await
+        .expect("record pending call");
+    let mut reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![])),
+        catalog,
+    );
+    reader.poll_interval = Duration::from_millis(1);
+
+    let projection = reader
+        .wait_for_response_completion(fixture.wait_request(run_id))
+        .await
+        .expect("wait response");
+
+    assert_eq!(projection.response.status, OpenAiResponseStatus::Completed);
+    assert_eq!(projection.response.output.len(), 3);
+    assert!(
+        projection.response.output.iter().any(|item| matches!(
+            item,
+            OpenAiResponseOutputItem::FunctionCallOutput { call_id, .. }
+                if call_id == "call_abc"
+        )),
+        "sibling internal tool output must be preserved"
+    );
+    assert!(
+        projection.response.output.iter().any(|item| matches!(
+            item,
+            OpenAiResponseOutputItem::FunctionCall { call_id, name, .. }
+                if call_id == "call_pending" && name == "lookup_weather"
+        )),
+        "pending external tool call must be surfaced"
+    );
+}
+
+#[tokio::test]
+async fn external_tool_store_rejects_output_for_non_pending_call_id() {
+    let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+    let run_id = TurnRunId::new();
+    catalog
+        .record_pending_call(
+            run_id,
+            PendingExternalCall::new(
+                "call_expected",
+                "lookup_weather",
+                serde_json::json!({"city": "Boston"}),
+            ),
+        )
+        .await
+        .expect("record pending call");
+    let store = OpenAiCompatRuntimeExternalToolStore {
+        catalog: catalog.clone(),
+    };
+
+    let error = store
+        .submit_tool_output(
+            OpenAiCompatTurnRunRef::new(run_id.to_string()).expect("run ref"),
+            "call_wrong".to_string(),
+            serde_json::json!("weather:sunny"),
+        )
+        .await
+        .expect_err("wrong call id must be rejected");
+
+    assert_eq!(error.status_code(), 400);
+    assert_eq!(
+        catalog.pending_calls(run_id).await.expect("pending").len(),
+        1
+    );
+    assert_eq!(
+        catalog
+            .take_output(run_id, "call_wrong")
+            .await
+            .expect("take wrong output"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn external_tool_store_accepts_output_for_pending_call_id() {
+    let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+    let run_id = TurnRunId::new();
+    catalog
+        .record_pending_call(
+            run_id,
+            PendingExternalCall::new(
+                "call_expected",
+                "lookup_weather",
+                serde_json::json!({"city": "Boston"}),
+            ),
+        )
+        .await
+        .expect("record pending call");
+    let store = OpenAiCompatRuntimeExternalToolStore {
+        catalog: catalog.clone(),
+    };
+
+    store
+        .submit_tool_output(
+            OpenAiCompatTurnRunRef::new(run_id.to_string()).expect("run ref"),
+            "call_expected".to_string(),
+            serde_json::json!("weather:sunny"),
+        )
+        .await
+        .expect("pending call id is accepted");
+
+    assert!(
+        catalog
+            .pending_calls(run_id)
+            .await
+            .expect("pending")
+            .is_empty()
+    );
+    assert_eq!(
+        catalog
+            .take_output(run_id, "call_expected")
+            .await
+            .expect("take output"),
+        Some(serde_json::json!("weather:sunny"))
+    );
+}
+
 #[test]
 fn openai_compat_resume_scope_preserves_actor_owner_boundary() {
     let tenant_id = TenantId::new("tenant-resume").expect("tenant");
@@ -487,6 +670,60 @@ impl ProjectionStream for StaticProjectionStream {
     }
 }
 
+struct StaticTurnCoordinator {
+    state: TurnRunState,
+}
+
+impl StaticTurnCoordinator {
+    fn new(state: TurnRunState) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait]
+impl TurnCoordinator for StaticTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test coordinator only supports get_run_state".to_string(),
+        })
+    }
+
+    async fn submit_turn(
+        &self,
+        _request: ironclaw_turns::SubmitTurnRequest,
+    ) -> Result<ironclaw_turns::SubmitTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test coordinator only supports get_run_state".to_string(),
+        })
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test coordinator only supports get_run_state".to_string(),
+        })
+    }
+
+    async fn cancel_run(
+        &self,
+        _request: ironclaw_turns::CancelRunRequest,
+    ) -> Result<ironclaw_turns::CancelRunResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test coordinator only supports get_run_state".to_string(),
+        })
+    }
+
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        if request.run_id == self.state.run_id && request.scope == self.state.scope {
+            Ok(self.state.clone())
+        } else {
+            Err(TurnError::ScopeNotFound)
+        }
+    }
+}
+
 struct SequencedProjectionStream {
     batches: Mutex<VecDeque<Vec<ProductOutboundEnvelope>>>,
     after_cursors: Mutex<Vec<Option<ProjectionCursor>>>,
@@ -552,6 +789,37 @@ fn run_status_envelope(
             .expect("projection state"),
         },
     )
+}
+
+fn turn_run_state(
+    projection_read: &ProjectionReadRequest,
+    run_id: TurnRunId,
+    status: TurnStatus,
+) -> TurnRunState {
+    TurnRunState {
+        scope: projection_read.scope.clone(),
+        actor: Some(projection_read.actor.clone()),
+        turn_id: TurnId::new(),
+        run_id,
+        status,
+        accepted_message_ref: AcceptedMessageRef::new("message:openai-compat-test")
+            .expect("accepted ref"),
+        source_binding_ref: SourceBindingRef::new("source:openai-compat-test").expect("source ref"),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply:openai-compat-test")
+            .expect("reply target"),
+        resolved_run_profile_id: RunProfileId::default_profile(),
+        resolved_run_profile_version: RunProfileVersion::new(1),
+        resolved_model_route: None,
+        received_at: Utc::now(),
+        checkpoint_id: None,
+        gate_ref: None,
+        blocked_activity_id: None,
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: EventCursor::default(),
+        product_context: None,
+        resume_disposition: None,
+    }
 }
 
 const RUN_ID: &str = "turn-run-1";
@@ -633,11 +901,20 @@ async fn append_run_output_tool_result(
     scope: &ThreadScope,
     thread_id: &ThreadId,
 ) {
+    append_run_output_tool_result_for_run(service, scope, thread_id, RUN_ID).await;
+}
+
+async fn append_run_output_tool_result_for_run(
+    service: &InMemorySessionThreadService,
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    run_id: &str,
+) {
     service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
             scope: scope.clone(),
             thread_id: thread_id.clone(),
-            turn_run_id: RUN_ID.to_string(),
+            turn_run_id: run_id.to_string(),
             result_ref: "result:tool-1".to_string(),
             safe_summary: ToolResultSafeSummary::new("search failed").expect("summary"),
             provider_call: Some(run_output_provider_call()),
