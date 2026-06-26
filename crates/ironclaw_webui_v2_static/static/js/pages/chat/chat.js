@@ -90,8 +90,20 @@ export function Chat({
   const approvalSubmitWarning = pendingGate
     ? "Resolve the approval request before sending another message."
     : "";
+  const activeRunBlocksSubmit = Boolean(
+    activeThreadId &&
+      activeRun?.runId &&
+      activeRun.threadId === activeThreadId &&
+      !pendingGate &&
+      (!activeRun.status ||
+        activeRun.status === "queued" ||
+        activeRun.status === "running")
+  );
   const composerSendDisabled =
-    Boolean(pendingGate) || (isProcessing && !pendingGate) || cooldownSeconds > 0;
+    Boolean(pendingGate) ||
+    (isProcessing && !pendingGate) ||
+    activeRunBlocksSubmit ||
+    cooldownSeconds > 0;
   const composerSendBlockedRef = React.useRef(composerSendDisabled);
   composerSendBlockedRef.current = composerSendDisabled;
   const composerStatusText =

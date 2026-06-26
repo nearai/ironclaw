@@ -60,8 +60,8 @@ use crate::slack_setup::{
 };
 
 use super::{
-    SlackHostBetaActorUserResolver, SlackHostBetaBuildError, SlackHostBetaConfig,
-    SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
+    SlackConversationPorts, SlackHostBetaActorUserResolver, SlackHostBetaBuildError,
+    SlackHostBetaConfig, SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
     SlackHostBetaRuntimeParts, build_slack_installation_record_with_resolvers,
     build_triggered_run_delivery_hook_from_parts, slack_bot_token_handle,
     slack_protocol_egress_from_parts,
@@ -72,6 +72,7 @@ pub(super) async fn build_runtime_mounts(
     config: SlackHostBetaRuntimeConfig,
 ) -> Result<SlackHostBetaMounts, SlackHostBetaBuildError> {
     let parts = Arc::new(SlackHostBetaRuntimeParts::from_runtime(runtime)?);
+    let conversation_ports = parts.conversation_ports().await?;
     let state = Arc::new(FilesystemSlackHostState::new(
         Arc::clone(&parts.local_runtime.host_state_filesystem),
         config.tenant_id.clone(),
@@ -131,6 +132,7 @@ pub(super) async fn build_runtime_mounts(
     }
     let resolver = DynamicSlackInstallationResolver::new(
         Arc::clone(&parts),
+        conversation_ports,
         Arc::clone(&setup_service),
         state.clone(),
         pairing.clone(),
@@ -579,6 +581,7 @@ impl PostSubmitDeliveryHook for DynamicSlackTriggeredRunDeliveryHook {
 #[derive(Clone)]
 struct DynamicSlackInstallationResolver {
     parts: Arc<SlackHostBetaRuntimeParts>,
+    conversation_ports: SlackConversationPorts,
     setup_service: Arc<SlackSetupService>,
     state: Arc<dyn RebornUserIdentityLookup>,
     pairing: SlackPersonalBindingPairingService,
@@ -589,6 +592,7 @@ struct DynamicSlackInstallationResolver {
 impl DynamicSlackInstallationResolver {
     fn new(
         parts: Arc<SlackHostBetaRuntimeParts>,
+        conversation_ports: SlackConversationPorts,
         setup_service: Arc<SlackSetupService>,
         state: Arc<dyn RebornUserIdentityLookup>,
         pairing: SlackPersonalBindingPairingService,
@@ -596,6 +600,7 @@ impl DynamicSlackInstallationResolver {
     ) -> Self {
         Self {
             parts,
+            conversation_ports,
             setup_service,
             state,
             pairing,
@@ -686,6 +691,7 @@ impl DynamicSlackInstallationResolver {
             config,
             actor_user_resolver,
             Some(subject_route_resolver),
+            self.conversation_ports.clone(),
         )
         .map_err(map_build_error_to_ingress_not_found(
             "build Slack installation resolver",

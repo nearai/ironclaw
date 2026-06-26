@@ -215,6 +215,46 @@ test("Chat refuses composer sends while a run is processing", async () => {
   assert.equal(sendCalls, 0);
 });
 
+test("Chat refuses composer sends while an active run is still running", async () => {
+  let sendCalls = 0;
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: false,
+      pendingGate: null,
+      channelConnectAction: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => {
+        sendCalls += 1;
+        return {};
+      },
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+      dismissChannelConnectAction: () => {},
+    },
+  });
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const props = componentProps(chatInput, components.ChatInput);
+  const response = await props.onSend("draft while run is still active");
+
+  assert.equal(props.disabled, false);
+  assert.equal(props.sendDisabled, true);
+  assert.equal(response, null);
+  assert.equal(sendCalls, 0);
+});
+
 test("Chat cancel button ignores active runs from another thread", () => {
   const { tree, components } = renderChat({
     hookState: {
