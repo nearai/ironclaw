@@ -2575,6 +2575,26 @@ Issue found and fixed:
   `aria-modal="true"`, and an `aria-labelledby` link to its title so tests and
   assistive tooling can address it as a named dialog.
 
+### Step 86: Legacy Configure Setup URL Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the credentials-link intent from legacy `test_auth_card_with_setup_url`
+to Reborn's v2 Extensions configure modal:
+
+- opened the real Reborn Extensions configure modal with setup metadata that
+  includes an onboarding `setup_url`;
+- asserted an HTTPS setup URL renders as a `Get credentials` link with
+  `_blank` and `noopener noreferrer`;
+- asserted a non-HTTPS setup URL does not render a clickable credentials link
+  and does not leave a `javascript:` href in the modal.
+
+Issue found and fixed:
+
+- `ConfigureModal` wrote onboarding `setup_url` values directly into `href`.
+  The modal now parses setup URLs and renders only HTTPS links, matching the
+  stricter auth/OAuth URL handling elsewhere in the Reborn Extensions UI.
+
 ## Open Migration Buckets
 
 Not yet ported:

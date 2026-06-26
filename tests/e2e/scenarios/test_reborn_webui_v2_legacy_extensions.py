@@ -1637,6 +1637,66 @@ async def test_reborn_legacy_configure_modal_renders_field_variants(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_configure_modal_setup_url_requires_https(
+    reborn_v2_server, reborn_v2_browser
+):
+    async def open_with_setup_url(setup_url: str):
+        harness = await _open_mocked_extensions_page(
+            reborn_v2_server,
+            reborn_v2_browser,
+            installed=[CONFIG_TOOL],
+            setup_payloads={
+                "config-tool": {
+                    "name": "config-tool",
+                    "kind": "wasm_tool",
+                    "secrets": [
+                        {
+                            "name": "API_TOKEN",
+                            "prompt": "API token",
+                            "provided": False,
+                            "optional": False,
+                            "auto_generate": False,
+                        }
+                    ],
+                    "fields": [],
+                    "onboarding": {
+                        "credential_instructions": "Create a token before continuing.",
+                        "setup_url": setup_url,
+                    },
+                }
+            },
+            tab="installed",
+        )
+        page = harness["page"]
+        card = _card_by_title(page, "Config Tool")
+        await expect(card).to_be_visible(timeout=5000)
+        await card.get_by_role("button", name="Configure").click()
+        modal = page.get_by_role("dialog", name="Configure Config Tool")
+        await expect(modal).to_be_visible(timeout=5000)
+        return harness, modal
+
+    https_harness, https_modal = await open_with_setup_url(
+        "https://platform.example.test/api-keys"
+    )
+    try:
+        link = https_modal.get_by_role("link", name="Get credentials")
+        await expect(link).to_be_visible()
+        await expect(link).to_have_attribute(
+            "href", "https://platform.example.test/api-keys"
+        )
+        await expect(link).to_have_attribute("target", "_blank")
+        await expect(link).to_have_attribute("rel", "noopener noreferrer")
+    finally:
+        await https_harness["context"].close()
+
+    bad_harness, bad_modal = await open_with_setup_url("javascript:alert(1)")
+    try:
+        await expect(bad_modal.get_by_role("link", name="Get credentials")).to_have_count(0)
+        await expect(bad_modal.locator('a[href^="javascript:"]')).to_have_count(0)
+    finally:
+        await bad_harness["context"].close()
+
+
 async def test_reborn_legacy_configure_modal_blank_existing_secret_is_not_submitted(
     reborn_v2_server, reborn_v2_browser
 ):

@@ -47,6 +47,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const canSave = manualSecrets.length > 0 || fields.length > 0;
   const isActive = extensionIsActive(extension);
   const canActivate = setupReadyForActivation({ extension, secrets, fields });
+  const setupUrl = httpsUrl(onboarding?.setup_url);
 
   if (isLoading) {
     return html`
@@ -92,10 +93,10 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
           ${onboarding.credential_instructions}
         </p>
       `}
-      ${onboarding?.setup_url &&
+      ${setupUrl &&
       html`
         <a
-          href=${onboarding.setup_url}
+          href=${setupUrl}
           target="_blank"
           rel="noopener noreferrer"
           className="mb-4 inline-flex items-center gap-1.5 text-sm text-signal hover:underline"
@@ -259,6 +260,16 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       </div>
     <//>
   `;
+}
+
+function httpsUrl(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(String(value));
+    return url.protocol === "https:" ? url.href : null;
+  } catch {
+    return null;
+  }
 }
 
 function ModalShell({ onClose, title, children }) {
