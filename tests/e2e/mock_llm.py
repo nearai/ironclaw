@@ -19,8 +19,21 @@ DENIAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+UNAVAILABLE_CAPABILITY_POLICY_TEXT = "not listed under Capabilities"
+UNAVAILABLE_CAPABILITY_RESPONSE = (
+    "That capability is unavailable or disabled for this request, so I "
+    "will not route it through another tool."
+)
+
 CANNED_RESPONSES = [
     (re.compile(r"empty routine response", re.IGNORECASE), ""),
+    (
+        re.compile(
+            r"issue 5197 disabled echo workaround|\buse\s+builtin\.echo\s+to\s+print\b",
+            re.IGNORECASE,
+        ),
+        UNAVAILABLE_CAPABILITY_RESPONSE,
+    ),
     # Reborn attachment e2e: the inbound pipeline extracts a document's text
     # and folds it into the model-visible <attachments> block. A unique marker
     # in the uploaded file proves the extracted text reached the prompt.
@@ -110,11 +123,6 @@ TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
 EMPTY_REPLY_TRIGGER = re.compile(r"issue 1780 empty reply", re.IGNORECASE)
 LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
 MULTI_STEP_TRIGGER = re.compile(r"multi step echo then time", re.IGNORECASE)
-REQUESTED_UNAVAILABLE_TOOL_TRIGGER = re.compile(
-    r"issue 5197 disabled echo workaround|\buse\s+builtin\.echo\s+to\s+print\b",
-    re.IGNORECASE,
-)
-UNAVAILABLE_CAPABILITY_POLICY_TEXT = "not listed under Capabilities"
 
 # Lifecycle canary triggers for write+cleanup flows against real provider APIs.
 GITHUB_ISSUE_LIFECYCLE_TRIGGER = re.compile(
@@ -1128,14 +1136,6 @@ def match_response(messages: list[dict]) -> str:
     resumed = _resumed_action_summary(messages)
     if resumed:
         return resumed
-    if (
-        REQUESTED_UNAVAILABLE_TOOL_TRIGGER.search(content)
-        and _conversation_has_unavailable_capability_policy(messages)
-    ):
-        return (
-            "That capability is unavailable or disabled for this request, so I "
-            "will not route it through another tool."
-        )
     denial_text = f"{content}\n{payload_text}"
     if DENIAL_PATTERN.search(denial_text):
         action_match = re.search(
@@ -1254,6 +1254,10 @@ def _explicit_canned_response(content: str) -> str | None:
     return None
 
 
+def _matches_unavailable_capability_response(content: str) -> bool:
+    return _explicit_canned_response(content) == UNAVAILABLE_CAPABILITY_RESPONSE
+
+
 def _normalize_tool_calls(tool_name: str, value: object) -> list[dict]:
     """Normalize the result of a TOOL_CALL_PATTERNS args function.
 
@@ -1330,7 +1334,7 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
         return None
     lower = content.lower()
     recent_tool_results = _find_tool_results(messages)
-    if REQUESTED_UNAVAILABLE_TOOL_TRIGGER.search(content):
+    if _matches_unavailable_capability_response(content):
         if _conversation_has_unavailable_capability_policy(messages):
             return None
         return [{
