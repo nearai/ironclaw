@@ -2215,6 +2215,27 @@ Issue fixed:
   through the normal send path. Failed rows keep their retry content and staged
   attachment payload so text and attachment sends can be retried consistently.
 
+### Step 70: Legacy Failed Attachment Retry Port
+
+Extended `test_reborn_webui_v2_legacy_pending_messages.py` to prove the retry
+fix covers attachment payloads, not just typed text.
+
+Ported the attachment side of legacy failed-send retry behavior:
+
+- staged a text attachment in the Reborn composer;
+- forced the first send to fail with a service-unavailable response;
+- asserted the failed optimistic row still renders the staged attachment card
+  and retry action;
+- clicked `Retry message`;
+- asserted the second Reborn send request preserves the same message content
+  and `{ filename, mime_type, data_base64 }` attachment payload.
+
+Behavior result:
+
+- no additional Reborn product change was required after Step 69. The retry
+  metadata added there already preserved staged attachments through the normal
+  send path, and this test locks that browser contract down.
+
 ## Open Migration Buckets
 
 Not yet ported:

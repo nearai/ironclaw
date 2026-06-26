@@ -585,3 +585,71 @@ async def test_reborn_legacy_failed_send_retry_resubmits_message(
         ]
     finally:
         await harness["context"].close()
+
+
+async def test_reborn_legacy_failed_attachment_send_retry_preserves_file_payload(
+    reborn_v2_server, reborn_v2_browser
+):
+    async def handle_fail_then_success(route, _payload, fulfill_json):
+        if len(harness["send_requests"]) == 1:
+            await fulfill_json(
+                route,
+                {"error": "service_unavailable", "kind": "service_unavailable"},
+                status=503,
+            )
+            return
+        await fulfill_json(route, _submitted_response(), status=202)
+
+    harness = await _open_mocked_pending_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        send_handler=handle_fail_then_success,
+    )
+    try:
+        page = harness["page"]
+        await page.set_input_files(
+            "input[type=file][multiple]",
+            files=[
+                {
+                    "name": "retry-note.txt",
+                    "mimeType": "text/plain",
+                    "buffer": b"Retry attachment body.",
+                }
+            ],
+        )
+        await expect(page.get_by_text("retry-note.txt")).to_be_visible(timeout=5000)
+
+        composer = page.locator(SEL_V2["chat_composer"])
+        await composer.fill("retry failed attachment send test")
+        await composer.press("Enter")
+
+        failed = page.locator(SEL_V2["msg_user"]).filter(
+            has_text="retry failed attachment send test"
+        )
+        await expect(failed).to_have_count(1, timeout=5000)
+        await expect(failed).to_contain_text("retry-note.txt")
+        await expect(failed).to_contain_text("Service unavailable")
+
+        first_payload = harness["send_requests"][0]
+        assert first_payload["content"] == "retry failed attachment send test"
+        assert first_payload["attachments"] == [
+            {
+                "mime_type": "text/plain",
+                "filename": "retry-note.txt",
+                "data_base64": "UmV0cnkgYXR0YWNobWVudCBib2R5Lg==",
+            }
+        ]
+
+        await failed.get_by_label("Retry message").click()
+        await _wait_for_request_count(harness["send_requests"], 1)
+
+        await expect(failed).to_have_count(1, timeout=5000)
+        await expect(failed).to_contain_text("retry-note.txt")
+        await expect(failed).not_to_contain_text("Service unavailable")
+        await expect(failed.get_by_label("Retry message")).to_have_count(0)
+        retry_payload = harness["send_requests"][1]
+        assert retry_payload["content"] == first_payload["content"]
+        assert retry_payload["attachments"] == first_payload["attachments"]
+        assert retry_payload["client_action_id"] != first_payload["client_action_id"]
+    finally:
+        await harness["context"].close()
