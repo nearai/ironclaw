@@ -202,6 +202,7 @@ async fn running_counter_decrements_on_block_and_resets_on_resume() {
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: block_state_ref(),
+            blocked_activity_id: None,
             reason: BlockedReason::Approval {
                 gate_ref: gate.clone(),
             },

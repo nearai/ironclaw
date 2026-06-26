@@ -1,6 +1,9 @@
 use ironclaw_turns::{
     LoopExit,
-    run_profile::{AgentLoopDriverHost, LoopDriverNoteKind, LoopProgressEvent, ParentLoopOutput},
+    run_profile::{
+        AgentLoopDriverHost, CapabilityCallCandidate, LoopDriverNoteKind, LoopProgressEvent,
+        ParentLoopOutput, VisibleCapabilitySurface,
+    },
 };
 use tracing::debug;
 
@@ -304,17 +307,9 @@ impl DefaultExecutorPipeline {
                     let resume = *resume;
                     pending_input_ack = resume.pending_input_ack;
                     pending_input_ack.ack(host).await?;
-                    let completed = self
-                        .capabilities
-                        .process(
-                            ctx,
-                            CapabilityInput {
-                                state: resume.state,
-                                surface: resume.surface,
-                                calls: vec![resume.call],
-                            },
-                        )
-                        .await?;
+                    let capability_input =
+                        resume_capability_input(resume.state, resume.surface, vec![resume.call])?;
+                    let completed = self.capabilities.process(ctx, capability_input).await?;
 
                     let completed = self.post_capability.process(ctx, completed).await?;
 
@@ -458,4 +453,21 @@ impl DefaultExecutorPipeline {
             }
         }
     }
+}
+
+pub(super) fn resume_capability_input(
+    state: LoopExecutionState,
+    surface: VisibleCapabilitySurface,
+    calls: Vec<CapabilityCallCandidate>,
+) -> Result<CapabilityInput, AgentLoopExecutorError> {
+    if calls.len() != 1 {
+        return Err(AgentLoopExecutorError::PlannerContract {
+            detail: "resume dispatch must contain exactly one capability call",
+        });
+    }
+    Ok(CapabilityInput {
+        state,
+        surface,
+        calls,
+    })
 }

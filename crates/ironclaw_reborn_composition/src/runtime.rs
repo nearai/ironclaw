@@ -9184,6 +9184,7 @@ command = "test"
                 lease_token,
                 checkpoint_id: TurnCheckpointId::new(),
                 state_ref: LoopCheckpointStateRef::new("checkpoint:audit").unwrap(),
+                blocked_activity_id: None,
                 reason: BlockedReason::Approval {
                     gate_ref: gate_ref.clone(),
                 },

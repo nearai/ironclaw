@@ -236,6 +236,7 @@ async fn submit_and_block_auth_run(
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: LoopCheckpointStateRef::new("checkpoint:runtime-auth-read-model")
                 .expect("checkpoint ref"),
+            blocked_activity_id: None,
             reason: BlockedReason::Auth {
                 gate_ref: gate_ref.clone(),
                 credential_requirements: Vec::new(),

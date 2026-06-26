@@ -57,6 +57,8 @@ pub struct BlockRunRequest {
     pub lease_token: TurnLeaseToken,
     pub checkpoint_id: TurnCheckpointId,
     pub state_ref: LoopCheckpointStateRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_activity_id: Option<CapabilityActivityId>,
     pub reason: BlockedReason,
 }
 

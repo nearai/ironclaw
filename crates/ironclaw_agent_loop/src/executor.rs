@@ -22,6 +22,8 @@ mod turn_stop;
 
 use assistant_reply::{AssistantReplyInput, AssistantReplyStage};
 use budget::{BudgetInput, BudgetStage, BudgetStep};
+#[cfg(test)]
+use canonical::resume_capability_input;
 use capabilities::{CapabilityInput, CapabilityStage};
 use capability_helpers::{
     CapabilitySurfaceIndex, append_capability_error_ref, append_capability_result_ref,
