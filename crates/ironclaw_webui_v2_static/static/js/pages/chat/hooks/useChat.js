@@ -392,10 +392,15 @@ export function useChat(threadId) {
   // hook can route to `/chat/<id>` after the first send.
   const send = React.useCallback(
     async (content, opts = {}) => {
-      const { threadId: targetThreadId, attachments: stagedAttachments = [] } =
-        opts;
+      const {
+        threadId: targetThreadId,
+        attachments: stagedAttachments = [],
+        displayContent,
+      } = opts;
       const wireAttachments = stagedAttachments.map(toWireAttachment);
       const renderAttachments = stagedAttachments.map(toRenderAttachment);
+      const renderContent =
+        typeof displayContent === "string" ? displayContent : content;
 
       if (pendingGate || pendingGateRef.current) {
         throw approvalGatePendingSendError();
@@ -441,7 +446,7 @@ export function useChat(threadId) {
       const pendingRecord = {
         id: `pending-${pendingSeqRef.current++}`,
         role: "user",
-        content,
+        content: renderContent,
         attachments: renderAttachments,
         timestamp: new Date().toISOString(),
         isOptimistic: true,
@@ -449,7 +454,7 @@ export function useChat(threadId) {
       const pendingRenderMessage = {
         id: pendingRecord.id,
         role: "user",
-        content,
+        content: renderContent,
         attachments: renderAttachments,
         timestamp: pendingRecord.timestamp,
         isOptimistic: true,

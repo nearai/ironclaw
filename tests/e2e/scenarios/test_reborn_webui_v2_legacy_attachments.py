@@ -216,6 +216,56 @@ async def test_reborn_legacy_unextractable_attachment_uses_placeholder(
     assert "failed to extract text" not in serialized.lower(), serialized[:1200]
 
 
+async def test_reborn_legacy_files_only_attachments_reload_from_history(
+    reborn_v2_page,
+):
+    """Port of legacy files-only attachment send and history re-render coverage."""
+    page = reborn_v2_page
+    await page.set_input_files(
+        "input[type=file][multiple]",
+        files=[
+            {
+                "name": "files-only.pdf",
+                "mimeType": "application/pdf",
+                "buffer": HELLO_PDF.read_bytes(),
+            },
+            {
+                "name": "files-only-notes.txt",
+                "mimeType": "text/plain",
+                "buffer": b"Files-only attachment note.",
+            },
+        ],
+    )
+
+    await expect(page.get_by_text("files-only.pdf")).to_be_visible(timeout=15000)
+    await expect(page.get_by_text("files-only-notes.txt")).to_be_visible(timeout=15000)
+    await page.get_by_label("Send").click()
+
+    user_message = page.locator(SEL_V2["msg_user"]).filter(
+        has_text="files-only-notes.txt"
+    ).last
+    await expect(user_message).to_contain_text("files-only.pdf", timeout=15000)
+    await expect(user_message).to_contain_text("files-only-notes.txt", timeout=15000)
+    await expect(user_message).not_to_contain_text("(files attached)")
+    await expect(user_message).not_to_contain_text("<attachments>")
+    await expect(page.locator(SEL_V2["msg_assistant"]).last).to_be_visible(
+        timeout=45000
+    )
+
+    await page.reload(wait_until="domcontentloaded")
+    reloaded_user_message = page.locator(SEL_V2["msg_user"]).filter(
+        has_text="files-only-notes.txt"
+    ).last
+    await expect(reloaded_user_message).to_contain_text(
+        "files-only.pdf", timeout=15000
+    )
+    await expect(reloaded_user_message).to_contain_text(
+        "files-only-notes.txt", timeout=15000
+    )
+    await expect(reloaded_user_message).not_to_contain_text("(files attached)")
+    await expect(reloaded_user_message).not_to_contain_text("<attachments>")
+
+
 async def test_reborn_legacy_attachment_count_limit_blocks_extra_files(
     reborn_v2_page,
 ):

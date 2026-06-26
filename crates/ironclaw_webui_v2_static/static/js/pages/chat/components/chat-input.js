@@ -15,6 +15,8 @@ import {
   setStagedAttachments,
 } from "../lib/draft-store.js";
 
+export const ATTACHMENTS_ONLY_CONTENT = "(files attached)";
+
 export function ChatInput({
   onSend,
   onCancel,
@@ -203,13 +205,17 @@ export function ChatInput({
   );
 
   const handleSend = React.useCallback(async () => {
-    // The v2 send contract requires non-empty content, so attachments
-    // ride along with text rather than sending on their own.
-    if (!text.trim() || sendBlockedRef.current) return;
+    const trimmed = text.trim();
+    const hasAttachments = attachments.length > 0;
+    const sendContent = trimmed || (hasAttachments ? ATTACHMENTS_ONLY_CONTENT : "");
+    if (!sendContent || sendBlockedRef.current) return;
     sendBlockedRef.current = true;
     setIsSending(true);
     try {
-      const response = await onSend(text.trim(), { attachments });
+      const response = await onSend(sendContent, {
+        attachments,
+        displayContent: trimmed,
+      });
       if (response === null) return;
       setText("");
       setAttachments([]);
@@ -298,7 +304,7 @@ export function ChatInput({
     setDragOver(false);
   }, []);
 
-  const hasPayload = text.trim();
+  const hasPayload = text.trim() || attachments.length > 0;
   const isSubmitDisabled = disabled || sendDisabled;
   const placeholder = isHero
     ? t("chat.heroPlaceholder")

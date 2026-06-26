@@ -9,6 +9,8 @@
 import { attachmentKindFromMime, formatBytes } from "./attachments.js";
 import { attachmentUrl } from "../../../lib/api.js";
 
+const ATTACHMENTS_ONLY_CONTENT = "(files attached)";
+
 // Project a stored `AttachmentRef` (snake_case wire shape) into the
 // render shape `MessageBubble` consumes. The timeline never carries bytes,
 // so `preview_url` is null here; a landed image instead gets a `fetch_url`
@@ -83,11 +85,18 @@ export function messagesFromTimeline(records, pendingMessages = [], threadId = n
     const isBusyRejected =
       role === "user" &&
       (record.status === "rejected_busy" || record.status === "deferred_busy");
+    const attachments = attachmentsFromRecord(record, threadId);
+    const content =
+      role === "user" &&
+      attachments?.length > 0 &&
+      record.content === ATTACHMENTS_ONLY_CONTENT
+        ? ""
+        : record.content || "";
     messages.push({
       id,
       role,
-      content: record.content || "",
-      attachments: attachmentsFromRecord(record, threadId),
+      content,
+      attachments,
       timestamp: timestampForRecord(record),
       kind: record.kind,
       status: isBusyRejected ? "error" : record.status,

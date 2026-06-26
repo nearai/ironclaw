@@ -2165,6 +2165,32 @@ Behavior adjustment:
   port, but it protects the functional browser/download outcome expected from
   legacy file/artifact workflows on the current WebUI v2 surface.
 
+### Step 68: Legacy Files-Only Attachment Port
+
+Extended `test_reborn_webui_v2_legacy_attachments.py` and fixed the Reborn
+composer/history rendering path.
+
+Ported the files-only attachment behavior from legacy `test_chat.py`:
+
+- staged a PDF and text file without entering message text;
+- sent the attachment-only draft through the real Reborn composer;
+- asserted the live user message renders attachment cards without exposing the
+  backend placeholder or raw `<attachments>` context;
+- reloaded the page and asserted the persisted timeline rehydrates the same
+  attachment cards without placeholder text.
+
+Issue fixed:
+
+- Reborn's composer displayed the send button state as payload-aware, but
+  `handleSend` returned early when the text area was empty. Staged files could
+  not be sent without extra typed text. The composer now treats staged
+  attachments as a valid payload, sends a backend-safe `(files attached)`
+  placeholder when the wire contract needs non-empty content, and keeps the UI
+  display content empty for attachment-only messages.
+- Persisted timeline rows containing that placeholder are projected back to
+  empty text when they also carry user attachments, so reload/history rendering
+  matches the live attachments-only view.
+
 ## Open Migration Buckets
 
 Not yet ported:

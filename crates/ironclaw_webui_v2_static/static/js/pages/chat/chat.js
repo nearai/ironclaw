@@ -116,7 +116,7 @@ export function Chat({
         )
       : null;
   const handleSend = React.useCallback(
-    async (content, { images = [], attachments = [] } = {}) => {
+    async (content, { images = [], attachments = [], displayContent } = {}) => {
       if (pendingGate) {
         throw new Error(approvalSubmitWarning);
       }
@@ -124,6 +124,7 @@ export function Chat({
       const response = await send(content, {
         images,
         attachments,
+        displayContent,
         threadId: activeThreadId,
       });
       const responseThreadId = response?.thread_id || activeThreadId;
