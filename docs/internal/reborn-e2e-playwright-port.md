@@ -1517,6 +1517,27 @@ Behavior adjustment:
   The test harness now applies active-state mutation only after a successful
   activation response.
 
+### Step 41: Legacy Install Failure Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the user-facing error-path intent from legacy
+`test_install_nonexistent` / `test_install_empty_name` to Reborn's Registry tab:
+
+- an install request can return `success: false` with a specific error message;
+- Reborn surfaces that message in the Extensions page action toast;
+- a failed install does not add the extension to the installed list;
+- the registry card remains in the available state with `Install` still
+  available for a later retry.
+
+Behavior adjustment:
+
+- Reborn's browser does not submit free-form extension names, so the port
+  asserts failed install handling through a real registry card and v2
+  `package_ref` payload rather than legacy invalid-name API requests. The test
+  harness now mutates registry/installed state only after a successful install
+  response.
+
 ## Open Migration Buckets
 
 Not yet ported:

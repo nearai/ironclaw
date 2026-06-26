@@ -159,6 +159,7 @@ async def _open_mocked_extensions_page(
     tab="registry",
     setup_payloads=None,
     setup_submit_responses=None,
+    install_responses=None,
     oauth_start_responses=None,
     activate_responses=None,
 ):
@@ -168,6 +169,7 @@ async def _open_mocked_extensions_page(
     registry_entries = [dict(entry) for entry in (registry or [])]
     setup_payloads_by_id = dict(setup_payloads or {})
     setup_submit_responses_by_id = dict(setup_submit_responses or {})
+    install_responses_by_id = dict(install_responses or {})
     oauth_start_responses_by_id = dict(oauth_start_responses or {})
     activate_responses_by_id = dict(activate_responses or {})
     install_requests: list[dict] = []
@@ -281,7 +283,14 @@ async def _open_mocked_extensions_page(
                 ),
                 None,
             )
-            if entry and not any(
+            response = install_responses_by_id.get(
+                package_id,
+                {
+                    "success": True,
+                    "message": f"{(entry or {}).get('display_name') or package_id} installed",
+                },
+            )
+            if response.get("success") is not False and entry and not any(
                 extension.get("package_ref", {}).get("id") == package_id
                 for extension in installed_extensions
             ):
@@ -304,15 +313,9 @@ async def _open_mocked_extensions_page(
                 )
                 installed.pop("installed", None)
                 installed_extensions.append(installed)
-            if entry:
+            if response.get("success") is not False and entry:
                 entry["installed"] = True
-            await fulfill_json(
-                route,
-                {
-                    "success": True,
-                    "message": f"{(entry or {}).get('display_name') or package_id} installed",
-                },
-            )
+            await fulfill_json(route, response)
             return
 
         if (
@@ -458,6 +461,41 @@ async def test_reborn_legacy_extensions_registry_search_and_install(
             {"package_ref": _package_ref("registry-tool")}
         ]
         await expect(page.get_by_text("Installed").first).to_be_visible(timeout=5000)
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_extensions_install_failure_keeps_registry_entry_available(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        registry=[REGISTRY_TOOL],
+        install_responses={
+            "registry-tool": {
+                "success": False,
+                "message": "Registry Tool is not available for this workspace.",
+            }
+        },
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, "Registry Tool")
+        await expect(card).to_be_visible(timeout=5000)
+        await expect(card.get_by_text("available", exact=True)).to_be_visible()
+        await card.get_by_role("button", name="Install").click()
+
+        await expect(
+            page.get_by_text("Registry Tool is not available for this workspace.")
+        ).to_be_visible(timeout=5000)
+        assert harness["install_requests"] == [
+            {"package_ref": _package_ref("registry-tool")}
+        ]
+
+        await expect(card.get_by_text("available", exact=True)).to_be_visible(timeout=5000)
+        await expect(card.get_by_role("button", name="Install")).to_have_count(1)
+        await expect(card.get_by_text("installed", exact=True)).to_have_count(0)
     finally:
         await harness["context"].close()
 
