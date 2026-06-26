@@ -1289,9 +1289,9 @@ async fn libsql_root() -> TestLibSqlRootFilesystem {
 mod postgres_tests {
     use super::*;
     use ironclaw_filesystem::{
-        Capability, CasExpectation, Entry, FilesystemError, FilesystemOperation, Filter, IndexKey,
-        IndexKind, IndexName, IndexSpec, IndexValue, Page, PostgresRootFilesystem, RecordKind,
-        SeqNo, TxnCapability,
+        Capability, CasExpectation, Entry, FileType, FilesystemError, FilesystemOperation, Filter,
+        IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, PostgresRootFilesystem,
+        RecordKind, SeqNo, TxnCapability,
     };
     use ironclaw_host_api::VirtualPath;
 
@@ -1400,6 +1400,31 @@ mod postgres_tests {
     }
 
     #[tokio::test]
+    async fn postgres_put_cas_version_on_missing_path_reports_no_found_version() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let missing = vpath(&prefix, "cas_version_missing");
+        let err = fs
+            .put(
+                &missing,
+                Entry::bytes(vec![1]),
+                CasExpectation::Version(ironclaw_filesystem::RecordVersion::from_backend(1)),
+            )
+            .await
+            .expect_err("version CAS on a missing path must fail");
+        match err {
+            FilesystemError::VersionMismatch { found, .. } => {
+                assert!(
+                    found.is_none(),
+                    "missing path should report no found version, got: {found:?}"
+                );
+            }
+            other => panic!("expected VersionMismatch, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn postgres_native_put_cas_any_increments_existing_version() {
         let Some((fs, prefix)) = postgres_root().await else {
             return;
@@ -1417,6 +1442,99 @@ mod postgres_tests {
         let got = fs.get(&path).await.unwrap().unwrap();
         assert_eq!(got.version, v2);
         assert_eq!(got.entry.body, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn postgres_put_cas_any_inserts_missing_path_and_returns_version() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let missing = vpath(&prefix, "cas_any_insert_missing");
+        let v1 = fs
+            .put(&missing, Entry::bytes(vec![7]), CasExpectation::Any)
+            .await
+            .expect("Any insert on a missing path must succeed");
+        assert_eq!(v1, ironclaw_filesystem::RecordVersion::from_backend(1));
+        let got = fs.get(&missing).await.unwrap().unwrap();
+        assert_eq!(got.entry.body, vec![7]);
+    }
+
+    // CAS-put directory invariant (folded into the single write statement by
+    // the round-trip fix). Mirrors the libsql `write_file` rejection tests but
+    // drives `put` directly, which is the primitive the SQL fold changed.
+
+    #[tokio::test]
+    async fn postgres_put_rejects_implicit_directory() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        // Writing a child first makes `dir` an implicit directory.
+        let dir = vpath(&prefix, "implicit");
+        let child = vpath(&prefix, "implicit/leaf");
+        fs.put(&child, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        // Every CAS arm must refuse to overwrite the implicit directory.
+        for cas in [
+            CasExpectation::Absent,
+            CasExpectation::Any,
+            CasExpectation::Version(ironclaw_filesystem::RecordVersion::from_backend(1)),
+        ] {
+            let err = fs
+                .put(&dir, Entry::bytes(vec![2]), cas)
+                .await
+                .expect_err("put over an implicit directory must fail");
+            assert!(
+                matches!(
+                    err,
+                    FilesystemError::Backend {
+                        operation: FilesystemOperation::WriteFile,
+                        ..
+                    }
+                ),
+                "expected directory-write Backend error, got: {err:?}"
+            );
+        }
+        // The child is untouched.
+        assert_eq!(fs.get(&child).await.unwrap().unwrap().entry.body, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn postgres_put_rejects_existing_directory() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let dir = VirtualPath::new(format!("{prefix}/explicit")).unwrap();
+        // create_dir_all materializes explicit directory rows (is_dir = TRUE).
+        // Keep `dir` childless so the exact-path explicit-directory guard
+        // (ON CONFLICT / is_dir = FALSE) is what rejects the put, not the
+        // descendant scan (covered by postgres_put_rejects_implicit_directory).
+        fs.create_dir_all(&dir).await.unwrap();
+
+        // Every CAS arm (distinct SQL: PUT_ABSENT_SQL / PUT_VERSION_SQL /
+        // PUT_ANY_SQL) must refuse to overwrite the explicit directory.
+        for cas in [
+            CasExpectation::Absent,
+            CasExpectation::Any,
+            CasExpectation::Version(ironclaw_filesystem::RecordVersion::from_backend(1)),
+        ] {
+            let err = fs
+                .put(&dir, Entry::bytes(vec![2]), cas)
+                .await
+                .expect_err("put over an explicit directory must fail");
+            assert!(
+                matches!(
+                    err,
+                    FilesystemError::Backend {
+                        operation: FilesystemOperation::WriteFile,
+                        ..
+                    }
+                ),
+                "expected directory-write Backend error, got: {err:?}"
+            );
+        }
+        assert_eq!(fs.stat(&dir).await.unwrap().file_type, FileType::Directory);
     }
 
     #[tokio::test]

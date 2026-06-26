@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use ironclaw_events::{DurableAuditLog, DurableEventLog, InMemoryAuditSink, RuntimeEvent};
+use ironclaw_extensions::ExtensionRegistry;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_first_party_extension_ports::{
@@ -40,8 +41,8 @@ use ironclaw_first_party_extension_ports::{
 };
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
-    AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId,
-    ResourceScope, TenantId, ThreadId, UserId,
+    AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, ExtensionId,
+    InvocationId, Principal, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
@@ -55,7 +56,8 @@ use ironclaw_product_workflow::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
     DefaultApprovalInteractionService, DefaultAuthInteractionService,
-    OutboundPreferencesProductFacade, RunStateApprovalInteractionReadModel,
+    OutboundPreferencesProductFacade, PersistentApprovalGranteeResolver,
+    RunStateApprovalInteractionReadModel,
 };
 use ironclaw_reborn::loop_exit_applier::{
     ApprovalGateEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
@@ -101,6 +103,9 @@ use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
+use crate::outbound_delivery_capability_surface::{
+    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, outbound_delivery_synthetic_provider,
+};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound_preferences::{
@@ -506,6 +511,38 @@ pub struct RebornRuntime {
     /// Hot-swap handle for the live LLM provider, when one was wired at boot.
     #[cfg(feature = "root-llm-provider")]
     llm_reload: Option<RebornLlmReloadParts>,
+}
+
+struct RegistryPersistentApprovalGranteeResolver {
+    registry: Arc<ExtensionRegistry>,
+    outbound_delivery_target_set_provider: ExtensionId,
+}
+
+impl PersistentApprovalGranteeResolver for RegistryPersistentApprovalGranteeResolver {
+    fn persistent_approval_grantee(&self, capability_id: &CapabilityId) -> Option<Principal> {
+        if let Some(descriptor) = self.registry.get_capability(capability_id) {
+            return Some(Principal::Extension(descriptor.provider.clone()));
+        }
+        if capability_id.as_str() == OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID {
+            return Some(Principal::Extension(
+                self.outbound_delivery_target_set_provider.clone(),
+            ));
+        }
+        None
+    }
+}
+
+impl RegistryPersistentApprovalGranteeResolver {
+    fn new(registry: Arc<ExtensionRegistry>) -> Result<Self, RebornRuntimeError> {
+        let outbound_delivery_target_set_provider = outbound_delivery_synthetic_provider()
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("outbound delivery synthetic provider id is invalid: {error}"),
+            })?;
+        Ok(Self {
+            registry,
+            outbound_delivery_target_set_provider,
+        })
+    }
 }
 
 pub(crate) type LocalDevSelectableSkillContextSource =
@@ -3124,7 +3161,15 @@ pub async fn build_reborn_runtime(
                     approval_resolver,
                     Arc::clone(&planned_turn_coordinator),
                 )
-                .with_persistent_policy_store(local_runtime.persistent_approval_policies.clone()),
+                .with_persistent_policy_store(local_runtime.persistent_approval_policies.clone())
+                .with_persistent_grantee_resolver(Arc::new(
+                    RegistryPersistentApprovalGranteeResolver::new(Arc::clone(
+                        &local_runtime.extension_registry,
+                    ))?,
+                ))
+                .with_tool_permission_override_store(
+                    local_runtime.tool_permission_overrides.clone(),
+                ),
             )
         } else {
             Arc::new(UnavailableApprovalInteractionService)
@@ -3862,6 +3907,28 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
+
+    #[test]
+    fn persistent_grantee_resolver_maps_outbound_delivery_target_set_to_synthetic_provider() {
+        let registry = Arc::new(ironclaw_extensions::ExtensionRegistry::new());
+        let resolver = super::RegistryPersistentApprovalGranteeResolver::new(registry)
+            .expect("resolver builds");
+        let capability_id = CapabilityId::new(
+            crate::outbound_delivery_capability_surface::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
+        )
+        .expect("capability id");
+        let expected_provider =
+            crate::outbound_delivery_capability_surface::outbound_delivery_synthetic_provider()
+                .expect("synthetic provider id");
+
+        assert_eq!(
+            ironclaw_product_workflow::PersistentApprovalGranteeResolver::persistent_approval_grantee(
+                &resolver,
+                &capability_id
+            ),
+            Some(Principal::Extension(expected_provider))
+        );
+    }
 
     /// Wiring guard: the `regex_skill_activation_enabled` flag from
     /// [`RebornRuntimeInput`] must reach

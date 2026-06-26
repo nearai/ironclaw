@@ -1,6 +1,7 @@
 import { apiFetch } from "../../../lib/api.js";
 
 const OPERATOR_CONFIG_BASE = "/api/webchat/v2/operator/config";
+const SETTINGS_TOOLS_BASE = "/api/webchat/v2/settings/tools";
 const AUTO_APPROVE_KEY = "agent.auto_approve_tools";
 const TOOL_PREFIX = "tool.";
 const TOOL_PERMISSION_STATES = new Set(["always_allow", "ask_each_time", "disabled"]);
@@ -50,7 +51,7 @@ export function settingsFromOperatorConfig(data) {
 }
 
 export async function fetchSettingsExport() {
-  const data = await apiFetch(OPERATOR_CONFIG_BASE);
+  const data = await apiFetch(SETTINGS_TOOLS_BASE);
   return {
     settings: settingsFromOperatorConfig(data),
     diagnostics: data.diagnostics || [],
@@ -58,10 +59,21 @@ export async function fetchSettingsExport() {
   };
 }
 export async function fetchSetting(key) {
+  if (key === AUTO_APPROVE_KEY) {
+    const data = await fetchSettingsExport();
+    return data.settings[AUTO_APPROVE_KEY] ?? false;
+  }
   const data = await apiFetch(`${OPERATOR_CONFIG_BASE}/${encodeURIComponent(key)}`);
   return data.entry?.value ?? null;
 }
 export async function updateSetting(key, value) {
+  if (key === AUTO_APPROVE_KEY) {
+    const data = await apiFetch(SETTINGS_TOOLS_BASE, {
+      method: "POST",
+      body: JSON.stringify({ enabled: Boolean(value) }),
+    });
+    return { success: true, entry: data.entry, value: data.entry?.value };
+  }
   const data = await apiFetch(`${OPERATOR_CONFIG_BASE}/${encodeURIComponent(key)}`, {
     method: "POST",
     body: JSON.stringify({ value }),
@@ -140,7 +152,7 @@ export function startCodexLogin() {
   });
 }
 export async function fetchTools() {
-  const data = await apiFetch(OPERATOR_CONFIG_BASE);
+  const data = await apiFetch(SETTINGS_TOOLS_BASE);
   return {
     tools: (data.entries || []).map(toolFromConfigEntry).filter(Boolean),
     diagnostics: data.diagnostics || [],
@@ -148,13 +160,10 @@ export async function fetchTools() {
 }
 export async function updateToolPermission(name, state) {
   const normalized = normalizeToolUpdateState(state);
-  const data = await apiFetch(
-    `${OPERATOR_CONFIG_BASE}/${encodeURIComponent(`${TOOL_PREFIX}${name}`)}`,
-    {
-      method: "POST",
-      body: JSON.stringify({ value: { state: normalized } }),
-    }
-  );
+  const data = await apiFetch(`${SETTINGS_TOOLS_BASE}/${encodeURIComponent(name)}`, {
+    method: "POST",
+    body: JSON.stringify({ state: normalized }),
+  });
   return { success: true, tool: toolFromConfigEntry(data.entry), entry: data.entry };
 }
 export function fetchExtensions() {

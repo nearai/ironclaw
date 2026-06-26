@@ -369,6 +369,12 @@ Slot bookkeeping is tied to acceptance, not merely polling:
   in that order; `active_fire_slot` is written before turn submission and
   `active_run_ref` is populated only after the accepted/replayed submit result
   returns a `TurnRunId`;
+- stale claim-only rows with `active_fire_slot` but no `active_run_ref` are
+  recovered by re-entering the same trusted submit path after a grace period.
+  The deterministic fire identity and trusted conversation binding must replay
+  any already accepted turn and backfill `active_run_ref` plus run-history
+  `thread_id`, instead of clearing the claim or minting a separate recovery
+  ledger;
 - retryable submit failures write `last_status = Error`, clear
   `active_fire_slot` and `active_run_ref`, leave `last_fired_slot` and
   `last_run_at` unchanged, and keep `next_run_at` at or before the failed

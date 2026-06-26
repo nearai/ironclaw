@@ -1135,31 +1135,40 @@ async fn instruction_bundle_allows_security_vocabulary_in_model_content() {
 }
 
 #[tokio::test]
-async fn instruction_bundle_rejects_trusted_skill_actual_secret_value() {
+async fn instruction_bundle_allows_trusted_skill_credential_shaped_value() {
+    // #5169: trusted/certified skill instruction bodies bypass content
+    // denylisting, so a credential-shaped value in the body no longer fails the
+    // turn. (Untrusted surfaces still reject it — see the tests below and the
+    // unit tests in prompt_text.rs.)
+    let body = "Use Authorization: Bearer ghp_secretvalue123".to_string();
     let context = claimed_run_context().await;
-    let error = InstructionBundleBuilder::new(context)
+    let bundle = InstructionBundleBuilder::new(context)
         .build(skill_instruction_request(
-            "Use Authorization: Bearer ghp_secretvalue123",
+            body.clone(),
             "GitHub skill",
             "trusted",
         ))
-        .unwrap_err();
+        .expect("trusted skill body must bypass content checks after #5169");
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert!(
+        bundle
+            .materialized_messages
+            .iter()
+            .any(|message| message.model_content == body)
+    );
 }
 
 #[tokio::test]
-async fn instruction_bundle_rejects_trusted_skill_authorization_scheme_secret_value() {
+async fn instruction_bundle_allows_trusted_skill_authorization_scheme_value() {
+    // #5169: an Authorization scheme + value in a trusted skill body is allowed.
     let context = claimed_run_context().await;
-    let error = InstructionBundleBuilder::new(context)
+    InstructionBundleBuilder::new(context)
         .build(skill_instruction_request(
             "Use Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZTEyMzQ",
             "GitHub skill",
             "trusted",
         ))
-        .unwrap_err();
-
-    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+        .expect("trusted skill body must bypass content checks after #5169");
 }
 
 #[tokio::test]
@@ -1191,6 +1200,74 @@ async fn instruction_bundle_rejects_untrusted_skill_security_vocabulary() {
 }
 
 #[tokio::test]
+async fn instruction_bundle_does_not_extend_trust_to_an_untrusted_chain_loaded_companion() {
+    // #5169 security boundary: each skill snippet is evaluated on its OWN
+    // trust_level. A `trusted` skill present in the same bundle (e.g. a parent
+    // that chain-loaded a companion via requires.skills) must NOT extend the
+    // content-check exemption to an `installed` companion snippet — the
+    // companion's credential-shaped body is still rejected.
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                compaction_message_index: Vec::new(),
+                instruction_snippets: vec![
+                    LoopContextSnippet {
+                        snippet_ref: "skill:code-review".to_string(),
+                        model_content: "Use Authorization: Bearer ghp_trustedparent123".to_string(),
+                        safe_summary: "code-review skill".to_string(),
+                        metadata: Some(LoopContextSnippetMetadata {
+                            source_name: "code-review".to_string(),
+                            trust_level: "trusted".to_string(),
+                        }),
+                    },
+                    LoopContextSnippet {
+                        snippet_ref: "skill:github".to_string(),
+                        model_content: "Use Authorization: Bearer ghp_companionvalue456"
+                            .to_string(),
+                        safe_summary: "github companion skill".to_string(),
+                        metadata: Some(LoopContextSnippetMetadata {
+                            source_name: "github".to_string(),
+                            trust_level: "installed".to_string(),
+                        }),
+                    },
+                ],
+                memory_snippets: Vec::new(),
+            },
+            visible_surface: None,
+            safety_context: None,
+            inline_messages: Vec::new(),
+            runtime_context: None,
+        })
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+}
+
+#[tokio::test]
+async fn instruction_bundle_rejects_untrusted_skill_host_path_and_secret_value() {
+    // #5169 boundary: the content-check exemption is trust-scoped. An *installed*
+    // (untrusted) skill body carrying a host path or a credential-shaped value is
+    // still rejected — only trusted/certified skill content bypasses the checks.
+    let context = claimed_run_context().await;
+    for body in [
+        "Read /Users/alice/.config/token before calling GitHub",
+        "Use Authorization: Bearer ghp_secretvalue123",
+    ] {
+        let error = InstructionBundleBuilder::new(context.clone())
+            .build(skill_instruction_request(body, "GitHub skill", "installed"))
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            AgentLoopHostErrorKind::PolicyDenied,
+            "body: {body:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn instruction_bundle_rejects_generic_model_content_security_vocabulary() {
     let context = claimed_run_context().await;
     let error = InstructionBundleBuilder::new(context)
@@ -1218,17 +1295,18 @@ async fn instruction_bundle_rejects_generic_model_content_security_vocabulary() 
 }
 
 #[tokio::test]
-async fn instruction_bundle_rejects_trusted_skill_host_path() {
+async fn instruction_bundle_allows_trusted_skill_host_path() {
+    // #5169: a host path in a trusted skill body is allowed (a path is not a
+    // leak, and skill docs reference paths constantly). Untrusted surfaces still
+    // reject host paths — see `instruction_bundle_builder_rejects_unsafe_instruction_context`.
     let context = claimed_run_context().await;
-    let error = InstructionBundleBuilder::new(context)
+    InstructionBundleBuilder::new(context)
         .build(skill_instruction_request(
             "Read /Users/alice/.config/token before calling GitHub",
             "GitHub skill",
             "trusted",
         ))
-        .unwrap_err();
-
-    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+        .expect("trusted skill body must bypass the host-path check after #5169");
 }
 
 #[tokio::test]

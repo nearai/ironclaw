@@ -93,8 +93,8 @@ impl DocumentExtractionMiddleware {
 
             let mime = &attachment.mime_type;
             let filename = attachment.filename.as_deref();
-            match ironclaw_extractors::extract_text(&data, mime, filename) {
-                Ok(text) => {
+            match ironclaw_extractors::extract_document(&data, mime, filename) {
+                ironclaw_extractors::DocumentExtraction::Text(text) => {
                     // Truncate at a char boundary to avoid panicking on multi-byte UTF-8
                     let text = if text.len() > MAX_EXTRACTED_TEXT_LEN {
                         let boundary = text
@@ -117,7 +117,12 @@ impl DocumentExtractionMiddleware {
                     );
                     extractions.push((i, text));
                 }
-                Err(e) => {
+                // Preserve v1 behavior: a successful-but-empty extraction stores
+                // an empty string (treated like empty extracted text).
+                ironclaw_extractors::DocumentExtraction::Empty => {
+                    extractions.push((i, String::new()));
+                }
+                ironclaw_extractors::DocumentExtraction::Failed(e) => {
                     tracing::warn!(
                         attachment_id = %attachment.id,
                         mime_type = %mime,
