@@ -3,7 +3,7 @@ use super::*;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use ironclaw_host_api::{CapabilityId, ThreadId};
+use ironclaw_host_api::{CapabilityId, ProviderToolName, ThreadId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
     ProductOutboundTarget, ProjectionCursor,
@@ -447,7 +447,7 @@ fn run_output_provider_call() -> ProviderToolCallReferenceEnvelope {
         provider_model_id: "gpt-test".to_string(),
         provider_turn_id: "turn-1".to_string(),
         provider_call_id: "call_abc".to_string(),
-        provider_tool_name: "web_search".to_string(),
+        provider_tool_name: ProviderToolName::new("web_search").expect("provider tool name"),
         capability_id: CapabilityId::new("web.search").expect("capability id"),
         arguments: serde_json::json!({ "query": "rust" }),
         response_reasoning: None,
@@ -658,4 +658,67 @@ async fn read_run_output_in_progress_surfaces_tool_output_without_final_message(
         projection.items[1],
         OpenAiResponseOutputItem::FunctionCallOutput { .. }
     ));
+}
+
+#[cfg(feature = "root-llm-provider")]
+fn provider_view(
+    id: &str,
+    default_model: &str,
+    active: bool,
+    active_model: Option<&str>,
+) -> ironclaw_product_workflow::LlmProviderView {
+    ironclaw_product_workflow::LlmProviderView {
+        id: id.to_string(),
+        description: String::new(),
+        adapter: "open_ai_completions".to_string(),
+        default_model: default_model.to_string(),
+        base_url: None,
+        builtin: true,
+        active,
+        active_model: active_model.map(str::to_string),
+        api_key_required: false,
+        accepts_api_key: true,
+        api_key_set: false,
+        can_list_models: true,
+    }
+}
+
+#[cfg(feature = "root-llm-provider")]
+#[test]
+fn model_entries_list_active_first_then_providers_deduped() {
+    let snapshot = ironclaw_product_workflow::LlmConfigSnapshot {
+        providers: vec![
+            provider_view("openai", "gpt-4o", true, Some("gpt-4o")),
+            provider_view("anthropic", "claude-opus-4", false, None),
+            // Duplicate model id (same default) must not be listed twice.
+            provider_view("openai-mirror", "gpt-4o", false, None),
+        ],
+        active: Some(ironclaw_product_workflow::LlmActiveSelection {
+            provider_id: "openai".to_string(),
+            model: Some("gpt-4o".to_string()),
+        }),
+    };
+
+    let entries = model_entries_from_snapshot(&snapshot);
+
+    assert_eq!(entries.len(), 2, "duplicate model id must be de-duplicated");
+    assert_eq!(entries[0].id, "gpt-4o", "active selection listed first");
+    assert_eq!(entries[0].owned_by.as_deref(), Some("openai"));
+    assert_eq!(entries[1].id, "claude-opus-4");
+    assert_eq!(entries[1].owned_by.as_deref(), Some("anthropic"));
+}
+
+#[cfg(feature = "root-llm-provider")]
+#[test]
+fn model_entries_fall_back_to_default_model_when_no_active_selection() {
+    let snapshot = ironclaw_product_workflow::LlmConfigSnapshot {
+        providers: vec![provider_view("anthropic", "claude-opus-4", false, None)],
+        active: None,
+    };
+
+    let entries = model_entries_from_snapshot(&snapshot);
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, "claude-opus-4");
+    assert_eq!(entries[0].owned_by.as_deref(), Some("anthropic"));
 }

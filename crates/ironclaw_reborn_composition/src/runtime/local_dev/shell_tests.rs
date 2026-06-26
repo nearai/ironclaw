@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
+};
 use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
 use ironclaw_loop_support::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
@@ -41,7 +43,7 @@ fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
         provider_model_id: "test-model".to_string(),
         turn_id: Some("provider-turn-1".to_string()),
         id: "call-1".to_string(),
-        name: "builtin_shell".to_string(),
+        name: ProviderToolName::new("builtin_shell").expect("provider tool name"), // safety: test-only provider-safe literal.
         arguments,
         response_reasoning: None,
         reasoning: None,
@@ -109,6 +111,9 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         ),
         approval_requests: local_runtime.approval_requests.clone(),
         capability_leases: local_runtime.capability_leases.clone(),
+        external_tool_catalog: std::sync::Arc::new(
+            ironclaw_turns::InMemoryExternalToolCatalog::new(),
+        ),
     };
     let run_context = run_context("shell-workdir").await;
     // Turn on the global auto-approve switch for this run's actor scope so the

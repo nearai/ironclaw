@@ -6,7 +6,8 @@ use axum::response::Response;
 
 use crate::{
     OpenAiCompatAuthenticatedCaller, OpenAiCompatHttpError, OpenAiCompatIdempotencyKey,
-    OpenAiCompatRouteSurface, OpenAiCompatRouterState, OpenAiResponseId, OpenAiResponseObject,
+    OpenAiCompatRouteSurface, OpenAiCompatRouterState, OpenAiModelListResponse, OpenAiResponseId,
+    OpenAiResponseObject,
 };
 
 pub async fn chat_completions(
@@ -31,6 +32,23 @@ pub async fn chat_completions(
     workflow
         .handle_chat_request(caller, request, &body, idempotency_key)
         .await
+}
+
+/// Handles `GET /v1/models` and its `/api/v1/models` alias.
+///
+/// Authentication is enforced first (mirroring `chat_completions`): a missing
+/// caller fails closed with `401` before the catalog is consulted. When no
+/// catalog is wired, the route fails closed with `501`.
+pub async fn models_list(
+    State(state): State<OpenAiCompatRouterState>,
+    caller: Option<Extension<OpenAiCompatAuthenticatedCaller>>,
+) -> Result<Json<OpenAiModelListResponse>, OpenAiCompatHttpError> {
+    let caller = require_caller(caller)?;
+    let Some(catalog) = state.models() else {
+        return Err(OpenAiCompatHttpError::not_wired());
+    };
+    let entries = catalog.list_models(&caller).await?;
+    Ok(Json(crate::models_catalog::model_list_response(entries)))
 }
 
 pub async fn responses_api_create(
