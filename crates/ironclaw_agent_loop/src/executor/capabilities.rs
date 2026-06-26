@@ -700,6 +700,11 @@ impl CapabilityStage {
                 state
                     .recent_failure_kinds
                     .push(capability_failure_kind(&failure.error_kind));
+                // Record the failing signature so a repeated identical failing
+                // call that has already been warned can terminalize the loop
+                // (see `DefaultStopConditionStrategy` repetition escape) instead
+                // of retrying to the wall-clock turn timeout.
+                capability_batch.record_failed_signature(capability_call_signature(&call)?);
                 let model_observation =
                     Some(model_visible_capability_failure_observation(&failure));
                 let summary = CapabilityErrorSummary {

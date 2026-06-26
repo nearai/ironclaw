@@ -111,6 +111,13 @@ pub(crate) struct CapabilityBatchTurnSummary {
     /// output-stagnation, never on failing/blocked calls.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub no_change_signatures: Vec<CapabilityCallSignature>,
+    /// Signatures of capability calls that returned a non-recoverable `Failed`
+    /// outcome this batch. Used to terminalize the repeated-call warning when
+    /// the model retries the *same* failing call without adapting — otherwise
+    /// such a loop runs to the wall-clock turn timeout instead of surfacing a
+    /// terminal, model-visible explanation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_signatures: Vec<CapabilityCallSignature>,
 }
 
 impl CapabilityBatchTurnSummary {
@@ -122,7 +129,15 @@ impl CapabilityBatchTurnSummary {
             observed_signatures: Vec::new(),
             made_progress_signatures: Vec::new(),
             no_change_signatures: Vec::new(),
+            failed_signatures: Vec::new(),
         }
+    }
+
+    /// Records the signature of a capability call that returned a `Failed`
+    /// outcome this batch. A repeated identical failing call that has already
+    /// been warned terminalizes the loop instead of retrying to the timeout.
+    pub(crate) fn record_failed_signature(&mut self, signature: CapabilityCallSignature) {
+        push_unique_signature(&mut self.failed_signatures, signature);
     }
 
     pub(crate) fn record_result(
@@ -213,8 +228,11 @@ pub(crate) enum StopKind {
 /// 3. **Repetition escape**: the same `CapabilityCallSignature` is observed
 ///    in `repetition_threshold` (default 3) of the last `repetition_window`
 ///    (default 5) iterations → render a model-visible warning. If the warning
-///    was rendered and the same repeated call then reports no progress →
-///    `Stop { NoProgressDetected }`.
+///    was rendered and the same repeated call then reports no progress — either
+///    a `NoChange` completion or a non-recoverable `Failed` outcome — →
+///    `Stop { NoProgressDetected }`. The failing-call arm stops a model that
+///    retries the identical failing operation without adapting before the run
+///    reaches its wall-clock turn timeout.
 /// 4. **Typed no-progress escape**: completed capability batches whose results
 ///    all report `NoChange` or `Blocked` progress for
 ///    `typed_progress_run_threshold` turns in a row →
@@ -447,7 +465,9 @@ fn transition_existing_warning(
         RepeatedCallWarningPhase::Rendered => {
             if signature_made_progress(just_completed, &signature) {
                 None
-            } else if signature_no_change(just_completed, &signature) {
+            } else if signature_no_change(just_completed, &signature)
+                || signature_failed(just_completed, &signature)
+            {
                 Some(RepeatedCallWarningState::terminal_ready(signature))
             } else {
                 Some(RepeatedCallWarningState::rendered(signature))
@@ -475,6 +495,14 @@ fn signature_made_progress(
         && just_completed
             .capability_batch
             .made_progress_signatures
+            .contains(signature)
+}
+
+fn signature_failed(just_completed: &TurnSummary, signature: &CapabilityCallSignature) -> bool {
+    just_completed.kind == TurnEndKind::AfterCapabilityBatch
+        && just_completed
+            .capability_batch
+            .failed_signatures
             .contains(signature)
 }
 
@@ -901,6 +929,43 @@ mod tests {
                 .stop_state
                 .repeated_call_warning
                 .expect("repeated call warning should terminalize");
+            assert_eq!(warning.signature, signature);
+            assert_eq!(warning.phase, RepeatedCallWarningPhase::TerminalReady);
+        }
+
+        #[tokio::test]
+        async fn rendered_repeated_signature_warning_and_failed_call_triggers_no_progress() {
+            // A model that keeps retrying the SAME failing capability call must
+            // terminalize after the repeated-call warning is rendered, rather
+            // than looping to the wall-clock turn timeout.
+            let strategy = DefaultStopConditionStrategy::default();
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            let signature = CapabilityCallSignature::from_call(
+                CapabilityId::new("demo.echo").expect("valid"),
+                &json!({"x": 1}),
+            )
+            .expect("valid call signature");
+            for _ in 0..3 {
+                state.recent_call_signatures.push(signature.clone());
+            }
+            state.stop_state.repeated_call_warning =
+                Some(RepeatedCallWarningState::rendered(signature.clone()));
+            let mut capability_batch = CapabilityBatchTurnSummary::for_invocation_count(1);
+            capability_batch.record_failed_signature(signature.clone());
+            let summary = after_batch_with_capability_summary(capability_batch);
+
+            let (state, outcome) = observe_and_decide(&strategy, state, summary).await;
+
+            assert!(matches!(
+                outcome,
+                StopOutcome::Stop {
+                    kind: StopKind::NoProgressDetected
+                }
+            ));
+            let warning = state
+                .stop_state
+                .repeated_call_warning
+                .expect("repeated call warning should terminalize on repeated failure");
             assert_eq!(warning.signature, signature);
             assert_eq!(warning.phase, RepeatedCallWarningPhase::TerminalReady);
         }

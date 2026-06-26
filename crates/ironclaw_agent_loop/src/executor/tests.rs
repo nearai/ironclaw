@@ -1433,6 +1433,7 @@ async fn capability_stage_returns_after_batch_summary() {
                         observed_signatures: vec![signature.clone()],
                         made_progress_signatures: vec![signature],
                         no_change_signatures: Vec::new(),
+                        failed_signatures: Vec::new(),
                     },
                 )
             );
@@ -1799,6 +1800,7 @@ async fn stop_stage_preserves_ack_and_returns_stop_kind() {
                         observed_signatures: Vec::new(),
                         made_progress_signatures: Vec::new(),
                         no_change_signatures: Vec::new(),
+                        failed_signatures: Vec::new(),
                     },
                 ),
                 pending_input_ack,
