@@ -50,7 +50,7 @@ use fs2::FileExt;
 use ironclaw_host_api::ReservationStatus;
 use ironclaw_host_api::{
     AgentId, MissionId, ProjectId, ResourceEstimate, ResourceReservationId, ResourceScope,
-    ResourceUsage, TenantId, ThreadId, UserId,
+    ResourceUsage, TenantId, ThreadId, UserId, sha256_digest_token,
 };
 pub use ironclaw_host_api::{ResourceReceipt, ResourceReservation};
 use rust_decimal::Decimal;
@@ -263,6 +263,142 @@ impl ResourceAccount {
 
         accounts
     }
+}
+
+#[derive(Serialize)]
+struct CanonicalTenantAccount<'a> {
+    kind: &'static str,
+    tenant_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct CanonicalUserAccount<'a> {
+    kind: &'static str,
+    tenant_id: &'a str,
+    user_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct CanonicalProjectAccount<'a> {
+    kind: &'static str,
+    tenant_id: &'a str,
+    user_id: &'a str,
+    project_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct CanonicalAgentAccount<'a> {
+    kind: &'static str,
+    tenant_id: &'a str,
+    user_id: &'a str,
+    project_id: Option<&'a str>,
+    agent_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct CanonicalMissionAccount<'a> {
+    kind: &'static str,
+    tenant_id: &'a str,
+    user_id: &'a str,
+    project_id: Option<&'a str>,
+    mission_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct CanonicalThreadAccount<'a> {
+    kind: &'static str,
+    tenant_id: &'a str,
+    user_id: &'a str,
+    project_id: Option<&'a str>,
+    mission_id: Option<&'a str>,
+    thread_id: &'a str,
+}
+
+/// Deterministic, structurally injective JSON identity for a resource account.
+///
+/// This is intentionally separate from [`ResourceAccount`]'s `Display`
+/// implementation: `Display` is a human-facing label that renders absent
+/// optional slots as `_`, while this representation preserves variant and
+/// option presence explicitly.
+pub fn canonical_json(account: &ResourceAccount) -> String {
+    match account {
+        ResourceAccount::Tenant { tenant_id } => {
+            serialize_canonical_account(&CanonicalTenantAccount {
+                kind: "tenant",
+                tenant_id: tenant_id.as_str(),
+            })
+        }
+        ResourceAccount::User { tenant_id, user_id } => {
+            serialize_canonical_account(&CanonicalUserAccount {
+                kind: "user",
+                tenant_id: tenant_id.as_str(),
+                user_id: user_id.as_str(),
+            })
+        }
+        ResourceAccount::Project {
+            tenant_id,
+            user_id,
+            project_id,
+        } => serialize_canonical_account(&CanonicalProjectAccount {
+            kind: "project",
+            tenant_id: tenant_id.as_str(),
+            user_id: user_id.as_str(),
+            project_id: project_id.as_str(),
+        }),
+        ResourceAccount::Agent {
+            tenant_id,
+            user_id,
+            project_id,
+            agent_id,
+        } => serialize_canonical_account(&CanonicalAgentAccount {
+            kind: "agent",
+            tenant_id: tenant_id.as_str(),
+            user_id: user_id.as_str(),
+            project_id: project_id.as_ref().map(ProjectId::as_str),
+            agent_id: agent_id.as_str(),
+        }),
+        ResourceAccount::Mission {
+            tenant_id,
+            user_id,
+            project_id,
+            mission_id,
+        } => serialize_canonical_account(&CanonicalMissionAccount {
+            kind: "mission",
+            tenant_id: tenant_id.as_str(),
+            user_id: user_id.as_str(),
+            project_id: project_id.as_ref().map(ProjectId::as_str),
+            mission_id: mission_id.as_str(),
+        }),
+        ResourceAccount::Thread {
+            tenant_id,
+            user_id,
+            project_id,
+            mission_id,
+            thread_id,
+        } => serialize_canonical_account(&CanonicalThreadAccount {
+            kind: "thread",
+            tenant_id: tenant_id.as_str(),
+            user_id: user_id.as_str(),
+            project_id: project_id.as_ref().map(ProjectId::as_str),
+            mission_id: mission_id.as_ref().map(MissionId::as_str),
+            thread_id: thread_id.as_str(),
+        }),
+    }
+}
+
+fn serialize_canonical_account(account: &impl Serialize) -> String {
+    serde_json::to_string(account)
+        .expect("serializing borrowed resource-account string fields to JSON cannot fail")
+}
+
+/// Fixed-length path-safe storage segment for a resource account.
+pub fn account_seg(account: &ResourceAccount) -> String {
+    let token = sha256_digest_token(canonical_json(account).as_bytes());
+    // `sha256_digest_token` is documented to return `sha256:<lower-hex>`.
+    token
+        .strip_prefix("sha256:")
+        .expect("host API SHA-256 digest token must use sha256: prefix")
+        .to_string()
 }
 
 /// Stable string label of the form `tenant/<t>/user/<u>/project/<p>/...`
@@ -2396,6 +2532,201 @@ fn decimal_to_f64(d: Decimal) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    fn tenant_id(value: &str) -> TenantId {
+        TenantId::from_trusted(value.to_string())
+    }
+
+    fn user_id(value: &str) -> UserId {
+        UserId::from_trusted(value.to_string())
+    }
+
+    fn project_id(value: &str) -> ProjectId {
+        ProjectId::from_trusted(value.to_string())
+    }
+
+    fn agent_id(value: &str) -> AgentId {
+        AgentId::from_trusted(value.to_string())
+    }
+
+    fn mission_id(value: &str) -> MissionId {
+        MissionId::from_trusted(value.to_string())
+    }
+
+    fn thread_id(value: &str) -> ThreadId {
+        ThreadId::from_trusted(value.to_string())
+    }
+
+    fn assert_path_safe_seg(seg: &str) {
+        assert_eq!(seg.len(), 64);
+        assert!(
+            seg.bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')),
+            "segment must be lowercase hex: {seg}"
+        );
+        assert!(!seg.contains('/'));
+        assert!(!seg.contains('.'));
+        assert!(!seg.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn canonical_json_serializes_all_account_variants_in_stable_field_order() {
+        assert_eq!(
+            canonical_json(&ResourceAccount::tenant(tenant_id("tenant"))),
+            r#"{"kind":"tenant","tenant_id":"tenant"}"#
+        );
+        assert_eq!(
+            canonical_json(&ResourceAccount::user(tenant_id("tenant"), user_id("user"))),
+            r#"{"kind":"user","tenant_id":"tenant","user_id":"user"}"#
+        );
+        assert_eq!(
+            canonical_json(&ResourceAccount::project(
+                tenant_id("tenant"),
+                user_id("user"),
+                project_id("project"),
+            )),
+            r#"{"kind":"project","tenant_id":"tenant","user_id":"user","project_id":"project"}"#
+        );
+        assert_eq!(
+            canonical_json(&ResourceAccount::agent(
+                tenant_id("tenant"),
+                user_id("user"),
+                None,
+                agent_id("agent"),
+            )),
+            r#"{"kind":"agent","tenant_id":"tenant","user_id":"user","project_id":null,"agent_id":"agent"}"#
+        );
+        assert_eq!(
+            canonical_json(&ResourceAccount::mission(
+                tenant_id("tenant"),
+                user_id("user"),
+                Some(project_id("project")),
+                mission_id("mission"),
+            )),
+            r#"{"kind":"mission","tenant_id":"tenant","user_id":"user","project_id":"project","mission_id":"mission"}"#
+        );
+        assert_eq!(
+            canonical_json(&ResourceAccount::thread(
+                tenant_id("tenant"),
+                user_id("user"),
+                Some(project_id("project")),
+                None,
+                thread_id("thread"),
+            )),
+            r#"{"kind":"thread","tenant_id":"tenant","user_id":"user","project_id":"project","mission_id":null,"thread_id":"thread"}"#
+        );
+    }
+
+    #[test]
+    fn account_seg_is_injective_for_distinct_accounts() {
+        let display_absent_project = ResourceAccount::agent(
+            tenant_id("tenant"),
+            user_id("user"),
+            None,
+            agent_id("agent"),
+        );
+        let display_underscore_project = ResourceAccount::agent(
+            tenant_id("tenant"),
+            user_id("user"),
+            Some(project_id("_")),
+            agent_id("agent"),
+        );
+
+        assert_eq!(
+            display_absent_project.to_string(),
+            display_underscore_project.to_string()
+        );
+        assert_ne!(
+            canonical_json(&display_absent_project),
+            canonical_json(&display_underscore_project)
+        );
+        assert_ne!(
+            account_seg(&display_absent_project),
+            account_seg(&display_underscore_project)
+        );
+
+        let accounts = vec![
+            ResourceAccount::tenant(tenant_id("tenant")),
+            ResourceAccount::user(tenant_id("tenant"), user_id("user")),
+            ResourceAccount::project(tenant_id("tenant"), user_id("user"), project_id("project")),
+            display_absent_project,
+            display_underscore_project,
+            ResourceAccount::mission(
+                tenant_id("tenant"),
+                user_id("user"),
+                Some(project_id("project")),
+                mission_id("mission"),
+            ),
+            ResourceAccount::thread(
+                tenant_id("tenant"),
+                user_id("user"),
+                Some(project_id("project")),
+                Some(mission_id("mission")),
+                thread_id("thread"),
+            ),
+            ResourceAccount::thread(
+                tenant_id("tenant\nwith-control"),
+                user_id("user"),
+                None,
+                None,
+                thread_id("thread"),
+            ),
+        ];
+
+        let mut canonical_values = HashSet::new();
+        let mut segs = HashSet::new();
+        for account in &accounts {
+            let canonical = canonical_json(account);
+            assert!(
+                canonical_values.insert(canonical.clone()),
+                "duplicate canonical JSON: {canonical}"
+            );
+
+            let seg = account_seg(account);
+            assert_path_safe_seg(&seg);
+            assert!(segs.insert(seg.clone()), "duplicate account seg: {seg}");
+        }
+    }
+
+    #[test]
+    fn account_seg_handles_slash_and_empty_ids_as_distinct_path_safe_segments() {
+        let slash_id = ResourceAccount::thread(
+            tenant_id("tenant"),
+            user_id("user"),
+            Some(project_id("project")),
+            Some(mission_id("mission")),
+            thread_id("thread/with/slash"),
+        );
+        let empty_id = ResourceAccount::thread(
+            tenant_id("tenant"),
+            user_id("user"),
+            Some(project_id("project")),
+            Some(mission_id("mission")),
+            thread_id(""),
+        );
+
+        let slash_seg = account_seg(&slash_id);
+        let empty_seg = account_seg(&empty_id);
+
+        assert_ne!(canonical_json(&slash_id), canonical_json(&empty_id));
+        assert_ne!(slash_seg, empty_seg);
+        assert_path_safe_seg(&slash_seg);
+        assert_path_safe_seg(&empty_seg);
+    }
+
+    #[test]
+    fn account_seg_is_deterministic() {
+        let account = ResourceAccount::mission(
+            tenant_id("tenant"),
+            user_id("user"),
+            Some(project_id("project")),
+            mission_id("mission"),
+        );
+
+        assert_eq!(canonical_json(&account), canonical_json(&account));
+        assert_eq!(account_seg(&account), account_seg(&account));
+    }
 
     #[test]
     fn atomic_snapshot_replace_overwrites_existing_file() {
