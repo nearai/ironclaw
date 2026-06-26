@@ -1138,6 +1138,58 @@ Behavior adjustment:
   to project overview behavior and generic skill visibility rather than the
   legacy portfolio-specific widget UI.
 
+### Step 32: Legacy OAuth, Extension OAuth, and MCP Auth Review
+
+Reviewed legacy `test_extension_oauth.py`, `test_mcp_auth_flow.py`,
+`test_oauth_refresh.py`, `test_oauth_credential_fallback.py`,
+`test_oauth_url_parameters.py`, and `test_skill_oauth_flow.py` against current
+Reborn product-auth, extension setup, and WebChat v2 auth-gate surfaces.
+
+Already-covered functional Reborn behavior:
+
+- WebChat v2 manual-token auth gates submit credentials through
+  `/api/reborn/product-auth/manual-token/submit` and resume the matching run
+  gate through the v2 gate-resolution endpoint;
+- WebChat v2 OAuth auth gates render only HTTPS authorization links, open them
+  with `noopener,noreferrer`, reject non-HTTPS values, and clear only matching
+  OAuth callback completion events;
+- extension activate/setup browser flows reject non-HTTPS `auth_url` and
+  `authorization_url` values and accept uppercase HTTPS URLs;
+- Reborn v2 extension setup endpoints expose Google OAuth requirements through
+  `/api/webchat/v2/extensions/{package_id}/setup`;
+- Reborn product-auth callback behavior, including one-shot claim semantics,
+  completed-callback replay without duplicate continuation dispatch, invalid
+  state rejection, and durable completed-flow replay, is covered by Rust
+  product-auth/composition contract tests.
+
+Current blocker:
+
+- legacy extension OAuth and MCP auth scenarios exercise the legacy
+  `/api/extensions/*` lifecycle plus public `/oauth/callback` route. Standalone
+  Reborn's browser route is the v2 `/api/webchat/v2/extensions/*` setup/activate
+  surface and its OAuth callback handling is product-auth service/composition
+  logic, not the old gateway `/oauth/callback` extension controller;
+- legacy hosted refresh and credential-fallback tests mutate/check legacy
+  `secrets` rows and legacy tool registry behavior around v1 WASM extension
+  execution. Reborn's equivalent path is host-runtime/product-auth credential
+  resolution and extension v2 lifecycle contract coverage, not the legacy DB
+  shape or `/api/chat/*` retry loop;
+- legacy skill OAuth tests drive v1 skill frontmatter registration,
+  `/api/chat/send`, and text-token auth mode. Reborn WebChat v2 exposes
+  structured auth gates and product-auth continuations instead of the legacy
+  free-text auth mode.
+
+Behavior adjustment:
+
+- The direct Reborn Playwright surface is already covered for auth prompts,
+  extension OAuth-start URL safety, and callback-completion UI handling. The
+  remaining legacy OAuth/MCP tests should not be copied line-for-line unless
+  Reborn intentionally exposes equivalent v2 callback HTTP routes, hosted
+  refresh test fixtures, or full browser-driven extension/MCP OAuth lifecycle
+  hooks. Until then, the durable callback and credential semantics belong in
+  Reborn Rust contract tests, with browser coverage limited to the v2 surfaces
+  users can actually operate.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -1160,9 +1212,10 @@ Not yet ported:
   Skills, tool permissions, channel label regressions, and the top-level
   extension install/manage/configure surface;
 - deeper OAuth/product-auth install/callback flows beyond browser prompt
-  handling and extension OAuth-start URL safety, including hosted callback
-  replay/removal and provider-backed extension/MCP setup where standalone Reborn
-  has matching endpoints;
+  handling, extension OAuth-start URL safety, and existing Rust callback
+  contracts, including hosted provider refresh and provider-backed extension/MCP
+  setup only where standalone Reborn exposes matching v2 browser endpoints or
+  fixtures;
 - remaining Slack/Telegram/channel pairing scenarios beyond the Reborn Slack
   proof-code connect card, especially lower-level member/admin pairing APIs and
   Telegram-specific/generic pairing once standalone Reborn exposes matching
