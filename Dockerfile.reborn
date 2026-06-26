@@ -41,7 +41,6 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook \
     --profile dist \
     --package ironclaw_reborn_cli \
-    --features webui-v2-beta,slack-v2-host-beta,postgres \
     --recipe-path recipe.json
 
 FROM deps AS builder
@@ -60,7 +59,6 @@ RUN mkdir -p src \
 RUN cargo build \
     --profile dist \
     --package ironclaw_reborn_cli \
-    --features webui-v2-beta,slack-v2-host-beta,postgres \
     --bin ironclaw-reborn
 
 FROM debian:bookworm-slim AS runtime

@@ -51,10 +51,7 @@ pub(crate) enum Command {
     Repl(repl::ReplCommand),
     /// Initialize the minimal Reborn runtime shell and exit.
     Run(run::RunCommand),
-    /// Start the Reborn WebUI service. Available only when the binary
-    /// is built with the `webui-v2-beta` Cargo feature; off by default
-    /// because the beta HTTP/auth gateway requires explicit opt-in
-    /// before being linked into a production binary.
+    /// Start the Reborn WebUI service.
     #[cfg(feature = "webui-v2-beta")]
     Serve(serve::ServeCommand),
     /// Inspect configured Reborn skills.

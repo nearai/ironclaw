@@ -30,28 +30,19 @@ This crate owns the standalone `ironclaw-reborn` command surface. Keep it small,
    - `cargo test -p ironclaw_architecture reborn`
    - `cargo clippy -p ironclaw_reborn_cli --all-targets -- -D warnings`
 
-## Beta features
+## Single binary surface
 
-The `webui-v2-beta` Cargo feature compiles in the WebChat v2 HTTP gateway
-subcommand (`ironclaw-reborn serve`). It is **off by default** so a
-default `cargo install` / release build does not link the axum router,
-auth middleware, or HTTP/SSE/WS stack at all. Producing a binary that
-exposes the v2 surface is an explicit opt-in:
+The default `ironclaw-reborn` build includes the Reborn product/runtime surfaces
+operators expect from one binary: model-provider wiring, WebChat v2 `serve`,
+Slack host-beta mounts, OpenAI-compatible route mounts, and PostgreSQL-backed
+hosted/production storage. Runtime config and env vars still fail closed unless
+the operator explicitly starts `serve`, supplies WebUI auth, enables Slack, or
+selects a hosted/production storage profile.
 
-```bash
-cargo install --path crates/ironclaw_reborn_cli --features webui-v2-beta
-# or, from a workspace checkout
-cargo build -p ironclaw_reborn_cli --features webui-v2-beta --release
-```
-
-When the feature is off, `ironclaw-reborn --help` does not list `serve`
-and `ironclaw-reborn serve …` returns `error: unrecognized subcommand`.
-This is verified by `help_mentions_reborn_commands` in `tests/smoke.rs`,
-which only asserts on the `serve` line under `#[cfg(feature =
-"webui-v2-beta")]`. Beta-only smoke tests (`serve_help_mentions_host_and_port`,
-`serve_fails_closed_when_env_bearer_token_var_is_unset`, etc.) are
-themselves feature-gated so default `cargo test -p ironclaw_reborn_cli`
-runs do not regress on a missing feature flag.
+Compatibility Cargo feature names may remain in the manifest, but new commands
+should not hide normal CLI surface area behind non-default features. If a route
+or integration is present in the shipped binary, prefer runtime enablement and
+config validation over compile-time omission.
 
 The descriptor-level "all v2 routes are actually mounted" regression
 lives at the composition layer in

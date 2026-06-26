@@ -223,7 +223,7 @@ pub(crate) fn reject_enabled_slack_without_feature(
     if resolve_slack_enablement(section)?.enabled {
         anyhow::bail!(
             "Slack enablement ([slack].enabled = true or {SLACK_ENABLED_ENV_VAR}=true) requires \
-             an ironclaw-reborn binary built with the `slack-v2-host-beta` Cargo feature"
+             the default ironclaw-reborn binary; this custom build omitted Slack host-beta support"
         );
     }
     Ok(())
