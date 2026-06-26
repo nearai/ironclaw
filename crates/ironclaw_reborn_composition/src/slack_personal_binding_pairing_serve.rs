@@ -360,6 +360,7 @@ mod tests {
                 agent_id: None,
                 project_id: None,
                 operator_webui_config: false,
+                role: ironclaw_host_api::UserRole::Member,
             })
             .body(Body::from(body))
             .unwrap()

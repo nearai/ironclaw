@@ -1508,6 +1508,7 @@ mod tests {
                         agent_id: Some(AgentId::new(AGENT).expect("agent")),
                         project_id: Some(ProjectId::new(PROJECT).expect("project")),
                         operator_webui_config: false,
+                        role: ironclaw_host_api::UserRole::Member,
                     })
                     .body(Body::from(redeem_body))
                     .expect("redeem request builds"),
@@ -1673,6 +1674,7 @@ mod tests {
                         agent_id: Some(AgentId::new(AGENT).expect("agent")),
                         project_id: Some(ProjectId::new(PROJECT).expect("project")),
                         operator_webui_config: true,
+                        role: ironclaw_host_api::UserRole::Member,
                     })
                     .body(Body::from(format!(
                         r#"{{"channel_id":"C0HOST","subject_user_id":"{SHARED_SUBJECT}"}}"#
@@ -2770,6 +2772,7 @@ mod tests {
                         agent_id: Some(AgentId::new(AGENT).expect("agent")),
                         project_id: Some(ProjectId::new(PROJECT).expect("project")),
                         operator_webui_config: false,
+                        role: ironclaw_host_api::UserRole::Member,
                     })
                     .body(Body::from(redeem_body))
                     .expect("redeem request builds"),
@@ -3016,6 +3019,7 @@ mod tests {
                         agent_id: Some(AgentId::new(AGENT).expect("agent")),
                         project_id: Some(ProjectId::new(PROJECT).expect("project")),
                         operator_webui_config: false,
+                        role: ironclaw_host_api::UserRole::Member,
                     })
                     .body(Body::from(redeem_body))
                     .expect("redeem request builds"),
