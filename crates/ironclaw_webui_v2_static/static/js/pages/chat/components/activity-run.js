@@ -87,10 +87,19 @@ function hasToolCalls(item) {
 function shouldExpandActivityRun(activity) {
   return (activity || []).some((item) => {
     if (item?.role === "thinking") return true;
-    if (item?.toolStatus === "running" || item?.toolStatus === "error") return true;
+    if (
+      item?.toolStatus === "running" ||
+      item?.toolStatus === "error" ||
+      item?.toolStatus === "declined"
+    ) {
+      return true;
+    }
     if (!hasToolCalls(item)) return false;
     return item.toolCalls.some(
-      (tool) => tool?.toolStatus === "running" || tool?.toolStatus === "error",
+      (tool) =>
+        tool?.toolStatus === "running" ||
+        tool?.toolStatus === "error" ||
+        tool?.toolStatus === "declined",
     );
   });
 }

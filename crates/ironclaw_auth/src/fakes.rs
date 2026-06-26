@@ -48,6 +48,7 @@ struct AuthState {
     continuations: Vec<AuthContinuationEvent>,
     refresh_fails: HashSet<CredentialAccountId>,
     refresh_backend_fails: HashSet<CredentialAccountId>,
+    refresh_invalid_grants: HashSet<CredentialAccountId>,
     refresh_races: HashMap<CredentialAccountId, (SecretHandle, SecretHandle)>,
     quarantines: HashMap<CredentialAccountId, SecretCleanupQuarantineReason>,
 }
@@ -77,6 +78,10 @@ impl InMemoryAuthProductServices {
 
     pub fn fail_next_refresh_backend_for_tests(&self, account_id: CredentialAccountId) {
         self.lock_state().refresh_backend_fails.insert(account_id);
+    }
+
+    pub fn invalid_grant_next_refresh_for_tests(&self, account_id: CredentialAccountId) {
+        self.lock_state().refresh_invalid_grants.insert(account_id);
     }
 
     pub fn complete_refresh_during_next_provider_call_for_tests(
@@ -300,7 +305,12 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             .accounts
             .get(&input.credential_account_id)
             .ok_or(AuthProductError::CredentialMissing)?;
-        if !scope_matches(&flow_scope, &account.scope) || account.provider != flow_provider {
+        // Use owner-granularity for the scope check, mirroring the production
+        // durable path (`flows.rs`). The flow record may carry a different
+        // invocation_id/thread_id/mission_id than the credential account; only
+        // the ownership boundary (tenant/user/agent/project + surface + session)
+        // is meaningful here. See `binding_scope_owns_account` in credential.rs.
+        if !binding_scope_owns_account(&flow_scope, account) || account.provider != flow_provider {
             return Err(AuthProductError::CrossScopeDenied);
         }
         if account.status != CredentialAccountStatus::Configured {
@@ -359,7 +369,16 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             .accounts
             .get(&input.credential_account_id)
             .ok_or(AuthProductError::CredentialMissing)?;
-        if !scope_matches(&flow_scope, &account.scope) || account.provider != flow_provider {
+        // Use owner-granularity for the scope check, mirroring the production
+        // durable path (`flows.rs`). The flow record's scope carries a fresh
+        // per-request `invocation_id` while the credential account may have been
+        // created under a different `invocation_id` (and/or thread/mission) in an
+        // earlier flow. Full `scope_matches` equality would always fail across
+        // requests. The meaningful ownership boundary is enforced by
+        // `binding_scope_owns_account` (tenant/user/agent/project + surface +
+        // session); see the canonical docstring on `binding_scope_owns_account`
+        // in credential.rs.
+        if !binding_scope_owns_account(&flow_scope, account) || account.provider != flow_provider {
             return Err(AuthProductError::CrossScopeDenied);
         }
         if account.status != CredentialAccountStatus::Configured {
@@ -938,6 +957,7 @@ impl AuthProviderClient for InMemoryAuthProductServices {
             let mut state = self.lock_state();
             let should_fail = state.refresh_fails.remove(&request.account_id);
             let should_backend_fail = state.refresh_backend_fails.remove(&request.account_id);
+            let should_invalid_grant = state.refresh_invalid_grants.remove(&request.account_id);
             if let Some((access_secret, refresh_secret)) =
                 state.refresh_races.remove(&request.account_id)
                 && let Some(account) = state.accounts.get_mut(&request.account_id)
@@ -947,13 +967,16 @@ impl AuthProviderClient for InMemoryAuthProductServices {
                 account.status = CredentialAccountStatus::Configured;
                 account.updated_at = Utc::now();
             }
-            (should_fail, should_backend_fail)
+            (should_fail, should_backend_fail, should_invalid_grant)
         };
         if should_fail.0 {
             return Err(AuthProductError::RefreshFailed);
         }
         if should_fail.1 {
             return Err(AuthProductError::BackendUnavailable);
+        }
+        if should_fail.2 {
+            return Err(AuthProductError::InvalidGrant);
         }
         Ok(OAuthProviderRefresh {
             provider: request.provider,

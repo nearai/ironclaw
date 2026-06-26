@@ -169,7 +169,12 @@ impl NearAiChatProvider {
     /// rejected those messages can still be exercised in tests via
     /// `new_with_options(..., true, ...)`.
     pub fn new(config: NearAiConfig, session: Arc<SessionManager>) -> Result<Self, LlmError> {
-        Self::new_with_options(config, session, false, 120)
+        Self::new_with_options(
+            config,
+            session,
+            false,
+            crate::config::DEFAULT_REQUEST_TIMEOUT_SECS,
+        )
     }
 
     /// Create a new provider with a custom request timeout.
@@ -189,8 +194,7 @@ impl NearAiChatProvider {
         flatten_tool_messages: bool,
         request_timeout_secs: u64,
     ) -> Result<Self, LlmError> {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(request_timeout_secs))
+        let client = crate::config::hardened_client_builder(request_timeout_secs)
             .build()
             .map_err(|e| LlmError::RequestFailed {
                 provider: "nearai_chat".to_string(),
@@ -2983,6 +2987,39 @@ mod tests {
         assert_eq!(
             provider.api_url("chat/completions"),
             "http://example.com/api/proxy/v1/chat/completions"
+        );
+    }
+
+    /// Verify the default request timeout sits below the Reborn runner lease
+    /// (90 s) so the HTTP layer fails a hung request before the lease
+    /// reclaims the runner.
+    #[test]
+    fn default_request_timeout_below_runner_lease() {
+        // Runner lease is 90 s (DEFAULT_RUNNER_LEASE_TTL_SECONDS in ironclaw_turns).
+        // ironclaw_llm must not depend on ironclaw_turns, so the bound is
+        // tested here by constant; the turns crate owns the invariant test on
+        // its own side.
+        const {
+            assert!(
+                crate::config::DEFAULT_REQUEST_TIMEOUT_SECS < 90,
+                "DEFAULT_REQUEST_TIMEOUT_SECS must be below the Reborn runner lease \
+                 (90 s) so the HTTP layer times out first",
+            );
+        }
+    }
+
+    /// Builder-config smoke test: provider constructs successfully with the
+    /// default timeout and the hardened client options (connect timeout,
+    /// keepalive) applied. reqwest does not expose builder values for readback,
+    /// so this asserts a successful build rather than the individual settings.
+    #[test]
+    fn nearai_provider_builds_with_default_timeout() {
+        let cfg = test_nearai_config("http://example.com/v1");
+        let result = NearAiChatProvider::new(cfg, test_session());
+        assert!(
+            result.is_ok(),
+            "NearAiChatProvider::new should succeed with default timeout: {:?}",
+            result.err()
         );
     }
 }

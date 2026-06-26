@@ -8,6 +8,7 @@ use crate::{
     RunStatusProjection,
 };
 
+#[derive(Clone)]
 pub(crate) struct RuntimeProjectionState {
     runs: HashMap<InvocationId, RunStatusProjection>,
     capability_activities: HashMap<InvocationId, CapabilityActivityProjection>,
@@ -23,12 +24,19 @@ impl RuntimeProjectionState {
         }
     }
 
-    pub(crate) fn with_capability_activity_output_limit(limit: usize) -> Self {
-        Self {
-            runs: HashMap::new(),
-            capability_activities: HashMap::new(),
-            capability_activity_output_limit: Some(limit),
-        }
+    pub(crate) fn with_output_limit(mut self, limit: usize) -> Self {
+        self.capability_activity_output_limit = Some(limit);
+        self
+    }
+
+    pub(crate) fn retain_invocations(
+        &mut self,
+        invocations: &std::collections::HashSet<InvocationId>,
+    ) {
+        self.runs
+            .retain(|invocation_id, _| invocations.contains(invocation_id));
+        self.capability_activities
+            .retain(|invocation_id, _| invocations.contains(invocation_id));
     }
 
     pub(crate) fn apply(&mut self, entry: &EventLogEntry<RuntimeEvent>) {

@@ -33,7 +33,7 @@ is_shared_test_path() {
     scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh|scripts/ci/package-feature-flags.sh)
       return 0
       ;;
-    .github/workflows/test.yml|.github/workflows/reborn-tests.yml|.github/workflows/reborn-integration.yml|.github/workflows/reborn-e2e.yml|.github/workflows/nightly-deep-ci.yml)
+    .github/workflows/test.yml|.github/workflows/reborn-tests.yml|.github/workflows/reborn-e2e.yml|.github/workflows/nightly-deep-ci.yml)
       return 0
       ;;
     crates/ironclaw_common/*|crates/ironclaw_host_api/*|crates/ironclaw_host_runtime/*|crates/ironclaw_loop_support/*)
@@ -66,7 +66,7 @@ is_shared_test_path() {
 is_reborn_test_path() {
   local path="$1"
   case "$path" in
-    docs/reborn/*|scripts/reborn-e2e-rust.sh|scripts/ci/run-reborn-root-partition.sh|tests/reborn_*|tests/support/reborn/*|tests/e2e/scenarios/test_reborn_*)
+    docs/reborn/*|scripts/reborn-e2e-rust.sh|scripts/ci/run-reborn-root-partition.sh|tests/reborn_*|tests/support/reborn/*|tests/fixtures/llm_traces/reborn_qa/*|tests/e2e/scenarios/test_reborn_*)
       return 0
       ;;
     crates/ironclaw_architecture/*)

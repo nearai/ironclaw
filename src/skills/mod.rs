@@ -338,6 +338,7 @@ mod tests {
             manifest: SkillManifest {
                 name: "test-api".to_string(),
                 version: "1.0.0".to_string(),
+                auto_activate: true,
                 description: "Test".to_string(),
                 activation: ActivationCriteria::default(),
                 credentials: vec![SkillCredentialSpec {
@@ -377,6 +378,7 @@ mod tests {
             manifest: SkillManifest {
                 name: "gmail".to_string(),
                 version: "1.0.0".to_string(),
+                auto_activate: true,
                 description: "Test".to_string(),
                 activation: ActivationCriteria::default(),
                 credentials: vec![SkillCredentialSpec {
@@ -434,6 +436,7 @@ mod tests {
             manifest: SkillManifest {
                 name: "bad-skill".to_string(),
                 version: "1.0.0".to_string(),
+                auto_activate: true,
                 description: "Test".to_string(),
                 activation: ActivationCriteria::default(),
                 credentials: vec![SkillCredentialSpec {

@@ -107,6 +107,14 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "reborn qa trace fixture" \
+  "tests/fixtures/llm_traces/reborn_qa/routine_health_ping.json" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "reborn e2e scenario" \
   "tests/e2e/scenarios/test_reborn_scope_isolation.py" \
   "docs_only=false

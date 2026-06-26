@@ -10,7 +10,7 @@ use ironclaw_host_api::{
     AgentId, CorrelationId, InvocationId, MissionId, ProjectId, ResourceScope, TenantId, ThreadId,
     UserId, VirtualPath,
 };
-use ironclaw_memory::{
+use ironclaw_memory_native::{
     ChunkingMemoryDocumentIndexer, FilesystemMemoryDocumentRepository,
     InMemoryMemoryDocumentRepository, MemoryBackend, MemoryBackendCapabilities,
     MemoryBackendFilesystemAdapter, MemoryContext, MemoryDocumentPath, MemoryDocumentScope,

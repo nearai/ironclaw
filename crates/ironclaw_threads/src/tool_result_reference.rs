@@ -1,4 +1,4 @@
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::{CapabilityId, ProviderToolName};
 use ironclaw_safety::{
     validate_optional_provider_metadata_text, validate_provider_arguments,
     validate_provider_identity, validate_provider_token, validate_provider_tool_name,
@@ -113,7 +113,7 @@ pub struct ProviderToolCallReferenceEnvelope {
     pub provider_model_id: String,
     pub provider_turn_id: String,
     pub provider_call_id: String,
-    pub provider_tool_name: String,
+    pub provider_tool_name: ProviderToolName,
     pub capability_id: CapabilityId,
     pub arguments: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -134,7 +134,8 @@ impl ProviderToolCallReferenceEnvelope {
             .map_err(|error| error.to_string())?;
         validate_provider_token(&self.provider_call_id, "provider call id", 512)
             .map_err(|error| error.to_string())?;
-        validate_provider_tool_name(&self.provider_tool_name).map_err(|error| error.to_string())?;
+        validate_provider_tool_name(self.provider_tool_name.as_str())
+            .map_err(|error| error.to_string())?;
         validate_provider_arguments(&self.arguments).map_err(|error| error.to_string())?;
         validate_optional_provider_text(
             &self.response_reasoning,
@@ -824,7 +825,7 @@ fn is_disallowed_control_character(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::CapabilityId;
+    use ironclaw_host_api::{CapabilityId, ProviderToolName};
 
     use super::{
         ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
@@ -880,13 +881,20 @@ mod tests {
 
     #[test]
     fn provider_reference_validation_rejects_sensitive_arguments_and_text() {
+        // Arguments carrying a real secret-like token are rejected by the
+        // entropy-based leak scan, which is the canonical guard after #5001
+        // dropped the crude bare-word substring markers.
         let mut envelope = provider_reference();
         let api_key = format!("sk-proj-{}", "a".repeat(24));
         envelope.arguments = serde_json::json!({"api_key": api_key});
         assert!(envelope.validate().is_err());
 
+        // Provider reasoning text flows through the same leak scan, so a leaked
+        // secret-like token there is rejected even though bare words like
+        // "stack trace" are now intentionally allowed (#5001, PinchBench bucket D).
         let mut envelope = provider_reference();
-        envelope.response_reasoning = Some("raw provider error included a stack trace".to_string());
+        let leaked_token = format!("sk-proj-{}", "b".repeat(24));
+        envelope.response_reasoning = Some(format!("provider error leaked {leaked_token}"));
         assert!(envelope.validate().is_err());
     }
 
@@ -1000,7 +1008,7 @@ mod tests {
             provider_model_id: "model".to_string(),
             provider_turn_id: "turn_1".to_string(),
             provider_call_id: "call_1".to_string(),
-            provider_tool_name: "demo__echo".to_string(),
+            provider_tool_name: ProviderToolName::new("demo__echo").expect("provider tool name"),
             capability_id: CapabilityId::new("demo.echo").expect("capability id"),
             arguments: serde_json::json!({"message":"hello"}),
             response_reasoning: None,

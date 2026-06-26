@@ -67,9 +67,8 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerCompletionPolicy, TriggerId,
-    TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerSchedule,
-    TriggerSourceKind, TriggerState,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerPollerWorkerConfig, TriggerRecord,
+    TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use tower::ServiceExt;
 
@@ -251,7 +250,6 @@ fn make_trigger_record(
         name: name.to_string(),
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
-        completion_policy: TriggerCompletionPolicy::CompleteAfterFirstFire,
         prompt: TRIGGER_PROMPT.to_string(),
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() - chrono::Duration::seconds(120),

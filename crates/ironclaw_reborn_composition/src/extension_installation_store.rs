@@ -9,7 +9,7 @@ use ironclaw_host_api::{ExtensionId, VirtualPath};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-const INSTALLATION_STATE_PATH: &str = "/system/extensions/.installations/state.json";
+const DEFAULT_INSTALLATION_STATE_PATH: &str = "/system/extensions/.installations/state.json";
 
 pub(crate) struct FilesystemExtensionInstallationStore {
     filesystem: std::sync::Arc<dyn RootFilesystem>,
@@ -19,14 +19,10 @@ pub(crate) struct FilesystemExtensionInstallationStore {
 }
 
 impl FilesystemExtensionInstallationStore {
-    pub(crate) async fn load(
+    pub(crate) async fn load_at(
         filesystem: std::sync::Arc<dyn RootFilesystem>,
+        state_path: VirtualPath,
     ) -> Result<Self, ExtensionInstallationError> {
-        let state_path = VirtualPath::new(INSTALLATION_STATE_PATH).map_err(|error| {
-            ExtensionInstallationError::InvalidInstallation {
-                reason: error.to_string(),
-            }
-        })?;
         let inner = InMemoryExtensionInstallationStore::default();
         match filesystem.read_file(&state_path).await {
             Ok(bytes) => {
@@ -34,8 +30,17 @@ impl FilesystemExtensionInstallationStore {
                     serde_json::from_slice(&bytes).map_err(invalid_installation_error)?;
                 state.load_into(&inner).await?;
             }
-            Err(FilesystemError::NotFound { .. }) | Err(FilesystemError::MountNotFound { .. }) => {}
-            Err(error) => return Err(invalid_installation_error(error)),
+            Err(FilesystemError::NotFound { .. }) => {}
+            Err(error) => {
+                tracing::debug!(
+                    ?error,
+                    state_path = %state_path.as_str(),
+                    "extension installation state load failed"
+                );
+                return Err(invalid_installation_error(
+                    "failed to load extension installation state",
+                ));
+            }
         }
         Ok(Self {
             filesystem,
@@ -43,6 +48,10 @@ impl FilesystemExtensionInstallationStore {
             inner,
             save_lock: Mutex::new(()),
         })
+    }
+
+    pub(crate) fn default_state_path() -> Result<VirtualPath, ExtensionInstallationError> {
+        default_installation_state_path()
     }
 
     async fn save_snapshot(&self) -> Result<(), ExtensionInstallationError> {
@@ -53,6 +62,14 @@ impl FilesystemExtensionInstallationStore {
             .await
             .map_err(invalid_installation_error)
     }
+}
+
+fn default_installation_state_path() -> Result<VirtualPath, ExtensionInstallationError> {
+    VirtualPath::new(DEFAULT_INSTALLATION_STATE_PATH).map_err(|error| {
+        ExtensionInstallationError::InvalidInstallation {
+            reason: error.to_string(),
+        }
+    })
 }
 
 #[async_trait]
@@ -262,5 +279,192 @@ impl WireManifestSource {
 fn invalid_installation_error(error: impl std::fmt::Display) -> ExtensionInstallationError {
     ExtensionInstallationError::InvalidInstallation {
         reason: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use ironclaw_extensions::{
+        ExtensionActivationState, ExtensionInstallationId, ExtensionManifestRecord,
+        ExtensionManifestRef, MANIFEST_SCHEMA_VERSION,
+    };
+    use ironclaw_filesystem::{
+        BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemOperation,
+        InMemoryBackend, RecordVersion, RootFilesystem, VersionedEntry,
+    };
+    use ironclaw_host_api::HostPortCatalog;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn load_at_treats_not_found_as_empty_state() {
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let state_path =
+            VirtualPath::new("/tenants/acme/system/extensions/.installations/missing-state.json")
+                .expect("valid state path");
+
+        let store = FilesystemExtensionInstallationStore::load_at(filesystem, state_path)
+            .await
+            .expect("missing state file loads as empty");
+
+        assert!(
+            store
+                .list_installations()
+                .await
+                .expect("list installations")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn load_at_sanitizes_filesystem_read_errors() {
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(ReadFailureFilesystem::new());
+        let state_path =
+            VirtualPath::new("/tenants/acme/system/extensions/.installations/state.json")
+                .expect("valid state path");
+
+        let error =
+            match FilesystemExtensionInstallationStore::load_at(filesystem, state_path).await {
+                Ok(_) => panic!("backend read failure should surface as invalid installation"),
+                Err(error) => error,
+            };
+
+        let rendered = error.to_string();
+        assert!(rendered.contains("failed to load extension installation state"));
+        assert!(!rendered.contains("/tenants/acme"));
+        assert!(!rendered.contains("raw backend detail"));
+    }
+
+    #[tokio::test]
+    async fn load_at_persists_state_to_custom_path() {
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let state_path =
+            VirtualPath::new("/tenants/acme/system/extensions/.installations/state.json")
+                .expect("valid state path");
+        let store = FilesystemExtensionInstallationStore::load_at(
+            Arc::clone(&filesystem),
+            state_path.clone(),
+        )
+        .await
+        .expect("store loads");
+        let installation_id =
+            ExtensionInstallationId::new("gmail".to_string()).expect("valid installation id");
+        let extension_id = ExtensionId::new("gmail").expect("valid extension id");
+        let manifest_ref = ExtensionManifestRef::new(extension_id.clone(), None);
+        let manifest = ExtensionManifestRecord::from_toml(
+            format!(
+                r#"
+schema_version = "{schema}"
+id = "gmail"
+name = "Gmail"
+version = "0.1.0"
+description = "test"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/gmail.wasm"
+
+[[capabilities]]
+id = "gmail.echo"
+description = "Echoes input"
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/gmail/echo.input.v1.json"
+output_schema_ref = "schemas/gmail/echo.output.v1.json"
+prompt_doc_ref = "prompts/gmail/echo.md"
+"#,
+                schema = MANIFEST_SCHEMA_VERSION,
+            ),
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+            None,
+        )
+        .expect("valid manifest");
+        store
+            .upsert_manifest_and_installation(
+                manifest,
+                ExtensionInstallation::new(
+                    installation_id.clone(),
+                    extension_id,
+                    ExtensionActivationState::Installed,
+                    manifest_ref,
+                    Vec::new(),
+                    Utc::now(),
+                )
+                .expect("valid installation"),
+            )
+            .await
+            .expect("installation saved");
+
+        assert!(
+            filesystem
+                .read_file(&state_path)
+                .await
+                .expect("state file exists")
+                .starts_with(b"{")
+        );
+
+        let reloaded = FilesystemExtensionInstallationStore::load_at(filesystem, state_path)
+            .await
+            .expect("store reloads");
+        assert!(
+            reloaded
+                .get_installation(&installation_id)
+                .await
+                .expect("installation read")
+                .is_some()
+        );
+    }
+
+    struct ReadFailureFilesystem {
+        inner: InMemoryBackend,
+    }
+
+    impl ReadFailureFilesystem {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryBackend::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RootFilesystem for ReadFailureFilesystem {
+        fn capabilities(&self) -> BackendCapabilities {
+            self.inner.capabilities()
+        }
+
+        async fn put(
+            &self,
+            path: &VirtualPath,
+            entry: Entry,
+            cas: CasExpectation,
+        ) -> Result<RecordVersion, FilesystemError> {
+            self.inner.put(path, entry, cas).await
+        }
+
+        async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+            Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "raw backend detail".to_string(),
+            })
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            self.inner.list_dir(path).await
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            self.inner.stat(path).await
+        }
+
+        async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            self.inner.delete(path).await
+        }
     }
 }

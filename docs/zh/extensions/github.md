@@ -61,6 +61,7 @@ ironclaw tool auth github
 - `get_pull_request`：获取特定拉取请求的详细信息
 - `get_pull_request_files`：获取拉取请求中的文件列表
 - `create_pr_review`：提交拉取请求审查
+- `get_authenticated_user`：获取已认证的 GitHub 用户
 - `list_repos`：列出仓库（用户/组织）
 - `get_file_content`：获取仓库中文件的内容
 - `trigger_workflow`：手动触发 GitHub Actions 工作流

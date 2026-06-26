@@ -927,6 +927,7 @@ async fn stage_http_secret(
             scope.clone(),
             handle.clone(),
             SecretMaterial::from(FIRST_PARTY_STAGED_SECRET),
+            None,
         )
         .await
         .unwrap();

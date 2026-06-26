@@ -1,0 +1,97 @@
+tokens:
+  mock-token-mock_auth_code:
+    login: e2e.google@example.com
+    scopes:
+      - https://www.googleapis.com/auth/gmail.readonly
+      - https://www.googleapis.com/auth/gmail.send
+      - https://www.googleapis.com/auth/calendar.readonly
+      - https://www.googleapis.com/auth/calendar.events
+      - https://www.googleapis.com/auth/drive.readonly
+      - https://www.googleapis.com/auth/drive.file
+  mock-refreshed-access-token:
+    login: e2e.google@example.com
+    scopes:
+      - https://www.googleapis.com/auth/gmail.readonly
+      - https://www.googleapis.com/auth/gmail.send
+      - https://www.googleapis.com/auth/calendar.readonly
+      - https://www.googleapis.com/auth/calendar.events
+      - https://www.googleapis.com/auth/drive.readonly
+      - https://www.googleapis.com/auth/drive.file
+
+google:
+  users:
+    - email: e2e.google@example.com
+      name: E2E Google User
+  messages:
+    - id: msg_emulate_unread
+      user_email: e2e.google@example.com
+      from: qa-sender@example.com
+      to: e2e.google@example.com
+      subject: Emulate seeded unread
+      body_text: This message came from the Emulate Google API.
+      date: "2026-06-22T12:00:00.000Z"
+      label_ids:
+        - INBOX
+        - UNREAD
+    - id: msg_emulate_near_inbound
+      user_email: e2e.google@example.com
+      from: partnerships@near.ai
+      to: e2e.google@example.com
+      subject: Follow up from NEAR AI
+      body_text: Please add this near.ai inbound to the ABC CRM sheet.
+      date: "2026-06-22T11:55:00.000Z"
+      label_ids:
+        - INBOX
+        - UNREAD
+  calendars:
+    - id: primary
+      user_email: e2e.google@example.com
+      summary: E2E Primary Calendar
+      description: Calendar data seeded by Emulate for Reborn QA.
+      time_zone: UTC
+      primary: true
+      selected: true
+      access_role: owner
+  calendar_events:
+    - id: evt_reborn_planning_sync
+      user_email: e2e.google@example.com
+      calendar_id: primary
+      summary: Reborn planning sync
+      description: Calendar event seeded by Emulate for Reborn QA.
+      start_date_time: "2026-06-22T13:00:00.000Z"
+      end_date_time: "2026-06-22T13:30:00.000Z"
+      attendees:
+        - email: teammate@example.com
+          display_name: Teammate
+    - id: evt_pepsico_procurement_sync
+      user_email: e2e.google@example.com
+      calendar_id: primary
+      summary: PepsiCo procurement sync
+      description: Next meeting company is PepsiCo.
+      start_date_time: "2026-06-22T14:00:00.000Z"
+      end_date_time: "2026-06-22T14:30:00.000Z"
+      attendees:
+        - email: buyer@pepsico.example
+          display_name: PepsiCo Buyer
+  drive_items:
+    - id: drv_reborn_qa_brief
+      user_email: e2e.google@example.com
+      name: Reborn QA Brief
+      mime_type: text/plain
+      parent_google_ids:
+        - root
+      data: Drive content seeded by Emulate for Reborn QA.
+    - id: drv_pepsico_account_brief
+      user_email: e2e.google@example.com
+      name: PepsiCo Account Brief
+      mime_type: text/plain
+      parent_google_ids:
+        - root
+      data: "PepsiCo account brief: procurement team is evaluating NEAR AI user-owned agents."
+    - id: drv_near_ai_strategy
+      user_email: e2e.google@example.com
+      name: NEAR AI Strategy
+      mime_type: text/plain
+      parent_google_ids:
+        - root
+      data: "NEAR AI Strategy: user-owned agents keep credentials and data under user control."

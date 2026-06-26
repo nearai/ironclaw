@@ -110,6 +110,7 @@ mod tests {
     async fn null_resolver_returns_none() {
         let resolver = NullCapabilityInputResolver;
         let invocation = CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("v1").expect("ok"),
             capability_id: CapabilityId::new("cap.x").expect("ok"),
             input_ref: CapabilityInputRef::new("input:x").expect("ok"),

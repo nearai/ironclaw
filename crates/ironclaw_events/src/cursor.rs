@@ -95,7 +95,7 @@ impl EventStreamKey {
 /// records whose corresponding scope field is `Some(want)`. A record with
 /// `None` in that field does **not** match a filter that asks for
 /// `Some(...)` — the filter is a tightening, never a permissive default.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReadScope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<ProjectId>,

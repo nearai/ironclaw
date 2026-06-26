@@ -34,15 +34,14 @@ async fn reborn_identity_prompt_scope_isolation_parity() {
         HostManagedModelResponse::assistant_reply("alice scoped reply"),
         HostManagedModelResponse::assistant_reply("bob scoped reply"),
     ]);
-    let mut harness =
-        RebornBinaryE2EHarness::with_model_gateway_identity_source_unscoped_shared_worker(
-            SHARED_ROOM,
-            model_gateway,
-            RecordingTestCapabilityPort::echo(),
-            identity_source.clone(),
-        )
-        .await
-        .expect("harness");
+    let mut harness = RebornBinaryE2EHarness::with_model_gateway_identity_source_shared(
+        SHARED_ROOM,
+        model_gateway,
+        RecordingTestCapabilityPort::echo(),
+        identity_source.clone(),
+    )
+    .await
+    .expect("harness");
 
     let alice = harness
         .submit_text_for_with_trigger(

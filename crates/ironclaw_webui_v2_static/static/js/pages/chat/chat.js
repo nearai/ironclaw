@@ -21,7 +21,6 @@ import { TypingIndicator } from "./components/typing-indicator.js";
 import { useChat } from "./hooks/useChat.js";
 import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
-import { buildScopedLogsPath } from "../logs/lib/logs-data.js";
 
 /* Grace window before an active thread's sidebar state is cleared to idle.
  * Long enough for SSE to rehydrate a gate/run after a thread switch (so a
@@ -50,6 +49,7 @@ export function Chat({
     messages,
     isProcessing,
     pendingGate,
+    busyGateNotice,
     channelConnectAction,
     suggestions,
     sseStatus,
@@ -84,9 +84,16 @@ export function Chat({
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
   const showLanding = !historyLoading && !hasMessages && !historyLoadError;
-  const composerDisabled = (isProcessing && !pendingGate) || cooldownSeconds > 0;
+  const approvalSubmitWarning = pendingGate
+    ? "Resolve the approval request before sending another message."
+    : "";
+  const composerSendDisabled =
+    Boolean(pendingGate) || (isProcessing && !pendingGate) || cooldownSeconds > 0;
+  const composerSendBlockedRef = React.useRef(composerSendDisabled);
+  composerSendBlockedRef.current = composerSendDisabled;
   const composerStatusText =
-    cooldownSeconds > 0 ? `Retry in ${cooldownSeconds}s` : undefined;
+    approvalSubmitWarning ||
+    (cooldownSeconds > 0 ? `Retry in ${cooldownSeconds}s` : undefined);
   // Scope the persisted composer draft to the open thread (or the
   // shared new-conversation slot when there's no active thread yet).
   const composerDraftKey = activeThreadId || NEW_DRAFT_KEY;
@@ -97,18 +104,12 @@ export function Chat({
       isProcessing &&
       !pendingGate
   );
-  const scopedLogsHref = React.useMemo(() => {
-    if (!activeThreadId) return null;
-    const runId =
-      activeRun?.threadId === activeThreadId ? activeRun.runId : null;
-    return buildScopedLogsPath(
-      { threadId: activeThreadId, runId },
-      { absolute: true }
-    );
-  }, [activeRun, activeThreadId]);
-
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [] } = {}) => {
+      if (pendingGate) {
+        throw new Error(approvalSubmitWarning);
+      }
+      if (composerSendBlockedRef.current) return null;
       const response = await send(content, {
         images,
         attachments,
@@ -120,15 +121,23 @@ export function Chat({
       }
       return response;
     },
-    [activeThreadId, onSelectThread, send]
+    [
+      activeThreadId,
+      approvalSubmitWarning,
+      composerSendDisabled,
+      onSelectThread,
+      pendingGate,
+      send,
+    ]
   );
 
   const handleSuggestion = React.useCallback(
     async (text) => {
+      if (composerSendDisabled) return;
       setSuggestions([]);
       await handleSend(text);
     },
-    [handleSend, setSuggestions]
+    [composerSendDisabled, handleSend, setSuggestions]
   );
 
   const handleCancelRun = React.useCallback(
@@ -206,18 +215,6 @@ export function Chat({
       <div className="flex min-w-0 flex-1 flex-col">
         <${ConnectionStatus} status=${sseStatus} />
 
-        ${scopedLogsHref &&
-        html`
-          <div className="flex justify-end border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)] px-4 py-1.5">
-            <a
-              href=${scopedLogsHref}
-              className="rounded-[6px] px-2 py-1 text-xs font-medium text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
-            >
-              ${t("nav.logs")}
-            </a>
-          </div>
-        `}
-
         ${historyLoadError &&
         html`
           <div
@@ -233,7 +230,8 @@ export function Chat({
           <${EmptyState}
             onSuggestion=${handleSuggestion}
             onSend=${handleSend}
-            disabled=${composerDisabled}
+            disabled=${false}
+            sendDisabled=${composerSendDisabled}
             initialText=${composerDraft}
             resetKey=${composerResetKey}
             draftKey=${composerDraftKey}
@@ -306,16 +304,28 @@ export function Chat({
                   approve(pendingGate.requestId, "always", pendingGate.kind)}
               />
             `)}
+            ${busyGateNotice &&
+            html`
+              <div
+                data-testid="busy-gate-notice"
+                role="status"
+                className="mx-auto mt-3 max-w-lg rounded-lg border border-copper/25 bg-copper/10 px-4 py-3 text-center text-sm leading-6 text-copper"
+              >
+                ${busyGateNotice.content}
+              </div>
+            `}
           <//>
 
           <${SuggestionChips}
             suggestions=${suggestions}
             onSelect=${handleSuggestion}
+            disabled=${composerSendDisabled}
           />
 
           <${ChatInput}
             onSend=${handleSend}
-            disabled=${composerDisabled}
+            disabled=${false}
+            sendDisabled=${composerSendDisabled}
             initialText=${composerDraft}
             resetKey=${composerResetKey}
             draftKey=${composerDraftKey}

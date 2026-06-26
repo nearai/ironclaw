@@ -4,7 +4,6 @@ import { formatCurrency, summarizeOverview } from "../lib/projects-presenters.js
 
 const metricTone = {
   projects: "muted",
-  missions: "signal",
   attention: "warning",
   spend: "success",
 };
@@ -17,12 +16,6 @@ export function ProjectsSummaryStrip({ overview }) {
       label: "Projects",
       value: summary.totalProjects,
       detail: `${summary.threadsToday} threads active today`,
-    },
-    {
-      key: "missions",
-      label: "Active missions",
-      value: summary.activeMissions,
-      detail: `${summary.pendingGates} gates across the workspace`,
     },
     {
       key: "attention",

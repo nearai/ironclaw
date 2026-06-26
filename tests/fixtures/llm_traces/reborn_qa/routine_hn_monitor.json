@@ -1,0 +1,118 @@
+{
+  "model_name": "recorded-qa-routine_hn_monitor",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Every hour, check Hacker News for new posts mentioning 'IronClaw' or 'NEAR AI' and send a summary to Slack."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Every hour, check Hacker News for new posts mentioning 'IronClaw' or 'NEAR AI' a",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "toolu_0122gyKy1ZPeTtPfFWDQobZk",
+            "name": "builtin__outbound_delivery_targets_list",
+            "arguments": {
+              "channel": "slack"
+            }
+          },
+          {
+            "id": "toolu_01T7eq6m7qyKi8rdpTYvnLPC",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "Slack"
+            }
+          }
+        ],
+        "input_tokens": 12452,
+        "output_tokens": 129
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Every hour, check Hacker News for new posts mentioning 'IronClaw' or 'NEAR AI' a",
+        "min_message_count": 5
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "toolu_016Tqf5AAyXXcJ5AMVcR4Ps7",
+            "name": "builtin__outbound_delivery_target_set",
+            "arguments": {
+              "target_id": "slack:qa-trace-dm"
+            }
+          }
+        ],
+        "input_tokens": 12692,
+        "output_tokens": 95
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "toolu_0122gyKy1ZPeTtPfFWDQobZk",
+          "name": "builtin__outbound_delivery_targets_list",
+          "content": " object targets array object capabilities object auth_prompts false final_replies true gate_prompts false target object channel slack description QA trace Slack direct message display_name Slack DM target_id slack:qa-trace-dm"
+        },
+        {
+          "tool_call_id": "toolu_01T7eq6m7qyKi8rdpTYvnLPC",
+          "name": "builtin__extension_search",
+          "content": " object payload object count 0 extensions array kind extension_search phase discovered"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Every hour, check Hacker News for new posts mentioning 'IronClaw' or 'NEAR AI' a",
+        "min_message_count": 7
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "toolu_01JvtdPuxz4KZx7zCtvDAtfB",
+            "name": "builtin__trigger_create",
+            "arguments": {
+              "name": "Hacker News: IronClaw & NEAR AI mentions (hourly)",
+              "prompt": "Fetch the Hacker News Algolia search API for recent posts mentioning 'IronClaw' or 'NEAR AI'.\n\nUse these two URLs:\n- https://hn.algolia.com/api/v1/search_by_date?query=IronClaw&tags=story&hitsPerPage=10\n- https://hn.algolia.com/api/v1/search_by_date?query=NEAR+AI&tags=story&hitsPerPage=10\n\nFilter results to only include posts created within the last 1 hour. For each matching post include: title, author, URL (or HN link: https://news.ycombinator.com/item?id=<objectID>), points, and number of comments.\n\nThen send a concise Slack summary structured like this:\n\n🔍 *Hacker News Mentions – Last Hour*\n\n**IronClaw** (N new posts)\n• [Title](link) by author — X pts, Y comments\n\n**NEAR AI** (N new posts)\n• [Title](link) by author — X pts, Y comments\n\nIf there are no new posts for a keyword in the last hour, say \"No new mentions.\"",
+              "schedule": { "kind": "cron", "expression": "0 * * * *", "timezone": "UTC" }
+            }
+          }
+        ],
+        "input_tokens": 12820,
+        "output_tokens": 429
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "toolu_016Tqf5AAyXXcJ5AMVcR4Ps7",
+          "name": "builtin__outbound_delivery_target_set",
+          "content": " object default_modality text final_reply_target object channel slack description QA trace Slack direct message display_name Slack DM target_id slack:qa-trace-dm final_reply_target_status available"
+        }
+      ]
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Every hour, check Hacker News for new posts mentioning 'IronClaw' or 'NEAR AI' a",
+        "min_message_count": 9
+      },
+      "response": {
+        "type": "text",
+        "content": "All set! Here's what's been configured:\n\n---\n\n### ✅ Hourly HN Monitor → Slack DM\n\n| Setting | Value |\n|---|---|\n| **Trigger** | Every hour at :00 (UTC) |\n| **First run** | 2026-06-19 at 19:00 UTC |\n| **Searches** | `IronClaw` and `NEAR AI` on Hacker News |\n| **Filter** | Only posts from the last hour |\n| **Delivery** | Slack DM (QA trace channel) |\n\n**Each hourly summary will include:**\n- Post title with link\n- Author, points, and comment count\n- Separate sections for each keyword\n- \"No new mentions\" if nothing new was posted\n\nTo stop or modify this trigger at any time, just ask.",
+        "input_tokens": 13390,
+        "output_tokens": 196
+      },
+      "expected_tool_results": [
+        {
+          "tool_call_id": "toolu_01JvtdPuxz4KZx7zCtvDAtfB",
+          "name": "builtin__trigger_create",
+          "content": " object trigger object agent_id qa-trace-agent completion_policy recurring created_at 2026-06-19T18:21:09.350284Z has_active_fire false is_active true is_enabled true last_run_at null last_status null name Hacker News: IronClaw & NEAR AI mentions (hourly) next_run_at 2026-06-19T19:00:00Z project_id null recent_runs array schedule object expression 0 * * * * kind cron timezone UTC source schedule state scheduled trigger_id 01KVGHV1V6ZPJE0AEWFKCKXHCX"
+        }
+      ]
+    }
+  ]
+}

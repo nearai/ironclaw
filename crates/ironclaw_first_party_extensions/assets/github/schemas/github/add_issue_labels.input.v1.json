@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub add_issue_labels input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": { "pattern": "\\.\\." }
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": { "pattern": "\\.\\." }
+    },
+    "issue_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "labels": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": { "type": "string", "minLength": 1, "maxLength": 100 }
+    }
+  },
+  "required": ["owner", "repo", "issue_number", "labels"]
+}

@@ -10,14 +10,15 @@ use ironclaw_turns::{
         CapabilityInputIssueCode, CapabilityInputRepair, CapabilityInvocation,
         CapabilityRecoveryHint, CapabilityResultMessage, CapabilitySurfaceVersion,
         ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ProviderToolCallReference,
-        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
-        ToolRecoveryObservation, VisibleCapabilitySurface,
+        RegisterProviderToolCallRequest, SameCallRetryConstraint, ToolObservationDetail,
+        ToolObservationStatus, ToolRecoveryObservation, VisibleCapabilitySurface,
     },
 };
 
 use crate::{
     state::{
         CapabilityCallSignature, LoopExecutionState, PendingApprovalResume, PendingAuthResume,
+        PendingExternalToolResume,
     },
     strategies::{CapabilityCallSummary, CapabilityErrorSummary, CapabilityFilter, GateKind},
 };
@@ -32,6 +33,7 @@ pub(super) fn capability_invocation_from_candidate(
     approval_resume: Option<CapabilityApprovalResume>,
 ) -> CapabilityInvocation {
     CapabilityInvocation {
+        activity_id: call.activity_id,
         surface_version: call.surface_version,
         capability_id: call.capability_id,
         input_ref: call.input_ref,
@@ -64,6 +66,7 @@ pub(super) fn capability_invocation_from_auth_resume_candidate(
             replay: pending_auth.replay.clone(),
         });
     CapabilityInvocation {
+        activity_id: call.activity_id,
         surface_version: call.surface_version,
         capability_id: call.capability_id,
         input_ref: call.input_ref,
@@ -77,6 +80,7 @@ pub(super) fn pending_approval_resume_candidate(
     surface_version: CapabilitySurfaceVersion,
 ) -> CapabilityCallCandidate {
     CapabilityCallCandidate {
+        activity_id: resume.activity_id_for_resume(),
         surface_version,
         capability_id: resume.capability_id.clone(),
         input_ref: resume.input_ref.clone(),
@@ -92,24 +96,28 @@ pub(super) async fn pending_auth_resume_candidate(
 ) -> Result<CapabilityCallCandidate, AgentLoopExecutorError> {
     if let Some(replay) = resume.provider_replay.as_ref() {
         let candidate = host
-            .register_provider_tool_call(ProviderToolCall {
-                provider_id: replay.provider_id.clone(),
-                provider_model_id: replay.provider_model_id.clone(),
-                turn_id: Some(replay.provider_turn_id.clone()),
-                id: replay.provider_call_id.clone(),
-                name: replay.provider_tool_name.clone(),
-                arguments: replay.arguments.clone(),
-                response_reasoning: replay.response_reasoning.clone(),
-                reasoning: replay.reasoning.clone(),
-                signature: replay.signature.clone(),
-            })
+            .register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
+                ProviderToolCall {
+                    provider_id: replay.provider_id.clone(),
+                    provider_model_id: replay.provider_model_id.clone(),
+                    turn_id: Some(replay.provider_turn_id.clone()),
+                    id: replay.provider_call_id.clone(),
+                    name: replay.provider_tool_name.clone(),
+                    arguments: replay.arguments.clone(),
+                    response_reasoning: replay.response_reasoning.clone(),
+                    reasoning: replay.reasoning.clone(),
+                    signature: replay.signature.clone(),
+                },
+                resume.activity_id_for_resume(),
+            ))
             .await
             .map_err(capability_host_error)?;
-        if candidate.capability_id != resume.capability_id
+        if candidate.activity_id != resume.activity_id_for_resume()
+            || candidate.capability_id != resume.capability_id
             || candidate.effective_capability_ids != resume.effective_capability_ids
         {
             return Err(AgentLoopExecutorError::PlannerContract {
-                detail: "auth resume provider replay no longer matches blocked capability",
+                detail: "auth resume provider replay no longer matches blocked capability activity",
             });
         }
         return Ok(candidate);
@@ -125,6 +133,7 @@ fn pending_auth_resume_staged_input_candidate(
     surface_version: CapabilitySurfaceVersion,
 ) -> CapabilityCallCandidate {
     CapabilityCallCandidate {
+        activity_id: resume.activity_id_for_resume(),
         surface_version,
         capability_id: resume.capability_id.clone(),
         input_ref: resume.input_ref.clone(),
@@ -307,7 +316,7 @@ pub(super) fn model_visible_capability_failure_observation(
             schema_version:
                 ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
             status: ToolObservationStatus::Error,
-            summary: format!("Capability failed with {}.", failure.error_kind.as_str()),
+            summary: model_visible_failure_summary(&failure.error_kind),
             detail: ToolObservationDetail::GenericFailure {
                 failure_kind: failure.error_kind.clone(),
             },
@@ -315,6 +324,13 @@ pub(super) fn model_visible_capability_failure_observation(
             recovery: Some(generic_failure_recovery(&failure.error_kind)),
             trust: ObservationTrust::UntrustedToolOutput,
         },
+    }
+}
+
+fn model_visible_failure_summary(error_kind: &CapabilityFailureKind) -> String {
+    match error_kind {
+        CapabilityFailureKind::GateDeclined => "Capability declined by user.".to_string(),
+        _ => format!("Capability failed with {}.", error_kind.as_str()),
     }
 }
 
@@ -371,9 +387,9 @@ fn invalid_input_observation(issues: Vec<CapabilityInputIssue>) -> ModelVisibleT
 
 fn generic_failure_recovery(error_kind: &CapabilityFailureKind) -> ToolRecoveryObservation {
     let same_call_retry = match error_kind {
-        CapabilityFailureKind::Authorization | CapabilityFailureKind::PolicyDenied => {
-            SameCallRetryConstraint::Forbidden
-        }
+        CapabilityFailureKind::Authorization
+        | CapabilityFailureKind::GateDeclined
+        | CapabilityFailureKind::PolicyDenied => SameCallRetryConstraint::Forbidden,
         CapabilityFailureKind::InvalidInput
         | CapabilityFailureKind::InvalidOutput
         | CapabilityFailureKind::OutputTooLarge => SameCallRetryConstraint::RequiresChangedInput,
@@ -462,6 +478,7 @@ pub(super) fn gate_tool_result_summary(kind: GateKind, outcome: &'static str) ->
         GateKind::Auth => "auth",
         GateKind::Resource => "resource",
         GateKind::AwaitDependentRun => "await_dependent_run",
+        GateKind::ExternalTool => "external_tool",
     };
     format!("{gate} gate {outcome}")
 }
@@ -477,6 +494,69 @@ pub(super) fn clear_matching_pending_auth_resume(
     {
         state.pending_auth_resume = None;
     }
+}
+
+pub(super) fn clear_matching_pending_external_tool_resume(
+    state: &mut LoopExecutionState,
+    call: &CapabilityCallCandidate,
+) {
+    if state
+        .pending_external_tool_resume
+        .as_ref()
+        .is_some_and(|resume| resume.capability_id == call.capability_id)
+    {
+        state.pending_external_tool_resume = None;
+    }
+}
+
+/// Reconstruct the parked external-tool call on resume.
+///
+/// Re-registers the provider tool call (via the stored replay) so the host's
+/// external-tool decorator re-binds `input_ref -> call_id` and re-stages the
+/// model's arguments, then the re-dispatched invocation completes from the
+/// run-scoped catalog's client-submitted output. Falls back to a staged-input
+/// candidate when no provider replay was captured.
+pub(super) async fn pending_external_tool_resume_candidate(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    resume: &PendingExternalToolResume,
+    surface_version: CapabilitySurfaceVersion,
+) -> Result<CapabilityCallCandidate, AgentLoopExecutorError> {
+    if let Some(replay) = resume.provider_replay.as_ref() {
+        let candidate = host
+            .register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
+                ProviderToolCall {
+                    provider_id: replay.provider_id.clone(),
+                    provider_model_id: replay.provider_model_id.clone(),
+                    turn_id: Some(replay.provider_turn_id.clone()),
+                    id: replay.provider_call_id.clone(),
+                    name: replay.provider_tool_name.clone(),
+                    arguments: replay.arguments.clone(),
+                    response_reasoning: replay.response_reasoning.clone(),
+                    reasoning: replay.reasoning.clone(),
+                    signature: replay.signature.clone(),
+                },
+                resume.activity_id_for_resume(),
+            ))
+            .await
+            .map_err(capability_host_error)?;
+        if candidate.activity_id != resume.activity_id_for_resume()
+            || candidate.capability_id != resume.capability_id
+            || candidate.effective_capability_ids != resume.effective_capability_ids
+        {
+            return Err(AgentLoopExecutorError::PlannerContract {
+                detail: "external tool resume provider replay no longer matches blocked capability activity",
+            });
+        }
+        return Ok(candidate);
+    }
+    Ok(CapabilityCallCandidate {
+        activity_id: resume.activity_id_for_resume(),
+        surface_version,
+        capability_id: resume.capability_id.clone(),
+        input_ref: resume.input_ref.clone(),
+        effective_capability_ids: resume.effective_capability_ids.clone(),
+        provider_replay: resume.provider_replay.clone(),
+    })
 }
 
 pub(super) fn push_completed_result(
@@ -518,6 +598,7 @@ mod tests {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 1000,
+            output_digest: None,
         };
         let result_a2 = CapabilityResultMessage {
             result_ref: ironclaw_turns::LoopResultRef::new("result:a2".to_string()).unwrap(),
@@ -525,6 +606,7 @@ mod tests {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 500,
+            output_digest: None,
         };
         let result_b = CapabilityResultMessage {
             result_ref: ironclaw_turns::LoopResultRef::new("result:b".to_string()).unwrap(),
@@ -532,6 +614,7 @@ mod tests {
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
             byte_len: 2000,
+            output_digest: None,
         };
         push_completed_result(&mut state, &cap_a, result_a1);
         push_completed_result(&mut state, &cap_a, result_a2);
@@ -568,7 +651,7 @@ mod tests {
             effective_capability_ids: vec![cap_a.clone(), cap_b.clone()],
             provider_replay: None,
             resume_token: None,
-            activity_id: None,
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             prior_approval: None,
             replay: None,
             disposition: None,
@@ -612,7 +695,7 @@ mod tests {
             effective_capability_ids: vec![cap.clone()],
             provider_replay: None,
             resume_token: Some(resume_token.clone()),
-            activity_id: None,
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             prior_approval: Some(AuthResumeApprovalIdentity {
                 approval_request_id,
                 correlation_id,
@@ -622,6 +705,7 @@ mod tests {
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
         let call = CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version,
             capability_id: cap.clone(),
             input_ref: CapabilityInputRef::new("input:both-fields").unwrap(),
@@ -668,8 +752,8 @@ mod tests {
      {
         // When `PendingAuthResume.resume_token` is None (the invocation never
         // passed an approval gate), the returned `CapabilityInvocation` must
-        // carry `auth_resume: None` so the host routes through `invoke_json`
-        // with a fresh invocation_id rather than the auth-resume path.
+        // carry `auth_resume: None` so the host routes through `invoke_json`,
+        // while preserving the call activity id as the invocation identity.
         use ironclaw_turns::run_profile::CapabilityInputRef;
 
         let cap = CapabilityId::new("test.cap").unwrap();
@@ -681,13 +765,15 @@ mod tests {
             effective_capability_ids: vec![cap.clone()],
             provider_replay: None,
             resume_token: None, // no prior approval — the key precondition
-            activity_id: None,
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             prior_approval: None,
             replay: None,
             disposition: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
+        let activity_id = ironclaw_turns::CapabilityActivityId::new();
         let call = CapabilityCallCandidate {
+            activity_id,
             surface_version,
             capability_id: cap.clone(),
             input_ref: CapabilityInputRef::new("input:none-token").unwrap(),
@@ -697,6 +783,10 @@ mod tests {
 
         let invocation = capability_invocation_from_auth_resume_candidate(call, &resume);
 
+        assert_eq!(
+            invocation.activity_id, activity_id,
+            "tokenless auth-resume candidates must preserve the parked activity id"
+        );
         assert!(
             invocation.auth_resume.is_none(),
             "auth_resume must be None when resume_token is None; got {:?}",

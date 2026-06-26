@@ -97,13 +97,13 @@ impl AnthropicOAuthProvider {
                 provider: "anthropic_oauth".to_string(),
             })?;
 
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "anthropic_oauth".to_string(),
-                reason: format!("Failed to build HTTP client: {}", e),
-            })?;
+        let client =
+            crate::config::hardened_client_builder(crate::config::DEFAULT_REQUEST_TIMEOUT_SECS)
+                .build()
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: "anthropic_oauth".to_string(),
+                    reason: format!("Failed to build HTTP client: {}", e),
+                })?;
 
         let active_model = std::sync::RwLock::new(config.model.clone());
         let base_url = if config.base_url.is_empty() {

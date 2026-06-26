@@ -2,6 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_auth::{
     AuthFlowId, AuthProductError, AuthProviderClient, CredentialAccountId, OAuthClientId,
     OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
@@ -15,7 +16,7 @@ use ironclaw_host_api::{
     CapabilityId, CapabilitySet, CorrelationId, ExtensionId, MountView, NetworkMethod,
     NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation, ResourceEstimate,
     ResourceScope, RuntimeCredentialInjection, RuntimeHttpEgress, RuntimeHttpEgressRequest,
-    RuntimeKind, SecretHandle, TrustClass,
+    RuntimeKind, SecretHandle, Timestamp, TrustClass,
 };
 use ironclaw_secrets::SecretStore;
 use secrecy::{ExposeSecret, SecretString};
@@ -257,13 +258,27 @@ impl HostOAuthProviderClient {
             .await
             .map_err(|_| AuthProductError::BackendUnavailable)?;
         if !(200..300).contains(&response.status) {
-            return Err(if (500..600).contains(&response.status) {
-                AuthProductError::BackendUnavailable
-            } else if refresh_request {
-                AuthProductError::RefreshFailed
-            } else {
-                AuthProductError::TokenExchangeFailed
-            });
+            if (500..600).contains(&response.status) {
+                return Err(AuthProductError::BackendUnavailable);
+            }
+            // For 4xx errors on a refresh request, check for invalid_grant to
+            // distinguish permanent revocation from transient failure.
+            // REDACTION: extract only the `error` code string — never log, serialize,
+            // or return the raw body, access token, refresh token, or any secret.
+            if refresh_request {
+                let error_code = serde_json::from_slice::<OAuthErrorResponseBody>(&response.body)
+                    .ok()
+                    .and_then(|body| body.error);
+                if error_code.as_deref() == Some("invalid_grant") {
+                    tracing::debug!(
+                        oauth_error_code = "invalid_grant",
+                        "oauth refresh token revoked by provider"
+                    );
+                    return Err(AuthProductError::InvalidGrant);
+                }
+                return Err(AuthProductError::RefreshFailed);
+            }
+            return Err(AuthProductError::TokenExchangeFailed);
         }
         parse_token_response(&response.body).map_err(|error| {
             if refresh_request {
@@ -333,25 +348,34 @@ impl HostOAuthProviderClient {
         refresh_secret: Option<SecretHandle>,
         tokens: OAuthTokenResponse,
     ) -> Result<StoredOAuthTokens, AuthProductError> {
+        // Compute access-token expiry from the server-reported TTL.
+        // Clamp to i32::MAX seconds (~68 years) before converting, then use
+        // checked_add_signed so a malformed/huge provider TTL yields None
+        // instead of panicking on chrono/DateTime overflow.
+        let access_expires_at: Option<Timestamp> = tokens.expires_in_seconds.and_then(|secs| {
+            let signed_secs = secs.min(i32::MAX as u64) as i64;
+            Utc::now().checked_add_signed(chrono::Duration::seconds(signed_secs))
+        });
+
         let refresh_token = tokens.refresh_token;
-        self.secret_store
-            .put(scope.clone(), access_secret.clone(), tokens.access_token)
-            .await
-            .map_err(map_secret_store_error)?;
+
+        // Crash-safety write order: persist the rotated REFRESH secret FIRST,
+        // then the ACCESS secret that carries `expires_at`.
+        //
+        // If a crash occurs between the two writes, the old (possibly
+        // expired/soon-expired) access secret remains in place. The next
+        // dispatch will detect the expiry and trigger a fresh refresh — safe.
+        // A fresh `expires_at` is never paired with a stale refresh token
+        // because the access record is written last.
         let refresh_secret = match (refresh_secret, refresh_token) {
             (Some(handle), Some(refresh_token)) => {
+                // Write refresh first (no expiry — refresh-token idle death is
+                // server-side, not a stored timestamp we can predict).
                 if let Err(error) = self
                     .secret_store
-                    .put(scope.clone(), handle.clone(), refresh_token)
+                    .put(scope.clone(), handle.clone(), refresh_token, None)
                     .await
                 {
-                    cleanup_written_access(
-                        &self.secret_store,
-                        &scope,
-                        &access_secret,
-                        self.spec.provider_id,
-                    )
-                    .await;
                     return Err(map_secret_store_error(error));
                 }
                 Some(handle)
@@ -359,6 +383,30 @@ impl HostOAuthProviderClient {
             (None, None) => None,
             _ => return Err(AuthProductError::BackendUnavailable),
         };
+
+        // Write access secret last, carrying the expiry so the inline refresh
+        // path can skip an unnecessary token-endpoint round-trip when the token
+        // is still valid.
+        if let Err(error) = self
+            .secret_store
+            .put(
+                scope.clone(),
+                access_secret.clone(),
+                tokens.access_token,
+                access_expires_at,
+            )
+            .await
+        {
+            // Access write failed. Do NOT delete the refresh secret that was
+            // just written above: the account record still references the
+            // deterministic refresh handle and the rotated refresh token is
+            // valid. Deleting it would turn a transient storage hiccup into a
+            // permanently unrecoverable credential (forced re-auth). The next
+            // refresh attempt will re-read the stored refresh token and try
+            // again.
+            return Err(map_secret_store_error(error));
+        }
+
         Ok(StoredOAuthTokens {
             access_secret,
             refresh_secret,
@@ -514,6 +562,14 @@ impl AuthProviderClient for HostOAuthProviderClient {
 struct StoredOAuthTokens {
     access_secret: SecretHandle,
     refresh_secret: Option<SecretHandle>,
+}
+
+/// Minimal OAuth error response — we extract only the `error` code field.
+/// The full body is never logged or returned to callers.
+#[derive(Debug, Deserialize)]
+struct OAuthErrorResponseBody {
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -720,21 +776,6 @@ fn oauth_execution_context(
         .validate()
         .map_err(|_| AuthProductError::BackendUnavailable)?;
     Ok(context)
-}
-
-async fn cleanup_written_access(
-    store: &Arc<dyn SecretStore>,
-    scope: &ResourceScope,
-    access_secret: &SecretHandle,
-    provider_id: &str,
-) {
-    if let Err(delete_error) = store.delete(scope, access_secret).await {
-        tracing::warn!(
-            provider_id,
-            secret_store_reason = delete_error.stable_reason(),
-            "oauth callback cleanup failed after refresh token write failure"
-        );
-    }
 }
 
 fn map_secret_store_error(error: ironclaw_secrets::SecretStoreError) -> AuthProductError {

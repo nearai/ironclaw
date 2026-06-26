@@ -18,7 +18,7 @@ use crate::agent::Agent;
 use crate::auth::extension::AuthManager;
 use crate::bridge::effect_adapter::EffectBridgeAdapter;
 use crate::bridge::engine_actions::mission_capability_actions;
-use crate::bridge::llm_adapter::LlmBridgeAdapter;
+use crate::bridge::llm_adapter::{LlmBridgeAdapter, LlmUsageRecorder};
 use crate::bridge::store_adapter::HybridStore;
 use crate::channels::web::GATEWAY_CHANNEL_NAME;
 use crate::channels::web::sse::SseManager;
@@ -59,6 +59,15 @@ const EXTERNAL_TOOL_CATALOG_SWEEP_INTERVAL: std::time::Duration =
 /// it. One hour matches typical pending-gate TTLs and gives callers
 /// plenty of headroom to resume a paused tool call.
 const EXTERNAL_TOOL_CATALOG_TTL: chrono::Duration = chrono::Duration::hours(1);
+/// Bound v1 conversation lookup before spawning Engine V2 work.
+///
+/// Two seconds keeps this optional enrichment below the normal interactive
+/// request budget while still giving cold libSQL/Postgres lookups room to
+/// complete. If it expires, the Engine V2 thread remains the durable source of
+/// truth and the v1 history mirror is skipped with a warning rather than
+/// blocking the user turn.
+const ENGINE_METADATA_V1_CONVERSATION_RESOLVE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(2);
 
 /// Check if the engine v2 is enabled via `ENGINE_V2=true` environment variable.
 pub fn is_engine_v2_enabled() -> bool {
@@ -1480,6 +1489,40 @@ async fn resolve_v1_conversation_for_message(
         .await
 }
 
+async fn resolve_v1_conversation_for_engine_metadata(
+    db: &Arc<dyn crate::db::Database>,
+    message: &IncomingMessage,
+) -> Option<uuid::Uuid> {
+    match tokio::time::timeout(
+        ENGINE_METADATA_V1_CONVERSATION_RESOLVE_TIMEOUT,
+        resolve_v1_conversation_for_message(db, message),
+    )
+    .await
+    {
+        Ok(Ok(cid)) => Some(cid),
+        Ok(Err(e)) => {
+            // silent-ok: v1 conversation resolution for engine metadata only enriches
+            // admin usage joins; engine v2 execution can proceed without this optional id.
+            tracing::warn!(
+                message_id = %message.id,
+                "failed to resolve v1 conversation for engine metadata: {e}"
+            );
+            None
+        }
+        Err(_) => {
+            // silent-ok: v1 conversation resolution for engine metadata is bounded so a
+            // slow DB cannot block engine v2 execution; the engine thread remains the
+            // durable source of truth and v1 history mirroring is skipped later.
+            tracing::warn!(
+                message_id = %message.id,
+                timeout_ms = ENGINE_METADATA_V1_CONVERSATION_RESOLVE_TIMEOUT.as_millis(),
+                "timed out resolving v1 conversation for engine metadata"
+            );
+            None
+        }
+    }
+}
+
 async fn reconcile_pending_gate_state(
     store: &Arc<dyn Store>,
     pending_gates: &crate::gate::store::PendingGateStore,
@@ -1743,9 +1786,15 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
 
     debug!("engine v2: initializing engine state");
 
+    let usage_recorder = Arc::new(LlmUsageRecorder::new(
+        agent.deps.store.clone(),
+        Arc::clone(&agent.deps.cost_guard),
+        agent.deps.llm_backend.clone(),
+    ));
     let llm_adapter = Arc::new(LlmBridgeAdapter::new(
         agent.llm().clone(),
         Some(agent.cheap_llm().clone()),
+        usage_recorder,
     ));
 
     let effect_adapter = Arc::new(
@@ -4688,15 +4737,31 @@ async fn handle_with_engine_inner(
     // executor task that starts immediately after spawn would race the
     // bridge's post-spawn `transfer` and miss caller tools on the
     // first turn.
+    let v1_conversation_id = if let Some(ref db) = state.db {
+        resolve_v1_conversation_for_engine_metadata(db, message).await
+    } else {
+        None
+    };
+
     let scope_uuid = parse_engine_thread_id(scope);
-    let extra_metadata = scope_uuid.map(|tid| {
+    let extra_metadata = if scope_uuid.is_some() || v1_conversation_id.is_some() {
         let mut map = serde_json::Map::new();
-        map.insert(
-            "conversation_scope".into(),
-            serde_json::Value::String(tid.0.to_string()),
-        );
-        map
-    });
+        if let Some(tid) = scope_uuid {
+            map.insert(
+                "conversation_scope".into(),
+                serde_json::Value::String(tid.0.to_string()),
+            );
+        }
+        if let Some(cid) = v1_conversation_id {
+            map.insert(
+                "v1_conversation_id".into(),
+                serde_json::Value::String(cid.to_string()),
+            );
+        }
+        Some(map)
+    } else {
+        None
+    };
 
     // Pre-bind per-execution context BEFORE the engine spawns the
     // thread. `handle_user_message` allocates and starts the engine
@@ -4788,16 +4853,19 @@ async fn handle_with_engine_inner(
     // are not UUIDs, so they are mapped to stable UUID conversation IDs while
     // preserving the original scope in `conversations.thread_id`.
     if let Some(ref db) = state.db {
-        match resolve_v1_conversation_for_message(db, message).await {
-            Ok(cid) => {
+        match v1_conversation_id {
+            Some(cid) => {
                 let _ = db
                     .add_conversation_message(cid, "user", effective_content)
                     .await;
             }
-            Err(e) => {
+            None => {
+                // silent-ok: when the bounded v1 lookup fails, the Engine V2 thread
+                // store remains the durable source for this turn. The v1 gateway
+                // history mirror cannot attach the user message without a conversation id.
                 tracing::warn!(
                     message_id = %message.id,
-                    "failed to resolve v1 conversation for user message persist: {e}"
+                    "failed to persist user message because v1 conversation was not resolved"
                 );
             }
         }

@@ -43,6 +43,58 @@ pub(super) fn decode_text(
     ))
 }
 
+/// Lenient binary probe for the **read** path only. Unlike [`reject_binary_probe`]
+/// (which rejects on a single NUL — correct for the patch path where exact byte
+/// fidelity matters), this rejects only when NUL bytes are *dense* in the probe
+/// window. Real binaries (images, executables) are NUL-heavy; a text log may
+/// carry a few stray NULs and should still be readable. Pairs with
+/// [`decode_text_lossy`] so logs with occasional non-UTF-8 bytes decode instead
+/// of hard-failing read_file (pinchbench syslog tasks).
+pub(super) fn reject_binary_probe_lenient(bytes: &[u8]) -> Result<(), CodingCapabilityError> {
+    if detect_encoding(bytes) == FileEncoding::Utf16Le {
+        return Ok(());
+    }
+    let probe = &bytes[..bytes.len().min(8192)];
+    if probe.is_empty() {
+        return Ok(());
+    }
+    let nul_count = probe.iter().filter(|&&byte| byte == 0).count();
+    // Reject only when NULs are both numerous (absolute floor, so a small log with
+    // one stray NUL isn't condemned by the ratio) AND dense (>~1% of the probe).
+    // Genuine binaries clear both bars; text logs with a few stray NULs pass.
+    const MIN_NUL_FLOOR: usize = 8;
+    if nul_count > MIN_NUL_FLOOR && nul_count.saturating_mul(100) > probe.len() {
+        return Err(operation_error());
+    }
+    Ok(())
+}
+
+/// Lossy decode for the **read** path only. Mirrors [`decode_text`] but replaces
+/// invalid UTF-8 / UTF-16 sequences with U+FFFD instead of failing, so a log with
+/// a Latin-1 byte or a truncated multibyte sequence is still readable. Never use
+/// this for the patch path: a lossy round-trip through `encode_text` would corrupt
+/// the file on write-back.
+pub(super) fn decode_text_lossy(bytes: &[u8]) -> (String, FileEncoding, LineEnding) {
+    let encoding = detect_encoding(bytes);
+    let raw = match encoding {
+        FileEncoding::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
+        FileEncoding::Utf16Le => {
+            let data = bytes.get(2..).unwrap_or_default();
+            let units = data
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect::<Vec<_>>();
+            String::from_utf16_lossy(&units)
+        }
+    };
+    let line_ending = detect_line_ending(&raw);
+    (
+        raw.replace("\r\n", "\n").replace('\r', "\n"),
+        encoding,
+        line_ending,
+    )
+}
+
 pub(super) fn encode_text(
     content: &str,
     encoding: FileEncoding,
@@ -376,7 +428,7 @@ fn normalize_with_source_map(value: &str) -> NormalizedText {
     for segment in value.split_inclusive('\n') {
         let has_newline = segment.ends_with('\n');
         let line = if has_newline {
-            &segment[..segment.len() - 1]
+            &segment[..segment.len() - 1] // safety: split_inclusive matched an ASCII '\n', so len - 1 is a char boundary.
         } else {
             segment
         };
@@ -591,5 +643,33 @@ mod tests {
                 occurrences: 2
             })
         );
+    }
+
+    #[test]
+    fn lenient_probe_passes_stray_nul_rejects_dense() {
+        // Small log with one stray NUL: floor (>8) not cleared -> passes.
+        let mut log = b"auth failure for root\n".to_vec();
+        log.push(0);
+        assert!(reject_binary_probe_lenient(&log).is_ok());
+
+        // NUL-dense binary (25%): both floor and ratio cleared -> rejected.
+        let binary: Vec<u8> = (0..4096)
+            .map(|i| if i % 4 == 0 { 0u8 } else { b'A' })
+            .collect();
+        assert!(reject_binary_probe_lenient(&binary).is_err());
+
+        // The strict probe still rejects even a single NUL (patch-path contract).
+        assert!(reject_binary_probe(&log).is_err());
+    }
+
+    #[test]
+    fn lossy_decode_replaces_invalid_utf8_instead_of_failing() {
+        let bytes = b"valid \xff text\r\nsecond line\n";
+        // Strict decode fails; lossy decode succeeds and normalizes CRLF.
+        assert!(decode_text(bytes).is_err());
+        let (content, _enc, _le) = decode_text_lossy(bytes);
+        assert!(content.contains("valid"));
+        assert!(content.contains("second line"));
+        assert!(!content.contains("\r\n"));
     }
 }

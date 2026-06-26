@@ -22,8 +22,6 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use std::collections::HashMap;
-
 use monty::{
     ExtFunctionResult, LimitedTracker, MontyObject, MontyRun, NameLookupResult, PrintWriter,
     ResourceLimits, RunProgress,
@@ -46,7 +44,7 @@ use crate::types::message::ThreadMessage;
 use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
 use crate::types::step::{ActionCall, StepId, TokenUsage};
-use crate::types::thread::{ActiveSkillProvenance, Thread, ThreadState};
+use crate::types::thread::{ActiveSkillProvenance, LlmCallPurpose, Thread, ThreadState};
 
 /// The compiled-in default orchestrator (v0).
 pub(crate) const DEFAULT_ORCHESTRATOR: &str = include_str!("../../orchestrator/default.py");
@@ -803,7 +801,7 @@ async fn handle_llm_complete(
             .and_then(|cfg| cfg.get("model"))
             .and_then(|v| v.as_str())
             .map(String::from),
-        metadata: HashMap::new(),
+        metadata: thread.llm_usage_metadata(LlmCallPurpose::Chat),
     };
 
     match deps.llm.complete(&messages, &actions, &config).await {
@@ -4247,11 +4245,11 @@ mod tests {
 
     // ── handle_llm_complete model forwarding ────────────────────
 
-    /// LLM backend that records the model from each `complete()` call.
+    /// LLM backend that records each `complete()` config.
     /// Used to verify the orchestrator's __llm_complete__ host fn forwards
-    /// `explicit_config["model"]` onto `LlmCallConfig.model`.
+    /// `explicit_config` and thread metadata onto `LlmCallConfig`.
     struct ModelCapturingLlm {
-        captured: tokio::sync::Mutex<Vec<Option<String>>>,
+        captured: tokio::sync::Mutex<Vec<LlmCallConfig>>,
     }
 
     #[async_trait::async_trait]
@@ -4266,7 +4264,7 @@ mod tests {
             _actions: &[crate::types::capability::ActionDef],
             config: &LlmCallConfig,
         ) -> Result<crate::traits::llm::LlmOutput, EngineError> {
-            self.captured.lock().await.push(config.model.clone());
+            self.captured.lock().await.push(config.clone());
             Ok(crate::traits::llm::LlmOutput {
                 response: crate::types::step::LlmResponse::Text("ok".into()),
                 usage: crate::types::step::TokenUsage::default(),
@@ -4482,7 +4480,66 @@ mod tests {
         assert!(matches!(result, ExtFunctionResult::Return(_)));
         let captured = concrete.captured.lock().await;
         assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0].as_deref(), Some("gpt-4o"));
+        assert_eq!(captured[0].model.as_deref(), Some("gpt-4o"));
+    }
+
+    #[tokio::test]
+    async fn execute_orchestrator_llm_complete_forwards_thread_usage_metadata() {
+        let concrete = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+        let (_signal_tx, mut signal_rx) = crate::runtime::messaging::signal_channel(1);
+        let gate_controller = crate::gate::CancellingGateController::arc();
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.metadata = serde_json::json!({
+            "conversation_scope": uuid::Uuid::new_v4().to_string(),
+            "v1_conversation_id": uuid::Uuid::new_v4().to_string(),
+        });
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let result = execute_orchestrator(
+            r#"
+llm_result = __llm_complete__([{"role": "user", "content": "hi"}], [], {})
+FINAL({"outcome": "completed", "response": llm_result["content"]})
+"#,
+            &mut thread,
+            &llm,
+            &effects,
+            &leases,
+            &policy,
+            &mut signal_rx,
+            None,
+            None,
+            Some(&store),
+            None,
+            &gate_controller,
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("execute orchestrator");
+
+        assert!(matches!(
+            result.outcome,
+            ThreadOutcome::Completed { response: Some(_) }
+        ));
+        let captured = concrete.captured.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured[0].metadata,
+            thread.llm_usage_metadata(LlmCallPurpose::Chat)
+        );
     }
 
     #[tokio::test]
@@ -4526,7 +4583,7 @@ mod tests {
 
         let captured = concrete.captured.lock().await;
         assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0], None);
+        assert_eq!(captured[0].model, None);
     }
 
     #[tokio::test]
