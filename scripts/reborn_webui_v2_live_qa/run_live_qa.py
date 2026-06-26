@@ -360,7 +360,7 @@ def _reborn_binary() -> Path:
 def build_reborn_binary() -> Path:
     features = os.environ.get(
         "REBORN_WEBUI_V2_LIVE_QA_FEATURES",
-        "webui-v2-beta,slack-v2-host-beta",
+        "webui-v2-beta,slack-v2-host-beta,openai-compat-beta",
     )
     build_env = os.environ.copy()
     build_env.setdefault("CARGO_PROFILE_DEV_DEBUG", "0")
@@ -2557,6 +2557,205 @@ async def case_webui_static_shell_csp_nonce(ctx: LiveQaContext) -> ProbeResult:
         )
     except Exception as exc:
         return _result(case_name, False, started, {"error": str(exc), "path": "/v2/"})
+
+
+def _auth_json_headers() -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {AUTH_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+
+async def _response_json(response: object) -> dict[str, object]:
+    try:
+        return response.json()  # type: ignore[attr-defined]
+    except Exception as exc:
+        text = getattr(response, "text", "")
+        raise AssertionError(f"response was not JSON: {text[:200]!r}") from exc
+
+
+def _assert_status(response: object, expected: int, label: str) -> None:
+    status_code = getattr(response, "status_code")
+    if status_code != expected:
+        text = getattr(response, "text", "")
+        raise AssertionError(
+            f"{label} returned HTTP {status_code}, expected {expected}: {text[:300]}"
+        )
+
+
+def _assert_openai_error(
+    payload: dict[str, object],
+    *,
+    code: str,
+    param: str | None = None,
+) -> None:
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        raise AssertionError(f"OpenAI-compatible error body missing error object: {payload!r}")
+    if error.get("code") != code:
+        raise AssertionError(f"error.code={error.get('code')!r}, expected {code!r}")
+    if param is not None and error.get("param") != param:
+        raise AssertionError(f"error.param={error.get('param')!r}, expected {param!r}")
+    if error.get("type") not in {
+        "invalid_request_error",
+        "authentication_error",
+        "not_found_error",
+    }:
+        raise AssertionError(f"unexpected error.type={error.get('type')!r}")
+
+
+async def case_responses_create_live_http_contract(ctx: LiveQaContext) -> ProbeResult:
+    import httpx
+
+    started = time.monotonic()
+    case_name = "responses_create_live_http_contract"
+    checked_paths = ["/api/v1/responses", "/v1/responses"]
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
+            unauthorized_statuses: dict[str, int] = {}
+            for path in checked_paths:
+                response = await client.post(
+                    f"{ctx.base_url}{path}",
+                    json={"model": "gpt-reborn", "input": "hello"},
+                )
+                unauthorized_statuses[path] = response.status_code
+                _assert_status(response, 401, f"unauthenticated POST {path}")
+
+            malformed = await client.post(
+                f"{ctx.base_url}/api/v1/responses",
+                content="{",
+                headers=_auth_json_headers(),
+            )
+            _assert_status(malformed, 400, "malformed POST /api/v1/responses")
+            malformed_body = await _response_json(malformed)
+            _assert_openai_error(malformed_body, code="invalid_request", param="body")
+
+            unsupported_tools = await client.post(
+                f"{ctx.base_url}/v1/responses",
+                json={
+                    "model": "gpt-reborn",
+                    "input": "hello",
+                    "tools": [{"type": "function"}],
+                },
+                headers=_auth_json_headers(),
+            )
+            _assert_status(
+                unsupported_tools,
+                400,
+                "unsupported tools POST /v1/responses",
+            )
+            unsupported_body = await _response_json(unsupported_tools)
+            _assert_openai_error(unsupported_body, code="invalid_request", param="tools")
+
+            invalid_idempotency = await client.post(
+                f"{ctx.base_url}/api/v1/responses",
+                json={"model": "gpt-reborn", "input": "hello"},
+                headers={**_auth_json_headers(), "idempotency-key": "i" * 257},
+            )
+            _assert_status(
+                invalid_idempotency,
+                400,
+                "invalid idempotency-key POST /api/v1/responses",
+            )
+            invalid_idempotency_body = await _response_json(invalid_idempotency)
+            _assert_openai_error(
+                invalid_idempotency_body,
+                code="invalid_request",
+                param="idempotency_key",
+            )
+
+        return _result(
+            case_name,
+            True,
+            started,
+            {
+                "checked_paths": checked_paths,
+                "unauthorized_statuses": unauthorized_statuses,
+                "malformed_status": malformed.status_code,
+                "unsupported_tools_status": unsupported_tools.status_code,
+                "invalid_idempotency_status": invalid_idempotency.status_code,
+            },
+        )
+    except Exception as exc:
+        return _result(
+            case_name,
+            False,
+            started,
+            {"error": str(exc), "checked_paths": checked_paths},
+        )
+
+
+async def case_responses_retrieve_cancel_live_http_contract(ctx: LiveQaContext) -> ProbeResult:
+    import httpx
+
+    started = time.monotonic()
+    case_name = "responses_retrieve_cancel_live_http_contract"
+    invalid_response_id = "not-a-response-id"
+    valid_missing_response_id = "resp_missing"
+    checked_paths = [
+        f"/api/v1/responses/{invalid_response_id}",
+        f"/v1/responses/{invalid_response_id}",
+        f"/api/v1/responses/{invalid_response_id}/cancel",
+        f"/v1/responses/{invalid_response_id}/cancel",
+    ]
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
+            unauth_retrieve = await client.get(
+                f"{ctx.base_url}/api/v1/responses/{valid_missing_response_id}"
+            )
+            _assert_status(
+                unauth_retrieve,
+                401,
+                "unauthenticated GET /api/v1/responses/{response_id}",
+            )
+            unauth_cancel = await client.post(
+                f"{ctx.base_url}/v1/responses/{valid_missing_response_id}/cancel"
+            )
+            _assert_status(
+                unauth_cancel,
+                401,
+                "unauthenticated POST /v1/responses/{response_id}/cancel",
+            )
+
+            not_found_statuses: dict[str, int] = {}
+            for path in checked_paths:
+                if path.endswith("/cancel"):
+                    response = await client.post(
+                        f"{ctx.base_url}{path}",
+                        headers=_auth_json_headers(),
+                    )
+                else:
+                    response = await client.get(
+                        f"{ctx.base_url}{path}",
+                        headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
+                    )
+                not_found_statuses[path] = response.status_code
+                _assert_status(response, 404, f"authenticated {path}")
+                body = await _response_json(response)
+                _assert_openai_error(body, code="not_found", param="response_id")
+
+        return _result(
+            case_name,
+            True,
+            started,
+            {
+                "checked_paths": checked_paths,
+                "unauthenticated_statuses": {
+                    "retrieve": unauth_retrieve.status_code,
+                    "cancel": unauth_cancel.status_code,
+                },
+                "not_found_statuses": not_found_statuses,
+            },
+        )
+    except Exception as exc:
+        return _result(
+            case_name,
+            False,
+            started,
+            {"error": str(exc), "checked_paths": checked_paths},
+        )
 
 
 async def case_webui_live_llm_chat(ctx: LiveQaContext) -> ProbeResult:
@@ -5044,6 +5243,22 @@ CASES: dict[str, CaseSpec] = {
     "webui_static_shell_csp_nonce": CaseSpec(
         case_webui_static_shell_csp_nonce,
         qa_matrix_test_ids=["REBCLI-063-TC-01"],
+    ),
+    "responses_create_live_http_contract": CaseSpec(
+        case_responses_create_live_http_contract,
+        qa_matrix_test_ids=[
+            "REBCLI-057-TC-02",
+            "REBCLI-057-TC-04",
+            "REBCLI-057-TC-05",
+        ],
+    ),
+    "responses_retrieve_cancel_live_http_contract": CaseSpec(
+        case_responses_retrieve_cancel_live_http_contract,
+        qa_matrix_test_ids=[
+            "REBCLI-058-TC-02",
+            "REBCLI-058-TC-04",
+            "REBCLI-058-TC-05",
+        ],
     ),
     "webui_live_llm_chat": CaseSpec(
         case_webui_live_llm_chat,
