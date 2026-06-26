@@ -43,7 +43,6 @@ use ironclaw_product_workflow::{
     ScopedLifecycleInstallationStore, ScopedLifecycleSubject,
     UpsertScopedLifecycleInstallationRequest, WebUiAuthenticatedCaller,
 };
-use ironclaw_product_workflow_storage::FilesystemScopedLifecycleInstallationStore;
 use serde::{Deserialize, Serialize};
 
 use crate::ProtectedRouteMount;
@@ -102,10 +101,12 @@ pub fn build_capability_admin_route_mount(
     tenant_id: TenantId,
 ) -> Option<ProtectedRouteMount> {
     let local_runtime = runtime.services().local_runtime.as_ref()?;
-    let installations = Arc::new(FilesystemScopedLifecycleInstallationStore::new(Arc::clone(
-        &local_runtime.extension_filesystem,
-    )
-        as Arc<dyn ironclaw_filesystem::RootFilesystem>));
+    // Same store construction (durable `/tenants` root) as the #5267 resolver,
+    // so an admin install here is visible to dispatch.
+    let installations = crate::capability_surface_policy::local_dev_scoped_lifecycle_store(
+        Arc::clone(&local_runtime.extension_filesystem)
+            as Arc<dyn ironclaw_filesystem::RootFilesystem>,
+    );
     Some(capability_admin_route_mount(
         CapabilityAdminRouteConfig::new(tenant_id, installations),
     ))

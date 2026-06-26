@@ -20,7 +20,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, TenantId, UserId};
+use ironclaw_host_api::{CapabilityId, TenantId, UserId, VirtualPath};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
 };
@@ -28,10 +28,38 @@ use ironclaw_product_workflow::{
     LifecyclePackageRef, ScopedLifecycleInstallationStore, ScopedLifecycleSubject,
     lifecycle_package_kind_label,
 };
+use ironclaw_product_workflow_storage::FilesystemScopedLifecycleInstallationStore;
 use ironclaw_turns::run_profile::LoopRunContext;
 use ironclaw_turns::scope::{TurnActor, TurnScope};
 
 use crate::available_extensions::{AvailableExtensionCatalog, visible_capability_ids};
+
+/// Durable virtual root for the local-dev scoped-lifecycle installation store.
+///
+/// The store's own default root is `/engine/...`, which has **no mounted
+/// backend** in the local-dev composite filesystem (it mounts `/tenants`,
+/// `/memory`, `/events`, `/projects`, `/system/extensions`). Rooting under the
+/// `/tenants` libSQL-backed durable mount makes installs survive restart. The
+/// raw composite is used (not a per-user `ScopedFilesystem`), so an admin's
+/// `AdminShared` install is tenant-shared — visible to every user's resolver —
+/// while the store's own path scheme keeps per-tenant isolation.
+///
+/// **Both** the availability resolver (#5267, read) and the admin write surface
+/// (#5268) must construct the store via [`local_dev_scoped_lifecycle_store`]
+/// with this root so writes are visible to reads.
+pub(crate) const LOCAL_DEV_SCOPED_LIFECYCLE_ROOT: &str = "/tenants/capability_policy";
+
+/// Construct the local-dev scoped-lifecycle installation store over the durable
+/// `/tenants` mount (see [`LOCAL_DEV_SCOPED_LIFECYCLE_ROOT`]).
+pub(crate) fn local_dev_scoped_lifecycle_store(
+    filesystem: Arc<dyn ironclaw_filesystem::RootFilesystem>,
+) -> Arc<dyn ScopedLifecycleInstallationStore> {
+    let root = VirtualPath::new(LOCAL_DEV_SCOPED_LIFECYCLE_ROOT)
+        .expect("LOCAL_DEV_SCOPED_LIFECYCLE_ROOT is a valid virtual path");
+    Arc::new(FilesystemScopedLifecycleInstallationStore::with_root(
+        filesystem, root,
+    ))
+}
 
 /// Maps an installed package to the capability ids it makes visible to the
 /// model. The bare `ScopedLifecycleInstallation` carries only a

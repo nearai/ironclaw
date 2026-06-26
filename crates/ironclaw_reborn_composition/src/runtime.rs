@@ -2831,16 +2831,18 @@ pub async fn build_reborn_runtime(
                 use crate::available_extensions::AvailableExtensionCatalog;
                 use crate::capability_surface_policy::{
                     ScopedLifecyclePolicyCapabilitySurfaceResolver, StaticPackageCapabilitySource,
+                    local_dev_scoped_lifecycle_store,
                 };
-                use ironclaw_product_workflow_storage::FilesystemScopedLifecycleInstallationStore;
 
                 // Safe in this `is_some()` arm; `ok_or` avoids an `expect`.
                 let local_runtime =
                     local_runtime.ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
-                let installation_store = Arc::new(FilesystemScopedLifecycleInstallationStore::new(
-                    Arc::clone(&local_runtime.extension_filesystem)
-                        as Arc<dyn ironclaw_filesystem::RootFilesystem>,
-                ));
+                // Same store construction (durable `/tenants` root) as the admin
+                // write surface (#5268) so admin installs are visible to dispatch.
+                let installation_store = local_dev_scoped_lifecycle_store(Arc::clone(
+                    &local_runtime.extension_filesystem,
+                )
+                    as Arc<dyn ironclaw_filesystem::RootFilesystem>);
                 // First-party extension manifests are the capability-id source:
                 // the catalog has no live `(tenant, package_ref)` facade and
                 // `product_workflow` cannot depend on this crate's lifecycle.
