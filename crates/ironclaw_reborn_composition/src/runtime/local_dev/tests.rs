@@ -2919,13 +2919,43 @@ mod tests {
         ))
         .await
         .expect("local-dev services build");
-        let run_context = run_context("extension-search-loop-port").await;
-        enable_global_auto_approve_for_run(
+        assert_extension_search_capability_port_reads_system_catalog(
             &services,
-            &run_context,
-            &UserId::new("local-dev-extension-search-user").expect("user id"),
+            "extension-search-loop-port",
+            "local-dev-extension-search-user",
         )
         .await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn hosted_single_tenant_volume_capability_port_extension_search_reads_system_catalog() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::build_reborn_services(
+            crate::hosted_single_tenant_volume_build_input(
+                "hosted-volume-extension-search-owner",
+                dir.path().join("hosted-volume"),
+            )
+            .expect("hosted volume input"),
+        )
+        .await
+        .expect("hosted volume services build");
+        assert_extension_search_capability_port_reads_system_catalog(
+            &services,
+            "hosted-volume-extension-search-loop-port",
+            "hosted-volume-extension-search-user",
+        )
+        .await;
+    }
+
+    async fn assert_extension_search_capability_port_reads_system_catalog(
+        services: &crate::RebornServices,
+        run_label: &str,
+        user_id: &str,
+    ) {
+        let run_context = run_context(run_label).await;
+        let user_id = UserId::new(user_id).expect("user id");
+        enable_global_auto_approve_for_run(services, &run_context, &user_id).await;
         let thread_scope = ThreadScope {
             tenant_id: run_context.scope.tenant_id.clone(),
             agent_id: run_context.scope.agent_id.clone().expect("agent id"),
@@ -2934,10 +2964,10 @@ mod tests {
             mission_id: None,
         };
         let wiring = capability_wiring(
-            &services,
+            services,
             Arc::new(InMemorySessionThreadService::default()),
             thread_scope,
-            UserId::new("local-dev-extension-search-user").expect("user id"),
+            user_id,
             Arc::new(
                 crate::local_dev_capability_policy::local_dev_capability_policy()
                     .expect("policy parses"),

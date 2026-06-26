@@ -193,22 +193,14 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
         request: InvocationServicesResolutionRequest<'_>,
     ) -> Result<InvocationServices, InvocationServicesError> {
         let plan = request.plan;
-        if !matches!(plan.deployment, DeploymentMode::LocalSingleUser) {
-            return Err(unsupported_non_local_plan(plan));
-        }
-        if plan.requires_filesystem
-            && !matches!(
-                plan.filesystem_backend,
-                FilesystemBackendKind::HostWorkspace | FilesystemBackendKind::HostWorkspaceAndHome
-            )
-        {
-            return Err(InvocationServicesError::UnsupportedFilesystemBackend {
-                backend: plan.filesystem_backend,
-            });
-        }
+        validate_filesystem_plan(plan, request.mounts)?;
         let process = if plan.requires_process {
             match plan.process_backend {
-                ProcessBackendKind::LocalHost => Arc::clone(&self.process),
+                ProcessBackendKind::LocalHost
+                    if matches!(plan.deployment, DeploymentMode::LocalSingleUser) =>
+                {
+                    Arc::clone(&self.process)
+                }
                 ProcessBackendKind::TenantSandbox => self.tenant_sandbox_process.clone().ok_or(
                     InvocationServicesError::UnsupportedProcessBackend {
                         backend: plan.process_backend,
@@ -223,31 +215,13 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
         } else {
             Arc::clone(&self.process)
         };
-        if plan.requires_network
-            && !matches!(
-                plan.network_mode,
-                NetworkMode::Brokered | NetworkMode::DirectLogged | NetworkMode::Direct
-            )
-        {
-            return Err(InvocationServicesError::UnsupportedNetworkMode {
-                mode: plan.network_mode,
-            });
-        }
+        validate_network_plan(plan)?;
         if plan.requires_network && self.runtime_http_egress.is_none() {
             return Err(InvocationServicesError::UnsupportedNetworkMode {
                 mode: plan.network_mode,
             });
         }
-        if plan.requires_secret
-            && !matches!(
-                plan.secret_mode,
-                SecretMode::ScrubbedEnv | SecretMode::InheritedEnv
-            )
-        {
-            return Err(InvocationServicesError::UnsupportedSecretMode {
-                mode: plan.secret_mode,
-            });
-        }
+        validate_secret_plan(plan)?;
         if plan.requires_secret && self.secret_store.is_none() {
             return Err(InvocationServicesError::SecretAccessRequired);
         }
@@ -276,29 +250,57 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
     }
 }
 
-fn unsupported_non_local_plan(plan: &ExecutionPlan) -> InvocationServicesError {
-    if plan.requires_filesystem {
-        return InvocationServicesError::UnsupportedFilesystemBackend {
+fn validate_filesystem_plan(
+    plan: &ExecutionPlan,
+    mounts: Option<&MountView>,
+) -> Result<(), InvocationServicesError> {
+    if !plan.requires_filesystem {
+        return Ok(());
+    }
+    match plan.filesystem_backend {
+        FilesystemBackendKind::HostWorkspace | FilesystemBackendKind::HostWorkspaceAndHome
+            if matches!(plan.deployment, DeploymentMode::LocalSingleUser) =>
+        {
+            Ok(())
+        }
+        FilesystemBackendKind::ScopedVirtual if mounts.is_some() => Ok(()),
+        _ => Err(InvocationServicesError::UnsupportedFilesystemBackend {
             backend: plan.filesystem_backend,
-        };
+        }),
     }
-    if plan.requires_process {
-        return InvocationServicesError::UnsupportedProcessBackend {
-            backend: plan.process_backend,
-        };
+}
+
+fn validate_network_plan(plan: &ExecutionPlan) -> Result<(), InvocationServicesError> {
+    if !plan.requires_network {
+        return Ok(());
     }
-    if plan.requires_network {
-        return InvocationServicesError::UnsupportedNetworkMode {
+    match plan.network_mode {
+        NetworkMode::Brokered => Ok(()),
+        NetworkMode::DirectLogged | NetworkMode::Direct
+            if matches!(plan.deployment, DeploymentMode::LocalSingleUser) =>
+        {
+            Ok(())
+        }
+        _ => Err(InvocationServicesError::UnsupportedNetworkMode {
             mode: plan.network_mode,
-        };
+        }),
     }
-    if plan.requires_secret {
-        return InvocationServicesError::UnsupportedSecretMode {
+}
+
+fn validate_secret_plan(plan: &ExecutionPlan) -> Result<(), InvocationServicesError> {
+    if !plan.requires_secret {
+        return Ok(());
+    }
+    match plan.secret_mode {
+        SecretMode::BrokeredHandles => Ok(()),
+        SecretMode::ScrubbedEnv | SecretMode::InheritedEnv
+            if matches!(plan.deployment, DeploymentMode::LocalSingleUser) =>
+        {
+            Ok(())
+        }
+        _ => Err(InvocationServicesError::UnsupportedSecretMode {
             mode: plan.secret_mode,
-        };
-    }
-    InvocationServicesError::UnsupportedProcessBackend {
-        backend: plan.process_backend,
+        }),
     }
 }
 
@@ -308,7 +310,7 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_filesystem::LocalFilesystem;
     use ironclaw_host_api::{
-        CapabilityId, ResourceScope,
+        CapabilityId, MountAlias, MountGrant, MountPermissions, ResourceScope, VirtualPath,
         runtime_policy::{RuntimeProfile, SecretMode},
     };
     use ironclaw_secrets::InMemorySecretStore;
@@ -552,6 +554,65 @@ mod tests {
     }
 
     #[test]
+    fn local_resolver_accepts_hosted_scoped_virtual_filesystem_with_mounts() {
+        let resolver = resolver_without_http();
+        let mut plan = plan(
+            ProcessBackendKind::None,
+            false,
+            false,
+            NetworkMode::Deny,
+            false,
+        );
+        plan.deployment = DeploymentMode::HostedMultiTenant;
+        plan.resolved_profile = RuntimeProfile::SecureDefault;
+        plan.requires_filesystem = true;
+        plan.filesystem_backend = FilesystemBackendKind::ScopedVirtual;
+        let mounts = scoped_mount_view();
+
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: Some(&mounts),
+            })
+            .expect("hosted scoped virtual filesystem should resolve with explicit mounts");
+
+        assert!(services.runtime_http_egress.is_none());
+    }
+
+    #[test]
+    fn local_resolver_rejects_hosted_scoped_virtual_filesystem_without_mounts() {
+        let resolver = resolver_without_http();
+        let mut plan = plan(
+            ProcessBackendKind::None,
+            false,
+            false,
+            NetworkMode::Deny,
+            false,
+        );
+        plan.deployment = DeploymentMode::HostedMultiTenant;
+        plan.resolved_profile = RuntimeProfile::SecureDefault;
+        plan.requires_filesystem = true;
+        plan.filesystem_backend = FilesystemBackendKind::ScopedVirtual;
+
+        let error = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::FilesystemDenied);
+        assert!(matches!(
+            error,
+            InvocationServicesError::UnsupportedFilesystemBackend {
+                backend: FilesystemBackendKind::ScopedVirtual
+            }
+        ));
+    }
+
+    #[test]
     fn local_resolver_ignores_unsupported_filesystem_backend_when_not_required() {
         let resolver = resolver_without_http();
         let mut plan = plan(
@@ -656,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn local_resolver_rejects_hosted_brokered_required_network() {
+    fn local_resolver_accepts_hosted_brokered_required_network() {
         let resolver = LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             Some(Arc::new(NoopRuntimeHttpEgress)),
@@ -668,6 +729,35 @@ mod tests {
             false,
             true,
             NetworkMode::Brokered,
+            false,
+        );
+        plan.deployment = DeploymentMode::HostedMultiTenant;
+        plan.resolved_profile = RuntimeProfile::HostedSafe;
+
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .expect("hosted brokered network should resolve through host egress");
+
+        assert!(services.runtime_http_egress.is_some());
+    }
+
+    #[test]
+    fn local_resolver_rejects_hosted_direct_required_network() {
+        let resolver = LocalInvocationServicesResolver::new(
+            Arc::new(LocalFilesystem::new()),
+            Some(Arc::new(NoopRuntimeHttpEgress)),
+            Arc::new(NoopProcessPort),
+            None,
+        );
+        let mut plan = plan(
+            ProcessBackendKind::None,
+            false,
+            true,
+            NetworkMode::Direct,
             false,
         );
         plan.deployment = DeploymentMode::HostedMultiTenant;
@@ -685,7 +775,7 @@ mod tests {
         assert!(matches!(
             error,
             InvocationServicesError::UnsupportedNetworkMode {
-                mode: NetworkMode::Brokered
+                mode: NetworkMode::Direct
             }
         ));
     }
@@ -845,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn local_resolver_rejects_brokered_required_secret_even_with_secret_store() {
+    fn local_resolver_accepts_brokered_required_secret_with_secret_store() {
         let resolver = LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             None,
@@ -861,6 +951,36 @@ mod tests {
         );
         plan.secret_mode = SecretMode::BrokeredHandles;
 
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .expect("brokered handles should resolve with a configured secret store");
+
+        assert!(services.secret_store.is_some());
+    }
+
+    #[test]
+    fn local_resolver_rejects_hosted_inherited_env_secret() {
+        let resolver = LocalInvocationServicesResolver::new(
+            Arc::new(LocalFilesystem::new()),
+            None,
+            Arc::new(NoopProcessPort),
+            Some(Arc::new(InMemorySecretStore::new())),
+        );
+        let mut plan = plan(
+            ProcessBackendKind::None,
+            false,
+            false,
+            NetworkMode::Deny,
+            true,
+        );
+        plan.deployment = DeploymentMode::HostedMultiTenant;
+        plan.resolved_profile = RuntimeProfile::HostedSafe;
+        plan.secret_mode = SecretMode::InheritedEnv;
+
         let error = resolver
             .resolve(InvocationServicesResolutionRequest {
                 plan: &plan,
@@ -873,7 +993,7 @@ mod tests {
         assert!(matches!(
             error,
             InvocationServicesError::UnsupportedSecretMode {
-                mode: SecretMode::BrokeredHandles
+                mode: SecretMode::InheritedEnv
             }
         ));
     }
@@ -924,6 +1044,15 @@ mod tests {
             Arc::new(NoopProcessPort),
             None,
         )
+    }
+
+    fn scoped_mount_view() -> MountView {
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/system/extensions".to_string()).expect("mount alias"),
+            VirtualPath::new("/system/extensions".to_string()).expect("virtual path"),
+            MountPermissions::read_only(),
+        )])
+        .expect("mount view")
     }
 
     fn plan(
