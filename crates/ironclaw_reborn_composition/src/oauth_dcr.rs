@@ -1871,6 +1871,14 @@ mod tests {
             self.inner.metadata(scope, handle).await
         }
 
+        async fn metadata_for_scope(
+            &self,
+            scope: &ResourceScope,
+        ) -> Result<Vec<ironclaw_secrets::SecretMetadata>, ironclaw_secrets::SecretStoreError>
+        {
+            self.inner.metadata_for_scope(scope).await
+        }
+
         async fn delete(
             &self,
             scope: &ResourceScope,

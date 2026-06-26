@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_approvals::ToolPermissionOverride;
 use ironclaw_authorization::{CapabilityLeaseError, CapabilityLeaseStatus, CapabilityLeaseStore};
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId,
     InvocationFingerprint, InvocationId, Principal, ResourceEstimate, ResourceScope, UserId,
 };
-use ironclaw_loop_support::{CapabilityResultWrite, loop_driver_execution_extension_id};
+use ironclaw_loop_support::CapabilityResultWrite;
 use ironclaw_product_workflow::{
     OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetId, RebornServicesError,
     RebornServicesErrorCode, WebUiAuthenticatedCaller,
@@ -15,9 +16,9 @@ use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, RunStateError};
 use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityInputRef,
-        CapabilityOutcome, CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken,
-        ConcurrencyHint, LoopRunContext,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityFailure,
+        CapabilityFailureKind, CapabilityInputRef, CapabilityOutcome, CapabilityProgress,
+        CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint, LoopRunContext,
     },
 };
 
@@ -26,10 +27,11 @@ use crate::outbound_delivery_capability_surface::{
     OUTBOUND_DELIVERY_TARGET_SET_PROVIDER_TOOL_NAME, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
     OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION, OUTBOUND_DELIVERY_TARGETS_LIST_PROVIDER_TOOL_NAME,
     OutboundDeliveryCapabilityInputError, list_outbound_delivery_targets_for_model,
-    outbound_delivery_target_set_input_schema, outbound_delivery_targets_list_input_schema,
-    parse_outbound_delivery_target_set_input, parse_outbound_delivery_targets_list_input,
-    set_outbound_delivery_target_for_model,
+    outbound_delivery_synthetic_provider, outbound_delivery_target_set_input_schema,
+    outbound_delivery_targets_list_input_schema, parse_outbound_delivery_target_set_input,
+    parse_outbound_delivery_targets_list_input, set_outbound_delivery_target_for_model,
 };
+use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::local_dev::synthetic_capability::{
     LocalDevSyntheticCapability, LocalDevSyntheticCapabilityDescriptor,
     LocalDevSyntheticCapabilityHandler, LocalDevSyntheticCapabilityInvocation,
@@ -41,6 +43,7 @@ pub(super) fn outbound_delivery_capabilities(
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
     target_set_requires_approval: bool,
+    approval_settings: Arc<dyn ApprovalSettingsProvider>,
 ) -> Result<Vec<LocalDevSyntheticCapability>, AgentLoopHostError> {
     Ok(vec![
         LocalDevSyntheticCapability::new(
@@ -70,6 +73,7 @@ pub(super) fn outbound_delivery_capabilities(
                 approval_requests,
                 capability_leases,
                 requires_approval: target_set_requires_approval,
+                approval_settings,
             }),
         ),
     ])
@@ -124,11 +128,18 @@ struct OutboundDeliveryTargetSetHandler {
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
     requires_approval: bool,
+    approval_settings: Arc<dyn ApprovalSettingsProvider>,
 }
 
 struct ApprovedDispatchLease {
     scope: ResourceScope,
     lease_id: CapabilityGrantId,
+}
+
+enum OutboundDeliveryApprovalSettingsDecision {
+    Allow,
+    Ask,
+    Deny,
 }
 
 #[async_trait]
@@ -155,17 +166,28 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
 
         let input = invocation_replay_input(&invocation).clone();
         let target_input = parse_outbound_delivery_target_set_input(&input).map_err(input_error)?;
+        let capability_id = outbound_delivery_target_set_capability_id()?;
         let approved_lease = if self.requires_approval {
             match invocation.request.approval_resume.clone() {
                 Some(resume) => Some(
                     self.verify_approved_resume(&invocation, &resume, &input)
                         .await?,
                 ),
-                None => {
-                    return self
-                        .request_approval(&invocation, &input, target_input.target_id())
-                        .await;
-                }
+                None => match self.settings_decision(&invocation, &capability_id).await? {
+                    OutboundDeliveryApprovalSettingsDecision::Allow => None,
+                    OutboundDeliveryApprovalSettingsDecision::Ask => {
+                        return self
+                            .request_approval(&invocation, &input, target_input.target_id())
+                            .await;
+                    }
+                    OutboundDeliveryApprovalSettingsDecision::Deny => {
+                        return Ok(CapabilityOutcome::Failed(CapabilityFailure {
+                            error_kind: CapabilityFailureKind::PolicyDenied,
+                            safe_summary: "outbound delivery target setter is disabled by tool approval settings".to_string(),
+                            detail: None,
+                        }));
+                    }
+                },
             }
         } else {
             if invocation.request.approval_resume.is_some() {
@@ -205,6 +227,37 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
 }
 
 impl OutboundDeliveryTargetSetHandler {
+    async fn settings_decision(
+        &self,
+        invocation: &LocalDevSyntheticCapabilityInvocation,
+        capability_id: &CapabilityId,
+    ) -> Result<OutboundDeliveryApprovalSettingsDecision, AgentLoopHostError> {
+        let scope = settings_scope_for_run(&invocation.run_context, &self.fallback_user_id);
+        let grantee = outbound_delivery_target_set_grantee()?;
+        match self
+            .approval_settings
+            .tool_override(&scope, capability_id)
+            .await
+        {
+            Some(ToolPermissionOverride::Disabled) => {
+                return Ok(OutboundDeliveryApprovalSettingsDecision::Deny);
+            }
+            Some(ToolPermissionOverride::AskEachTime) => {
+                return Ok(OutboundDeliveryApprovalSettingsDecision::Ask);
+            }
+            None => {}
+        }
+        if self
+            .approval_settings
+            .tool_always_allow(&scope, capability_id, &grantee)
+            .await
+            || self.approval_settings.global_auto_approve(&scope).await
+        {
+            return Ok(OutboundDeliveryApprovalSettingsDecision::Allow);
+        }
+        Ok(OutboundDeliveryApprovalSettingsDecision::Ask)
+    }
+
     async fn request_approval(
         &self,
         invocation: &LocalDevSyntheticCapabilityInvocation,
@@ -228,9 +281,7 @@ impl OutboundDeliveryTargetSetHandler {
                 ApprovalRequest {
                     id: approval_request_id,
                     correlation_id,
-                    requested_by: Principal::Extension(loop_driver_execution_extension_id(
-                        &invocation.run_context,
-                    )?),
+                    requested_by: outbound_delivery_target_set_grantee()?,
                     action: Box::new(Action::Dispatch {
                         capability: capability_id,
                         estimated_resources: estimate.clone(),
@@ -419,6 +470,21 @@ fn resource_scope_for_run(
     scope
 }
 
+fn settings_scope_for_run(
+    run_context: &LoopRunContext,
+    fallback_user_id: &UserId,
+) -> ResourceScope {
+    ResourceScope {
+        tenant_id: run_context.scope.tenant_id.clone(),
+        user_id: effective_user_id(run_context, fallback_user_id),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
 fn effective_user_id(run_context: &LoopRunContext, fallback_user_id: &UserId) -> UserId {
     run_context
         .scope
@@ -440,6 +506,17 @@ fn outbound_delivery_target_set_capability_id() -> Result<CapabilityId, AgentLoo
             format!("outbound delivery target set capability id is invalid: {error}"),
         )
     })
+}
+
+fn outbound_delivery_target_set_grantee() -> Result<Principal, AgentLoopHostError> {
+    outbound_delivery_synthetic_provider()
+        .map(Principal::Extension)
+        .map_err(|error| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                format!("outbound delivery synthetic provider id is invalid: {error}"),
+            )
+        })
 }
 
 fn approval_fingerprint(

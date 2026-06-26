@@ -19,6 +19,7 @@ export function ChatInput({
   onSend,
   onCancel,
   disabled,
+  sendDisabled = disabled,
   canCancel = false,
   initialText = "",
   resetKey = "",
@@ -40,6 +41,9 @@ export function ChatInput({
   const [dragOver, setDragOver] = React.useState(false);
   const textareaRef = React.useRef(null);
   const fileInputRef = React.useRef(null);
+  const sendBlockedRef = React.useRef(false);
+  const sendBlocked = disabled || sendDisabled || isSending;
+  sendBlockedRef.current = sendBlocked;
   // Mirror of `attachments` plus a serial promise, so overlapping addFiles()
   // calls validate against the latest staged set rather than a stale snapshot
   // (each stageFiles is async; without this two fast drops could both admit
@@ -201,10 +205,12 @@ export function ChatInput({
   const handleSend = React.useCallback(async () => {
     // The v2 send contract requires non-empty content, so attachments
     // ride along with text rather than sending on their own.
-    if (!text.trim() || disabled || isSending) return;
+    if (!text.trim() || sendBlockedRef.current) return;
+    sendBlockedRef.current = true;
     setIsSending(true);
     try {
-      await onSend(text.trim(), { attachments });
+      const response = await onSend(text.trim(), { attachments });
+      if (response === null) return;
       setText("");
       setAttachments([]);
       attachmentsRef.current = [];
@@ -216,17 +222,10 @@ export function ChatInput({
     } catch {
       // The failed optimistic message renders retry details in the thread.
     } finally {
+      sendBlockedRef.current = disabled || sendDisabled;
       setIsSending(false);
     }
-  }, [
-    text,
-    attachments,
-    disabled,
-    isSending,
-    onSend,
-    draftKey,
-    cancelPendingDraft,
-  ]);
+  }, [text, attachments, onSend, draftKey, cancelPendingDraft, disabled, sendDisabled]);
 
   const handleChange = React.useCallback(
     (e) => {
@@ -255,6 +254,9 @@ export function ChatInput({
     (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
+        const domSendDisabled =
+          textareaRef.current?.dataset?.sendDisabled === "true";
+        if (domSendDisabled || sendBlockedRef.current) return;
         handleSend();
       }
     },
@@ -297,6 +299,7 @@ export function ChatInput({
   }, []);
 
   const hasPayload = text.trim();
+  const isSubmitDisabled = disabled || sendDisabled;
   const placeholder = isHero
     ? t("chat.heroPlaceholder")
     : t("chat.followUpPlaceholder");
@@ -308,8 +311,8 @@ export function ChatInput({
     "relative mx-auto w-full max-w-5xl rounded-[20px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] shadow-[var(--v2-card-shadow)] p-2.5 transition-colors",
     // Highlight the full rounded container on focus (not just the
     // leaking textarea ring), mirroring the global input:focus accent.
-    // Suppressed while disabled so the Working-state composer never
-    // looks interactive.
+    // Suppressed only when the composer is hard-disabled; busy runs
+    // still allow draft editing.
     disabled
       ? ""
       : "focus-within:border-[var(--v2-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_srgb,var(--v2-accent)_28%,transparent)]",
@@ -403,6 +406,7 @@ export function ChatInput({
           onChange=${handleChange}
           onKeyDown=${onKeyDown}
           onPaste=${onPaste}
+          data-send-disabled=${isSubmitDisabled ? "true" : "false"}
           placeholder=${placeholder}
           rows=${1}
           disabled=${disabled}
@@ -419,7 +423,7 @@ export function ChatInput({
         />
 
         <div className="mt-2 flex items-center gap-2">
-          ${disabled &&
+          ${isSubmitDisabled &&
           html`
             <span className="inline-flex items-center gap-2 text-xs text-[var(--v2-text-muted)]">
               <span className="h-2 w-2 rounded-full bg-[var(--v2-accent)]" />
@@ -458,7 +462,7 @@ export function ChatInput({
                   variant="primary"
                   size="icon-sm"
                   onClick=${handleSend}
-                  disabled=${disabled || isSending || !hasPayload}
+                  disabled=${isSubmitDisabled || isSending || !hasPayload}
                   aria-label=${t("chat.send")}
                   className="rounded-full"
                 >

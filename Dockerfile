@@ -74,7 +74,7 @@ RUN cargo build --profile dist --bin ironclaw
 # src/ edit. The extensions are standalone crates with their own lockfiles.
 FROM chef AS wasm-builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends jq && rm -rf /var/lib/apt/lists/*
+RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends jq && rm -rf /var/lib/apt/lists/*
 
 COPY tools-src/ tools-src/
 COPY channels-src/ channels-src/
@@ -121,8 +121,8 @@ RUN set -eux; \
 # Stage 5a: Shared runtime base
 FROM debian:bookworm-slim AS runtime-base
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+RUN apt-get -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw

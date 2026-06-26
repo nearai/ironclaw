@@ -61,7 +61,7 @@ pub use capability_port::{
     loop_driver_execution_extension_id,
 };
 pub use capability_surface_filter::{
-    CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
+    CapabilitySurfaceDenyFilter, CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
 };
 pub use compaction_task::{
     ACTIVE_TASK_COMPACTION_PROMPT_ID, DEFAULT_COMPACTION_PROMPT_ID, HostManagedLoopCompactionPort,
@@ -132,7 +132,7 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    LoopMessageRef, TurnId, TurnRunId,
+    LoopGateRef, LoopMessageRef, TurnId, TurnRunId,
     run_profile::ModelProfileId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
@@ -1684,6 +1684,7 @@ pub enum HostManagedModelErrorKind {
     PolicyDenied,
     ConfigurationError,
     BudgetExceeded,
+    BudgetApprovalRequired,
     /// Provider credentials are missing, expired, or otherwise unavailable.
     CredentialUnavailable,
     Unavailable,
@@ -1696,6 +1697,7 @@ pub struct HostManagedModelError {
     pub kind: HostManagedModelErrorKind,
     pub safe_summary: String,
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
+    pub gate_ref: Option<LoopGateRef>,
 }
 
 impl HostManagedModelError {
@@ -1704,6 +1706,7 @@ impl HostManagedModelError {
             kind,
             safe_summary: safe_model_summary(kind).to_string(),
             reason_kind: None,
+            gate_ref: None,
         }
     }
 
@@ -1712,11 +1715,17 @@ impl HostManagedModelError {
             kind,
             safe_summary: safe_summary.into(),
             reason_kind: None,
+            gate_ref: None,
         }
     }
 
     pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
         self.reason_kind = Some(reason_kind);
+        self
+    }
+
+    pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
+        self.gate_ref = Some(gate_ref);
         self
     }
 }
@@ -2019,6 +2028,9 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
     if let Some(reason_kind) = error.reason_kind {
         host_error = host_error.with_reason_kind(reason_kind);
     }
+    if let Some(gate_ref) = error.gate_ref {
+        host_error = host_error.with_gate_ref(gate_ref);
+    }
     host_error
 }
 
@@ -2029,6 +2041,9 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
         HostManagedModelErrorKind::PolicyDenied => AgentLoopHostErrorKind::PolicyDenied,
         HostManagedModelErrorKind::ConfigurationError => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::BudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
+        HostManagedModelErrorKind::BudgetApprovalRequired => {
+            AgentLoopHostErrorKind::BudgetApprovalRequired
+        }
         HostManagedModelErrorKind::CredentialUnavailable => {
             AgentLoopHostErrorKind::CredentialUnavailable
         }
@@ -2044,6 +2059,7 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
         HostManagedModelErrorKind::PolicyDenied => "model profile is not permitted",
         HostManagedModelErrorKind::ConfigurationError => "model route configuration is invalid",
         HostManagedModelErrorKind::BudgetExceeded => "model request exceeded its budget",
+        HostManagedModelErrorKind::BudgetApprovalRequired => "model request needs budget approval",
         HostManagedModelErrorKind::CredentialUnavailable => "model credentials are unavailable",
         HostManagedModelErrorKind::Unavailable => "model service is unavailable",
         HostManagedModelErrorKind::Cancelled => "model request was cancelled",
@@ -2053,6 +2069,41 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_gateway_error_sanitizes_raw_detail_without_losing_budget_gate() {
+        let gate_ref = LoopGateRef::new("gate:budget-static-check").expect("gate ref");
+        let raw_detail = format!(
+            "provider 500: {} tool temporarily unavailable; api_key=secret; /private/path",
+            "System"
+        );
+
+        let error = HostManagedModelError::new(
+            HostManagedModelErrorKind::BudgetApprovalRequired,
+            raw_detail.as_str(),
+        )
+        .with_gate_ref(gate_ref.clone());
+
+        assert_eq!(error.safe_summary, "model request needs budget approval");
+        assert!(!error.safe_summary.contains("System tool"));
+        assert!(!error.safe_summary.contains("secret"));
+        assert!(!error.safe_summary.contains("/private/path"));
+
+        let host_error = model_gateway_error(error);
+
+        assert_eq!(
+            host_error.kind,
+            AgentLoopHostErrorKind::BudgetApprovalRequired
+        );
+        assert_eq!(host_error.gate_ref, Some(gate_ref));
+        assert_eq!(
+            host_error.safe_summary,
+            "model request needs budget approval"
+        );
+        assert!(!host_error.safe_summary.contains("System tool"));
+        assert!(!host_error.safe_summary.contains("secret"));
+        assert!(!host_error.safe_summary.contains("/private/path"));
+    }
 
     #[test]
     fn personal_context_admitted_summary_empty_paths_uses_count_only() {

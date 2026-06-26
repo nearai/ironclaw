@@ -6,7 +6,8 @@ use std::sync::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, MissionId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    AgentId, CapabilityId, MissionId, ProjectId, ProviderToolName, ResourceScope, TenantId,
+    ThreadId, UserId,
 };
 use ironclaw_loop_support::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
@@ -2270,7 +2271,8 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
                 provider_call_id: "call_1".to_string(),
-                provider_tool_name: "demo__echo".to_string(),
+                provider_tool_name: ProviderToolName::new("demo__echo")
+                    .expect("provider tool name"),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 arguments: serde_json::json!({"message":"hello"}),
                 response_reasoning: Some("provider reasoning".to_string()),
@@ -2337,7 +2339,7 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
         .expect("provider call metadata");
     assert_eq!(provider_call.provider_turn_id, "turn_1");
     assert_eq!(provider_call.provider_call_id, "call_1");
-    assert_eq!(provider_call.provider_tool_name, "demo__echo");
+    assert_eq!(provider_call.provider_tool_name.as_str(), "demo__echo");
     assert_eq!(provider_call.capability_id.as_str(), "demo.echo");
     assert_eq!(
         provider_call.arguments,
@@ -2755,6 +2757,7 @@ async fn empty_capability_port_exposes_empty_surface_and_rejects_invocations() {
 
     let error = port
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
             capability_id: CapabilityId::new("demo.echo").unwrap(),
             input_ref: CapabilityInputRef::new("input:opaque").unwrap(),
@@ -2775,6 +2778,7 @@ async fn empty_capability_batch_returns_typed_denial_reason() {
     let outcome = port
         .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
             invocations: vec![CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque").unwrap(),
@@ -2800,6 +2804,7 @@ async fn empty_capability_batch_rejects_stale_surface() {
     let error = port
         .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
             invocations: vec![CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("nonempty:v1").unwrap(),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque").unwrap(),
@@ -3046,7 +3051,8 @@ async fn model_port_preserves_provider_metadata_for_explicit_refs_outside_contex
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
                 provider_call_id: "call_1".to_string(),
-                provider_tool_name: "demo__echo".to_string(),
+                provider_tool_name: ProviderToolName::new("demo__echo")
+                    .expect("provider tool name"),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 arguments: serde_json::json!({"message":"hello"}),
                 response_reasoning: Some("provider response reasoning".to_string()),
@@ -3103,7 +3109,7 @@ async fn model_port_preserves_provider_metadata_for_explicit_refs_outside_contex
     assert_eq!(provider_call.provider_id, "test-provider");
     assert_eq!(provider_call.provider_model_id, "test-model");
     assert_eq!(provider_call.provider_call_id, "call_1");
-    assert_eq!(provider_call.provider_tool_name, "demo__echo");
+    assert_eq!(provider_call.provider_tool_name.as_str(), "demo__echo");
 }
 
 #[tokio::test]
@@ -3874,13 +3880,10 @@ fn user_model_messages(fixture: &ThreadFixture) -> Vec<LoopModelMessage> {
     }]
 }
 
-fn provider_tool_definition(
-    capability_id: CapabilityId,
-    name: impl Into<String>,
-) -> ProviderToolDefinition {
+fn provider_tool_definition(capability_id: CapabilityId, name: &str) -> ProviderToolDefinition {
     ProviderToolDefinition {
         capability_id,
-        name: name.into(),
+        name: ProviderToolName::new(name).expect("provider tool name"),
         description: "test provider tool".to_string(),
         parameters: serde_json::json!({"type": "object"}),
     }

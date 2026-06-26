@@ -12,6 +12,7 @@
 //! ([`ResourceScope::system`]). The handle is derived from the provider id:
 //! `llm_provider_<id>_api_key`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use ironclaw_host_api::{ResourceScope, SecretHandle};
@@ -53,6 +54,28 @@ impl LlmKeyStore {
             .await
             .map_err(LlmKeyStoreError::Store)?
             .is_some())
+    }
+
+    /// Provider ids that have an operator-stored key.
+    pub async fn stored_provider_ids(&self) -> Result<HashSet<String>, LlmKeyStoreError> {
+        const PREFIX: &str = "llm_provider_";
+        const SUFFIX: &str = "_api_key";
+
+        Ok(self
+            .store
+            .metadata_for_scope(&scope())
+            .await
+            .map_err(LlmKeyStoreError::Store)?
+            .into_iter()
+            .filter_map(|metadata| {
+                metadata
+                    .handle
+                    .as_str()
+                    .strip_prefix(PREFIX)?
+                    .strip_suffix(SUFFIX)
+                    .map(ToString::to_string)
+            })
+            .collect())
     }
 
     /// Read back the stored key value for `provider_id`, if any.
@@ -125,12 +148,24 @@ mod tests {
         let keys = store();
         assert!(!keys.exists("acme").await.expect("exists"));
         assert!(keys.read("acme").await.expect("read").is_none());
+        assert!(
+            keys.stored_provider_ids()
+                .await
+                .expect("stored provider ids")
+                .is_empty()
+        );
 
         keys.put("acme", SecretMaterial::from("sk-test-value"))
             .await
             .expect("put");
 
         assert!(keys.exists("acme").await.expect("exists"));
+        assert_eq!(
+            keys.stored_provider_ids()
+                .await
+                .expect("stored provider ids"),
+            HashSet::from(["acme".to_string()])
+        );
         let value = keys.read("acme").await.expect("read").expect("some");
         assert_eq!(
             secrecy::ExposeSecret::expose_secret(&value),
@@ -159,6 +194,31 @@ mod tests {
         assert!(keys.delete("acme").await.expect("delete"));
         assert!(!keys.exists("acme").await.expect("exists"));
         assert!(!keys.delete("acme").await.expect("delete again"));
+    }
+
+    #[tokio::test]
+    async fn stored_provider_ids_ignores_unrelated_secret_handles() {
+        let store = Arc::new(InMemorySecretStore::new());
+        store
+            .put(
+                scope(),
+                SecretHandle::new("not_an_llm_key").expect("handle"),
+                SecretMaterial::from("unrelated"),
+                None,
+            )
+            .await
+            .expect("put unrelated");
+        let keys = LlmKeyStore::new(store);
+        keys.put("openai", SecretMaterial::from("sk-openai"))
+            .await
+            .expect("put openai");
+
+        assert_eq!(
+            keys.stored_provider_ids()
+                .await
+                .expect("stored provider ids"),
+            HashSet::from(["openai".to_string()])
+        );
     }
 
     #[tokio::test]

@@ -56,8 +56,7 @@ impl GithubCopilotProvider {
                 }
             })?;
 
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(request_timeout_secs))
+        let client = crate::config::hardened_client_builder(request_timeout_secs)
             .build()
             .map_err(|e| LlmError::RequestFailed {
                 provider: "github_copilot".to_string(),

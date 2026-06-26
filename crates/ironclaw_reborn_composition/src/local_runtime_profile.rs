@@ -10,6 +10,10 @@ use crate::{RebornBuildInput, RebornCompositionProfile};
 pub enum RebornLocalRuntimeProfileError {
     #[error("profile={profile} is not a local Reborn runtime profile")]
     UnsupportedProfile { profile: RebornCompositionProfile },
+    #[error(
+        "profile=hosted-single-tenant-volume requires a binary built with the `libsql` feature"
+    )]
+    MissingLibsqlFeature,
     #[error("failed to resolve local runtime policy: {0}")]
     Policy(#[from] ResolveError),
 }
@@ -42,6 +46,11 @@ pub fn local_runtime_build_input_with_options(
     root: PathBuf,
     options: RebornLocalRuntimeProfileOptions,
 ) -> Result<RebornBuildInput, RebornLocalRuntimeProfileError> {
+    #[cfg(not(feature = "libsql"))]
+    if profile == RebornCompositionProfile::HostedSingleTenantVolume {
+        return Err(RebornLocalRuntimeProfileError::MissingLibsqlFeature);
+    }
+
     let policy = local_runtime_policy(profile, options)?;
     Ok(
         RebornBuildInput::local_dev_with_profile(profile, owner_id, root)
@@ -51,16 +60,37 @@ pub fn local_runtime_build_input_with_options(
 
 /// Resolved policy for the standalone local development runtime profile.
 pub fn local_dev_runtime_policy() -> Result<ResolvedRuntimePolicy, ResolveError> {
-    local_runtime_policy(
-        RebornCompositionProfile::LocalDev,
-        RebornLocalRuntimeProfileOptions::default(),
+    local_runtime_policy_for_local_dev_shape("local-dev")
+}
+
+/// Resolved policy for the hosted single-tenant local product surface.
+pub fn hosted_single_tenant_runtime_policy() -> Result<ResolvedRuntimePolicy, ResolveError> {
+    local_runtime_policy_for_local_dev_shape("hosted-single-tenant")
+}
+
+/// Resolved policy for a hosted single-tenant preview backed by the local
+/// runtime substrate. It keeps process execution disabled while preserving the
+/// scoped virtual filesystem, brokered network, brokered secret handles, and
+/// ask-always approval posture from the resolver-owned secure default.
+pub fn hosted_single_tenant_volume_runtime_policy() -> Result<ResolvedRuntimePolicy, ResolveError> {
+    let request = ironclaw_runtime_policy::ResolveRequest::new(
+        DeploymentMode::HostedMultiTenant,
+        RuntimeProfile::SecureDefault,
+    );
+    ironclaw_runtime_policy::resolve(request)
+}
+
+/// Build the hosted single-tenant volume substrate input with the matching
+/// secure hosted runtime policy.
+pub fn hosted_single_tenant_volume_build_input(
+    owner_id: impl Into<String>,
+    root: PathBuf,
+) -> Result<RebornBuildInput, RebornLocalRuntimeProfileError> {
+    local_runtime_build_input(
+        RebornCompositionProfile::HostedSingleTenantVolume,
+        owner_id,
+        root,
     )
-    .map_err(|error| match error {
-        RebornLocalRuntimeProfileError::Policy(error) => error,
-        RebornLocalRuntimeProfileError::UnsupportedProfile { .. } => {
-            unreachable!("local-dev is a local runtime profile")
-        }
-    })
 }
 
 /// Resolved policy for trusted single-user local development with inherited
@@ -76,6 +106,9 @@ pub fn local_dev_yolo_runtime_policy(
     )
     .map_err(|error| match error {
         RebornLocalRuntimeProfileError::Policy(error) => error,
+        RebornLocalRuntimeProfileError::MissingLibsqlFeature => {
+            unreachable!("local-dev-yolo is not the hosted volume profile")
+        }
         RebornLocalRuntimeProfileError::UnsupportedProfile { .. } => {
             unreachable!("local-dev-yolo is a local runtime profile")
         }
@@ -89,7 +122,12 @@ fn local_runtime_policy(
     let runtime_profile = match profile {
         RebornCompositionProfile::LocalDev => RuntimeProfile::LocalDev,
         RebornCompositionProfile::LocalDevYolo => RuntimeProfile::LocalYolo,
+        RebornCompositionProfile::HostedSingleTenantVolume => {
+            return hosted_single_tenant_volume_runtime_policy()
+                .map_err(RebornLocalRuntimeProfileError::Policy);
+        }
         RebornCompositionProfile::Disabled
+        | RebornCompositionProfile::HostedSingleTenant
         | RebornCompositionProfile::Production
         | RebornCompositionProfile::MigrationDryRun => {
             return Err(RebornLocalRuntimeProfileError::UnsupportedProfile { profile });
@@ -103,4 +141,22 @@ fn local_runtime_policy(
         )
     };
     Ok(ironclaw_runtime_policy::resolve(request)?)
+}
+
+fn local_runtime_policy_for_local_dev_shape(
+    profile_name: &'static str,
+) -> Result<ResolvedRuntimePolicy, ResolveError> {
+    local_runtime_policy(
+        RebornCompositionProfile::LocalDev,
+        RebornLocalRuntimeProfileOptions::default(),
+    )
+    .map_err(|error| match error {
+        RebornLocalRuntimeProfileError::Policy(error) => error,
+        RebornLocalRuntimeProfileError::MissingLibsqlFeature => {
+            unreachable!("{profile_name} is not the hosted volume profile")
+        }
+        RebornLocalRuntimeProfileError::UnsupportedProfile { .. } => {
+            unreachable!("{profile_name} uses the local-dev runtime policy shape")
+        }
+    })
 }

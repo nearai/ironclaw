@@ -1,10 +1,11 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::LoopDiagnosticRef;
+use crate::{LoopDiagnosticRef, LoopGateRef};
 
 use super::host::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind, LoopModelPort,
@@ -13,6 +14,23 @@ use super::host::{
 };
 use super::milestones::{LoopHostMilestoneEmitter, LoopHostMilestoneSink};
 use super::model_work::{ModelWorkOutcome, ModelWorkRequest};
+
+/// Hard ceiling on a single primary assistant model call.
+///
+/// This is a defense-in-depth bound that wraps the entire gateway call (every
+/// provider, not just NEAR AI). It MUST stay below the runner lease
+/// ([`crate::memory::DEFAULT_RUNNER_LEASE_TTL_SECONDS`] = 90s) so a hung
+/// provider is surfaced as a retryable `Unavailable` error before the lease
+/// reclaims the runner mid-flight — the failure mode that wedged the Reborn
+/// runtime on 2026-06-24. The invariant is enforced by
+/// `primary_model_call_timeout_is_below_runner_lease` below.
+///
+/// Layered ordering: provider HTTP timeout (`ironclaw_llm`
+/// `DEFAULT_REQUEST_TIMEOUT_SECS` = 60s) < this wrapper (75s) < runner lease
+/// (90s). The provider bound fires first on the common path so the precise
+/// provider error surfaces; this wrapper catches gateway-layer stalls the inner
+/// bound misses.
+const PRIMARY_MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(75);
 
 /// Outcome passed to [`LoopModelBudgetAccountant::post_model_call`] so the
 /// accountant can record usage on success or note the failure kind.
@@ -109,6 +127,9 @@ pub struct LoopModelGatewayError {
     pub safe_summary: LoopSafeSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_ref: Option<LoopGateRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
@@ -121,12 +142,33 @@ impl LoopModelGatewayError {
             kind,
             safe_summary: LoopSafeSummary::new(safe_summary)?,
             reason_kind: None,
+            gate_ref: None,
             diagnostic_ref: None,
         })
     }
 
+    /// Build the gateway error for a primary model call that exceeded its
+    /// timeout. Surfaces as `AgentLoopHostErrorKind::Unavailable`, which the
+    /// recovery strategy treats as retryable — the correct disposition for a
+    /// transient provider/gateway stall. Infallible: the safe summary is a
+    /// known-good literal.
+    pub fn timed_out() -> Self {
+        Self {
+            kind: AgentLoopHostErrorKind::Unavailable,
+            safe_summary: LoopSafeSummary::model_gateway_timed_out(),
+            reason_kind: None,
+            gate_ref: None,
+            diagnostic_ref: None,
+        }
+    }
+
     pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
         self.reason_kind = Some(reason_kind);
+        self
+    }
+
+    pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
+        self.gate_ref = Some(gate_ref);
         self
     }
 
@@ -139,6 +181,9 @@ impl LoopModelGatewayError {
         let mut error = AgentLoopHostError::new(self.kind, self.safe_summary.as_str().to_string());
         if let Some(reason_kind) = self.reason_kind {
             error = error.with_reason_kind(reason_kind);
+        }
+        if let Some(gate_ref) = self.gate_ref {
+            error = error.with_gate_ref(gate_ref);
         }
         if let Some(diagnostic_ref) = self.diagnostic_ref {
             error = error.with_diagnostic_ref(diagnostic_ref);
@@ -335,14 +380,18 @@ where
             );
         }
 
-        let gateway_result = self
-            .gateway
-            .stream_model(LoopModelGatewayRequest {
-                context: self.context.clone(),
-                request: request.clone(),
-            })
-            .await
-            .map(sanitize_model_response);
+        // Bound the primary model call so a hung provider/gateway surfaces as a
+        // retryable error before the runner lease reclaims this run mid-flight.
+        // See `PRIMARY_MODEL_CALL_TIMEOUT`.
+        let gateway_call = self.gateway.stream_model(LoopModelGatewayRequest {
+            context: self.context.clone(),
+            request: request.clone(),
+        });
+        let gateway_result =
+            match tokio::time::timeout(PRIMARY_MODEL_CALL_TIMEOUT, gateway_call).await {
+                Ok(result) => result.map(sanitize_model_response),
+                Err(_elapsed) => Err(LoopModelGatewayError::timed_out()),
+            };
 
         // Post-call accounting fires on BOTH success and failure. The
         // RAII guard stays armed across this await — if the future is
@@ -472,4 +521,25 @@ fn sanitize_model_response(mut response: LoopModelResponse) -> LoopModelResponse
         reply.content = sanitize_model_visible_text(std::mem::take(&mut reply.content));
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The primary model-call timeout must fire before the runner lease can
+    /// reclaim the run mid-flight. This guards against a silent regression of
+    /// the 2026-06-24 wedge, where the provider timeout (120s) exceeded the
+    /// lease (90s) and the lease killed runners before any timeout fired.
+    #[test]
+    fn primary_model_call_timeout_is_below_runner_lease() {
+        let lease_secs = u64::try_from(crate::memory::DEFAULT_RUNNER_LEASE_TTL_SECONDS)
+            .expect("runner lease TTL is non-negative");
+        assert!(
+            PRIMARY_MODEL_CALL_TIMEOUT.as_secs() < lease_secs,
+            "primary model-call timeout ({}s) must be below the runner lease ({}s)",
+            PRIMARY_MODEL_CALL_TIMEOUT.as_secs(),
+            lease_secs,
+        );
+    }
 }

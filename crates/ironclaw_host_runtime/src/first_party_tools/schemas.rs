@@ -466,6 +466,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         }),
         "schemas/builtin/trigger_create.input.v1.json" => json!({
             "type": "object",
+            "description": "Create a scheduled trigger. Pass the trigger object itself with top-level fields `name`, `prompt`, and `schedule`; do not wrap the schedule in `operation`, `data`, or a parser request object.",
             "properties": {
                 "name": {
                     "type": "string",
@@ -476,18 +477,20 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "description": "Prompt submitted when the trigger fires. Runtime validation caps UTF-8 content at 32768 bytes. Do not embed delivery routing here; when the user asks to send routine or trigger results through an outbound product/channel, first select the target through the visible outbound delivery target capabilities, then create the trigger."
                 },
                 "schedule": {
-                    "description": "When and how often the trigger fires. Use 'once' for one-time actions, reminders, 'do X at <date/time>', or 'next <weekday>'. Use 'cron' for recurring/repeating schedules.",
+                    "description": "When and how often the trigger fires. This value is the schedule object itself. For recurring triggers use {\"kind\":\"cron\",\"expression\":\"0 14 * * 2\",\"timezone\":\"America/Los_Angeles\"}. For one-time triggers use {\"kind\":\"once\",\"at\":\"2026-06-23T14:00:00\",\"timezone\":\"America/Los_Angeles\"}. Do not pass {\"operation\":\"parse\",\"data\":...}.",
                     "oneOf": [
                         {
+                            "type": "object",
                             "properties": {
                                 "kind": { "const": "cron" },
-                                "expression": { "type": "string", "description": "Five-, six-, or seven-field cron expression; cadence at least one minute." },
+                                "expression": { "type": "string", "description": "Five-, six-, or seven-field cron expression; cadence at least one minute. Example: `0 14 * * 2` for Tuesdays at 2 PM in `timezone`." },
                                 "timezone": { "type": "string", "description": "IANA timezone name (e.g. America/New_York, UTC)." }
                             },
                             "required": ["kind", "expression", "timezone"],
                             "additionalProperties": false
                         },
                         {
+                            "type": "object",
                             "properties": {
                                 "kind": { "const": "once" },
                                 "at": { "type": "string", "description": "Local wall-clock datetime in `timezone`, format YYYY-MM-DDTHH:MM:SS; interpreted in the given timezone and converted to UTC." },
@@ -521,6 +524,22 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "additionalProperties": false
         }),
         "schemas/builtin/trigger_remove.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "trigger_id": { "type": "string", "description": "Trigger id returned by trigger_create or trigger_list" }
+            },
+            "required": ["trigger_id"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trigger_pause.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "trigger_id": { "type": "string", "description": "Trigger id returned by trigger_create or trigger_list" }
+            },
+            "required": ["trigger_id"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trigger_resume.input.v1.json" => json!({
             "type": "object",
             "properties": {
                 "trigger_id": { "type": "string", "description": "Trigger id returned by trigger_create or trigger_list" }

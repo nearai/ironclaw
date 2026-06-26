@@ -1188,19 +1188,28 @@ impl DefaultHostRuntime {
             );
             return;
         }
-        let scope = PersistentApprovalScope::from_resource_scope(&context.resource_scope);
-        let lookup_results = join_all(persistent_approval_grantees(context).into_iter().map(
-            |grantee| {
-                let policies = Arc::clone(policies);
-                let key = PersistentApprovalPolicyKey {
-                    scope: scope.clone(),
-                    action,
-                    capability_id: capability_id.clone(),
-                    grantee,
-                };
-                async move { policies.lookup(&key).await }
-            },
-        ))
+        let scopes = persistent_approval_lookup_scopes(&context.resource_scope);
+        let grantees = persistent_approval_grantees(context);
+        let lookup_results = join_all(
+            scopes
+                .into_iter()
+                .flat_map(|scope| {
+                    grantees
+                        .iter()
+                        .cloned()
+                        .map(move |grantee| (scope.clone(), grantee))
+                })
+                .map(|(scope, grantee)| {
+                    let policies = Arc::clone(policies);
+                    let key = PersistentApprovalPolicyKey {
+                        scope,
+                        action,
+                        capability_id: capability_id.clone(),
+                        grantee,
+                    };
+                    async move { policies.lookup(&key).await }
+                }),
+        )
         .await;
         for policy in lookup_results {
             let policy = match policy {
@@ -1954,6 +1963,23 @@ fn persistent_approval_grantees(context: &ironclaw_host_api::ExecutionContext) -
     grantees
 }
 
+fn persistent_approval_lookup_scopes(scope: &ResourceScope) -> Vec<PersistentApprovalScope> {
+    let user_scope = PersistentApprovalScope {
+        tenant_id: scope.tenant_id.clone(),
+        user_id: scope.user_id.clone(),
+        agent_id: None,
+        project_id: None,
+    };
+    let legacy_scope = PersistentApprovalScope::from_resource_scope(scope);
+    if legacy_scope == user_scope {
+        vec![user_scope]
+    } else {
+        // User-scope settings-page policies intentionally win lookup order over
+        // legacy agent/project-scoped prompt policies.
+        vec![user_scope, legacy_scope]
+    }
+}
+
 fn host_runtime_spawn_input_for_capability(
     capability_id: &CapabilityId,
     input: serde_json::Value,
@@ -1982,7 +2008,15 @@ fn failure_from(
 ) -> RuntimeCapabilityFailure {
     let kind = failure_kind_from(&error);
     let message = sanitized_failure_message(&error);
-    RuntimeCapabilityFailure::new(capability_id, kind, message)
+    let detail = match error {
+        CapabilityInvocationError::Dispatch { detail, .. } => detail,
+        _ => None,
+    };
+    let mut failure = RuntimeCapabilityFailure::new(capability_id, kind, message);
+    if let Some(detail) = detail {
+        failure = failure.with_detail(detail);
+    }
+    failure
 }
 
 /// Returns a stable, redacted summary message for a capability invocation
@@ -2169,6 +2203,7 @@ mod tests {
         CapabilityInvocationError::Dispatch {
             kind,
             safe_summary: None,
+            detail: None,
         }
     }
 
@@ -2459,6 +2494,7 @@ output_schema_ref = "schemas/test.output.json"
                 "apply_patch failed for path workspace main.rs: old_string matched 0 times"
                     .to_string(),
             ),
+            detail: None,
         };
 
         assert_eq!(
@@ -2472,11 +2508,41 @@ output_schema_ref = "schemas/test.output.json"
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
             safe_summary: Some("read_file failed for path workspace api_key.txt".to_string()),
+            detail: None,
         };
 
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
         assert_eq!(message, "dispatch failed: OperationFailed");
         assert!(!message.contains("api_key"));
+    }
+
+    #[test]
+    fn failure_from_preserves_dispatch_detail() {
+        let issue = ironclaw_host_api::DispatchInputIssue::new(
+            "schedule.kind",
+            ironclaw_host_api::DispatchInputIssueCode::MissingRequired,
+        )
+        .expected("cron or once");
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            safe_summary: Some("trigger_create input failed validation".to_string()),
+            detail: Some(ironclaw_host_api::DispatchFailureDetail::InvalidInput {
+                issues: vec![issue.clone()],
+            }),
+        };
+
+        let failure = failure_from(
+            error,
+            CapabilityId::new("builtin.trigger_create").expect("valid capability id"),
+        );
+
+        assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+        assert_eq!(
+            failure.detail,
+            Some(ironclaw_host_api::DispatchFailureDetail::InvalidInput {
+                issues: vec![issue]
+            })
+        );
     }
 
     #[test]

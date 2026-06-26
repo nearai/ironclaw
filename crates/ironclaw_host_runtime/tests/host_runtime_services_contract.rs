@@ -4948,26 +4948,35 @@ async fn host_runtime_services_denies_wasm_http_when_shared_egress_has_no_policy
 
 #[tokio::test]
 async fn host_runtime_services_wasm_input_encode_releases_prepared_reservation() {
-    let services = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/services/runtime_adapters.rs"),
+    // Regression guard: the WASM dispatch path must take its resource reservation
+    // and wrap it in a `ReservationGuard` (RAII) *before* the fallible input-encode
+    // step, so that an encode failure — or any other early return before the guard
+    // is settled — releases the reservation via `Drop` instead of leaking it.
+    //
+    // This is a structural check rather than a behavioural one because
+    // `serde_json::to_string(&Value)` is effectively infallible, so the
+    // input-encode error branch is not triggerable at runtime. The guard's actual
+    // Drop/release behaviour (including the cancellation path) is covered by the
+    // unit tests in `services::wasm_execution::tests`. We assert ordering here:
+    // reservation bound -> guard constructed -> input encoded.
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/services/wasm_execution.rs"),
     )
     .unwrap();
-    let reservation_index = services
+    let reservation_index = source
         .find("let reservation = match request.resource_reservation")
         .expect("WASM execution must bind the dispatch reservation");
-    let input_index = services
+    let guard_index = source
+        .find("ReservationGuard::new(request.governor, reservation.id)")
+        .expect("WASM dispatch must wrap the prepared reservation in a ReservationGuard");
+    let input_index = source
         .find("let input_json = match serde_json::to_string(&request.input)")
-        .expect("WASM input encoding must use explicit cleanup branch");
+        .expect("WASM dispatch must encode the tool input after taking the reservation");
 
     assert!(
-        reservation_index < input_index,
-        "WASM adapters must take ownership of a prepared reservation before input encoding so encode failures can release it"
-    );
-    assert!(
-        services.contains(
-            "Err(_) => {\n            release_wasm_reservation(request.governor, reservation.id);"
-        ),
-        "InputEncode failures must release the prepared WASM reservation"
+        reservation_index < guard_index && guard_index < input_index,
+        "WASM adapters must wrap the prepared reservation in a ReservationGuard before \
+         input encoding so encode (and any other) early-return failures release it via Drop"
     );
 }
 
@@ -8309,6 +8318,15 @@ impl SecretStore for CountingErrorSecretStore {
         _handle: &SecretHandle,
     ) -> Result<Option<SecretMetadata>, SecretStoreError> {
         self.metadata_calls.fetch_add(1, Ordering::SeqCst);
+        Err(SecretStoreError::StoreUnavailable {
+            reason: "simulated backend failure".to_string(),
+        })
+    }
+
+    async fn metadata_for_scope(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
         Err(SecretStoreError::StoreUnavailable {
             reason: "simulated backend failure".to_string(),
         })

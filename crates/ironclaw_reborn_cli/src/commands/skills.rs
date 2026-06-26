@@ -92,17 +92,14 @@ struct SkillListConfig {
 fn build_skill_list_config(config: &RebornBootConfig) -> anyhow::Result<SkillListConfig> {
     let config_file = crate::runtime::read_config_file(config)?;
     let profile = crate::runtime::effective_profile(config, config_file.as_ref())?;
-    match profile {
-        RebornProfile::LocalDev | RebornProfile::LocalDevYolo => {}
-        RebornProfile::Production | RebornProfile::MigrationDryRun => {
-            anyhow::bail!(
-                "ironclaw-reborn skills currently supports profile=local-dev or profile=local-dev-yolo; got profile={profile}"
-            );
-        }
+    if !profile.supports_local_runtime_skill_management() {
+        anyhow::bail!(
+            "ironclaw-reborn skills currently supports profile=local-dev, profile=local-dev-yolo, profile=hosted-single-tenant, or profile=hosted-single-tenant-volume; got profile={profile}"
+        );
     }
     Ok(SkillListConfig {
         owner_id: crate::runtime::default_owner_id(config_file.as_ref()).to_string(),
-        local_dev_root: config.home().path().join("local-dev"),
+        local_dev_root: crate::runtime::local_runtime_storage_root(config, profile),
         profile,
     })
 }

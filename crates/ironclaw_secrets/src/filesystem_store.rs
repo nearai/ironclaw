@@ -46,8 +46,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, IndexKey, IndexKind, IndexName, IndexSpec,
-    IndexValue, RootFilesystem, ScopedFilesystem,
+    CasExpectation, ContentType, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
+    IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
     AgentId, HostApiError, MissionId, ProjectId, ResourceScope, ScopedPath, SecretHandle, ThreadId,
@@ -370,6 +370,46 @@ where
                 handle: stored.handle,
                 expires_at: stored.expires_at,
             }))
+    }
+
+    async fn metadata_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
+        let root = secret_owner_root(scope)?;
+        let mut offset = 0;
+        let mut metadata = Vec::new();
+        loop {
+            let entries = match self
+                .filesystem
+                .query(
+                    scope,
+                    &root,
+                    &Filter::All,
+                    Page::new(offset, Page::MAX_LIMIT),
+                )
+                .await
+            {
+                Ok(entries) => entries,
+                Err(error) if is_not_found(&error) => return Ok(metadata),
+                Err(error) => return Err(fs_to_secret_store_error(error)),
+            };
+            let entry_count = entries.len();
+            for versioned in entries {
+                let stored: StoredSecret = deserialize_secret(&versioned.entry.body)?;
+                if same_scope_owner(&stored.scope, scope) {
+                    metadata.push(SecretMetadata {
+                        scope: stored.scope,
+                        handle: stored.handle,
+                        expires_at: stored.expires_at,
+                    });
+                }
+            }
+            if entry_count < Page::MAX_LIMIT as usize {
+                return Ok(metadata);
+            }
+            offset += entry_count as u64;
+        }
     }
 
     async fn delete(
@@ -1728,6 +1768,55 @@ mod tests {
 
         let second = store.consume(&scope, lease.id).await.unwrap_err();
         assert!(second.is_consumed());
+    }
+
+    #[tokio::test]
+    async fn filesystem_secret_store_lists_metadata_for_scope_owner() {
+        let fs = Arc::new(InMemoryBackend::new());
+        let scoped = default_scoped_fs(Arc::clone(&fs));
+        let store = FilesystemSecretStore::new(scoped, test_crypto());
+        let scope = sample_scope("tenant-a", "user-a");
+        let mut other_project_scope = scope.clone();
+        other_project_scope.project_id = Some(ProjectId::new("project-b").unwrap());
+
+        store
+            .put(
+                scope.clone(),
+                SecretHandle::new("api_key").unwrap(),
+                SecretMaterial::from("secret-a"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                scope.clone(),
+                SecretHandle::new("model_key").unwrap(),
+                SecretMaterial::from("secret-b"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                other_project_scope,
+                SecretHandle::new("other_project_key").unwrap(),
+                SecretMaterial::from("secret-c"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut handles: Vec<_> = store
+            .metadata_for_scope(&scope)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|metadata| metadata.handle.as_str().to_string())
+            .collect();
+        handles.sort();
+
+        assert_eq!(handles, vec!["api_key", "model_key"]);
     }
 
     /// Operator-wide secrets are stored under [`ResourceScope::system`], whose

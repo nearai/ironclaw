@@ -6,11 +6,15 @@ mod tests {
 
     use super::super::*;
 
-    use ironclaw_approvals::ApprovalResolver;
+    use ironclaw_approvals::{
+        ApprovalResolver, CapabilityPermissionOverrideStore, PersistentApprovalAction,
+        PersistentApprovalPolicyInput, PersistentApprovalPolicyStore, ToolPermissionOverride,
+        ToolPermissionOverrideInput,
+    };
     use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore};
     use ironclaw_host_api::{
-        AgentId, CapabilityId, EffectKind, InvocationId, MountPermissions, NetworkPolicy,
-        ProjectId, TenantId, ThreadId,
+        AgentId, CapabilityId, EffectKind, GrantConstraints, InvocationId, MountPermissions,
+        NetworkPolicy, Principal, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
     };
     use ironclaw_host_runtime::{
         APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
@@ -37,8 +41,9 @@ mod tests {
         AcceptedMessageRef, LoopMessageRef, ReplyTargetBindingRef, RunProfileResolutionRequest,
         RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope,
         run_profile::{
-            CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-            InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, ModelProfileId,
+            CapabilityCallCandidate, CapabilityFailureKind, CapabilityInputRef,
+            CapabilityInvocation, CapabilityOutcome, InMemoryLoopHostMilestoneSink,
+            InMemoryRunProfileResolver, ModelProfileId, RegisterProviderToolCallRequest,
             VisibleCapabilityRequest,
         },
     };
@@ -69,6 +74,35 @@ mod tests {
             .await
             .expect("profile resolves");
         LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved)
+    }
+
+    /// Turn on the global auto-approve switch for the `(tenant, user)` a run
+    /// dispatches under so a scripted tool call exercises the dispatch path
+    /// instead of stopping at the per-tool approval gate. The Tools-settings
+    /// switch is authoritative for first-party tool dispatch; enabling
+    /// it here mirrors the operator having flipped it on before letting the
+    /// agent run tools.
+    async fn enable_global_auto_approve_for_run(
+        services: &crate::RebornServices,
+        run_context: &LoopRunContext,
+        user_id: &UserId,
+    ) {
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let mut scope = run_context.scope.to_resource_scope();
+        scope.user_id = user_id.clone();
+        ironclaw_approvals::AutoApproveSettingStore::set(
+            local_runtime.auto_approve_settings.as_ref(),
+            ironclaw_approvals::AutoApproveSettingInput {
+                updated_by: ironclaw_host_api::Principal::User(user_id.clone()),
+                scope,
+                enabled: true,
+            },
+        )
+        .await
+        .expect("enabling global auto-approve should succeed");
     }
 
     fn local_dev_minimal_approval_policy()
@@ -137,29 +171,30 @@ mod tests {
     ) -> HostVisibleCapabilityRequest {
         let policy = crate::local_dev_capability_policy::local_dev_capability_policy()
             .expect("policy parses");
+        let empty_mounts = MountView::default();
 
         local_dev_visible_capability_request(
             run_context,
             fallback_user_id,
-            MountView::default(),
-            MountView::default(),
-            MountView::default(),
-            &policy,
-            &LocalDevExtensionSurface::default(),
+            LocalDevVisibleCapabilityInputs {
+                workspace_mounts: &empty_mounts,
+                skill_mounts: &empty_mounts,
+                memory_mounts: &empty_mounts,
+                system_extensions_lifecycle_mounts: &empty_mounts,
+                policy: &policy,
+                extension_surface: &LocalDevExtensionSurface::default(),
+            },
         )
         .expect("visible request")
     }
 
-    fn provider_tool_call_with_name(
-        name: impl Into<String>,
-        arguments: serde_json::Value,
-    ) -> ProviderToolCall {
+    fn provider_tool_call_with_name(name: &str, arguments: serde_json::Value) -> ProviderToolCall {
         ProviderToolCall {
             provider_id: "test-provider".to_string(),
             provider_model_id: "test-model".to_string(),
             turn_id: Some("provider-turn-1".to_string()),
             id: "call-1".to_string(),
-            name: name.into(),
+            name: ProviderToolName::new(name).expect("provider tool name"),
             arguments,
             response_reasoning: None,
             reasoning: None,
@@ -169,6 +204,17 @@ mod tests {
 
     fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
         provider_tool_call_with_name("builtin_echo", arguments)
+    }
+
+    fn invocation_for_candidate(candidate: &CapabilityCallCandidate) -> CapabilityInvocation {
+        CapabilityInvocation {
+            activity_id: candidate.activity_id,
+            surface_version: candidate.surface_version.clone(),
+            capability_id: candidate.capability_id.clone(),
+            input_ref: candidate.input_ref.clone(),
+            approval_resume: None,
+            auth_resume: None,
+        }
     }
 
     struct StaticOutboundDeliveryTargetProvider {
@@ -457,6 +503,13 @@ mod tests {
         )
         .expect("local-dev capability wiring");
 
+        enable_global_auto_approve_for_run(
+            &services,
+            &run_context,
+            &UserId::new(user).expect("user id"),
+        )
+        .await;
+
         GsuiteSurfaceHarness {
             _dir: dir,
             wiring,
@@ -625,6 +678,88 @@ mod tests {
             Some(result_ref.as_str())
         );
         assert!(preview_message.tool_result_provider_call.is_none());
+        let preview_record = display_previews
+            .record_for_invocation(invocation_id)
+            .expect("live preview record");
+        assert_eq!(
+            preview_record.timeline_message_id,
+            Some(preview_message.message_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_io_writes_durable_preview_under_run_actor_owner() {
+        let actor_user_id = UserId::new("preview-actor").expect("actor user id");
+        let runtime_owner_id = UserId::new("runtime-owner").expect("runtime owner id");
+        let run_context = run_context("durable-preview-actor-owner")
+            .await
+            .with_actor(TurnActor::new(actor_user_id.clone()));
+        let base_thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: Some(runtime_owner_id),
+            mission_id: None,
+        };
+        let actor_thread_scope = ThreadScope {
+            owner_user_id: Some(actor_user_id.clone()),
+            ..base_thread_scope.clone()
+        };
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: actor_thread_scope.clone(),
+                thread_id: Some(run_context.thread_id.clone()),
+                created_by_actor_id: format!("user:{}", actor_user_id.as_str()),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("actor-owned thread exists");
+        let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+            Arc::clone(&display_previews),
+            thread_service.clone(),
+            base_thread_scope,
+        );
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(serde_json::json!({"message": "hello"})),
+            )
+            .await
+            .expect("input stages");
+        let invocation_id = InvocationId::new();
+
+        let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
+        let CapabilityWriteResult { result_ref, .. } = capability_io
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
+                invocation_id,
+                capability_id: &capability_id,
+                output: serde_json::json!({"content": "hello"}),
+                display_preview: None,
+            })
+            .await
+            .expect("result stages");
+
+        let history = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: actor_thread_scope,
+                thread_id: run_context.thread_id.clone(),
+            })
+            .await
+            .expect("actor-owned history loads");
+        let preview_message = history
+            .messages
+            .iter()
+            .find(|message| message.kind == MessageKind::CapabilityDisplayPreview)
+            .expect("durable preview message under actor owner");
+        assert_eq!(
+            preview_message.tool_result_ref.as_deref(),
+            Some(result_ref.as_str())
+        );
         let preview_record = display_previews
             .record_for_invocation(invocation_id)
             .expect("live preview record");
@@ -817,6 +952,9 @@ mod tests {
         let memory_mounts =
             crate::local_dev_mounts::memory_mount_view(MountPermissions::read_write_list_delete())
                 .expect("memory mounts build");
+        let system_extensions_lifecycle_mounts =
+            crate::local_dev_mounts::system_extensions_lifecycle_mount_view()
+                .expect("system extensions lifecycle mounts build");
         assert!(workspace_mounts.mounts.iter().all(|mount| {
             mount.alias.as_str() != "/skills" && mount.alias.as_str() != "/system/skills"
         }));
@@ -840,6 +978,7 @@ mod tests {
             &workspace_mounts,
             &skill_mounts,
             &memory_mounts,
+            &system_extensions_lifecycle_mounts,
         );
         let grant_for = |capability_id: &str| {
             grants
@@ -913,7 +1052,10 @@ mod tests {
             extension_search_grant.constraints.allowed_effects,
             vec![EffectKind::DispatchCapability, EffectKind::ReadFilesystem]
         );
-        assert!(extension_search_grant.constraints.mounts.mounts.is_empty());
+        assert_eq!(
+            extension_search_grant.constraints.mounts,
+            system_extensions_lifecycle_mounts
+        );
         assert_eq!(
             extension_search_grant.constraints.network,
             NetworkPolicy::default()
@@ -925,7 +1067,7 @@ mod tests {
         ] {
             let grant = grant_for(capability_id);
             assert_eq!(grant.constraints.allowed_effects, local_dev_allowed_effects);
-            assert!(grant.constraints.mounts.mounts.is_empty());
+            assert_eq!(grant.constraints.mounts, system_extensions_lifecycle_mounts);
             assert_eq!(grant.constraints.network, NetworkPolicy::default());
         }
         let extension_activate_grant = grant_for(EXTENSION_ACTIVATE_CAPABILITY_ID);
@@ -938,12 +1080,9 @@ mod tests {
                 EffectKind::Network
             ]
         );
-        assert!(
-            extension_activate_grant
-                .constraints
-                .mounts
-                .mounts
-                .is_empty()
+        assert_eq!(
+            extension_activate_grant.constraints.mounts,
+            system_extensions_lifecycle_mounts
         );
         assert_eq!(
             extension_activate_grant
@@ -1070,6 +1209,9 @@ mod tests {
             policy,
             workspace_mounts: local_runtime.workspace_mounts.clone(),
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -1078,9 +1220,15 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
         let port = factory
             .create_capability_port(&run_context)
@@ -1121,7 +1269,7 @@ mod tests {
             signature: None,
         };
         let candidate = port
-            .register_provider_tool_call(call)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
             .await
             .expect("provider call stages");
         assert_eq!(
@@ -1129,13 +1277,7 @@ mod tests {
             SKILL_ACTIVATE_CAPABILITY_ID
         );
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
-                surface_version: candidate.surface_version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&candidate))
             .await
             .expect("skill activation invokes");
         assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
@@ -1239,6 +1381,9 @@ mod tests {
             policy: Arc::clone(&local_runtime.capability_policy),
             workspace_mounts: local_runtime.workspace_mounts.clone(),
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -1248,8 +1393,14 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
 
         let tenant_id = TenantId::new("tenant-project-create").expect("tenant id");
@@ -1286,23 +1437,19 @@ mod tests {
         // `append_capability_result_ref` and terminate the whole run; this locks
         // that regression — the capability must still complete.
         let candidate = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__project_create",
-                serde_json::json!({
-                    "name": "Build /api <svc>",
-                    "description": "Ship the project feature"
-                }),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__project_create",
+                    serde_json::json!({
+                        "name": "Build /api <svc>",
+                        "description": "Ship the project feature"
+                    }),
+                ),
             ))
             .await
             .expect("project_create call stages");
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
-                surface_version: candidate.surface_version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&candidate))
             .await
             .expect("project_create invokes");
         let message = match outcome {
@@ -1406,12 +1553,26 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let fallback_user_id = UserId::new("outbound-delivery-fallback-user").expect("user id");
+        let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+            local_runtime.tool_permission_overrides.clone();
+        let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+            local_runtime.auto_approve_settings.clone();
+        let approval_settings = Arc::new(
+            crate::local_dev_authorization::StoreApprovalSettingsProvider::new(
+                tool_permission_overrides,
+                auto_approve_settings,
+                local_runtime.persistent_approval_policies.clone(),
+            ),
+        );
         let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy,
             workspace_mounts: local_runtime.workspace_mounts.clone(),
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -1420,9 +1581,13 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: Some(outbound_preferences_facade),
             outbound_delivery_target_set_requires_approval: true,
+            approval_settings,
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
 
         let owner_user_id = UserId::new("outbound-delivery-owner").expect("user id");
@@ -1457,13 +1622,19 @@ mod tests {
         let tool_definitions = port.tool_definitions().expect("tool definitions");
         let tool_definition_names = tool_definitions
             .iter()
-            .map(|definition| definition.name.clone())
+            .map(|definition| definition.name.as_str().to_string())
             .collect::<Vec<_>>();
-        assert!(tool_definition_names.contains(&"builtin__outbound_delivery_targets_list".into()));
-        assert!(tool_definition_names.contains(&"builtin__outbound_delivery_target_set".into()));
+        assert!(
+            tool_definition_names.contains(&"builtin__outbound_delivery_targets_list".to_string())
+        );
+        assert!(
+            tool_definition_names.contains(&"builtin__outbound_delivery_target_set".to_string())
+        );
         let list_tool = tool_definitions
             .iter()
-            .find(|definition| definition.name == "builtin__outbound_delivery_targets_list")
+            .find(|definition| {
+                definition.name.as_str() == "builtin__outbound_delivery_targets_list"
+            })
             .expect("list tool definition should exist");
         assert!(
             list_tool
@@ -1473,7 +1644,7 @@ mod tests {
         );
         let set_tool = tool_definitions
             .iter()
-            .find(|definition| definition.name == "builtin__outbound_delivery_target_set")
+            .find(|definition| definition.name.as_str() == "builtin__outbound_delivery_target_set")
             .expect("set tool definition should exist");
         assert!(
             set_tool
@@ -1483,9 +1654,11 @@ mod tests {
         );
 
         let malformed_list = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__outbound_delivery_targets_list",
-                serde_json::Value::Null,
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_targets_list",
+                    serde_json::Value::Null,
+                ),
             ))
             .await
             .expect_err("malformed list input should fail validation");
@@ -1495,20 +1668,16 @@ mod tests {
         );
 
         let list_candidate = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__outbound_delivery_targets_list",
-                serde_json::json!({ "channel": "slack" }),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_targets_list",
+                    serde_json::json!({ "channel": "slack" }),
+                ),
             ))
             .await
             .expect("list call stages");
         let list_outcome = port
-            .invoke_capability(CapabilityInvocation {
-                surface_version: list_candidate.surface_version,
-                capability_id: list_candidate.capability_id,
-                input_ref: list_candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&list_candidate))
             .await
             .expect("list call invokes");
         let list_result_ref = match list_outcome {
@@ -1530,9 +1699,11 @@ mod tests {
         );
 
         let malformed_set = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__outbound_delivery_target_set",
-                serde_json::json!({ "target_id": "bad\nid" }),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": "bad\nid" }),
+                ),
             ))
             .await
             .expect_err("malformed set input should fail validation");
@@ -1550,23 +1721,19 @@ mod tests {
             actor_user_id.clone(),
         );
         let set_candidate = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__outbound_delivery_target_set",
-                serde_json::json!({ "target_id": slack_target_id.as_str() }),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": slack_target_id.as_str() }),
+                ),
             ))
             .await
             .expect("set call stages");
+        let set_activity_id = set_candidate.activity_id;
         let set_surface_version = set_candidate.surface_version.clone();
         let set_capability_id_from_candidate = set_candidate.capability_id.clone();
-        let set_input_ref = set_candidate.input_ref.clone();
         let blocked_outcome = port
-            .invoke_capability(CapabilityInvocation {
-                surface_version: set_surface_version.clone(),
-                capability_id: set_capability_id_from_candidate.clone(),
-                input_ref: set_input_ref.clone(),
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&set_candidate))
             .await
             .expect("set call reaches approval gate");
         let approval_resume = match blocked_outcome {
@@ -1580,6 +1747,7 @@ mod tests {
             }
             outcome => panic!("set should require approval, got {outcome:?}"),
         };
+        let approval_request_id = approval_resume.approval_request_id;
         assert!(
             local_runtime
                 .outbound_preferences
@@ -1613,8 +1781,10 @@ mod tests {
                 &local_runtime.workspace_mounts,
                 &local_runtime.skill_mounts,
                 &local_runtime.memory_mounts,
+                &local_runtime.system_extensions_lifecycle_mounts,
             )
             .expect("outbound delivery approval lease terms");
+        let persistent_terms = approval.clone();
         ApprovalResolver::new(
             local_runtime.approval_requests.as_ref(),
             local_runtime.capability_leases.as_ref(),
@@ -1629,6 +1799,7 @@ mod tests {
 
         let set_outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: set_activity_id,
                 surface_version: set_surface_version,
                 capability_id: set_capability_id_from_candidate,
                 input_ref: CapabilityInputRef::new("input:stale-approval-resume")
@@ -1680,6 +1851,88 @@ mod tests {
             lease.status == CapabilityLeaseStatus::Consumed
                 && lease.grant.capability == set_capability_id
         }));
+
+        let mut persistent_scope = approval_scope.clone();
+        persistent_scope.agent_id = None;
+        persistent_scope.project_id = None;
+        persistent_scope.mission_id = None;
+        persistent_scope.thread_id = None;
+        local_runtime
+            .persistent_approval_policies
+            .allow(PersistentApprovalPolicyInput {
+                scope: persistent_scope,
+                action: PersistentApprovalAction::Dispatch,
+                capability_id: set_capability_id.clone(),
+                grantee: Principal::Extension(
+                    crate::outbound_delivery_capability_surface::outbound_delivery_synthetic_provider(
+                    )
+                    .expect("outbound delivery synthetic provider id"),
+                ),
+                approved_by: Principal::User(actor_user_id.clone()),
+                constraints: GrantConstraints {
+                    allowed_effects: persistent_terms.allowed_effects,
+                    mounts: persistent_terms.mounts,
+                    network: persistent_terms.network,
+                    secrets: persistent_terms.secrets,
+                    resource_ceiling: persistent_terms.resource_ceiling,
+                    expires_at: persistent_terms.expires_at,
+                    max_invocations: None,
+                },
+                source_approval_request_id: Some(approval_request_id),
+            })
+            .await
+            .expect("persistent outbound delivery approval is stored");
+
+        let second_set_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": slack_target_id.as_str() }),
+                ),
+            ))
+            .await
+            .expect("second set call stages");
+        let second_set_outcome = port
+            .invoke_capability(invocation_for_candidate(&second_set_candidate))
+            .await
+            .expect("persistent always-allow set call invokes");
+        match second_set_outcome {
+            CapabilityOutcome::Completed(_) => {}
+            outcome => panic!("persistent always-allow set should complete, got {outcome:?}"),
+        }
+        local_runtime
+            .tool_permission_overrides
+            .set(ToolPermissionOverrideInput {
+                scope: {
+                    let mut scope = run_context.scope.to_resource_scope();
+                    scope.user_id = owner_user_id.clone();
+                    scope.tenant_user_settings_scope()
+                },
+                capability_id: set_capability_id,
+                state: ToolPermissionOverride::Disabled,
+                updated_by: Principal::User(actor_user_id),
+            })
+            .await
+            .expect("disabled override is stored");
+        let disabled_set_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": slack_target_id.as_str() }),
+                ),
+            ))
+            .await
+            .expect("disabled set call stages");
+        let disabled_set_outcome = port
+            .invoke_capability(invocation_for_candidate(&disabled_set_candidate))
+            .await
+            .expect("disabled set call returns a capability outcome");
+        match disabled_set_outcome {
+            CapabilityOutcome::Failed(failure) => {
+                assert_eq!(failure.error_kind, CapabilityFailureKind::PolicyDenied);
+            }
+            outcome => panic!("disabled set should fail non-terminally, got {outcome:?}"),
+        }
         let observed_provider_callers = slack_provider.observed_callers();
         assert!(
             observed_provider_callers
@@ -1791,20 +2044,16 @@ mod tests {
             actor_user_id.clone(),
         );
         let set_candidate = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "builtin__outbound_delivery_target_set",
-                serde_json::json!({ "target_id": slack_target_id.as_str() }),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__outbound_delivery_target_set",
+                    serde_json::json!({ "target_id": slack_target_id.as_str() }),
+                ),
             ))
             .await
             .expect("set call stages");
         let set_outcome = port
-            .invoke_capability(CapabilityInvocation {
-                surface_version: set_candidate.surface_version,
-                capability_id: set_candidate.capability_id,
-                input_ref: set_candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&set_candidate))
             .await
             .expect("set call invokes");
         assert!(
@@ -1873,6 +2122,9 @@ mod tests {
             policy,
             workspace_mounts: local_runtime.workspace_mounts.clone(),
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -1881,9 +2133,15 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
         let run_context = run_context("outbound-delivery-hidden")
             .await
@@ -1910,10 +2168,14 @@ mod tests {
             .tool_definitions()
             .expect("tool definitions")
             .into_iter()
-            .map(|definition| definition.name)
+            .map(|definition| definition.name.as_str().to_string())
             .collect::<Vec<_>>();
-        assert!(!tool_definition_names.contains(&"builtin__outbound_delivery_targets_list".into()));
-        assert!(!tool_definition_names.contains(&"builtin__outbound_delivery_target_set".into()));
+        assert!(
+            !tool_definition_names.contains(&"builtin__outbound_delivery_targets_list".to_string())
+        );
+        assert!(
+            !tool_definition_names.contains(&"builtin__outbound_delivery_target_set".to_string())
+        );
     }
 
     #[tokio::test]
@@ -1971,6 +2233,9 @@ mod tests {
             policy,
             workspace_mounts,
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -1979,11 +2244,23 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
         let run_context = run_context("host-mount-read").await;
+        enable_global_auto_approve_for_run(
+            &services,
+            &run_context,
+            &UserId::new("local-yolo-host-user").expect("user id"),
+        )
+        .await;
         let port = factory
             .create_capability_port(&run_context)
             .await
@@ -2111,6 +2388,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
@@ -2144,6 +2422,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
@@ -2199,6 +2478,9 @@ mod tests {
             policy,
             workspace_mounts,
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -2207,11 +2489,23 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
         let run_context = run_context("skill-install-write").await;
+        enable_global_auto_approve_for_run(
+            &services,
+            &run_context,
+            &UserId::new("local-dev-skill-port-user").expect("user id"),
+        )
+        .await;
         let port = factory
             .create_capability_port(&run_context)
             .await
@@ -2232,6 +2526,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)
                     .expect("skill_install capability id"), // safety: built-in capability id is a valid literal.
@@ -2297,6 +2592,9 @@ mod tests {
             policy,
             workspace_mounts,
             memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -2305,11 +2603,23 @@ mod tests {
             trajectory_observer: None,
             outbound_preferences_facade: None,
             outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
         let run_context = run_context("no-host-disclosure").await;
+        enable_global_auto_approve_for_run(
+            &services,
+            &run_context,
+            &UserId::new("local-dev-no-host-user").expect("user id"),
+        )
+        .await;
         let port = factory
             .create_capability_port(&run_context)
             .await
@@ -2379,6 +2689,7 @@ mod tests {
             .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
         let outcome = port
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
@@ -2575,9 +2886,11 @@ mod tests {
         assert!(active_capability_ids.contains(&"github.comment_issue"));
 
         let staged_after_activation = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                "github__search_issues",
-                serde_json::json!({"query": "repo:nearai/ironclaw is:issue"}),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "github__search_issues",
+                    serde_json::json!({"query": "repo:nearai/ironclaw is:issue"}),
+                ),
             ))
             .await
             .expect("provider registration resolves github after prompt-stage refresh");
@@ -2594,6 +2907,115 @@ mod tests {
         assert!(
             tool_definition_ids.contains(&"github.search_issues"),
             "refreshed provider tools should include github after activation"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_capability_port_extension_search_reads_system_catalog() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-extension-search-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        assert_extension_search_capability_port_reads_system_catalog(
+            &services,
+            "extension-search-loop-port",
+            "local-dev-extension-search-user",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn hosted_single_tenant_volume_capability_port_extension_search_reads_system_catalog() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::build_reborn_services(
+            crate::hosted_single_tenant_volume_build_input(
+                "hosted-volume-extension-search-owner",
+                dir.path().join("hosted-volume"),
+            )
+            .expect("hosted volume input"),
+        )
+        .await
+        .expect("hosted volume services build");
+        assert_extension_search_capability_port_reads_system_catalog(
+            &services,
+            "hosted-volume-extension-search-loop-port",
+            "hosted-volume-extension-search-user",
+        )
+        .await;
+    }
+
+    async fn assert_extension_search_capability_port_reads_system_catalog(
+        services: &crate::RebornServices,
+        run_label: &str,
+        user_id: &str,
+    ) {
+        let run_context = run_context(run_label).await;
+        let user_id = UserId::new(user_id).expect("user id");
+        enable_global_auto_approve_for_run(services, &run_context, &user_id).await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let wiring = capability_wiring(
+            services,
+            Arc::new(InMemorySessionThreadService::default()),
+            thread_scope,
+            user_id,
+            Arc::new(
+                crate::local_dev_capability_policy::local_dev_capability_policy()
+                    .expect("policy parses"),
+            ),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
+            None,
+            None,
+        )
+        .expect("local-dev capability wiring");
+        let port = wiring
+            .capability_factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+        let tool_definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id.as_str() == EXTENSION_SEARCH_CAPABILITY_ID)
+            .expect("extension_search tool definition");
+
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    tool_definition.name.as_str(),
+                    serde_json::json!({"query": "gmail"}),
+                ),
+            ))
+            .await
+            .expect("extension_search provider tool call stages");
+        assert_eq!(
+            candidate.capability_id.as_str(),
+            EXTENSION_SEARCH_CAPABILITY_ID
+        );
+
+        let outcome = port
+            .invoke_capability(invocation_for_candidate(&candidate))
+            .await
+            .expect("extension_search invocation");
+
+        assert!(
+            matches!(outcome, CapabilityOutcome::Completed(_)),
+            "extension_search should be authorized to read the system extension catalog, got {outcome:?}"
         );
     }
 
@@ -2651,7 +3073,7 @@ mod tests {
         );
         call1.id = "call-mid-response-1".to_string();
         let candidate1 = port
-            .register_provider_tool_call(call1)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call1))
             .await
             .expect("first register");
 
@@ -2694,7 +3116,7 @@ mod tests {
         );
         call2.id = "call-mid-response-2".to_string();
         let candidate2 = port
-            .register_provider_tool_call(call2)
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call2))
             .await
             .expect("second register after extension activation");
 
@@ -2706,20 +3128,8 @@ mod tests {
         let batch_result = port
             .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
                 invocations: vec![
-                    ironclaw_turns::run_profile::CapabilityInvocation {
-                        surface_version: candidate1.surface_version,
-                        capability_id: candidate1.capability_id,
-                        input_ref: candidate1.input_ref,
-                        approval_resume: None,
-                        auth_resume: None,
-                    },
-                    ironclaw_turns::run_profile::CapabilityInvocation {
-                        surface_version: candidate2.surface_version,
-                        capability_id: candidate2.capability_id,
-                        input_ref: candidate2.input_ref,
-                        approval_resume: None,
-                        auth_resume: None,
-                    },
+                    invocation_for_candidate(&candidate1),
+                    invocation_for_candidate(&candidate2),
                 ],
                 stop_on_first_suspension: false,
             })
@@ -2775,24 +3185,17 @@ mod tests {
             .into_iter()
             .find(|definition| definition.capability_id.as_str() == "gmail.list_messages")
             .expect("gmail.list_messages tool definition");
-        assert_eq!(tool_definition.name, "gmail__list_messages");
+        assert_eq!(tool_definition.name.as_str(), "gmail__list_messages");
 
         let candidate = port
-            .register_provider_tool_call(provider_tool_call_with_name(
-                tool_definition.name,
-                serde_json::json!({}),
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(tool_definition.name.as_str(), serde_json::json!({})),
             ))
             .await
             .expect("gmail provider tool call stages");
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
-                surface_version: candidate.surface_version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-                approval_resume: None,
-                auth_resume: None,
-            })
+            .invoke_capability(invocation_for_candidate(&candidate))
             .await
             .expect("gmail provider tool call invokes");
 

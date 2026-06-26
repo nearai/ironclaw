@@ -28,7 +28,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 65536,
-      "description": "Repository file path."
+      "description": "Repository file path. The GitHub response content field is base64-encoded for file blobs."
     },
     "ref": {
       "type": "string",

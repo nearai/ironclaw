@@ -660,26 +660,10 @@ mod tests {
         let key = key_for(&scope);
 
         store.allow(input(scope)).await.expect("allow policy");
-        assert_eq!(
-            store
-                .records
-                .path_cache
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .len(),
-            1
-        );
+        assert_eq!(store.records.path_cache_len(), 1);
 
         store.lookup(&key).await.expect("lookup policy");
-        assert_eq!(
-            store
-                .records
-                .path_cache
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .len(),
-            1
-        );
+        assert_eq!(store.records.path_cache_len(), 1);
     }
 
     #[tokio::test]
@@ -695,15 +679,7 @@ mod tests {
                 .expect("allow policy");
         }
 
-        assert!(
-            store
-                .records
-                .path_cache
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .len()
-                <= POLICY_PATH_CACHE_MAX_ENTRIES
-        );
+        assert!(store.records.path_cache_len() <= POLICY_PATH_CACHE_MAX_ENTRIES);
     }
 
     #[tokio::test]
@@ -759,15 +735,7 @@ mod tests {
             .await
             .expect("allow second policy");
 
-        assert!(
-            store
-                .records
-                .mutation_locks
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .len()
-                <= 1
-        );
+        assert!(store.records.mutation_lock_count() <= 1);
     }
 
     #[tokio::test]

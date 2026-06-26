@@ -5,7 +5,7 @@ use std::{error::Error, fmt, sync::Arc};
 use ironclaw_agent_loop::{
     executor::CanonicalAgentLoopExecutor,
     family::{LoopFamilyId, LoopFamilyRegistry},
-    state::CHECKPOINT_SCHEMA_ID,
+    state::{CHECKPOINT_SCHEMA_ID, CHECKPOINT_SCHEMA_VERSION},
 };
 use ironclaw_turns::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, RunProfileId,
@@ -28,7 +28,7 @@ use crate::{
 pub const PLANNED_DRIVER_DEFAULT_ID: &str = "reborn:planned-default";
 pub const PLANNED_DRIVER_DEFAULT_VERSION: u64 = 1;
 pub const PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID: &str = CHECKPOINT_SCHEMA_ID;
-pub const PLANNED_DRIVER_CHECKPOINT_SCHEMA_VERSION: u64 = 1;
+pub const PLANNED_DRIVER_CHECKPOINT_SCHEMA_VERSION: u64 = CHECKPOINT_SCHEMA_VERSION;
 pub const PLANNED_DEFAULT_PROFILE_ID: &str = "reborn-planned-default";
 pub const SUBAGENT_PLANNED_DRIVER_ID: &str = "reborn:planned-subagent";
 pub const SUBAGENT_PLANNED_PROFILE_ID: &str = "reborn-planned-subagent";

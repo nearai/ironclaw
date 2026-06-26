@@ -305,7 +305,12 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             .accounts
             .get(&input.credential_account_id)
             .ok_or(AuthProductError::CredentialMissing)?;
-        if !scope_matches(&flow_scope, &account.scope) || account.provider != flow_provider {
+        // Use owner-granularity for the scope check, mirroring the production
+        // durable path (`flows.rs`). The flow record may carry a different
+        // invocation_id/thread_id/mission_id than the credential account; only
+        // the ownership boundary (tenant/user/agent/project + surface + session)
+        // is meaningful here. See `binding_scope_owns_account` in credential.rs.
+        if !binding_scope_owns_account(&flow_scope, account) || account.provider != flow_provider {
             return Err(AuthProductError::CrossScopeDenied);
         }
         if account.status != CredentialAccountStatus::Configured {
@@ -364,7 +369,16 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             .accounts
             .get(&input.credential_account_id)
             .ok_or(AuthProductError::CredentialMissing)?;
-        if !scope_matches(&flow_scope, &account.scope) || account.provider != flow_provider {
+        // Use owner-granularity for the scope check, mirroring the production
+        // durable path (`flows.rs`). The flow record's scope carries a fresh
+        // per-request `invocation_id` while the credential account may have been
+        // created under a different `invocation_id` (and/or thread/mission) in an
+        // earlier flow. Full `scope_matches` equality would always fail across
+        // requests. The meaningful ownership boundary is enforced by
+        // `binding_scope_owns_account` (tenant/user/agent/project + surface +
+        // session); see the canonical docstring on `binding_scope_owns_account`
+        // in credential.rs.
+        if !binding_scope_owns_account(&flow_scope, account) || account.provider != flow_provider {
             return Err(AuthProductError::CrossScopeDenied);
         }
         if account.status != CredentialAccountStatus::Configured {

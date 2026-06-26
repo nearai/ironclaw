@@ -142,6 +142,22 @@ impl ResourceScope {
             ..self.clone()
         }
     }
+
+    /// Copy of this scope narrowed to the durable per-user settings owner.
+    ///
+    /// Approval settings are shared by tenant/user and must not be keyed by
+    /// transient run axes such as agent, project, mission, or thread.
+    pub fn tenant_user_settings_scope(&self) -> Self {
+        Self {
+            tenant_id: self.tenant_id.clone(),
+            user_id: self.user_id.clone(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: self.invocation_id,
+        }
+    }
 }
 
 /// Origin of a background reservation. Distinguishes heartbeats, routines,
