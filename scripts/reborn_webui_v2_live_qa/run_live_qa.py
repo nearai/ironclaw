@@ -2643,6 +2643,68 @@ def _assert_response_completed(
     return response_id
 
 
+async def _read_sse_until(response: object, terminal_events: set[str]) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    current_event = "message"
+    data_lines: list[str] = []
+
+    async def flush_event() -> bool:
+        nonlocal current_event, data_lines
+        if not data_lines:
+            current_event = "message"
+            return False
+        data = "\n".join(data_lines)
+        payload: object
+        if data == "[DONE]":
+            payload = data
+        else:
+            try:
+                payload = json.loads(data)
+            except json.JSONDecodeError as exc:
+                raise AssertionError(f"SSE data was not JSON: {data[:300]!r}") from exc
+        events.append({"event": current_event, "data": payload})
+        terminal = current_event in terminal_events
+        current_event = "message"
+        data_lines = []
+        return terminal
+
+    async for line in response.aiter_lines():  # type: ignore[attr-defined]
+        if line == "":
+            if await flush_event():
+                break
+            continue
+        if line.startswith(":"):
+            continue
+        field, _, value = line.partition(":")
+        value = value[1:] if value.startswith(" ") else value
+        if field == "event":
+            current_event = value
+        elif field == "data":
+            data_lines.append(value)
+    else:
+        await flush_event()
+    return events
+
+
+def _sse_output_text(events: list[dict[str, object]]) -> str:
+    parts: list[str] = []
+
+    def collect(value: object) -> None:
+        if isinstance(value, list):
+            for item in value:
+                collect(item)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if key in {"delta", "text"} and isinstance(item, str):
+                    parts.append(item)
+                else:
+                    collect(item)
+
+    for event in events:
+        collect(event.get("data"))
+    return "".join(parts)
+
+
 async def case_responses_create_retrieve_live_llm_contract(ctx: LiveQaContext) -> ProbeResult:
     import httpx
 
@@ -2718,6 +2780,91 @@ async def case_responses_create_retrieve_live_llm_contract(ctx: LiveQaContext) -
             observed["conflict_status"] = conflict.status_code
 
         return _result(case_name, True, started, observed)
+    except Exception as exc:
+        return _result(case_name, False, started, {"error": str(exc), **observed})
+
+
+async def case_responses_stream_live_llm_contract(ctx: LiveQaContext) -> ProbeResult:
+    import httpx
+
+    started = time.monotonic()
+    case_name = "responses_stream_live_llm_contract"
+    marker = f"RESPONSES_STREAM_LIVE_QA_OK_{uuid.uuid4().hex[:8].upper()}"
+    observed: dict[str, object] = {
+        "marker": marker,
+        "path": "/v1/responses",
+    }
+    request_body = {
+        "model": "gpt-reborn",
+        "stream": True,
+        "input": (
+            "Live Responses API streaming QA verification. Reply with exactly "
+            f"this token and no extra words: {marker}"
+        ),
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=180.0, follow_redirects=False) as client:
+            async with client.stream(
+                "POST",
+                f"{ctx.base_url}/v1/responses",
+                json=request_body,
+                headers=_auth_json_headers(),
+            ) as response:
+                _assert_status(response, 200, "live streaming POST /v1/responses")
+                content_type = response.headers.get("content-type", "")
+                if "text/event-stream" not in content_type:
+                    raise AssertionError(
+                        f"streaming response content-type was {content_type!r}"
+                    )
+                events = await asyncio.wait_for(
+                    _read_sse_until(
+                        response,
+                        {"response.completed", "response.failed", "response.cancelled", "error"},
+                    ),
+                    timeout=90.0,
+                )
+
+        event_names = [str(event.get("event")) for event in events]
+        text = _sse_output_text(events)
+        observed.update(
+            {
+                "event_names": event_names,
+                "event_count": len(events),
+                "text_excerpt": text[:500],
+            }
+        )
+        if "response.created" not in event_names:
+            raise AssertionError(f"SSE stream did not emit response.created: {event_names!r}")
+        if "response.completed" not in event_names:
+            raise AssertionError(f"SSE stream did not emit response.completed: {event_names!r}")
+        if "error" in event_names or "response.failed" in event_names:
+            raise AssertionError(f"SSE stream emitted failure event: {event_names!r}")
+        if marker not in text:
+            raise AssertionError(f"SSE output did not contain marker {marker!r}: {text[:500]!r}")
+        raw_events = json.dumps(events, sort_keys=True)
+        for forbidden in ("ProjectionCursor", "cursor:", "SECRET_TOKEN"):
+            if forbidden in raw_events:
+                raise AssertionError(f"SSE output leaked forbidden token {forbidden!r}")
+
+        return _result(
+            case_name,
+            True,
+            started,
+            {
+                **observed,
+            },
+        )
+    except asyncio.CancelledError as exc:
+        return _result(
+            case_name,
+            False,
+            started,
+            {
+                "error": f"stream read was cancelled while waiting for terminal SSE event: {exc}",
+                **observed,
+            },
+        )
     except Exception as exc:
         return _result(case_name, False, started, {"error": str(exc), **observed})
 
@@ -5368,6 +5515,14 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-057-TC-01",
             "REBCLI-057-TC-03",
             "REBCLI-058-TC-01",
+        ],
+    ),
+    "responses_stream_live_llm_contract": CaseSpec(
+        case_responses_stream_live_llm_contract,
+        qa_matrix_test_ids=[
+            "REBCLI-057-TC-01",
+            "REBCLI-057-TC-03",
+            "REBCLI-057-TC-06",
         ],
     ),
     "responses_create_live_http_contract": CaseSpec(

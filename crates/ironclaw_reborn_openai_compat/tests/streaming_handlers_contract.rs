@@ -378,9 +378,13 @@ async fn responses_stream_emits_cancelled_event_on_cancelled_run_status() {
 }
 
 #[tokio::test]
-async fn responses_stream_omits_text_done_when_completed_without_text() {
+async fn responses_stream_waits_for_text_after_early_completed_status() {
     let streamer = Arc::new(QueuedStreamer::new());
     streamer.push_response(vec![run_status_envelope("resp-empty-done", "completed")]);
+    streamer.push_response(vec![final_reply_envelope(
+        "resp-final-after-done",
+        "hello final",
+    )]);
     let router = router(streamer);
 
     let response = router
@@ -393,7 +397,11 @@ async fn responses_stream_omits_text_done_when_completed_without_text() {
 
     assert_eq!(response.status(), http::StatusCode::OK);
     let raw = read_until(response, "event: response.completed").await;
-    assert!(!raw.contains("response.output_text.done"), "raw SSE: {raw}");
+    assert!(
+        raw.contains("event: response.output_text.done"),
+        "raw SSE: {raw}"
+    );
+    assert!(raw.contains("\"text\":\"hello final\""), "raw SSE: {raw}");
     assert!(raw.contains("\"status\":\"completed\""), "raw SSE: {raw}");
 }
 

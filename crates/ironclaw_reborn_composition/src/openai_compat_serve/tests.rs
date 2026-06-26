@@ -577,6 +577,37 @@ async fn external_tool_resume_rejects_non_blocked_running_run() {
     assert_eq!(error.status_code(), 409);
 }
 
+#[tokio::test]
+async fn openai_response_streamer_appends_finalized_message_after_completed_status() {
+    let fixture = ResponseReaderFixture::new("stream-final").await;
+    let run_id = TurnRunId::new();
+    fixture
+        .append_final_assistant_message(run_id, "streamed final text")
+        .await
+        .expect("append final message");
+    let stream = Arc::new(StaticProjectionStream::new(vec![run_status_envelope(
+        fixture.thread_id.as_str(),
+        run_id,
+        "completed",
+    )]));
+    let streamer = OpenAiCompatRuntimeProjectionStreamer::new(stream, fixture.threads.clone());
+
+    let events = streamer
+        .drain_response(fixture.stream_request(run_id))
+        .await
+        .expect("drain response stream");
+
+    let final_reply = events
+        .iter()
+        .find_map(|event| match event.payload() {
+            ProductOutboundPayload::FinalReply(view) => Some(view),
+            _ => None,
+        })
+        .expect("final reply event");
+    assert_eq!(final_reply.turn_run_id, run_id);
+    assert_eq!(final_reply.text, "streamed final text");
+}
+
 struct ResponseReaderFixture {
     threads: Arc<InMemorySessionThreadService>,
     actor_scope: OpenAiCompatActorScope,
@@ -659,6 +690,27 @@ impl ResponseReaderFixture {
             requested_model: "reborn-test".to_string(),
             projection_read: self.projection_read.clone(),
             mapping: self.mapping(run_id),
+        }
+    }
+
+    fn stream_request(&self, run_id: TurnRunId) -> OpenAiResponseProjectionStreamRequest {
+        OpenAiResponseProjectionStreamRequest {
+            public_id: OpenAiResponseId::new("resp_test").expect("response id"),
+            actor_scope: self.actor_scope.clone(),
+            accepted_ack: ProductInboundAck::Accepted {
+                accepted_message_ref: AcceptedMessageRef::new("accepted:test")
+                    .expect("accepted ref"),
+                submitted_run_id: run_id,
+            },
+            requested_model: "reborn-test".to_string(),
+            projection_subscription: ProjectionSubscriptionRequest {
+                actor: self.projection_read.actor.clone(),
+                scope: self.projection_read.scope.clone(),
+                after_cursor: None,
+            },
+            mapping: self.mapping(run_id),
+            wait_timeout: Duration::from_secs(1),
+            after_cursor: None,
         }
     }
 

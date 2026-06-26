@@ -200,6 +200,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("webui_api_auth_security_headers", default_cases)
         self.assertIn("webui_static_shell_csp_nonce", default_cases)
         self.assertIn("responses_create_retrieve_live_llm_contract", default_cases)
+        self.assertIn("responses_stream_live_llm_contract", default_cases)
         self.assertIn("responses_create_live_http_contract", default_cases)
         self.assertIn("responses_retrieve_cancel_live_http_contract", default_cases)
         self.assertEqual(
@@ -219,6 +220,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "responses_create_retrieve_live_llm_contract"
             ].qa_matrix_test_ids,
             ["REBCLI-057-TC-01", "REBCLI-057-TC-03", "REBCLI-058-TC-01"],
+        )
+        self.assertEqual(
+            run_live_qa.CASES["responses_stream_live_llm_contract"].qa_matrix_test_ids,
+            ["REBCLI-057-TC-01", "REBCLI-057-TC-03", "REBCLI-057-TC-06"],
         )
         self.assertEqual(
             run_live_qa.CASES["responses_create_live_http_contract"].qa_matrix_test_ids,
@@ -297,6 +302,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             manifest["qa_matrix"]["represented_test_ids"],
         )
         self.assertIn(
+            "REBCLI-057-TC-06",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
+        self.assertIn(
             "REBCLI-058-TC-02",
             manifest["qa_matrix"]["represented_test_ids"],
         )
@@ -328,6 +337,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(
             cases["responses_create_retrieve_live_llm_contract"]["qa_matrix_test_ids"],
             ["REBCLI-057-TC-01", "REBCLI-057-TC-03", "REBCLI-058-TC-01"],
+        )
+        self.assertEqual(
+            cases["responses_stream_live_llm_contract"]["qa_matrix_test_ids"],
+            ["REBCLI-057-TC-01", "REBCLI-057-TC-03", "REBCLI-057-TC-06"],
         )
         self.assertEqual(
             cases["responses_create_live_http_contract"]["qa_matrix_test_ids"],
