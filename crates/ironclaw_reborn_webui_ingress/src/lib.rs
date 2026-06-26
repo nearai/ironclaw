@@ -62,7 +62,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{any, get},
 };
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::{UserId, UserRole};
 use ironclaw_reborn_composition::WebuiAuthenticator;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
@@ -296,6 +296,134 @@ impl WebuiAuthenticator for EnvBearerAuthenticator {
 /// avoid spelling out `Arc<dyn WebuiAuthenticator>` at every call site.
 pub type SharedWebuiAuthenticator = Arc<dyn WebuiAuthenticator>;
 
+/// Authenticator that maps several bearer **user-tokens** to distinct
+/// `(UserId, UserRole)` pairs, so one operator can act as several users — e.g.
+/// `director@` (Admin), `Bob` / `Carol` (Member), and a shared `engineering@`
+/// (Member) — by swapping the bearer token. This is the local-dev / standalone
+/// way to exercise per-user capability policy (issue #5272): unlike
+/// [`EnvBearerAuthenticator`] (single token → single operator), the resolved
+/// [`UserRole`] travels with the authentication so the role-gated admin surface
+/// and the per-(tenant, user) dispatch principal both work per token.
+///
+/// Deliberately minimal and local-dev-oriented. It does **not** grant
+/// operator WebUI config privileges (`mounts_operator_webui_config_routes` is
+/// `false`); deployment-wide config stays with the separate operator
+/// credential. Production multi-user auth uses `SessionAuthenticator` /
+/// `OidcAuthenticator`.
+#[derive(Debug)]
+pub struct StaticUserTokenAuthenticator {
+    entries: Vec<UserTokenEntry>,
+}
+
+#[derive(Debug)]
+struct UserTokenEntry {
+    /// `SecretString` so token material is redacted in `Debug` / logs.
+    token: SecretString,
+    user_id: UserId,
+    role: UserRole,
+}
+
+/// One `(token, user_id, role)` row as parsed from the
+/// `IRONCLAW_REBORN_USER_TOKENS` JSON env. `role` defaults to the
+/// least-privilege `Member` when omitted.
+#[derive(Debug, serde::Deserialize)]
+struct UserTokenConfig {
+    token: String,
+    user_id: String,
+    #[serde(default)]
+    role: UserRole,
+}
+
+impl StaticUserTokenAuthenticator {
+    /// Build from explicit `(token, user_id, role)` rows. Rejects an empty
+    /// table and any empty token (a bare `Authorization: Bearer ` would
+    /// otherwise match).
+    pub fn new(
+        rows: impl IntoIterator<Item = (SecretString, UserId, UserRole)>,
+    ) -> Result<Self, UserTokenConfigError> {
+        let mut entries = Vec::new();
+        for (token, user_id, role) in rows {
+            if token.expose_secret().is_empty() {
+                return Err(UserTokenConfigError::EmptyToken);
+            }
+            entries.push(UserTokenEntry {
+                token,
+                user_id,
+                role,
+            });
+        }
+        if entries.is_empty() {
+            return Err(UserTokenConfigError::Empty);
+        }
+        Ok(Self { entries })
+    }
+
+    /// Parse a JSON array of `{ "token", "user_id", "role" }` objects, e.g.
+    /// `[{"token":"d-tok","user_id":"user:director","role":"admin"}, …]`.
+    /// `role` accepts `owner` / `admin` / `member` and defaults to `member`.
+    pub fn from_json(json: &str) -> Result<Self, UserTokenConfigError> {
+        let configs: Vec<UserTokenConfig> = serde_json::from_str(json)
+            .map_err(|error| UserTokenConfigError::Parse(error.to_string()))?;
+        let mut rows = Vec::with_capacity(configs.len());
+        for config in configs {
+            let user_id = UserId::new(&config.user_id).map_err(|error| {
+                UserTokenConfigError::InvalidUserId {
+                    value: config.user_id.clone(),
+                    reason: error.to_string(),
+                }
+            })?;
+            rows.push((SecretString::from(config.token), user_id, config.role));
+        }
+        Self::new(rows)
+    }
+}
+
+/// Errors raised when constructing [`StaticUserTokenAuthenticator`].
+#[derive(Debug, Error)]
+pub enum UserTokenConfigError {
+    #[error("user-token table must not be empty")]
+    Empty,
+    #[error("bearer token must not be empty")]
+    EmptyToken,
+    #[error("invalid user-token JSON: {0}")]
+    Parse(String),
+    #[error("user-token entry has invalid user_id `{value}`: {reason}")]
+    InvalidUserId { value: String, reason: String },
+}
+
+#[async_trait]
+impl WebuiAuthenticator for StaticUserTokenAuthenticator {
+    async fn authenticate(
+        &self,
+        candidate: &str,
+    ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
+        // Compare against every entry with a constant-time equality and never
+        // short-circuit, so neither the matched token's content nor its
+        // position in the table leaks through response timing.
+        let candidate = candidate.as_bytes();
+        let mut matched: Option<&UserTokenEntry> = None;
+        for entry in &self.entries {
+            if entry
+                .token
+                .expose_secret()
+                .as_bytes()
+                .ct_eq(candidate)
+                .into()
+            {
+                matched = Some(entry);
+            }
+        }
+        matched.map(|entry| {
+            ironclaw_reborn_composition::WebuiAuthentication::user(entry.user_id.clone())
+                .with_role(entry.role)
+        })
+    }
+
+    fn mounts_operator_webui_config_routes(&self) -> bool {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,5 +479,74 @@ mod tests {
         )
         .expect_err("empty token must be rejected at construction");
         assert!(matches!(err, EnvBearerConfigError::EmptyToken));
+    }
+
+    const USER_TOKENS_JSON: &str = r#"[
+        {"token":"director-token","user_id":"user:director","role":"admin"},
+        {"token":"bob-token","user_id":"user:bob","role":"member"},
+        {"token":"eng-token","user_id":"user:engineering"}
+    ]"#;
+
+    #[tokio::test]
+    async fn static_user_token_authenticator_maps_token_to_user_and_role() {
+        let auth = StaticUserTokenAuthenticator::from_json(USER_TOKENS_JSON).expect("auth");
+
+        let director = auth.authenticate("director-token").await.expect("director");
+        assert_eq!(director.user_id.as_str(), "user:director");
+        assert_eq!(director.role, UserRole::Admin);
+        // A user-token authenticator never grants operator WebUI config.
+        assert!(!director.capabilities.operator_webui_config);
+
+        let bob = auth.authenticate("bob-token").await.expect("bob");
+        assert_eq!(bob.user_id.as_str(), "user:bob");
+        assert_eq!(bob.role, UserRole::Member);
+
+        // `role` omitted → least-privilege Member default.
+        let eng = auth.authenticate("eng-token").await.expect("engineering");
+        assert_eq!(eng.user_id.as_str(), "user:engineering");
+        assert_eq!(eng.role, UserRole::Member);
+    }
+
+    #[tokio::test]
+    async fn static_user_token_authenticator_rejects_unknown_and_empty_tokens() {
+        let auth = StaticUserTokenAuthenticator::from_json(USER_TOKENS_JSON).expect("auth");
+        assert!(auth.authenticate("nope").await.is_none());
+        assert!(auth.authenticate("").await.is_none());
+        // Prefix of a real token must not match.
+        assert!(auth.authenticate("director").await.is_none());
+    }
+
+    #[test]
+    fn static_user_token_authenticator_rejects_empty_table_and_empty_token() {
+        assert!(matches!(
+            StaticUserTokenAuthenticator::from_json("[]").expect_err("empty table"),
+            UserTokenConfigError::Empty
+        ));
+        assert!(matches!(
+            StaticUserTokenAuthenticator::from_json(
+                r#"[{"token":"","user_id":"user:x","role":"member"}]"#
+            )
+            .expect_err("empty token"),
+            UserTokenConfigError::EmptyToken
+        ));
+    }
+
+    #[test]
+    fn static_user_token_authenticator_rejects_invalid_user_id_and_bad_json() {
+        assert!(matches!(
+            StaticUserTokenAuthenticator::from_json(r#"[{"token":"t","user_id":""}]"#)
+                .expect_err("invalid user id"),
+            UserTokenConfigError::InvalidUserId { .. }
+        ));
+        assert!(matches!(
+            StaticUserTokenAuthenticator::from_json("not json").expect_err("bad json"),
+            UserTokenConfigError::Parse(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn static_user_token_authenticator_does_not_mount_operator_routes() {
+        let auth = StaticUserTokenAuthenticator::from_json(USER_TOKENS_JSON).expect("auth");
+        assert!(!auth.mounts_operator_webui_config_routes());
     }
 }
