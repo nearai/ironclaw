@@ -1,4 +1,4 @@
-//! The bundled `ironclaw.memory.native` Extension Manifest v2 (issue #3537).
+//! The bundled `ironclaw.memory` Extension Manifest v2 (issue #3537).
 //!
 //! This module owns the host-bundled native memory extension: its v2 TOML
 //! manifest, the host service identity that backs it, and the function that
@@ -31,7 +31,7 @@ use ironclaw_host_api::VirtualPath;
 use crate::extension_contracts::{default_host_api_contract_registry, default_host_port_catalog};
 
 /// Reserved host-bundled extension id for the native memory provider.
-pub const NATIVE_MEMORY_EXTENSION_ID: &str = "ironclaw.memory.native";
+pub const NATIVE_MEMORY_EXTENSION_ID: &str = "ironclaw.memory";
 
 /// Host service identity declared by the manifest's `first_party` runtime. The
 /// host must register a matching service for the bundled manifest to be
@@ -42,12 +42,12 @@ pub const NATIVE_MEMORY_PROVIDER_SERVICE: &str = "native_memory_provider";
 /// Virtual package root for the bundled native memory extension. Used as a
 /// stable identity for the registered package; on the always-on lane the
 /// manifest's schemas are served inline rather than read from this path.
-const NATIVE_MEMORY_PACKAGE_ROOT: &str = "/system/extensions/ironclaw.memory.native";
+const NATIVE_MEMORY_PACKAGE_ROOT: &str = "/system/extensions/ironclaw.memory";
 
 /// Raw bundled manifest TOML for the native memory extension.
 pub const NATIVE_MEMORY_MANIFEST_TOML: &str = include_str!("../assets/memory_native/manifest.toml");
 
-/// Parse and validate the bundled `ironclaw.memory.native` manifest.
+/// Parse and validate the bundled `ironclaw.memory` manifest.
 ///
 /// Validation is fail-closed: the reserved id, `first_party` runtime, declared
 /// host ports, schema refs, and provider-prefixed capability ids are all checked

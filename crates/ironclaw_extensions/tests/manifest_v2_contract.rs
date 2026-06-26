@@ -462,7 +462,7 @@ fn host_bundled_source_may_assert_first_party_and_reserved_id() {
     let toml = format!(
         r#"
 schema_version = "{schema}"
-id = "ironclaw.memory.native"
+id = "ironclaw.memory"
 name = "Reborn Native Memory"
 version = "0.1.0"
 description = "host-bundled"
@@ -473,7 +473,7 @@ kind = "first_party"
 service = "native_memory_provider"
 
 [[capabilities]]
-id = "ironclaw.memory.native.context.retrieve"
+id = "ironclaw.memory.context.retrieve"
 implements = ["memory.context_retrieval.v1"]
 description = "Retrieve bounded provider-neutral memory context."
 default_permission = "allow"

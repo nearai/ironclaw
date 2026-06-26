@@ -2948,7 +2948,7 @@ pub(crate) fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBu
     Ok(registry)
 }
 
-/// Insert the always-on `ironclaw.memory.native` package into a registry that
+/// Insert the always-on `ironclaw.memory` package into a registry that
 /// already holds the builtin package. Native memory rides the same always-on
 /// lane as builtin (not the catalog/lifecycle lane), so it is registered here
 /// directly rather than discovered from the extension catalog.
@@ -3072,7 +3072,7 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
                     reason: format!("native memory first-party package id is invalid: {error}"),
                 }
             })?,
-            "/system/extensions/ironclaw.memory.native/manifest.toml".to_string(),
+            "/system/extensions/ironclaw.memory/manifest.toml".to_string(),
             None,
             HostTrustAssignment::first_party(),
             vec![

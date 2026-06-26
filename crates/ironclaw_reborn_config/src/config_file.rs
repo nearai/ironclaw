@@ -140,7 +140,7 @@ pub struct MemorySection {
 pub struct MemoryProfileBinding {
     /// Memory capability profile id, e.g. `memory.document_store.v1`.
     pub profile_id: String,
-    /// `ironclaw.memory.native`, `memory.disabled`, or a third-party id.
+    /// `ironclaw.memory`, `memory.disabled`, or a third-party id.
     pub extension_id: String,
 }
 
@@ -1980,7 +1980,7 @@ tick_jitter_max_secs = 5
         let toml = r#"
 [[memory.profile_bindings]]
 profile_id = "memory.document_store.v1"
-extension_id = "ironclaw.memory.native"
+extension_id = "ironclaw.memory"
 
 [[memory.admin_overrides]]
 profile_id = "memory.context_retrieval.v1"
@@ -1996,7 +1996,7 @@ deployment_profile = "production"
         );
         assert_eq!(
             memory.profile_bindings[0].extension_id,
-            "ironclaw.memory.native"
+            "ironclaw.memory"
         );
         assert_eq!(memory.admin_overrides.len(), 1);
         assert_eq!(memory.admin_overrides[0].deployment_profile, "production");
@@ -2104,7 +2104,7 @@ mem0_base_url = "https://mem0.example.com"
         let toml = r#"
 [[memory.profile_bindings]]
 profile_id = "memory.document_store.v1"
-extension_id = "ironclaw.memory.native"
+extension_id = "ironclaw.memory"
 typo = true
 "#;
         let err = RebornConfigFile::parse_text(toml, &attributed())

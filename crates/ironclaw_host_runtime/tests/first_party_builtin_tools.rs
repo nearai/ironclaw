@@ -153,7 +153,7 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         "builtin.http.save should steer GitHub repository API tasks toward the GitHub extension"
     );
 
-    // Memory tools now live in the always-on `ironclaw.memory.native` package,
+    // Memory tools now live in the always-on `ironclaw.memory` package,
     // not the generic builtin package; assert their effects there.
     let native_package = native_memory_first_party_package().unwrap();
     let memory_write = native_package
@@ -8610,7 +8610,7 @@ fn registry() -> ExtensionRegistry {
         .insert(builtin_first_party_package().unwrap())
         .unwrap();
     // Native memory rides the always-on lane alongside builtin; register its
-    // package so the `ironclaw.memory.native.*` capabilities are declared for
+    // package so the `ironclaw.memory.*` capabilities are declared for
     // dispatch + surface in these host-runtime tests (mirrors composition).
     registry
         .insert(native_memory_first_party_package().unwrap())
@@ -9284,7 +9284,7 @@ fn trust_policy() -> HostTrustPolicy {
         // its own first-party trust entry (mirrors the composition trust policy).
         AdminEntry::for_local_manifest(
             PackageId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER).unwrap(),
-            "/system/extensions/ironclaw.memory.native/manifest.toml".to_string(),
+            "/system/extensions/ironclaw.memory/manifest.toml".to_string(),
             None,
             HostTrustAssignment::first_party(),
             builtin_effects(),

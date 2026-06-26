@@ -417,8 +417,8 @@ async fn capability_display_preview_store_summarizes_read_limits_and_memory_tree
     assert!(read_summary.contains("limit: 4096"));
 
     let memory_tree_preview = completed_preview_for_input(
-        "ironclaw.memory.native.tree",
-        "ironclaw.memory.native.tree",
+        "ironclaw.memory.tree",
+        "ironclaw.memory.tree",
         serde_json::json!({
             "limit": 12
         }),
@@ -452,8 +452,8 @@ async fn capability_display_preview_store_summarizes_search_and_memory_inputs() 
     assert!(!search_subtitle.contains("sk-secret"));
 
     let memory_preview = completed_preview_for_input(
-        "ironclaw.memory.native.write",
-        "ironclaw.memory.native.write",
+        "ironclaw.memory.write",
+        "ironclaw.memory.write",
         serde_json::json!({
             "target": "/workspace/notes/deploy.md",
             "content": "token: sk-secret",

@@ -2076,7 +2076,7 @@ impl HostRuntimeCapabilityHarness {
             secrets: Vec::new(),
             provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             // Memory capabilities now belong to the sibling
-            // `ironclaw.memory.native` provider (issue #3537), not builtin, so the
+            // `ironclaw.memory` provider (issue #3537), not builtin, so the
             // run-scoped capability authority must trust that provider too —
             // otherwise memory dispatch fails closed as Unauthorized ("untrusted
             // grant"), surfacing as a terminal `driver_unavailable`. The ceiling
@@ -2575,7 +2575,7 @@ fn local_dev_host_runtime_with_http_egress(
 }
 
 /// The always-on first-party extension surface shared by the core-builtins
-/// harness runtimes: the `builtin` package plus the `ironclaw.memory.native`
+/// harness runtimes: the `builtin` package plus the `ironclaw.memory`
 /// package (issue #3537), which rides the same always-on first-party lane in
 /// production composition. Both core-builtins runtimes build their registry
 /// here so the two cannot drift apart.
@@ -2805,7 +2805,7 @@ fn first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
             // mirroring the production composition trust policy.
             AdminEntry::for_local_manifest(
                 PackageId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER)?,
-                "/system/extensions/ironclaw.memory.native/manifest.toml".to_string(),
+                "/system/extensions/ironclaw.memory/manifest.toml".to_string(),
                 None,
                 HostTrustAssignment::first_party(),
                 first_party_trust_effects(),

@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-/// Input schemas for the native memory extension (`ironclaw.memory.native`),
+/// Input schemas for the native memory extension (`ironclaw.memory`),
 /// served inline by `surface.rs` the way builtin schemas are.
 ///
 /// The bundled v2 manifest's asset schema files are the single source of truth:

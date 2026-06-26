@@ -5,7 +5,7 @@
 
 ## Context
 
-`ironclaw.memory.native` is the host-bundled provider for the memory capability
+`ironclaw.memory` is the host-bundled provider for the memory capability
 profiles (`memory.context_retrieval.v1`, `memory.interaction_log.v1`,
 `memory.document_store.v1`). It must persist memory documents, chunks, versions,
 and (optionally) embeddings.
@@ -44,7 +44,7 @@ not a raw handle:
 
 The vocabulary and contract are landed: the storage and audit ports
 (`host.storage.sql_transaction.first_party`, `host.events.audit`) are registered
-in `default_host_port_catalog()`. The live `ironclaw.memory.native` manifest is
+in `default_host_port_catalog()`. The live `ironclaw.memory` manifest is
 filesystem-backed and declares **no** host ports; these stay catalogued
 vocabulary that the deferred SQL-backed variant will declare and validate against. The **concrete `reborn_memory_*` dual-backend SQL
 repository behind the storage port** is delivered behind the non-default

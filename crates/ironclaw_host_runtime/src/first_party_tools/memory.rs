@@ -23,13 +23,14 @@ use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest, FirstPartyCa
 
 use super::{input_error, operation_error};
 
-// Native memory rides the always-on first-party lane (like `builtin`), as its
-// own `ironclaw.memory.native` extension. The model-facing tool names derive
-// from these ids (`.` -> `__`): `ironclaw__memory__native__{read,write,search,tree}`.
-pub const MEMORY_SEARCH_CAPABILITY_ID: &str = "ironclaw.memory.native.search";
-pub const MEMORY_WRITE_CAPABILITY_ID: &str = "ironclaw.memory.native.write";
-pub const MEMORY_READ_CAPABILITY_ID: &str = "ironclaw.memory.native.read";
-pub const MEMORY_TREE_CAPABILITY_ID: &str = "ironclaw.memory.native.tree";
+// The memory extension rides the always-on first-party lane (like `builtin`),
+// as the `ironclaw.memory` extension (backed by the native provider by default,
+// swappable via the document-store binding). The model-facing tool names derive
+// from these ids (`.` -> `__`): `ironclaw__memory__{read,write,search,tree}`.
+pub const MEMORY_SEARCH_CAPABILITY_ID: &str = "ironclaw.memory.search";
+pub const MEMORY_WRITE_CAPABILITY_ID: &str = "ironclaw.memory.write";
+pub const MEMORY_READ_CAPABILITY_ID: &str = "ironclaw.memory.read";
+pub const MEMORY_TREE_CAPABILITY_ID: &str = "ironclaw.memory.tree";
 const MEMORY_PROMPT_SAFETY_EXTENSION_ID: &str = "memory.prompt_safety";
 
 struct MemoryServices {
@@ -648,7 +649,7 @@ mod tests {
         // registered for its id, so the *model-facing memory tool* dispatches
         // through to that provider rather than failing closed — proving a mem0
         // (or any third-party) binding transparently swaps the service behind the
-        // same `ironclaw.memory.native.*` tools, through the real resolver path.
+        // same `ironclaw.memory.*` tools, through the real resolver path.
         let provider = Arc::new(RecordingMemoryService::default());
         let resolver = document_store_resolver("acme.honcho")
             .with_third_party_document_store_provider(

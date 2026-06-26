@@ -88,7 +88,7 @@ impl MemoryDeploymentProfile {
 /// been handed a resolved binding preserve the pre-#3537 behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum MemoryProviderBinding {
-    /// Host-bundled native provider (`ironclaw.memory.native`).
+    /// Host-bundled native provider (`ironclaw.memory`).
     #[default]
     Native,
     /// Explicitly disabled (`memory.disabled`); non-production only.
@@ -109,7 +109,7 @@ impl MemoryProviderBinding {
 #[derive(Debug, Clone)]
 pub struct MemoryProfileBindingEntry {
     pub profile_id: CapabilityProfileId,
-    /// `ironclaw.memory.native`, `memory.disabled`, or a third-party id.
+    /// `ironclaw.memory`, `memory.disabled`, or a third-party id.
     pub extension_id: String,
 }
 

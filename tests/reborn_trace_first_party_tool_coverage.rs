@@ -74,7 +74,7 @@ fn host_runtime_tool_wait() -> HarnessWaitConfig {
 #[test]
 fn reborn_builtin_first_party_capability_e2e_coverage_is_complete() {
     // The always-on first-party surface is the union of the `builtin` package
-    // and the sibling `ironclaw.memory.native` package (issue #3537), which now
+    // and the sibling `ironclaw.memory` package (issue #3537), which now
     // owns the memory_* capabilities on the same always-on first-party lane.
     let declared = builtin_first_party_package()
         .expect("built-in first-party package builds")
