@@ -27,11 +27,14 @@ use ironclaw_host_runtime::memory_binding::{MemoryBindingPolicy, MemoryProviderB
 use ironclaw_host_runtime::memory_profiles::MEMORY_DOCUMENT_STORE_PROFILE_ID;
 use ironclaw_host_runtime::memory_provider::MemoryServiceResolver;
 use ironclaw_memory::{MemoryService, PromptWriteSafetyEventSink};
+#[cfg(feature = "memory-mem0")]
 use ironclaw_memory_mem0::{
     MEM0_MEMORY_EXTENSION_ID, Mem0Config, Mem0HttpTransport, Mem0MemoryService, Mem0Transport,
 };
 use ironclaw_memory_native::NativeMemoryService;
-use secrecy::{ExposeSecret, SecretString};
+#[cfg(feature = "memory-mem0")]
+use secrecy::ExposeSecret;
+use secrecy::SecretString;
 
 const LOG_TARGET: &str = "ironclaw_reborn::memory";
 
@@ -89,7 +92,9 @@ pub struct MemoryProviderDeps {
     /// Test seam: a pre-built mem0 transport (an in-memory mock). Production
     /// leaves this `None`, so the factory builds a real `reqwest` transport from
     /// [`Mem0ConnectionConfig`]; tests inject a mock to exercise the wiring
-    /// without a live mem0 endpoint.
+    /// without a live mem0 endpoint. Gated with the provider itself — there is no
+    /// mem0 transport type to hold when `memory-mem0` is not compiled in.
+    #[cfg(feature = "memory-mem0")]
     pub mem0_transport_override: Option<Arc<dyn Mem0Transport>>,
 }
 
@@ -101,6 +106,7 @@ impl MemoryProviderDeps {
             filesystem: None,
             prompt_write_safety_sink: None,
             mem0,
+            #[cfg(feature = "memory-mem0")]
             mem0_transport_override: None,
         }
     }
@@ -139,19 +145,23 @@ fn create_third_party_provider(
     extension_id: &str,
     deps: &MemoryProviderDeps,
 ) -> Option<Arc<dyn MemoryService>> {
-    match extension_id {
-        MEM0_MEMORY_EXTENSION_ID => create_mem0_provider(deps),
-        other => {
-            tracing::warn!(
-                target: LOG_TARGET,
-                extension_id = other,
-                "no memory provider is registered for this third-party extension id; the document-store binding fails closed"
-            );
-            None
-        }
+    #[cfg(feature = "memory-mem0")]
+    if extension_id == MEM0_MEMORY_EXTENSION_ID {
+        return create_mem0_provider(deps);
     }
+    // No provider is registered for this third-party id — or the `memory-mem0`
+    // feature is not compiled in — so the document-store binding fails closed.
+    #[cfg(not(feature = "memory-mem0"))]
+    let _ = deps;
+    tracing::warn!(
+        target: LOG_TARGET,
+        extension_id,
+        "no memory provider is registered for this third-party extension id (or the `memory-mem0` feature is not compiled in); the document-store binding fails closed"
+    );
+    None
 }
 
+#[cfg(feature = "memory-mem0")]
 fn create_mem0_provider(deps: &MemoryProviderDeps) -> Option<Arc<dyn MemoryService>> {
     let config = Mem0Config {
         app_id: deps.mem0.app_id.clone(),
@@ -238,6 +248,7 @@ mod tests {
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::ExtensionId;
 
+    #[cfg(feature = "memory-mem0")]
     fn mem0_binding() -> MemoryProviderBinding {
         MemoryProviderBinding::ThirdParty {
             extension_id: ExtensionId::new(MEM0_MEMORY_EXTENSION_ID).unwrap(),
@@ -250,6 +261,7 @@ mod tests {
             filesystem: Some(Arc::new(InMemoryBackend::new())),
             prompt_write_safety_sink: None,
             mem0: Mem0ConnectionConfig::default(),
+            #[cfg(feature = "memory-mem0")]
             mem0_transport_override: None,
         };
         assert!(create_document_store_provider(&MemoryProviderBinding::Native, &deps).is_some());
@@ -267,6 +279,7 @@ mod tests {
         assert!(create_document_store_provider(&MemoryProviderBinding::Disabled, &deps).is_none());
     }
 
+    #[cfg(feature = "memory-mem0")]
     #[test]
     fn mem0_binding_without_credentials_fails_closed() {
         // The mem0 id is recognized, but with no base URL / API key and no
@@ -275,6 +288,7 @@ mod tests {
         assert!(create_document_store_provider(&mem0_binding(), &deps).is_none());
     }
 
+    #[cfg(feature = "memory-mem0")]
     #[test]
     fn mem0_binding_with_a_blocked_base_url_fails_closed() {
         let deps = MemoryProviderDeps::for_third_party(Mem0ConnectionConfig {
@@ -285,6 +299,7 @@ mod tests {
         assert!(create_document_store_provider(&mem0_binding(), &deps).is_none());
     }
 
+    #[cfg(feature = "memory-mem0")]
     #[test]
     fn mem0_binding_with_real_connection_builds_a_provider() {
         // A well-formed base URL + key builds the real transport-backed provider.
@@ -296,6 +311,7 @@ mod tests {
         assert!(create_document_store_provider(&mem0_binding(), &deps).is_some());
     }
 
+    #[cfg(feature = "memory-mem0")]
     #[test]
     fn mem0_binding_with_a_local_base_url_and_no_key_builds_a_provider() {
         // The default self-hosted mem0 OSS deployment: a localhost base URL and NO

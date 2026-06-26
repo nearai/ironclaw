@@ -22,6 +22,13 @@ root-llm-provider = [
     "ironclaw_llm/registry-provider-factory",
     "ironclaw_reborn/root-llm-provider",
 ]
+# Compile the mem0 third-party memory provider into the composed runtime.
+# Off by default (productionization, #5264) so default builds carry no mem0
+# code or its `reqwest`/`rustls` transport deps; an operator who binds memory
+# to mem0 builds with `--features memory-mem0`. mem0 stays runtime-off too
+# (the binding policy defaults to native). Mirrors `root-llm-provider`'s
+# optional-dep shape.
+memory-mem0 = ["dep:ironclaw_memory_mem0"]
 # Expose test-only helpers (mock LLM gateway, budget runtime accessors)
 # so integration tests in this crate's `tests/` directory and downstream
 # crates can drive `build_reborn_runtime` with a stub model gateway
@@ -120,7 +127,7 @@ ironclaw_mcp = { path = "../ironclaw_mcp" }
 # (filesystem) provider and the mem0 (REST) provider — and builds whichever the
 # `[memory]` binding selects.
 ironclaw_memory = { path = "../ironclaw_memory" }
-ironclaw_memory_mem0 = { path = "../ironclaw_memory_mem0" }
+ironclaw_memory_mem0 = { path = "../ironclaw_memory_mem0", optional = true }
 ironclaw_memory_native = { path = "../ironclaw_memory_native" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }

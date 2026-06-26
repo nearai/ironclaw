@@ -682,6 +682,17 @@ fn reborn_loop_support_llm_wiring_stays_out_of_root_src() {
             && composition_manifest.contains("default-features = false"),
         "ironclaw_reborn_composition must gate `ironclaw_llm` behind the same `root-llm-provider` feature with `optional = true, default-features = false`"
     );
+
+    // mem0 (the third-party memory provider) follows the same optional-dep
+    // discipline: it is gated behind a `memory-mem0` feature on composition, so a
+    // default build carries no mem0 code or its reqwest/rustls transport. The
+    // `dep:ironclaw_memory_mem0` feature syntax only compiles when the dependency
+    // is `optional = true`, so this also confirms the dep is optional.
+    assert!(
+        composition_manifest.contains("memory-mem0")
+            && composition_manifest.contains("dep:ironclaw_memory_mem0"),
+        "ironclaw_reborn_composition must gate `ironclaw_memory_mem0` behind a `memory-mem0` feature (optional dep), mirroring root-llm-provider — a default build stays mem0-free"
+    );
 }
 
 /// Lock the narrowed `ironclaw_reborn` public surface in place.
