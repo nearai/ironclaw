@@ -1804,16 +1804,18 @@ fn is_accepted_auth_denial(envelope: &ProductInboundEnvelope, ack: &ProductInbou
 // using the same polling machinery as the observer path (above).
 
 /// Composition-owned hook invoked by the trigger poller after a successful fire
-/// submission. The composition root wires a real implementation (behind the
-/// `slack-v2-host-beta` feature) or a no-op.
+/// submission has been durably settled in trigger storage. The composition root
+/// wires a real implementation (behind the `slack-v2-host-beta` feature) or a
+/// no-op.
 #[async_trait]
 pub trait PostSubmitDeliveryHook: Send + Sync {
     /// Called with the original trigger fire, the submitted run id, and the
-    /// turn scope the run was submitted under. The trigger poller owns the
-    /// non-blocking handoff by invoking this hook from a detached task, so hook
-    /// latency cannot delay fire settlement. Implementations may still spawn
-    /// their own longer-lived delivery tasks when they need bounded admission or
-    /// shutdown tracking.
+    /// turn scope the run was submitted under. The trigger poller invokes this
+    /// hook from a detached task after the accepted fire appears as settled, so
+    /// hook latency cannot delay settlement and delivery cannot precede the
+    /// persisted run/thread mapping. Implementations may still spawn their own
+    /// longer-lived delivery tasks when they need bounded admission or shutdown
+    /// tracking.
     async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope);
 }
 

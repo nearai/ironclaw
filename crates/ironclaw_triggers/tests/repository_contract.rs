@@ -1,6 +1,6 @@
 #![cfg(any(feature = "libsql", feature = "postgres"))]
 
-use chrono::{TimeZone, Utc};
+use chrono::{SecondsFormat, TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository, TriggerError,
@@ -3698,6 +3698,83 @@ mod fire_claim_contract {
             tenant("tenant-postgres-accepted-concurrent"),
         )
         .await;
+        clear_postgres_triggers(&pool).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_repository_mark_fire_accepted_settles_equivalent_active_fire_timestamp_text()
+    {
+        let Some((_container, pool)) = postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+
+        let trigger_id = TriggerId::parse("01J00000000000000000000018").expect("ulid");
+        let tenant_id = tenant("tenant-postgres-accepted-text");
+        let fire_slot = ts(1_704_067_200);
+        let accepted_at = ts(1_704_067_205);
+        repo.upsert_trigger(sample_record(trigger_id, tenant_id.clone(), fire_slot))
+            .await
+            .expect("insert record");
+        assert!(matches!(
+            repo.claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("claim fire"),
+            ClaimDueFireOutcome::Claimed(_)
+        ));
+
+        let equivalent_fire_slot_text = fire_slot.to_rfc3339_opts(SecondsFormat::Secs, false);
+        let canonical_fire_slot_text = fire_slot.to_rfc3339_opts(SecondsFormat::Nanos, true);
+        assert_ne!(
+            equivalent_fire_slot_text, canonical_fire_slot_text,
+            "test must rewrite to an equivalent but non-canonical timestamp string"
+        );
+        pool.get()
+            .await
+            .expect("postgres connection")
+            .execute(
+                "UPDATE trigger_records
+                 SET active_fire_slot = $1
+                 WHERE tenant_id = $2 AND trigger_id = $3",
+                &[
+                    &equivalent_fire_slot_text,
+                    &tenant_id.as_str(),
+                    &trigger_id.to_string(),
+                ],
+            )
+            .await
+            .expect("rewrite active fire timestamp text");
+
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f65").expect("valid run");
+        let thread_id =
+            ThreadId::new("01890f0f-ee01-7000-8000-000000000003").expect("valid thread id");
+        let accepted = repo
+            .mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                run_id,
+                thread_id: thread_id.clone(),
+                submitted_at: accepted_at,
+            })
+            .await
+            .expect("accept fire with equivalent active_fire_slot text")
+            .expect("accepted fire should settle");
+
+        assert_eq!(accepted.active_run_ref, Some(run_id));
+        let runs = repo
+            .list_trigger_run_history(tenant_id, trigger_id, 1)
+            .await
+            .expect("run history");
+        assert_eq!(runs[0].run_id, Some(run_id));
+        assert_eq!(runs[0].thread_id, Some(thread_id));
         clear_postgres_triggers(&pool).await;
     }
 

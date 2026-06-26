@@ -101,6 +101,24 @@ pub trait TrustedTriggerFireSubmitter: Send + Sync {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerAcceptedFireSettlement {
+    pub fire: TriggerFire,
+    pub run_id: TurnRunId,
+    pub turn_scope: TurnScope,
+}
+
+pub trait TriggerFireSettlementObserver: Send + Sync {
+    fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement);
+}
+
+#[derive(Debug, Default)]
+pub struct NoopTriggerFireSettlementObserver;
+
+impl TriggerFireSettlementObserver for NoopTriggerFireSettlementObserver {
+    fn on_accepted_fire_settled(&self, _event: TriggerAcceptedFireSettlement) {}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerActiveRunStateRequest {
     pub tenant_id: TenantId,
     pub trigger_id: TriggerId,
