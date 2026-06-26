@@ -64,6 +64,7 @@ async def _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
     project_requests: list[str] = []
+    thread_create_requests: list[dict] = []
 
     async def fulfill_json(route, payload, status=200):
         await route.fulfill(
@@ -104,7 +105,40 @@ async def _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser):
 
         await route.continue_()
 
+    async def handle_threads(route):
+        request = route.request
+        parsed = urlparse(request.url)
+        path = parsed.path
+
+        if path == "/api/webchat/v2/threads" and request.method == "GET":
+            await fulfill_json(route, {"threads": [], "next_cursor": None})
+            return
+
+        if path == "/api/webchat/v2/threads" and request.method == "POST":
+            body = json.loads(request.post_data or "{}")
+            thread_create_requests.append(body)
+            await fulfill_json(
+                route,
+                {
+                    "thread": {
+                        "thread_id": "thread-project-scoped",
+                        "title": "Project scoped conversation",
+                        "project_id": body.get("project_id"),
+                        "created_at": "2026-04-12T11:00:00Z",
+                        "updated_at": "2026-04-12T11:00:00Z",
+                    }
+                },
+            )
+            return
+
+        if path == "/api/webchat/v2/threads/thread-project-scoped/timeline":
+            await fulfill_json(route, {"messages": [], "next_cursor": None})
+            return
+
+        await route.continue_()
+
     await page.route("**/api/webchat/v2/projects**", handle_projects)
+    await page.route("**/api/webchat/v2/threads**", handle_threads)
     await page.goto(f"{reborn_v2_server}/v2/projects?token={REBORN_V2_AUTH_TOKEN}")
 
     try:
@@ -115,7 +149,12 @@ async def _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser):
             f"Projects grid did not render on {page.url}.\nBody text:\n{body_text}"
         ) from error
 
-    return {"context": context, "page": page, "project_requests": project_requests}
+    return {
+        "context": context,
+        "page": page,
+        "project_requests": project_requests,
+        "thread_create_requests": thread_create_requests,
+    }
 
 
 async def test_reborn_legacy_projects_overview_search_and_open_workspace(
@@ -189,5 +228,30 @@ async def test_reborn_legacy_projects_search_no_match_can_be_cleared(
         await expect(
             page.locator(SEL_V2["project_card_for"].format(id=PRODUCT_PROJECT_ID))
         ).to_be_visible()
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_project_workspace_starts_scoped_chat_thread(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser)
+    try:
+        page = harness["page"]
+
+        await page.locator(
+            SEL_V2["project_card_for"].format(id=MOCK_PROJECT_ID)
+        ).locator(SEL_V2["project_open_workspace"]).click()
+        await expect(
+            page.locator(SEL_V2["project_workspace_for"].format(id=MOCK_PROJECT_ID))
+        ).to_be_visible(timeout=10000)
+
+        await page.get_by_role("button", name="New conversation").click()
+        await page.wait_for_url("**/v2/chat/thread-project-scoped", timeout=10000)
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=10000)
+
+        assert len(harness["thread_create_requests"]) == 1
+        assert harness["thread_create_requests"][0]["project_id"] == MOCK_PROJECT_ID
+        assert harness["thread_create_requests"][0]["client_action_id"]
     finally:
         await harness["context"].close()

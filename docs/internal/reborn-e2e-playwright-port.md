@@ -2714,6 +2714,35 @@ Behavior mapping:
   routine-scoped OAuth credential injection remain open because they still lack
   a non-stub Reborn v2 routines surface.
 
+### Step 92: Legacy Project Scoped Conversation Port
+
+Extended `test_reborn_webui_v2_legacy_projects.py` and fixed Reborn project
+workspace navigation.
+
+Ported the project-to-thread workflow intent from legacy project drill-in
+coverage to the current Reborn Projects workspace:
+
+- opened a real Reborn project workspace from `/v2/projects`;
+- clicked the workspace `New conversation` action;
+- asserted the v2 thread-create request includes the selected `project_id`;
+- asserted the browser lands on the new `/v2/chat/{thread_id}` route with the
+  chat composer visible.
+
+Issue found and fixed:
+
+- The Projects page created a scoped thread with `threadsState.createThread(projectId)`
+  but then navigated to `/chat` with the thread id only in router state.
+  `ChatPage` clears active thread state on routes without `:threadId`, so the
+  newly-created project thread was immediately lost. The workspace action now
+  navigates directly to `/chat/{newThreadId}`.
+
+Behavior mapping:
+
+- Legacy project tests could drill into engine mission/thread detail panels.
+  Those Reborn project child APIs are still TODO stubs, so this step protects
+  the implemented project-thread boundary: a project workspace can create and
+  open a chat thread scoped to that project through the v2 thread API.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -2907,10 +2936,11 @@ implemented.
 
 The project overview port confirmed a project-detail parity gap: Reborn's
 Projects page now uses the real `/api/webchat/v2/projects` surface for project
-entities, but its missions, threads, widgets, mission detail, and thread detail
-client functions still return TODO stubs. The migrated test therefore covers
-list/search/open-workspace behavior and leaves the legacy engine-v2 drill-in
-tests open until matching Reborn endpoints land.
+entities and can create project-scoped chat threads, but its missions, threads,
+widgets, mission detail, and thread detail client functions still return TODO
+stubs. The migrated tests therefore cover list/search/open-workspace and
+project-scoped chat creation behavior while leaving the legacy engine-v2
+mission/thread/widget drill-in tests open until matching Reborn endpoints land.
 
 The Responses API port confirmed a route-contract difference: Reborn's
 OpenAI-compatible Responses API accepts typed Responses input items and rejects

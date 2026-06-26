@@ -85,7 +85,7 @@ export function ProjectsPage() {
     setChatFlowError(null);
     try {
       const newThreadId = await threadsState.createThread(projectId);
-      navigate("/chat", { state: { threadId: newThreadId } });
+      navigate(newThreadId ? `/chat/${newThreadId}` : "/chat");
       workspaceState.invalidate();
     } catch (error) {
       setChatFlowError({
