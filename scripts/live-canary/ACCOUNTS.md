@@ -95,6 +95,20 @@ existing auth-live Google token secrets:
 - `AUTH_LIVE_GOOGLE_ACCESS_TOKEN`
 - `AUTH_LIVE_GOOGLE_REFRESH_TOKEN`
 
+For copied Reborn homes whose stored Google access tokens have expired, the
+runtime/side-effect rows also require a Google OAuth client secret that matches
+the client ID used by the stored Google consent flow. Set one of these to that
+Google Cloud OAuth client secret, locally or as a repo-scoped GitHub Actions
+secret under `github.com/nearai/ironclaw/settings/secrets/actions`:
+
+- `IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET`
+- `GOOGLE_CLIENT_SECRET`
+- `GOOGLE_OAUTH_CLIENT_SECRET`
+
+Without that matching client secret, Reborn WebUI v2 live QA records
+`missing_google_ready` before executing the Google runtime rows `2D`, `2F`,
+`4E`, `5C`, `5D`, `6C`, `6E`, and `7E`.
+
 Slack workflow cases require bot-level Slack credentials for the Reborn Slack
 adapter. `SLACK_WEBHOOK_URL` is only for canary reporting and is not sufficient
 for WebUI Slack workflow coverage.
