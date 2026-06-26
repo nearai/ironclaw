@@ -138,6 +138,139 @@ SUPPORT_SUBSTRATE_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_ROUTE_CONTRACT_COMMAND = CommandSpec(
+    name="webui_v2_route_contracts",
+    description=(
+        "Native WebUI v2 route, descriptor, handler, operator, schema, and "
+        "SSE capacity contracts."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "--jobs",
+        "2",
+    ],
+)
+
+WEBUI_V2_SEND_MULTILINE_COMMAND = CommandSpec(
+    name="webui_v2_send_multiline_contract",
+    description="Focused send-message route contract for preserving multiline content.",
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "send_message_preserves_multiline_content",
+        "--",
+        "--exact",
+    ],
+)
+
+WEBUI_V2_SEND_ERROR_COMMAND = CommandSpec(
+    name="webui_v2_send_error_contract",
+    description="Focused send-message route contract for sanitized service errors.",
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "send_message_service_error_maps_to_sanitized_http_response",
+        "--",
+        "--exact",
+    ],
+)
+
+WEBUI_V2_CANCEL_ERROR_COMMAND = CommandSpec(
+    name="webui_v2_cancel_error_contract",
+    description="Focused cancel-run route contract for sanitized service errors.",
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "cancel_run_service_error_maps_to_sanitized_http_response",
+        "--",
+        "--exact",
+    ],
+)
+
+WEBUI_V2_FS_HANDLER_COMMAND = CommandSpec(
+    name="webui_v2_filesystem_handler_slice",
+    description="Focused WebUI v2 filesystem handler negative-path contract slice.",
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "fs_",
+        "--test",
+        "webui_v2_handlers_contract",
+    ],
+)
+
+COMPOSITION_MOUNT_FS_COMMAND = CommandSpec(
+    name="composition_mount_filesystem_reader",
+    description="Composition mount filesystem reader traversal and policy contracts.",
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "mount_filesystem_reader",
+        "--lib",
+    ],
+)
+
+WEBUI_V2_HANDLER_CONTRACT_COMMAND = CommandSpec(
+    name="webui_v2_handler_contract_file",
+    description="Full WebUI v2 handler contract test file.",
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--test",
+        "webui_v2_handlers_contract",
+    ],
+)
+
+WEBUI_V2_RUST_STATIC_COMMAND = CommandSpec(
+    name="webui_v2_rust_static_regression",
+    description=(
+        "Native WebUI v2 Rust route package plus embedded static asset/router "
+        "package under all features."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "-p",
+        "ironclaw_webui_v2_static",
+        "--all-features",
+        "--jobs",
+        "2",
+    ],
+)
+
 CASES: dict[str, CaseSpec] = {
     "openai_compat_owner_crate_regression": CaseSpec(
         name="openai_compat_owner_crate_regression",
@@ -169,6 +302,53 @@ CASES: dict[str, CaseSpec] = {
         notes=(
             "Runs the focused durable ledger contract first, then the broad "
             "iteration-182 support-substrate command referenced by the QA matrix."
+        ),
+    ),
+    "webui_v2_route_contract_regression": CaseSpec(
+        name="webui_v2_route_contract_regression",
+        feature="WebUI v2 chat route contracts",
+        category="Hermetic Route Contract",
+        qa_matrix_test_ids=[
+            "REBCLI-055-TC-08",
+            "REBCLI-065-TC-23",
+            "REBCLI-065-TC-24",
+            "REBCLI-065-TC-25",
+        ],
+        commands=[
+            WEBUI_V2_SEND_MULTILINE_COMMAND,
+            WEBUI_V2_SEND_ERROR_COMMAND,
+            WEBUI_V2_CANCEL_ERROR_COMMAND,
+            WEBUI_V2_ROUTE_CONTRACT_COMMAND,
+        ],
+        notes=(
+            "Runs the three focused WebUI v2 chat route contracts from the QA "
+            "matrix, then the full native ironclaw_webui_v2 package check."
+        ),
+    ),
+    "webui_v2_filesystem_api_regression": CaseSpec(
+        name="webui_v2_filesystem_api_regression",
+        feature="WebUI v2 workspace filesystem API",
+        category="Hermetic Rust/API",
+        qa_matrix_test_ids=["REBCLI-084-TC-08"],
+        commands=[
+            WEBUI_V2_FS_HANDLER_COMMAND,
+            COMPOSITION_MOUNT_FS_COMMAND,
+            WEBUI_V2_HANDLER_CONTRACT_COMMAND,
+        ],
+        notes=(
+            "Runs the focused WebUI v2 filesystem handler slice, composition "
+            "mount filesystem reader policy tests, and full handler contract file."
+        ),
+    ),
+    "webui_v2_rust_static_regression": CaseSpec(
+        name="webui_v2_rust_static_regression",
+        feature="WebUI v2 native routes and static router",
+        category="WebUI Rust/Static Regression",
+        qa_matrix_test_ids=["REBCLI-055-TC-13"],
+        commands=[WEBUI_V2_RUST_STATIC_COMMAND],
+        notes=(
+            "Matches the QA matrix Rust/static command for REBCLI-055-TC-13; "
+            "browser/static Node coverage remains separate."
         ),
     ),
 }
