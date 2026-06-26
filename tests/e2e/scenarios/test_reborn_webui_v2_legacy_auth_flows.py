@@ -2,6 +2,7 @@
 
 import json
 import re
+from urllib.parse import unquote, urlparse
 
 from playwright.async_api import expect
 
@@ -14,6 +15,7 @@ from reborn_webui_harness import (
 
 
 THREAD_ID = "thread-legacy-auth-flows"
+THREAD_B_ID = "thread-legacy-auth-flows-other"
 RUN_ID = "run-legacy-auth-flows"
 FAKE_GITHUB_PAT = "ghp_fake4112PAT_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 GITHUB_PAT_RE = re.compile(
@@ -33,11 +35,35 @@ async def _open_stubbed_auth_thread(
     *,
     manual_token_status=200,
     manual_token_body=None,
+    thread_records: list[dict] | None = None,
+    timelines: dict[str, list[dict]] | None = None,
 ):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
     manual_token_requests: list[dict] = []
     resolve_requests: list[dict] = []
+    default_thread_records = [
+        {
+            "thread_id": THREAD_ID,
+            "title": "Legacy auth flow port",
+            "created_at": "2026-06-26T00:00:00Z",
+            "updated_at": "2026-06-26T00:00:00Z",
+        }
+    ]
+    default_timelines = {
+        THREAD_ID: [
+            {
+                "message_id": "seed-user",
+                "kind": "user",
+                "content": "Use a protected integration",
+                "sequence": 1,
+                "status": "accepted",
+                "created_at": "2026-06-26T00:00:00Z",
+            }
+        ]
+    }
+    thread_records = thread_records or default_thread_records
+    timelines = timelines or default_timelines
 
     await page.add_init_script(
         """
@@ -105,32 +131,18 @@ async def _open_stubbed_auth_thread(
         await fulfill_json(
             route,
             {
-                "threads": [
-                    {
-                        "thread_id": THREAD_ID,
-                        "title": "Legacy auth flow port",
-                        "created_at": "2026-06-26T00:00:00Z",
-                        "updated_at": "2026-06-26T00:00:00Z",
-                    }
-                ],
+                "threads": thread_records,
                 "next_cursor": None,
             },
         )
 
     async def handle_timeline(route):
+        parsed = urlparse(route.request.url)
+        thread_id = unquote(parsed.path.split("/threads/", 1)[1].split("/timeline", 1)[0])
         await fulfill_json(
             route,
             {
-                "messages": [
-                    {
-                        "message_id": "seed-user",
-                        "kind": "user",
-                        "content": "Use a protected integration",
-                        "sequence": 1,
-                        "status": "accepted",
-                        "created_at": "2026-06-26T00:00:00Z",
-                    }
-                ],
+                "messages": timelines.get(thread_id, []),
                 "next_cursor": None,
             },
         )
@@ -168,7 +180,7 @@ async def _open_stubbed_auth_thread(
     await page.route("**/api/webchat/v2/session", handle_session)
     await page.route("**/api/webchat/v2/threads", handle_threads)
     await page.route("**/api/webchat/v2/threads?**", handle_threads)
-    await page.route(f"**/api/webchat/v2/threads/{THREAD_ID}/timeline**", handle_timeline)
+    await page.route("**/api/webchat/v2/threads/*/timeline**", handle_timeline)
     await page.route("**/api/reborn/product-auth/manual-token/submit", handle_manual_token)
     await page.route(
         f"**/api/webchat/v2/threads/{THREAD_ID}/runs/**/gates/**/resolve",
@@ -462,6 +474,109 @@ async def test_reborn_legacy_auth_prompt_replaces_existing_prompt(
                 "gate_ref": "manual-token-second-gate",
             }
         ]
+    finally:
+        await context.close()
+
+
+async def test_reborn_legacy_auth_prompt_does_not_block_other_thread(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Port foreign-thread auth isolation to Reborn's route-scoped auth gate state."""
+    context, page, _manual_token_requests, _resolve_requests = await _open_stubbed_auth_thread(
+        reborn_v2_server,
+        reborn_v2_browser,
+        thread_records=[
+            {
+                "thread_id": THREAD_ID,
+                "title": "Auth Thread A",
+                "created_at": "2026-06-26T00:00:00Z",
+                "updated_at": "2026-06-26T00:00:00Z",
+            },
+            {
+                "thread_id": THREAD_B_ID,
+                "title": "Auth Thread B",
+                "created_at": "2026-06-26T00:01:00Z",
+                "updated_at": "2026-06-26T00:01:00Z",
+            },
+        ],
+        timelines={
+            THREAD_ID: [
+                {
+                    "message_id": "thread-a-user",
+                    "kind": "user",
+                    "content": "Use a protected integration",
+                    "sequence": 1,
+                    "status": "accepted",
+                    "created_at": "2026-06-26T00:00:00Z",
+                }
+            ],
+            THREAD_B_ID: [
+                {
+                    "message_id": "thread-b-user",
+                    "kind": "user",
+                    "content": "Thread B can continue",
+                    "sequence": 1,
+                    "status": "accepted",
+                    "created_at": "2026-06-26T00:01:00Z",
+                }
+            ],
+        },
+    )
+    send_requests: list[dict] = []
+
+    async def handle_send_b(route):
+        send_requests.append(json.loads(route.request.post_data or "{}"))
+        await route.fulfill(
+            status=202,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "thread_id": THREAD_B_ID,
+                    "run_id": "run-thread-b-auth-send",
+                    "status": "queued",
+                }
+            ),
+        )
+
+    await page.route(f"**/api/webchat/v2/threads/{THREAD_B_ID}/messages", handle_send_b)
+
+    try:
+        await _emit_auth_prompt(
+            page,
+            challenge_kind="manual_token",
+            gate_ref="manual-token-thread-a-gate",
+            headline="Connect Thread A",
+            body="Thread A needs credentials before it can continue.",
+        )
+        await expect(page.locator(SEL_V2["auth_gate"])).to_have_count(1)
+        await expect(page.locator(SEL_V2["chat_composer"])).to_have_attribute(
+            "data-send-disabled",
+            "true",
+        )
+
+        await page.locator("#gateway-sidebar button").filter(
+            has_text="Auth Thread B"
+        ).first.click()
+        await expect(
+            page.locator(SEL_V2["msg_user"]).filter(has_text="Thread B can continue")
+        ).to_be_visible(timeout=15000)
+        await expect(page.locator(SEL_V2["auth_gate"])).to_have_count(0)
+
+        composer = page.locator(SEL_V2["chat_composer"])
+        await expect(composer).to_have_attribute(
+            "data-send-disabled",
+            "false",
+            timeout=5000,
+        )
+        await composer.fill("send while other thread needs auth")
+        await composer.press("Enter")
+
+        await expect(page.locator(SEL_V2["msg_user"]).last).to_contain_text(
+            "send while other thread needs auth",
+            timeout=10000,
+        )
+        assert len(send_requests) == 1
+        assert send_requests[0]["content"] == "send while other thread needs auth"
     finally:
         await context.close()
 

@@ -2640,6 +2640,29 @@ Behavior mapping:
   state leaking across route/sidebar thread changes, so the port asserts that
   boundary directly.
 
+### Step 89: Legacy Foreign-Thread Auth Prompt Isolation Port
+
+Extended `test_reborn_webui_v2_legacy_auth_flows.py`.
+
+Ported the isolation intent from legacy onboarding/auth-required tests that
+ensured auth prompts for another thread did not render into or block the active
+thread:
+
+- opened two mocked Reborn WebChat v2 threads in the browser;
+- emitted a pending manual-token auth gate on thread A and verified the active
+  composer is locally blocked;
+- switched through the real Reborn thread sidebar to thread B;
+- asserted thread B has no stale auth gate, its composer is enabled, and a
+  normal chat message posts to thread B's v2 `/messages` endpoint.
+
+Behavior mapping:
+
+- Legacy v1 tracked unread counters for foreign-thread onboarding events in a
+  global map. Reborn receives events through the active thread's route-scoped
+  EventSource and has no equivalent global auth-card renderer. The
+  Reborn-equivalent risk is stale auth gate state leaking across thread changes,
+  so the port asserts that boundary directly.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -2668,10 +2691,10 @@ Not yet ported:
   including any future persistence-backed extension-service contracts not
   visible in the browser;
 - deeper OAuth/product-auth install/callback flows beyond browser prompt
-  handling, extension OAuth-start URL safety, and existing Rust callback
-  contracts, including hosted provider refresh and provider-backed extension/MCP
-  setup only where standalone Reborn exposes matching v2 browser endpoints or
-  fixtures;
+  handling, prompt replacement, cross-thread isolation, extension OAuth-start
+  URL safety, and existing Rust callback contracts, including hosted provider
+  refresh and provider-backed extension/MCP setup only where standalone Reborn
+  exposes matching v2 browser endpoints or fixtures;
 - remaining Slack/Telegram/channel pairing scenarios beyond the Reborn Slack
   proof-code connect card and generic member self-claim form, especially
   lower-level admin pending pairing APIs once standalone Reborn exposes a
@@ -2800,6 +2823,11 @@ controls until the async action finishes.
 The other-thread approval isolation port did not require a Reborn product fix:
 the pending gate state is already scoped to the active thread route, and normal
 message sends on a different thread continue through the v2 `/messages`
+endpoint.
+
+The foreign-thread auth prompt isolation port did not require a Reborn product
+fix: pending auth gate state is already scoped to the active thread route, and
+normal message sends on a different thread continue through the v2 `/messages`
 endpoint.
 
 The tool-activity history port did not require a Reborn product behavior fix:
