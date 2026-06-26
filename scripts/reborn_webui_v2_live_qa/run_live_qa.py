@@ -1287,6 +1287,149 @@ def _google_oauth_refresh_probe(
     return result
 
 
+def _google_oauth_client_pair(
+    extra_env: dict[str, str] | None = None,
+) -> tuple[tuple[str, str] | None, tuple[str, str] | None]:
+    client_id = _first_env_value(
+        [
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
+            "GOOGLE_CLIENT_ID",
+            "GOOGLE_OAUTH_CLIENT_ID",
+        ],
+        extra_env,
+    )
+    client_secret = _first_env_value(
+        [
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET",
+            "GOOGLE_CLIENT_SECRET",
+            "GOOGLE_OAUTH_CLIENT_SECRET",
+        ],
+        extra_env,
+    )
+    return client_id, client_secret
+
+
+def _google_runtime_access_token(
+    reborn_home: Path,
+    user_id: str,
+    extra_env: dict[str, str] | None = None,
+) -> tuple[str, dict[str, object]]:
+    env_access_token = _first_env_value(
+        [
+            "AUTH_LIVE_GOOGLE_ACCESS_TOKEN",
+            "IRONCLAW_REBORN_GOOGLE_ACCESS_TOKEN",
+        ],
+        extra_env,
+    )
+    if env_access_token:
+        return env_access_token[1], {
+            "source": env_access_token[0],
+            "refreshed": False,
+            "account_id": None,
+        }
+
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    master_key_path = reborn_home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+    if not db_path.exists() or not master_key_path.exists():
+        raise LiveQaError("Google runtime token unavailable: Reborn DB or secret key missing")
+
+    account_pattern = (
+        f"/tenants/reborn-cli/users/{user_id}/secrets/agents/reborn-cli-agent/"
+        "product-auth/%/accounts/%.json"
+    )
+    with sqlite3.connect(db_path) as db:
+        account_rows = db.execute(
+            "SELECT path, contents FROM root_filesystem_entries WHERE path LIKE ?",
+            (account_pattern,),
+        ).fetchall()
+    now = datetime.now(timezone.utc)
+    master_key = master_key_path.read_text(encoding="utf-8").strip()
+    client_id, client_secret = _google_oauth_client_pair(extra_env)
+    if not client_id:
+        stored_client_id = _stored_google_oauth_client_id_from_reborn_home(reborn_home)
+        if stored_client_id:
+            client_id = stored_client_id
+
+    errors: list[str] = []
+    for _path, raw in account_rows:
+        try:
+            account = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if account.get("provider") != "google" or account.get("status") != "configured":
+            continue
+        account_id = str(account.get("id") or "")
+        access_handle = str(
+            account.get("access_secret") or account.get("access_secret_handle") or ""
+        )
+        refresh_handle = str(
+            account.get("refresh_secret") or account.get("refresh_secret_handle") or ""
+        )
+        access_secret = _root_filesystem_secret_metadata_by_handle(db_path, access_handle)
+        expires_at = access_secret.get("expires_at") if access_secret else None
+        expires_dt = _parse_rfc3339(expires_at)
+        if access_secret and (expires_dt is None or expires_dt > now):
+            return _decrypt_filesystem_secret(
+                master_key,
+                _root_filesystem_secret_by_handle(db_path, access_handle),
+            ), {
+                "source": "reborn_product_auth_access_secret",
+                "refreshed": False,
+                "account_id": account_id,
+                "access_secret_expired": False,
+            }
+        if not refresh_handle:
+            errors.append(f"account {account_id or '<unknown>'} has no refresh secret")
+            continue
+        if not client_id or not client_secret:
+            raise LiveQaError(
+                "Google runtime token unavailable: copied access token is expired "
+                "and Google OAuth client id/secret env is incomplete"
+            )
+        refresh_token = _decrypt_filesystem_secret(
+            master_key,
+            _root_filesystem_secret_by_handle(db_path, refresh_handle),
+        )
+        try:
+            import httpx
+
+            response = httpx.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": client_id[1],
+                    "client_secret": client_secret[1],
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                },
+                timeout=20.0,
+            )
+            payload = response.json()
+        except Exception as exc:
+            errors.append(
+                f"account {account_id or '<unknown>'} refresh request failed: {type(exc).__name__}"
+            )
+            continue
+        access_token = str(payload.get("access_token") or "")
+        if response.status_code < 400 and access_token:
+            return access_token, {
+                "source": "reborn_product_auth_refresh_secret",
+                "refreshed": True,
+                "account_id": account_id,
+                "expires_in_seconds": payload.get("expires_in"),
+                "scope_count": len(str(payload.get("scope") or "").split()),
+            }
+        errors.append(
+            "account "
+            f"{account_id or '<unknown>'} refresh failed with "
+            f"{payload.get('error') or response.status_code}"
+        )
+
+    raise LiveQaError(
+        "Google runtime token unavailable: "
+        + ("; ".join(errors) if errors else "no configured Google account found")
+    )
+
+
 def _google_product_auth_preflight(
     reborn_home: Path,
     user_id: str,
@@ -1864,7 +2007,12 @@ def _slack_team_id_from_bot_token_env(bot_token_env: str) -> str | None:
     return team_id or None
 
 
-def prepare_reborn_home(args: argparse.Namespace, selected_cases: list[str]) -> PreparedRebornHome:
+def prepare_reborn_home(
+    args: argparse.Namespace,
+    selected_cases: list[str],
+    *,
+    case_name: str | None = None,
+) -> PreparedRebornHome:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     needs_slack = any(CASES[name].requires_slack for name in selected_cases)
     needs_slack_target = any(CASES[name].requires_slack_target for name in selected_cases)
@@ -1882,12 +2030,15 @@ def prepare_reborn_home(args: argparse.Namespace, selected_cases: list[str]) -> 
         )
 
     prepared_home = args.output_dir / "reborn-home"
+    if case_name:
+        prepared_home = prepared_home / case_name
     if prepared_home.exists():
         shutil.rmtree(prepared_home)
 
     def _ignore(_dir: str, names: list[str]) -> set[str]:
         return {name for name in names if name.endswith(".lock")}
 
+    prepared_home.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source_home, prepared_home, ignore=_ignore)
     config_path = prepared_home / "config.toml"
     route_configured_from_env = _append_slack_channel_route_if_configured(
@@ -2604,6 +2755,191 @@ async def _live_github_latest_release(owner: str, repo: str) -> dict[str, str]:
     }
 
 
+def _extract_google_spreadsheet_id(text: str) -> str | None:
+    patterns = [
+        r"https://docs\.google\.com/spreadsheets/d/([A-Za-z0-9_-]+)",
+        r"\bspreadsheet(?:\s+id)?\s*[:=]\s*([A-Za-z0-9_-]{20,})",
+        r"\b([A-Za-z0-9_-]{30,})\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
+async def _google_sheet_contains_marker(
+    *,
+    access_token: str,
+    spreadsheet_id: str,
+    marker: str,
+    range_name: str = "A1:Z1000",
+) -> dict[str, object]:
+    import httpx
+
+    url = (
+        "https://sheets.googleapis.com/v4/spreadsheets/"
+        f"{spreadsheet_id}/values/{urllib.parse.quote(range_name, safe='!:$')}"
+    )
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"majorDimension": "ROWS"},
+        )
+    try:
+        payload: object = response.json()
+    except ValueError:
+        payload = {}
+    if response.status_code < 200 or response.status_code >= 300:
+        error = payload.get("error") if isinstance(payload, dict) else None
+        message = error.get("message") if isinstance(error, dict) else str(payload)[:300]
+        raise AssertionError(
+            f"Google Sheets read returned HTTP {response.status_code}: {message}"
+        )
+    values = payload.get("values") if isinstance(payload, dict) else None
+    if not isinstance(values, list):
+        values = []
+    marker_lower = marker.lower()
+    for row_index, row in enumerate(values, start=1):
+        if not isinstance(row, list):
+            continue
+        for column_index, cell in enumerate(row, start=1):
+            if marker_lower in str(cell).lower():
+                return {
+                    "found": True,
+                    "row_index": row_index,
+                    "column_index": column_index,
+                    "row_count": len(values),
+                }
+    return {"found": False, "row_count": len(values)}
+
+
+async def _wait_for_google_sheet_marker(
+    *,
+    access_token: str,
+    spreadsheet_id: str,
+    marker: str,
+    timeout: float = 240.0,
+    range_name: str = "A1:Z1000",
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout
+    last_check: dict[str, object] | None = None
+    while time.monotonic() < deadline:
+        last_check = await _google_sheet_contains_marker(
+            access_token=access_token,
+            spreadsheet_id=spreadsheet_id,
+            marker=marker,
+            range_name=range_name,
+        )
+        if last_check.get("found"):
+            return last_check
+        await asyncio.sleep(2.0)
+    raise AssertionError(
+        "Google Sheet marker was not observed before timeout. "
+        f"spreadsheet_id_present={bool(spreadsheet_id)} marker={marker!r} "
+        f"last_check={last_check!r}"
+    )
+
+
+async def _gmail_delivery_target_email(
+    *,
+    access_token: str,
+    extra_env: dict[str, str] | None = None,
+) -> str:
+    configured = _first_env_value(
+        [
+            "REBORN_WEBUI_V2_LIVE_QA_EMAIL_TARGET",
+            "LIVE_CANARY_EMAIL_TARGET",
+            "AUTH_LIVE_GOOGLE_EMAIL",
+            "GOOGLE_TEST_EMAIL",
+        ],
+        extra_env,
+    )
+    if configured:
+        return configured[1]
+
+    import httpx
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    try:
+        payload: object = response.json()
+    except ValueError:
+        payload = {}
+    if response.status_code < 200 or response.status_code >= 300:
+        error = payload.get("error") if isinstance(payload, dict) else None
+        message = error.get("message") if isinstance(error, dict) else str(payload)[:300]
+        raise AssertionError(
+            f"Gmail profile read returned HTTP {response.status_code}: {message}"
+        )
+    email = str(payload.get("emailAddress") if isinstance(payload, dict) else "").strip()
+    if not email:
+        raise AssertionError("Gmail profile did not include an emailAddress")
+    return email
+
+
+async def _gmail_message_contains_marker(
+    *,
+    access_token: str,
+    marker: str,
+) -> dict[str, object]:
+    import httpx
+
+    query = f'"{marker}" newer_than:1d'
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"q": query, "maxResults": 10},
+        )
+    try:
+        payload: object = response.json()
+    except ValueError:
+        payload = {}
+    if response.status_code < 200 or response.status_code >= 300:
+        error = payload.get("error") if isinstance(payload, dict) else None
+        message = error.get("message") if isinstance(error, dict) else str(payload)[:300]
+        raise AssertionError(
+            f"Gmail message search returned HTTP {response.status_code}: {message}"
+        )
+    messages = payload.get("messages") if isinstance(payload, dict) else None
+    if not isinstance(messages, list):
+        messages = []
+    return {
+        "found": bool(messages),
+        "message_count": len(messages),
+        "result_size_estimate": (
+            payload.get("resultSizeEstimate") if isinstance(payload, dict) else None
+        ),
+    }
+
+
+async def _wait_for_gmail_marker(
+    *,
+    access_token: str,
+    marker: str,
+    timeout: float = 240.0,
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout
+    last_check: dict[str, object] | None = None
+    while time.monotonic() < deadline:
+        last_check = await _gmail_message_contains_marker(
+            access_token=access_token,
+            marker=marker,
+        )
+        if last_check.get("found"):
+            return last_check
+        await asyncio.sleep(3.0)
+    raise AssertionError(
+        "Gmail marker was not observed before timeout. "
+        f"marker={marker!r} last_check={last_check!r}"
+    )
+
+
 async def case_qa_3b_endpoint_status_live_chat(ctx: LiveQaContext) -> ProbeResult:
     marker = "REBORN_QA_3B_ENDPOINT_STATUS_DONE"
     url = "https://cloud-api.near.ai"
@@ -3252,6 +3588,124 @@ async def case_qa_2e_calendar_prep_email_routine(ctx: LiveQaContext) -> ProbeRes
     )
 
 
+async def case_qa_2f_calendar_prep_email_delivery(ctx: LiveQaContext) -> ProbeResult:
+    started = time.monotonic()
+    suffix = str(int(time.time() * 1000))
+    marker = f"REBORN_QA_2F_CALENDAR_PREP_EMAIL_DELIVERED_{suffix}"
+    try:
+        access_token, token_meta = _google_runtime_access_token(
+            ctx.reborn_home,
+            _auth_user_id(),
+            ctx.env,
+        )
+        target_email = await _gmail_delivery_target_email(
+            access_token=access_token,
+            extra_env=ctx.env,
+        )
+    except Exception as exc:
+        return _result(
+            "qa_2f_calendar_prep_email_delivery",
+            False,
+            started,
+            {
+                "error": str(exc),
+                "marker": marker,
+                "target_email_present": False,
+            },
+        )
+
+    result = await _live_chat_with_extensions_case(
+        ctx,
+        case_name="qa_2f_calendar_prep_email_delivery",
+        marker=marker,
+        required_text=["Gmail", "email"],
+        extensions=[
+            {
+                "package_id": "gmail",
+                "display_name": "Gmail",
+                "required_tools": ["gmail.send_message"],
+            },
+            {
+                "package_id": "google-calendar",
+                "display_name": "Google Calendar",
+                "required_tools": ["google-calendar.list_events"],
+            },
+            {
+                "package_id": "google-drive",
+                "display_name": "Google Drive",
+                "required_tools": ["google-drive.list_files"],
+            },
+            {
+                "package_id": "google-docs",
+                "display_name": "Google Docs",
+                "required_tools": ["google-docs.read_content"],
+                "ensure_installed": False,
+            },
+            {
+                "package_id": "web-access",
+                "display_name": "Web Access",
+                "required_tools": ["web-access.search"],
+                "ensure_installed": False,
+            },
+        ],
+        prompt=(
+            "QA case 2F: perform the meeting-prep email side effect now. Use my "
+            "live Google Calendar connection to inspect upcoming events, and use "
+            "Google Drive or Docs and live web search for context if available. "
+            f"Send a Gmail email to {target_email} with subject "
+            f"`Reborn QA 2F meeting prep {suffix}`. The email body must include "
+            f"the exact marker {marker}. If no upcoming meeting is available, "
+            "send a short email that clearly says no upcoming calendar event was "
+            "available. In the final answer include the exact marker "
+            f"{marker}, include the word Gmail, and include the word email."
+        ),
+        timeout=420.0,
+        extra_details={
+            "target_email_present": True,
+            "target_source": (
+                "env"
+                if _first_env_value(
+                    [
+                        "REBORN_WEBUI_V2_LIVE_QA_EMAIL_TARGET",
+                        "LIVE_CANARY_EMAIL_TARGET",
+                        "AUTH_LIVE_GOOGLE_EMAIL",
+                        "GOOGLE_TEST_EMAIL",
+                    ],
+                    ctx.env,
+                )
+                else "gmail_profile"
+            ),
+        },
+        forbidden_text=[
+            "auth_denied",
+            "auth_required",
+            "authentication required",
+            "can't send",
+            "cannot send",
+            "permission denied",
+        ],
+    )
+    if not result.success:
+        result.latency_ms = int((time.monotonic() - started) * 1000)
+        return result
+    try:
+        delivery = await _wait_for_gmail_marker(
+            access_token=access_token,
+            marker=marker,
+            timeout=360.0,
+        )
+        result.details["google_token"] = token_meta
+        result.details["gmail_delivery"] = delivery
+        result.latency_ms = int((time.monotonic() - started) * 1000)
+        return result
+    except Exception as exc:
+        result.success = False
+        result.latency_ms = int((time.monotonic() - started) * 1000)
+        result.details["google_token"] = token_meta
+        result.details["error"] = str(exc)
+        return result
+
+
 async def case_qa_4a_gmail_connect(ctx: LiveQaContext) -> ProbeResult:
     return await _extension_authenticated_case(
         ctx,
@@ -3337,6 +3791,107 @@ async def case_qa_5c_strategy_doc_knowledge_base(ctx: LiveQaContext) -> ProbeRes
     )
 
 
+async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResult:
+    started = time.monotonic()
+    wall_started = time.time()
+    suffix = str(int(wall_started * 1000))
+    doc_marker = f"REBORN_QA_5D_STRATEGY_DOC_{suffix}"
+    slack_marker = f"REBORN_QA_5D_SLACK_STRATEGY_ANSWER_{suffix}"
+    nonce = f"QA5D-NONCE-{uuid.uuid4()}"
+    strategy_phrase = (
+        "Reborn QA 5D strategy north star: answer Slack questions from "
+        f"live Google Docs grounding with nonce {nonce}."
+    )
+    doc_creation = await _live_chat_with_extensions_case(
+        ctx,
+        case_name="qa_5d_slack_strategy_doc_answer",
+        marker=doc_marker,
+        required_text=["strategy", "Google Docs"],
+        extensions=[
+            {
+                "package_id": "google-docs",
+                "display_name": "Google Docs",
+                "required_tools": [
+                    "google-docs.create_document",
+                    "google-docs.read_content",
+                ],
+            },
+        ],
+        prompt=(
+            "QA case 5D setup: create a new Google Docs document titled "
+            f"`{doc_marker}`. Put this exact strategy sentence in the body: "
+            f"{strategy_phrase} Read the document content back through Google "
+            "Docs. In the final answer include the exact marker "
+            f"{doc_marker}, the word strategy, and the phrase Google Docs."
+        ),
+        timeout=360.0,
+        extra_details={
+            "doc_marker": doc_marker,
+            "slack_marker": slack_marker,
+            "strategy_phrase": strategy_phrase,
+        },
+        forbidden_text=[
+            "auth_denied",
+            "auth_required",
+            "authentication required",
+            "can't create",
+            "cannot create",
+            "permission denied",
+        ],
+    )
+    if not doc_creation.success:
+        return doc_creation
+    observed: dict[str, object] = {
+        **doc_creation.details,
+        "doc_creation_latency_ms": doc_creation.latency_ms,
+    }
+    try:
+        slack = _slack_preflight(ctx)
+        channel_id = _slack_delivery_channel_id(ctx)
+        if not channel_id:
+            raise AssertionError("Slack inbound test could not resolve a DM/channel id")
+        slack_user_id = str(slack.get("legacy_actor_user_id") or "U0REBORNQA")
+        post_result = await _post_signed_slack_dm_event(
+            ctx,
+            channel_id=channel_id,
+            user_id=slack_user_id,
+            text=(
+                "QA case 5D: use connected Google Drive or Google Docs to find "
+                f"the document titled `{doc_marker}`. Answer with the strategy "
+                "north star from that document. Do not answer from memory. "
+                f"Include the exact marker {slack_marker} in your Slack reply."
+            ),
+            event_id=f"EvREBORNQA5D{suffix}",
+        )
+        observed["signed_event"] = post_result
+        deadline = time.monotonic() + 360.0
+        last_history: dict[str, object] | None = None
+        while time.monotonic() < deadline:
+            history = await _slack_history_contains_marker(
+                ctx,
+                channel_id=channel_id,
+                marker=slack_marker,
+                oldest_epoch=wall_started,
+                required_text=[nonce, "Google Docs", "grounding"],
+            )
+            last_history = history
+            if history.get("found"):
+                observed["slack_history"] = history
+                return _result("qa_5d_slack_strategy_doc_answer", True, started, observed)
+            await asyncio.sleep(2.0)
+        raise AssertionError(
+            "Slack grounded strategy answer marker was not observed after signed "
+            f"Slack event. last_history={last_history!r}"
+        )
+    except Exception as exc:
+        return _result(
+            "qa_5d_slack_strategy_doc_answer",
+            False,
+            started,
+            {"error": str(exc), **observed},
+        )
+
+
 async def case_qa_6b_sheets_connect(ctx: LiveQaContext) -> ProbeResult:
     return await _extension_authenticated_case(
         ctx,
@@ -3404,6 +3959,87 @@ async def case_qa_6d_gmail_to_sheet_routine(ctx: LiveQaContext) -> ProbeResult:
             f"exact marker {marker} and include the words routine and Gmail."
         ),
     )
+
+
+async def case_qa_6e_gmail_to_sheet_delivery(ctx: LiveQaContext) -> ProbeResult:
+    started = time.monotonic()
+    marker = f"REBORN_QA_6E_GMAIL_TO_SHEET_DELIVERY_{int(time.time() * 1000)}"
+    result = await _live_chat_with_extensions_case(
+        ctx,
+        case_name="qa_6e_gmail_to_sheet_delivery",
+        marker=marker,
+        required_text=["Google Sheet", "spreadsheet"],
+        extensions=[
+            {
+                "package_id": "gmail",
+                "display_name": "Gmail",
+                "required_tools": ["gmail.list_messages"],
+                "ensure_installed": False,
+            },
+            {
+                "package_id": "google-sheets",
+                "display_name": "Google Sheets",
+                "required_tools": [
+                    "google-sheets.create_spreadsheet",
+                    "google-sheets.append_values",
+                ],
+            },
+        ],
+        prompt=(
+            "QA case 6E: perform the CRM Gmail-to-Sheet side effect now. Inspect "
+            "at most one recent Gmail inbox message. Create a new Google Sheet "
+            f"named `{marker}` and append exactly one row with columns Source, "
+            "Summary, and QA Marker. The QA Marker cell must contain the exact "
+            f"marker {marker}. If no Gmail message is available, still append a "
+            "row with Source as Gmail, Summary as no recent message available, "
+            f"and QA Marker as {marker}. In the final answer include the exact "
+            f"marker {marker}, include the phrase Google Sheet, and include the "
+            "created spreadsheet URL."
+        ),
+        timeout=420.0,
+        forbidden_text=[
+            "auth_denied",
+            "auth_required",
+            "authentication required",
+            "can't create",
+            "cannot create",
+            "permission denied",
+        ],
+    )
+    if not result.success:
+        return result
+    text_excerpt = str(result.details.get("text_excerpt") or "")
+    spreadsheet_id = _extract_google_spreadsheet_id(text_excerpt)
+    result.details["spreadsheet_id_present"] = bool(spreadsheet_id)
+    if not spreadsheet_id:
+        result.success = False
+        result.details["error"] = "assistant did not return a Google spreadsheet URL or id"
+        return result
+    try:
+        access_token, token_meta = _google_runtime_access_token(
+            ctx.reborn_home,
+            _auth_user_id(),
+            ctx.env,
+        )
+        sheet_check = await _google_sheet_contains_marker(
+            access_token=access_token,
+            spreadsheet_id=spreadsheet_id,
+            marker=marker,
+        )
+        result.details["google_token"] = token_meta
+        result.details["spreadsheet_id"] = spreadsheet_id
+        result.details["sheet_marker_check"] = sheet_check
+        if not sheet_check.get("found"):
+            result.success = False
+            result.details["error"] = "Google Sheet did not contain the QA marker row"
+        result.latency_ms = int((time.monotonic() - started) * 1000)
+        return result
+    except Exception as exc:
+        result.success = False
+        result.latency_ms = int((time.monotonic() - started) * 1000)
+        result.details["spreadsheet_id"] = spreadsheet_id
+        result.details["error"] = str(exc)
+        return result
 
 
 async def case_qa_7b_sheets_connect(ctx: LiveQaContext) -> ProbeResult:
@@ -3610,6 +4246,110 @@ async def case_qa_4d_github_release_slack_routine(ctx: LiveQaContext) -> ProbeRe
     )
 
 
+async def case_qa_4e_github_release_email_delivery(ctx: LiveQaContext) -> ProbeResult:
+    started = time.monotonic()
+    suffix = str(int(time.time() * 1000))
+    marker = f"REBORN_QA_4E_GITHUB_RELEASE_EMAIL_DELIVERED_{suffix}"
+    try:
+        release = await _live_github_latest_release("nearai", "ironclaw")
+        access_token, token_meta = _google_runtime_access_token(
+            ctx.reborn_home,
+            _auth_user_id(),
+            ctx.env,
+        )
+        target_email = await _gmail_delivery_target_email(
+            access_token=access_token,
+            extra_env=ctx.env,
+        )
+    except Exception as exc:
+        return _result(
+            "qa_4e_github_release_email_delivery",
+            False,
+            started,
+            {
+                "error": str(exc),
+                "marker": marker,
+                "target_email_present": False,
+            },
+        )
+
+    result = await _live_chat_with_extensions_case(
+        ctx,
+        case_name="qa_4e_github_release_email_delivery",
+        marker=marker,
+        required_text=["Gmail", release["tag_name"]],
+        extensions=[
+            {
+                "package_id": "gmail",
+                "display_name": "Gmail",
+                "required_tools": ["gmail.send_message"],
+            },
+            {
+                "package_id": "web-access",
+                "display_name": "Web Access",
+                "required_tools": ["web-access.search"],
+            },
+        ],
+        prompt=(
+            "QA case 4E: perform the GitHub release email side effect now. "
+            "Check the latest public nearai/ironclaw release using live web or "
+            f"HTTP context. The release API URL is {release['api_url']} and the "
+            f"expected latest release tag is {release['tag_name']}. Send a Gmail "
+            f"email to {target_email} with subject `Reborn QA 4E release "
+            f"{release['tag_name']} {suffix}`. The email body must include the "
+            f"exact marker {marker}, the word GitHub, and the release tag "
+            f"{release['tag_name']}. In the final answer include the exact marker "
+            f"{marker}, include the word Gmail, and include the release tag "
+            f"{release['tag_name']}."
+        ),
+        timeout=420.0,
+        extra_details={
+            **release,
+            "target_email_present": True,
+            "target_source": (
+                "env"
+                if _first_env_value(
+                    [
+                        "REBORN_WEBUI_V2_LIVE_QA_EMAIL_TARGET",
+                        "LIVE_CANARY_EMAIL_TARGET",
+                        "AUTH_LIVE_GOOGLE_EMAIL",
+                        "GOOGLE_TEST_EMAIL",
+                    ],
+                    ctx.env,
+                )
+                else "gmail_profile"
+            ),
+        },
+        forbidden_text=[
+            "auth_denied",
+            "auth_required",
+            "authentication required",
+            "can't send",
+            "cannot send",
+            "permission denied",
+        ],
+    )
+    if not result.success:
+        result.latency_ms = int((time.monotonic() - started) * 1000)
+        return result
+    try:
+        delivery = await _wait_for_gmail_marker(
+            access_token=access_token,
+            marker=marker,
+            timeout=360.0,
+        )
+        result.details["google_token"] = token_meta
+        result.details["gmail_delivery"] = delivery
+        result.latency_ms = int((time.monotonic() - started) * 1000)
+        return result
+    except Exception as exc:
+        result.success = False
+        result.latency_ms = int((time.monotonic() - started) * 1000)
+        result.details["google_token"] = token_meta
+        result.details["error"] = str(exc)
+        return result
+
+
 async def case_qa_5a_slack_connect(ctx: LiveQaContext) -> ProbeResult:
     return await _slack_connect_case(ctx, case_name="qa_5a_slack_connect")
 
@@ -3757,6 +4497,122 @@ async def case_qa_7d_slack_bug_message_trigger(ctx: LiveQaContext) -> ProbeResul
         )
     except Exception as exc:
         return _result(case_name, False, started, {"error": str(exc), **observed})
+
+
+async def case_qa_7e_slack_bug_sheet_delivery(ctx: LiveQaContext) -> ProbeResult:
+    started = time.monotonic()
+    wall_started = time.time()
+    suffix = str(int(wall_started * 1000))
+    sheet_marker = f"REBORN_QA_7E_BUG_TRACKER_SHEET_{suffix}"
+    row_marker = f"REBORN_QA_7E_BUG_ROW_{suffix}"
+    bug_summary = f"live QA signed Slack bug row side effect {suffix}"
+    setup = await _live_chat_with_extensions_case(
+        ctx,
+        case_name="qa_7e_slack_bug_sheet_delivery",
+        marker=sheet_marker,
+        required_text=["Google Sheet", "spreadsheet"],
+        extensions=[
+            {
+                "package_id": "google-sheets",
+                "display_name": "Google Sheets",
+                "required_tools": [
+                    "google-sheets.create_spreadsheet",
+                    "google-sheets.append_values",
+                ],
+            },
+        ],
+        prompt=(
+            "QA case 7E setup: create a new Google Sheet named "
+            f"`{sheet_marker}` with exactly one header row and no bug data rows. "
+            "The header columns must be Summary, Reporter, Slack Timestamp, "
+            "Status, and QA Marker. In the final answer include the exact marker "
+            f"{sheet_marker}, include the phrase Google Sheet, and include the "
+            "created spreadsheet URL."
+        ),
+        timeout=360.0,
+        forbidden_text=[
+            "auth_denied",
+            "auth_required",
+            "authentication required",
+            "can't create",
+            "cannot create",
+            "permission denied",
+        ],
+    )
+    if not setup.success:
+        return setup
+    observed: dict[str, object] = {
+        **setup.details,
+        "setup_latency_ms": setup.latency_ms,
+        "sheet_marker": sheet_marker,
+        "row_marker": row_marker,
+    }
+    text_excerpt = str(setup.details.get("text_excerpt") or "")
+    spreadsheet_id = _extract_google_spreadsheet_id(text_excerpt)
+    observed["spreadsheet_id_present"] = bool(spreadsheet_id)
+    if not spreadsheet_id:
+        return _result(
+            "qa_7e_slack_bug_sheet_delivery",
+            False,
+            started,
+            {
+                **observed,
+                "error": "assistant did not return a Google spreadsheet URL or id",
+            },
+        )
+    try:
+        access_token, token_meta = _google_runtime_access_token(
+            ctx.reborn_home,
+            _auth_user_id(),
+            ctx.env,
+        )
+        slack = _slack_preflight(ctx)
+        channel_id = _slack_delivery_channel_id(ctx)
+        if not channel_id:
+            raise AssertionError("Slack inbound test could not resolve a DM/channel id")
+        slack_user_id = str(slack.get("legacy_actor_user_id") or "U0REBORNQA")
+        post_result = await _post_signed_slack_dm_event(
+            ctx,
+            channel_id=channel_id,
+            user_id=slack_user_id,
+            text=(
+                f"bug: {bug_summary}. Append this bug to the Google Sheet "
+                f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit. "
+                "Use Summary from this bug message, Reporter as the Slack user, "
+                "Slack Timestamp from this Slack event if available, Status as New, "
+                f"and QA Marker exactly {row_marker}. Do not create a new sheet."
+            ),
+            event_id=f"EvREBORNQA7E{suffix}",
+        )
+        marker_check = await _wait_for_google_sheet_marker(
+            access_token=access_token,
+            spreadsheet_id=spreadsheet_id,
+            marker=row_marker,
+            timeout=360.0,
+        )
+        return _result(
+            "qa_7e_slack_bug_sheet_delivery",
+            True,
+            started,
+            {
+                **observed,
+                "google_token": token_meta,
+                "spreadsheet_id": spreadsheet_id,
+                "signed_event": post_result,
+                "sheet_marker_check": marker_check,
+            },
+        )
+    except Exception as exc:
+        return _result(
+            "qa_7e_slack_bug_sheet_delivery",
+            False,
+            started,
+            {
+                **observed,
+                "spreadsheet_id": spreadsheet_id,
+                "error": str(exc),
+            },
+        )
 
 
 async def case_qa_7c_slack_bug_logger_routine(ctx: LiveQaContext) -> ProbeResult:
@@ -3920,6 +4776,7 @@ class CaseSpec:
         requires_telegram: bool = False,
         requires_github_auth: bool = False,
         default_enabled: bool = True,
+        implemented: bool = True,
     ) -> None:
         self.fn = fn
         self.requires_slack = requires_slack
@@ -3929,6 +4786,7 @@ class CaseSpec:
         self.requires_telegram = requires_telegram
         self.requires_github_auth = requires_github_auth
         self.default_enabled = default_enabled
+        self.implemented = implemented
 
 
 CASES: dict[str, CaseSpec] = {
@@ -3936,16 +4794,19 @@ CASES: dict[str, CaseSpec] = {
         _gated_case("qa_1a_telegram_connect"),
         requires_telegram=True,
         default_enabled=False,
+        implemented=False,
     ),
     "qa_1b_telegram_near_news_chat": CaseSpec(
         _gated_case("qa_1b_telegram_near_news_chat"),
         requires_telegram=True,
         default_enabled=False,
+        implemented=False,
     ),
     "qa_1c_telegram_near_news_routine": CaseSpec(
         _gated_case("qa_1c_telegram_near_news_routine"),
         requires_telegram=True,
         default_enabled=False,
+        implemented=False,
     ),
     "qa_2a_gmail_connect": CaseSpec(
         case_qa_2a_gmail_connect,
@@ -3970,7 +4831,7 @@ CASES: dict[str, CaseSpec] = {
         requires_google_product_auth=True,
     ),
     "qa_2f_calendar_prep_email_delivery": CaseSpec(
-        _gated_case("qa_2f_calendar_prep_email_delivery"),
+        case_qa_2f_calendar_prep_email_delivery,
         requires_google_product_auth=True,
         requires_google_runtime_access=True,
         default_enabled=False,
@@ -4008,7 +4869,7 @@ CASES: dict[str, CaseSpec] = {
         requires_slack_target=True,
     ),
     "qa_4e_github_release_email_delivery": CaseSpec(
-        _gated_case("qa_4e_github_release_email_delivery"),
+        case_qa_4e_github_release_email_delivery,
         requires_google_product_auth=True,
         requires_google_runtime_access=True,
         default_enabled=False,
@@ -4028,8 +4889,9 @@ CASES: dict[str, CaseSpec] = {
         default_enabled=False,
     ),
     "qa_5d_slack_strategy_doc_answer": CaseSpec(
-        _gated_case("qa_5d_slack_strategy_doc_answer"),
+        case_qa_5d_slack_strategy_doc_answer,
         requires_slack=True,
+        requires_slack_target=True,
         requires_google_product_auth=True,
         requires_google_runtime_access=True,
         default_enabled=False,
@@ -4053,7 +4915,7 @@ CASES: dict[str, CaseSpec] = {
         requires_google_product_auth=True,
     ),
     "qa_6e_gmail_to_sheet_delivery": CaseSpec(
-        _gated_case("qa_6e_gmail_to_sheet_delivery"),
+        case_qa_6e_gmail_to_sheet_delivery,
         requires_google_product_auth=True,
         requires_google_runtime_access=True,
         default_enabled=False,
@@ -4078,8 +4940,9 @@ CASES: dict[str, CaseSpec] = {
         requires_slack_target=True,
     ),
     "qa_7e_slack_bug_sheet_delivery": CaseSpec(
-        _gated_case("qa_7e_slack_bug_sheet_delivery"),
+        case_qa_7e_slack_bug_sheet_delivery,
         requires_slack=True,
+        requires_slack_target=True,
         requires_google_product_auth=True,
         requires_google_runtime_access=True,
         default_enabled=False,
@@ -4103,6 +4966,7 @@ CASES: dict[str, CaseSpec] = {
 
 
 def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
+    qa_matrix_path = os.environ.get("REBORN_WEBUI_V2_LIVE_QA_MATRIX_PATH", "").strip()
     represented_rows = sorted(
         {
             row
@@ -4118,9 +4982,9 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
         "default_cases": [
             name for name, spec in CASES.items() if spec.default_enabled
         ],
-        "qa_sheet": {
-            "url": "https://docs.google.com/spreadsheets/d/1IpioaRFnDw8cW4fj9vxg1pBRWN7swVQLRq1FqVlJAls/edit?gid=0#gid=0",
-            "sheet": "Automated",
+        "qa_matrix": {
+            "source": "local_xlsx",
+            "path": qa_matrix_path or None,
             "represented_rows": represented_rows,
             "represented_row_count": len(represented_rows),
         },
@@ -4137,11 +5001,14 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
                 "requires_google_runtime_access": spec.requires_google_runtime_access,
                 "requires_telegram": spec.requires_telegram,
                 "requires_github_auth": spec.requires_github_auth,
+                "implemented": spec.implemented,
                 "status": (
                     "default"
                     if spec.default_enabled
                     else "gated:requires_live_telegram"
                     if spec.requires_telegram
+                    else "gated:placeholder_needs_live_side_effect_verifier"
+                    if not spec.implemented
                     else "gated:requires_live_github_auth"
                     if spec.requires_github_auth
                     else "gated:requires_live_google_product_auth"
@@ -4191,13 +5058,19 @@ async def run_cases(args: argparse.Namespace) -> int:
         raise LiveQaError(
             f"ironclaw-reborn binary missing at {binary}; rerun without --skip-build"
         )
-    prepared_home = prepare_reborn_home(args, selected_cases)
-    preflight_path = write_preflight(args.output_dir, prepared_home)
-    print(f"[reborn-webui-v2-live-qa] preflight={preflight_path}", flush=True)
     results: list[ProbeResult] = []
     first_base_url = ""
     for name in selected_cases:
         case_spec = CASES[name]
+        prepared_home = prepare_reborn_home(args, [name], case_name=name)
+        preflight_path = write_preflight(args.output_dir, prepared_home)
+        case_preflight_path = args.output_dir / f"preflight.{name}.json"
+        shutil.copyfile(preflight_path, case_preflight_path)
+        print(
+            f"[reborn-webui-v2-live-qa] preflight={preflight_path} "
+            f"case_preflight={case_preflight_path}",
+            flush=True,
+        )
         slack_preflight = prepared_home.preflight.get("slack", {})
         google_preflight = prepared_home.preflight.get("google_product_auth", {})
         telegram_preflight = prepared_home.preflight.get("telegram", {})
