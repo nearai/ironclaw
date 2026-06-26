@@ -7,8 +7,9 @@
     },
     "target": {
       "type": "string",
-      "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'bootstrap' to clear BOOTSTRAP.md (content is ignored; the file is always cleared), or a relative memory document path.",
-      "default": "daily_log"
+      "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'bootstrap' to clear BOOTSTRAP.md (content is ignored; the file is always cleared), or a relative memory document path. A reserved name or relative path is allowed; it must not be absolute (no leading '/'), contain '..' traversal, or use backslash separators. The host filesystem additionally resolves the path within the scoped /memory mount.",
+      "default": "daily_log",
+      "not": { "pattern": "(^/)|(\\.\\.)|(\\\\)" }
     },
     "append": {
       "type": "boolean",

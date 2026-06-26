@@ -76,9 +76,14 @@ impl Mem0HttpResponse {
     }
 }
 
-/// A transport-level failure (connection, TLS, timeout, non-JSON body). Opaque
-/// on purpose: the provider maps it to a sanitized `MemoryServiceError` and the
-/// host logs the cause.
+/// A transport-level failure (connection, TLS, timeout, or reading the response
+/// body bytes). Opaque on purpose: the provider maps it to a sanitized
+/// `MemoryServiceError` and the host logs the cause.
+///
+/// A non-JSON or empty 2xx body is deliberately *not* a transport failure:
+/// `execute` degrades it to `Value::Null` (the HTTP status is the authoritative
+/// success signal and the service tolerates a null/unrecognized body), so an
+/// un-parseable body never surfaces here.
 #[derive(Debug, Error)]
 #[error("mem0 transport failure: {message}")]
 pub struct Mem0TransportError {

@@ -60,4 +60,14 @@ pub enum Mem0Error {
     /// would drop every previously-stored profile field on the next write.
     #[error("stored mem0 profile is not a JSON object: {reason}")]
     CorruptProfile { reason: String },
+
+    /// A 2xx mem0 response body matched none of the recognized list shapes (a
+    /// bare array, or an object wrapping `results`/`memories`/`data`). Surfaced
+    /// as a failure so list-shaped reads fail loud instead of silently treating
+    /// an unrecognized body as "no memories" — which would, for example, let
+    /// `profile_set` overwrite an existing profile it merely failed to decode. A
+    /// genuinely-empty list is a recognized shape (an empty array) and is not an
+    /// error.
+    #[error("mem0 returned an unrecognized response body shape")]
+    UnrecognizedResponse,
 }

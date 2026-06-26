@@ -2,7 +2,7 @@ schema_version = "reborn.extension_manifest.v2"
 id = "ironclaw.memory.native"
 name = "Reborn Native Memory"
 version = "0.1.0"
-description = "Host-bundled native memory provider (issue #3537). The model-facing memory tools below implement the host-defined memory.document_store.v1 profile; the provider is filesystem-backed and registered on the always-on first-party lane (like the builtin toolset), so the tools are unconditionally available. Provider-swapping is governed by the document-store profile binding, not by install/enable lifecycle."
+description = "Host-bundled native memory provider (issue #3537). The read and write tools below implement the host-defined memory.document_store.v1 profile; search and tree are provider-specific model-facing tools that implement no portable profile. The provider is filesystem-backed and registered on the always-on first-party lane (like the builtin toolset), so the tools are unconditionally available. Provider-swapping is governed by the document-store profile binding, not by install/enable lifecycle."
 # Requested trust only; the host trust policy computes effective trust. A
 # `first_party` runtime + reserved `ironclaw.*` id are accepted only for the
 # loader-supplied `HostBundled` source, and only when a matching host service

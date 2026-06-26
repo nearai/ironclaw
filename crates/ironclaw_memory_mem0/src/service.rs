@@ -140,7 +140,8 @@ impl Mem0MemoryService {
             .await
             .map_err(MemoryServiceError::operation_from)?;
         ensure_success(&response, "profile_set").map_err(MemoryServiceError::operation_from)?;
-        match latest_profile_text(&response_items(&response.body)) {
+        let items = response_items(&response.body).map_err(MemoryServiceError::operation_from)?;
+        match latest_profile_text(&items) {
             // No prior profile memory at all: the first write starts from empty.
             None => Ok(Map::new()),
             // A prior profile exists but does not parse as a JSON object. Fail
@@ -171,6 +172,7 @@ impl MemoryService for Mem0MemoryService {
             .map_err(MemoryServiceError::operation_from)?;
         ensure_success(&response, "search").map_err(MemoryServiceError::operation_from)?;
         let results = response_items(&response.body)
+            .map_err(MemoryServiceError::operation_from)?
             .into_iter()
             .filter_map(|item| {
                 Some(MemoryServiceSearchResult {
@@ -264,6 +266,7 @@ impl MemoryService for Mem0MemoryService {
         // document reads back scrambled. `sort_by` is stable, so fragments that
         // share (or lack) a `created_at` keep their relative list order.
         let mut fragments: Vec<&Value> = response_items(&response.body)
+            .map_err(MemoryServiceError::operation_from)?
             .into_iter()
             .filter(|item| item_metadata_str(item, TARGET_KEY) == Some(request.path.as_str()))
             .collect();
@@ -301,7 +304,7 @@ impl MemoryService for Mem0MemoryService {
         // MAPPING GAP: mem0 has no document hierarchy. Best-effort: surface the
         // distinct `target` tags (optionally prefix-filtered) as a flat list.
         let mut targets = std::collections::BTreeSet::new();
-        for item in response_items(&response.body) {
+        for item in response_items(&response.body).map_err(MemoryServiceError::operation_from)? {
             if let Some(target) = item_metadata_str(item, TARGET_KEY)
                 && (request.path.is_empty() || target.starts_with(request.path.as_str()))
             {
@@ -367,8 +370,8 @@ impl MemoryService for Mem0MemoryService {
         // MAPPING GAP: return the newest `kind=profile` memory's raw bytes, if any
         // (newest by `created_at`, since mem0 list order is not chronological). The
         // host parses + size-caps them, exactly as for native.
-        let document = latest_profile_text(&response_items(&response.body))
-            .map(|text| text.as_bytes().to_vec());
+        let items = response_items(&response.body).map_err(MemoryServiceError::operation_from)?;
+        let document = latest_profile_text(&items).map(|text| text.as_bytes().to_vec());
         Ok(MemoryServiceProfileReadResponse { document })
     }
 
@@ -399,6 +402,7 @@ impl MemoryService for Mem0MemoryService {
         // model-visible budgets — this provider never shapes model-visible
         // content (see `MemoryServiceContextSnippet` docs).
         let snippets = response_items(&response.body)
+            .map_err(MemoryServiceError::unavailable_from)?
             .into_iter()
             .filter_map(|item| {
                 Some(MemoryServiceContextSnippet {
@@ -451,16 +455,24 @@ fn ensure_success(response: &Mem0HttpResponse, operation: &'static str) -> Resul
 /// Extract the list of memory objects from a mem0 response, tolerating the
 /// documented shapes: a bare array, or an object wrapping `results`/`memories`/
 /// `data`.
-fn response_items(body: &Value) -> Vec<&Value> {
+///
+/// A 2xx body in *none* of those shapes is a contract violation, not "no
+/// memories": fail loud with [`Mem0Error::UnrecognizedResponse`] rather than
+/// returning an empty vec. A silent empty would let callers that branch on "no
+/// items" — notably `profile_set`'s read-merge-write — mistake an unrecognized
+/// body for "no prior data" and overwrite every previously-stored field. A
+/// genuinely-empty list is a recognized empty array (or `{"results": []}`) and
+/// still returns `Ok(vec![])`.
+fn response_items(body: &Value) -> Result<Vec<&Value>, Mem0Error> {
     if let Some(array) = body.as_array() {
-        return array.iter().collect();
+        return Ok(array.iter().collect());
     }
     for key in ["results", "memories", "data"] {
         if let Some(array) = body.get(key).and_then(Value::as_array) {
-            return array.iter().collect();
+            return Ok(array.iter().collect());
         }
     }
-    Vec::new()
+    Err(Mem0Error::UnrecognizedResponse)
 }
 
 fn item_text(item: &Value) -> Option<&str> {
@@ -998,5 +1010,23 @@ mod tests {
             .filter(|request| request.method == Mem0HttpMethod::Post)
             .count();
         assert_eq!(posts, 0, "must not write when the prior profile is corrupt");
+    }
+
+    #[tokio::test]
+    async fn list_path_fails_loud_on_an_unrecognized_response_body() {
+        // A 2xx body that is neither a bare array nor an object wrapping
+        // `results`/`memories`/`data` is a contract violation. The list path
+        // (here via `profile_read`) must surface an error rather than silently
+        // returning "no memories" (an empty document) — a silent empty would let
+        // a later `profile_set` overwrite an existing profile it merely failed to
+        // decode.
+        let (service, _transport) = service_with(MockMem0Transport::always_ok(
+            json!({ "unexpected": "shape" }),
+        ));
+        let error = service
+            .profile_read(invocation())
+            .await
+            .expect_err("an unrecognized list body must fail loud, not return empty");
+        assert_eq!(error.kind(), MemoryServiceErrorKind::Operation);
     }
 }
