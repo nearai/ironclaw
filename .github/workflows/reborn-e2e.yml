@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         group:
           - architecture
