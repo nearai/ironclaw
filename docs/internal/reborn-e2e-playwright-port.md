@@ -1710,6 +1710,28 @@ Behavior adjustment:
   of stable element IDs, so the port drives the visible controls by role/name
   and asserts their observable behavior.
 
+### Step 50: Legacy Extension Removal State Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the browser-visible state invariant behind legacy
+`test_removed_not_in_extensions`, `test_removed_extension_not_listed`, and
+`test_removed_not_in_registry_installed`:
+
+- removing an installed extension submits the v2 remove request for its
+  `package_ref`;
+- the Registry tab no longer renders an installed section for that extension;
+- the same catalog entry returns as `available` with an `Install` action;
+- the removed entry no longer exposes installed-only actions or the active
+  status badge.
+
+Behavior adjustment:
+
+- Legacy asserted three separate backend lists (`/api/extensions`,
+  `/api/extensions/tools`, and `/api/extensions/registry`). Reborn's port
+  asserts the unified v2 Registry projection, which is what operators see after
+  the extensions and registry queries are invalidated.
+
 ## Open Migration Buckets
 
 Not yet ported:

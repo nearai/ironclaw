@@ -721,6 +721,54 @@ async def test_reborn_legacy_extensions_remove_failure_keeps_card(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_extensions_remove_clears_installed_state(
+    reborn_v2_server, reborn_v2_browser
+):
+    active_tool_registry_entry = {
+        "package_ref": _package_ref("active-tool"),
+        "display_name": "Active Tool",
+        "kind": "wasm_tool",
+        "description": "An installed WASM tool extension",
+        "keywords": ["search"],
+        "installed": True,
+    }
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[ACTIVE_TOOL],
+        registry=[active_tool_registry_entry],
+        tab="registry",
+    )
+    try:
+        page = harness["page"]
+        active_card = _card_by_title(page, "Active Tool")
+        await expect(active_card).to_be_visible(timeout=5000)
+        await expect(active_card.get_by_text("active", exact=True)).to_be_visible()
+        await expect(page.get_by_text("Installed", exact=True)).to_be_visible()
+
+        await active_card.get_by_label("More actions").click()
+        dialog_future = await _capture_next_confirm(page, accept=True)
+        await page.get_by_role("menuitem", name="Remove").click()
+        dialog = await asyncio.wait_for(dialog_future, timeout=5)
+        assert dialog["type"] == "confirm"
+        assert "Active Tool" in dialog["message"]
+        await expect(page.get_by_text("Active Tool removed")).to_be_visible(timeout=5000)
+        assert harness["remove_requests"] == ["active-tool"]
+
+        await expect(page.get_by_text("Installed", exact=True)).to_have_count(0)
+        available_card = _card_by_title(page, "Active Tool")
+        await expect(available_card.get_by_text("available", exact=True)).to_be_visible(
+            timeout=5000
+        )
+        await expect(
+            available_card.get_by_role("button", name="Install")
+        ).to_be_visible()
+        await expect(available_card.get_by_label("More actions")).to_have_count(0)
+        await expect(available_card.get_by_text("active", exact=True)).to_have_count(0)
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_extensions_reinstall_after_remove_requires_setup_again(
     reborn_v2_server, reborn_v2_browser
 ):
