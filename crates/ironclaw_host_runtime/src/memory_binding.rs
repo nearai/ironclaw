@@ -526,4 +526,23 @@ mod tests {
         let err = MemoryBindingPolicy::resolve(input).expect_err("no provider available");
         assert!(matches!(err, MemoryBindingError::NativeUnavailable { .. }));
     }
+
+    #[test]
+    fn case_variant_of_native_id_fails_closed_not_misclassified() {
+        // The `ExtensionId` grammar is lowercase-only (host-api `ids.rs`), so a
+        // case variant of the native id (`Ironclaw.Memory.Native`) is not a valid
+        // extension id at all. The raw-string compare against the native sentinel
+        // is therefore deliberately case-sensitive: a case variant must fail closed
+        // as an invalid id rather than be (mis)classified as a usable third-party
+        // binding. (Case-insensitive normalization would instead accept an invalid
+        // uppercase id as if it were the native sentinel.)
+        let mut input = MemoryBindingInput::native_default(MemoryDeploymentProfile::LocalDev);
+        input.bindings = vec![binding(
+            MEMORY_DOCUMENT_STORE_PROFILE_ID,
+            "Ironclaw.Memory.Native",
+        )];
+        let err = MemoryBindingPolicy::resolve(input)
+            .expect_err("an uppercase variant of the native id is not a valid extension id");
+        assert!(matches!(err, MemoryBindingError::InvalidExtensionId { .. }));
+    }
 }

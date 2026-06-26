@@ -204,6 +204,17 @@ impl MemoryService for Mem0MemoryService {
                 detail: "mem0 has no in-place substring patch",
             }));
         }
+        // MAPPING GAP: mem0 OSS is append-only — every `add` appends a new memory,
+        // and there is no addressable document to overwrite. A replace-style write
+        // (`append == false`, no patch) cannot be honored, so reject it explicitly
+        // as a stable, recoverable "unsupported" operation rather than silently
+        // adding a memory and then misreporting `append: true` back to the caller.
+        if !request.append {
+            return Err(MemoryServiceError::operation_from(Mem0Error::Unsupported {
+                operation: "write.replace",
+                detail: "mem0 is append-only; replace-style writes are not supported",
+            }));
+        }
         // MAPPING GAP: an empty write is the native `bootstrap` clear, which has
         // no mem0 analogue (no addressable document to truncate). Treat it as an
         // invalid request, matching the native provider's empty-content rule.
@@ -246,10 +257,19 @@ impl MemoryService for Mem0MemoryService {
             .map_err(MemoryServiceError::operation_from)?;
         ensure_success(&response, "read").map_err(MemoryServiceError::operation_from)?;
         // MAPPING GAP: mem0 is not path-addressable. Reconstruct a "document" by
-        // concatenating every memory tagged with the requested `target`.
-        let parts: Vec<String> = response_items(&response.body)
+        // concatenating every memory tagged with the requested `target`. mem0's
+        // list order is NOT chronological (mem0/Qdrant `get_all` makes no ordering
+        // guarantee — the same caveat the profile path documents), so sort the
+        // fragments by `created_at` before joining; otherwise an append-style
+        // document reads back scrambled. `sort_by` is stable, so fragments that
+        // share (or lack) a `created_at` keep their relative list order.
+        let mut fragments: Vec<&Value> = response_items(&response.body)
             .into_iter()
             .filter(|item| item_metadata_str(item, TARGET_KEY) == Some(request.path.as_str()))
+            .collect();
+        fragments.sort_by(|left, right| item_created_at(left).cmp(item_created_at(right)));
+        let parts: Vec<String> = fragments
+            .into_iter()
             .filter_map(|item| item_text(item).map(str::to_string))
             .collect();
         if parts.is_empty() {
@@ -584,6 +604,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_replace_is_rejected() {
+        // mem0 OSS is append-only, so a replace-style write (`append == false`,
+        // with no patch) cannot be honored. It must be rejected as a stable,
+        // recoverable operation error — never silently turned into an add that
+        // then misreports `append: true`.
+        let (service, transport) =
+            service_with(MockMem0Transport::always_ok(json!({ "id": "m-1" })));
+        let error = service
+            .write(
+                invocation(),
+                MemoryServiceWriteRequest {
+                    target: "notes/alpha.md".to_string(),
+                    content: "replace me".to_string(),
+                    append: false,
+                    old_string: None,
+                    new_string: None,
+                    replace_all: false,
+                    metadata: None,
+                    timezone: None,
+                },
+            )
+            .await
+            .expect_err("a replace-style write must be rejected");
+        assert_eq!(error.kind(), MemoryServiceErrorKind::Operation);
+        // The rejection happens before any add reaches the transport: no memory is
+        // silently appended on a replace request.
+        assert!(
+            transport.recorded().is_empty(),
+            "a rejected replace must not POST an add"
+        );
+    }
+
+    #[tokio::test]
     async fn search_parses_results_object_shape() {
         let (service, transport) = service_with(MockMem0Transport::always_ok(json!({
             "results": [
@@ -663,6 +716,41 @@ mod tests {
             .await
             .expect_err("absent target is not found");
         assert_eq!(missing.kind(), MemoryServiceErrorKind::Input);
+    }
+
+    #[tokio::test]
+    async fn read_joins_fragments_in_created_at_order_not_list_order() {
+        // mem0/Qdrant list order is not chronological, so a `target`'s fragments
+        // arrive out of order (newest in the MIDDLE here). `read` must join them by
+        // `created_at` (oldest first) so an append-style document round-trips in the
+        // order it was written, not in arbitrary list order.
+        let (service, _transport) = service_with(MockMem0Transport::always_ok(json!([
+            {
+                "memory": "second",
+                "created_at": "2026-02-01T00:00:00Z",
+                "metadata": { "target": "notes/log.md" }
+            },
+            {
+                "memory": "third",
+                "created_at": "2026-03-01T00:00:00Z",
+                "metadata": { "target": "notes/log.md" }
+            },
+            {
+                "memory": "first",
+                "created_at": "2026-01-01T00:00:00Z",
+                "metadata": { "target": "notes/log.md" }
+            }
+        ])));
+        let read = service
+            .read(
+                invocation(),
+                MemoryServiceReadRequest {
+                    path: "notes/log.md".to_string(),
+                },
+            )
+            .await
+            .expect("read should succeed");
+        assert_eq!(read.content, "first\nsecond\nthird");
     }
 
     #[tokio::test]

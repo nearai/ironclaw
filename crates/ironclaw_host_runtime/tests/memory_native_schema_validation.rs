@@ -107,10 +107,27 @@ fn search_input_schema_accepts_valid_and_rejects_invalid() {
     assert!(validator.is_valid(&json!({"query": "budgets"})));
     assert!(validator.is_valid(&json!({"q": "budgets"})));
     assert!(validator.is_valid(&json!({"text": "budgets", "limit": 3})));
+    // A single non-empty alias on its own is accepted.
+    assert!(
+        validator.is_valid(&json!({"pattern": "budgets"})),
+        "a single non-empty alias is accepted"
+    );
 
     assert!(
         !validator.is_valid(&json!({"limit": 5})),
         "at least one of query/q/text/pattern is required"
+    );
+    assert!(
+        !validator.is_valid(&json!({"query": ""})),
+        "an empty query is rejected by minLength"
+    );
+    assert!(
+        !validator.is_valid(&json!({"q": ""})),
+        "an empty alias is rejected by minLength"
+    );
+    assert!(
+        !validator.is_valid(&json!({"query": "a", "text": "b"})),
+        "conflicting aliases (more than one supplied) are rejected"
     );
     assert!(
         !validator.is_valid(&json!({"query": "x", "limit": 9999})),
@@ -128,6 +145,33 @@ fn tree_input_schema_accepts_valid_and_rejects_invalid() {
 
     assert!(validator.is_valid(&json!({})), "all fields are optional");
     assert!(validator.is_valid(&json!({"path": "notes", "depth": 2})));
+    assert!(
+        validator.is_valid(&json!({"path": ""})),
+        "an explicit empty path is the memory root"
+    );
+    assert!(
+        validator.is_valid(&json!({"path": "notes/sub"})),
+        "internal path separators are allowed"
+    );
+
+    // Scoped-path tightening (mirrors document-read.input): absolute paths and
+    // traversal forms are rejected at the schema, ahead of the host filesystem gate.
+    assert!(
+        !validator.is_valid(&json!({"path": "/abs"})),
+        "absolute paths are rejected"
+    );
+    assert!(
+        !validator.is_valid(&json!({"path": "../escape"})),
+        "parent-dir traversal is rejected"
+    );
+    assert!(
+        !validator.is_valid(&json!({"path": "notes/../secrets"})),
+        "embedded '..' traversal is rejected"
+    );
+    assert!(
+        !validator.is_valid(&json!({"path": "notes\\evil"})),
+        "backslash separators are rejected"
+    );
 
     assert!(
         !validator.is_valid(&json!({"depth": 99})),
@@ -136,5 +180,22 @@ fn tree_input_schema_accepts_valid_and_rejects_invalid() {
     assert!(
         !validator.is_valid(&json!({"rogue": 1})),
         "additionalProperties is false"
+    );
+}
+
+#[test]
+fn document_read_output_schema_requires_word_count() {
+    let validator = validator_for("schemas/memory/document-read.output.v1.json");
+
+    // `read()` always returns word_count (via MemoryServiceReadResponse), so the
+    // output schema requires it alongside path/content.
+    assert!(validator.is_valid(&json!({
+        "path": "notes/alpha.md",
+        "content": "hello world",
+        "word_count": 2
+    })));
+    assert!(
+        !validator.is_valid(&json!({"path": "notes/alpha.md", "content": "hello world"})),
+        "word_count is required"
     );
 }

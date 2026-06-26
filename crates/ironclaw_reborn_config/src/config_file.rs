@@ -981,9 +981,12 @@ impl RebornConfigFile {
             }
             // The mem0 base URL is operator-pasteable; run the same inline-secret
             // guard as the sibling fields (a credentialed URL is rejected at
-            // transport construction, but a pasted secret must be caught here too).
+            // transport construction, but a pasted secret must be caught here too),
+            // plus non-empty + trimmed: a blank (`"   "`) or whitespace-padded
+            // (`" https://h "`) value otherwise parses here and only fails later,
+            // opaquely, at transport construction during startup.
             if let Some(base_url) = memory.mem0_base_url.as_deref() {
-                check(Cow::Borrowed("memory.mem0_base_url"), base_url)?;
+                check_non_empty_trimmed(Cow::Borrowed("memory.mem0_base_url"), base_url)?;
             }
         }
         Ok(())
@@ -2058,6 +2061,41 @@ mem0_base_url = "https://mem0.example.com/?key=sk-proj-1234567890abcdef12345678"
         let err = RebornConfigFile::parse_text(toml, &attributed())
             .expect_err("an inline secret in mem0_base_url must be rejected");
         assert!(matches!(err, RebornConfigFileError::InlineSecret { .. }));
+    }
+
+    #[test]
+    fn memory_rejects_blank_or_untrimmed_mem0_base_url() {
+        // A whitespace-only base URL must be rejected as empty at parse time, not
+        // round-tripped and deferred to an opaque transport-construction failure.
+        let blank = r#"
+[memory]
+mem0_base_url = "   "
+"#;
+        let err = RebornConfigFile::parse_text(blank, &attributed())
+            .expect_err("a whitespace-only mem0_base_url must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+
+        // A URL padded with leading/trailing whitespace is rejected too: the pad
+        // would silently break URL parsing later.
+        let padded = r#"
+[memory]
+mem0_base_url = " https://mem0.example.com "
+"#;
+        let err = RebornConfigFile::parse_text(padded, &attributed())
+            .expect_err("an untrimmed mem0_base_url must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+
+        // A clean, trimmed, secret-free URL still parses.
+        let ok = r#"
+[memory]
+mem0_base_url = "https://mem0.example.com"
+"#;
+        let cfg = RebornConfigFile::parse_text(ok, &attributed())
+            .expect("a clean mem0_base_url must parse");
+        assert_eq!(
+            cfg.memory.and_then(|m| m.mem0_base_url).as_deref(),
+            Some("https://mem0.example.com")
+        );
     }
 
     #[test]

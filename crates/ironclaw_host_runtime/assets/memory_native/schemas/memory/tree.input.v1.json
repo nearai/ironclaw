@@ -3,8 +3,9 @@
   "properties": {
     "path": {
       "type": "string",
-      "description": "Relative memory directory path to list; omit for the memory root",
-      "default": ""
+      "default": "",
+      "description": "Relative memory directory path to list; omit (or empty) for the memory root. Must not be absolute (no leading '/'), contain '..' traversal, or use backslash separators. The host filesystem additionally resolves the path within the scoped /memory mount.",
+      "not": { "pattern": "(^/)|(\\.\\.)|(\\\\)" }
     },
     "depth": {
       "type": "integer",

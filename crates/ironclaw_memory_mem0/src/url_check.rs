@@ -8,6 +8,9 @@
 //! What this enforces:
 //! - URL parses
 //! - Scheme is `http` or `https`
+//! - No embedded userinfo (credentials belong in the redacted API key)
+//! - Host is not the hosted mem0 cloud (`mem0.ai` / `*.mem0.ai`): this adapter is
+//!   self-hosted-OSS only, so a cloud host fails closed.
 //! - Host (when it is a literal IP) is not in the `AlwaysBlocked` class:
 //!   cloud-metadata (`169.254.169.254`), link-local, multicast, the
 //!   unspecified `0.0.0.0`/`::`. These are *never* legitimate operator
@@ -24,44 +27,55 @@ use crate::error::Mem0Error;
 /// Validate the configured mem0 base URL.
 ///
 /// Returns `Err(Mem0Error::InvalidUrl { .. })` on parse failure, non-http(s)
-/// scheme, missing host, or an `AlwaysBlocked` literal IP host.
+/// scheme, embedded credentials, missing host, the hosted mem0 cloud host, or an
+/// `AlwaysBlocked` literal IP host.
 pub(crate) fn check_base_url(url: &str) -> Result<(), Mem0Error> {
+    // None of these rejections carry the raw URL: only a redacted `reason` survives
+    // into the error (see `Mem0Error::InvalidUrl`), so a misconfigured host or a
+    // query-string token cannot leak into host logs.
     let parsed = reqwest::Url::parse(url).map_err(|error| Mem0Error::InvalidUrl {
-        url: url.to_string(),
         reason: error.to_string(),
     })?;
 
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
         return Err(Mem0Error::InvalidUrl {
-            url: url.to_string(),
             reason: format!("only http/https are allowed (got '{scheme}')"),
         });
     }
 
     // Reject a base URL that carries embedded credentials (`https://user:pass@host`).
     // Credentials belong in `MEMORY_MEM0_API_KEY` (a redacted secret), never in the
-    // operator base URL where they would leak into logs and error messages. Redact
-    // the userinfo from the rejection error so the password is not echoed back.
+    // operator base URL where they would leak into logs and error messages. The
+    // error carries no URL at all, so the password cannot be echoed back.
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(Mem0Error::InvalidUrl {
-            url: redact_userinfo(&parsed),
             reason: "must not embed credentials in the base URL (userinfo is not allowed)"
                 .to_string(),
         });
     }
 
     let host = parsed.host_str().ok_or_else(|| Mem0Error::InvalidUrl {
-        url: url.to_string(),
         reason: "missing host".to_string(),
     })?;
+
+    // Fail closed on the hosted mem0 cloud. This adapter targets self-hosted mem0
+    // OSS only (see crate docs); config separately documents that the base URL is
+    // never the cloud, but enforce it here too so a misconfigured cloud URL is
+    // rejected at construction rather than silently talking to the cloud.
+    if is_mem0_cloud_host(host) {
+        return Err(Mem0Error::InvalidUrl {
+            reason: format!(
+                "host '{host}' is the hosted mem0 cloud; this adapter supports self-hosted mem0 OSS only"
+            ),
+        });
+    }
 
     let normalized_host = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = normalized_host.parse::<IpAddr>()
         && is_always_blocked(&ip)
     {
         return Err(Mem0Error::InvalidUrl {
-            url: url.to_string(),
             reason: format!("host '{host}' is not a permitted endpoint"),
         });
     }
@@ -69,21 +83,13 @@ pub(crate) fn check_base_url(url: &str) -> Result<(), Mem0Error> {
     Ok(())
 }
 
-/// A copy of `url` with any embedded userinfo stripped, so a rejection error or
-/// log never echoes the credentials it is rejecting.
-fn redact_userinfo(url: &reqwest::Url) -> String {
-    let mut redacted = url.clone();
-    // `set_username`/`set_password` only reject cannot-be-a-base URLs, which an
-    // http(s) URL never is; on the impossible failure fall back to scheme + host.
-    if redacted.set_username("").is_ok() && redacted.set_password(None).is_ok() {
-        redacted.to_string()
-    } else {
-        format!(
-            "{}://{}",
-            url.scheme(),
-            url.host_str().unwrap_or("<redacted>")
-        )
-    }
+/// Hosts belonging to the hosted mem0 cloud. The adapter is self-hosted-OSS only,
+/// so the cloud apex (`mem0.ai`) and any subdomain (`*.mem0.ai`) are rejected. DNS
+/// is case-insensitive and may carry a trailing FQDN dot, so normalize both before
+/// comparing.
+fn is_mem0_cloud_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == "mem0.ai" || host.ends_with(".mem0.ai")
 }
 
 fn is_always_blocked(ip: &IpAddr) -> bool {
@@ -157,5 +163,39 @@ mod tests {
     #[test]
     fn rejects_non_http_scheme() {
         check_base_url("file:///etc/passwd").expect_err("file scheme rejected");
+    }
+
+    #[test]
+    fn rejects_hosted_mem0_cloud() {
+        // The adapter is self-hosted-OSS only, so a hosted mem0 cloud host fails
+        // closed — both the apex and a subdomain, case-insensitively.
+        let err =
+            check_base_url("https://api.mem0.ai").expect_err("hosted mem0 cloud apex rejected");
+        assert!(matches!(err, Mem0Error::InvalidUrl { .. }));
+        check_base_url("https://app.mem0.ai/v1").expect_err("hosted mem0 cloud subdomain rejected");
+        check_base_url("https://API.MEM0.AI")
+            .expect_err("hosted mem0 cloud host is matched case-insensitively");
+        // A self-hosted host that merely *contains* "mem0" is NOT the cloud and
+        // stays allowed (no over-blocking of legitimate self-hosted endpoints).
+        check_base_url("https://mem0.internal.example.com").unwrap();
+    }
+
+    #[test]
+    fn rejection_error_does_not_echo_the_configured_url() {
+        // A misconfigured base URL can carry a sensitive host or a query-string
+        // token. The rejection error must not echo the raw URL (host/path/query)
+        // back into a log line — only the cause/kind survives. A non-http scheme is
+        // rejected before host parsing, so this exercises that general path.
+        let err = check_base_url("ftp://secret-host.internal/path?token=swordfish")
+            .expect_err("non-http scheme rejected");
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("secret-host.internal"),
+            "the configured host must not leak into the error: {rendered}"
+        );
+        assert!(
+            !rendered.contains("swordfish"),
+            "a query-string token must not leak into the error: {rendered}"
+        );
     }
 }

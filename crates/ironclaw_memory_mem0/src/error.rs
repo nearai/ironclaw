@@ -16,10 +16,18 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum Mem0Error {
     /// The configured mem0 base URL failed the baseline SSRF check: it did not
-    /// parse, used a non-http(s) scheme, had no host, or named an always-blocked
-    /// literal IP (cloud-metadata / link-local / multicast / unspecified).
-    #[error("invalid mem0 base URL '{url}': {reason}")]
-    InvalidUrl { url: String, reason: String },
+    /// parse, used a non-http(s) scheme, had no host, named an always-blocked
+    /// literal IP (cloud-metadata / link-local / multicast / unspecified), or named
+    /// the hosted mem0 cloud (this adapter is self-hosted-OSS only).
+    ///
+    /// The raw URL is deliberately NOT carried in this error: a misconfigured base
+    /// URL can embed a sensitive host or a query-string token, and this `Display`
+    /// reaches host logs. Only the redacted `reason` is kept. The blocked-host
+    /// cases name the offending host *inside* `reason`, but only for hosts that are
+    /// well-known and non-secret by construction (a blocked literal IP or a public
+    /// mem0 cloud host).
+    #[error("invalid mem0 base URL: {reason}")]
+    InvalidUrl { reason: String },
 
     /// The `reqwest` client could not be constructed (e.g. an API key that is
     /// not a valid HTTP header value, or a TLS backend failure).
