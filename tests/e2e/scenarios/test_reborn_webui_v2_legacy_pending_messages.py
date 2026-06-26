@@ -419,17 +419,24 @@ async def test_reborn_legacy_pending_attachment_message_survives_thread_reload(
     )
     try:
         page = harness["page"]
-        await page.set_input_files(
-            "input[type=file][multiple]",
-            files=[
+        await expect(
+            page.get_by_text("Hello, what do you need help with?")
+        ).to_be_visible(timeout=15000)
+        async with page.expect_file_chooser() as chooser_info:
+            await page.get_by_label("Attach files").click()
+        chooser = await chooser_info.value
+        await chooser.set_files(
+            [
                 {
                     "name": "pending-note.txt",
                     "mimeType": "text/plain",
                     "buffer": b"Attachment survives Reborn pending reload.",
                 }
-            ],
+            ]
         )
-        await expect(page.get_by_text("pending-note.txt")).to_be_visible(timeout=15000)
+        await expect(page.locator("body")).to_contain_text(
+            "pending-note.txt", timeout=15000
+        )
 
         composer = page.locator(SEL_V2["chat_composer"])
         await composer.fill("Pending attachment reload test")

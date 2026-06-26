@@ -1,7 +1,8 @@
 """Legacy project overview coverage ported to Reborn WebChat v2."""
 
 import json
-from urllib.parse import unquote, urlparse
+from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
 
 from playwright.async_api import expect
 
@@ -14,6 +15,8 @@ from reborn_webui_harness import (
 
 MOCK_PROJECT_ID = "068f67da-49b6-4f6c-9463-8d243c2cff6c"
 PRODUCT_PROJECT_ID = "b1234567-cafe-4000-a000-111111111111"
+PROJECT_THREAD_ID = "thread-project-files"
+PROJECT_WORKSPACE_FILE_BYTES = b"# Launch Brief\n\nShip the research digest.\n"
 
 MOCK_PROJECTS = [
     {
@@ -65,6 +68,8 @@ async def _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser):
     page = await context.new_page()
     project_requests: list[str] = []
     thread_create_requests: list[dict] = []
+    project_thread_requests: list[str] = []
+    project_file_requests: list[str] = []
 
     async def fulfill_json(route, payload, status=200):
         await route.fulfill(
@@ -111,6 +116,27 @@ async def _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser):
         path = parsed.path
 
         if path == "/api/webchat/v2/threads" and request.method == "GET":
+            query = parse_qs(parsed.query)
+            if query.get("project_id") == [MOCK_PROJECT_ID]:
+                project_thread_requests.append(request.url)
+                await fulfill_json(
+                    route,
+                    {
+                        "threads": [
+                            {
+                                "thread_id": PROJECT_THREAD_ID,
+                                "title": "Weekly research digest",
+                                "goal": "Summarize launch-readiness signals.",
+                                "thread_type": "chat",
+                                "project_id": MOCK_PROJECT_ID,
+                                "created_at": "2026-04-12T11:30:00Z",
+                                "updated_at": "2026-04-12T12:00:00Z",
+                            }
+                        ],
+                        "next_cursor": None,
+                    },
+                )
+                return
             await fulfill_json(route, {"threads": [], "next_cursor": None})
             return
 
@@ -135,6 +161,55 @@ async def _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser):
             await fulfill_json(route, {"messages": [], "next_cursor": None})
             return
 
+        if path == f"/api/webchat/v2/threads/{PROJECT_THREAD_ID}/files":
+            project_file_requests.append(request.url)
+            query = parse_qs(parsed.query)
+            if query.get("path") == ["/workspace/reports"]:
+                await fulfill_json(
+                    route,
+                    {
+                        "entries": [
+                            {
+                                "name": "launch-brief.md",
+                                "path": "/workspace/reports/launch-brief.md",
+                                "kind": "file",
+                                "size": len(PROJECT_WORKSPACE_FILE_BYTES),
+                            }
+                        ]
+                    },
+                )
+                return
+
+            await fulfill_json(
+                route,
+                {
+                    "entries": [
+                        {
+                            "name": "reports",
+                            "path": "/workspace/reports",
+                            "kind": "directory",
+                        },
+                        {
+                            "name": "README.md",
+                            "path": "/workspace/README.md",
+                            "kind": "file",
+                            "size": 42,
+                        },
+                    ]
+                },
+            )
+            return
+
+        if path == f"/api/webchat/v2/threads/{PROJECT_THREAD_ID}/files/content":
+            project_file_requests.append(request.url)
+            await route.fulfill(
+                status=200,
+                content_type="text/markdown",
+                body=PROJECT_WORKSPACE_FILE_BYTES.decode("utf-8"),
+                headers={"Cache-Control": "no-store"},
+            )
+            return
+
         await route.continue_()
 
     await page.route("**/api/webchat/v2/projects**", handle_projects)
@@ -154,6 +229,8 @@ async def _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser):
         "page": page,
         "project_requests": project_requests,
         "thread_create_requests": thread_create_requests,
+        "project_thread_requests": project_thread_requests,
+        "project_file_requests": project_file_requests,
     }
 
 
@@ -277,5 +354,49 @@ async def test_reborn_legacy_project_workspace_starts_scoped_chat_thread(
         assert len(harness["thread_create_requests"]) == 1
         assert harness["thread_create_requests"][0]["project_id"] == MOCK_PROJECT_ID
         assert harness["thread_create_requests"][0]["client_action_id"]
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_project_workspace_lists_and_downloads_files(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser)
+    try:
+        page = harness["page"]
+
+        await page.locator(
+            SEL_V2["project_card_for"].format(id=MOCK_PROJECT_ID)
+        ).locator(SEL_V2["project_open_workspace"]).click()
+        await expect(
+            page.locator(SEL_V2["project_workspace_for"].format(id=MOCK_PROJECT_ID))
+        ).to_be_visible(timeout=10000)
+
+        await expect(page.get_by_text("Weekly research digest")).to_be_visible(
+            timeout=10000
+        )
+        reports_entry = page.locator(
+            SEL_V2["project_filesystem_entry_for"].format(path="/workspace/reports")
+        )
+        await expect(reports_entry).to_be_visible(timeout=10000)
+        await reports_entry.click()
+
+        launch_brief_entry = page.locator(
+            SEL_V2["project_filesystem_entry_for"].format(
+                path="/workspace/reports/launch-brief.md"
+            )
+        )
+        await expect(launch_brief_entry).to_be_visible(timeout=10000)
+
+        async with page.expect_download() as download_info:
+            await launch_brief_entry.click()
+        download = await download_info.value
+        assert download.suggested_filename == "launch-brief.md"
+        assert Path(await download.path()).read_bytes() == PROJECT_WORKSPACE_FILE_BYTES
+
+        assert harness["project_thread_requests"]
+        assert any("project_id=" in url for url in harness["project_thread_requests"])
+        assert any("/files" in url for url in harness["project_file_requests"])
+        assert any("/files/content" in url for url in harness["project_file_requests"])
     finally:
         await harness["context"].close()

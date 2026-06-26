@@ -503,6 +503,13 @@ Behavior adjustment:
   in-progress history state. Reborn's equivalent user-visible risk is the
   optimistic pending message cache dropping staged attachment render metadata
   during a route/timeline reload before the v2 send resolves.
+- Rebuilding the current WebUI v2 assets exposed a related Reborn remount race:
+  a selected file could be accepted by the transient dock composer while an
+  empty thread finished loading and switched to the landing composer. Text
+  drafts survived through the draft store, but staged attachments were only
+  persisted by a later React effect and could be lost during the remount.
+  Attachment staging/removal now updates the staged-attachment draft store
+  immediately, so accepted files survive composer remounts.
 - Legacy background-thread processing indicators relied on v1 thread metadata
   and unread badges. Reborn's current standalone browser only receives
   per-active-thread run status through the v2 EventSource; the port asserts the
@@ -881,10 +888,10 @@ Behavior adjustment:
 
 - Legacy project detail tests used `/api/engine/projects/overview`,
   `/api/engine/missions`, `/api/engine/threads`, and project widget endpoints.
-  Reborn currently has real v2 project list/create/read/update/delete and
-  membership ACL endpoints, but project missions, project threads, and widgets
-  still return TODO stubs in the client adapter. This port covers the
-  implemented Reborn project contract and leaves the deeper mission/thread/widget
+  Reborn currently has real v2 project list/create/read/update/delete,
+  membership ACL, and project-filtered thread-list endpoints. Project missions
+  and widgets still return TODO stubs in the client adapter. This port covers
+  the implemented Reborn project contract and leaves the deeper mission/widget
   drill-in behavior as a product parity gap.
 
 Frontend harness adjustment:
@@ -2977,6 +2984,52 @@ Behavior adjustment:
   today: start from the Automations empty state, copy a ready prompt if useful,
   then continue in chat.
 
+### Step 100: Legacy Project Workspace Files Port
+
+Extended `test_reborn_webui_v2_legacy_projects.py` and wired Reborn project
+threads to the existing v2 thread-list filter.
+
+Ported the legacy project-detail drill-in intent that exposed project activity
+and workspace artifacts:
+
+- the Projects adapter now calls `/api/webchat/v2/threads?project_id=...` and
+  normalizes `thread_id` records into the project workspace shape;
+- the workspace activity column renders the project thread returned by the v2
+  API;
+- the project filesystem panel lists a representative project thread's
+  `/workspace` entries through `/api/webchat/v2/threads/{thread_id}/files`;
+- nested folder navigation preserves the selected workspace path; and
+- clicking a file row downloads the bytes from
+  `/api/webchat/v2/threads/{thread_id}/files/content`.
+
+Issue found and fixed:
+
+- The Projects workspace rendered a filesystem panel, but the adapter still
+  returned an empty TODO thread list even though the backend already supports a
+  `project_id` filter on the v2 thread list API. With no representative thread
+  ID, the file browser always stayed in its "No files yet" state. The adapter
+  now uses the existing endpoint and normalizes the Reborn thread record.
+
+Behavior mapping:
+
+- Legacy project detail pages exposed richer mission/thread/widget panels.
+  Reborn still lacks mission/widget APIs, so this step protects the currently
+  implemented project-thread and project-file boundary rather than inventing
+  unavailable child resources.
+
+Validation:
+
+- `cd crates/ironclaw_webui_v2_static/frontend && bash build.sh --no-vendor`
+  -> passed with the existing Node 18/react-router engine warning
+- `cargo build -p ironclaw_reborn_cli --features webui-v2-beta`
+  -> passed
+- `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_projects.py -q`
+  -> `5 passed`
+- `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_pending_messages.py -q`
+  -> `11 passed`
+- `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_*.py -q`
+  -> `154 passed`
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -3034,9 +3087,10 @@ Not yet ported:
   Automations run-history panel, because those tests target legacy
   `/api/routines/*`, `/api/jobs/*`, HTTP-channel triggers, routine-scoped OAuth
   fallback, and the legacy routines tab;
-- legacy project mission/thread/widget drill-in parity, because the current
-  Reborn project page maps real project entities but still uses TODO client
-  stubs for per-project missions, threads, widgets, and detail actions;
+- legacy project mission/widget drill-in parity, because the current Reborn
+  project page maps real project entities and project-filtered threads but
+  still uses TODO client stubs for per-project missions, widgets, and detail
+  actions;
 - legacy plan-mode browser parity, because the current Reborn WebChat v2 UI has
   no visible plan checklist/card surface or matching plan interaction controls;
 - legacy portfolio widget/share parity, because current Reborn project widgets

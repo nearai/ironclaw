@@ -271,6 +271,9 @@ SEL_V2 = {
     "project_workspace": "[data-testid='project-workspace']",
     "project_workspace_for": "[data-testid='project-workspace'][data-project-id='{id}']",
     "project_workspace_title": "[data-testid='project-workspace-title']",
+    "project_filesystem_entry_for": (
+        "[data-testid='project-filesystem-entry'][data-entry-path='{path}']"
+    ),
     # Download chip for an agent-produced workspace file; `{path}` selects one.
     # Clicking a chip opens the shared attachment preview modal, whose footer
     # carries the Download action.

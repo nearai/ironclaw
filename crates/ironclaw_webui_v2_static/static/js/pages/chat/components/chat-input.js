@@ -163,11 +163,10 @@ export function ChatInput({
             t,
           });
           if (staged.length > 0) {
-            setAttachments((prev) => {
-              const next = [...prev, ...staged];
-              attachmentsRef.current = next;
-              return next;
-            });
+            const next = [...attachmentsRef.current, ...staged];
+            attachmentsRef.current = next;
+            setStagedAttachments(draftKey, next);
+            setAttachments(next);
           }
           setAttachmentError(errors.length > 0 ? errors.join(" ") : "");
         })
@@ -175,19 +174,18 @@ export function ChatInput({
           setAttachmentError(t("chat.attachmentStagingFailed"));
         });
     },
-    [disabled, limits, t]
+    [disabled, draftKey, limits, t]
   );
 
   const removeAttachment = React.useCallback((id) => {
-    setAttachments((prev) => {
-      const next = prev.filter((att) => att.id !== id);
-      // Keep the ref in lockstep so a same-tick add validates against the
-      // post-removal set, not a stale snapshot (the effect sync is async).
-      attachmentsRef.current = next;
-      return next;
-    });
+    const next = attachmentsRef.current.filter((att) => att.id !== id);
+    // Keep both the ref and draft store in lockstep so a same-tick add or
+    // composer remount observes the post-removal set.
+    attachmentsRef.current = next;
+    setStagedAttachments(draftKey, next);
+    setAttachments(next);
     setAttachmentError("");
-  }, []);
+  }, [draftKey]);
 
   const openFilePicker = React.useCallback(() => {
     if (disabled) return;
