@@ -553,6 +553,33 @@ async def test_reborn_legacy_extensions_installed_actions(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_activate_success_marks_extension_active_with_capabilities(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[INACTIVE_MCP],
+        tab="mcp",
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, "Inactive MCP")
+        await expect(card).to_be_visible(timeout=5000)
+        await expect(card.get_by_text("installed", exact=True)).to_be_visible()
+
+        await card.get_by_role("button", name="Activate").click()
+        await expect(page.get_by_text("inactive-mcp activated")).to_be_visible(timeout=5000)
+        assert harness["activate_requests"] == ["inactive-mcp"]
+
+        await expect(card.get_by_text("active", exact=True)).to_be_visible(timeout=5000)
+        await expect(card.get_by_role("button", name="Activate")).to_have_count(0)
+        await card.get_by_role("button", name="1 capability").click()
+        await expect(card.get_by_text("lookup", exact=True)).to_be_visible()
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_extensions_remove_cancel_keeps_card(
     reborn_v2_server, reborn_v2_browser
 ):

@@ -1579,6 +1579,27 @@ Behavior adjustment:
   behavior instead of legacy `/api/extensions/{name}/setup` not-installed
   requests.
 
+### Step 44: Legacy Activation Success State Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the browser-visible part of legacy
+`test_extension_active_after_configure`, `test_tools_registered_after_activate`,
+and `test_activate_already_active_idempotent`:
+
+- a successful v2 activation response flips the installed extension card to the
+  `active` state;
+- the primary `Activate` action disappears after activation;
+- the extension's capability disclosure remains available after the state
+  transition.
+
+Behavior adjustment:
+
+- Reborn WebUI v2 exposes activation as a card-level action and capability list
+  projection, not the legacy `/api/extensions/tools` endpoint. The port asserts
+  the current browser state and v2 activation envelope rather than legacy tools
+  registry rows.
+
 ## Open Migration Buckets
 
 Not yet ported:
