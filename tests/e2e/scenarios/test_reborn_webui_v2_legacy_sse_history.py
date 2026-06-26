@@ -8,7 +8,7 @@ import aiohttp
 import httpx
 from playwright.async_api import expect
 
-from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, wait_for_sse_comment
 from reborn_webui_harness import (
     USER_ID,
     create_thread as _create_thread,
@@ -439,3 +439,22 @@ async def test_reborn_legacy_excess_sse_connections_are_rate_limited(
                 assert body["error"] == "rate_limited"
                 assert body["kind"] == "busy"
                 assert body["retryable"] is True
+
+
+async def test_reborn_legacy_sse_keepalive_comments_arrive(reborn_v2_server):
+    """Port the legacy idle SSE keepalive check to Reborn's v2 event stream."""
+    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    async with httpx.AsyncClient(headers=headers) as client:
+        thread_id = await _create_thread(client, reborn_v2_server)
+
+    events_url = f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/events"
+    timeout = aiohttp.ClientTimeout(total=25, sock_read=25)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(
+            events_url,
+            params={"token": REBORN_V2_AUTH_TOKEN},
+            headers={"Accept": "text/event-stream"},
+        ) as response:
+            assert response.status == 200, await response.text()
+            keepalive = await wait_for_sse_comment(response, timeout=22)
+            assert keepalive.startswith(":")

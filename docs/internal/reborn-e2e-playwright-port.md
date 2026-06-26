@@ -305,6 +305,8 @@ Ported the durable-history and reconnect intent from legacy
   terminal run update and reload the v2 timeline to render the assistant reply.
 - excess Reborn v2 SSE event streams for one `(tenant, user)` are rejected at
   the per-caller concurrency cap with a retryable 429 response.
+- idle Reborn v2 SSE event streams emit keepalive comment frames so browser and
+  proxy connections are not silently dropped while no projection events exist.
 
 Behavior adjustment:
 
