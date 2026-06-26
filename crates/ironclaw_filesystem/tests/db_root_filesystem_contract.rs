@@ -8,7 +8,7 @@ use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{
     BatchPut, Capability, CasExpectation, Entry, FileType, FilesystemError, FilesystemOperation,
     Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, LibSqlRootFilesystem, Page,
-    RecordKind, SeqNo,
+    RecordKind, SeqNo, TxnCapability,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::VirtualPath;
@@ -1357,15 +1357,36 @@ async fn libsql_put_batch_single_put_succeeds() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
-async fn libsql_put_batch_multi_surfaces_unsupported_begin_txn() {
-    // libSQL advertises CAS only (no `begin` override), so an N>1
-    // put_batch surfaces the typed `Unsupported{BeginTxn}` from the
-    // default trait impl today. PR-3 adds a native libSQL multi-key
-    // transaction that flips this leg to all-or-nothing atomic.
+async fn libsql_put_batch_multi_all_or_nothing() {
+    // PR-3 flip: libSQL now advertises `TxnCapability::MultiKey` + the
+    // `BatchPut` capability and runs an N>1 `put_batch` inside a single
+    // `BEGIN IMMEDIATE … COMMIT`. A mix of Absent (insert) and Version
+    // (CAS update) legs all land together; a single stale `Version` leg
+    // rolls the whole batch back so NONE of the others are written.
+    //
+    // (Mirrors `postgres_put_batch_multi_all_or_nothing` so both
+    // `MultiKey` backends prove the identical all-or-nothing contract.)
     let filesystem = libsql_root().await;
+    assert_eq!(filesystem.capabilities().txn(), TxnCapability::MultiKey);
+    assert!(filesystem.capabilities().has(Capability::BatchPut));
+
+    // Pre-create two paths so the batch can exercise Version CAS legs.
+    let c = VirtualPath::new("/secrets/leases/batch_multi/C").unwrap();
+    let d = VirtualPath::new("/secrets/leases/batch_multi/D").unwrap();
+    let vc = filesystem
+        .put(&c, Entry::bytes(vec![10]), CasExpectation::Absent)
+        .await
+        .unwrap();
+    let vd = filesystem
+        .put(&d, Entry::bytes(vec![20]), CasExpectation::Absent)
+        .await
+        .unwrap();
+
+    // Happy batch: 2 Absent (new) + 2 Version (existing) — 4 mixed legs
+    // all land with the correct assigned versions.
     let a = VirtualPath::new("/secrets/leases/batch_multi/A").unwrap();
     let b = VirtualPath::new("/secrets/leases/batch_multi/B").unwrap();
-    let err = filesystem
+    let versions = filesystem
         .put_batch(vec![
             BatchPut {
                 path: a.clone(),
@@ -1377,22 +1398,174 @@ async fn libsql_put_batch_multi_surfaces_unsupported_begin_txn() {
                 entry: Entry::bytes(vec![2]),
                 cas: CasExpectation::Absent,
             },
+            BatchPut {
+                path: c.clone(),
+                entry: Entry::bytes(vec![11]),
+                cas: CasExpectation::Version(vc),
+            },
+            BatchPut {
+                path: d.clone(),
+                entry: Entry::bytes(vec![21]),
+                cas: CasExpectation::Version(vd),
+            },
+        ])
+        .await
+        .unwrap();
+    assert_eq!(versions.len(), 4);
+    assert_eq!(versions[0].get(), 1);
+    assert_eq!(versions[1].get(), 1);
+    assert_eq!(versions[2].get(), 2);
+    assert_eq!(versions[3].get(), 2);
+    assert_eq!(
+        filesystem.get(&a).await.unwrap().unwrap().entry.body,
+        vec![1]
+    );
+    assert_eq!(
+        filesystem.get(&b).await.unwrap().unwrap().entry.body,
+        vec![2]
+    );
+    assert_eq!(
+        filesystem.get(&c).await.unwrap().unwrap().entry.body,
+        vec![11]
+    );
+    assert_eq!(
+        filesystem.get(&d).await.unwrap().unwrap().entry.body,
+        vec![21]
+    );
+
+    // Stale leg: `vc` is now stale (c advanced to v2). E and F precede the
+    // stale C leg and individually succeed, then the stale C leg fails →
+    // the whole `BEGIN IMMEDIATE` rolls back, leaving E and F unwritten and
+    // C unchanged. This proves the short-circuit ROLLBACK commits nothing.
+    let e = VirtualPath::new("/secrets/leases/batch_multi/E").unwrap();
+    let f = VirtualPath::new("/secrets/leases/batch_multi/F").unwrap();
+    let err = filesystem
+        .put_batch(vec![
+            BatchPut {
+                path: e.clone(),
+                entry: Entry::bytes(vec![5]),
+                cas: CasExpectation::Absent,
+            },
+            BatchPut {
+                path: f.clone(),
+                entry: Entry::bytes(vec![6]),
+                cas: CasExpectation::Absent,
+            },
+            BatchPut {
+                path: c.clone(),
+                entry: Entry::bytes(vec![99]),
+                cas: CasExpectation::Version(vc),
+            },
         ])
         .await
         .unwrap_err();
     assert!(
-        matches!(
-            err,
-            FilesystemError::Unsupported {
-                operation: FilesystemOperation::BeginTxn,
-                ..
-            }
-        ),
-        "libSQL N>1 put_batch must be Unsupported until PR-3, got {err:?}"
+        matches!(err, FilesystemError::VersionMismatch { .. }),
+        "stale CAS leg must surface VersionMismatch, got {err:?}"
     );
-    // begin() failed before any write, so nothing landed.
-    assert!(filesystem.get(&a).await.unwrap().is_none());
-    assert!(filesystem.get(&b).await.unwrap().is_none());
+    assert!(
+        filesystem.get(&e).await.unwrap().is_none(),
+        "E must roll back"
+    );
+    assert!(
+        filesystem.get(&f).await.unwrap().is_none(),
+        "F must roll back"
+    );
+    assert_eq!(
+        filesystem.get(&c).await.unwrap().unwrap().entry.body,
+        vec![11],
+        "C must be unchanged after the failed batch"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_returning_probe_leaves_no_scratch_row() {
+    // The init-time RETURNING-support probe runs `INSERT … RETURNING version`
+    // against a scratch path inside `BEGIN IMMEDIATE`, then ROLLBACKs the
+    // probe txn so nothing persists. Assert the scratch path is absent after
+    // a fresh `run_migrations()` so the probe can never leak a stray row.
+    let filesystem = libsql_root().await;
+    let scratch = VirtualPath::new(LibSqlRootFilesystem::RETURNING_PROBE_PATH).unwrap();
+    assert!(
+        filesystem.get(&scratch).await.unwrap().is_none(),
+        "RETURNING probe must leave no scratch row after init"
+    );
+    // The probe must still have produced a working batch path — the scratch
+    // row is gone, but BatchPut/MultiKey are advertised because BEGIN
+    // IMMEDIATE + a readback mechanism were confirmed.
+    assert!(filesystem.capabilities().has(Capability::BatchPut));
+    assert_eq!(filesystem.capabilities().txn(), TxnCapability::MultiKey);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_begin_txn_commits_rolls_back_and_scopes_to_prefix() {
+    // Direct coverage of the native `begin()`/`StorageTxn` plane: a committed
+    // txn with a mixed Absent + Any leg (Any exercises the version readback —
+    // the one CAS mode whose assigned version isn't known arithmetically), a
+    // rolled-back txn that writes nothing, and the prefix fail-closed guard.
+    //
+    // Note: the txn uses `BEGIN IMMEDIATE` (not deferred) so the write lock is
+    // held up front; a deferred txn could hit SQLITE_BUSY mid-batch and break
+    // all-or-nothing.
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/secrets/leases/txn").unwrap();
+    let a = VirtualPath::new("/secrets/leases/txn/A").unwrap();
+    let b = VirtualPath::new("/secrets/leases/txn/B").unwrap();
+
+    // Commit path: an Absent insert + an Any upsert both land atomically.
+    let mut txn = filesystem.begin(&prefix).await.unwrap();
+    let va = txn
+        .put(&a, Entry::bytes(vec![1]), CasExpectation::Absent)
+        .await
+        .unwrap();
+    let vb = txn
+        .put(&b, Entry::bytes(vec![2]), CasExpectation::Any)
+        .await
+        .unwrap();
+    assert_eq!(va.get(), 1);
+    assert_eq!(
+        vb.get(),
+        1,
+        "Any upsert of a fresh path reads back version 1"
+    );
+    // Reads inside the open txn observe the uncommitted writes.
+    assert_eq!(txn.get(&a).await.unwrap().unwrap().entry.body, vec![1]);
+    txn.commit().await.unwrap();
+    assert_eq!(
+        filesystem.get(&a).await.unwrap().unwrap().entry.body,
+        vec![1]
+    );
+    assert_eq!(
+        filesystem.get(&b).await.unwrap().unwrap().entry.body,
+        vec![2]
+    );
+
+    // Rollback path: a write then rollback leaves nothing.
+    let c = VirtualPath::new("/secrets/leases/txn/C").unwrap();
+    let mut txn = filesystem.begin(&prefix).await.unwrap();
+    txn.put(&c, Entry::bytes(vec![3]), CasExpectation::Absent)
+        .await
+        .unwrap();
+    txn.rollback().await;
+    assert!(
+        filesystem.get(&c).await.unwrap().is_none(),
+        "rolled-back txn write must not persist"
+    );
+
+    // Prefix guard: a leg outside the txn prefix fails closed.
+    let mut txn = filesystem.begin(&prefix).await.unwrap();
+    let outside = VirtualPath::new("/memory/elsewhere").unwrap();
+    let err = txn
+        .put(&outside, Entry::bytes(vec![9]), CasExpectation::Absent)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, FilesystemError::PathOutsideMount { .. }),
+        "txn put outside prefix must be PathOutsideMount, got {err:?}"
+    );
+    txn.rollback().await;
 }
 
 #[cfg(feature = "libsql")]
