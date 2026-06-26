@@ -303,6 +303,8 @@ Ported the durable-history and reconnect intent from legacy
   SSE stream without carrying the first thread's `after_cursor`.
 - two browser tabs open to the same Reborn thread both receive the same
   terminal run update and reload the v2 timeline to render the assistant reply.
+- excess Reborn v2 SSE event streams for one `(tenant, user)` are rejected at
+  the per-caller concurrency cap with a retryable 429 response.
 
 Behavior adjustment:
 

@@ -1,8 +1,10 @@
 """Legacy SSE reconnect and history persistence coverage ported to Reborn v2."""
 
+from contextlib import AsyncExitStack
 import json
 from urllib.parse import parse_qs, urlparse
 
+import aiohttp
 import httpx
 from playwright.async_api import expect
 
@@ -402,3 +404,38 @@ async def test_reborn_legacy_multiple_tabs_receive_same_response(
             )
     finally:
         await context.close()
+
+
+async def test_reborn_legacy_excess_sse_connections_are_rate_limited(
+    reborn_v2_server,
+):
+    """Port the legacy SSE connection cap to Reborn's per-caller stream limit."""
+    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    async with httpx.AsyncClient(headers=headers) as client:
+        thread_id = await _create_thread(client, reborn_v2_server)
+
+    events_path = f"/api/webchat/v2/threads/{thread_id}/events"
+    events_url = f"{reborn_v2_server}{events_path}"
+    params = {"token": REBORN_V2_AUTH_TOKEN}
+    request_headers = {"Accept": "text/event-stream"}
+    timeout = aiohttp.ClientTimeout(total=15, sock_read=15)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with AsyncExitStack() as stack:
+            for _ in range(3):
+                response = await stack.enter_async_context(
+                    session.get(events_url, params=params, headers=request_headers)
+                )
+                assert response.status == 200, await response.text()
+                assert response.headers.get("content-type", "").startswith(
+                    "text/event-stream"
+                )
+
+            async with session.get(
+                events_url, params=params, headers=request_headers
+            ) as rejected:
+                body = await rejected.json(content_type=None)
+                assert rejected.status == 429, body
+                assert body["error"] == "rate_limited"
+                assert body["kind"] == "busy"
+                assert body["retryable"] is True
