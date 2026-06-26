@@ -1073,6 +1073,33 @@ Behavior adjustment:
   then, browser tests would only validate placeholder data rather than the
   legacy user/secret/usage lifecycle behavior.
 
+### Step 30: Legacy Generic Pairing Review
+
+Reviewed legacy `test_pairing.py` and `test_channel_pairing_flow.py` against
+the current Reborn Extensions and channel-connect surfaces.
+
+Already-covered functional Reborn behavior:
+
+- Slack personal proof-code pairing through chat input and
+  `/api/webchat/v2/extensions/pairing/redeem` is covered by
+  `test_reborn_legacy_slack_connect_command_renders_pairing_card_and_redeems_code`.
+
+Current blocker:
+
+- the generic Extensions channel `PairingSection` is rendered for channel
+  packages in `pairing_required` or `pairing` state, but
+  `fetchPairingRequests` and `approvePairingCode` in
+  `pages/extensions/lib/extensions-api.js` still return local TODO stub
+  responses instead of calling v2 pairing endpoints.
+
+Behavior adjustment:
+
+- Legacy generic pairing-list, member/admin access, optional `thread_id`, and
+  channel-name sanitization tests target the legacy `/api/pairing/*` endpoint
+  family. Those are not direct Reborn WebUI v2 ports until standalone Reborn
+  exposes matching v2 generic pairing list/approve endpoints. Current Reborn
+  coverage remains scoped to the Slack proof-code redeem contract that exists.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -1100,7 +1127,8 @@ Not yet ported:
   has matching endpoints;
 - remaining Slack/Telegram/channel pairing scenarios beyond the Reborn Slack
   proof-code connect card, especially lower-level member/admin pairing APIs and
-  Telegram-specific pairing once standalone Reborn exposes matching surfaces;
+  Telegram-specific/generic pairing once standalone Reborn exposes matching
+  non-stub v2 surfaces;
 - admin/operator flows, including Users, dashboard, and usage views, because the
   current Reborn Admin API adapter intentionally returns TODO stub payloads until
   v2 admin endpoints replace the legacy `/api/admin/*` contracts;
