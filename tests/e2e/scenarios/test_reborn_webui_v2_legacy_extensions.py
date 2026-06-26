@@ -642,6 +642,55 @@ async def test_reborn_legacy_extensions_install_failure_keeps_registry_entry_ava
         await harness["context"].close()
 
 
+async def test_reborn_legacy_extensions_install_auth_url_opens_popup(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        registry=[REGISTRY_TOOL],
+        install_responses={
+            "registry-tool": {
+                "success": True,
+                "message": "Registry Tool installed",
+                "auth_url": "HTTPS://example.com/oauth?state=install",
+            }
+        },
+    )
+    try:
+        page = harness["page"]
+        await page.evaluate(
+            """
+            () => {
+              window.__openedUrls = [];
+              window.open = (url) => {
+                window.__openedUrls.push(url);
+                return null;
+              };
+            }
+            """
+        )
+
+        card = _card_by_title(page, "Registry Tool")
+        await expect(card).to_be_visible(timeout=5000)
+        await card.get_by_role("button", name="Install").click()
+
+        await expect(page.get_by_text("Registry Tool installed")).to_be_visible(
+            timeout=5000
+        )
+        await page.wait_for_function(
+            "() => window.__openedUrls.some((url) => /^https:\\/\\//i.test(url))",
+            timeout=5000,
+        )
+        opened = await page.evaluate("() => window.__openedUrls")
+        assert opened[-1].lower().startswith("https://example.com/oauth"), opened
+        assert harness["install_requests"] == [
+            {"package_ref": _package_ref("registry-tool")}
+        ]
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_install_setup_required_channel_opens_configure_modal(
     reborn_v2_server, reborn_v2_browser
 ):

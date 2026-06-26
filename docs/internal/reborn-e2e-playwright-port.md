@@ -2367,6 +2367,27 @@ Behavior adjustment:
   event stream that resumes via `after_cursor`, so the migrated test asserts the
   caller-visible reconnect URL rather than the removed v1 history-reload hook.
 
+### Step 77: Legacy Extension Install OAuth URL Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the install-response OAuth popup behavior from legacy `test_extensions.py`
+to Reborn's extension registry flow:
+
+- installed a registry extension through the real Reborn Extensions page;
+- mocked the Reborn `/api/webchat/v2/extensions/install` response with
+  `auth_url`;
+- asserted the browser opens the HTTPS authorization URL through `window.open`;
+- asserted the install request uses Reborn's structured
+  `{ package_ref: { kind, id } }` payload.
+
+Behavior adjustment:
+
+- Legacy assertions targeted `/api/extensions/install`, legacy auth-card globals,
+  and unqualified extension names. Reborn's equivalent install boundary is the
+  WebUI v2 extension registry action and the package-ref DTO; auth UI after
+  provider callback remains covered by the product-auth/browser prompt tests.
+
 ## Open Migration Buckets
 
 Not yet ported:
