@@ -70,11 +70,12 @@
 # EXECUTABLE BODY (the comment outline above is the SPEC and stays intact).
 # ============================================================================
 #
-# Red->green driver for epic #5261 role-model build. Steps that work against
-# *current* logic HARD-ASSERT; role-model steps not yet built are marked
-# `@pytest.mark.xfail(..., strict=False)` so the suite is GREEN now and each
-# xfail is removed as its feature (D1-D7) lands. The precise gap is named in
-# every xfail reason so the reviewer knows which to drop.
+# Ground-truth driver for epic #5261 role-model build. All five role-model
+# features (A-E / D1-D7) are built, so every SPEC step HARD-ASSERTS against the
+# live policy-enabled serve. The single remaining `@pytest.mark.xfail` is NOT a
+# feature gap: it is the gdrive Google-OAuth sub-path of step 9, which needs a
+# real browser consent + provider callback that cannot be driven headlessly in
+# this harness. Its reason names that limitation precisely.
 #
 # Run:
 #   cd tests/e2e
@@ -83,12 +84,15 @@
 # asyncio_mode="auto" is set globally in pyproject.toml, so NO @pytest.mark.asyncio.
 
 import asyncio
+import json
 import os
 import signal
 import socket
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import aiohttp
 import httpx
 import pytest
 
@@ -411,6 +415,106 @@ async def _create_thread(client, base_url, token):
     return resp.json()["thread"]["thread_id"]
 
 
+async def _offered_tool_names(client, mock_llm_server):
+    """Provider tool names the mock LLM was last offered (the model's dispatch
+    surface). Reads /__mock/last_chat_request — the most recent
+    /v1/chat/completions body the mock saw — and projects out tool names."""
+    resp = await client.get(f"{mock_llm_server}/__mock/last_chat_request", timeout=15)
+    resp.raise_for_status()
+    tools = resp.json().get("tools", []) or []
+    return {t.get("function", {}).get("name") for t in tools}
+
+
+async def _drain_projection_items(base_url, thread_id, token, *, timeout: float = 12.0):
+    """Open the v2 SSE stream for a thread (via the ?token= shim — the only route
+    that accepts it) and return the items of the LAST projection state frame seen.
+
+    The v2 stream is projection-derived: each `projection_snapshot`/
+    `projection_update` carries the full renderable `ProductProjectionState`,
+    including per-run `run_status`, `gate`, and `capability_activity` items. We
+    drain a few seconds of frames and return the final item set so a caller can
+    assert whether a capability reached dispatch (gate/activity) or the run
+    failed/declined.
+    """
+    events_url = f"{base_url}/api/webchat/v2/threads/{thread_id}/events?token={token}"
+    last_items: list = []
+    client_timeout = aiohttp.ClientTimeout(total=timeout + 2, sock_read=timeout + 2)
+    try:
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.get(
+                events_url, headers={"Accept": "text/event-stream"}
+            ) as response:
+                if response.status != 200:
+                    return last_items
+                try:
+                    async with asyncio.timeout(timeout):
+                        async for raw in response.content:
+                            line = raw.decode("utf-8", "replace").strip()
+                            if not line.startswith("data:") or line == "data:":
+                                continue
+                            try:
+                                frame = json.loads(line[5:].strip())
+                            except json.JSONDecodeError:
+                                continue
+                            if frame.get("type") in (
+                                "projection_snapshot",
+                                "projection_update",
+                            ):
+                                items = (frame.get("state") or {}).get("items")
+                                if items is not None:
+                                    last_items = items
+                            # Stop early once the run reaches a terminal/gate state.
+                            if _items_run_settled(last_items):
+                                break
+                except (asyncio.TimeoutError, TimeoutError):
+                    pass
+    except Exception:
+        return last_items
+    return last_items
+
+
+def _items_run_settled(items: list) -> bool:
+    """True once a projection item set shows the run blocked on a gate or done."""
+    for item in items:
+        gate = item.get("gate")
+        if gate:
+            return True
+        run_status = item.get("run_status")
+        if run_status and run_status.get("status") in (
+            "blocked_approval",
+            "blocked_auth",
+            "completed",
+            "failed",
+            "cancelled",
+        ):
+            return True
+    return False
+
+
+def _items_have_approval_gate(items: list) -> bool:
+    """True if the projection shows the run parked on an approval gate.
+
+    builtin.shell carries an approval requirement in this profile, so a granted
+    member's shell call dispatches and parks at an approval gate. The v2
+    `GatePromptView` for an approval gate carries `gate_kind: approval` (it does
+    not surface the raw capability_id); the gate's presence is the proof the
+    capability passed the policy filter and reached dispatch.
+    """
+    return any(
+        (item.get("gate") or {}).get("gate_kind") == "approval" for item in items
+    )
+
+
+def _items_run_status(items: list):
+    """The last run_status item's status string, or None."""
+    status = None
+    for item in items:
+        run_status = item.get("run_status")
+        if run_status and run_status.get("status"):
+            status = run_status["status"]
+    return status
+
+
 # ---------------------------------------------------------------------------
 # Per-test org/account state. Building the directory is itself part of the
 # SPEC (sections 1-2), so it lives in a fixture that the section tests share.
@@ -510,20 +614,26 @@ async def test_section2_install_and_grant_writes_succeed(org_state):
         assert status == 200, f"hide {cap} for {member}: HTTP {status}"
 
 
-@pytest.mark.xfail(
-    reason="bob user-keyed secret: manual-token flow is setup + secret-submit "
-    "(scope/interaction_id/validated-token shape), not the /setup + /submit "
-    "shape the SPEC sketches; exact request contract unverified (D-future).",
-    strict=False,
-)
 async def test_section2_bob_user_keyed_secret(org_state):
-    """Step 9: set bob's own provider key via the manual-token flow.
+    """Step 9: set bob's own provider key via the REAL manual-token flow.
 
     The live routes are POST /api/reborn/product-auth/manual-token/{setup,
-    submit,secret-submit}; `submit`/`secret-submit` require a validated token
-    plus the setup-issued interaction_id and a scoped invocation. The precise
-    body shape is not pinned down here, so this is a best-effort xfail until the
-    manual-token request contract for a user-keyed member secret is confirmed.
+    secret-submit} (see crates/ironclaw_reborn_composition/src/product_auth_serve/
+    manual_token.rs). The flow is two steps with NO browser-supplied scope:
+
+      1. setup  -> the host mints a fresh scoped interaction and returns its
+         `interaction_id` plus the `invocation_id` it minted the scope under.
+         `run_id`/`gate_ref` are omitted, so the continuation is `SetupOnly`
+         (a standalone user-keyed credential, not a turn-gate resume).
+      2. secret-submit -> the browser carries that `invocation_id` BACK in the
+         flattened scope (`scope_from_authenticated_caller_parts_requiring_
+         invocation` rejects a missing one with 400) plus the setup-issued
+         `interaction_id` and the raw token on its dedicated body field. On
+         success the route returns the redacted `credential_ref` (200).
+
+    The credential is owned at BOB's user_id (the scope is derived server-side
+    from bob's bearer, never the body), proving the user-keyed per-member secret
+    path. The gdrive OAuth sub-path is asserted separately below.
     """
     base_url = org_state["base_url"]
     bob = org_state["tokens"]["bob"]
@@ -534,15 +644,75 @@ async def test_section2_bob_user_keyed_secret(org_state):
             json={"provider": "github", "account_label": "bob-github"},
             timeout=15,
         )
-        assert setup.status_code == 200, setup.text
-        interaction_id = setup.json()["interaction_id"]
+        assert setup.status_code == 200, f"manual-token setup: {setup.status_code} {setup.text}"
+        setup_body = setup.json()
+        interaction_id = setup_body["interaction_id"]
+        # The host-minted invocation scope MUST be round-tripped on secret-submit;
+        # secret-submit's scope resolver rejects a missing invocation_id with 400.
+        invocation_id = setup_body["invocation_id"]
+        assert interaction_id and invocation_id, setup_body
+
         submit = await client.post(
             f"{base_url}/api/reborn/product-auth/manual-token/secret-submit",
             headers=_bearer(bob),
-            json={"interaction_id": interaction_id, "token": "ghp_bob_personal_token"},
+            json={
+                "interaction_id": interaction_id,
+                "invocation_id": invocation_id,
+                "token": "ghp_bob_personal_access_token_0123456789",
+            },
             timeout=15,
         )
-        assert submit.status_code == 200, submit.text
+        assert submit.status_code == 200, (
+            f"manual-token secret-submit: {submit.status_code} {submit.text}"
+        )
+        submit_body = submit.json()
+        # Success projection: a redacted credential_ref and a credential status.
+        assert submit_body.get("credential_ref"), submit_body
+        assert submit_body.get("status"), submit_body
+
+
+@pytest.mark.xfail(
+    reason="gdrive (Google) is OAuth-keyed, not manual-token. The user-keyed Google "
+    "credential requires an OAuth consent: completing it needs a real browser at "
+    "Google's consent screen + a provider callback, which cannot be driven "
+    "headlessly here. The github manual-token path (test above) is step 9's "
+    "hard-asserted user-keyed secret; the graceful no-key auth-gate path is step 15.",
+    strict=False,
+)
+async def test_section2_bob_gdrive_oauth_keyed_secret(org_state):
+    """Step 9 (gdrive sub-path): Google Drive is OAuth-keyed, not manual-token.
+
+    We exercise the real OAuth START route for bob (POST /extensions/google-drive/
+    setup/oauth/start) and assert it would hand back an `authorization_url` to
+    redirect the browser to. Completing the credential (consent + callback) needs
+    a real browser, so the end-to-end credential cannot be established headlessly —
+    hence the precise xfail. The github manual-token path is the hard assert.
+    """
+    base_url = org_state["base_url"]
+    bob = org_state["tokens"]["bob"]
+    # The route caps caller-supplied expiry at the flow TTL (10 min); 5 min is well
+    # inside it (PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS in product_auth_serve/mod.rs).
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(minutes=5)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    async with httpx.AsyncClient() as client:
+        start = await client.post(
+            f"{base_url}/api/webchat/v2/extensions/google-drive/setup/oauth/start",
+            headers=_bearer(bob),
+            json={
+                "provider": "google",
+                "account_label": "bob-gdrive",
+                "scopes": ["https://www.googleapis.com/auth/drive"],
+                "expires_at": expires_at,
+            },
+            timeout=15,
+        )
+        # Even if the start succeeds, consent cannot be driven headlessly; the
+        # authorization_url assertion is the furthest this harness can reach.
+        assert start.status_code == 200, (
+            f"gdrive oauth start: {start.status_code} {start.text}"
+        )
+        assert start.json().get("authorization_url"), start.text
 
 
 # ===========================================================================
@@ -581,14 +751,9 @@ async def test_section3_step12_deletion_guards(org_state):
         assert deleted.status_code == 204, f"owner->admin delete: {deleted.status_code} {deleted.text}"
 
 
-@pytest.mark.xfail(
-    reason="step 12 deletion guards (D5/G1, #5355): self-delete, admin->owner, "
-    "admin->peer-admin, and last-owner protection are not built — the delete "
-    "handler today checks only is_admin + tenant, so these 403 cases 204.",
-    strict=False,
-)
 async def test_section3_step12_deletion_guards_403_cases(org_state):
-    """The four guard cases that must 403 once D5 lands (today they 204)."""
+    """The four guard cases that must 403 (D5/G1, #5355): self-delete,
+    admin->owner, admin->peer-admin, and last-owner protection."""
     base_url = org_state["base_url"]
     director = org_state["tokens"]["director"]
 
@@ -635,19 +800,13 @@ async def test_section3_step12_deletion_guards_403_cases(org_state):
         assert r4.status_code == 403, f"last-owner self-delete must be 403, got {r4.status_code}"
 
 
-@pytest.mark.xfail(
-    reason="step 13 (D6/G4, #5355): an admin may not change the OWNER's caps. "
-    "The per-user caps route discards AdminCaller.0 and never compares ranks, "
-    "so officer(admin)->director(owner) currently 200s instead of 403.",
-    strict=False,
-)
 async def test_section3_step13_admin_cannot_change_owner_caps(org_state):
     """Step 13: an admin PUT director(owner)'s caps -> 403.
 
     Mint a fresh admin bearer here rather than reusing `officer` (module-scoped
     `org_state` is shared, and the step-12 owner->admin delete may have revoked
-    officer's token) so the xfail stays honest: it must fail on the rank check
-    (admin can't touch an owner), not on a stale 401.
+    officer's token) so the assertion stays honest: it must hit the rank check
+    (admin can't touch an owner) and 403, not fail on a stale 401.
     """
     base_url = org_state["base_url"]
     director = org_state["tokens"]["director"]
@@ -669,31 +828,117 @@ async def test_section3_step13_admin_cannot_change_owner_caps(org_state):
 # SECTION 4 — enforcement at dispatch (per-user tool surface)
 # ===========================================================================
 
-@pytest.mark.xfail(
-    reason="step 14 BEHAVIORAL: per-user dispatch-surface enforcement needs a "
-    "deterministic model tool-call against a real installed extension tool plus "
-    "the role-aware resolver (D2/D3) and builtin governance (D4); none of "
-    "alice(builtin.shell)/admin-all-access are built, and the mock LLM has no "
-    "canned tool-call wired for these capabilities yet.",
-    strict=False,
-)
-async def test_section4_step14_dispatch_surface_enforcement(org_state):
-    """Step 14: run the same tool-seeking turn per user; assert RAN vs
-    PolicyDenied at dispatch. Requires D2/D3/D4 + a mock-LLM canned tool call."""
+SHELL_PROBE_PROMPT = "capability policy probe: run the shell tool please"
+SHELL_PROVIDER_TOOL = "builtin__shell"  # capability_id `builtin.shell` -> `.`->`__`
+
+
+async def _drive_shell_probe(client, base_url, mock_llm_server, token):
+    """Send the shell-probe turn as `token`, returning (offered_tools, items).
+
+    `offered_tools` is the model's dispatch surface (the tools the v2 loop built
+    and offered the model for this user) captured from the mock LLM. `items` is
+    the final SSE projection item set for the run. The mock maps the probe prompt
+    to a `builtin__shell` tool_call, mirroring how the real v2 send-message turn
+    maps a model tool_call back to a capability invocation.
+    """
+    thread_id = await _create_thread(client, base_url, token)
+    send = await client.post(
+        f"{base_url}/api/webchat/v2/threads/{thread_id}/messages",
+        headers=_bearer(token),
+        json={"client_action_id": str(uuid.uuid4()), "content": SHELL_PROBE_PROMPT},
+        timeout=30,
+    )
+    assert send.status_code in (200, 202), f"send: {send.status_code} {send.text}"
+    # Let the loop build the surface + call the model at least once, then capture
+    # the offered tool surface from the mock before any other user's turn runs.
+    await asyncio.sleep(1.5)
+    offered = await _offered_tool_names(client, mock_llm_server)
+    items = await _drain_projection_items(base_url, thread_id, token)
+    return offered, items
+
+
+async def test_section4_step14_dispatch_surface_enforcement(org_state, mock_llm_server):
+    """Step 14 (BEHAVIORAL): drive the SAME tool-seeking turn per user and assert
+    enforcement at DISPATCH — the tools the model was offered, and whether the
+    granted capability reached execution — NOT from settings/tools.
+
+    The probe asks the model to run the shell capability; the mock LLM maps it to
+    a `builtin__shell` tool_call. The capability-policy resolver builds a per-user
+    visible surface BEFORE the model is called, so:
+
+    * ALICE is GRANTED builtin.shell -> `builtin__shell` is offered, and the call
+      dispatches: it reaches the builtin governance + approval seam (the run goes
+      `blocked_approval` on builtin.shell), proving it RAN past the policy filter.
+      (builtin.shell carries an approval requirement in this profile; reaching the
+      gate is the "ran" signal — the model was allowed the tool and the loop
+      dispatched it.)
+    * CARL has every capability HIDDEN (deny all) -> `builtin__shell` is NOT in
+      his filtered surface (only the always-present capability_info meta-tool),
+      so the policy declines it when the loop builds the model surface.
+    * OFFICER is an ADMIN -> admin bypass (D2/D3): the full builtin surface is
+      offered (including `builtin__shell`) and the call dispatches to the gate,
+      even though members are capped.
+
+    `capability_info` (`ironclaw.loop.capability_info`) is a host meta-capability
+    present on every surface, so it is not a per-user signal; the decisive signal
+    is whether `builtin__shell` is present and reaches dispatch.
+    """
     base_url = org_state["base_url"]
-    alice = org_state["tokens"]["alice"]
     async with httpx.AsyncClient() as client:
-        thread_id = await _create_thread(client, base_url, alice)
-        # Would send a prompt the mock LLM maps to a web_search tool call, then
-        # poll the timeline for the tool result (RAN) vs a PolicyDenied marker.
-        assert thread_id  # placeholder until the canned tool-call lands.
-        raise AssertionError("dispatch-surface enforcement assertions not yet wired")
+        # ALICE — allowed builtin.shell: offered the tool AND it dispatches.
+        alice_offered, alice_items = await _drive_shell_probe(
+            client, base_url, mock_llm_server, org_state["tokens"]["alice"]
+        )
+        assert SHELL_PROVIDER_TOOL in alice_offered, (
+            f"alice (granted builtin.shell) must be offered {SHELL_PROVIDER_TOOL} "
+            f"at dispatch; offered={sorted(alice_offered)}"
+        )
+        assert _items_have_approval_gate(alice_items), (
+            "alice's builtin.shell call must reach dispatch (the approval gate), "
+            f"proving it ran past the policy filter; run_status="
+            f"{_items_run_status(alice_items)} items={alice_items}"
+        )
+
+        # CARL — deny all: builtin.shell is hidden from the model surface.
+        carl_offered, _carl_items = await _drive_shell_probe(
+            client, base_url, mock_llm_server, org_state["tokens"]["carl"]
+        )
+        assert SHELL_PROVIDER_TOOL not in carl_offered, (
+            f"carl (deny all) must NOT be offered {SHELL_PROVIDER_TOOL} — the "
+            f"policy hides it when the loop builds the surface; offered="
+            f"{sorted(carl_offered)}"
+        )
+
+        # ADMIN — full builtin surface (D2/D3 admin bypass) + dispatch.
+        # Mint a fresh admin here rather than reusing org_state's `officer`: the
+        # section-3 deletion-guard tests delete and recreate `officer`, revoking
+        # the module-scoped token, so reusing it would 401 on a stale bearer
+        # instead of exercising the admin surface. (Same pattern as step 13.)
+        director = org_state["tokens"]["director"]
+        admin = await _create_user(client, base_url, director, "surface-admin", "admin")
+        admin_offered, admin_items = await _drive_shell_probe(
+            client, base_url, mock_llm_server, admin
+        )
+        assert SHELL_PROVIDER_TOOL in admin_offered, (
+            f"admin must be offered {SHELL_PROVIDER_TOOL} (admin bypass); "
+            f"offered={sorted(admin_offered)}"
+        )
+        # Admin sees more than the two-tool member surface alice gets.
+        assert len(admin_offered) > len(alice_offered), (
+            f"admin surface ({len(admin_offered)}) must exceed alice's capped "
+            f"member surface ({len(alice_offered)})"
+        )
+        assert _items_have_approval_gate(admin_items), (
+            "admin's builtin.shell call must reach dispatch (the approval gate); "
+            f"run_status={_items_run_status(admin_items)} items={admin_items}"
+        )
 
 
 async def test_section4_step16_approval_pref_available_capability(org_state):
     """Step 16 (available case): a member may set an approval pref on a cap
-    AVAILABLE to them. The live route is POST /settings/tools/{capability_id}
-    (PUT is not yet accepted — see the xfail below)."""
+    AVAILABLE to them. Exercises the back-compat POST verb on
+    /settings/tools/{capability_id}; the PUT verb is covered by the
+    unavailable-rejection test below."""
     base_url = org_state["base_url"]
     alice = org_state["tokens"]["alice"]
     # alice's allow-set intersected with the live catalog; fall back to the
@@ -712,12 +957,6 @@ async def test_section4_step16_approval_pref_available_capability(org_state):
         assert resp.status_code == 200, f"approval pref on available cap: {resp.status_code} {resp.text}"
 
 
-@pytest.mark.xfail(
-    reason="step 16 PUT + unavailable-rejection (D7, #5344/#5355): the route only "
-    "accepts POST today (no .put()), and there is no CapabilityAvailabilityProbe "
-    "gating, so a pref on an UNAVAILABLE cap is not yet rejected with 403/404.",
-    strict=False,
-)
 async def test_section4_step16_approval_pref_unavailable_rejected(org_state):
     """Step 16 (rejection case): PUT an approval pref on a cap UNAVAILABLE to the
     member -> 403/404. Needs the PUT verb + availability probe (D7)."""

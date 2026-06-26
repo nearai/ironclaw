@@ -134,6 +134,21 @@ NOTION_SEARCH_LIFECYCLE_TRIGGER = re.compile(
 )
 
 TOOL_CALL_PATTERNS = [
+    # Capability-policy dispatch-surface enforcement (#5261 step 14).
+    #
+    # The user prompt below makes the model attempt the builtin shell capability.
+    # The v2 native surface exposes builtin.shell to the model under the provider
+    # tool name `builtin__shell` (capability_id `.` -> `__`), so that is the name
+    # the model emits — mirroring how the real v2 send-message turn maps a model
+    # tool_call back to a capability invocation. A member who is GRANTED
+    # builtin.shell is offered this tool and the call dispatches (reaching the
+    # approval gate); a member with it HIDDEN never sees it in the filtered
+    # surface, so the policy bites when the loop builds the model surface.
+    (
+        re.compile(r"capability policy probe: run the shell tool", re.IGNORECASE),
+        "builtin__shell",
+        lambda _: {"command": "echo capability-policy-probe", "timeout": 5},
+    ),
     # Parallel tool calls: return both echo and time in one response
     (
         re.compile(r"parallel echo and time", re.IGNORECASE),
