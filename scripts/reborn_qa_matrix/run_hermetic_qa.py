@@ -96,6 +96,29 @@ OPENAI_RESPONSES_WORKFLOW_COMMAND = CommandSpec(
     ],
 )
 
+OPENAI_CHAT_WORKFLOW_COMMAND = CommandSpec(
+    name="openai_chat_workflow_handlers_contract",
+    description=(
+        "Focused OpenAI-compatible Chat Completions handler contracts for "
+        "success, streaming guardrails, idempotency, validation, projection, "
+        "and sanitized error behavior."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_openai_compat",
+        "--test",
+        "chat_workflow_handlers_contract",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 PRODUCT_WORKFLOW_LEDGER_COMMAND = CommandSpec(
     name="product_workflow_storage_durable_ledger",
     description=(
@@ -373,6 +396,27 @@ CASES: dict[str, CaseSpec] = {
             "duplicate: create on /api/v1 and /v1, retrieve/cancel, auth, "
             "invalid input, unsupported fields, wait timeout, cross-scope "
             "not-found shape, and sanitized ProductWorkflow errors."
+        ),
+    ),
+    "openai_chat_completions_workflow_regression": CaseSpec(
+        name="openai_chat_completions_workflow_regression",
+        feature="OpenAI-compatible Chat Completions API",
+        category="Hermetic Chat Completions Handler Contract",
+        qa_matrix_test_ids=[
+            "REBCLI-056-TC-01",
+            "REBCLI-056-TC-02",
+            "REBCLI-056-TC-03",
+            "REBCLI-056-TC-04",
+            "REBCLI-056-TC-05",
+            "REBCLI-056-TC-06",
+        ],
+        commands=[OPENAI_CHAT_WORKFLOW_COMMAND],
+        notes=(
+            "Focused Chat Completions contract coverage that PR #5348 does "
+            "not duplicate: non-stream success, idempotency replay/conflict, "
+            "malformed JSON, model/idempotency validation, streaming "
+            "guardrails, projection metadata, and sanitized ProductWorkflow "
+            "errors."
         ),
     ),
     "support_substrate_product_workflow_regression": CaseSpec(

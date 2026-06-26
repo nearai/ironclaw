@@ -43,6 +43,14 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-056-TC-01",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "REBCLI-056-TC-06",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-055-TC-07",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -64,6 +72,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             )
             self.assertIn(
                 "openai_responses_api_workflow_regression",
+                {case["case"] for case in manifest["cases"]},
+            )
+            self.assertIn(
+                "openai_chat_completions_workflow_regression",
                 {case["case"] for case in manifest["cases"]},
             )
             self.assertIn(
@@ -250,6 +262,44 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             commands = results["results"][0]["details"]["commands"]
             self.assertEqual(commands[0]["name"], "webui_v2_static_js_suite")
             self.assertIn("node --test", commands[0]["command"])
+
+    def test_chat_completions_case_dry_run_maps_primary_chat_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "openai_chat_completions_workflow_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-056-TC-01",
+                    "REBCLI-056-TC-02",
+                    "REBCLI-056-TC-03",
+                    "REBCLI-056-TC-04",
+                    "REBCLI-056-TC-05",
+                    "REBCLI-056-TC-06",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                commands[0]["name"],
+                "openai_chat_workflow_handlers_contract",
+            )
+            self.assertIn(
+                "--test chat_workflow_handlers_contract",
+                commands[0]["command"],
+            )
 
     def test_failed_command_stops_later_commands_in_case(self):
         case = run_hermetic_qa.CaseSpec(
