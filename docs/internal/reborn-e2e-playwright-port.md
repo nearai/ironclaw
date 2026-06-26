@@ -739,7 +739,10 @@ Ported the user-visible resource-limit intent from legacy
 - older history is fetched only after the user activates the visible "Load older
   messages" control;
 - one explicit load appends one older 50-message page without auto-loading the
-  rest of a long thread.
+  rest of a long thread;
+- sending a new user message while a full 50-message page is loaded appends the
+  new message at the live end without implicitly fetching older history into
+  the DOM.
 - an SSE error schedules Reborn's first reconnect timeout, and hiding the tab
   clears that pending reconnect timeout instead of leaving it active.
 

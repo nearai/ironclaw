@@ -16,6 +16,7 @@ from reborn_webui_harness import (
 THREAD_ID = "thread-legacy-dom-resource-limits"
 FULL_PAGE_THREAD_ID = "thread-legacy-dom-full-page-response"
 RECONNECT_THREAD_ID = "thread-legacy-dom-reconnect"
+FULL_PAGE_SEND_THREAD_ID = "thread-legacy-dom-full-page-send"
 
 
 def _timeline_message(sequence: int) -> dict:
@@ -301,6 +302,143 @@ async def test_reborn_response_projection_survives_full_history_page(
             page.get_by_text("Final response near DOM page cap with the final sentence intact.")
         ).to_be_visible()
         await expect(page.get_by_text("Final response near DOM page cap")).to_have_count(1)
+    finally:
+        await context.close()
+
+
+async def test_reborn_user_send_survives_full_history_page_without_loading_older(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Port legacy near-DOM-cap user-send preservation to Reborn history paging."""
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    timeline_queries: list[dict[str, list[str]]] = []
+    sent_messages: list[dict] = []
+
+    await page.add_init_script(
+        """
+        (() => {
+          class FakeEventSource extends EventTarget {
+            constructor(url) {
+              super();
+              this.url = url;
+              this.readyState = 0;
+              queueMicrotask(() => {
+                this.readyState = 1;
+                if (typeof this.onopen === "function") this.onopen(new Event("open"));
+              });
+            }
+            close() {
+              this.readyState = 2;
+            }
+          }
+          window.EventSource = FakeEventSource;
+        })();
+        """
+    )
+
+    async def fulfill_json(route, body):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route):
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route):
+        await fulfill_json(
+            route,
+            {
+                "threads": [
+                    {
+                        "thread_id": FULL_PAGE_SEND_THREAD_ID,
+                        "title": "Legacy full-page send port",
+                        "created_at": "2026-06-26T00:00:00Z",
+                        "updated_at": "2026-06-26T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_timeline(route):
+        query = parse_qs(urlparse(route.request.url).query)
+        timeline_queries.append(query)
+        await fulfill_json(
+            route,
+            {
+                "messages": [_timeline_message(i) for i in range(201, 251)],
+                "next_cursor": "older-200",
+            },
+        )
+
+    async def handle_send(route):
+        body = json.loads(route.request.post_data or "{}")
+        sent_messages.append(body)
+        await fulfill_json(
+            route,
+            {
+                "thread_id": FULL_PAGE_SEND_THREAD_ID,
+                "run_id": "run-full-page-send",
+                "status": "queued",
+                "accepted_message_ref": "message:full-page-send-user",
+            },
+        )
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads", handle_threads)
+    await page.route("**/api/webchat/v2/threads?**", handle_threads)
+    await page.route(
+        f"**/api/webchat/v2/threads/{FULL_PAGE_SEND_THREAD_ID}/timeline**",
+        handle_timeline,
+    )
+    await page.route(
+        f"**/api/webchat/v2/threads/{FULL_PAGE_SEND_THREAD_ID}/messages",
+        handle_send,
+    )
+
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/v2/chat/{FULL_PAGE_SEND_THREAD_ID}"
+            f"?token={REBORN_V2_AUTH_TOKEN}"
+        )
+
+        bubbles = page.locator(f"{SEL_V2['msg_user']}, {SEL_V2['msg_assistant']}")
+        await expect(bubbles).to_have_count(50, timeout=15000)
+        assert timeline_queries == [{"limit": ["50"]}]
+        await expect(page.get_by_text("DOM page message 201")).to_be_visible()
+        await expect(page.get_by_text("DOM page message 150")).to_have_count(0)
+
+        composer = page.locator(SEL_V2["chat_composer"])
+        await composer.fill("new message while history page is full")
+        await composer.press("Enter")
+
+        await expect(bubbles).to_have_count(51, timeout=5000)
+        await expect(page.locator(SEL_V2["msg_user"]).last).to_contain_text(
+            "new message while history page is full",
+            timeout=5000,
+        )
+        assert sent_messages and sent_messages[-1]["content"] == (
+            "new message while history page is full"
+        )
+        assert timeline_queries == [{"limit": ["50"]}]
+        await expect(page.get_by_text("DOM page message 150")).to_have_count(0)
     finally:
         await context.close()
 
