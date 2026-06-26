@@ -1,3 +1,7 @@
+mod child_io;
+mod progress;
+mod redaction;
+
 use std::{
     any::Any,
     collections::BTreeMap,
@@ -11,6 +15,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::{
+    child_io::{join_child_stderr_reader, spawn_child_stderr_reader},
+    progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
+    redaction::{redact_libsql_path, redact_postgres_url},
+};
 use clap::{Parser, ValueEnum};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
@@ -72,6 +81,10 @@ struct Args {
     /// Postgres pool size per process.
     #[arg(long, default_value_t = 4)]
     postgres_pool_size: usize,
+
+    /// Emit live progress to stderr every N seconds. Set to 0 to disable.
+    #[arg(long, default_value_t = 1)]
+    progress_interval_seconds: u64,
 
     #[arg(long, hide = true)]
     child_index: Option<usize>,
@@ -223,6 +236,13 @@ fn validate_args(args: &Args) -> Result<(), String> {
 }
 
 async fn prewarm(args: &Args, run_id: &str) -> Result<(), String> {
+    eprintln!(
+        "{} prewarming backend={} scenario={} run_id={}",
+        log_prefix(args),
+        args.backend.as_str(),
+        args.scenario.as_str(),
+        run_id
+    );
     let backend = build_backend(args, run_id).await?;
     let account = ResourceAccount::tenant(TenantId::new("stress-prewarm").map_err(display_err)?);
     backend
@@ -236,6 +256,14 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
     let current_exe =
         std::env::current_exe().map_err(|error| format!("resolve current executable: {error}"))?;
     let libsql_path = args.libsql_path.clone().unwrap_or_else(default_libsql_path);
+
+    eprintln!(
+        "{} spawning {} child processes total_operations_per_child={} progress_interval_seconds={}",
+        log_prefix(args),
+        args.processes,
+        args.concurrency.saturating_mul(args.operations),
+        args.progress_interval_seconds
+    );
 
     let mut children = Vec::with_capacity(args.processes);
     for child_index in 0..args.processes {
@@ -257,6 +285,8 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.scenario.as_str())
             .arg("--postgres-pool-size")
             .arg(args.postgres_pool_size.to_string())
+            .arg("--progress-interval-seconds")
+            .arg(args.progress_interval_seconds.to_string())
             .arg("--run-id")
             .arg(run_id)
             .arg("--child-index")
@@ -270,7 +300,13 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             command.env("IRONCLAW_FILESYSTEM_POSTGRES_URL", url);
         }
         match command.spawn() {
-            Ok(child) => children.push((child_index, child)),
+            Ok(mut child) => {
+                let stderr_reader = child
+                    .stderr
+                    .take()
+                    .and_then(|stderr| spawn_child_stderr_reader(child_index, stderr));
+                children.push((child_index, child, stderr_reader));
+            }
             Err(error) => {
                 terminate_children(&mut children);
                 return Err(format!("spawn child {child_index}: {error}"));
@@ -280,20 +316,21 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
 
     let mut summaries = Vec::with_capacity(children.len());
     while !children.is_empty() {
-        let (child_index, child) = children.remove(0);
+        let (child_index, child, stderr_reader) = children.remove(0);
         let output = match child.wait_with_output() {
             Ok(output) => output,
             Err(error) => {
+                join_child_stderr_reader(child_index, stderr_reader);
                 terminate_children(&mut children);
                 return Err(format!("wait for child {child_index}: {error}"));
             }
         };
+        join_child_stderr_reader(child_index, stderr_reader);
         if !output.status.success() {
             terminate_children(&mut children);
             return Err(format!(
-                "child {child_index} failed with status {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
+                "child {child_index} failed with status {}; see stderr above for child logs",
+                output.status
             ));
         }
         let stdout = match String::from_utf8(output.stdout) {
@@ -321,7 +358,26 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
 }
 
 async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, String> {
+    eprintln!(
+        "{} preparing backend={} scenario={} run_id={}",
+        log_prefix(args),
+        args.backend.as_str(),
+        args.scenario.as_str(),
+        run_id
+    );
     let backend = build_backend(args, run_id).await?;
+    let total_operations = args.concurrency.saturating_mul(args.operations);
+    eprintln!(
+        "{} running target={} concurrency={} operations_per_thread={} total_operations={} users={} tenants={} progress_interval_seconds={}",
+        log_prefix(args),
+        backend.target,
+        args.concurrency,
+        args.operations,
+        total_operations,
+        args.users,
+        args.tenants,
+        args.progress_interval_seconds
+    );
     let identities = Arc::new(SyntheticIds::new(args)?);
     let started = Instant::now();
     let governor = Arc::clone(&backend.governor);
@@ -339,13 +395,44 @@ async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, String>
                 }
             })??;
     let elapsed = started.elapsed();
-    Ok(summarize(args, run_id, backend.target, elapsed, samples))
+    let summary = summarize(args, run_id, backend.target, elapsed, samples);
+    eprintln!(
+        "{} finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
+        log_prefix(args),
+        summary.attempted,
+        summary.succeeded,
+        summary.failed,
+        summary.duration_ms,
+        summary.throughput_ops_sec
+    );
+    Ok(summary)
 }
 
 fn run_threads(
     governor: &Arc<dyn ResourceGovernor>,
     args: &Args,
     identities: &Arc<SyntheticIds>,
+) -> Result<Vec<Sample>, String> {
+    let total_operations = args.concurrency.saturating_mul(args.operations);
+    let progress = Arc::new(ProgressCounters::default());
+    let progress_reporter = spawn_progress_reporter(
+        log_prefix(args),
+        args.backend.as_str(),
+        args.scenario.as_str(),
+        args.progress_interval_seconds,
+        total_operations,
+        Arc::clone(&progress),
+    );
+    let result = run_threads_inner(governor, args, identities, &progress);
+    stop_progress_reporter(progress_reporter);
+    result
+}
+
+fn run_threads_inner(
+    governor: &Arc<dyn ResourceGovernor>,
+    args: &Args,
+    identities: &Arc<SyntheticIds>,
+    progress: &Arc<ProgressCounters>,
 ) -> Result<Vec<Sample>, String> {
     let (sender, receiver) = mpsc::channel();
     let mut handles = Vec::with_capacity(args.concurrency);
@@ -354,19 +441,22 @@ fn run_threads(
         let governor = Arc::clone(governor);
         let identities = Arc::clone(identities);
         let sender = sender.clone();
+        let progress = Arc::clone(progress);
         let args = args.clone();
         let handle = match thread::Builder::new()
             .name(format!("storage-stress-{worker_index}"))
             .spawn(move || -> Result<(), String> {
                 let mut samples = Vec::with_capacity(args.operations);
                 for operation_index in 0..args.operations {
-                    samples.push(run_one_operation(
+                    let sample = run_one_operation(
                         &governor,
                         &args,
                         &identities,
                         worker_index,
                         operation_index,
-                    ));
+                    );
+                    progress.record(sample.error.is_some());
+                    samples.push(sample);
                 }
                 sender
                     .send(samples)
@@ -584,6 +674,13 @@ fn classify_error(error: &ResourceError) -> String {
     }
 }
 
+fn log_prefix(args: &Args) -> String {
+    match args.child_index {
+        Some(child_index) => format!("[storage-stress child={child_index}]"),
+        None => "[storage-stress]".to_string(),
+    }
+}
+
 async fn build_backend(args: &Args, run_id: &str) -> Result<BackendHandle, String> {
     match args.backend {
         Backend::Libsql => build_libsql_backend(args, run_id).await,
@@ -689,12 +786,13 @@ async fn cleanup_generated_libsql_path(path: &Path) {
     }
 }
 
-fn terminate_children(children: &mut Vec<(usize, Child)>) {
-    for (_, child) in children.iter_mut() {
+fn terminate_children(children: &mut Vec<(usize, Child, Option<JoinHandle<()>>)>) {
+    for (_, child, _) in children.iter_mut() {
         let _ = child.kill();
     }
-    for (_, mut child) in children.drain(..) {
+    for (child_index, mut child, stderr_reader) in children.drain(..) {
         let _ = child.wait();
+        join_child_stderr_reader(child_index, stderr_reader);
     }
 }
 
@@ -788,74 +886,6 @@ fn optional_env_var(name: &str) -> Result<Option<String>, String> {
     }
 }
 
-fn redact_libsql_path(_path: &Path) -> String {
-    "libsql://<redacted-local-path>".to_string()
-}
-
-fn redact_postgres_url(url: &str) -> String {
-    if let Some(redacted) = redact_postgres_uri(url, "postgres://") {
-        return redacted;
-    }
-    if let Some(redacted) = redact_postgres_uri(url, "postgresql://") {
-        return redacted;
-    }
-    if let Some(redacted) = redact_postgres_key_value_config(url) {
-        return redacted;
-    }
-    "postgres://<redacted>".to_string()
-}
-
-fn redact_postgres_uri(url: &str, scheme: &str) -> Option<String> {
-    let rest = url.strip_prefix(scheme)?;
-    let redacted_rest = match rest.find('@') {
-        Some(at) => format!("<redacted>@{}", redact_uri_password_query(&rest[at + 1..])),
-        None => redact_uri_password_query(rest),
-    };
-    Some(format!("{scheme}{redacted_rest}"))
-}
-
-fn redact_uri_password_query(rest: &str) -> String {
-    let Some((prefix, query)) = rest.split_once('?') else {
-        return rest.to_string();
-    };
-    let redacted_query = query
-        .split('&')
-        .map(|pair| {
-            let key = pair.split_once('=').map(|(key, _)| key).unwrap_or(pair);
-            if key.eq_ignore_ascii_case("password") {
-                format!("{key}=<redacted>")
-            } else {
-                pair.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("&");
-    format!("{prefix}?{redacted_query}")
-}
-
-fn redact_postgres_key_value_config(config: &str) -> Option<String> {
-    let mut saw_assignment = false;
-    let parts = config
-        .split_whitespace()
-        .map(|part| {
-            let Some((key, _)) = part.split_once('=') else {
-                return part.to_string();
-            };
-            saw_assignment = true;
-            if key.eq_ignore_ascii_case("password") {
-                format!("{key}=<redacted>")
-            } else {
-                part.to_string()
-            }
-        })
-        .collect::<Vec<_>>();
-    if saw_assignment {
-        Some(parts.join(" "))
-    } else {
-        None
-    }
-}
-
 fn display_err(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -926,6 +956,7 @@ mod tests {
             libsql_path: None,
             postgres_url: None,
             postgres_pool_size: 4,
+            progress_interval_seconds: 0,
             child_index: None,
         }
     }
