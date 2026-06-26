@@ -2825,22 +2825,34 @@ pub async fn build_reborn_runtime(
         // `HooksActivationConfig` master-flag-default-off pattern. When the
         // feature is absent or the flag is off, local-dev keeps the historical
         // `AllowAll` surface so existing flows are unchanged.
+        //
+        // SCOPE (epic #5261): this — and the other three dimensions sourced from
+        // the shared `capability_policy_{resolver,delta_store}` handles — wire only
+        // on the local-runtime path (`Some(local_runtime)`). The production-graph
+        // profiles (`build_backend_production`, `local_runtime: None`) take the
+        // `EmptyCapabilitySurfaceResolver` branch below and carry no policy
+        // resolver, so they do NOT enforce capability policy yet. The milestone
+        // targets the LocalDev-shaped `serve` profiles; production enforcement is a
+        // deferred follow-on (wire the same shared handles into the production store
+        // graph).
         #[cfg(feature = "capability-policy")]
         let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
-            if capability_policy_activated() {
+            if crate::capability_policy_engine::capability_policy_activated() {
                 use crate::available_extensions::AvailableExtensionCatalog;
                 use crate::capability_surface_policy::{
                     ScopedLifecyclePolicyCapabilitySurfaceResolver, StaticPackageCapabilitySource,
+                    local_dev_scoped_lifecycle_store,
                 };
-                use ironclaw_product_workflow_storage::FilesystemScopedLifecycleInstallationStore;
 
                 // Safe in this `is_some()` arm; `ok_or` avoids an `expect`.
                 let local_runtime =
                     local_runtime.ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
-                let installation_store = Arc::new(FilesystemScopedLifecycleInstallationStore::new(
-                    Arc::clone(&local_runtime.extension_filesystem)
-                        as Arc<dyn ironclaw_filesystem::RootFilesystem>,
-                ));
+                // Same store construction (durable `/tenants` root) as the admin
+                // write surface (#5268) so admin installs are visible to dispatch.
+                let installation_store = local_dev_scoped_lifecycle_store(Arc::clone(
+                    &local_runtime.extension_filesystem,
+                )
+                    as Arc<dyn ironclaw_filesystem::RootFilesystem>);
                 // First-party extension manifests are the capability-id source:
                 // the catalog has no live `(tenant, package_ref)` facade and
                 // `product_workflow` cannot depend on this crate's lifecycle.
@@ -2856,9 +2868,20 @@ pub async fn build_reborn_runtime(
                         })?;
                 let package_capabilities =
                     Arc::new(StaticPackageCapabilitySource::from_catalog(&catalog));
+                // The SINGLE shared policy resolver (#5261 D3), constructed once
+                // in factory.rs over the SAME delta store the admin REST surface
+                // writes. Availability = installed AND policy-available; the
+                // resolver also carries identity/approval/config for the later
+                // enforcement seams.
+                let capability_policy_resolver =
+                    local_runtime
+                        .capability_policy_resolver
+                        .clone()
+                        .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
                 Arc::new(ScopedLifecyclePolicyCapabilitySurfaceResolver::new(
                     installation_store,
                     package_capabilities,
+                    capability_policy_resolver,
                 ))
             } else {
                 Arc::new(AllowAllCapabilitySurfaceResolver)
@@ -3672,19 +3695,10 @@ fn validate_runtime_identity(
     })
 }
 
-/// Whether the per-(tenant, user) capability policy resolver (#5267) is active
-/// for this runtime. Compiled in by the `capability-policy` feature, but OFF
-/// unless `IRONCLAW_REBORN_CAPABILITY_POLICY` is set truthy
-/// (`1` / `true` / `yes` / `on`). Enabling the feature alone therefore never
-/// changes local-dev behaviour — the operator opts in (e.g. for the
-/// four-dimension admin demo / #5268). Mirrors the `HooksActivationConfig`
-/// master-flag-default-off shape with an env toggle.
-#[cfg(feature = "capability-policy")]
-fn capability_policy_activated() -> bool {
-    std::env::var("IRONCLAW_REBORN_CAPABILITY_POLICY")
-        .map(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
-}
+// The activation gate `capability_policy_activated()` now lives (shared
+// `pub(crate)`) in `capability_policy_engine.rs` so both this module
+// (availability seam) and `factory.rs` (shared delta-store / resolver handle
+// construction) gate on the same switch — see #5261 D3 / D5.
 
 // The local-dev capability-surface default: expose everything. Under the
 // `capability-policy` feature it remains the fallback when the policy is not

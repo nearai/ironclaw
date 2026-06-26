@@ -53,6 +53,17 @@ openai-compat-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/openai-compat-beta",
 ]
+# Per-(tenant, user) capability availability policy at the dispatch seam
+# (#5267) in the assembled runtime. Compiles in the scoped-lifecycle-backed
+# resolver; activated at runtime by `IRONCLAW_REBORN_CAPABILITY_POLICY`
+# (default off, so a plain build keeps the prior `AllowAll` local-dev surface).
+# This availability slice forwards only to the composition crate. The
+# `ironclaw_reborn_webui_ingress?/capability-policy` forward (and the matching
+# ingress-crate feature) is the control-plane branch's job (#5272) and is added
+# there, since this slice does not modify the ingress crate or serve.rs.
+capability-policy = [
+    "ironclaw_reborn_composition/capability-policy",
+]
 # Enable production PostgreSQL storage composition for `ironclaw-reborn`.
 postgres = [
     "ironclaw_reborn_composition/postgres",
