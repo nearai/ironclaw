@@ -220,7 +220,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
         Ok(ModelStep::Exit(failed_exit(
             ctx.host,
             checked.state,
-            LoopFailureKind::DriverBug,
+            LoopFailureKind::ModelError,
             Some(checked.checkpoint_id),
         )?))
     }
