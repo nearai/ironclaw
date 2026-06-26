@@ -1047,6 +1047,24 @@ fn apply_cap_env_override(
     Ok(())
 }
 
+/// Apply the `IRONCLAW_REBORN_RUNNER_WORKER_COUNT` env override onto `slot`.
+/// Absent → unchanged; `0` → unlimited (`None`); positive → that count.
+/// Strict-presence semantics: a set-but-blank / non-numeric value is fatal.
+///
+/// Sibling of [`apply_cap_env_override`]; kept separate only because the worker
+/// count is `usize` / `NonZeroUsize` (scheduler permits) while the caps are
+/// `u32` / `NonZeroU32`, and stable Rust cannot express one helper generic over
+/// `NonZero<T>` (`ZeroablePrimitive` is unstable).
+fn apply_worker_count_env_override(
+    name: &str,
+    slot: &mut Option<std::num::NonZeroUsize>,
+) -> anyhow::Result<()> {
+    if let Some(raw) = env_util::strict_env_var_parsed::<usize>(name)? {
+        *slot = resolve_worker_count(Some(raw), *slot);
+    }
+    Ok(())
+}
+
 fn runner_settings(
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
 ) -> anyhow::Result<TurnRunnerSettings> {
@@ -1090,11 +1108,10 @@ fn runner_settings(
     // even when no `[runner]` config section exists). Strict-presence
     // semantics; `0` means "unlimited" for every concurrency knob — for
     // `worker_count` that removes the global scheduler throttle entirely.
-    if let Some(raw) =
-        env_util::strict_env_var_parsed::<usize>("IRONCLAW_REBORN_RUNNER_WORKER_COUNT")?
-    {
-        settings.worker_count = resolve_worker_count(Some(raw), settings.worker_count);
-    }
+    apply_worker_count_env_override(
+        "IRONCLAW_REBORN_RUNNER_WORKER_COUNT",
+        &mut settings.worker_count,
+    )?;
     apply_cap_env_override(
         "IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER",
         &mut settings.max_concurrent_runs_per_user,
