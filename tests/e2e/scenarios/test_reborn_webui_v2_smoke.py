@@ -30,6 +30,7 @@ import os
 import signal
 import socket
 import uuid
+from enum import StrEnum
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -41,6 +42,12 @@ from playwright.async_api import async_playwright, expect
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, wait_for_ready
 
 USER_ID = "reborn-v2-e2e-user"
+
+
+class ToolPermissionState(StrEnum):
+    DEFAULT = "default"
+    DISABLED = "disabled"
+    ASK_EACH_TIME = "ask_each_time"
 
 
 def _find_free_port() -> int:
@@ -255,6 +262,49 @@ async def _send_message(
     assert response.status_code in (200, 202), response.text
 
 
+async def _set_tool_permission(
+    client: httpx.AsyncClient,
+    base_url: str,
+    capability_id: str,
+    state: ToolPermissionState,
+) -> None:
+    response = await client.post(
+        f"{base_url}/api/webchat/v2/settings/tools/{capability_id}",
+        json={"state": state.value},
+        timeout=15,
+    )
+    assert response.status_code == 200, (
+        f"Failed to set {capability_id} to {state}: "
+        f"{response.status_code} {response.text}"
+    )
+
+
+async def _get_timeline(
+    client: httpx.AsyncClient, base_url: str, thread_id: str
+) -> dict:
+    response = await client.get(
+        f"{base_url}/api/webchat/v2/threads/{thread_id}/timeline",
+        timeout=15,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+async def _restore_disabled_tool_policy(client: httpx.AsyncClient, base_url: str) -> None:
+    errors = []
+    for capability_id in ("builtin.echo", "builtin.shell"):
+        try:
+            await _set_tool_permission(
+                client,
+                base_url,
+                capability_id,
+                ToolPermissionState.DEFAULT,
+            )
+        except Exception as error:
+            errors.append(f"{capability_id}: {error}")
+    assert not errors, "Failed to restore tool permission defaults: " + "; ".join(errors)
+
+
 async def _wait_for_assistant_message(
     client: httpx.AsyncClient,
     base_url: str,
@@ -286,6 +336,28 @@ async def _wait_for_assistant_message(
         f"Timed out waiting for a finalized assistant message in thread {thread_id}. "
         f"Last timeline: {last_timeline}"
     )
+
+
+@pytest.fixture
+async def disabled_echo_shell_ask_policy(reborn_v2_server):
+    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    async with httpx.AsyncClient(headers=headers) as client:
+        try:
+            await _set_tool_permission(
+                client,
+                reborn_v2_server,
+                "builtin.echo",
+                ToolPermissionState.DISABLED,
+            )
+            await _set_tool_permission(
+                client,
+                reborn_v2_server,
+                "builtin.shell",
+                ToolPermissionState.ASK_EACH_TIME,
+            )
+            yield
+        finally:
+            await _restore_disabled_tool_policy(client, reborn_v2_server)
 
 
 async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2_browser):
@@ -338,6 +410,32 @@ async def test_reborn_v2_text_turn_persists(reborn_v2_server):
         )
 
 
+@pytest.mark.usefixtures("disabled_echo_shell_ask_policy")
+async def test_reborn_v2_disabled_tool_does_not_route_through_shell(
+    reborn_v2_server,
+):
+    """A named unavailable tool request should not route through another tool."""
+    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    async with httpx.AsyncClient(headers=headers) as client:
+        thread_id = await _create_thread(client, reborn_v2_server)
+        prompt = "Use builtin.echo to print: disabled-test"
+        await _send_message(client, reborn_v2_server, thread_id, prompt)
+
+        assistant = await _wait_for_assistant_message(
+            client,
+            reborn_v2_server,
+            thread_id,
+            timeout=45,
+        )
+        assert "will not route it through another tool" in assistant.get("content", "")
+
+        timeline = await _get_timeline(client, reborn_v2_server, thread_id)
+        timeline_text = json.dumps(timeline, sort_keys=True)
+        assert "builtin_shell" not in timeline_text
+        assert "builtin.shell" not in timeline_text
+        assert "echo \\\"disabled-test\\\"" not in timeline_text
+
+
 async def test_reborn_v2_ui_send_renders_reply(reborn_v2_page, reborn_v2_server):
     """Typing in the composer and pressing Enter renders the assistant reply in the SPA."""
     composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
@@ -350,6 +448,208 @@ async def test_reborn_v2_ui_send_renders_reply(reborn_v2_page, reborn_v2_server)
     )
     await expect(reborn_v2_page.locator(SEL_V2["msg_assistant"]).first).to_contain_text(
         "Hello", timeout=30000
+    )
+
+
+async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v2_page):
+    """The composer stays editable while the current assistant run is still active."""
+    composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
+    await composer.fill("editable composer slow response")
+    await composer.press("Enter")
+
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+        "editable composer slow response", timeout=15000
+    )
+    await expect(
+        reborn_v2_page.locator(SEL_V2["typing_indicator"])
+    ).to_be_visible(timeout=15000)
+
+    await expect(composer).to_be_enabled()
+    await composer.fill("draft while the reply is still running")
+    await expect(composer).to_have_value("draft while the reply is still running")
+
+    await composer.press("Enter")
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
+
+
+async def test_reborn_v2_approval_gate_blocks_composer_send(
+    reborn_v2_server, reborn_v2_browser
+):
+    """An open approval gate shows the warning and blocks new sends locally."""
+    thread_id = "thread-approval-blocked"
+    send_requests: list[dict] = []
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    await page.add_init_script(
+        """
+        (() => {
+          const streams = [];
+          class FakeEventSource extends EventTarget {
+            constructor(url) {
+              super();
+              this.url = url;
+              this.readyState = 0;
+              streams.push(this);
+              setTimeout(() => {
+                this.readyState = 1;
+                if (typeof this.onopen === "function") this.onopen(new Event("open"));
+              }, 0);
+            }
+            close() {
+              this.readyState = 2;
+            }
+          }
+          window.EventSource = FakeEventSource;
+          window.__emitV2Sse = (type, frame, id = "cursor-1") => {
+            const stream = streams[streams.length - 1];
+            if (!stream) throw new Error("no EventSource stream is open");
+            const event = new MessageEvent(type, {
+              data: JSON.stringify({ type, ...frame }),
+              lastEventId: id,
+            });
+            stream.dispatchEvent(event);
+          };
+        })();
+        """
+    )
+
+    async def fulfill_json(route, body, status=200):
+        await route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route):
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route):
+        await fulfill_json(
+            route,
+            {
+                "threads": [
+                    {
+                        "thread_id": thread_id,
+                        "title": "Approval blocked regression",
+                        "created_at": "2026-06-25T00:00:00Z",
+                        "updated_at": "2026-06-25T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_timeline(route):
+        await fulfill_json(
+            route,
+            {
+                "messages": [
+                    {
+                        "message_id": "seed-user",
+                        "kind": "user",
+                        "content": "trigger approval",
+                        "sequence": 1,
+                        "status": "accepted",
+                        "created_at": "2026-06-25T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_send(route):
+        send_requests.append(json.loads(route.request.post_data or "{}"))
+        await fulfill_json(route, {"thread_id": thread_id}, status=202)
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads", handle_threads)
+    await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
+    await page.route(f"**/api/webchat/v2/threads/{thread_id}/messages", handle_send)
+
+    try:
+        await page.goto(f"{reborn_v2_server}/v2/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
+        await expect(page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+            "trigger approval", timeout=15000
+        )
+
+        await page.evaluate(
+            """
+            () => window.__emitV2Sse("gate", {
+              prompt: {
+                turn_run_id: "run-gated",
+                gate_ref: "gate-shell",
+                invocation_id: "invoke-shell",
+                headline: "Approval required",
+                body: "Allow shell to inspect the workspace?",
+                allow_always: false,
+                approval_context: {
+                  tool_name: "builtin.shell",
+                  reason: "Allow shell to inspect the workspace?",
+                  action: { label: "Run command" },
+                  destination: { label: "Local workspace" },
+                  details: [{ label: "Command", value: "pwd" }]
+                }
+              }
+            })
+            """
+        )
+
+        await expect(page.locator(SEL_V2["approval_card"]).first).to_be_visible(timeout=5000)
+        await expect(
+            page.get_by_text("Resolve the approval request before sending another message.")
+        ).to_be_visible(timeout=5000)
+
+        composer = page.locator(SEL_V2["chat_composer"])
+        await composer.fill("new message while approval is open")
+        await composer.press("Enter")
+        await expect(page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
+        assert send_requests == []
+    finally:
+        await context.close()
+
+
+async def test_reborn_v2_desktop_sidebar_can_collapse_and_persist(reborn_v2_page):
+    """Desktop users can collapse the sidebar, and the preference survives reload."""
+    sidebar = reborn_v2_page.locator(SEL_V2["sidebar"])
+    toggle = reborn_v2_page.locator(SEL_V2["sidebar_toggle"])
+
+    await expect(toggle).to_be_visible(timeout=15000)
+    await expect(sidebar).to_be_visible(timeout=15000)
+
+    await toggle.click()
+    await expect(sidebar).to_be_hidden(timeout=5000)
+    await reborn_v2_page.wait_for_function(
+        "() => localStorage.getItem('ironclaw:v2-sidebar-open') === 'false'",
+        timeout=5000,
+    )
+
+    await reborn_v2_page.reload()
+    await expect(reborn_v2_page.locator(SEL_V2["chat_composer"])).to_be_visible(
+        timeout=15000
+    )
+    await expect(sidebar).to_be_hidden(timeout=5000)
+
+    await toggle.click()
+    await expect(sidebar).to_be_visible(timeout=5000)
+    await reborn_v2_page.wait_for_function(
+        "() => localStorage.getItem('ironclaw:v2-sidebar-open') === 'true'",
+        timeout=5000,
     )
 
 

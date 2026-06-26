@@ -1,3 +1,4 @@
+mod mutation_tests;
 mod resolver_tests;
 
 use std::{
@@ -238,6 +239,18 @@ impl TriggerRepository for ScriptedRepository {
         _: Option<AgentId>,
         _: Option<ProjectId>,
         _: TriggerId,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        Err(Self::backend_error())
+    }
+
+    async fn set_scoped_trigger_state(
+        &self,
+        _: TenantId,
+        _: UserId,
+        _: Option<AgentId>,
+        _: Option<ProjectId>,
+        _: TriggerId,
+        _: TriggerState,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         Err(Self::backend_error())
     }
@@ -679,6 +692,18 @@ async fn automation_facade_maps_not_found_trigger_error_to_404() {
     assert_eq!(error.code, RebornServicesErrorCode::NotFound);
     assert_eq!(error.kind, RebornServicesErrorKind::NotFound);
     assert_eq!(error.status_code, 404);
+    assert!(!error.retryable);
+}
+
+#[test]
+fn map_trigger_error_preserves_blocked_materialization_semantics() {
+    let error = super::map_trigger_error(TriggerError::BlockedMaterialization {
+        reason: "trusted trigger inbound request blocked".to_string(),
+    });
+
+    assert_eq!(error.code, RebornServicesErrorCode::Forbidden);
+    assert_eq!(error.kind, RebornServicesErrorKind::ParticipantDenied);
+    assert_eq!(error.status_code, 403);
     assert!(!error.retryable);
 }
 

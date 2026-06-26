@@ -28,7 +28,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 65536,
-      "description": "Pull request title."
+      "description": "Pull request title. Required unless issue is supplied to convert an existing issue into a pull request."
     },
     "head": {
       "type": "string",
@@ -47,6 +47,25 @@
       "maxLength": 65536,
       "description": "Pull request body."
     },
+    "issue": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Existing issue number to convert into a pull request."
+    },
+    "head_repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository where the head branch lives for same-organization cross-repository pull requests."
+    },
+    "maintainer_can_modify": {
+      "type": "boolean",
+      "description": "Whether maintainers may modify the pull request branch."
+    },
     "draft": {
       "type": "boolean",
       "default": false
@@ -55,8 +74,19 @@
   "required": [
     "owner",
     "repo",
-    "title",
     "head",
     "base"
+  ],
+  "anyOf": [
+    {
+      "required": [
+        "title"
+      ]
+    },
+    {
+      "required": [
+        "issue"
+      ]
+    }
   ]
 }

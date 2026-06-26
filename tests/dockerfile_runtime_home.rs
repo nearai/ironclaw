@@ -209,6 +209,41 @@ fn reborn_hosted_single_tenant_volume_seed_config_uses_volume_storage() {
 }
 
 #[test]
+fn reborn_hosted_single_tenant_seed_config_keeps_disabled_slack_legacy_free() {
+    let config = read_repo_file("docker/reborn/config.hosted-single-tenant.toml");
+    let parsed = config
+        .parse::<toml::Value>()
+        .expect("hosted seed config should be valid TOML");
+    let slack = parsed
+        .get("slack")
+        .and_then(toml::Value::as_table)
+        .expect("hosted seed config should include [slack]");
+
+    assert_eq!(
+        slack.get("enabled").and_then(toml::Value::as_bool),
+        Some(false),
+        "hosted seed config should keep Slack disabled until WebUI setup enables it",
+    );
+
+    for legacy_field in [
+        "installation_id",
+        "team_id",
+        "api_app_id",
+        "slack_user_id",
+        "user_id",
+        "shared_subject_user_id",
+        "channel_routes",
+        "signing_secret_env",
+        "bot_token_env",
+    ] {
+        assert!(
+            !slack.contains_key(legacy_field),
+            "disabled hosted seed config must not include legacy Slack field `{legacy_field}`"
+        );
+    }
+}
+
+#[test]
 fn reborn_dockerfile_build_is_covered_by_ci() {
     // The Reborn Dockerfile build can live in any CI workflow — it moved from
     // test.yml to platform-and-compat.yml when the cross-cutting jobs were
@@ -424,6 +459,54 @@ fn reborn_entrypoint_preserves_existing_config() {
     assert_eq!(
         std::fs::read_to_string(fake.home_dir.join("config.toml")).expect("preserved config"),
         "api_version = \"custom.local/v1\"\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn reborn_entrypoint_migrates_disabled_legacy_slack_fields() {
+    let fake = setup_fake_entrypoint();
+    std::fs::create_dir_all(&fake.home_dir).expect("home dir");
+    std::fs::write(
+        fake.home_dir.join("config.toml"),
+        r#"api_version = "ironclaw.runtime/v1"
+
+[boot]
+profile = "hosted-single-tenant-volume"
+
+[slack]
+enabled = false
+signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
+bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
+"#,
+    )
+    .expect("existing config");
+
+    let output = Command::new("sh")
+        .arg(repo_file("docker/reborn/entrypoint.sh"))
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
+        .env("IRONCLAW_REBORN_PROFILE", "hosted-single-tenant-volume")
+        .env("IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY", "true")
+        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config =
+        std::fs::read_to_string(fake.home_dir.join("config.toml")).expect("migrated config");
+    assert!(config.contains("[slack]"));
+    assert!(config.contains("enabled = false"));
+    assert!(!config.contains("signing_secret_env"));
+    assert!(!config.contains("bot_token_env"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Removed disabled legacy Slack setup fields")
     );
 }
 

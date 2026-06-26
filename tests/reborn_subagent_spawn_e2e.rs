@@ -20,6 +20,7 @@ use reborn_support::{
 };
 
 #[tokio::test]
+#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by emptying DISABLED_CAPABILITY_IDS"]
 async fn blocking_spawn_parks_parent_then_resumes_with_child_result() {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
@@ -84,6 +85,7 @@ async fn blocking_spawn_parks_parent_then_resumes_with_child_result() {
 }
 
 #[tokio::test]
+#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by emptying DISABLED_CAPABILITY_IDS"]
 async fn legacy_explicit_blocking_spawn_still_parks_parent_and_resumes() {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
@@ -142,6 +144,7 @@ async fn legacy_explicit_blocking_spawn_still_parks_parent_and_resumes() {
 }
 
 #[tokio::test]
+#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by emptying DISABLED_CAPABILITY_IDS"]
 async fn background_spawn_is_rejected_before_child_run_or_auth_invocation() {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
@@ -195,6 +198,7 @@ async fn background_spawn_is_rejected_before_child_run_or_auth_invocation() {
 }
 
 #[tokio::test]
+#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by emptying DISABLED_CAPABILITY_IDS"]
 async fn blocking_spawn_waits_while_child_is_blocked_on_approval_then_resumes() {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
@@ -304,6 +308,7 @@ async fn blocking_spawn_waits_while_child_is_blocked_on_approval_then_resumes() 
 }
 
 #[tokio::test]
+#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by emptying DISABLED_CAPABILITY_IDS"]
 async fn parallel_blocking_spawn_resumes_once_after_last_child() {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {

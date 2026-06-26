@@ -84,6 +84,7 @@ A duplicate idempotency key must replay prior accepted submit and admission-reje
 
 - Claiming a queued run atomically moves it to `Running`, stores runner ID/lease token, increments `claim_count`, records `last_heartbeat_at`, records `lease_expires_at`, and updates active-lock metadata.
 - Heartbeats only renew metadata for matching, unexpired runner ID/lease token; successful heartbeats refresh `last_heartbeat_at` and extend `lease_expires_at`.
+- Physical adapters may split high-churn runner lease metadata from lower-churn turn snapshots/tables, as long as all read, recovery, and terminal transition APIs expose one logical run state. Liveness decisions must use durable lease metadata, not require one lifecycle event per heartbeat.
 - Expired `Running` and `CancelRequested` leases transition to `RecoveryRequired`, clear current runner ownership, emit a redacted recovery event, and keep the active lock so uncertain side-effecting work is not auto-retried.
 - Blocking a running run requires a matching, unexpired lease, writes a checkpoint record, stores the latest checkpoint/gate refs on the run, clears current lease ownership, and keeps the active lock.
 - Loop-driver resume payloads are staged in a host-owned `CheckpointStateStore` before a public checkpoint record is written. The store returns an opaque `LoopCheckpointStateRef`; callers cannot choose arbitrary refs for durable records.

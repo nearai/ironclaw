@@ -214,15 +214,25 @@ impl CodexChatGptProvider {
         refresh_token: Option<SecretString>,
         auth_path: Option<PathBuf>,
         request_timeout_secs: u64,
-    ) -> Self {
+    ) -> Result<Self, crate::LlmError> {
         tracing::warn!(
             "Codex ChatGPT provider uses a private, undocumented API \
              (chatgpt.com/backend-api/codex). This may violate OpenAI's \
              Terms of Service and could break without notice."
         );
 
-        Self {
-            client: Client::new(),
+        // The total request timeout is applied per-request (see
+        // `send_http_request`); the shared builder adds the connect/keepalive/
+        // pool-idle hygiene at the client level.
+        let client = crate::config::hardened_client_builder(request_timeout_secs)
+            .build()
+            .map_err(|e| crate::LlmError::RequestFailed {
+                provider: "codex_chatgpt".to_string(),
+                reason: format!("Failed to build HTTP client: {e}"),
+            })?;
+
+        Ok(Self {
+            client,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: RwLock::new(api_key),
             configured_model: configured_model.to_string(),
@@ -231,7 +241,7 @@ impl CodexChatGptProvider {
             auth_path,
             request_timeout: Duration::from_secs(request_timeout_secs),
             refresh_lock: Mutex::new(()),
-        }
+        })
     }
 
     /// Resolve the model to use, lazily on first call.

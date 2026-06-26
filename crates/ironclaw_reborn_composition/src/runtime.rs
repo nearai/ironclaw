@@ -22,7 +22,7 @@
 
 // arch-exempt: large_file, needs Reborn runtime helper extraction, plan #4471
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use ironclaw_events::{DurableAuditLog, DurableEventLog, InMemoryAuditSink, RuntimeEvent};
+use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_first_party_extension_ports::{
@@ -40,8 +41,8 @@ use ironclaw_first_party_extension_ports::{
 };
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
-    AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId,
-    ResourceScope, TenantId, ThreadId, UserId,
+    AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, ExtensionId,
+    InvocationId, Principal, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
@@ -55,10 +56,11 @@ use ironclaw_product_workflow::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
     DefaultApprovalInteractionService, DefaultAuthInteractionService,
-    OutboundPreferencesProductFacade, RunStateApprovalInteractionReadModel,
+    OutboundPreferencesProductFacade, PersistentApprovalGranteeResolver,
+    RunStateApprovalInteractionReadModel,
 };
 use ironclaw_reborn::loop_exit_applier::{
-    ApprovalGateEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
+    ApprovalGateEvidenceStore, ResourceGateEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
 };
 use ironclaw_reborn::milestone_events::{
     DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
@@ -101,6 +103,9 @@ use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
+use crate::outbound_delivery_capability_surface::{
+    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, outbound_delivery_synthetic_provider,
+};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound_preferences::{
@@ -285,9 +290,18 @@ fn enforce_runtime_cutover_gate(
             }
             Ok(())
         }
-        RebornCompositionProfile::LocalDev
-        | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenantVolume => Ok(()),
+        RebornCompositionProfile::HostedSingleTenantVolume => {
+            if readiness.state != RebornReadinessState::HostedSingleTenantVolumePreviewValidated {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason: format!(
+                        "profile=hosted-single-tenant-volume cannot start Reborn runtime before hosted volume preview readiness is validated; required_state=HostedSingleTenantVolumePreviewValidated, state={:?}",
+                        readiness.state
+                    ),
+                });
+            }
+            Ok(())
+        }
+        RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => Ok(()),
     }
 }
 
@@ -476,12 +490,12 @@ pub struct RebornRuntime {
     #[cfg(feature = "root-llm-provider")]
     skill_learning_extraction_tasks:
         Option<Arc<crate::skill_learning::SkillLearningExtractionTasks>>,
-    /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
-    /// `set_trigger_post_submit_hook` fills this after `build_reborn_runtime` returns.
+    /// Late-binding dispatcher shared with the trigger poller.
+    /// `set_trigger_post_submit_hook` installs the hook after
+    /// `build_reborn_runtime` returns and drains any startup settlements.
     /// `None` when the trigger poller is not enabled.
     #[cfg(feature = "slack-v2-host-beta")]
-    post_submit_hook_slot:
-        Option<Arc<std::sync::OnceLock<Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>>>>,
+    post_submit_hook_dispatch: Option<Arc<crate::trigger_poller::PostSubmitHookDispatch>>,
     #[cfg(any(test, feature = "test-support"))]
     trigger_conversation_pairing:
         Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
@@ -510,6 +524,60 @@ pub struct RebornRuntime {
     llm_reload: Option<RebornLlmReloadParts>,
 }
 
+struct RegistryPersistentApprovalGranteeResolver {
+    registry: Arc<SharedExtensionRegistry>,
+    cached_registry: StdMutex<CachedExtensionRegistrySnapshot>,
+    outbound_delivery_target_set_provider: ExtensionId,
+}
+
+struct CachedExtensionRegistrySnapshot {
+    version: u64,
+    snapshot: Arc<ExtensionRegistry>,
+}
+
+impl PersistentApprovalGranteeResolver for RegistryPersistentApprovalGranteeResolver {
+    fn persistent_approval_grantee(&self, capability_id: &CapabilityId) -> Option<Principal> {
+        let registry = self.cached_snapshot();
+        if let Some(descriptor) = registry.get_capability(capability_id) {
+            return Some(Principal::Extension(descriptor.provider.clone()));
+        }
+        if capability_id.as_str() == OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID {
+            return Some(Principal::Extension(
+                self.outbound_delivery_target_set_provider.clone(),
+            ));
+        }
+        None
+    }
+}
+
+impl RegistryPersistentApprovalGranteeResolver {
+    fn new(registry: Arc<SharedExtensionRegistry>) -> Result<Self, RebornRuntimeError> {
+        let version = registry.version();
+        let snapshot = registry.snapshot();
+        let outbound_delivery_target_set_provider = outbound_delivery_synthetic_provider()
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("outbound delivery synthetic provider id is invalid: {error}"),
+            })?;
+        Ok(Self {
+            registry,
+            cached_registry: StdMutex::new(CachedExtensionRegistrySnapshot { version, snapshot }),
+            outbound_delivery_target_set_provider,
+        })
+    }
+
+    fn cached_snapshot(&self) -> Arc<ExtensionRegistry> {
+        let version = self.registry.version();
+        let Ok(mut cached) = self.cached_registry.lock() else {
+            return self.registry.snapshot();
+        };
+        if cached.version != version {
+            cached.snapshot = self.registry.snapshot();
+            cached.version = version;
+        }
+        Arc::clone(&cached.snapshot)
+    }
+}
+
 pub(crate) type LocalDevSelectableSkillContextSource =
     SelectableSkillContextSource<FilesystemSkillBundleSource<LocalDevRootFilesystem>>;
 type LocalDevSkillExecutionAdapter =
@@ -527,13 +595,11 @@ type LocalDevSkillExecutionAdapter =
 struct TriggerPollerServices {
     materializer: Arc<dyn ironclaw_triggers::TriggerPromptMaterializer>,
     trusted_submitter: Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>,
-    /// Late-binding slot for the post-submit hook. Created here and shared with
-    /// the poller wrapper; filled later by `RebornRuntime::set_trigger_post_submit_hook`
-    /// so `build_slack_host_beta_mounts` (called after runtime build) can wire the
-    /// hook without restarting the poller.
+    /// Late-binding dispatcher for the post-submit hook. Created here and shared
+    /// with the poller; `RebornRuntime::set_trigger_post_submit_hook` installs
+    /// the hook later and drains accepted fires settled during startup.
     #[cfg(feature = "slack-v2-host-beta")]
-    post_submit_hook_slot:
-        Arc<std::sync::OnceLock<Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>>>,
+    post_submit_hook_dispatch: Arc<crate::trigger_poller::PostSubmitHookDispatch>,
     /// Test-support handle on the SAME conversation services instance the
     /// poller-side materializer/submitter use, so integration tests can call
     /// the production `pair_external_actor` API to seed the trigger
@@ -582,7 +648,9 @@ async fn build_trigger_poller_services(
             materializer,
             trusted_submitter,
             #[cfg(feature = "slack-v2-host-beta")]
-            post_submit_hook_slot: Arc::new(std::sync::OnceLock::new()),
+            post_submit_hook_dispatch: Arc::new(
+                crate::trigger_poller::PostSubmitHookDispatch::new(),
+            ),
             #[cfg(any(test, feature = "test-support"))]
             pairing_service,
         })
@@ -609,7 +677,9 @@ async fn build_trigger_poller_services(
             materializer,
             trusted_submitter,
             #[cfg(feature = "slack-v2-host-beta")]
-            post_submit_hook_slot: Arc::new(std::sync::OnceLock::new()),
+            post_submit_hook_dispatch: Arc::new(
+                crate::trigger_poller::PostSubmitHookDispatch::new(),
+            ),
             #[cfg(any(test, feature = "test-support"))]
             pairing_service,
         })
@@ -767,6 +837,42 @@ fn approval_request_id_from_gate_ref(gate_ref: &LoopGateRef) -> Option<ApprovalR
         .as_str()
         .strip_prefix("gate:approval-")
         .and_then(|value| ApprovalRequestId::parse(value).ok())
+}
+
+struct LocalDevBudgetResourceGateEvidence {
+    budget_gates: Arc<dyn ironclaw_resources::BudgetGateStore>,
+}
+
+#[async_trait::async_trait]
+impl ResourceGateEvidenceStore for LocalDevBudgetResourceGateEvidence {
+    async fn pending_resource_gate(
+        &self,
+        scope: &TurnScope,
+        gate_ref: &LoopGateRef,
+    ) -> Result<bool, TurnError> {
+        let Some(gate_id) = budget_gate_id_from_gate_ref(gate_ref) else {
+            return Ok(false);
+        };
+        let gate = self
+            .budget_gates
+            .get(&scope.to_resource_scope(), gate_id)
+            .map_err(|error| TurnError::Unavailable {
+                reason: format!("budget gate evidence lookup failed: {error}"),
+            })?;
+        Ok(gate
+            .map(|gate| matches!(gate.status, ironclaw_resources::BudgetGateStatus::Pending))
+            .unwrap_or(false))
+    }
+}
+
+fn budget_gate_id_from_gate_ref(
+    gate_ref: &LoopGateRef,
+) -> Option<ironclaw_resources::BudgetGateId> {
+    gate_ref
+        .as_str()
+        .strip_prefix("gate:budget-")
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .map(ironclaw_resources::BudgetGateId::from_uuid)
 }
 
 #[async_trait::async_trait]
@@ -990,6 +1096,10 @@ impl RebornRuntime {
     /// Exposed for diagnostics / readiness reporting; **not** for traffic.
     pub fn services(&self) -> &RebornServices {
         &self.services
+    }
+
+    pub(crate) fn webui_tenant_id(&self) -> &TenantId {
+        &self.thread_scope.tenant_id
     }
 
     #[cfg(test)]
@@ -1287,33 +1397,32 @@ impl RebornRuntime {
     /// the hook itself is constructed (e.g. inside
     /// [`crate::slack_host_beta::build_slack_host_beta_mounts`]). The hook is
     /// idempotent: a second call is silently ignored. Returns `false` when the
-    /// trigger poller is not enabled (slot is `None`) or the slot is already
-    /// occupied, `true` on first successful set.
+    /// trigger poller is not enabled (no dispatcher) or a hook is already
+    /// installed, `true` on first successful install.
     #[cfg(feature = "slack-v2-host-beta")]
     pub fn set_trigger_post_submit_hook(
         &self,
         hook: Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>,
     ) -> bool {
-        let Some(slot) = self.post_submit_hook_slot.as_ref() else {
+        let Some(dispatch) = self.post_submit_hook_dispatch.as_ref() else {
             tracing::debug!("set_trigger_post_submit_hook: trigger poller not enabled, ignoring");
             return false;
         };
-        match slot.set(hook) {
-            Ok(()) => true,
-            Err(_) => {
-                tracing::debug!(
-                    "set_trigger_post_submit_hook: slot already occupied, ignoring (idempotent)"
-                );
-                false
-            }
+        if dispatch.install_hook(hook) {
+            true
+        } else {
+            tracing::debug!(
+                "set_trigger_post_submit_hook: hook already installed, ignoring (idempotent)"
+            );
+            false
         }
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) fn trigger_post_submit_hook_is_set(&self) -> bool {
-        self.post_submit_hook_slot
+        self.post_submit_hook_dispatch
             .as_ref()
-            .is_some_and(|slot| slot.get().is_some())
+            .is_some_and(|dispatch| dispatch.is_hook_installed())
     }
 
     #[cfg(test)]
@@ -1453,6 +1562,28 @@ impl RebornRuntime {
         self.turn_scope_for(&conversation.0).to_resource_scope()
     }
 
+    /// Test-only: enable the global auto-approve switch for this runtime's
+    /// actor scope so a scripted turn exercises the dispatch path instead of
+    /// blocking on the per-tool approval gate. The Tools-settings switch is
+    /// authoritative for first-party tool dispatch; turning it on here
+    /// mirrors what an operator would do before letting the agent run tools.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn enable_global_auto_approve_for_test(&self, conversation: &ConversationId) {
+        let store = self
+            .services
+            .local_dev_auto_approve_settings_for_test()
+            .expect("local-dev runtime should expose an auto-approve setting store");
+        let scope = self.turn_scope_for(&conversation.0).to_resource_scope();
+        store
+            .set(ironclaw_approvals::AutoApproveSettingInput {
+                updated_by: ironclaw_host_api::Principal::User(scope.user_id.clone()),
+                scope,
+                enabled: true,
+            })
+            .await
+            .expect("enabling global auto-approve should succeed");
+    }
+
     /// Apply the outcome of a resolved [`BudgetApprovalGate`]: when the
     /// gate is approved, raise the affected account's limit so a
     /// subsequent `send_user_message` can re-issue the reservation that
@@ -1574,8 +1705,8 @@ impl RebornRuntime {
             .await?;
 
         let reply = async {
-            let terminal_state = self
-                .wait_for_terminal(&submitted.scope, submitted.run_id, &cancellation)
+            let settled_state = self
+                .wait_for_terminal_or_gate(&submitted.scope, submitted.run_id, &cancellation)
                 .await?;
             let assistant_text = self
                 .read_latest_assistant_text(&conversation.0, submitted.run_id)
@@ -1584,8 +1715,8 @@ impl RebornRuntime {
             Ok(AssistantReply {
                 conversation: conversation.clone(),
                 run_id: submitted.run_id,
-                status: terminal_state.status,
-                failure_category: terminal_state
+                status: settled_state.status,
+                failure_category: settled_state
                     .failure
                     .as_ref()
                     .map(|failure| failure.category().to_string()),
@@ -1870,66 +2001,15 @@ impl RebornRuntime {
         )
     }
 
-    async fn wait_for_terminal(
-        &self,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-        cancellation: &CancellationToken,
-    ) -> Result<TurnRunState, RebornRuntimeError> {
-        let start = std::time::Instant::now();
-        loop {
-            if self.turn_scheduler.is_stopped() {
-                return Err(RebornRuntimeError::WorkerStopped);
-            }
-            let state = self
-                .turn_coordinator
-                .get_run_state(GetRunStateRequest {
-                    scope: scope.clone(),
-                    run_id,
-                })
-                .await?;
-            if state.status.is_terminal() {
-                return Ok(state);
-            }
-            // TurnStatus::RecoveryRequired is now terminal (is_terminal() returns true)
-            // so the branch above handles it; no special cancel-to-release-lock is needed.
-            if start.elapsed() > self.poll_settings.max_total {
-                self.cancel_run(
-                    scope,
-                    run_id,
-                    SanitizedCancelReason::Timeout,
-                    "timeout-cancel",
-                )
-                .await?;
-                return Err(RebornRuntimeError::RunTimeout {
-                    timeout: self.poll_settings.max_total,
-                });
-            }
-            tokio::select! {
-                _ = cancellation.cancelled() => {
-                    self.cancel_run(
-                        scope,
-                        run_id,
-                        SanitizedCancelReason::UserRequested,
-                        "caller-cancel",
-                    )
-                    .await?;
-                    return Err(RebornRuntimeError::OperationCancelled);
-                }
-                _ = tokio::time::sleep(self.poll_settings.interval) => {}
-            }
-        }
-    }
-
-    /// Like [`Self::wait_for_terminal`], but also returns when the run parks on
-    /// a user-resolvable gate (auth/approval/resource) instead of polling until
-    /// those non-terminal states either resolve or hit `RunTimeout`.
+    /// Returns when the run reaches a terminal state or parks on a
+    /// user-/client-resolvable gate (auth/approval/resource/external-tool)
+    /// instead of polling until those non-terminal states either resolve or hit
+    /// `RunTimeout`.
     /// `BlockedDependentRun` is deliberately excluded — it is an internal wait
     /// on a child run, not facade-resolvable, so it keeps polling. The returned
     /// state carries the `Blocked*` status and
     /// `gate_ref`; the caller decides whether to resolve (through the WebUI
-    /// facade) or stop. Test/recording-support only.
-    #[cfg(any(test, feature = "test-support"))]
+    /// facade) or stop.
     async fn wait_for_terminal_or_gate(
         &self,
         scope: &TurnScope,
@@ -1950,7 +2030,8 @@ impl RebornRuntime {
                 .await?;
             // Exhaustive on purpose: a new `TurnStatus` variant must force a
             // compile error here rather than silently defaulting to "not a
-            // gate". Only the user-resolvable gates short-circuit recording.
+            // gate". Only the user-/client-resolvable gates
+            // (auth/approval/resource/external-tool) short-circuit recording.
             // `BlockedDependentRun` is an internal wait on a child run (the
             // upstream contract names it `AwaitDependentRun`) — it is not
             // resolvable through the gate facade, so it keeps polling like
@@ -1959,6 +2040,10 @@ impl RebornRuntime {
             let blocked_on_gate = match state.status {
                 TurnStatus::BlockedApproval
                 | TurnStatus::BlockedAuth
+                // External-tool gates are resolved by the API client submitting
+                // tool output, not by the runtime — short-circuit the wait and
+                // return the parked state instead of polling forever.
+                | TurnStatus::BlockedExternalTool
                 | TurnStatus::BlockedResource => true,
                 TurnStatus::BlockedDependentRun
                 | TurnStatus::Queued
@@ -2342,24 +2427,22 @@ pub async fn build_reborn_runtime(
     })?;
 
     let profile = services_input.profile();
-    match profile {
-        RebornCompositionProfile::LocalDev
-        | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenant
-        | RebornCompositionProfile::HostedSingleTenantVolume
-        | RebornCompositionProfile::Production => {}
-        RebornCompositionProfile::MigrationDryRun => {
+    if !profile.starts_live_runtime() {
+        if profile == RebornCompositionProfile::MigrationDryRun {
             return Err(RebornRuntimeError::InvalidArgument {
                 reason:
                     "profile=migration-dry-run validates production-shaped wiring but must not start live Reborn runtime traffic"
                         .to_string(),
             });
         }
-        RebornCompositionProfile::Disabled => {
+        if profile == RebornCompositionProfile::Disabled {
             return Err(RebornRuntimeError::InvalidArgument {
                 reason: "profile=disabled must not start live Reborn runtime traffic".to_string(),
             });
         }
+        return Err(RebornRuntimeError::InvalidArgument {
+            reason: format!("profile={profile} must not start live Reborn runtime traffic"),
+        });
     }
     if services_input.runtime_policy().is_none() {
         return Err(RebornRuntimeError::InvalidArgument {
@@ -2443,10 +2526,7 @@ pub async fn build_reborn_runtime(
     let production_scheduler_wake: Option<ironclaw_reborn::runtime::SchedulerWakeWiring> = None;
 
     let runtime_parts = match profile {
-        RebornCompositionProfile::LocalDev
-        | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenant
-        | RebornCompositionProfile::HostedSingleTenantVolume => {
+        profile if profile.uses_local_runtime_substrate() => {
             let local_runtime =
                 services
                     .local_runtime
@@ -2670,6 +2750,11 @@ pub async fn build_reborn_runtime(
             LocalDevApprovalGateEvidence {
                 approval_requests: Arc::clone(&local_runtime.approval_requests)
                     as Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+            },
+        ));
+        loop_exit_evidence = loop_exit_evidence.with_resource_gate_evidence(Arc::new(
+            LocalDevBudgetResourceGateEvidence {
+                budget_gates: Arc::clone(&local_runtime.budget_gate_store),
             },
         ));
     }
@@ -3103,7 +3188,21 @@ pub async fn build_reborn_runtime(
                     approval_resolver,
                     Arc::clone(&planned_turn_coordinator),
                 )
-                .with_persistent_policy_store(local_runtime.persistent_approval_policies.clone()),
+                .with_persistent_policy_store(local_runtime.persistent_approval_policies.clone())
+                .with_persistent_grantee_resolver(Arc::new(
+                    RegistryPersistentApprovalGranteeResolver::new(
+                        local_runtime
+                            .shared_extension_registry
+                            .clone()
+                            .ok_or_else(|| RebornRuntimeError::InvalidArgument {
+                                reason: "canonical shared extension registry is required"
+                                    .to_string(),
+                            })?,
+                    )?,
+                ))
+                .with_tool_permission_override_store(
+                    local_runtime.tool_permission_overrides.clone(),
+                ),
             )
         } else {
             Arc::new(UnavailableApprovalInteractionService)
@@ -3138,16 +3237,16 @@ pub async fn build_reborn_runtime(
     };
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
-    // `trigger_poller_handle`, `post_submit_hook_slot`, and the test-support
-    // `trigger_conversation_pairing_value` are produced atomically inside
-    // a single `if trigger_poller.enabled` expression. Avoid a
+    // `trigger_poller_handle`, `post_submit_hook_dispatch`, and the
+    // test-support `trigger_conversation_pairing_value` are produced atomically
+    // inside a single `if trigger_poller.enabled` expression. Avoid a
     // `let mut … = None` sentinel pattern flagged by code review
     // (review f-ptr-3): the `let X;` deferred-init form is single-assign
     // per branch and Rust's borrow checker prevents reads before init.
     let trigger_poller_handle: Option<TriggerPollerRuntimeHandle>;
     #[cfg(feature = "slack-v2-host-beta")]
-    let runtime_post_submit_hook_slot: Option<
-        Arc<std::sync::OnceLock<Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>>>,
+    let runtime_post_submit_hook_dispatch: Option<
+        Arc<crate::trigger_poller::PostSubmitHookDispatch>,
     >;
     #[cfg(any(test, feature = "test-support"))]
     let trigger_conversation_pairing_value: Option<
@@ -3179,10 +3278,10 @@ pub async fn build_reborn_runtime(
                 Some(Arc::clone(&trigger_poller_services.pairing_service));
         }
         #[cfg(feature = "slack-v2-host-beta")]
-        let hook_slot = Arc::clone(&trigger_poller_services.post_submit_hook_slot);
+        let hook_dispatch = Arc::clone(&trigger_poller_services.post_submit_hook_dispatch);
         #[cfg(feature = "slack-v2-host-beta")]
         {
-            runtime_post_submit_hook_slot = Some(Arc::clone(&hook_slot));
+            runtime_post_submit_hook_dispatch = Some(Arc::clone(&hook_dispatch));
         }
         trigger_poller_handle = spawn_trigger_poller(
             trigger_poller,
@@ -3192,7 +3291,7 @@ pub async fn build_reborn_runtime(
                 trusted_submitter: trigger_poller_services.trusted_submitter,
                 active_run_lookup,
                 #[cfg(feature = "slack-v2-host-beta")]
-                post_submit_hook_slot: hook_slot,
+                post_submit_hook_dispatch: hook_dispatch,
             },
         )
         .map_err(|error| RebornRuntimeError::InvalidArgument {
@@ -3202,7 +3301,7 @@ pub async fn build_reborn_runtime(
         trigger_poller_handle = None;
         #[cfg(feature = "slack-v2-host-beta")]
         {
-            runtime_post_submit_hook_slot = None;
+            runtime_post_submit_hook_dispatch = None;
         }
         #[cfg(any(test, feature = "test-support"))]
         {
@@ -3279,7 +3378,7 @@ pub async fn build_reborn_runtime(
         #[cfg(feature = "root-llm-provider")]
         skill_learning_extraction_tasks,
         #[cfg(feature = "slack-v2-host-beta")]
-        post_submit_hook_slot: runtime_post_submit_hook_slot,
+        post_submit_hook_dispatch: runtime_post_submit_hook_dispatch,
         #[cfg(any(test, feature = "test-support"))]
         trigger_conversation_pairing: trigger_conversation_pairing_value,
         outbound_delivery_target_registry,
@@ -3842,6 +3941,129 @@ mod tests {
     use chrono::Utc;
     use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
 
+    #[test]
+    fn persistent_grantee_resolver_maps_outbound_delivery_target_set_to_synthetic_provider() {
+        let registry = Arc::new(ironclaw_extensions::SharedExtensionRegistry::new(
+            ironclaw_extensions::ExtensionRegistry::new(),
+        ));
+        let resolver = super::RegistryPersistentApprovalGranteeResolver::new(registry)
+            .expect("resolver builds");
+        let capability_id = CapabilityId::new(
+            crate::outbound_delivery_capability_surface::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
+        )
+        .expect("capability id");
+        let expected_provider =
+            crate::outbound_delivery_capability_surface::outbound_delivery_synthetic_provider()
+                .expect("synthetic provider id");
+
+        assert_eq!(
+            ironclaw_product_workflow::PersistentApprovalGranteeResolver::persistent_approval_grantee(
+                &resolver,
+                &capability_id
+            ),
+            Some(Principal::Extension(expected_provider))
+        );
+    }
+
+    #[test]
+    fn persistent_grantee_resolver_reads_shared_registry_capability_providers() {
+        let registry = Arc::new(ironclaw_extensions::SharedExtensionRegistry::new(
+            ironclaw_extensions::ExtensionRegistry::new(),
+        ));
+        for (extension_id, capabilities) in [
+            ("nearai", &["web_search"][..]),
+            ("github", &["get_repo"][..]),
+            ("google-calendar", &["list_events"][..]),
+        ] {
+            registry
+                .insert(test_extension_package(extension_id, capabilities))
+                .expect("insert test package");
+        }
+        let resolver = super::RegistryPersistentApprovalGranteeResolver::new(Arc::clone(&registry))
+            .expect("resolver builds");
+
+        for (capability_id, extension_id) in [
+            ("nearai.web_search", "nearai"),
+            ("github.get_repo", "github"),
+            ("google-calendar.list_events", "google-calendar"),
+        ] {
+            assert_eq!(
+                ironclaw_product_workflow::PersistentApprovalGranteeResolver::persistent_approval_grantee(
+                    &resolver,
+                    &CapabilityId::new(capability_id).expect("capability id")
+                ),
+                Some(Principal::Extension(
+                    ExtensionId::new(extension_id).expect("extension id")
+                ))
+            );
+        }
+
+        registry
+            .insert(test_extension_package("google-drive", &["list_files"]))
+            .expect("insert later package");
+        assert_eq!(
+            ironclaw_product_workflow::PersistentApprovalGranteeResolver::persistent_approval_grantee(
+                &resolver,
+                &CapabilityId::new("google-drive.list_files").expect("capability id")
+            ),
+            Some(Principal::Extension(
+                ExtensionId::new("google-drive").expect("extension id")
+            ))
+        );
+    }
+
+    fn test_extension_package(
+        extension_id: &str,
+        capabilities: &[&str],
+    ) -> ironclaw_extensions::ExtensionPackage {
+        let capability_blocks = capabilities
+            .iter()
+            .map(|name| {
+                format!(
+                    r#"
+[[capabilities]]
+id = "{extension_id}.{name}"
+description = "{name}"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/{name}.input.json"
+output_schema_ref = "schemas/{name}.output.json"
+"#
+                )
+            })
+            .collect::<String>();
+        let manifest_toml = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{extension_id}"
+name = "{extension_id}"
+version = "0.1.0"
+description = "test extension"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "stdio"
+command = "test"
+
+{capability_blocks}
+"#
+        );
+        let manifest = ironclaw_extensions::ExtensionManifest::parse(
+            &manifest_toml,
+            ironclaw_extensions::ManifestSource::HostBundled,
+            &ironclaw_host_api::HostPortCatalog::empty(),
+        )
+        .expect("manifest parses");
+        ironclaw_extensions::ExtensionPackage::from_manifest(
+            manifest,
+            ironclaw_host_api::VirtualPath::new(format!("/system/extensions/{extension_id}"))
+                .expect("root"),
+        )
+        .expect("package builds")
+    }
+
     /// Wiring guard: the `regex_skill_activation_enabled` flag from
     /// [`RebornRuntimeInput`] must reach
     /// [`SkillActivationSelectorConfig::regex_activation_enabled`]
@@ -3990,6 +4212,21 @@ mod tests {
     }
 
     #[test]
+    fn runtime_cutover_gate_allows_hosted_volume_preview_readiness() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            RebornReadinessState::HostedSingleTenantVolumePreviewValidated,
+            vec![crate::RebornReadinessDiagnostic::hosted_single_tenant_volume()],
+        );
+
+        super::enforce_runtime_cutover_gate(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            &readiness,
+        )
+        .expect("validated hosted volume preview runtime can start");
+    }
+
+    #[test]
     fn runtime_cutover_gate_rejects_local_dev_readiness_for_hosted_single_tenant() {
         let readiness = readiness_for_runtime_gate(
             RebornCompositionProfile::HostedSingleTenant,
@@ -4008,6 +4245,32 @@ mod tests {
         assert!(reason.contains("hosted-single-tenant"), "reason: {reason}");
         assert!(
             reason.contains("HostedSingleTenantValidated"),
+            "reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn runtime_cutover_gate_rejects_local_dev_readiness_for_hosted_volume() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            RebornReadinessState::DevOnly,
+            vec![crate::RebornReadinessDiagnostic::local_dev()],
+        );
+
+        let error = super::enforce_runtime_cutover_gate(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            &readiness,
+        )
+        .expect_err("hosted volume runtime requires preview readiness");
+        let RebornRuntimeError::InvalidArgument { reason } = error else {
+            panic!("expected invalid argument, got {error:?}");
+        };
+        assert!(
+            reason.contains("hosted-single-tenant-volume"),
+            "reason: {reason}"
+        );
+        assert!(
+            reason.contains("HostedSingleTenantVolumePreviewValidated"),
             "reason: {reason}"
         );
     }
@@ -4071,7 +4334,7 @@ mod tests {
     use ironclaw_host_api::ProjectId;
     use ironclaw_host_api::{
         Action, AgentId, ApprovalRequest, ApprovalRequestId, AuditStage, CapabilityId,
-        CorrelationId, EffectKind, InvocationFingerprint, InvocationId, Principal,
+        CorrelationId, EffectKind, ExtensionId, InvocationFingerprint, InvocationId, Principal,
         ResourceEstimate, ResourceScope, TenantId, ThreadId, UserId,
         runtime_policy::{
             ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy,
@@ -4106,8 +4369,9 @@ mod tests {
         TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
         run_profile::{
             InMemoryRunProfileResolver, LoopCapabilityPort, LoopCheckpointStateRef, LoopRunContext,
-            ModelProfileId, ProviderToolCall, RunProfileResolutionRequest, RunProfileResolver,
-            SkillVisibility, VisibleCapabilityRequest,
+            ModelProfileId, ProviderToolCall, RegisterProviderToolCallRequest,
+            RunProfileResolutionRequest, RunProfileResolver, SkillVisibility,
+            VisibleCapabilityRequest,
         },
         runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort},
     };
@@ -4135,7 +4399,8 @@ mod tests {
         build_reborn_runtime,
     };
 
-    const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+    const RUNTIME_POLL_TIMEOUT: Duration = Duration::from_secs(10);
+    const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(15);
 
     async fn stop_turn_runner_worker_for_manual_state_test(runtime: &super::RebornRuntime) {
         runtime.turn_scheduler.stop_for_test().await;
@@ -4321,17 +4586,19 @@ mod tests {
                 .find(|definition| definition.capability_id == echo_id)
                 .expect("echo provider tool definition");
             let candidate = capabilities
-                .register_provider_tool_call(ProviderToolCall {
-                    provider_id: "test-provider".to_string(),
-                    provider_model_id: "test-model".to_string(),
-                    turn_id: Some("provider-turn-1".to_string()),
-                    id: "call-1".to_string(),
-                    name: echo_tool.name,
-                    arguments: serde_json::json!({"message": "hello from tool"}),
-                    response_reasoning: None,
-                    reasoning: None,
-                    signature: None,
-                })
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                    ProviderToolCall {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        turn_id: Some("provider-turn-1".to_string()),
+                        id: "call-1".to_string(),
+                        name: echo_tool.name,
+                        arguments: serde_json::json!({"message": "hello from tool"}),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: None,
+                    },
+                ))
                 .await
                 .map_err(model_capability_error)?;
             Ok(HostManagedModelResponse::capability_calls(
@@ -4387,17 +4654,19 @@ mod tests {
             // ~2.4 KB message: far over the 512-byte string preview cap.
             let big_message = LARGE_ECHO_MESSAGE.repeat(100);
             let candidate = capabilities
-                .register_provider_tool_call(ProviderToolCall {
-                    provider_id: "test-provider".to_string(),
-                    provider_model_id: "test-model".to_string(),
-                    turn_id: Some("provider-turn-1".to_string()),
-                    id: "call-1".to_string(),
-                    name: echo_tool.name,
-                    arguments: serde_json::json!({ "message": big_message }),
-                    response_reasoning: None,
-                    reasoning: None,
-                    signature: None,
-                })
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                    ProviderToolCall {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        turn_id: Some("provider-turn-1".to_string()),
+                        id: "call-1".to_string(),
+                        name: echo_tool.name,
+                        arguments: serde_json::json!({ "message": big_message }),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: None,
+                    },
+                ))
                 .await
                 .map_err(model_capability_error)?;
             Ok(HostManagedModelResponse::capability_calls(
@@ -4441,17 +4710,19 @@ mod tests {
                 .find(|definition| definition.capability_id == notion_search_id)
                 .expect("activated Notion capability should be visible");
             let candidate = capabilities
-                .register_provider_tool_call(ProviderToolCall {
-                    provider_id: "test-provider".to_string(),
-                    provider_model_id: "test-model".to_string(),
-                    turn_id: Some("provider-turn-auth-gate".to_string()),
-                    id: "call-auth-gate".to_string(),
-                    name: notion_tool.name,
-                    arguments: serde_json::json!({ "query": "project notes" }),
-                    response_reasoning: None,
-                    reasoning: None,
-                    signature: None,
-                })
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                    ProviderToolCall {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        turn_id: Some("provider-turn-auth-gate".to_string()),
+                        id: "call-auth-gate".to_string(),
+                        name: notion_tool.name,
+                        arguments: serde_json::json!({ "query": "project notes" }),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: None,
+                    },
+                ))
                 .await
                 .map_err(model_capability_error)?;
             Ok(HostManagedModelResponse::capability_calls(
@@ -4514,17 +4785,19 @@ mod tests {
                 .find(|definition| definition.capability_id == list_dir_id)
                 .expect("list_dir provider tool definition");
             let candidate = capabilities
-                .register_provider_tool_call(ProviderToolCall {
-                    provider_id: "test-provider".to_string(),
-                    provider_model_id: "test-model".to_string(),
-                    turn_id: Some("provider-turn-1".to_string()),
-                    id: "call-1".to_string(),
-                    name: list_dir_tool.name,
-                    arguments: serde_json::json!({"path": "/workspace"}),
-                    response_reasoning: None,
-                    reasoning: None,
-                    signature: None,
-                })
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                    ProviderToolCall {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        turn_id: Some("provider-turn-1".to_string()),
+                        id: "call-1".to_string(),
+                        name: list_dir_tool.name,
+                        arguments: serde_json::json!({"path": "/workspace"}),
+                        response_reasoning: None,
+                        reasoning: None,
+                        signature: None,
+                    },
+                ))
                 .await
                 .map_err(model_capability_error)?;
             Ok(HostManagedModelResponse::capability_calls(
@@ -6184,7 +6457,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: RUNTIME_SEND_TIMEOUT,
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -6271,7 +6544,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: RUNTIME_SEND_TIMEOUT,
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -6371,7 +6644,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: RUNTIME_SEND_TIMEOUT,
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -6447,7 +6720,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: RUNTIME_SEND_TIMEOUT,
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -6526,7 +6799,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(10),
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway_for_runtime);
 
@@ -6555,6 +6828,9 @@ mod tests {
             .expect("activate Notion MCP");
 
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let outcome = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message_until_gate(&conversation, "search Notion"),
@@ -6828,6 +7104,9 @@ mod tests {
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let reply = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "use echo tool"),
@@ -6973,6 +7252,9 @@ mod tests {
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let reply = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "use echo tool"),
@@ -7043,6 +7325,9 @@ mod tests {
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let reply = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "echo a big payload"),
@@ -7293,7 +7578,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(3),
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -7429,7 +7714,7 @@ mod tests {
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let result = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.execute_skill_message(&conversation, "$asset-helper use policy"),
         )
         .await
@@ -7536,7 +7821,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(3),
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -7606,7 +7891,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(3),
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway);
 
@@ -7688,7 +7973,7 @@ mod tests {
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
         let result = tokio::time::timeout(
-            Duration::from_secs(3),
+            RUNTIME_SEND_TIMEOUT,
             runtime.execute_skill_message(&conversation, "$marker-helper"),
         )
         .await
@@ -7851,12 +8136,15 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: RUNTIME_SEND_TIMEOUT,
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway_for_runtime);
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let reply = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "list workspace"),
@@ -8327,6 +8615,100 @@ mod tests {
             resolved.as_str(),
             "legacy-runtime-user",
             "a returning legacy SSO user keeps their UserId through the runtime accessor"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[tokio::test]
+    async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use ironclaw_webui_v2::{
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State,
+            webui_v2_router,
+        };
+        use tower::ServiceExt;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-webui-diagnostics-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-diagnostics-tenant".to_string(),
+            agent_id: "runtime-webui-diagnostics-agent".to_string(),
+            source_binding_id: "runtime-webui-diagnostics-source".to_string(),
+            reply_target_binding_id: "runtime-webui-diagnostics-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-diagnostics-tenant").unwrap(),
+            UserId::new("runtime-webui-diagnostics-owner").unwrap(),
+            Some(AgentId::new("runtime-webui-diagnostics-agent").unwrap()),
+            None,
+        );
+        let router = webui_v2_router(WebUiV2State::new(
+            bundle.api,
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+        ))
+        .layer(axum::Extension(WebUiV2Capabilities {
+            operator_webui_config: true,
+        }))
+        .layer(axum::Extension(caller));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/webchat/v2/operator/diagnostics")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body bytes");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("diagnostics json");
+        assert!(
+            json["operator_status"]["checks"]
+                .as_array()
+                .expect("status checks")
+                .iter()
+                .any(|check| check["id"] == "readiness_composition_profile"
+                    && check["status"] == "blocked"
+                    && check["summary"]
+                        .as_str()
+                        .is_some_and(|summary| summary.contains("reason=dev-only-profile"))),
+            "diagnostics route should expose readiness-derived status checks: {json}"
+        );
+        assert!(
+            json["diagnostics"]
+                .as_array()
+                .expect("diagnostics")
+                .iter()
+                .any(|diagnostic| diagnostic["reason_code"]
+                    == "operator_doctor_readiness_composition_profile_blocked"
+                    && diagnostic["key"] == "readiness_composition_profile"),
+            "diagnostics route should expose readiness-derived doctor diagnostics: {json}"
         );
 
         runtime.shutdown().await.expect("runtime shutdown");
@@ -9128,7 +9510,9 @@ mod tests {
                     signature: None,
                 };
                 let candidate1 = capabilities
-                    .register_provider_tool_call(call1.clone())
+                    .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                        call1.clone(),
+                    ))
                     .await
                     .map_err(model_capability_error)?;
 
@@ -9171,7 +9555,7 @@ mod tests {
                 call1.id = "call-multi-2".to_string();
                 call1.arguments = serde_json::json!({"message": "hello from call 2"});
                 let candidate2 = capabilities
-                    .register_provider_tool_call(call1)
+                    .register_provider_tool_call(RegisterProviderToolCallRequest::new(call1))
                     .await
                     .map_err(model_capability_error)?;
 
@@ -9209,7 +9593,7 @@ mod tests {
         })
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(10),
+            max_total: RUNTIME_POLL_TIMEOUT,
         })
         .with_model_gateway_override(gateway_for_runtime);
 
@@ -9236,6 +9620,9 @@ mod tests {
             .expect("facade slot should be empty before seeding");
 
         let conversation = runtime.new_conversation().await.expect("conversation");
+        runtime
+            .enable_global_auto_approve_for_test(&conversation)
+            .await;
         let reply = tokio::time::timeout(
             RUNTIME_SEND_TIMEOUT,
             runtime.send_user_message(&conversation, "use echo tool twice"),

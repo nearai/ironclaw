@@ -1,6 +1,6 @@
 import { useLocation } from "react-router";
 import { React } from "../../../lib/html.js";
-import { queryOperatorLogs } from "../../../lib/api.js";
+import { queryLogs, queryOperatorLogs } from "../../../lib/api.js";
 import { normalizeOperatorLogsResponse } from "../lib/logs-data.js";
 
 const POLL_INTERVAL_MS = 2000;
@@ -16,9 +16,10 @@ const SCOPE_QUERY_PARAMS = [
   ["source", "source", "logs.scope.source"],
 ];
 
-export function readLogScopeFromLocation(location = globalThis.location) {
+export function readLogScopeFromLocation(location = globalThis.location, defaultThreadId = null) {
   const params = new URLSearchParams(location?.search || "");
-  return SCOPE_QUERY_PARAMS.reduce((scope, [key, param, labelKey]) => {
+  const scope = { active: [] };
+  for (const [key, param, labelKey] of SCOPE_QUERY_PARAMS) {
     const value = params.get(param)?.trim();
     if (value) {
       scope[key] = value;
@@ -26,13 +27,23 @@ export function readLogScopeFromLocation(location = globalThis.location) {
     } else {
       scope[key] = null;
     }
-    return scope;
-  }, { active: [] });
+  }
+  if (!scope.threadId && defaultThreadId) {
+    scope.threadId = defaultThreadId;
+  }
+  return scope;
 }
 
-export function useLogs() {
+// Fail closed to caller-scoped logs if layout context is missing. Operator logs
+// are an optimization for operator-capable sessions, not the default.
+export function useLogs({ isAdmin = false, defaultThreadId = null } = {}) {
   const location = useLocation();
-  const scope = React.useMemo(() => readLogScopeFromLocation(location), [location.search]);
+  const locationSearch = location?.search || "";
+  const scope = React.useMemo(
+    () => readLogScopeFromLocation(location, defaultThreadId),
+    [defaultThreadId, locationSearch]
+  );
+  const { runId, source, threadId, toolCallId, toolName, turnId } = scope;
   const [entries, setEntries] = React.useState([]);
   const [levelFilter, setLevelFilter] = React.useState("all");
   const [targetFilter, setTargetFilter] = React.useState("");
@@ -40,26 +51,44 @@ export function useLogs() {
   const [autoScroll, setAutoScroll] = React.useState(true);
   const [isLoading, setIsLoading] = React.useState(true);
   const [error, setError] = React.useState(null);
-  const [isUnsupported, setIsUnsupported] = React.useState(false);
   const hiddenEntryIdsRef = React.useRef(new Set());
   const requestIdRef = React.useRef(0);
+  const needsThreadScope = !isAdmin && !threadId;
+
+  React.useEffect(() => {
+    requestIdRef.current += 1;
+    setEntries([]);
+    setError(null);
+  }, [isAdmin, runId, source, threadId, toolCallId, toolName, turnId]);
 
   const loadLogs = React.useCallback(async () => {
-    if (isUnsupported) return;
+    if (needsThreadScope) {
+      setIsLoading(false);
+      return;
+    }
     const requestId = ++requestIdRef.current;
     setIsLoading(true);
     try {
-      const response = await queryOperatorLogs({
+      const request = {
         limit: LOG_LIMIT,
         level: levelFilter === "all" ? null : levelFilter,
         target: targetFilter.trim() || null,
-        threadId: scope.threadId,
-        runId: scope.runId,
-        turnId: scope.turnId,
-        toolCallId: scope.toolCallId,
-        toolName: scope.toolName,
-        source: scope.source,
-      });
+        threadId,
+        runId,
+        turnId,
+        toolCallId,
+        toolName,
+        source,
+      };
+      let response;
+      try {
+        response = await (isAdmin ? queryOperatorLogs(request) : queryLogs(request));
+      } catch (err) {
+        if (!isAdmin || !TERMINAL_UNSUPPORTED_STATUSES.has(err?.status)) {
+          throw err;
+        }
+        response = await queryLogs(request);
+      }
       if (requestId !== requestIdRef.current) return;
       const hidden = hiddenEntryIdsRef.current;
       const logs = normalizeOperatorLogsResponse(response);
@@ -68,29 +97,34 @@ export function useLogs() {
       setError(null);
     } catch (err) {
       if (requestId !== requestIdRef.current) return;
-      if (TERMINAL_UNSUPPORTED_STATUSES.has(err?.status)) {
-        setEntries([]);
-        setError(null);
-        setIsUnsupported(true);
-        return;
-      }
       setError(err);
     } finally {
       if (requestId === requestIdRef.current) {
         setIsLoading(false);
       }
     }
-  }, [isUnsupported, levelFilter, scope, targetFilter]);
+  }, [
+    isAdmin,
+    levelFilter,
+    needsThreadScope,
+    runId,
+    source,
+    targetFilter,
+    threadId,
+    toolCallId,
+    toolName,
+    turnId,
+  ]);
 
   React.useEffect(() => {
     loadLogs();
   }, [loadLogs]);
 
   React.useEffect(() => {
-    if (paused || isUnsupported) return undefined;
+    if (paused || needsThreadScope) return undefined;
     const timer = setInterval(loadLogs, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [isUnsupported, loadLogs, paused]);
+  }, [loadLogs, needsThreadScope, paused]);
 
   const togglePause = React.useCallback(() => {
     setPaused((value) => !value);
@@ -120,7 +154,8 @@ export function useLogs() {
     serverLevel: null,
     changeServerLevel: async () => {},
     scope,
-    status: error ? "error" : isLoading ? "loading" : "ready",
+    needsThreadScope,
+    status: needsThreadScope ? "needs_scope" : error ? "error" : isLoading ? "loading" : "ready",
     isLoading,
     error,
   };

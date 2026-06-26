@@ -11,6 +11,7 @@ Owns the thin WASM ProductAdapter host-glue boundary for IronClaw Reborn.
 - Runtime-specific WIT/request shapes may live here, but shared product-surface DTOs stay in `ironclaw_product_adapters`.
 - ProductAdapter components may use v1-style minimal WASI p2 for wasm32-wasip2 compatibility: clock/random are allowed; env, args, stdio, preopened directories, inherited network, and DNS lookup must stay disabled. Current slice is parse/render-only: the ProductAdapter WIT `http-egress` import fails closed until host-runtime egress wiring is injected in a follow-up.
 - Keep dependencies minimal. Avoid workflow/runtime crates unless a concrete host-glue call site requires them and architecture tests are updated deliberately.
+- Admission/intake backpressure (the `max_in_flight` permit in `runner.rs`/`runner_immediate_ack.rs`) gates fast intake only — auth, parse, stamp, and `submit_inbound`. An admission/intake permit must NOT be held across an unbounded downstream wait (post-ACK delivery poll, final-reply wait, LLM poll). Release it once the work is durably accepted (`ProductInboundAck::is_durable_outcome`) — before invoking the post-ACK observer — and bound the downstream work with its own mechanism (the delivery-side semaphore/single-flight guard/`max_wait`). Conflating admission with work duration lets a handful of slow turns exhaust every intake slot and silently reject new inbound webhooks under load.
 
 Tests:
 

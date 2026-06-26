@@ -109,6 +109,37 @@ Reducer rules:
 - product-facing capability activity projections expose only metadata-safe
   lifecycle facts; raw tool arguments, raw output, command strings, host paths,
   and provider payloads stay outside the projection contract
+- capability activity rows are keyed by stable invocation/activity identity.
+  The loop assigns this identity before capability dispatch, and gate
+  checkpoints must persist it even when a producer blocks without a resume
+  token.
+  Gate refusal must update the parked capability activity by that identity
+  instead of creating a separate synthetic UI row. Product projections represent
+  auth/approval refusal as terminal `failed` activity with sanitized
+  `error_kind = gate_declined`; run-level `cancelled` remains reserved for
+  whole-run cancellation. Display-preview projections derived from failed
+  capability activity must carry the same sanitized `error_kind` so refresh and
+  replay paths can render refusal as a neutral declined state instead of a
+  generic failure.
+- generic lifecycle projections expose only redacted lifecycle facts. Internal
+  resolver refs such as accepted-message refs, source/reply binding refs, and
+  gate refs remain in the lifecycle event/reducer substrate; reducers that need
+  them must use the raw reducer service, and those refs must not be replayed
+  through the generic public lifecycle projection surface.
+- product-facing gate projection rows must carry the run identity and gate kind
+  needed to resolve the gate. When the gate is tied to a parked capability
+  activity, the row also carries the stable invocation id. Auth gate rows may
+  carry product-safe auth context, such as challenge kind, provider, account
+  label, authorization URL, and expiry, when that context is needed to rebuild
+  OAuth/manual-token affordances. Clients must not infer gate run identity from
+  the latest active run or from tool name/order heuristics.
+  Product adapters may additionally emit rich `GatePrompt`/`AuthPrompt`
+  payloads for immediate UI affordances such as OAuth URLs or approval context,
+  but those prompt payloads are enrichments. Approval request details remain
+  prompt-only unless a product adapter defines an explicit redaction contract;
+  replay/rebase reconstruction must still work from the product gate row's own
+  `run_id`, `gate_kind`, `gate_ref`, and any product-safe auth context. This is
+  a product gate surface, not the generic lifecycle projection surface.
 - product-facing model reasoning projections must use model-visible-sanitized
   reasoning deltas only. They are live UI hints, not canonical transcript,
   checkpoint, audit, or replay state.

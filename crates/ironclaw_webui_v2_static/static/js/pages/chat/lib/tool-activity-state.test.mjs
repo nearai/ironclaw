@@ -36,6 +36,7 @@ test("tool activity state keeps denied tools visible through a follow-up gate", 
       kind: "gate",
       runId,
       gateRef: "gate:web",
+      invocationId: "invocation-web",
       toolName: "web-access.search",
     },
     stateRef,
@@ -46,6 +47,7 @@ test("tool activity state keeps denied tools visible through a follow-up gate", 
       kind: "gate",
       runId,
       gateRef: "gate:web",
+      invocationId: "invocation-web",
       toolName: "web-access.search",
     },
     stateRef,
@@ -57,6 +59,7 @@ test("tool activity state keeps denied tools visible through a follow-up gate", 
       kind: "gate",
       runId,
       gateRef: "gate:nearai",
+      invocationId: "invocation-nearai",
       toolName: "nearai.web_search",
     },
     stateRef,
@@ -73,11 +76,11 @@ test("tool activity state keeps denied tools visible through a follow-up gate", 
       [
         "tool-invocation-web",
         "search",
-        "error",
+        "declined",
         "gate:web",
       ],
       [
-        `tool-gate:${runId}:gate:nearai`,
+        "tool-invocation-nearai",
         "web_search",
         "running",
         "gate:nearai",
@@ -96,7 +99,7 @@ test("tool activity state keeps denied tools visible through a follow-up gate", 
     stateRef,
   );
 
-  assert.equal(messages[0].toolStatus, "error");
+  assert.equal(messages[0].toolStatus, "declined");
 
   upsertToolActivityMessage(
     setMessages,
@@ -114,6 +117,7 @@ test("tool activity state keeps denied tools visible through a follow-up gate", 
       kind: "gate",
       runId,
       gateRef: "gate:nearai",
+      invocationId: "invocation-nearai",
       toolName: "nearai.web_search",
     },
     stateRef,
@@ -130,13 +134,13 @@ test("tool activity state keeps denied tools visible through a follow-up gate", 
       [
         "tool-invocation-web",
         "search",
-        "error",
+        "declined",
         "gate:web",
       ],
       [
         "tool-invocation-nearai",
         "web_search",
-        "error",
+        "declined",
         "gate:nearai",
       ],
     ],
@@ -154,6 +158,7 @@ test("tool activity state keeps repeated same-tool approval gates separate", () 
     kind: "gate",
     runId,
     gateRef: `gate:extension-install:${index}`,
+    invocationId: `invocation-install-${index}`,
     toolName: "builtin.extension_install",
   });
 
@@ -171,25 +176,76 @@ test("tool activity state keeps repeated same-tool approval gates separate", () 
     ]),
     [
       [
-        `tool-gate:${runId}:gate:extension-install:1`,
+        "tool-invocation-install-1",
         "extension_install",
-        "error",
+        "declined",
         "gate:extension-install:1",
       ],
       [
-        `tool-gate:${runId}:gate:extension-install:2`,
+        "tool-invocation-install-2",
         "extension_install",
-        "error",
+        "declined",
         "gate:extension-install:2",
       ],
       [
-        `tool-gate:${runId}:gate:extension-install:3`,
+        "tool-invocation-install-3",
         "extension_install",
-        "error",
+        "declined",
         "gate:extension-install:3",
       ],
     ],
   );
+});
+
+test("tool activity state does not synthesize gate activity without invocation id", () => {
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+
+  ensureGateToolActivity(
+    setMessages,
+    {
+      kind: "gate",
+      runId: "run-missing-id",
+      gateRef: "gate:web-search",
+      toolName: "web-access.search",
+    },
+    stateRef,
+  );
+
+  assert.deepEqual(messages, []);
+});
+
+test("tool activity state can mark auth gates declined without invocation id", () => {
+  const stateRef = { current: createToolActivityState() };
+  let messages = [];
+  const setMessages = (updater) => {
+    messages = typeof updater === "function" ? updater(messages) : updater;
+  };
+
+  failGateToolActivity(
+    setMessages,
+    {
+      kind: "auth_required",
+      runId: "run-auth-declined",
+      gateRef: "gate:auth-required",
+      gateKind: "auth",
+      headline: "Authentication required",
+    },
+    stateRef,
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(
+    messages[0].id,
+    "tool-gate:run-auth-declined:auth_required:gate:auth-required",
+  );
+  assert.equal(messages[0].toolName, "Authentication required");
+  assert.equal(messages[0].toolStatus, "declined");
+  assert.equal(messages[0].toolErrorKind, "gate_declined");
+  assert.equal(messages[0].gateRef, "gate:auth-required");
 });
 
 test("tool activity cards use unprefixed display names", () => {
@@ -218,6 +274,34 @@ test("tool activity cards use unprefixed display names", () => {
     }).toolName,
     "web_search",
   );
+});
+
+test("tool activity cards map gate-declined lifecycle frames to declined status", () => {
+  const card = toolCardFromActivity({
+    invocation_id: "invocation-declined",
+    capability_id: "builtin.extension_activate",
+    status: "failed",
+    error_kind: "gate_declined",
+  });
+
+  assert.equal(card.toolStatus, "declined");
+  assert.equal(card.toolError, "gate_declined");
+  assert.equal(card.toolErrorKind, "gate_declined");
+});
+
+test("tool preview cards preserve gate-declined error kind as declined status", () => {
+  const card = toolCardFromPreview({
+    invocation_id: "invocation-preview-declined",
+    capability_id: "builtin.extension_activate",
+    title: "extension_activate",
+    status: "failed",
+    error_kind: "gate_declined",
+    output_summary: "gate_declined",
+  });
+
+  assert.equal(card.toolStatus, "declined");
+  assert.equal(card.toolError, "gate_declined");
+  assert.equal(card.toolErrorKind, "gate_declined");
 });
 
 test("tool activity state leaves pending gates unnumbered after existing timeline activity", () => {
@@ -253,6 +337,7 @@ test("tool activity state leaves pending gates unnumbered after existing timelin
       kind: "gate",
       runId,
       gateRef: "gate:web-search",
+      invocationId: "invocation-web-search",
       toolName: "web-access.search",
     },
     stateRef,
@@ -279,6 +364,7 @@ test("tool activity state preserves existing order when a gate is denied", () =>
     kind: "gate",
     runId,
     gateRef: "gate:web-search",
+    invocationId: "invocation-web-search",
     toolName: "web-access.search",
   };
 
@@ -290,7 +376,7 @@ test("tool activity state preserves existing order when a gate is denied", () =>
   failGateToolActivity(setMessages, gate, stateRef);
 
   assert.equal(messages.length, 1);
-  assert.equal(messages[0].toolStatus, "error");
+  assert.equal(messages[0].toolStatus, "declined");
   assert.equal(messages[0].activityOrder, 4);
 });
 
@@ -350,6 +436,7 @@ test("tool activity state applies durable projection order to gate activity", ()
       kind: "gate",
       runId,
       gateRef: "gate:web-search",
+      invocationId: "invocation-web-search",
       toolName: "web-access.search",
     },
     stateRef,

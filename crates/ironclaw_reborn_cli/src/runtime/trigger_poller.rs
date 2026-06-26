@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use ironclaw_reborn_composition::TriggerPollerSettings;
 
+use crate::operator_env::{strict_bool_env_var, strict_env_var, truncate_env_value_for_display};
+
 use super::RuntimeInputCaller;
-use super::env_util::{strict_env_var, truncate_env_value_for_display};
 
 /// Upper bound on `poll_interval_secs` (config) and
 /// `IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS` (env). One hour caps the
@@ -123,19 +124,8 @@ pub(super) fn trigger_poller_settings(
     // Layer 1: environment variable overrides. Uses strict presence
     // semantics — a present-but-blank value is fatal, not a silent
     // fall-through to config/default.
-    if let Some(raw) = strict_env_var("IRONCLAW_TRIGGER_POLLER_ENABLED")? {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" => settings.enabled = true,
-            "0" | "false" => settings.enabled = false,
-            _ => {
-                // Display the operator's original value (case preserved), not the
-                // lowercased match key — they need to find it in their config.
-                let display = truncate_env_value_for_display(&raw);
-                anyhow::bail!(
-                    "IRONCLAW_TRIGGER_POLLER_ENABLED must be one of 1, true, 0, false (got {display:?})"
-                )
-            }
-        }
+    if let Some(enabled) = strict_bool_env_var("IRONCLAW_TRIGGER_POLLER_ENABLED")? {
+        settings.enabled = enabled;
     }
 
     if let Some(raw) = strict_env_var("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS")? {

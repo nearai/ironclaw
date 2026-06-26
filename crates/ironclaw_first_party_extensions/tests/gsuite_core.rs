@@ -1047,7 +1047,7 @@ async fn gsuite_handler_maps_panicking_runtime_egress_to_backend() {
 }
 
 #[tokio::test]
-async fn gsuite_handler_fails_before_egress_when_google_account_is_missing_or_ambiguous() {
+async fn gsuite_handler_handles_missing_hidden_and_duplicate_google_accounts() {
     let scope = scope();
     let auth = Arc::new(InMemoryAuthProductServices::new());
     let egress = Arc::new(RecordingEgress::permissive_success());
@@ -1111,7 +1111,7 @@ async fn gsuite_handler_fails_before_egress_when_google_account_is_missing_or_am
         true,
     )
     .await;
-    let error = dispatch_error(
+    let output = dispatch_ok(
         auth,
         scope,
         GMAIL_SEND_MESSAGE_CAPABILITY_ID,
@@ -1120,13 +1120,8 @@ async fn gsuite_handler_fails_before_egress_when_google_account_is_missing_or_am
     )
     .await;
 
-    assert_eq!(error.kind(), RuntimeDispatchErrorKind::Client);
-    assert!(matches!(
-        error.reason(),
-        Some(GsuiteCredentialDispatchReason::Recovery(recovery))
-            if recovery.kind() == ironclaw_auth::CredentialRecoveryKind::AccountSelectionRequired
-    ));
-    assert!(egress.requests().is_empty());
+    assert_eq!(output["status"], 200);
+    assert_eq!(egress.requests().len(), 1);
 }
 
 #[tokio::test]
