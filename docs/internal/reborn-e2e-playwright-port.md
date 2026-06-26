@@ -2236,6 +2236,24 @@ Behavior result:
   metadata added there already preserved staged attachments through the normal
   send path, and this test locks that browser contract down.
 
+### Step 71: Legacy OAuth Completion Isolation Port
+
+Extended `test_reborn_webui_v2_legacy_auth_flows.py`.
+
+Ported the isolation intent behind legacy onboarding/OAuth completion tests:
+
+- opened a Reborn OAuth auth gate for one run gate;
+- dispatched the browser storage completion event used by Reborn's product-auth
+  callback bridge, but with a different `gate_ref`;
+- asserted the active OAuth prompt remains visible and no unrelated completion
+  clears the pending gate.
+
+Behavior result:
+
+- no Reborn product change was required. `useChat` already matches callback
+  completions by `turn_run_ref` and `gate_ref`; this browser test now protects
+  that isolation contract.
+
 ## Open Migration Buckets
 
 Not yet ported:
