@@ -145,8 +145,7 @@ use crate::product_auth_runtime_credentials::ProductAuthRuntimeCredentialResolve
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
-    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessDiagnostic,
-    RebornReadinessState, RebornWorkerReadiness,
+    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornWorkerReadiness,
 };
 use crate::{
     available_extensions::{
@@ -780,7 +779,8 @@ pub async fn build_reborn_services(
         RebornCompositionProfile::Disabled => Ok(RebornServices::disabled()),
         RebornCompositionProfile::LocalDev
         | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenant => build_local_runtime(input).await,
+        | RebornCompositionProfile::HostedSingleTenant
+        | RebornCompositionProfile::HostedSingleTenantVolume => build_local_runtime(input).await,
         RebornCompositionProfile::Production | RebornCompositionProfile::MigrationDryRun => {
             build_production_shaped(input).await
         }
@@ -879,6 +879,14 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 LocalDevStorageBackendInput::LocalDefault,
                 None::<ironclaw_secrets::SecretMaterial>,
             ),
+            #[cfg(feature = "postgres")]
+            RebornStorageInput::HostedSingleTenantPostgres { .. }
+                if profile != RebornCompositionProfile::HostedSingleTenant =>
+            {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: format!("{profile} profile requires local-runtime storage input"),
+                });
+            }
             #[cfg(feature = "postgres")]
             RebornStorageInput::HostedSingleTenantPostgres {
                 root,
@@ -1623,7 +1631,7 @@ fn local_dev_extension_installation_state_path(
     profile: RebornCompositionProfile,
     local_runtime_identity: Option<&RebornLocalRuntimeIdentity>,
 ) -> Result<VirtualPath, RebornBuildError> {
-    if profile != RebornCompositionProfile::HostedSingleTenant {
+    if !profile.uses_hosted_extension_installation_state() {
         return FilesystemExtensionInstallationStore::default_state_path().map_err(|error| {
             RebornBuildError::InvalidConfig {
                 reason: format!("extension installation state path is invalid: {error}"),
@@ -3978,30 +3986,7 @@ fn readiness_for(
     turn_coordinator: bool,
     product_auth: bool,
 ) -> RebornReadiness {
-    let (state, diagnostics) = match profile {
-        RebornCompositionProfile::Disabled => (
-            RebornReadinessState::Disabled,
-            vec![RebornReadinessDiagnostic::disabled()],
-        ),
-        RebornCompositionProfile::LocalDev => (
-            RebornReadinessState::DevOnly,
-            vec![RebornReadinessDiagnostic::local_dev()],
-        ),
-        RebornCompositionProfile::LocalDevYolo => (
-            RebornReadinessState::DevOnly,
-            vec![RebornReadinessDiagnostic::local_dev_yolo()],
-        ),
-        RebornCompositionProfile::HostedSingleTenant => (
-            RebornReadinessState::HostedSingleTenantValidated,
-            vec![RebornReadinessDiagnostic::hosted_single_tenant()],
-        ),
-        RebornCompositionProfile::Production => {
-            (RebornReadinessState::ProductionValidated, Vec::new())
-        }
-        RebornCompositionProfile::MigrationDryRun => {
-            (RebornReadinessState::MigrationDryRunValidated, Vec::new())
-        }
-    };
+    let (state, diagnostics) = crate::readiness::readiness_contract_for_profile(profile);
 
     RebornReadiness {
         profile,
@@ -4057,6 +4042,7 @@ mod tests {
     use secrecy::ExposeSecret;
 
     use crate::{
+        RebornReadinessDiagnostic, RebornReadinessState,
         extension_lifecycle::ExtensionActivationMode,
         local_dev_capability_policy::{
             LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
@@ -4084,6 +4070,24 @@ mod tests {
         };
         let path = local_dev_extension_installation_state_path(
             RebornCompositionProfile::HostedSingleTenant,
+            Some(&identity),
+        )
+        .expect("state path");
+
+        assert_eq!(
+            path.as_str(),
+            "/tenants/acme/system/extensions/.installations/state.json"
+        );
+    }
+
+    #[test]
+    fn extension_installation_state_path_uses_durable_tenant_root_for_hosted_volume() {
+        let identity = RebornLocalRuntimeIdentity {
+            tenant_id: TenantId::new("acme").expect("tenant id"),
+            agent_id: ironclaw_host_api::AgentId::new("agent").expect("agent id"),
+        };
+        let path = local_dev_extension_installation_state_path(
+            RebornCompositionProfile::HostedSingleTenantVolume,
             Some(&identity),
         )
         .expect("state path");
@@ -6088,6 +6092,21 @@ mod tests {
         assert_eq!(
             yolo.diagnostics,
             vec![RebornReadinessDiagnostic::local_dev_yolo()]
+        );
+
+        let hosted_volume = readiness_for(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            true,
+            true,
+            true,
+        );
+        assert_eq!(
+            hosted_volume.state,
+            RebornReadinessState::HostedSingleTenantVolumePreviewValidated
+        );
+        assert_eq!(
+            hosted_volume.diagnostics,
+            vec![RebornReadinessDiagnostic::hosted_single_tenant_volume()]
         );
     }
 

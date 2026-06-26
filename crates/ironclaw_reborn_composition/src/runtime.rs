@@ -60,7 +60,7 @@ use ironclaw_product_workflow::{
     RunStateApprovalInteractionReadModel,
 };
 use ironclaw_reborn::loop_exit_applier::{
-    ApprovalGateEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
+    ApprovalGateEvidenceStore, ResourceGateEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
 };
 use ironclaw_reborn::milestone_events::{
     DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
@@ -284,6 +284,17 @@ fn enforce_runtime_cutover_gate(
                 return Err(RebornRuntimeError::InvalidArgument {
                     reason: format!(
                         "profile=hosted-single-tenant cannot start Reborn runtime before hosted single-tenant readiness is validated; required_state=HostedSingleTenantValidated, state={:?}",
+                        readiness.state
+                    ),
+                });
+            }
+            Ok(())
+        }
+        RebornCompositionProfile::HostedSingleTenantVolume => {
+            if readiness.state != RebornReadinessState::HostedSingleTenantVolumePreviewValidated {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason: format!(
+                        "profile=hosted-single-tenant-volume cannot start Reborn runtime before hosted volume preview readiness is validated; required_state=HostedSingleTenantVolumePreviewValidated, state={:?}",
                         readiness.state
                     ),
                 });
@@ -802,6 +813,42 @@ fn approval_request_id_from_gate_ref(gate_ref: &LoopGateRef) -> Option<ApprovalR
         .as_str()
         .strip_prefix("gate:approval-")
         .and_then(|value| ApprovalRequestId::parse(value).ok())
+}
+
+struct LocalDevBudgetResourceGateEvidence {
+    budget_gates: Arc<dyn ironclaw_resources::BudgetGateStore>,
+}
+
+#[async_trait::async_trait]
+impl ResourceGateEvidenceStore for LocalDevBudgetResourceGateEvidence {
+    async fn pending_resource_gate(
+        &self,
+        scope: &TurnScope,
+        gate_ref: &LoopGateRef,
+    ) -> Result<bool, TurnError> {
+        let Some(gate_id) = budget_gate_id_from_gate_ref(gate_ref) else {
+            return Ok(false);
+        };
+        let gate = self
+            .budget_gates
+            .get(&scope.to_resource_scope(), gate_id)
+            .map_err(|error| TurnError::Unavailable {
+                reason: format!("budget gate evidence lookup failed: {error}"),
+            })?;
+        Ok(gate
+            .map(|gate| matches!(gate.status, ironclaw_resources::BudgetGateStatus::Pending))
+            .unwrap_or(false))
+    }
+}
+
+fn budget_gate_id_from_gate_ref(
+    gate_ref: &LoopGateRef,
+) -> Option<ironclaw_resources::BudgetGateId> {
+    gate_ref
+        .as_str()
+        .strip_prefix("gate:budget-")
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .map(ironclaw_resources::BudgetGateId::from_uuid)
 }
 
 #[async_trait::async_trait]
@@ -1635,8 +1682,8 @@ impl RebornRuntime {
             .await?;
 
         let reply = async {
-            let terminal_state = self
-                .wait_for_terminal(&submitted.scope, submitted.run_id, &cancellation)
+            let settled_state = self
+                .wait_for_terminal_or_gate(&submitted.scope, submitted.run_id, &cancellation)
                 .await?;
             let assistant_text = self
                 .read_latest_assistant_text(&conversation.0, submitted.run_id)
@@ -1645,8 +1692,8 @@ impl RebornRuntime {
             Ok(AssistantReply {
                 conversation: conversation.clone(),
                 run_id: submitted.run_id,
-                status: terminal_state.status,
-                failure_category: terminal_state
+                status: settled_state.status,
+                failure_category: settled_state
                     .failure
                     .as_ref()
                     .map(|failure| failure.category().to_string()),
@@ -1931,67 +1978,15 @@ impl RebornRuntime {
         )
     }
 
-    async fn wait_for_terminal(
-        &self,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-        cancellation: &CancellationToken,
-    ) -> Result<TurnRunState, RebornRuntimeError> {
-        let start = std::time::Instant::now();
-        loop {
-            if self.turn_scheduler.is_stopped() {
-                return Err(RebornRuntimeError::WorkerStopped);
-            }
-            let state = self
-                .turn_coordinator
-                .get_run_state(GetRunStateRequest {
-                    scope: scope.clone(),
-                    run_id,
-                })
-                .await?;
-            if state.status.is_terminal() {
-                return Ok(state);
-            }
-            // TurnStatus::RecoveryRequired is now terminal (is_terminal() returns true)
-            // so the branch above handles it; no special cancel-to-release-lock is needed.
-            if start.elapsed() > self.poll_settings.max_total {
-                self.cancel_run(
-                    scope,
-                    run_id,
-                    SanitizedCancelReason::Timeout,
-                    "timeout-cancel",
-                )
-                .await?;
-                return Err(RebornRuntimeError::RunTimeout {
-                    timeout: self.poll_settings.max_total,
-                });
-            }
-            tokio::select! {
-                _ = cancellation.cancelled() => {
-                    self.cancel_run(
-                        scope,
-                        run_id,
-                        SanitizedCancelReason::UserRequested,
-                        "caller-cancel",
-                    )
-                    .await?;
-                    return Err(RebornRuntimeError::OperationCancelled);
-                }
-                _ = tokio::time::sleep(self.poll_settings.interval) => {}
-            }
-        }
-    }
-
-    /// Like [`Self::wait_for_terminal`], but also returns when the run parks on
-    /// a user-/client-resolvable gate (auth/approval/resource/external-tool)
+    /// Returns when the run reaches a terminal state or parks on a
+    /// user-/client-resolvable gate (auth/approval/resource/external-tool)
     /// instead of polling until those non-terminal states either resolve or hit
     /// `RunTimeout`.
     /// `BlockedDependentRun` is deliberately excluded — it is an internal wait
     /// on a child run, not facade-resolvable, so it keeps polling. The returned
     /// state carries the `Blocked*` status and
     /// `gate_ref`; the caller decides whether to resolve (through the WebUI
-    /// facade) or stop. Test/recording-support only.
-    #[cfg(any(test, feature = "test-support"))]
+    /// facade) or stop.
     async fn wait_for_terminal_or_gate(
         &self,
         scope: &TurnScope,
@@ -2371,7 +2366,8 @@ impl RebornRuntime {
 ///
 /// **Currently supported profiles:** `RebornCompositionProfile::LocalDev`,
 /// `RebornCompositionProfile::LocalDevYolo`,
-/// `RebornCompositionProfile::HostedSingleTenant`, and
+/// `RebornCompositionProfile::HostedSingleTenant`,
+/// `RebornCompositionProfile::HostedSingleTenantVolume`, and
 /// `RebornCompositionProfile::Production` are wired end-to-end here. Production
 /// starts only after readiness diagnostics validate that live traffic can be
 /// exposed without a partial cutover.
@@ -2408,23 +2404,22 @@ pub async fn build_reborn_runtime(
     })?;
 
     let profile = services_input.profile();
-    match profile {
-        RebornCompositionProfile::LocalDev
-        | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenant
-        | RebornCompositionProfile::Production => {}
-        RebornCompositionProfile::MigrationDryRun => {
+    if !profile.starts_live_runtime() {
+        if profile == RebornCompositionProfile::MigrationDryRun {
             return Err(RebornRuntimeError::InvalidArgument {
                 reason:
                     "profile=migration-dry-run validates production-shaped wiring but must not start live Reborn runtime traffic"
                         .to_string(),
             });
         }
-        RebornCompositionProfile::Disabled => {
+        if profile == RebornCompositionProfile::Disabled {
             return Err(RebornRuntimeError::InvalidArgument {
                 reason: "profile=disabled must not start live Reborn runtime traffic".to_string(),
             });
         }
+        return Err(RebornRuntimeError::InvalidArgument {
+            reason: format!("profile={profile} must not start live Reborn runtime traffic"),
+        });
     }
     if services_input.runtime_policy().is_none() {
         return Err(RebornRuntimeError::InvalidArgument {
@@ -2508,9 +2503,7 @@ pub async fn build_reborn_runtime(
     let production_scheduler_wake: Option<ironclaw_reborn::runtime::SchedulerWakeWiring> = None;
 
     let runtime_parts = match profile {
-        RebornCompositionProfile::LocalDev
-        | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenant => {
+        profile if profile.uses_local_runtime_substrate() => {
             let local_runtime =
                 services
                     .local_runtime
@@ -2734,6 +2727,11 @@ pub async fn build_reborn_runtime(
             LocalDevApprovalGateEvidence {
                 approval_requests: Arc::clone(&local_runtime.approval_requests)
                     as Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+            },
+        ));
+        loop_exit_evidence = loop_exit_evidence.with_resource_gate_evidence(Arc::new(
+            LocalDevBudgetResourceGateEvidence {
+                budget_gates: Arc::clone(&local_runtime.budget_gate_store),
             },
         ));
     }
@@ -4084,6 +4082,21 @@ mod tests {
     }
 
     #[test]
+    fn runtime_cutover_gate_allows_hosted_volume_preview_readiness() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            RebornReadinessState::HostedSingleTenantVolumePreviewValidated,
+            vec![crate::RebornReadinessDiagnostic::hosted_single_tenant_volume()],
+        );
+
+        super::enforce_runtime_cutover_gate(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            &readiness,
+        )
+        .expect("validated hosted volume preview runtime can start");
+    }
+
+    #[test]
     fn runtime_cutover_gate_rejects_local_dev_readiness_for_hosted_single_tenant() {
         let readiness = readiness_for_runtime_gate(
             RebornCompositionProfile::HostedSingleTenant,
@@ -4102,6 +4115,32 @@ mod tests {
         assert!(reason.contains("hosted-single-tenant"), "reason: {reason}");
         assert!(
             reason.contains("HostedSingleTenantValidated"),
+            "reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn runtime_cutover_gate_rejects_local_dev_readiness_for_hosted_volume() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            RebornReadinessState::DevOnly,
+            vec![crate::RebornReadinessDiagnostic::local_dev()],
+        );
+
+        let error = super::enforce_runtime_cutover_gate(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            &readiness,
+        )
+        .expect_err("hosted volume runtime requires preview readiness");
+        let RebornRuntimeError::InvalidArgument { reason } = error else {
+            panic!("expected invalid argument, got {error:?}");
+        };
+        assert!(
+            reason.contains("hosted-single-tenant-volume"),
+            "reason: {reason}"
+        );
+        assert!(
+            reason.contains("HostedSingleTenantVolumePreviewValidated"),
             "reason: {reason}"
         );
     }
