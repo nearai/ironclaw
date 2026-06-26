@@ -505,9 +505,9 @@ async fn native_context_retrieve_returns_candidates_without_aggregate_byte_budge
 #[tokio::test]
 async fn native_record_interaction_writes_thread_log_and_feeds_short_term_lane() {
     // The native provider STORES the full turn history: `record_interaction`
-    // appends the exchange to the thread-scoped short-term doc at
-    // `threads/<thread_id>/log.md` (the SAME `threads/<T>/` convention the
-    // short-term retrieval lane filters on). A real backend (InMemoryBackend +
+    // writes the exchange to a PER-RUN thread doc at
+    // `threads/<thread_id>/<turn_run_id>.md` (the SAME `threads/<T>/` convention
+    // the short-term retrieval lane filters on). A real backend (InMemoryBackend +
     // chunking indexer + FTS) proves the write feeds the read lane end to end.
     let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
 
@@ -522,13 +522,15 @@ async fn native_record_interaction_writes_thread_log_and_feeds_short_term_lane()
                     MemoryInteractionMessage {
                         role: MemoryInteractionRole::User,
                         content: "remember my favorite planning color is teal".to_string(),
+                        name: Some("user-record".to_string()),
                     },
                     MemoryInteractionMessage {
                         role: MemoryInteractionRole::Assistant,
                         content: "noted, your favorite planning color is teal".to_string(),
+                        name: Some("agent-record".to_string()),
                     },
                 ],
-                run_id: Some("run-record-1".to_string()),
+                turn_run_id: Some("run-record-1".to_string()),
                 metadata: json!({}),
             },
         )
@@ -539,12 +541,12 @@ async fn native_record_interaction_writes_thread_log_and_feeds_short_term_lane()
         "a thread-scoped interaction must be recorded by the native provider"
     );
 
-    // (a) A direct read of the thread log contains BOTH messages verbatim.
+    // (a) A direct read of the per-run thread doc contains BOTH messages verbatim.
     let read = service
         .read(
             scoped.clone(),
             MemoryServiceReadRequest {
-                path: "threads/thread-record/log.md".to_string(),
+                path: "threads/thread-record/run-record-1.md".to_string(),
             },
         )
         .await
@@ -577,11 +579,102 @@ async fn native_record_interaction_writes_thread_log_and_feeds_short_term_lane()
         .await
         .expect("short-term context retrieval after record");
     assert!(
-        snippets.iter().any(
-            |snippet| snippet.relative_path == "threads/thread-record/log.md"
-                && !snippet.text.is_empty()
-        ),
-        "short-term lane must surface the recorded thread log: {snippets:?}"
+        snippets.iter().any(|snippet| snippet.relative_path
+            == "threads/thread-record/run-record-1.md"
+            && !snippet.text.is_empty()),
+        "short-term lane must surface the recorded per-run thread doc: {snippets:?}"
+    );
+}
+
+#[tokio::test]
+async fn native_record_interaction_is_idempotent_on_rerun() {
+    // CR1: a scheduler re-run of an already-`Completed` run records the same
+    // exchange again. Because the native provider writes a PER-RUN file
+    // (`threads/<thread_id>/<turn_run_id>.md`) with overwrite semantics (NOT an
+    // append to a shared `log.md`), recording twice for the same
+    // `(thread_id, turn_run_id)` must leave a SINGLE copy — no duplication, no
+    // unbounded growth.
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+
+    let mut scoped = invocation();
+    scoped.scope.thread_id = Some(ThreadId::new("thread-rerun").expect("valid thread"));
+
+    let request = || MemoryServiceRecordRequest {
+        messages: vec![
+            MemoryInteractionMessage {
+                role: MemoryInteractionRole::User,
+                content: "the deploy is on tuesday".to_string(),
+                name: Some("user-rerun".to_string()),
+            },
+            MemoryInteractionMessage {
+                role: MemoryInteractionRole::Assistant,
+                content: "noted, deploy tuesday".to_string(),
+                name: Some("agent-rerun".to_string()),
+            },
+        ],
+        turn_run_id: Some("run-rerun-1".to_string()),
+        metadata: json!({}),
+    };
+
+    for _ in 0..2 {
+        let response = service
+            .record_interaction(scoped.clone(), request())
+            .await
+            .expect("record_interaction persists the exchange");
+        assert!(response.recorded, "each record must report recorded=true");
+    }
+
+    let read = service
+        .read(
+            scoped.clone(),
+            MemoryServiceReadRequest {
+                path: "threads/thread-rerun/run-rerun-1.md".to_string(),
+            },
+        )
+        .await
+        .expect("the per-run thread doc reads back");
+    assert_eq!(
+        read.content.matches("the deploy is on tuesday").count(),
+        1,
+        "re-recording the same run must overwrite (idempotent), not duplicate: {:?}",
+        read.content
+    );
+    assert_eq!(
+        read.content.matches("noted, deploy tuesday").count(),
+        1,
+        "assistant reply must also appear exactly once: {:?}",
+        read.content
+    );
+}
+
+#[tokio::test]
+async fn native_record_interaction_without_turn_run_id_is_noop() {
+    // The per-run file is named by `turn_run_id`; with no run id there is no
+    // per-run doc to write, so the native provider degrades to a no-op
+    // (recorded=false) rather than erroring or writing an unnamed file.
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+
+    let mut scoped = invocation();
+    scoped.scope.thread_id = Some(ThreadId::new("thread-no-run").expect("valid thread"));
+
+    let response = service
+        .record_interaction(
+            scoped,
+            MemoryServiceRecordRequest {
+                messages: vec![MemoryInteractionMessage {
+                    role: MemoryInteractionRole::User,
+                    content: "no run id to record under".to_string(),
+                    name: Some("user-no-run".to_string()),
+                }],
+                turn_run_id: None,
+                metadata: json!({}),
+            },
+        )
+        .await
+        .expect("record_interaction without a turn_run_id must degrade, not error");
+    assert!(
+        !response.recorded,
+        "an interaction with no turn_run_id must not be recorded"
     );
 }
 
@@ -600,8 +693,9 @@ async fn native_record_interaction_without_thread_is_noop() {
                 messages: vec![MemoryInteractionMessage {
                     role: MemoryInteractionRole::User,
                     content: "no thread to record under".to_string(),
+                    name: Some("user-record".to_string()),
                 }],
-                run_id: None,
+                turn_run_id: None,
                 metadata: json!({}),
             },
         )

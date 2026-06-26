@@ -1,12 +1,16 @@
 //! After-turn interaction recording for the Reborn planned loop (mem0 `add`).
 //!
-//! At the run-end seam (a `Completed` run), the host hands the just-finished
-//! user -> assistant exchange to the memory provider's
-//! [`MemoryService::record_interaction`], mirroring
-//! `mem0.add(messages=[user, assistant], user_id, run_id, metadata)`. The host
-//! passes the interaction DATA and lets the provider decide what to record
-//! (verbatim, LLM extraction, or nothing) — it makes NO verbatim-vs-extract /
-//! provenance / TTL decision here.
+//! At the run-end seam (a `Completed` run), the host hands the just-finished run's
+//! FULL ordered transcript (every user / assistant / tool message of the turn) to
+//! the memory provider's [`MemoryService::record_interaction`], mirroring
+//! `mem0.add(messages=[...], metadata)`. The host passes the interaction DATA and
+//! lets the provider decide what to record (verbatim, LLM extraction, or nothing)
+//! — it makes NO verbatim-vs-extract / provenance / TTL decision here.
+//!
+//! mem0's session/`run_id` maps to our `scope.thread_id` (the conversation), which
+//! the provider derives from the invocation scope; the request's `turn_run_id` is
+//! per-turn PROVENANCE only (it names the native per-run transcript file), NOT the
+//! mem0 session id.
 //!
 //! This is a post-terminal, best-effort side effect: the run is ALREADY
 //! `Completed` when the recorder runs, so any failure (history read, missing
@@ -22,7 +26,7 @@ use ironclaw_memory::{
     MemoryServiceRecordRequest,
 };
 use ironclaw_threads::{
-    MessageKind, MessageStatus, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
+    MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadMessageRecord,
     ThreadScope,
 };
 use ironclaw_turns::{TurnActor, TurnRunState};
@@ -89,18 +93,36 @@ impl AfterTurnMemoryRecorder {
         };
 
         let run_id = state.run_id.to_string();
-        let Some(messages) = build_exchange(&history, &run_id) else {
-            debug!("after-turn memory: no user/assistant exchange for run; skipping");
+        let actor_user_id = actor.user_id.as_str();
+        let agent_id = state.scope.agent_id.as_ref().map(|id| id.as_str());
+        let messages = build_transcript(&history.messages, &run_id, actor_user_id, agent_id);
+        // Skip only when the transcript carries no user/assistant content — a
+        // turn with nothing meaningful to remember (matches "native stores the
+        // full turn history"). Tool-only fragments alone are not recorded.
+        let has_conversational_message = messages.iter().any(|message| {
+            matches!(
+                message.role,
+                MemoryInteractionRole::User | MemoryInteractionRole::Assistant
+            )
+        });
+        if !has_conversational_message {
+            debug!("after-turn memory: no user/assistant content for run; skipping");
             return;
-        };
+        }
 
         // Pass the raw interaction DATA; the provider decides what to do with it.
-        // `user_id`/`agent_id`/`thread_id` ride the invocation scope.
-        let invocation = invocation_for_run(state, actor);
+        // `user_id`/`agent_id`/`thread_id` ride the invocation scope. `turn_run_id`
+        // + `correlation_id` ride `metadata` as opaque provenance (the provider
+        // self-generates timestamps; the host does not add them).
+        let correlation_id = CorrelationId::new();
+        let invocation = invocation_for_run(state, actor, correlation_id);
         let request = MemoryServiceRecordRequest {
             messages,
-            run_id: Some(run_id),
-            metadata: serde_json::json!({}),
+            turn_run_id: Some(run_id.clone()),
+            metadata: serde_json::json!({
+                "turn_run_id": run_id,
+                "correlation_id": correlation_id.to_string(),
+            }),
         };
         if let Err(error) = self
             .memory_writer
@@ -112,41 +134,71 @@ impl AfterTurnMemoryRecorder {
     }
 }
 
-/// Build the `[user, assistant]` exchange for `run_id` from the thread history,
-/// or `None` when either side (or its content) is missing.
-fn build_exchange(history: &ThreadHistory, run_id: &str) -> Option<Vec<MemoryInteractionMessage>> {
-    let user_content = history
-        .messages
+/// Build the full ordered turn transcript for `run_id` from the thread messages:
+/// every message tagged with this `turn_run_id`, in sequence order, mapped to its
+/// `User` / `Assistant` / `Tool` role (other kinds — `System`, summaries,
+/// checkpoint/preview references — are skipped). Per-message `name` carries the
+/// actor label (mem0 message `name`): the user's `user_id`, the `agent_id` for an
+/// assistant, `None` for a tool message.
+///
+/// Captures EVERY finalized assistant message (all steps + the final answer), not
+/// just the first — the audit-H1 fix over the prior `.find()` of a single
+/// assistant. Returns the messages in order; the caller decides whether the
+/// transcript is worth recording.
+fn build_transcript(
+    messages: &[ThreadMessageRecord],
+    run_id: &str,
+    actor_user_id: &str,
+    agent_id: Option<&str>,
+) -> Vec<MemoryInteractionMessage> {
+    let mut records: Vec<&ThreadMessageRecord> = messages
         .iter()
-        .find(|message| {
-            message.kind == MessageKind::User && message.turn_run_id.as_deref() == Some(run_id)
+        .filter(|message| message.turn_run_id.as_deref() == Some(run_id))
+        .collect();
+    // Sequence order is the stable transcript order, independent of the read
+    // backend's iteration order.
+    records.sort_by_key(|message| message.sequence);
+
+    records
+        .into_iter()
+        .filter_map(|message| {
+            // Map kind -> interaction role; skip System (and any other non-turn
+            // kind such as summaries or checkpoint/preview references).
+            let (role, name) = match message.kind {
+                MessageKind::User => (MemoryInteractionRole::User, Some(actor_user_id.to_string())),
+                // Every finalized assistant step, including the FINAL answer. A
+                // non-finalized draft is superseded by its finalized row, so only
+                // finalized assistants enter the transcript.
+                MessageKind::Assistant if message.status == MessageStatus::Finalized => (
+                    MemoryInteractionRole::Assistant,
+                    agent_id.map(str::to_string),
+                ),
+                MessageKind::ToolResultReference => (MemoryInteractionRole::Tool, None),
+                _ => return None,
+            };
+            // Skip messages with no usable content (e.g. a redacted row).
+            let content = message
+                .content
+                .as_deref()
+                .map(str::trim)
+                .filter(|content| !content.is_empty())?;
+            Some(MemoryInteractionMessage {
+                role,
+                content: content.to_string(),
+                name,
+            })
         })
-        .and_then(|message| message.content.as_deref())?;
-    let assistant_content = history
-        .messages
-        .iter()
-        .find(|message| {
-            message.kind == MessageKind::Assistant
-                && message.status == MessageStatus::Finalized
-                && message.turn_run_id.as_deref() == Some(run_id)
-        })
-        .and_then(|message| message.content.as_deref())?;
-    Some(vec![
-        MemoryInteractionMessage {
-            role: MemoryInteractionRole::User,
-            content: user_content.to_string(),
-        },
-        MemoryInteractionMessage {
-            role: MemoryInteractionRole::Assistant,
-            content: assistant_content.to_string(),
-        },
-    ])
+        .collect()
 }
 
 /// Build the memory invocation for a run: the thread is kept (short-term lane),
 /// `user_id` is the run's actor. Mirrors `invocation_for_context_request` in
 /// `ironclaw_host_runtime::memory_context`.
-fn invocation_for_run(state: &TurnRunState, actor: &TurnActor) -> MemoryInvocation {
+fn invocation_for_run(
+    state: &TurnRunState,
+    actor: &TurnActor,
+    correlation_id: CorrelationId,
+) -> MemoryInvocation {
     MemoryInvocation {
         scope: ResourceScope {
             tenant_id: state.scope.tenant_id.clone(),
@@ -157,6 +209,129 @@ fn invocation_for_run(state: &TurnRunState, actor: &TurnActor) -> MemoryInvocati
             thread_id: Some(state.scope.thread_id.clone()),
             invocation_id: InvocationId::new(),
         },
-        correlation_id: CorrelationId::new(),
+        correlation_id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_threads::ThreadMessageId;
+
+    fn record(
+        sequence: u64,
+        kind: MessageKind,
+        status: MessageStatus,
+        turn_run_id: &str,
+        content: &str,
+    ) -> ThreadMessageRecord {
+        ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id: ironclaw_host_api::ThreadId::new("thread-after-turn-test")
+                .expect("valid thread id"),
+            sequence,
+            kind,
+            status,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: Some(turn_run_id.to_string()),
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: Some(content.to_string()),
+            attachments: Vec::new(),
+            redaction_ref: None,
+        }
+    }
+
+    /// H1 regression + mem0 parity: the after-turn transcript must capture the
+    /// FULL ordered run transcript — every user/assistant/tool message tagged with
+    /// this run, in sequence order, INCLUDING the final assistant and every
+    /// intermediate step (not just the first finalized assistant, the prior
+    /// `.find()` bug). `System` messages and messages from other runs are
+    /// excluded; each message carries its actor `name`.
+    #[test]
+    fn build_transcript_captures_full_ordered_run_including_final_assistant() {
+        let run = "run-under-test";
+        let messages = vec![
+            record(
+                1,
+                MessageKind::User,
+                MessageStatus::Accepted,
+                run,
+                "please do X",
+            ),
+            record(
+                2,
+                MessageKind::Assistant,
+                MessageStatus::Finalized,
+                run,
+                "step one: thinking",
+            ),
+            record(
+                3,
+                MessageKind::ToolResultReference,
+                MessageStatus::Finalized,
+                run,
+                "tool output Y",
+            ),
+            record(
+                4,
+                MessageKind::Assistant,
+                MessageStatus::Finalized,
+                run,
+                "final answer Z",
+            ),
+            // Excluded: a System message in the same run...
+            record(
+                5,
+                MessageKind::System,
+                MessageStatus::Finalized,
+                run,
+                "system note",
+            ),
+            // ...and a message belonging to a different run.
+            record(
+                6,
+                MessageKind::Assistant,
+                MessageStatus::Finalized,
+                "other-run",
+                "other run reply",
+            ),
+        ];
+
+        let transcript = build_transcript(&messages, run, "user-abc", Some("agent-def"));
+
+        let shape: Vec<(MemoryInteractionRole, &str, Option<&str>)> = transcript
+            .iter()
+            .map(|message| {
+                (
+                    message.role,
+                    message.content.as_str(),
+                    message.name.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (MemoryInteractionRole::User, "please do X", Some("user-abc")),
+                (
+                    MemoryInteractionRole::Assistant,
+                    "step one: thinking",
+                    Some("agent-def"),
+                ),
+                (MemoryInteractionRole::Tool, "tool output Y", None),
+                (
+                    MemoryInteractionRole::Assistant,
+                    "final answer Z",
+                    Some("agent-def"),
+                ),
+            ],
+            "transcript must be the full ordered run: user, every finalized \
+             assistant (including the FINAL one) and tool messages, each with its \
+             actor name; System and other-run messages excluded"
+        );
     }
 }

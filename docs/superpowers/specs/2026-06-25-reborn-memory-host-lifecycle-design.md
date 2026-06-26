@@ -17,12 +17,13 @@ calls the (working) native retrieval.
 
 ```
 on_run_start (once per run):
-  long_term  = memory.search(query=latest_user_message, scope={tenant,user})
-  short_term = memory.search(query=latest_user_message, scope={tenant,user}, filter={thread_id})
+  long_term  = memory.search(query=latest_user_message, scope={tenant,user,agent,project})
+  short_term = memory.search(query=latest_user_message, scope={tenant,user,agent,project}, filter={thread_id})
 before_model_call:
   prompt = system + long_term + short_term + conversation
 after_each_turn (= our run end):
-  memory.add(exchange=[user,assistant], user_id, thread_id, agent_id, run_id, provenance, ttl)
+  memory.add(transcript=[user, …assistant steps + tool results, final assistant],
+             user_id, thread_id, agent_id, turn_run_id=provenance, metadata)
 on_run_end (optional):
   optional thread summary; TTL / evict-from-surfacing only — never hard-delete
 ```
@@ -73,7 +74,7 @@ executor, never threaded into `MemoryService`/`RuntimeCapabilityRequest`).
 | Q3 | what `add` records | **Host passes the data; the provider decides** (Ben, 2026-06-26). A low-level `MemoryService::record_interaction(messages, run_id, metadata)` — mem0 `add` shape; `user_id`/`agent_id`/`thread_id` ride the invocation scope. Native stores the full turn history under `threads/<thread_id>/`; a mem0 provider could run extraction (`infer=true`). No host-side verbatim-vs-extract decision. Default no-op trait impl → providers opt in. |
 | Q4 | provenance/TTL | **Provider concern, not host.** The host passes `metadata`; provenance / TTL / extraction are each provider's choice. For native self-scoped thread scratch, none are needed in v1. (This is also why the heavy Trap-4 machinery doesn't bind here — the data is the user's own exchange in their own thread.) |
 | Q5 | delete scratch vs "never delete LLM data" | **TTL / evict-from-surfacing only; archive, never hard-delete.** |
-| Q6 | per-run cache + invalidation | Fetch once per run; invalidate on latest-user-message / input-cursor change. |
+| Q6 | per-run cache + invalidation | Fetch once per run. **v1 (shipped): NO mid-run query invalidation.** The first prompt build that carries a user message seeds the per-run `OnceCell` and freezes it for the run; a build with no user message yet does **not** seed the cell, so the first real user message still fetches (the M1 fix). Mid-run re-query on latest-user-message / input-cursor change is a deferred follow-up, not in v1. |
 
 ## Phased TDD plan (red → green per step)
 
@@ -147,6 +148,52 @@ templates in `prompts/*.md`.
   (never fails the completed run). Wired via `DefaultPlannedRuntimeParts.after_turn_memory_writer`
   (raw `Arc<dyn MemoryService>`) + composition resolve. This closes the write half:
   the after-turn record feeds the short-term lane the Phase-1 read surfaces.
+- **2026-06-26 · Consolidated fixes (PR #5327 review: mem0-parity + adversarial audit + CodeRabbit).**
+  - **Run-vs-session (A1):** `MemoryServiceRecordRequest.run_id` → `turn_run_id:
+    Option<String>`. mem0's session/`run_id` maps to our `scope.thread_id` (the
+    conversation — a provider derives the session from the invocation scope); the
+    request's `turn_run_id` is per-turn **provenance** only (it names the native
+    per-run file), never the mem0 session id. `turn_run_id`/`metadata` are opaque
+    provider pass-through (N1).
+  - **Full transcript (A2 / audit H1):** `build_exchange` → `build_transcript`
+    captures the FULL ordered run transcript — every `ThreadMessageRecord` tagged
+    with the `turn_run_id`, in sequence order, mapped User/Assistant/Tool (System +
+    other kinds skipped). This includes the FINAL assistant and every intermediate
+    step + tool result (fixes H1: the prior `.find()` recorded only the first
+    finalized assistant). Skip only when the transcript carries no user/assistant
+    content.
+  - **Idempotent per-run file (CR1):** native `record_interaction` now writes the
+    transcript to a PER-RUN file `threads/<thread_id>/<turn_run_id>.md` with
+    `append: false` (overwrite), instead of appending to a shared `log.md`. A
+    scheduler re-run of a `Completed` run overwrites idempotently — no duplication,
+    no unbounded growth. Per-run files stay under `threads/<T>/`, so the short-term
+    lane still surfaces them; long-term still excludes `threads/`. Skips
+    (`recorded:false`) when `turn_run_id` is `None`, no `thread_id`, or no messages.
+  - **Actor name (A3) + provenance metadata (A4):** `MemoryInteractionMessage`
+    gains `name: Option<String>` (mem0 message `name` → per-memory `actor_id`):
+    user = `user_id`, assistant = `agent_id`, `None` for tool. The request
+    `metadata` = `{ turn_run_id, correlation_id }` (the provider self-generates
+    timestamps; the host does not add them).
+  - **Cache None-freeze (audit M1):** `load_memory_snippets_once` builds the
+    request first and only seeds the per-run `OnceCell` when a request exists, so a
+    first build with no user message no longer freezes memory to empty (see Q6).
+  - **`threads/` reserved prefix (audit L1, advisory):** `threads/` is reserved for
+    per-thread short-term scratch — a doc written there is excluded from the
+    long-term lane and matched by no short-term lane unless its thread is active.
+    This is advisory (documented + pinned by the native exclude/scope tests);
+    rejecting tool-originated writes to `threads/` is a deferred follow-up.
+  - **Long-term starvation (audit L2):** the combined memory budget is
+    short-term-first, so a scratch-heavy thread can still starve the long-term
+    lane. Documented v1 follow-up (per-lane sub-budget floor) — not addressed here.
+  - **Optional-Arc arch-exempt (audit L3):** the three new `Option<Arc<…>>` fields
+    (`after_turn_memory_recorder`, two `memory_context_service`) carry
+    `// arch-exempt: optional_arc, deferred production wiring, issue #5013`; their
+    comments now say "production wires None pending #5013" (they are genuine
+    `Option`s, NOT the non-optional null-object `user_profile_source`).
+  - **Build break (CR2):** `tests/support/reborn/harness.rs`'s
+    `DefaultPlannedRuntimeParts` literal was missing `after_turn_memory_writer:
+    None` (compiled only in the ROOT `ironclaw` crate's test harness, which the
+    per-crate gate skipped). Added; all other literals already carry both fields.
 - **Next:** the full add→surface **e2e** (run 1 records → run 2's short-term lane
   surfaces it in the model request), then the full gate, then the PR + audit +
   CodeRabbit loop above. Phase 3 (`on_run_end` durable summary) optional / follow-up.

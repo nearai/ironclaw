@@ -218,9 +218,10 @@ where
     /// Optional proactive-memory source. When wired, memory snippets are fetched
     /// ONCE per run (cached in `memory_snippets_cache`) and surfaced into the
     /// prompt's `"memory"` section; when absent, `memory_snippets` stays empty.
-    /// Genuinely optional — a composition without a memory backend wires `None`
-    /// and degrades to no memory, never failing the turn (mirrors
-    /// `user_profile_source`).
+    /// Optional; production wires `None` pending #5013 — a composition without a
+    /// memory backend degrades to no memory, never failing the turn. (Unlike the
+    /// non-optional null-object `user_profile_source`, this is a genuine `Option`.)
+    // arch-exempt: optional_arc, deferred production wiring, issue #5013
     memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
     /// Per-run cache for the fetched memory snippets. Shared across clones via
     /// `Arc` so the "fetch once per run" guarantee holds even if the port is
@@ -461,15 +462,18 @@ where
         let Some(service) = self.memory_context_service.as_deref() else {
             return Vec::new();
         };
+        // Build the request BEFORE touching the cache. When there is no actor or no
+        // user message yet, there is nothing to query: return empty WITHOUT seeding
+        // the `OnceCell`, so a later prompt build that DOES carry a user message can
+        // still fetch (M1 regression — seeding the cell with an empty vec here froze
+        // memory to empty for the rest of the run). Only `get_or_try_init` once a
+        // real request exists.
+        let Some(request) = self.build_memory_prompt_context_request(context_messages) else {
+            return Vec::new();
+        };
         let cached = self
             .memory_snippets_cache
-            .get_or_try_init(|| async {
-                let Some(request) = self.build_memory_prompt_context_request(context_messages)
-                else {
-                    return Ok(Vec::new());
-                };
-                service.load_memory_snippets(request).await
-            })
+            .get_or_try_init(|| async { service.load_memory_snippets(request).await })
             .await;
         match cached {
             Ok(snippets) => snippets.clone(),

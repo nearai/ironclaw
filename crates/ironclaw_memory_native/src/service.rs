@@ -407,22 +407,31 @@ impl MemoryService for NativeMemoryService {
             tracing::debug!("record_interaction skipped: no thread_id on invocation scope");
             return Ok(MemoryServiceRecordResponse { recorded: false });
         };
+        // The per-run transcript file is named by `turn_run_id` (provenance). With
+        // no run id there is no per-run doc to write, so degrade to a no-op.
+        let Some(turn_run_id) = request.turn_run_id.as_deref() else {
+            tracing::debug!("record_interaction skipped: no turn_run_id on request");
+            return Ok(MemoryServiceRecordResponse { recorded: false });
+        };
         if request.messages.is_empty() {
             return Ok(MemoryServiceRecordResponse { recorded: false });
         }
-        // Append to the thread's short-term log under the SAME `threads/<T>/`
+        // Write the full transcript to a PER-RUN file under the SAME `threads/<T>/`
         // convention `retrieve_context`'s short-term lane filters on (reusing
-        // `thread_memory_prefix`, not a second prefix). Route through the existing
-        // append write flow (`MemoryServiceWriteRequest { append: true }`), which
-        // builds the `MemoryDocumentScope`/`MemoryContext` via `scoped_context`.
-        let target = format!("{}log.md", thread_memory_prefix(&thread_id));
+        // `thread_memory_prefix`). Using a per-run path
+        // (`threads/<thread_id>/<turn_run_id>.md`) with `append: false` (overwrite)
+        // makes the record idempotent: a scheduler re-run of an already-`Completed`
+        // run overwrites the same file instead of duplicating the exchange into an
+        // unbounded shared `log.md` (CR1). Route through the existing write flow,
+        // which builds the `MemoryDocumentScope`/`MemoryContext` via `scoped_context`.
+        let target = format!("{}{turn_run_id}.md", thread_memory_prefix(&thread_id));
         let content = format_interaction(&request.messages);
         self.write(
             invocation,
             MemoryServiceWriteRequest {
                 target,
                 content,
-                append: true,
+                append: false,
                 old_string: None,
                 new_string: None,
                 replace_all: false,
@@ -653,6 +662,12 @@ fn tree_for_paths(paths: &[String], root: &str, max_depth: usize) -> Vec<Value> 
 /// ("run-local") memory. Documents under `threads/<thread_id>/` belong to the
 /// short-term lane: included by thread-scoped retrieval, excluded from long-term
 /// (general) retrieval. Reserved — general user memory does not use this prefix.
+///
+/// Advisory reservation (audit L1): a document written under `threads/foo.md` is
+/// excluded from the long-term lane AND matched by no short-term lane unless
+/// `foo` is the active thread, so it can become a retrieval "black hole". v1
+/// keeps this advisory (pinned by the exclude/scope tests); rejecting
+/// tool-originated writes to `threads/` is a deferred follow-up.
 const THREAD_MEMORY_ROOT: &str = "threads/";
 
 /// Virtual-path prefix under which a specific thread's short-term memory lives.
@@ -679,13 +694,22 @@ fn compare_memory_search_results(
         .then_with(|| left.path.relative_path().cmp(right.path.relative_path()))
 }
 
-/// Render an interaction exchange into the short-term thread log body. Each
-/// message becomes a `## {role}` heading followed by its content, so an appended
-/// turn reads as a simple Markdown transcript.
+/// Render an interaction exchange into the per-run thread transcript body. Each
+/// message becomes a `## {role}` heading (with the actor `name` in parentheses
+/// when present, e.g. `## user (alice)`) followed by its content, so the per-run
+/// file reads as a simple Markdown transcript.
 fn format_interaction(messages: &[MemoryInteractionMessage]) -> String {
     messages
         .iter()
-        .map(|message| format!("## {}\n{}\n", message.role.as_str(), message.content))
+        .map(|message| match message.name.as_deref() {
+            Some(name) => format!(
+                "## {} ({})\n{}\n",
+                message.role.as_str(),
+                name,
+                message.content
+            ),
+            None => format!("## {}\n{}\n", message.role.as_str(), message.content),
+        })
         .collect()
 }
 

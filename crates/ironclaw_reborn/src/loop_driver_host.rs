@@ -956,9 +956,11 @@ where
     user_profile_source: Arc<dyn HostUserProfileSource>,
     /// Per-run proactive-memory source. Resolved once at the first prompt build
     /// of the run; its admitted snippets are surfaced into the prompt's "memory"
-    /// section every turn. Defaults to `None` (no memory) so compositions without
-    /// a memory backend degrade gracefully — same optionality contract as
-    /// `user_profile_source`.
+    /// section every turn. Optional; production wires `None` pending #5013, so a
+    /// composition without a memory backend degrades gracefully. (Unlike
+    /// `user_profile_source` — a non-optional null-object defaulting to
+    /// `EmptyUserProfileSource` — this is a genuine `Option`.)
+    // arch-exempt: optional_arc, deferred production wiring, issue #5013
     memory_context_service: Option<Arc<dyn MemoryPromptContextService>>,
     communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,

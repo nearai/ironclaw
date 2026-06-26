@@ -1606,9 +1606,9 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
 /// `NativeMemoryService` (over `InMemoryBackend`) is wired into an
 /// `AfterTurnMemoryRecorder` on the executor. Once the turn-runner worker drives
 /// a queued run to `Completed`, the executor's run-end seam must record the
-/// `[user, assistant]` exchange — so the memory store's
-/// `threads/<thread_id>/log.md` ends up containing BOTH the user message and the
-/// assistant reply ("model says hi"). This drives the production call site
+/// run's full transcript — so the memory store's per-run doc at
+/// `threads/<thread_id>/<turn_run_id>.md` ends up containing BOTH the user message
+/// and the assistant reply ("model says hi"). This drives the production call site
 /// (`apply_exit`), not the recorder in isolation (testing.md "test through the
 /// caller").
 #[tokio::test]
@@ -1696,7 +1696,7 @@ async fn turn_runner_worker_records_after_turn_memory_on_completed_run() {
         },
         correlation_id: CorrelationId::new(),
     };
-    let log_path = format!("threads/{}/log.md", fixture.thread_id);
+    let log_path = format!("threads/{}/{run_id}.md", fixture.thread_id);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     let content = loop {
         match memory_writer

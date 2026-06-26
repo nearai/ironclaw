@@ -69,10 +69,12 @@ pub struct RebornTurnRunExecutor {
     loop_exit_applier: Arc<LoopExitApplier>,
     driver_registry: Arc<DriverRegistry>,
     host_factory: Arc<dyn HostFactory>,
-    /// After-turn interaction recorder (mem0 `add` seam). Genuinely optional:
-    /// only compositions that resolve a memory document-store provider wire it;
-    /// the production graph currently degrades to `None` (issue #5013), the same
-    /// optionality as `memory_context_service` on `DefaultPlannedRuntimeParts`.
+    /// After-turn interaction recorder (mem0 `add` seam). Optional; production
+    /// wires `None` pending #5013 — only compositions that resolve a memory
+    /// document-store provider attach it, and a `Completed` run finishes cleanly
+    /// without it (the same genuine optionality as `memory_context_service` on
+    /// `DefaultPlannedRuntimeParts`).
+    // arch-exempt: optional_arc, deferred production wiring, issue #5013
     after_turn_memory_recorder: Option<Arc<AfterTurnMemoryRecorder>>,
 }
 

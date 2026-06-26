@@ -2568,6 +2568,123 @@ async fn load_loop_context_without_memory_service_returns_empty_memory() {
     assert!(bundle.memory_snippets.is_empty());
 }
 
+/// Regression (adversarial audit M1): when the FIRST prompt build of a run has no
+/// user message yet (so no query can be derived), memory retrieval must return
+/// empty WITHOUT seeding the per-run cache. The prior code seeded the `OnceCell`
+/// with an empty vec on the `None` request, freezing memory to empty for the rest
+/// of the run — so a later build that DOES carry a user message could never fetch.
+/// The fix builds the request first and only `get_or_try_init`s when a request
+/// exists, so the empty first build does not poison the cache.
+#[tokio::test]
+async fn load_loop_context_without_user_message_does_not_freeze_memory_cache() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let tenant_id = TenantId::new("tenant-cache-freeze").unwrap();
+    let agent_id = AgentId::new("agent-cache-freeze").unwrap();
+    let project_id = ProjectId::new("project-cache-freeze").unwrap();
+    let user_id = UserId::new("user-cache-freeze").unwrap();
+    let thread_id = ThreadId::new("thread-cache-freeze").unwrap();
+    let thread_scope = ThreadScope {
+        tenant_id: tenant_id.clone(),
+        agent_id: agent_id.clone(),
+        project_id: Some(project_id.clone()),
+        owner_user_id: Some(user_id.clone()),
+        mission_id: None,
+    };
+    // The thread exists but carries NO user message yet.
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let turn_scope = TurnScope::new(
+        tenant_id,
+        Some(agent_id),
+        Some(project_id),
+        thread_id.clone(),
+    );
+    let resolved = InMemoryRunProfileResolver::default()
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    let run_context = LoopRunContext::new(turn_scope, TurnId::new(), TurnRunId::new(), resolved)
+        .with_actor(TurnActor::new(user_id.clone()));
+
+    let memory_service = Arc::new(CountingMemoryContextService::default());
+    let context_port =
+        ThreadBackedLoopContextPort::new(
+            Arc::clone(&thread_service),
+            thread_scope.clone(),
+            run_context,
+            16,
+        )
+        .with_memory_context_service(
+            Arc::clone(&memory_service) as Arc<dyn MemoryPromptContextService>
+        );
+
+    let request = LoopContextRequest {
+        after: None,
+        limit: 16,
+        mode: PromptMode::TextOnly,
+    };
+
+    // First build: no user message -> no derivable query -> empty memory and,
+    // crucially, NO fetch and NO cache seed.
+    let first = context_port
+        .load_loop_context(request.clone())
+        .await
+        .expect("first prompt build should succeed");
+    assert!(
+        first.memory_snippets.is_empty(),
+        "no user message means no memory snippets"
+    );
+    assert_eq!(
+        memory_service.fetches.load(Ordering::SeqCst),
+        0,
+        "with no user message there is no query, so memory must not be fetched"
+    );
+
+    // A user message now arrives in the thread.
+    thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: user_id.as_str().to_string(),
+            source_binding_id: Some("source-web".to_string()),
+            reply_target_binding_id: Some("reply-web".to_string()),
+            external_event_id: Some("event-cache-freeze-1".to_string()),
+            content: MessageContent::text("remember the gate code is 4242"),
+        })
+        .await
+        .unwrap();
+
+    // Second build: a user message now exists, so memory MUST fetch. If the first
+    // (None) build had frozen the cache, this would still be empty.
+    let second = context_port
+        .load_loop_context(request)
+        .await
+        .expect("second prompt build should succeed");
+    assert!(
+        !second.memory_snippets.is_empty(),
+        "a later build carrying a user message must fetch memory; the empty first \
+         build must not freeze the per-run cache"
+    );
+    assert_eq!(
+        memory_service.fetches.load(Ordering::SeqCst),
+        1,
+        "memory is fetched exactly once, on the first build that has a user message"
+    );
+    assert_eq!(
+        memory_service.last_query.lock().unwrap().as_deref(),
+        Some("remember the gate code is 4242"),
+        "the memory query must derive from the user message that finally arrived"
+    );
+}
+
 async fn production_loop_request(
     fixture: &ThreadFixture,
     model_preference: Option<ModelProfileId>,

@@ -475,23 +475,46 @@ impl MemoryInteractionRole {
 
 /// One message in an interaction exchange passed to
 /// [`MemoryService::record_interaction`].
+///
+/// `name` is the optional per-message actor label (mem0's message `name`, which a
+/// provider may map to a per-memory `actor_id`): the human `user_id` for a user
+/// message, the `agent_id` for an assistant message, `None` for a tool message.
+/// Provider-neutral and opaque — the native provider stores it verbatim in the
+/// transcript heading; a mem0 provider forwards it as the message `name`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryInteractionMessage {
     pub role: MemoryInteractionRole,
     pub content: String,
+    /// Optional actor label (mem0 message `name` → per-memory `actor_id`): user
+    /// `user_id` / assistant `agent_id` / `None` for a tool message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// Request for [`MemoryService::record_interaction`]: the raw interaction DATA.
 ///
-/// Mirrors `mem0.add(messages=[...], run_id, metadata)`. The host passes the
-/// messages, run id, and metadata and lets the *provider* decide what to record
-/// (store verbatim, run LLM extraction, or nothing) — the host makes no
+/// Mirrors `mem0.add(messages=[...], metadata=...)`. The host passes the messages
+/// and free-form `metadata` and lets the *provider* decide what to record (store
+/// verbatim, run LLM extraction, or nothing) — the host makes no
 /// verbatim-vs-extract / provenance / TTL decision. `user_id`/`agent_id`/
 /// `thread_id` ride the invocation's [`ResourceScope`], not this request.
+///
+/// `turn_run_id` is the IronClaw per-turn run id, carried as **provenance** for
+/// this exchange. It is NOT mem0's session/`run_id`: mem0's session id maps to our
+/// `scope.thread_id` (the conversation) — which a provider derives from the
+/// invocation scope — so one mem0 "run"/session spans many of our turns. The
+/// native provider uses `turn_run_id` to name a per-run transcript file so that
+/// re-recording the same run overwrites idempotently instead of duplicating.
+/// `turn_run_id` and `metadata` are opaque provider pass-through.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemoryServiceRecordRequest {
     pub messages: Vec<MemoryInteractionMessage>,
-    pub run_id: Option<String>,
+    /// IronClaw per-turn run id (provenance), `None` when unavailable. Opaque
+    /// provider pass-through — NOT the mem0 session id (that is `scope.thread_id`).
+    pub turn_run_id: Option<String>,
+    /// Free-form provenance metadata, opaque provider pass-through (e.g.
+    /// `{ "turn_run_id", "correlation_id" }`). A provider self-generates
+    /// timestamps; the host does not add them.
     pub metadata: Value,
 }
 
@@ -575,9 +598,11 @@ pub trait MemoryService: Send + Sync {
 
     /// Record a completed interaction exchange (the after-turn `add` seam).
     ///
-    /// The host passes the raw interaction DATA — the `[user, assistant]`
-    /// messages, the `run_id`, and free-form `metadata` — and lets the *provider*
-    /// decide what to do with it (store verbatim, run LLM extraction, or nothing).
+    /// The host passes the raw interaction DATA — the ordered turn transcript
+    /// messages, the per-turn `turn_run_id` (provenance, NOT the mem0 session id —
+    /// that is `scope.thread_id`), and free-form `metadata` — and lets the
+    /// *provider* decide what to do with it (store verbatim, run LLM extraction, or
+    /// nothing). `turn_run_id` and `metadata` are opaque provider pass-through.
     /// `user_id`/`agent_id`/`thread_id` ride `invocation.scope`. Name-aligned with
     /// the reserved `memory.interaction.record.v1` op; this is a host-driven trait
     /// method, not a model-facing capability.
@@ -694,13 +719,15 @@ mod tests {
                 MemoryInteractionMessage {
                     role: MemoryInteractionRole::User,
                     content: "hello".to_string(),
+                    name: Some("user-1".to_string()),
                 },
                 MemoryInteractionMessage {
                     role: MemoryInteractionRole::Assistant,
                     content: "hi there".to_string(),
+                    name: Some("agent-1".to_string()),
                 },
             ],
-            run_id: Some("run-1".to_string()),
+            turn_run_id: Some("run-1".to_string()),
             metadata: json!({}),
         };
 
