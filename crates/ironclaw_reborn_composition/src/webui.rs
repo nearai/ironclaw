@@ -336,19 +336,8 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     // assembled with a boot config. The secret store stays private to this
     // crate; the service is the only facade-shaped handle that leaves.
     #[cfg(feature = "root-llm-provider")]
-    if let Some(boot) = runtime.webui_boot_config() {
-        let keys = crate::LlmKeyStore::new(runtime.services().secret_store());
-        let mut llm_config = crate::RebornLlmConfigService::new(boot.clone(), keys);
-        if let Some(reload) = runtime.webui_llm_reload_trigger() {
-            llm_config = llm_config.with_reload_trigger(reload);
-        }
-        if let Some(session) = runtime.webui_llm_session() {
-            llm_config = llm_config.with_nearai_session(session);
-        }
-        if let Some(states) = runtime.webui_nearai_login_states() {
-            llm_config = llm_config.with_nearai_login_states(states);
-        }
-        api = api.with_llm_config_service(Arc::new(llm_config));
+    if let Some(llm_config) = build_llm_config_service(runtime) {
+        api = api.with_llm_config_service(llm_config);
     }
 
     Ok(RebornWebuiBundle {
@@ -356,6 +345,31 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         product_auth: services.product_auth.clone(),
         readiness: services.readiness.clone(),
     })
+}
+
+/// Compose the operator LLM-config settings service from the runtime's boot
+/// config, secret store, and optional reload/session/login-state handles.
+///
+/// Returns `None` when the runtime was assembled without a boot config. Shared
+/// by `build_webui_services` (operator LLM routes) and the OpenAI-compatible
+/// `/v1/models` catalog so both read the same configured-model source.
+#[cfg(feature = "root-llm-provider")]
+pub(crate) fn build_llm_config_service(
+    runtime: &RebornRuntime,
+) -> Option<Arc<dyn ironclaw_product_workflow::LlmConfigService>> {
+    let boot = runtime.webui_boot_config()?;
+    let keys = crate::LlmKeyStore::new(runtime.services().secret_store());
+    let mut llm_config = crate::RebornLlmConfigService::new(boot.clone(), keys);
+    if let Some(reload) = runtime.webui_llm_reload_trigger() {
+        llm_config = llm_config.with_reload_trigger(reload);
+    }
+    if let Some(session) = runtime.webui_llm_session() {
+        llm_config = llm_config.with_nearai_session(session);
+    }
+    if let Some(states) = runtime.webui_nearai_login_states() {
+        llm_config = llm_config.with_nearai_login_states(states);
+    }
+    Some(Arc::new(llm_config))
 }
 
 struct ReadinessOperatorStatusService {
@@ -735,6 +749,11 @@ fn status_response_from_readiness(readiness: &RebornReadiness) -> RebornOperator
             RebornOperatorStatusState::Ready,
             RebornOperatorStatusSeverity::Info,
             None,
+        ),
+        crate::RebornReadinessState::HostedSingleTenantVolumePreviewValidated => (
+            RebornOperatorStatusState::Degraded,
+            RebornOperatorStatusSeverity::Warning,
+            Some("mounted-volume hosted preview is ready for single-tenant validation but is not production storage".to_string()),
         ),
         crate::RebornReadinessState::ProductionValidated => (
             RebornOperatorStatusState::Ready,

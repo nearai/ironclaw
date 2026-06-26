@@ -84,6 +84,16 @@ impl MemoryServiceWriteRequest {
             Some(Value::Null) | None => "daily_log".to_string(),
             Some(_) => return Err(MemoryServiceError::input()),
         };
+        // Provider-neutral containment: reject a target that would escape the
+        // scoped memory mount before it reaches any provider. The model-facing
+        // `document-write` input schema advertises the same `not` pattern, but
+        // that schema is only surfaced to the model — it is not host-validated
+        // against the actual tool arguments — and a swapped provider may use the
+        // target verbatim (the mem0 adapter stores it as a memory metadata tag).
+        // The native filesystem provider keeps its own stricter
+        // `reject_local_or_traversal_path` as defense in depth; enforcing here
+        // closes the tool-surface path for every bound provider.
+        reject_out_of_scope_target(&target)?;
         let content = input
             .get("content")
             .and_then(Value::as_str)
@@ -646,6 +656,19 @@ fn optional_u64(input: &Value, key: &'static str) -> Option<u64> {
     input.get(key).and_then(Value::as_u64)
 }
 
+/// Reject a write `target` that would escape the scoped memory mount. Mirrors the
+/// fail-closed `not` pattern the model-facing `document-write` input schema
+/// advertises — `(^/)|(\.\.)|(\\)`: an absolute path (leading `/`), any `..`
+/// traversal, or a backslash separator. Reserved names (`daily_log`, `memory`,
+/// `heartbeat`, `bootstrap`) and ordinary relative document paths (`notes/x.md`)
+/// pass unchanged.
+fn reject_out_of_scope_target(target: &str) -> Result<(), MemoryServiceError> {
+    if target.starts_with('/') || target.contains("..") || target.contains('\\') {
+        return Err(MemoryServiceError::input());
+    }
+    Ok(())
+}
+
 fn validated_profile_fields(input: &Value) -> Result<Map<String, Value>, MemoryServiceError> {
     let obj = input.as_object().ok_or_else(MemoryServiceError::input)?;
     let mut out = Map::new();
@@ -740,5 +763,47 @@ mod tests {
             !response.recorded,
             "a provider that does not override record_interaction must report recorded=false"
         );
+    }
+
+    #[test]
+    fn write_request_rejects_out_of_scope_targets() {
+        // A traversal-shaped target must be rejected at the contract layer, ahead
+        // of provider dispatch — the model-facing schema is not host-enforced, and
+        // a swapped provider (e.g. mem0) would otherwise use the target verbatim.
+        for target in ["/abs", "../escape", "notes/../secrets", "notes\\evil"] {
+            let input = json!({ "target": target, "content": "x" });
+            let result = MemoryServiceWriteRequest::from_tool_input(&input);
+            assert!(
+                result.is_err_and(|error| error.kind() == MemoryServiceErrorKind::Input),
+                "target {target:?} must be rejected as out-of-scope"
+            );
+        }
+    }
+
+    #[test]
+    fn write_request_accepts_reserved_names_and_relative_paths() {
+        // Reserved names and ordinary relative document paths are unaffected.
+        for target in [
+            "daily_log",
+            "memory",
+            "heartbeat",
+            "bootstrap",
+            "notes/sub.md",
+        ] {
+            let input = json!({ "target": target, "content": "x" });
+            assert!(
+                MemoryServiceWriteRequest::from_tool_input(&input).is_ok(),
+                "target {target:?} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn write_request_default_daily_log_target_is_accepted() {
+        // The defaulted target (no `target` field) must also pass the guard.
+        let input = json!({ "content": "x" });
+        let request =
+            MemoryServiceWriteRequest::from_tool_input(&input).expect("default target is in-scope");
+        assert_eq!(request.target, "daily_log");
     }
 }

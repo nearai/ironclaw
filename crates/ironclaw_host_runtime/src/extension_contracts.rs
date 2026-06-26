@@ -36,8 +36,12 @@ pub fn default_host_api_contract_registry() -> Result<HostApiContractRegistry, M
 /// *declare* it without failing closed on an unknown-port error.
 ///
 /// The memory ports (`host.storage.sql_transaction.first_party`,
-/// `host.events.audit`) back the bundled `ironclaw.memory.native` extension
-/// (issue #3537).
+/// `host.events.audit`) are future storage/audit vocabulary for the deferred
+/// SQL-backed memory milestone (issue #3537, ADR 0002), not a live backing
+/// today: the bundled `ironclaw.memory.native` extension is filesystem-backed
+/// and declares no host ports (see `native_memory_declares_no_host_ports`).
+/// Cataloguing them here only lets a manifest *declare* them without failing
+/// closed on an unknown-port error.
 pub fn default_host_port_catalog() -> Result<HostPortCatalog, HostApiError> {
     HostPortCatalog::new(vec![
         HostPortCatalogEntry::new(HostPortId::new(HOST_RUNTIME_HTTP_EGRESS_PORT_ID)?),

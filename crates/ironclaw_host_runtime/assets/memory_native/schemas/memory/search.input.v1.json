@@ -3,18 +3,22 @@
   "properties": {
     "query": {
       "type": "string",
+      "minLength": 1,
       "description": "Preferred natural language search query for persistent memory"
     },
     "q": {
       "type": "string",
+      "minLength": 1,
       "description": "Alias for query"
     },
     "text": {
       "type": "string",
+      "minLength": 1,
       "description": "Alias for query"
     },
     "pattern": {
       "type": "string",
+      "minLength": 1,
       "description": "Alias for query"
     },
     "limit": {
@@ -25,7 +29,7 @@
       "description": "Maximum number of memory results to return"
     }
   },
-  "anyOf": [
+  "oneOf": [
     { "required": ["query"] },
     { "required": ["q"] },
     { "required": ["text"] },

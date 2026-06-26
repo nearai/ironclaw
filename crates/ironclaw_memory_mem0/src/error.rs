@@ -16,10 +16,18 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum Mem0Error {
     /// The configured mem0 base URL failed the baseline SSRF check: it did not
-    /// parse, used a non-http(s) scheme, had no host, or named an always-blocked
-    /// literal IP (cloud-metadata / link-local / multicast / unspecified).
-    #[error("invalid mem0 base URL '{url}': {reason}")]
-    InvalidUrl { url: String, reason: String },
+    /// parse, used a non-http(s) scheme, had no host, named an always-blocked
+    /// literal IP (cloud-metadata / link-local / multicast / unspecified), or named
+    /// the hosted mem0 cloud (this adapter is self-hosted-OSS only).
+    ///
+    /// The raw URL is deliberately NOT carried in this error: a misconfigured base
+    /// URL can embed a sensitive host or a query-string token, and this `Display`
+    /// reaches host logs. Only the redacted `reason` is kept. The blocked-host
+    /// cases name the offending host *inside* `reason`, but only for hosts that are
+    /// well-known and non-secret by construction (a blocked literal IP or a public
+    /// mem0 cloud host).
+    #[error("invalid mem0 base URL: {reason}")]
+    InvalidUrl { reason: String },
 
     /// The `reqwest` client could not be constructed (e.g. an API key that is
     /// not a valid HTTP header value, or a TLS backend failure).
@@ -52,4 +60,14 @@ pub enum Mem0Error {
     /// would drop every previously-stored profile field on the next write.
     #[error("stored mem0 profile is not a JSON object: {reason}")]
     CorruptProfile { reason: String },
+
+    /// A 2xx mem0 response body matched none of the recognized list shapes (a
+    /// bare array, or an object wrapping `results`/`memories`/`data`). Surfaced
+    /// as a failure so list-shaped reads fail loud instead of silently treating
+    /// an unrecognized body as "no memories" — which would, for example, let
+    /// `profile_set` overwrite an existing profile it merely failed to decode. A
+    /// genuinely-empty list is a recognized shape (an empty array) and is not an
+    /// error.
+    #[error("mem0 returned an unrecognized response body shape")]
+    UnrecognizedResponse,
 }

@@ -53,7 +53,10 @@ case "${package}" in
     printf '%s\n' "--features libsql"
     ;;
   ironclaw_reborn_composition)
-    printf '%s\n' "--features test-support,webui-v2-beta,slack-v2-host-beta,libsql"
+    # memory-mem0 turns on the (off-by-default) mem0 third-party memory provider
+    # so its factory + swap tests run here; the feature-off build stays covered by
+    # the `--no-default-features` composition run in test.yml.
+    printf '%s\n' "--features test-support,webui-v2-beta,slack-v2-host-beta,libsql,memory-mem0"
     ;;
   ironclaw_reborn)
     printf '%s\n' "--features root-llm-provider,libsql-secrets,libsql-restart-tests,webui-user-store"

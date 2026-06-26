@@ -5,6 +5,6 @@
     "content": { "type": "string", "description": "Full document content" },
     "word_count": { "type": "integer", "description": "Word count of the document content" }
   },
-  "required": ["path", "content"],
+  "required": ["path", "content", "word_count"],
   "additionalProperties": false
 }

@@ -115,14 +115,18 @@ fn dockerfile_reborn_builds_with_postgres_feature() {
 
     assert!(
         dockerfile
-            .matches("webui-v2-beta,slack-v2-host-beta,postgres")
+            .matches("webui-v2-beta,slack-v2-host-beta,libsql,postgres")
             .count()
             >= 2,
-        "Dockerfile.reborn must compile both cargo-chef deps and final binary with postgres: {dockerfile}"
+        "Dockerfile.reborn must compile both cargo-chef deps and final binary with libsql and postgres: {dockerfile}"
     );
     assert!(
         dockerfile.contains("config.production.toml"),
         "Dockerfile.reborn must ship the opt-in production config: {dockerfile}"
+    );
+    assert!(
+        dockerfile.contains("config.hosted-single-tenant-volume.toml"),
+        "Dockerfile.reborn must ship the hosted volume seed config: {dockerfile}"
     );
     let builder_stage = dockerfile
         .split_once("FROM deps AS builder")
@@ -475,6 +479,10 @@ fn profile_list_shows_supported_profiles_without_reborn_home() {
     assert!(stdout.contains("local-dev (default)"), "stdout: {stdout}");
     assert!(stdout.contains("local-dev-yolo"), "stdout: {stdout}");
     assert!(stdout.contains("hosted-single-tenant"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("hosted-single-tenant-volume"),
+        "stdout: {stdout}"
+    );
     assert!(stdout.contains("production"), "stdout: {stdout}");
     assert!(stdout.contains("migration-dry-run"), "stdout: {stdout}");
     assert!(
@@ -502,7 +510,7 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
     let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(json["selector"], "IRONCLAW_REBORN_PROFILE");
     let profiles = json["profiles"].as_array().expect("profiles array");
-    assert_eq!(profiles.len(), 5);
+    assert_eq!(profiles.len(), 6);
     assert!(
         profiles
             .iter()
@@ -517,6 +525,12 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
         profiles
             .iter()
             .any(|profile| profile["name"] == "hosted-single-tenant"
+                && profile["default"] == false)
+    );
+    assert!(
+        profiles
+            .iter()
+            .any(|profile| profile["name"] == "hosted-single-tenant-volume"
                 && profile["default"] == false)
     );
     assert!(

@@ -18,11 +18,13 @@ use crate::{
 /// outbound HTTP through host policy, credential, and response-limit services.
 pub const HOST_RUNTIME_HTTP_EGRESS_PORT_ID: &str = "host.runtime.http_egress";
 
-/// First-party SQL/transaction storage port. HostBundled first-party only: it
-/// backs native memory persistence (and other first-party durable storage)
-/// through a host-scoped transaction surface rather than a raw pool handle.
-/// Concrete adapters live in host/runtime service crates; this is the validation
-/// contract name only.
+/// First-party SQL/transaction storage port. HostBundled first-party only:
+/// reserved for first-party durable storage that runs through a host-scoped
+/// transaction surface rather than a raw pool handle. This is part of the future
+/// storage-port vocabulary, not a live backing today — the native memory provider
+/// is filesystem-backed and declares no host ports (see
+/// `native_memory_declares_no_host_ports`). Concrete adapters live in host/runtime
+/// service crates; this is the validation contract name only.
 pub const HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID: &str =
     "host.storage.sql_transaction.first_party";
 

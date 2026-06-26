@@ -28,9 +28,10 @@ use super::{
     cancelled_exit, capability_batch_counts, capability_call_signature, capability_error_class,
     capability_failure_kind, capability_host_error,
     capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
-    capability_is_visible, capability_summary, clear_matching_pending_auth_resume, failed_exit,
-    honor_retry_alteration, model_visible_capability_failure_observation, push_call_signature_once,
-    push_completed_result, sanitized_strategy_summary,
+    capability_is_visible, capability_summary, clear_matching_pending_auth_resume,
+    clear_matching_pending_external_tool_resume, failed_exit, honor_retry_alteration,
+    model_visible_capability_failure_observation, push_call_signature_once, push_completed_result,
+    sanitized_strategy_summary,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -200,6 +201,43 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             }
         }
 
+        // A run resumed from a cancelled/denied external-tool gate must not
+        // re-dispatch the parked client tool (no output was submitted →
+        // re-park → infinite loop). Surface a model-visible failure for the
+        // denied call and let other parallel calls proceed.
+        if let Some(pending) = state.pending_external_tool_resume.as_ref().filter(|p| {
+            matches!(
+                p.disposition.as_ref(),
+                Some(ironclaw_turns::GateResumeDisposition::Denied)
+            )
+        }) {
+            let denied_activity_id = pending.activity_id_for_resume();
+            state.pending_external_tool_resume = None;
+            match self
+                .short_circuit_denied_resume(
+                    ctx,
+                    state,
+                    &mut signatures,
+                    &mut capability_batch,
+                    denied_activity_id,
+                    "external tool gate cancelled by client",
+                    visible_calls,
+                )
+                .await?
+            {
+                ControlFlow::Break(exit) => return Ok(exit),
+                ControlFlow::Continue((next, remaining)) => {
+                    state = next;
+                    visible_calls = remaining;
+                }
+            }
+            if visible_calls.is_empty() {
+                return self
+                    .completed_turn(ctx, state, result_refs_start, capability_batch)
+                    .await;
+            }
+        }
+
         // Compute batch policy from the final set of calls that will actually
         // reach invoke_capability_batch (post auth-deny partition if applicable).
         let summaries = visible_calls
@@ -344,6 +382,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
                         clear_matching_pending_approval_resume(&mut state, &call);
                         clear_matching_pending_auth_resume(&mut state, &call);
+                        clear_matching_pending_external_tool_resume(&mut state, &call);
                         append_completed_capability_result(
                             ctx.host,
                             &mut state,
@@ -362,6 +401,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
                         clear_matching_pending_approval_resume(&mut state, &call);
                         clear_matching_pending_auth_resume(&mut state, &call);
+                        clear_matching_pending_external_tool_resume(&mut state, &call);
                         append_spawned_child_result(
                             ctx.host,
                             &mut state,
@@ -385,6 +425,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
                         clear_matching_pending_approval_resume(&mut state, &call);
                         clear_matching_pending_auth_resume(&mut state, &call);
+                        clear_matching_pending_external_tool_resume(&mut state, &call);
                         let result = CapabilityResultMessage {
                             result_ref,
                             safe_summary,
@@ -546,6 +587,7 @@ impl CapabilityStage {
             CapabilityOutcome::Completed(result) => {
                 clear_matching_pending_approval_resume(&mut state, &call);
                 clear_matching_pending_auth_resume(&mut state, &call);
+                clear_matching_pending_external_tool_resume(&mut state, &call);
                 append_completed_capability_result(
                     ctx.host,
                     &mut state,
@@ -564,6 +606,7 @@ impl CapabilityStage {
             } => {
                 clear_matching_pending_approval_resume(&mut state, &call);
                 clear_matching_pending_auth_resume(&mut state, &call);
+                clear_matching_pending_external_tool_resume(&mut state, &call);
                 append_spawned_child_result(
                     ctx.host,
                     &mut state,
@@ -616,6 +659,7 @@ impl CapabilityStage {
                 // outcomes GateStage re-populates the record when it blocks.
                 clear_matching_pending_approval_resume(&mut state, &call);
                 clear_matching_pending_auth_resume(&mut state, &call);
+                clear_matching_pending_external_tool_resume(&mut state, &call);
                 let auth_resume = auth_resume_for_gate(auth_resume, prior_approval.as_ref());
                 GateStage
                     .process(
@@ -640,6 +684,25 @@ impl CapabilityStage {
                             state,
                             call,
                             kind: GateKind::Resource,
+                            gate_ref,
+                            credential_requirements: Vec::new(),
+                            approval_resume: None,
+                            auth_resume: None,
+                        },
+                    )
+                    .await
+            }
+            CapabilityOutcome::ExternalToolPending { gate_ref, .. } => {
+                // The model called a client-supplied tool: park the run and
+                // return control to the API client. No resume payload here —
+                // the client submits the tool output on resume.
+                GateStage
+                    .process(
+                        ctx,
+                        GateInput {
+                            state,
+                            call,
+                            kind: GateKind::ExternalTool,
                             gate_ref,
                             credential_requirements: Vec::new(),
                             approval_resume: None,
@@ -777,6 +840,7 @@ impl CapabilityStage {
 
         clear_matching_pending_approval_resume(&mut state, &call);
         clear_matching_pending_auth_resume(&mut state, &call);
+        clear_matching_pending_external_tool_resume(&mut state, &call);
         for _ in 0..MAX_CAPABILITY_RETRIES {
             match ctx
                 .planner

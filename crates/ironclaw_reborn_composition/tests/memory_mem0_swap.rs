@@ -13,6 +13,11 @@
 //! The factory builds the provider over an injected in-memory `MockMem0Transport`
 //! (no live mem0 endpoint), exercising the real config → policy → factory →
 //! register → resolve path rather than hand-injecting the provider.
+//!
+//! Gated on `memory-mem0`: the provider it swaps in is compiled only under that
+//! feature, so this proof runs with `--features memory-mem0` (the feature-off
+//! build carries no mem0 code to swap).
+#![cfg(feature = "memory-mem0")]
 
 use std::sync::Arc;
 

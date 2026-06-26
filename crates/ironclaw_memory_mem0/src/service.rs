@@ -61,6 +61,7 @@ const ADD_PATH: &str = "/memories";
 const SEARCH_PATH: &str = "/search";
 const LIST_PATH: &str = "/memories";
 const USER_ID_QUERY: &str = "user_id";
+const APP_ID_QUERY: &str = "app_id";
 const TARGET_KEY: &str = "target";
 const SOURCE_KEY: &str = "source";
 const SOURCE_VALUE: &str = "ironclaw.memory";
@@ -119,6 +120,53 @@ impl Mem0MemoryService {
         }
     }
 
+    /// Fold the workspace partition (`config.app_id`) into the mem0 `user_id`
+    /// namespace.
+    ///
+    /// CRITICAL ISOLATION INVARIANT: the self-hosted mem0 OSS server enforces
+    /// search/`get_all` filtering by `user_id` (and `agent_id`), but NOT by
+    /// `app_id` — a top-level `app_id` is accepted and stored, yet silently
+    /// ignored when filtering (verified empirically: a cross-`app_id` query
+    /// returns the other partition's rows). Rather than depend on which secondary
+    /// identifiers a given mem0 version actually enforces, the provider encodes
+    /// the ENTIRE partition — full scope AND workspace — into the one key that is
+    /// guaranteed enforced: `user_id`. So the workspace partition the local-dev
+    /// composition passes as `config.app_id` is prefixed into the `user_id`
+    /// namespace here; that prefix IS the isolation boundary. (`app_id` is still
+    /// stamped via `stamp_app_id` as forward-compatible metadata, but MUST NOT be
+    /// relied on for isolation.) Production leaves `app_id` unset → no prefix →
+    /// pure scope namespace, so memory persists across restarts for the same scope.
+    fn with_workspace_prefix(&self, base: String) -> String {
+        match self.config.app_id.as_deref() {
+            Some(prefix) => format!("{prefix}/{base}"),
+            None => base,
+        }
+    }
+
+    /// Full-scope memory namespace (tenant/user/agent/project) + workspace prefix.
+    fn scoped_namespace(&self, scope: &ResourceScope) -> String {
+        self.with_workspace_prefix(scope_namespace(scope))
+    }
+
+    /// Owner-only (profile) namespace (tenant/user) + workspace prefix.
+    fn owner_scoped_namespace(&self, scope: &ResourceScope) -> String {
+        self.with_workspace_prefix(owner_namespace(scope))
+    }
+
+    /// Build the query-string parameters for a GET `/memories` (list) request.
+    ///
+    /// Always includes `user_id=<namespace>`. When `self.config.app_id` is set,
+    /// also appends `app_id=<value>` so that list-based operations (read, tree,
+    /// profile_read, and the profile_set read-step) scope to the same app_id
+    /// partition that search and write already use via [`Self::stamp_app_id`].
+    fn list_query(&self, namespace: String) -> Vec<(String, String)> {
+        let mut query = vec![(USER_ID_QUERY.to_string(), namespace)];
+        if let Some(app_id) = self.config.app_id.as_deref() {
+            query.push((APP_ID_QUERY.to_string(), app_id.to_string()));
+        }
+        query
+    }
+
     /// Fetch the latest `kind=profile` memory for `namespace` and parse it as a
     /// JSON object, for the read step of `profile_set`'s read-merge-write.
     ///
@@ -135,12 +183,13 @@ impl Mem0MemoryService {
             .transport
             .execute(Mem0HttpRequest::get(
                 LIST_PATH,
-                vec![(USER_ID_QUERY.to_string(), namespace.to_string())],
+                self.list_query(namespace.to_string()),
             ))
             .await
             .map_err(MemoryServiceError::operation_from)?;
         ensure_success(&response, "profile_set").map_err(MemoryServiceError::operation_from)?;
-        match latest_profile_text(&response_items(&response.body)) {
+        let items = response_items(&response.body).map_err(MemoryServiceError::operation_from)?;
+        match latest_profile_text(&items) {
             // No prior profile memory at all: the first write starts from empty.
             None => Ok(Map::new()),
             // A prior profile exists but does not parse as a JSON object. Fail
@@ -162,7 +211,7 @@ impl MemoryService for Mem0MemoryService {
         invocation: MemoryInvocation,
         request: MemoryServiceSearchRequest,
     ) -> Result<MemoryServiceSearchResponse, MemoryServiceError> {
-        let namespace = scope_namespace(&invocation.scope);
+        let namespace = self.scoped_namespace(&invocation.scope);
         let body = self.search_body(&namespace, &request.query, request.limit);
         let response = self
             .transport
@@ -171,6 +220,7 @@ impl MemoryService for Mem0MemoryService {
             .map_err(MemoryServiceError::operation_from)?;
         ensure_success(&response, "search").map_err(MemoryServiceError::operation_from)?;
         let results = response_items(&response.body)
+            .map_err(MemoryServiceError::operation_from)?
             .into_iter()
             .filter_map(|item| {
                 Some(MemoryServiceSearchResult {
@@ -204,13 +254,24 @@ impl MemoryService for Mem0MemoryService {
                 detail: "mem0 has no in-place substring patch",
             }));
         }
+        // MAPPING GAP: mem0 OSS is append-only — every `add` appends a new memory,
+        // and there is no addressable document to overwrite. A replace-style write
+        // (`append == false`, no patch) cannot be honored, so reject it explicitly
+        // as a stable, recoverable "unsupported" operation rather than silently
+        // adding a memory and then misreporting `append: true` back to the caller.
+        if !request.append {
+            return Err(MemoryServiceError::operation_from(Mem0Error::Unsupported {
+                operation: "write.replace",
+                detail: "mem0 is append-only; replace-style writes are not supported",
+            }));
+        }
         // MAPPING GAP: an empty write is the native `bootstrap` clear, which has
         // no mem0 analogue (no addressable document to truncate). Treat it as an
         // invalid request, matching the native provider's empty-content rule.
         if request.content.trim().is_empty() {
             return Err(MemoryServiceError::input());
         }
-        let namespace = scope_namespace(&invocation.scope);
+        let namespace = self.scoped_namespace(&invocation.scope);
         let metadata = json!({ TARGET_KEY: request.target, SOURCE_KEY: SOURCE_VALUE });
         let body = self.add_body(&namespace, &request.content, metadata);
         let response = self
@@ -235,21 +296,28 @@ impl MemoryService for Mem0MemoryService {
         invocation: MemoryInvocation,
         request: MemoryServiceReadRequest,
     ) -> Result<MemoryServiceReadResponse, MemoryServiceError> {
-        let namespace = scope_namespace(&invocation.scope);
+        let namespace = self.scoped_namespace(&invocation.scope);
         let response = self
             .transport
-            .execute(Mem0HttpRequest::get(
-                LIST_PATH,
-                vec![(USER_ID_QUERY.to_string(), namespace)],
-            ))
+            .execute(Mem0HttpRequest::get(LIST_PATH, self.list_query(namespace)))
             .await
             .map_err(MemoryServiceError::operation_from)?;
         ensure_success(&response, "read").map_err(MemoryServiceError::operation_from)?;
         // MAPPING GAP: mem0 is not path-addressable. Reconstruct a "document" by
-        // concatenating every memory tagged with the requested `target`.
-        let parts: Vec<String> = response_items(&response.body)
+        // concatenating every memory tagged with the requested `target`. mem0's
+        // list order is NOT chronological (mem0/Qdrant `get_all` makes no ordering
+        // guarantee — the same caveat the profile path documents), so sort the
+        // fragments by `created_at` before joining; otherwise an append-style
+        // document reads back scrambled. `sort_by` is stable, so fragments that
+        // share (or lack) a `created_at` keep their relative list order.
+        let mut fragments: Vec<&Value> = response_items(&response.body)
+            .map_err(MemoryServiceError::operation_from)?
             .into_iter()
             .filter(|item| item_metadata_str(item, TARGET_KEY) == Some(request.path.as_str()))
+            .collect();
+        fragments.sort_by(|left, right| item_created_at(left).cmp(item_created_at(right)));
+        let parts: Vec<String> = fragments
+            .into_iter()
             .filter_map(|item| item_text(item).map(str::to_string))
             .collect();
         if parts.is_empty() {
@@ -268,20 +336,17 @@ impl MemoryService for Mem0MemoryService {
         invocation: MemoryInvocation,
         request: MemoryServiceTreeRequest,
     ) -> Result<MemoryServiceTreeResponse, MemoryServiceError> {
-        let namespace = scope_namespace(&invocation.scope);
+        let namespace = self.scoped_namespace(&invocation.scope);
         let response = self
             .transport
-            .execute(Mem0HttpRequest::get(
-                LIST_PATH,
-                vec![(USER_ID_QUERY.to_string(), namespace)],
-            ))
+            .execute(Mem0HttpRequest::get(LIST_PATH, self.list_query(namespace)))
             .await
             .map_err(MemoryServiceError::operation_from)?;
         ensure_success(&response, "tree").map_err(MemoryServiceError::operation_from)?;
         // MAPPING GAP: mem0 has no document hierarchy. Best-effort: surface the
         // distinct `target` tags (optionally prefix-filtered) as a flat list.
         let mut targets = std::collections::BTreeSet::new();
-        for item in response_items(&response.body) {
+        for item in response_items(&response.body).map_err(MemoryServiceError::operation_from)? {
             if let Some(target) = item_metadata_str(item, TARGET_KEY)
                 && (request.path.is_empty() || target.starts_with(request.path.as_str()))
             {
@@ -307,7 +372,7 @@ impl MemoryService for Mem0MemoryService {
         // `profile_read` (which returns the latest) sees every preserved field.
         // mem0 has no compare-and-set, so concurrent writers still race; this
         // closes the unconditional-drop gap, not the CAS gap.
-        let namespace = owner_namespace(&invocation.scope);
+        let namespace = self.owner_scoped_namespace(&invocation.scope);
         let mut merged = self.fetch_latest_profile_object(&namespace).await?;
         for (key, value) in request.fields {
             merged.insert(key, value);
@@ -334,21 +399,18 @@ impl MemoryService for Mem0MemoryService {
         &self,
         invocation: MemoryInvocation,
     ) -> Result<MemoryServiceProfileReadResponse, MemoryServiceError> {
-        let namespace = owner_namespace(&invocation.scope);
+        let namespace = self.owner_scoped_namespace(&invocation.scope);
         let response = self
             .transport
-            .execute(Mem0HttpRequest::get(
-                LIST_PATH,
-                vec![(USER_ID_QUERY.to_string(), namespace)],
-            ))
+            .execute(Mem0HttpRequest::get(LIST_PATH, self.list_query(namespace)))
             .await
             .map_err(MemoryServiceError::operation_from)?;
         ensure_success(&response, "profile_read").map_err(MemoryServiceError::operation_from)?;
         // MAPPING GAP: return the newest `kind=profile` memory's raw bytes, if any
         // (newest by `created_at`, since mem0 list order is not chronological). The
         // host parses + size-caps them, exactly as for native.
-        let document = latest_profile_text(&response_items(&response.body))
-            .map(|text| text.as_bytes().to_vec());
+        let items = response_items(&response.body).map_err(MemoryServiceError::operation_from)?;
+        let document = latest_profile_text(&items).map(|text| text.as_bytes().to_vec());
         Ok(MemoryServiceProfileReadResponse { document })
     }
 
@@ -361,7 +423,7 @@ impl MemoryService for Mem0MemoryService {
         {
             return Ok(Vec::new());
         }
-        let namespace = scope_namespace(&invocation.scope);
+        let namespace = self.scoped_namespace(&invocation.scope);
         let body = self.search_body(&namespace, &request.query, request.max_snippets);
         // Context retrieval degrades to "no memory context" (Unavailable) on a
         // backend failure rather than aborting the turn, matching native.
@@ -379,6 +441,7 @@ impl MemoryService for Mem0MemoryService {
         // model-visible budgets — this provider never shapes model-visible
         // content (see `MemoryServiceContextSnippet` docs).
         let snippets = response_items(&response.body)
+            .map_err(MemoryServiceError::unavailable_from)?
             .into_iter()
             .filter_map(|item| {
                 Some(MemoryServiceContextSnippet {
@@ -431,16 +494,24 @@ fn ensure_success(response: &Mem0HttpResponse, operation: &'static str) -> Resul
 /// Extract the list of memory objects from a mem0 response, tolerating the
 /// documented shapes: a bare array, or an object wrapping `results`/`memories`/
 /// `data`.
-fn response_items(body: &Value) -> Vec<&Value> {
+///
+/// A 2xx body in *none* of those shapes is a contract violation, not "no
+/// memories": fail loud with [`Mem0Error::UnrecognizedResponse`] rather than
+/// returning an empty vec. A silent empty would let callers that branch on "no
+/// items" — notably `profile_set`'s read-merge-write — mistake an unrecognized
+/// body for "no prior data" and overwrite every previously-stored field. A
+/// genuinely-empty list is a recognized empty array (or `{"results": []}`) and
+/// still returns `Ok(vec![])`.
+fn response_items(body: &Value) -> Result<Vec<&Value>, Mem0Error> {
     if let Some(array) = body.as_array() {
-        return array.iter().collect();
+        return Ok(array.iter().collect());
     }
     for key in ["results", "memories", "data"] {
         if let Some(array) = body.get(key).and_then(Value::as_array) {
-            return array.iter().collect();
+            return Ok(array.iter().collect());
         }
     }
-    Vec::new()
+    Err(Mem0Error::UnrecognizedResponse)
 }
 
 fn item_text(item: &Value) -> Option<&str> {
@@ -584,6 +655,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_replace_is_rejected() {
+        // mem0 OSS is append-only, so a replace-style write (`append == false`,
+        // with no patch) cannot be honored. It must be rejected as a stable,
+        // recoverable operation error — never silently turned into an add that
+        // then misreports `append: true`.
+        let (service, transport) =
+            service_with(MockMem0Transport::always_ok(json!({ "id": "m-1" })));
+        let error = service
+            .write(
+                invocation(),
+                MemoryServiceWriteRequest {
+                    target: "notes/alpha.md".to_string(),
+                    content: "replace me".to_string(),
+                    append: false,
+                    old_string: None,
+                    new_string: None,
+                    replace_all: false,
+                    metadata: None,
+                    timezone: None,
+                },
+            )
+            .await
+            .expect_err("a replace-style write must be rejected");
+        assert_eq!(error.kind(), MemoryServiceErrorKind::Operation);
+        // The rejection happens before any add reaches the transport: no memory is
+        // silently appended on a replace request.
+        assert!(
+            transport.recorded().is_empty(),
+            "a rejected replace must not POST an add"
+        );
+    }
+
+    #[tokio::test]
     async fn search_parses_results_object_shape() {
         let (service, transport) = service_with(MockMem0Transport::always_ok(json!({
             "results": [
@@ -663,6 +767,41 @@ mod tests {
             .await
             .expect_err("absent target is not found");
         assert_eq!(missing.kind(), MemoryServiceErrorKind::Input);
+    }
+
+    #[tokio::test]
+    async fn read_joins_fragments_in_created_at_order_not_list_order() {
+        // mem0/Qdrant list order is not chronological, so a `target`'s fragments
+        // arrive out of order (newest in the MIDDLE here). `read` must join them by
+        // `created_at` (oldest first) so an append-style document round-trips in the
+        // order it was written, not in arbitrary list order.
+        let (service, _transport) = service_with(MockMem0Transport::always_ok(json!([
+            {
+                "memory": "second",
+                "created_at": "2026-02-01T00:00:00Z",
+                "metadata": { "target": "notes/log.md" }
+            },
+            {
+                "memory": "third",
+                "created_at": "2026-03-01T00:00:00Z",
+                "metadata": { "target": "notes/log.md" }
+            },
+            {
+                "memory": "first",
+                "created_at": "2026-01-01T00:00:00Z",
+                "metadata": { "target": "notes/log.md" }
+            }
+        ])));
+        let read = service
+            .read(
+                invocation(),
+                MemoryServiceReadRequest {
+                    path: "notes/log.md".to_string(),
+                },
+            )
+            .await
+            .expect("read should succeed");
+        assert_eq!(read.content, "first\nsecond\nthird");
     }
 
     #[tokio::test]
@@ -910,5 +1049,149 @@ mod tests {
             .filter(|request| request.method == Mem0HttpMethod::Post)
             .count();
         assert_eq!(posts, 0, "must not write when the prior profile is corrupt");
+    }
+
+    /// Build a service with a specific `app_id` configured (for isolation tests).
+    fn service_with_app_id(
+        transport: MockMem0Transport,
+        app_id: &str,
+    ) -> (Mem0MemoryService, Arc<MockMem0Transport>) {
+        let transport = Arc::new(transport);
+        let service = Mem0MemoryService::new(
+            Arc::clone(&transport) as Arc<dyn Mem0Transport>,
+            Mem0Config::new().with_app_id(app_id),
+        );
+        (service, transport)
+    }
+
+    #[tokio::test]
+    async fn list_query_includes_app_id_when_configured() {
+        // When a service has `app_id` set, every GET /memories list request
+        // (used by `read`, `tree`, `profile_read`, and the profile_set read-step)
+        // must carry `app_id` as a query param — matching how `search` and `write`
+        // already scope via the request body `stamp_app_id`. Without this,
+        // list-based operations leak across app partitions.
+        let (service, transport) = service_with_app_id(
+            MockMem0Transport::always_ok(json!([
+                { "memory": "isolated", "metadata": { "target": "notes/a.md" } }
+            ])),
+            "ws-abc123",
+        );
+        service
+            .read(
+                invocation(),
+                MemoryServiceReadRequest {
+                    path: "notes/a.md".to_string(),
+                },
+            )
+            .await
+            .expect("read should succeed");
+
+        let recorded = transport.recorded();
+        assert_eq!(recorded.len(), 1);
+        let request = &recorded[0];
+        assert_eq!(request.method, Mem0HttpMethod::Get);
+        // The query must contain both user_id and app_id.
+        let has_user_id = request.query.iter().any(|(key, _)| key == USER_ID_QUERY);
+        let app_id_value = request
+            .query
+            .iter()
+            .find(|(key, _)| key == APP_ID_QUERY)
+            .map(|(_, value)| value.as_str());
+        assert!(has_user_id, "user_id must always be present in list query");
+        assert_eq!(
+            app_id_value,
+            Some("ws-abc123"),
+            "app_id must appear in list query when configured"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_is_prefixed_into_the_user_id_namespace() {
+        // CRITICAL no-leak guard. mem0 OSS enforces filtering by `user_id`, NOT
+        // `app_id` (verified empirically), so the workspace partition the
+        // composition passes as `app_id` MUST be folded into the `user_id`
+        // namespace — that prefix IS the isolation boundary. A regression that
+        // drops it silently re-opens cross-workspace leakage (two workspaces would
+        // share one `user_id` partition). Every op routes through
+        // `scoped_namespace`/`owner_scoped_namespace`, so checking one list op
+        // proves the shared `with_workspace_prefix` mechanism.
+        let (service, transport) = service_with_app_id(
+            MockMem0Transport::always_ok(json!([
+                { "memory": "x", "metadata": { "target": "notes/a.md" } }
+            ])),
+            "ws-deadbeef",
+        );
+        service
+            .read(
+                invocation(),
+                MemoryServiceReadRequest {
+                    path: "notes/a.md".to_string(),
+                },
+            )
+            .await
+            .expect("read should succeed");
+
+        let recorded = transport.recorded();
+        let user_id = recorded[0]
+            .query
+            .iter()
+            .find(|(key, _)| key == USER_ID_QUERY)
+            .map(|(_, value)| value.as_str())
+            .expect("list query must carry user_id");
+        assert!(
+            user_id.starts_with("ws-deadbeef/"),
+            "workspace MUST prefix the user_id namespace (the enforced isolation \
+             boundary), got {user_id:?}"
+        );
+        assert!(
+            user_id.contains("tenant-mem0/user-mem0"),
+            "the logical scope must remain in the namespace after the prefix, got {user_id:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_query_omits_app_id_when_not_configured() {
+        // When no `app_id` is set (the default / production path where scope is
+        // handled only by `user_id`), GET /memories must NOT add an `app_id`
+        // query param — consistent with how `stamp_app_id` behaves for POST bodies.
+        let (service, transport) = service_with(MockMem0Transport::always_ok(json!([
+            { "memory": "m", "metadata": { "target": "notes/a.md" } }
+        ])));
+        service
+            .read(
+                invocation(),
+                MemoryServiceReadRequest {
+                    path: "notes/a.md".to_string(),
+                },
+            )
+            .await
+            .expect("read should succeed");
+
+        let recorded = transport.recorded();
+        let request = &recorded[0];
+        let has_app_id = request.query.iter().any(|(key, _)| key == APP_ID_QUERY);
+        assert!(
+            !has_app_id,
+            "app_id must NOT appear in list query when not configured"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_path_fails_loud_on_an_unrecognized_response_body() {
+        // A 2xx body that is neither a bare array nor an object wrapping
+        // `results`/`memories`/`data` is a contract violation. The list path
+        // (here via `profile_read`) must surface an error rather than silently
+        // returning "no memories" (an empty document) — a silent empty would let
+        // a later `profile_set` overwrite an existing profile it merely failed to
+        // decode.
+        let (service, _transport) = service_with(MockMem0Transport::always_ok(
+            json!({ "unexpected": "shape" }),
+        ));
+        let error = service
+            .profile_read(invocation())
+            .await
+            .expect_err("an unrecognized list body must fail loud, not return empty");
+        assert_eq!(error.kind(), MemoryServiceErrorKind::Operation);
     }
 }

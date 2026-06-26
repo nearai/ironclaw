@@ -120,7 +120,10 @@ use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPoli
 use ironclaw_turns::FilesystemTurnStateStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;
-use ironclaw_turns::{CheckpointStateStore, DefaultTurnCoordinator, LoopCheckpointStore};
+use ironclaw_turns::{
+    CheckpointStateStore, DefaultTurnCoordinator, ExternalToolCatalog, InMemoryExternalToolCatalog,
+    LoopCheckpointStore,
+};
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_turns::{
     InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryTurnStateStore,
@@ -144,8 +147,7 @@ use crate::product_auth_runtime_credentials::ProductAuthRuntimeCredentialResolve
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
-    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessDiagnostic,
-    RebornReadinessState, RebornWorkerReadiness,
+    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornWorkerReadiness,
 };
 use crate::{
     available_extensions::{
@@ -520,6 +522,11 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) owner_user_id: UserId,
     pub(crate) approval_requests: Arc<LocalDevApprovalRequestStore>,
     pub(crate) capability_leases: Arc<LocalDevCapabilityLeaseStore>,
+    /// Per-runtime catalog of client-supplied ("external") tools. Shared between
+    /// the loop capability host (which offers them to the model and parks calls)
+    /// and the OpenAI-compatible Responses surface (which registers tool specs
+    /// and submits client outputs), so both see the same run-scoped state.
+    pub(crate) external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
     // Used in approval_test_support (cfg(test) only); suppress the dead-code
     // lint on non-test builds where that module is not compiled in.
@@ -782,7 +789,8 @@ pub async fn build_reborn_services(
         RebornCompositionProfile::Disabled => Ok(RebornServices::disabled()),
         RebornCompositionProfile::LocalDev
         | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenant => build_local_runtime(input).await,
+        | RebornCompositionProfile::HostedSingleTenant
+        | RebornCompositionProfile::HostedSingleTenantVolume => build_local_runtime(input).await,
         RebornCompositionProfile::Production | RebornCompositionProfile::MigrationDryRun => {
             build_production_shaped(input).await
         }
@@ -858,18 +866,9 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         local_runtime_identity,
         turn_state_store_limits,
         memory_binding_policy,
-        memory_provider_connection,
+        mut memory_provider_connection,
         ..
     } = input;
-    // One memory provider resolver for this runtime (issue #3537): the memory
-    // tools and the local-dev profile source both build their `MemoryService`
-    // through it, so there is a single place that maps the binding to a provider.
-    // For a third-party document-store binding (e.g. mem0, issue #5264) the
-    // factory builds and registers that provider here; native stays per-invocation.
-    let memory_service_resolver = crate::build_memory_service_resolver(
-        memory_binding_policy,
-        &crate::MemoryProviderDeps::for_third_party(memory_provider_connection),
-    );
     let local_runtime_identity_for_nearai_mcp = local_runtime_identity.clone();
     let (root, workspace_root, host_home_root, storage_backend_input, secret_master_key) =
         match storage {
@@ -892,6 +891,14 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 LocalDevStorageBackendInput::LocalDefault,
                 None::<ironclaw_secrets::SecretMaterial>,
             ),
+            #[cfg(feature = "postgres")]
+            RebornStorageInput::HostedSingleTenantPostgres { .. }
+                if profile != RebornCompositionProfile::HostedSingleTenant =>
+            {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: format!("{profile} profile requires local-runtime storage input"),
+                });
+            }
             #[cfg(feature = "postgres")]
             RebornStorageInput::HostedSingleTenantPostgres {
                 root,
@@ -927,6 +934,33 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         reason: "local-dev workspace root could not be initialized".to_string(),
     })?;
     let root = canonicalize_local_dev_path(&root, "storage root")?;
+    // LOCAL-DEV ONLY: bound mem0 memory to this workspace so memories from one
+    // local-dev root never leak into another, even when both point at the same
+    // mem0 server. A stable hash of the canonical root path is used as the mem0
+    // `app_id`; this mirrors how native memory is already isolated (its
+    // filesystem store lives under `local_dev_root`). An explicitly-configured
+    // `app_id` always wins (operator override takes precedence).
+    //
+    // Production paths (`build_*_production` / `RebornProductionBuildContext`)
+    // are NOT touched here: production keeps `app_id` from config (default None
+    // → pure user/tenant scope, persistent across restarts for the same tenant).
+    if memory_provider_connection.app_id.is_none() {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        root.hash(&mut hasher);
+        memory_provider_connection.app_id = Some(format!("ws-{:016x}", hasher.finish()));
+    }
+    // One memory provider resolver for this runtime (issue #3537): the memory
+    // tools and the local-dev profile source both build their `MemoryService`
+    // through it, so there is a single place that maps the binding to a provider.
+    // For a third-party document-store binding (e.g. mem0, issue #5264) the
+    // factory builds and registers that provider here; native stays per-invocation.
+    // Built here (after root canonicalization) so the workspace-bounded `app_id`
+    // set above is already in place when the mem0 transport is constructed.
+    let memory_service_resolver = crate::build_memory_service_resolver(
+        memory_binding_policy,
+        &crate::MemoryProviderDeps::for_third_party(memory_provider_connection),
+    );
     let workspace_root = canonicalize_local_dev_path(&workspace_root, "workspace root")?;
     let include_host_home = runtime_policy.as_ref().is_some_and(|policy| {
         policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
@@ -1638,7 +1672,7 @@ fn local_dev_extension_installation_state_path(
     profile: RebornCompositionProfile,
     local_runtime_identity: Option<&RebornLocalRuntimeIdentity>,
 ) -> Result<VirtualPath, RebornBuildError> {
-    if profile != RebornCompositionProfile::HostedSingleTenant {
+    if !profile.uses_hosted_extension_installation_state() {
         return FilesystemExtensionInstallationStore::default_state_path().map_err(|error| {
             RebornBuildError::InvalidConfig {
                 reason: format!("extension installation state path is invalid: {error}"),
@@ -1770,6 +1804,7 @@ fn build_local_dev_store_graph(
         owner_user_id: owner_user_id.clone(),
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
+        external_tool_catalog: Arc::new(InMemoryExternalToolCatalog::new()),
         runtime_policy,
         capability_policy: Arc::clone(&capability_policy),
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
@@ -1921,6 +1956,7 @@ fn build_local_dev_store_graph(
         owner_user_id: owner_user_id.clone(),
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
+        external_tool_catalog: Arc::new(InMemoryExternalToolCatalog::new()),
         runtime_policy,
         capability_policy: Arc::clone(&capability_policy),
         persistent_approval_policies: Arc::clone(&persistent_approval_policies),
@@ -4058,30 +4094,7 @@ fn readiness_for(
     turn_coordinator: bool,
     product_auth: bool,
 ) -> RebornReadiness {
-    let (state, diagnostics) = match profile {
-        RebornCompositionProfile::Disabled => (
-            RebornReadinessState::Disabled,
-            vec![RebornReadinessDiagnostic::disabled()],
-        ),
-        RebornCompositionProfile::LocalDev => (
-            RebornReadinessState::DevOnly,
-            vec![RebornReadinessDiagnostic::local_dev()],
-        ),
-        RebornCompositionProfile::LocalDevYolo => (
-            RebornReadinessState::DevOnly,
-            vec![RebornReadinessDiagnostic::local_dev_yolo()],
-        ),
-        RebornCompositionProfile::HostedSingleTenant => (
-            RebornReadinessState::HostedSingleTenantValidated,
-            vec![RebornReadinessDiagnostic::hosted_single_tenant()],
-        ),
-        RebornCompositionProfile::Production => {
-            (RebornReadinessState::ProductionValidated, Vec::new())
-        }
-        RebornCompositionProfile::MigrationDryRun => {
-            (RebornReadinessState::MigrationDryRunValidated, Vec::new())
-        }
-    };
+    let (state, diagnostics) = crate::readiness::readiness_contract_for_profile(profile);
 
     RebornReadiness {
         profile,
@@ -4137,6 +4150,7 @@ mod tests {
     use secrecy::ExposeSecret;
 
     use crate::{
+        RebornReadinessDiagnostic, RebornReadinessState,
         extension_lifecycle::ExtensionActivationMode,
         local_dev_capability_policy::{
             LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
@@ -4164,6 +4178,24 @@ mod tests {
         };
         let path = local_dev_extension_installation_state_path(
             RebornCompositionProfile::HostedSingleTenant,
+            Some(&identity),
+        )
+        .expect("state path");
+
+        assert_eq!(
+            path.as_str(),
+            "/tenants/acme/system/extensions/.installations/state.json"
+        );
+    }
+
+    #[test]
+    fn extension_installation_state_path_uses_durable_tenant_root_for_hosted_volume() {
+        let identity = RebornLocalRuntimeIdentity {
+            tenant_id: TenantId::new("acme").expect("tenant id"),
+            agent_id: ironclaw_host_api::AgentId::new("agent").expect("agent id"),
+        };
+        let path = local_dev_extension_installation_state_path(
+            RebornCompositionProfile::HostedSingleTenantVolume,
             Some(&identity),
         )
         .expect("state path");
@@ -4290,6 +4322,7 @@ mod tests {
             owner_user_id: base_runtime.owner_user_id.clone(),
             approval_requests: Arc::clone(&base_runtime.approval_requests),
             capability_leases: Arc::clone(&base_runtime.capability_leases),
+            external_tool_catalog: Arc::clone(&base_runtime.external_tool_catalog),
             runtime_policy: base_runtime.runtime_policy.clone(),
             capability_policy: Arc::clone(&base_runtime.capability_policy),
             persistent_approval_policies: Arc::clone(&base_runtime.persistent_approval_policies),
@@ -6168,6 +6201,21 @@ mod tests {
         assert_eq!(
             yolo.diagnostics,
             vec![RebornReadinessDiagnostic::local_dev_yolo()]
+        );
+
+        let hosted_volume = readiness_for(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            true,
+            true,
+            true,
+        );
+        assert_eq!(
+            hosted_volume.state,
+            RebornReadinessState::HostedSingleTenantVolumePreviewValidated
+        );
+        assert_eq!(
+            hosted_volume.diagnostics,
+            vec![RebornReadinessDiagnostic::hosted_single_tenant_volume()]
         );
     }
 

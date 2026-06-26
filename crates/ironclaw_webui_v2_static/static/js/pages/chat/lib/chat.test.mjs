@@ -65,6 +65,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     ChatInput() {},
     ConnectionStatus() {},
     EmptyState() {},
+    Icon() {},
     KeyboardShortcuts() {},
     Link() {},
     MessageList() {},
@@ -362,6 +363,13 @@ test("Chat links to scoped logs for the active thread run", () => {
     "/v2/logs?thread_id=thread-1&run_id=run-1",
   );
   assert.ok(logsLink.values.includes("nav.logs"));
+
+  const messageList = findComponent(tree, components.MessageList);
+  assert.equal(
+    findComponent(messageList, components.Link),
+    null,
+    "active run logs link should not render in the message list footer near the composer",
+  );
 });
 
 test("Chat deny gate callback routes through approve compatibility path", () => {
