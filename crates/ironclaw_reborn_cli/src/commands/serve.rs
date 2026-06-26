@@ -548,12 +548,17 @@ impl ServeCommand {
             // create/list/delete/set-role over the SAME durable store the
             // `LocalUserDirectoryAuthenticator` resolves tokens through (the
             // `Arc` is shared, so a minted token is immediately resolvable).
+            //
+            // The per-user capability policy mount (below) needs the SAME store
+            // `Arc` for its target-role rank check, so borrow the `Option` here
+            // (`Arc::clone`) instead of moving it, and consume it for the
+            // capability mount last — preserving the single-`Arc` invariant.
             #[cfg(feature = "capability-policy")]
-            if let Some(store) = user_directory_store_for_mount {
+            if let Some(store) = user_directory_store_for_mount.as_ref() {
                 let mount = ironclaw_reborn_composition::local_user_admin_route_mount(
                     ironclaw_reborn_composition::LocalUserAdminRouteConfig::new(
                         local_user_admin_tenant_id,
-                        store,
+                        Arc::clone(store),
                     ),
                 );
                 serve_config = serve_config.with_protected_route_mount(mount);
@@ -565,13 +570,19 @@ impl ServeCommand {
             // Per-user capability policy admin surface (#5268): admin-gated
             // PUT/DELETE/GET writing per-user CapabilityPolicyDelta rows into the
             // SAME shared delta store the dispatch PolicyResolver reads, so a grant
-            // here is immediately visible to enforcement.
+            // here is immediately visible to enforcement. The mutating handlers
+            // additionally resolve the TARGET user's role through the SAME shared
+            // user-directory `Arc` (so an admin may not change the owner's caps),
+            // so the mount is gated on the directory being present — exactly like
+            // the `/admin/users` mount above.
             #[cfg(feature = "capability-policy")]
-            if let Some(mount) =
-                ironclaw_reborn_composition::build_capability_user_policy_route_mount(
-                    &runtime,
-                    capability_user_policy_tenant_id,
-                )
+            if let Some(store) = user_directory_store_for_mount
+                && let Some(mount) =
+                    ironclaw_reborn_composition::build_capability_user_policy_route_mount(
+                        &runtime,
+                        capability_user_policy_tenant_id,
+                        store,
+                    )
             {
                 serve_config = serve_config.with_protected_route_mount(mount);
                 eprintln!(

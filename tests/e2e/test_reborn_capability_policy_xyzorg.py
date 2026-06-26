@@ -630,19 +630,13 @@ async def test_section3_step12_deletion_guards_403_cases(org_state):
         assert r4.status_code == 403, f"last-owner self-delete must be 403, got {r4.status_code}"
 
 
-@pytest.mark.xfail(
-    reason="step 13 (D6/G4, #5355): an admin may not change the OWNER's caps. "
-    "The per-user caps route discards AdminCaller.0 and never compares ranks, "
-    "so officer(admin)->director(owner) currently 200s instead of 403.",
-    strict=False,
-)
 async def test_section3_step13_admin_cannot_change_owner_caps(org_state):
     """Step 13: an admin PUT director(owner)'s caps -> 403.
 
     Mint a fresh admin bearer here rather than reusing `officer` (module-scoped
     `org_state` is shared, and the step-12 owner->admin delete may have revoked
-    officer's token) so the xfail stays honest: it must fail on the rank check
-    (admin can't touch an owner), not on a stale 401.
+    officer's token) so the assertion stays honest: it must hit the rank check
+    (admin can't touch an owner) and 403, not fail on a stale 401.
     """
     base_url = org_state["base_url"]
     director = org_state["tokens"]["director"]
