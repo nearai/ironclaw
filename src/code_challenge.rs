@@ -87,23 +87,19 @@ pub fn normalize_submitted_code(submission: &str) -> Option<String> {
 }
 
 /// Generate a fixed-length code from the provided alphabet.
+///
+/// Each character is selected with `random_range` (thread-local OS-seeded
+/// CSPRNG), which rejection-samples to avoid the modulo bias of
+/// `byte % alphabet.len()` for alphabets whose length does not divide 256.
 pub fn generate_code(len: usize, alphabet: &[u8]) -> String {
+    use rand::RngExt as _;
+
     if len == 0 || alphabet.is_empty() {
         return String::new();
     }
 
-    let mut bytes = vec![0u8; len];
-    fill_secure_random(&mut bytes);
-    bytes
-        .into_iter()
-        .map(|byte| alphabet[byte as usize % alphabet.len()] as char)
+    let mut rng = rand::rng();
+    (0..len)
+        .map(|_| alphabet[rng.random_range(0..alphabet.len())] as char)
         .collect()
-}
-
-fn fill_secure_random(bytes: &mut [u8]) {
-    use rand::{RngExt as _, TryRng as _};
-
-    if rand::rngs::SysRng.try_fill_bytes(bytes).is_err() {
-        rand::rng().fill(bytes);
-    }
 }
