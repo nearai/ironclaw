@@ -6,9 +6,9 @@
 //! [`ironclaw_capability_policy`] crate and the durable
 //! [`CapabilityPolicyDeltaStore`], NOT on the scoped-lifecycle installation
 //! store that backs the per-`(tenant, user)` capability **availability**
-//! resolver (which lands in a separate availability PR). Keeping the engine and
-//! the availability resolver on opposite sides of a file boundary lets the two
-//! ship as separate PRs.
+//! resolver (which lives in [`crate::capability_surface_policy`]). Keeping the
+//! engine and the availability resolver on opposite sides of a file boundary
+//! lets the two ship as separate PRs.
 
 use std::sync::Arc;
 
@@ -25,12 +25,29 @@ use ironclaw_capability_policy::{
 };
 use ironclaw_product_workflow_storage::FilesystemCapabilityPolicyDeltaStore;
 
-/// Acting-principal derivation for a turn: prefer the explicit actor, falling
-/// back to the scope's explicit owner. Ownerless / actor-fallback turns have no
-/// subject. Kept here (rather than imported from the availability surface
-/// resolver) so the engine stays #4544-independent; the availability seam, when
-/// it lands, derives the same principal the same way.
-fn principal_user_id<'a>(scope: &'a TurnScope, actor: Option<&'a TurnActor>) -> Option<&'a UserId> {
+/// The acting principal for capability policy: the turn's actor (the user
+/// driving it) first, then the explicit thread owner. A shared (room-agent)
+/// account resolves to its own `UserId` here when a turn is driven as it.
+/// Returns `None` for an ownerless / actor-fallback turn.
+///
+/// SUBJECT INVARIANT (epic #5261): all four policy dimensions must resolve the
+/// same `PolicySubject` for a given turn or an admin grant applies
+/// inconsistently. Availability and configuration key off this helper
+/// (actor-first, then explicit owner); approval (`PolicyResolverAdminApprovalSource`)
+/// and identity (`resolve_identity_mandate`) key off the dispatch
+/// `ResourceScope.user_id`. Those agree whenever the actor IS the acting user —
+/// which is every path the hand-driven Acme walkthrough exercises (you drive as
+/// each user directly, including the shared `engineering@` account). They could
+/// diverge only on a future delegated turn where `actor != resource_scope owner`;
+/// aligning the dispatch `ResourceScope` with this helper for that case is a
+/// deferred follow-up (not exercised by the milestone). Lives here (the
+/// #4544-independent engine) so both the availability resolver
+/// (`crate::capability_surface_policy`) and the config adapter below share one
+/// copy.
+pub(crate) fn principal_user_id<'a>(
+    scope: &'a TurnScope,
+    actor: Option<&'a TurnActor>,
+) -> Option<&'a UserId> {
     actor
         .map(|actor| &actor.user_id)
         .or_else(|| scope.explicit_owner_user_id())
