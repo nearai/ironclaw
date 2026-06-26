@@ -136,10 +136,13 @@ fn external_tool_capability_id(tool_name: &str) -> Result<CapabilityId, AgentLoo
 }
 
 fn validate_external_tool_name_for_provider(tool_name: &str) -> Result<(), AgentLoopHostError> {
-    ProviderToolDefinition::validate_name(tool_name).map_err(|_| {
+    ProviderToolDefinition::validate_name(tool_name).map_err(|error| {
         AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            "external tool name cannot be represented as a provider tool name",
+            error.kind,
+            format!(
+                "external tool name cannot be represented as a provider tool name: {}",
+                error.safe_summary
+            ),
         )
     })
 }
@@ -630,9 +633,14 @@ mod tests {
             .await
             .expect_err("invalid external tool name should fail closed");
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
-        assert_eq!(
-            error.safe_summary,
-            "external tool name cannot be represented as a provider tool name"
+        assert!(
+            error.safe_summary.contains(
+                "external tool name cannot be represented as a provider tool name: \
+                 tool name cannot be represented as a provider tool name: \
+                 only ASCII letters, digits, '_', and '-' are allowed"
+            ),
+            "invalid provider tool name should preserve validation cause, got {:?}",
+            error.safe_summary
         );
     }
 }

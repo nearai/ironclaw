@@ -6,7 +6,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ProviderToolName,
+    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, HostApiError, ProviderToolName,
     ResourceEstimate, RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
@@ -1366,24 +1366,14 @@ impl ProviderToolDefinition {
     ) -> Result<Self, AgentLoopHostError> {
         Ok(Self {
             capability_id,
-            name: ProviderToolName::new(name.into()).map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "tool name cannot be represented as a provider tool name",
-                )
-            })?,
+            name: ProviderToolName::new(name.into()).map_err(provider_tool_name_error)?,
             description: description.into(),
             parameters,
         })
     }
 
     pub fn validate_name(name: &str) -> Result<(), AgentLoopHostError> {
-        ProviderToolName::new(name).map_err(|_| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "tool name cannot be represented as a provider tool name",
-            )
-        })?;
+        ProviderToolName::new(name).map_err(provider_tool_name_error)?;
         Ok(())
     }
 }
@@ -1429,18 +1419,28 @@ impl ProviderToolCall {
             provider_model_id: provider_model_id.into(),
             turn_id,
             id: id.into(),
-            name: ProviderToolName::new(name.into()).map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "tool name cannot be represented as a provider tool name",
-                )
-            })?,
+            name: ProviderToolName::new(name.into()).map_err(provider_tool_name_error)?,
             arguments,
             response_reasoning: None,
             reasoning: None,
             signature: None,
         })
     }
+}
+
+fn provider_tool_name_error(error: HostApiError) -> AgentLoopHostError {
+    let detail = match error {
+        HostApiError::InvalidId {
+            kind: "provider_tool_name",
+            reason,
+            ..
+        } => reason,
+        other => other.to_string(),
+    };
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::InvalidInvocation,
+        format!("tool name cannot be represented as a provider tool name: {detail}"),
+    )
 }
 
 /// Durable reference to provider tool-call metadata for tool-result replay.
