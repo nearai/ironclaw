@@ -43,7 +43,7 @@ fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
         provider_model_id: "test-model".to_string(),
         turn_id: Some("provider-turn-1".to_string()),
         id: "call-1".to_string(),
-        name: ProviderToolName::new("builtin_shell").expect("provider tool name"),
+        name: ProviderToolName::new("builtin_shell").expect("provider tool name"), // safety: test-only provider-safe literal.
         arguments,
         response_reasoning: None,
         reasoning: None,

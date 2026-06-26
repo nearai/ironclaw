@@ -1704,10 +1704,12 @@ fn collect_provider_tool_name_uses_in_source(
 ) {
     let mut pending_cfg_test = false;
     let mut skipping_test_module_depth: Option<usize> = None;
+    let mut in_block_comment = false;
     for (index, line) in contents.lines().enumerate() {
         let line_number = index + 1;
+        let code = strip_line_strings_and_comments(line, &mut in_block_comment);
         if let Some(depth) = skipping_test_module_depth {
-            let next_depth = update_brace_depth(depth, line);
+            let next_depth = update_brace_depth(depth, &code);
             if next_depth == 0 {
                 skipping_test_module_depth = None;
             } else {
@@ -1721,12 +1723,13 @@ fn collect_provider_tool_name_uses_in_source(
             pending_cfg_test = true;
             continue;
         }
+        let code_trimmed = code.trim();
         if pending_cfg_test {
-            if trimmed.starts_with("#[") || trimmed.is_empty() {
+            if code_trimmed.starts_with("#[") || code_trimmed.is_empty() {
                 continue;
             }
-            if trimmed.starts_with("mod tests") && trimmed.contains('{') {
-                let depth = update_brace_depth(0, line);
+            if code_trimmed.contains('{') {
+                let depth = update_brace_depth(0, &code);
                 if depth > 0 {
                     skipping_test_module_depth = Some(depth);
                 }
@@ -1737,7 +1740,7 @@ fn collect_provider_tool_name_uses_in_source(
         }
 
         for pattern in ["ProviderToolName", "provider_tool_name"] {
-            if line.contains(pattern) {
+            if code.contains(pattern) {
                 uses.push(ProviderToolNameUse {
                     path: relative.to_string(),
                     line_number,
@@ -1746,6 +1749,54 @@ fn collect_provider_tool_name_uses_in_source(
             }
         }
     }
+}
+
+fn strip_line_strings_and_comments(line: &str, in_block_comment: &mut bool) -> String {
+    let mut output = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(character) = chars.next() {
+        if *in_block_comment {
+            if character == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                *in_block_comment = false;
+                output.push(' ');
+                output.push(' ');
+            } else {
+                output.push(' ');
+            }
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            output.push(' ');
+            continue;
+        }
+        if character == '"' {
+            in_string = true;
+            output.push(' ');
+            continue;
+        }
+        if character == '/' && chars.peek() == Some(&'/') {
+            break;
+        }
+        if character == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            *in_block_comment = true;
+            output.push(' ');
+            output.push(' ');
+            continue;
+        }
+        output.push(character);
+    }
+    output
 }
 
 fn update_brace_depth(depth: usize, line: &str) -> usize {

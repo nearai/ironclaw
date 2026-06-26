@@ -78,11 +78,11 @@ impl SurfaceSnapshot {
     }
 
     pub(super) fn capability_info(&self, requested: &str) -> Option<CapabilityInfoEntry<'_>> {
-        if let Ok(provider_name) = ProviderToolName::new(requested) {
-            if let Some(capability_id) = self.provider_names.get(&provider_name) {
-                let capability = self.capabilities.get(capability_id)?;
-                return Some(capability.capability_info(capability_id));
-            }
+        if let Ok(provider_name) = ProviderToolName::new(requested)
+            && let Some(capability_id) = self.provider_names.get(&provider_name)
+        {
+            let capability = self.capabilities.get(capability_id)?;
+            return Some(capability.capability_info(capability_id));
         }
         let requested_id = CapabilityId::new(requested).ok()?;
         self.capabilities

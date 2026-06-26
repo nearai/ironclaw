@@ -1115,7 +1115,8 @@ fn provider_tool_call_from_llm(
     provider_turn_id: String,
     replay_identity: &ProviderReplayIdentity,
 ) -> Result<ProviderToolCall, HostManagedModelError> {
-    let name = ProviderToolName::new(tool_call.name).map_err(|_| {
+    let name = ProviderToolName::new(tool_call.name).map_err(|error| {
+        debug!(%error, "reborn model gateway rejected invalid provider tool name");
         HostManagedModelError::safe(
             HostManagedModelErrorKind::InvalidOutput,
             "model returned an invalid provider tool name",

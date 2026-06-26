@@ -623,7 +623,7 @@ mod reborn_support_tests {
             },
             expected_tool_results: vec![ExpectedToolResult {
                 tool_call_id: "call-1".to_string(),
-                name: "test.echo".to_string(),
+                name: "test__echo".to_string(),
                 content: "tool output".to_string(),
             }],
         };
@@ -656,6 +656,7 @@ mod reborn_support_tests {
             substring
                 .stream_model(model_request(vec![tool_result_message(
                     "call-1",
+                    "test__echo",
                     "test.echo",
                     "tool output with suffix",
                 )]))
@@ -674,6 +675,7 @@ mod reborn_support_tests {
         matched
             .stream_model(model_request(vec![tool_result_message(
                 "call-1",
+                "test__echo",
                 "test.echo",
                 "tool output",
             )]))
@@ -689,7 +691,7 @@ mod reborn_support_tests {
                 response: HostManagedModelResponse::assistant_reply("after tool"),
                 expected_tool_results: vec![ExpectedToolResult {
                     tool_call_id: "call-scripted".to_string(),
-                    name: "builtin.write_file".to_string(),
+                    name: "builtin__write_file".to_string(),
                     content: "result:ref-123".to_string(),
                 }],
             }]);
@@ -707,6 +709,7 @@ mod reborn_support_tests {
         gateway
             .stream_model(model_request(vec![tool_result_message(
                 "call-scripted",
+                "builtin__write_file",
                 "builtin.write_file",
                 "result:ref-123",
             )]))
@@ -2123,12 +2126,13 @@ mod reborn_support_tests {
     fn tool_result_message(
         provider_call_id: &str,
         provider_tool_name: &str,
+        capability_id: &str,
         content: &str,
     ) -> HostManagedModelMessage {
         tool_result_message_with_capability_id(
             provider_call_id,
             provider_tool_name,
-            provider_tool_name,
+            capability_id,
             content,
         )
     }

@@ -1992,7 +1992,7 @@ fn provider_tool_name_with_digest(
     };
     let candidate = format!("{prefix}__{suffix}");
     let candidate = ProviderToolName::new(candidate)
-        .expect("provider tool name generator must produce provider-safe names");
+        .expect("provider tool name generator must produce provider-safe names"); // safety: `prefix` is sanitized and `suffix` is a fixed ASCII hex digest slice.
     if existing
         .get(&candidate)
         .is_none_or(|existing_id| existing_id.as_str() == capability_id)
