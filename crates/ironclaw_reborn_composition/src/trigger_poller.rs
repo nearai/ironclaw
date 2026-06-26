@@ -15,7 +15,7 @@ use ironclaw_triggers::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_triggers::{TriggerAcceptedFireSettlement, TriggerFireSettlementObserver};
-use rand::Rng;
+use rand::RngExt as _;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
