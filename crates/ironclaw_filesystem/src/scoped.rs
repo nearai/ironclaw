@@ -6,8 +6,9 @@ use ironclaw_host_api::{
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
-    CasExpectation, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, Filter,
-    IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo, VersionedEntry, path_prefix_matches,
+    BatchPut, CasExpectation, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation,
+    Filter, IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
+    path_prefix_matches,
 };
 
 /// Resolver from a per-invocation [`ResourceScope`] to the [`MountView`] that
@@ -48,6 +49,18 @@ impl<F: ?Sized> std::fmt::Debug for ScopedFilesystem<F> {
             .field("resolver", &"<MountViewResolver>")
             .finish()
     }
+}
+
+/// One write leg of a scoped [`put_batch`](ScopedFilesystem::put_batch): an
+/// [`Entry`] to write at a runtime-visible [`ScopedPath`] under the given
+/// [`CasExpectation`]. The wrapper resolves each `path` to a backend
+/// [`VirtualPath`](ironclaw_host_api::VirtualPath) and permission-checks it
+/// before delegating to [`RootFilesystem::put_batch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedBatchPut {
+    pub path: ScopedPath,
+    pub entry: Entry,
+    pub cas: CasExpectation,
 }
 
 impl<F> ScopedFilesystem<F>
@@ -107,6 +120,34 @@ where
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::WriteFile)?;
         self.root.put(&virtual_path, entry, cas).await
+    }
+
+    /// Write several [`Entry`] values in one call.
+    ///
+    /// Each leg's [`ScopedPath`] is resolved and permission-checked (as a
+    /// write) against this scope's [`MountView`] before any backend dispatch;
+    /// the resolved [`BatchPut`]s are then handed to
+    /// [`RootFilesystem::put_batch`]. The composite enforces that all paths
+    /// land on one mount; this wrapper enforces per-path authorization. See
+    /// [`RootFilesystem::put_batch`] for the N==1-always / N>1-atomic-only-on-
+    /// `MultiKey` availability contract.
+    pub async fn put_batch(
+        &self,
+        scope: &ResourceScope,
+        puts: Vec<ScopedBatchPut>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        let view = self.mount_view(scope)?;
+        let mut resolved = Vec::with_capacity(puts.len());
+        for ScopedBatchPut { path, entry, cas } in puts {
+            let virtual_path =
+                resolve_with_permission_view(&view, &path, FilesystemOperation::PutBatch)?;
+            resolved.push(BatchPut {
+                path: virtual_path,
+                entry,
+                cas,
+            });
+        }
+        self.root.put_batch(resolved).await
     }
 
     /// Read the entry at `path`, returning `None` if absent.
@@ -437,6 +478,7 @@ fn operation_allowed(permissions: &MountPermissions, operation: FilesystemOperat
         | FilesystemOperation::CreateDirAll
         | FilesystemOperation::EnsureIndex
         | FilesystemOperation::BeginTxn
+        | FilesystemOperation::PutBatch
         | FilesystemOperation::Append => permissions.write,
         FilesystemOperation::ListDir => permissions.list,
         FilesystemOperation::Stat => permissions.read || permissions.list,

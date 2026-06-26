@@ -5,9 +5,10 @@ use ironclaw_host_api::VirtualPath;
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
-    BackendCapabilities, BackendId, BackendKind, Capability, CasExpectation, ContentKind, DirEntry,
-    Entry, FileStat, FilesystemError, Filter, IndexPolicy, IndexSpec, Page, RecordVersion,
-    RootFilesystem, SeqNo, StorageClass, VersionedEntry, path_prefix_matches,
+    BackendCapabilities, BackendId, BackendKind, BatchPut, Capability, CasExpectation, ContentKind,
+    DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, Filter, IndexPolicy,
+    IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo, StorageClass, VersionedEntry,
+    path_prefix_matches,
 };
 
 /// Trusted catalog record for one virtual filesystem mount.
@@ -162,6 +163,7 @@ fn validate_mount_capabilities(
         Capability::IndexFts,
         Capability::IndexVector,
         Capability::Events,
+        Capability::BatchPut,
     ];
     let mut shortfalls: Vec<Capability> = NEW_AXES
         .iter()
@@ -265,6 +267,29 @@ impl RootFilesystem for CompositeRootFilesystem {
         self.matching_mount(path)?.backend.begin(path).await
     }
 
+    // A batch may not straddle mounts: every path must resolve to the same
+    // mount as the first leg, else the whole call fails `PathOutsideMount` and
+    // nothing is written. Identity is compared by pointer on the resolved
+    // `CompositeMount`, so a single resolve per path settles routing.
+    async fn put_batch(&self, puts: Vec<BatchPut>) -> Result<Vec<RecordVersion>, FilesystemError> {
+        if puts.is_empty() {
+            return Err(FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::PutBatch,
+                reason: "empty put_batch".to_string(),
+            });
+        }
+        let first_mount = self.matching_mount(&puts[0].path)?;
+        for put in &puts[1..] {
+            let mount = self.matching_mount(&put.path)?;
+            if !std::ptr::eq(mount, first_mount) {
+                return Err(FilesystemError::PathOutsideMount {
+                    path: put.path.clone(),
+                });
+            }
+        }
+        first_mount.backend.put_batch(puts).await
+    }
+
     // ── Event plane ──
 
     async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
@@ -353,5 +378,118 @@ impl RootFilesystem for CompositeRootFilesystem {
             .backend
             .create_dir_all(path)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ironclaw_host_api::VirtualPath;
+
+    use crate::{
+        BackendCapabilities, BackendId, BackendKind, BatchPut, CasExpectation,
+        CompositeRootFilesystem, ContentKind, Entry, FilesystemError, FilesystemOperation,
+        InMemoryBackend, IndexPolicy, MountDescriptor, RootFilesystem, StorageClass,
+    };
+
+    fn descriptor(root: &str) -> MountDescriptor {
+        MountDescriptor {
+            virtual_root: VirtualPath::new(root).unwrap(),
+            backend_id: BackendId::new(format!("mem{}", root.replace('/', "_"))).unwrap(),
+            backend_kind: BackendKind::MemoryDocuments,
+            storage_class: StorageClass::StructuredRecords,
+            content_kind: ContentKind::StructuredRecord,
+            index_policy: IndexPolicy::NotIndexed,
+            capabilities: BackendCapabilities::in_memory_full(),
+        }
+    }
+
+    fn vp(s: &str) -> VirtualPath {
+        VirtualPath::new(s).unwrap()
+    }
+
+    #[tokio::test]
+    async fn put_batch_single_routes_to_owning_mount() {
+        let mut composite = CompositeRootFilesystem::new();
+        let secrets = Arc::new(InMemoryBackend::new());
+        composite
+            .mount(descriptor("/secrets"), secrets.clone())
+            .unwrap();
+
+        let versions = composite
+            .put_batch(vec![BatchPut {
+                path: vp("/secrets/leases/A"),
+                entry: Entry::bytes(vec![9]),
+                cas: CasExpectation::Absent,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(
+            secrets
+                .get(&vp("/secrets/leases/A"))
+                .await
+                .unwrap()
+                .unwrap()
+                .entry
+                .body,
+            vec![9]
+        );
+    }
+
+    #[tokio::test]
+    async fn put_batch_cross_mount_rejected_writes_nothing() {
+        let mut composite = CompositeRootFilesystem::new();
+        let secrets = Arc::new(InMemoryBackend::new());
+        let memory = Arc::new(InMemoryBackend::new());
+        composite
+            .mount(descriptor("/secrets"), secrets.clone())
+            .unwrap();
+        composite
+            .mount(descriptor("/memory"), memory.clone())
+            .unwrap();
+
+        let err = composite
+            .put_batch(vec![
+                BatchPut {
+                    path: vp("/secrets/leases/A"),
+                    entry: Entry::bytes(vec![1]),
+                    cas: CasExpectation::Absent,
+                },
+                BatchPut {
+                    path: vp("/memory/docs/B"),
+                    entry: Entry::bytes(vec![2]),
+                    cas: CasExpectation::Absent,
+                },
+            ])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, FilesystemError::PathOutsideMount { .. }),
+            "cross-mount put_batch must be rejected, got {err:?}"
+        );
+        // The composite rejects before delegating, so neither backend wrote.
+        assert!(
+            secrets
+                .get(&vp("/secrets/leases/A"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(memory.get(&vp("/memory/docs/B")).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn put_batch_empty_rejected() {
+        let composite = CompositeRootFilesystem::new();
+        let err = composite.put_batch(Vec::new()).await.unwrap_err();
+        assert!(matches!(
+            err,
+            FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::PutBatch,
+                ..
+            }
+        ));
     }
 }

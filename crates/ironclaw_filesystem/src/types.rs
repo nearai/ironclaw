@@ -39,6 +39,11 @@ pub enum FilesystemOperation {
     /// replay/live boundary. Distinct from `Tail` (which streams records) so a
     /// head_seq failure surfaces under its own operation in logs/errors.
     HeadSeq,
+    /// Batched multi-key write
+    /// ([`put_batch`](crate::RootFilesystem::put_batch)). Maps to
+    /// `permissions.write` like the other write ops; it is its own variant so a
+    /// batch failure surfaces distinctly from a single `put`.
+    PutBatch,
 }
 
 impl std::fmt::Display for FilesystemOperation {
@@ -59,6 +64,7 @@ impl std::fmt::Display for FilesystemOperation {
             Self::Append => "append",
             Self::Tail => "tail",
             Self::HeadSeq => "head_seq",
+            Self::PutBatch => "put_batch",
         })
     }
 }
@@ -325,6 +331,9 @@ pub enum Capability {
     IndexVector,
     // Event plane (`append`/`tail`).
     Events,
+    // Batched multi-key write plane (`put_batch`). Advertised only by backends
+    // whose `put_batch` is atomic for N>1 (i.e. `TxnCapability::MultiKey`).
+    BatchPut,
 }
 
 impl Capability {
@@ -349,6 +358,7 @@ impl Capability {
             Capability::IndexFts,
             Capability::IndexVector,
             Capability::Events,
+            Capability::BatchPut,
         ]
     }
 }
@@ -536,5 +546,75 @@ mod tests {
         assert!(capabilities.has(Capability::IndexFts));
         assert!(capabilities.has(Capability::IndexVector));
         assert!(capabilities.has(Capability::Events));
+    }
+
+    #[test]
+    fn in_memory_full_does_not_advertise_batch_put() {
+        // CAS-only backends must NOT advertise BatchPut until their native
+        // multi-key put_batch lands (in-memory: PR-4). Locking this keeps
+        // consumers gating on the capability from being misled.
+        assert!(!BackendCapabilities::in_memory_full().has(Capability::BatchPut));
+    }
+
+    #[test]
+    fn sql_typical_full_does_not_advertise_batch_put() {
+        // Same contract for the SQL-typical baseline (libSQL: PR-3). Atomic
+        // N>1 batching is opted into per-backend, never implied by the
+        // default capability set.
+        assert!(!BackendCapabilities::sql_typical_full().has(Capability::BatchPut));
+    }
+
+    #[test]
+    fn capability_all_lists_every_variant_including_batch_put() {
+        // Independent enumeration of every `Capability` variant. The
+        // exhaustive `match` below fails to compile when a new variant is
+        // added without extending this list — the reminder to also add the
+        // variant to `Capability::all()`. The length/membership asserts then
+        // catch the case where a variant exists in the enum but was forgotten
+        // in `all()`, so a future drift fails CI rather than silently shipping.
+        let every = [
+            Capability::Read,
+            Capability::Write,
+            Capability::Append,
+            Capability::List,
+            Capability::Stat,
+            Capability::Delete,
+            Capability::Records,
+            Capability::Query,
+            Capability::IndexExact,
+            Capability::IndexPrefix,
+            Capability::IndexFts,
+            Capability::IndexVector,
+            Capability::Events,
+            Capability::BatchPut,
+        ];
+        fn _exhaustive(cap: Capability) {
+            match cap {
+                Capability::Read
+                | Capability::Write
+                | Capability::Append
+                | Capability::List
+                | Capability::Stat
+                | Capability::Delete
+                | Capability::Records
+                | Capability::Query
+                | Capability::IndexExact
+                | Capability::IndexPrefix
+                | Capability::IndexFts
+                | Capability::IndexVector
+                | Capability::Events
+                | Capability::BatchPut => {}
+            }
+        }
+
+        let all = Capability::all();
+        assert_eq!(
+            all.len(),
+            every.len(),
+            "Capability::all() must list every variant"
+        );
+        for cap in every {
+            assert!(all.contains(&cap), "{cap:?} missing from Capability::all()");
+        }
     }
 }

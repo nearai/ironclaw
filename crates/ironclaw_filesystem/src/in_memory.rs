@@ -1183,4 +1183,140 @@ mod tests {
             .await;
         assert!(ok.is_ok(), "top-level VectorNearest must still work");
     }
+
+    #[tokio::test]
+    async fn put_batch_single_put_succeeds() {
+        // N==1 routes through the plain `put`, so it works on every
+        // backend including the CAS-only in-memory reference.
+        let fs = InMemoryBackend::new();
+        let path = vpath("/secrets/leases/batch_single/L1");
+        let versions = fs
+            .put_batch(vec![crate::BatchPut {
+                path: path.clone(),
+                entry: Entry::bytes(vec![1]),
+                cas: CasExpectation::Absent,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].get(), 1);
+        assert_eq!(fs.get(&path).await.unwrap().unwrap().entry.body, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn put_batch_multi_surfaces_unsupported_begin_txn() {
+        // The in-memory backend supports CAS only (`begin` is Unsupported),
+        // so an N>1 put_batch surfaces the typed `Unsupported{BeginTxn}`
+        // from the default trait impl today. PR-4 adds a native multi-key
+        // override that flips this leg to all-or-nothing atomic.
+        let fs = InMemoryBackend::new();
+        let a = vpath("/secrets/leases/batch_multi/A");
+        let b = vpath("/secrets/leases/batch_multi/B");
+        let err = fs
+            .put_batch(vec![
+                crate::BatchPut {
+                    path: a.clone(),
+                    entry: Entry::bytes(vec![1]),
+                    cas: CasExpectation::Absent,
+                },
+                crate::BatchPut {
+                    path: b.clone(),
+                    entry: Entry::bytes(vec![2]),
+                    cas: CasExpectation::Absent,
+                },
+            ])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                FilesystemError::Unsupported {
+                    operation: FilesystemOperation::BeginTxn,
+                    ..
+                }
+            ),
+            "in-memory N>1 put_batch must be Unsupported until PR-4, got {err:?}"
+        );
+        // begin() failed before any write, so nothing landed.
+        assert!(fs.get(&a).await.unwrap().is_none());
+        assert!(fs.get(&b).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn put_batch_empty_rejected() {
+        let fs = InMemoryBackend::new();
+        let err = fs.put_batch(Vec::new()).await.unwrap_err();
+        assert!(matches!(
+            err,
+            FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::PutBatch,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn put_batch_exceeding_cap_rejected_before_any_write() {
+        // A batch larger than the universal MAX_BATCH_PUTS cap is rejected by
+        // the default trait impl before it ever opens a transaction, so
+        // nothing lands. The cap is shared so PR-2/3/4 reuse this one const.
+        let fs = InMemoryBackend::new();
+        let puts: Vec<crate::BatchPut> = (0..=crate::MAX_BATCH_PUTS)
+            .map(|i| crate::BatchPut {
+                path: vpath(&format!("/secrets/leases/cap/L{i}")),
+                entry: Entry::bytes(vec![i as u8]),
+                cas: CasExpectation::Absent,
+            })
+            .collect();
+        assert!(puts.len() > crate::MAX_BATCH_PUTS);
+        let probe = puts[0].path.clone();
+        let err = fs.put_batch(puts).await.unwrap_err();
+        match err {
+            FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::PutBatch,
+                reason,
+            } => assert!(
+                reason.contains("MAX_BATCH_PUTS"),
+                "expected cap reason, got {reason}"
+            ),
+            other => panic!("expected BackendInfrastructure cap error, got {other:?}"),
+        }
+        // Cap check short-circuits before begin(), so the first leg is absent.
+        assert!(fs.get(&probe).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn put_batch_divergent_roots_rejected_by_default_impl() {
+        // When N>1 legs share no leading path component, the default impl
+        // cannot derive a transaction prefix and surfaces a typed
+        // BackendInfrastructure error (nothing written).
+        let fs = InMemoryBackend::new();
+        let err = fs
+            .put_batch(vec![
+                crate::BatchPut {
+                    path: vpath("/memory/a"),
+                    entry: Entry::bytes(vec![1]),
+                    cas: CasExpectation::Absent,
+                },
+                crate::BatchPut {
+                    path: vpath("/turns/b"),
+                    entry: Entry::bytes(vec![2]),
+                    cas: CasExpectation::Absent,
+                },
+            ])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                FilesystemError::BackendInfrastructure {
+                    operation: FilesystemOperation::PutBatch,
+                    ..
+                }
+            ),
+            "divergent-root batch must surface BackendInfrastructure, got {err:?}"
+        );
+        assert!(fs.get(&vpath("/memory/a")).await.unwrap().is_none());
+        assert!(fs.get(&vpath("/turns/b")).await.unwrap().is_none());
+    }
 }
