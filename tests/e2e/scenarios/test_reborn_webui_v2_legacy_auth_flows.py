@@ -411,6 +411,61 @@ async def test_reborn_legacy_auth_prompt_does_not_duplicate_as_assistant_text(
         await context.close()
 
 
+async def test_reborn_legacy_auth_prompt_replaces_existing_prompt(
+    reborn_v2_server, reborn_v2_browser
+):
+    context, page, manual_token_requests, _resolve_requests = await _open_stubbed_auth_thread(
+        reborn_v2_server, reborn_v2_browser
+    )
+    try:
+        await _emit_auth_prompt(
+            page,
+            challenge_kind="manual_token",
+            gate_ref="manual-token-first-gate",
+            provider="github",
+            account_label="GitHub PAT",
+            headline="Connect GitHub",
+            body="First token prompt",
+        )
+        first_gate = page.locator(SEL_V2["auth_gate_for"].format(kind="manual_token")).first
+        await expect(first_gate).to_be_visible(timeout=5000)
+        await expect(first_gate).to_contain_text("First token prompt")
+
+        await _emit_auth_prompt(
+            page,
+            challenge_kind="manual_token",
+            gate_ref="manual-token-second-gate",
+            provider="slack",
+            account_label="Slack token",
+            headline="Connect Slack",
+            body="Second token prompt",
+        )
+
+        await expect(page.locator(SEL_V2["auth_gate"])).to_have_count(1)
+        gate = page.locator(SEL_V2["auth_gate_for"].format(kind="manual_token")).first
+        await expect(gate).to_contain_text("Connect Slack")
+        await expect(gate).to_contain_text("Slack token")
+        await expect(gate).to_contain_text("Second token prompt")
+        await expect(
+            page.locator(SEL_V2["auth_gate"]).filter(has_text="First token prompt")
+        ).to_have_count(0)
+        await page.locator(SEL_V2["auth_token_input"]).fill("xoxb-second-token")
+        await gate.get_by_role("button", name="Use token").click()
+        await expect(gate).to_be_hidden(timeout=5000)
+        assert manual_token_requests == [
+            {
+                "provider": "slack",
+                "account_label": "Slack token",
+                "token": "xoxb-second-token",
+                "thread_id": THREAD_ID,
+                "run_id": RUN_ID,
+                "gate_ref": "manual-token-second-gate",
+            }
+        ]
+    finally:
+        await context.close()
+
+
 async def test_reborn_legacy_oauth_prompt_opens_https_authorization_only(
     reborn_v2_server, reborn_v2_browser
 ):

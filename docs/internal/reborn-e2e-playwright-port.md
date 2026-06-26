@@ -2431,6 +2431,30 @@ Behavior adjustment:
   the migrated test pins the safer two-step contract and the localized
   credential-save failure message.
 
+### Step 80: Legacy Auth Prompt Replacement Port
+
+Extended `test_reborn_webui_v2_legacy_auth_flows.py`.
+
+Ported the modal/global auth prompt replacement behavior from legacy
+`test_auth_card_replaces_existing_same_extension` and
+`test_auth_card_for_different_extension_replaces_existing_prompt`:
+
+- emitted one Reborn `manual_token` `auth_required` prompt;
+- emitted a second `manual_token` prompt for a different provider before
+  resolving the first;
+- asserted only one auth gate remains visible;
+- asserted the first prompt body is gone and the second prompt's headline,
+  account label, and body are rendered;
+- submitted a token and asserted Reborn sends the credential to the second
+  gate ref only.
+
+Behavior adjustment:
+
+- Legacy v1 replaced DOM cards keyed by extension name. Reborn has a single
+  pending run gate, so the migrated test asserts the user-visible single-prompt
+  invariant and verifies the submit path targets the replacement
+  `auth_request_ref`.
+
 ## Open Migration Buckets
 
 Not yet ported:
