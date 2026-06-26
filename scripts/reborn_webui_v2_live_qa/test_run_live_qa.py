@@ -9,6 +9,7 @@ Run with::
 from __future__ import annotations
 
 import argparse
+import asyncio
 import importlib.util
 import json
 import os
@@ -196,6 +197,119 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         ]
         self.assertIn("qa_4b_github_connect", default_cases)
 
+    def test_case_manifest_distinguishes_targeted_from_placeholder_gates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            matrix_path = output_dir / "ironclaw_reborn_cli_qa_matrix.xlsx"
+            with patch.dict(
+                os.environ,
+                {"REBORN_WEBUI_V2_LIVE_QA_MATRIX_PATH": str(matrix_path)},
+                clear=False,
+            ):
+                manifest_path = run_live_qa.write_case_manifest(
+                    output_dir,
+                    [
+                        "qa_2d_calendar_prep_live_chat",
+                        "qa_2f_calendar_prep_email_delivery",
+                    ],
+                )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertNotIn("qa_sheet", manifest)
+        self.assertEqual(manifest["qa_matrix"]["source"], "local_xlsx")
+        self.assertEqual(manifest["qa_matrix"]["path"], str(matrix_path))
+        cases = {case["case"]: case for case in manifest["cases"]}
+        self.assertTrue(cases["qa_2d_calendar_prep_live_chat"]["implemented"])
+        self.assertEqual(
+            cases["qa_2d_calendar_prep_live_chat"]["status"],
+            "gated:requires_live_google_product_auth",
+        )
+        self.assertTrue(cases["qa_2f_calendar_prep_email_delivery"]["implemented"])
+        self.assertEqual(
+            cases["qa_2f_calendar_prep_email_delivery"]["status"],
+            "gated:requires_live_google_product_auth",
+        )
+        self.assertTrue(cases["qa_4e_github_release_email_delivery"]["implemented"])
+        self.assertEqual(
+            cases["qa_4e_github_release_email_delivery"]["status"],
+            "gated:requires_live_google_product_auth",
+        )
+        self.assertTrue(cases["qa_5d_slack_strategy_doc_answer"]["implemented"])
+        self.assertTrue(cases["qa_5d_slack_strategy_doc_answer"]["requires_slack_target"])
+        self.assertEqual(
+            cases["qa_5d_slack_strategy_doc_answer"]["status"],
+            "gated:requires_live_google_product_auth",
+        )
+        self.assertTrue(cases["qa_6e_gmail_to_sheet_delivery"]["implemented"])
+        self.assertEqual(
+            cases["qa_6e_gmail_to_sheet_delivery"]["status"],
+            "gated:requires_live_google_product_auth",
+        )
+        self.assertTrue(cases["qa_7e_slack_bug_sheet_delivery"]["implemented"])
+        self.assertTrue(cases["qa_7e_slack_bug_sheet_delivery"]["requires_slack_target"])
+        self.assertEqual(
+            cases["qa_7e_slack_bug_sheet_delivery"]["status"],
+            "gated:requires_live_google_product_auth",
+        )
+        self.assertFalse(cases["qa_1a_telegram_connect"]["implemented"])
+        self.assertEqual(
+            cases["qa_1a_telegram_connect"]["status"],
+            "gated:requires_live_telegram",
+        )
+
+    def test_gmail_delivery_target_prefers_explicit_env(self):
+        target = asyncio.run(
+            run_live_qa._gmail_delivery_target_email(
+                access_token="unused-token",
+                extra_env={"REBORN_WEBUI_V2_LIVE_QA_EMAIL_TARGET": "qa@example.test"},
+            )
+        )
+        self.assertEqual(target, "qa@example.test")
+
+    def test_extract_google_spreadsheet_id_from_url_or_label(self):
+        spreadsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
+        self.assertEqual(
+            run_live_qa._extract_google_spreadsheet_id(
+                f"Created: https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit#gid=0"
+            ),
+            spreadsheet_id,
+        )
+        self.assertEqual(
+            run_live_qa._extract_google_spreadsheet_id(
+                f"spreadsheet id: {spreadsheet_id}"
+            ),
+            spreadsheet_id,
+        )
+        self.assertIsNone(run_live_qa._extract_google_spreadsheet_id("no sheet here"))
+
+    def test_google_runtime_token_requires_client_secret_for_expired_copied_account(self):
+        if importlib.util.find_spec("cryptography") is None:
+            self.skipTest("cryptography is installed in the e2e venv, not system Python")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "reborn-home"
+            env = {
+                "AUTH_LIVE_GOOGLE_ACCESS_TOKEN": "expired-access-token",
+                "AUTH_LIVE_GOOGLE_REFRESH_TOKEN": "refresh-token",
+                "IRONCLAW_REBORN_GOOGLE_CLIENT_ID": "client-id",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                seed = run_live_qa._seed_generated_google_product_auth_if_configured(
+                    home,
+                    "qa-user",
+                )
+            self.assertTrue(seed["seeded"])
+
+            with patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(
+                    run_live_qa.LiveQaError,
+                    "client id/secret env is incomplete",
+                ):
+                    run_live_qa._google_runtime_access_token(
+                        home,
+                        "qa-user",
+                        {"IRONCLAW_REBORN_GOOGLE_CLIENT_ID": "client-id"},
+                    )
+
     def test_bootstrap_forwards_all_cases_flag(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir) / "out"
@@ -381,6 +495,76 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 {"found": False, "marker_found": True},
             )
         )
+
+    def test_run_cases_isolates_reborn_home_and_preflight_per_selected_case(self):
+        async def fake_case(ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode="live",
+                success=True,
+                latency_ms=1,
+                details={"reborn_home": str(ctx.reborn_home)},
+            )
+
+        async def fake_start_reborn_server(
+            _binary: Path,
+            reborn_home: Path,
+            _output_dir: Path,
+            _env: dict[str, str],
+        ):
+            return object(), f"http://127.0.0.1/{reborn_home.name}"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "out"
+            binary = root / "ironclaw-reborn"
+            binary.touch()
+            args = argparse.Namespace(
+                all_cases=False,
+                case=["case_a", "case_b"],
+                output_dir=output_dir,
+                reborn_home=root / "missing-source-home",
+                skip_build=True,
+                require_slack_live=False,
+            )
+            cases = {
+                "case_a": run_live_qa.CaseSpec(fake_case),
+                "case_b": run_live_qa.CaseSpec(fake_case),
+            }
+            env = {
+                "LIVE_OPENAI_COMPATIBLE_API_KEY": "fake-live-llm-key",
+                "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV": "LIVE_OPENAI_COMPATIBLE_API_KEY",
+            }
+
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(run_live_qa, "CASES", cases),
+                patch.object(run_live_qa, "QA_SHEET_CASES", {}),
+                patch.object(run_live_qa, "_reborn_binary", return_value=binary),
+                patch.object(
+                    run_live_qa,
+                    "start_reborn_server",
+                    side_effect=fake_start_reborn_server,
+                ),
+                patch.object(run_live_qa, "stop_process"),
+            ):
+                status = asyncio.run(run_live_qa.run_cases(args))
+
+            self.assertEqual(status, 0)
+            case_a_home = output_dir / "reborn-home" / "case_a"
+            case_b_home = output_dir / "reborn-home" / "case_b"
+            self.assertTrue((case_a_home / "config.toml").exists())
+            self.assertTrue((case_b_home / "config.toml").exists())
+            self.assertNotEqual(case_a_home, case_b_home)
+
+            case_a_preflight = json.loads(
+                (output_dir / "preflight.case_a.json").read_text(encoding="utf-8")
+            )
+            case_b_preflight = json.loads(
+                (output_dir / "preflight.case_b.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(case_a_preflight["reborn_home"], str(case_a_home))
+            self.assertEqual(case_b_preflight["reborn_home"], str(case_b_home))
 
 
 if __name__ == "__main__":
