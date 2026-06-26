@@ -217,6 +217,136 @@ async def test_reborn_legacy_sse_resume_reuses_last_cursor_without_history_reloa
         await context.close()
 
 
+async def test_reborn_legacy_usage_event_does_not_render_message_badge(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Port of legacy turn_cost-event rendering guard to Reborn's event stream."""
+    thread_id = "thread-legacy-usage-event"
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    await page.add_init_script(
+        """
+        (() => {
+          const streams = [];
+          class FakeEventSource extends EventTarget {
+            constructor(url) {
+              super();
+              this.url = url;
+              this.readyState = 0;
+              streams.push(this);
+              setTimeout(() => {
+                this.readyState = 1;
+                if (typeof this.onopen === "function") this.onopen(new Event("open"));
+              }, 0);
+            }
+            close() {
+              this.readyState = 2;
+            }
+          }
+          window.EventSource = FakeEventSource;
+          window.__emitV2MessageSse = (frame, id = "cursor-usage") => {
+            const stream = streams[streams.length - 1];
+            if (!stream) throw new Error("no EventSource stream is open");
+            stream.dispatchEvent(new MessageEvent("message", {
+              data: JSON.stringify(frame),
+              lastEventId: id,
+            }));
+          };
+        })();
+        """
+    )
+
+    async def fulfill_json(route, body):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route):
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route):
+        await fulfill_json(
+            route,
+            {
+                "threads": [
+                    {
+                        "thread_id": thread_id,
+                        "title": "Usage event rendering port",
+                        "created_at": "2026-06-26T00:00:00Z",
+                        "updated_at": "2026-06-26T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_timeline(route):
+        await fulfill_json(
+            route,
+            {
+                "messages": [
+                    {
+                        "message_id": "seed-assistant",
+                        "kind": "assistant",
+                        "content": "No footer please",
+                        "sequence": 1,
+                        "status": "completed",
+                        "created_at": "2026-06-26T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads", handle_threads)
+    await page.route("**/api/webchat/v2/threads?**", handle_threads)
+    await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
+
+    try:
+        await page.goto(f"{reborn_v2_server}/v2/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
+        assistant = page.locator(SEL_V2["msg_assistant"]).first
+        await expect(assistant).to_contain_text("No footer please", timeout=15000)
+        await expect(page.locator(".turn-cost-badge")).to_have_count(0)
+
+        await page.evaluate(
+            """
+            () => window.__emitV2MessageSse({
+              type: "turn_cost",
+              thread_id: "thread-legacy-usage-event",
+              input_tokens: 632101,
+              output_tokens: 0,
+              cost_usd: "$1.6296"
+            })
+            """
+        )
+
+        await page.wait_for_timeout(250)
+        await expect(page.locator(SEL_V2["msg_assistant"])).to_have_count(1)
+        await expect(page.locator(".turn-cost-badge")).to_have_count(0)
+        await expect(assistant).not_to_contain_text("632,101 tokens")
+        await expect(assistant).not_to_contain_text("$1.6296")
+    finally:
+        await context.close()
+
+
 async def test_reborn_legacy_sse_thread_switch_drops_prior_thread_cursor(
     reborn_v2_server, reborn_v2_browser
 ):

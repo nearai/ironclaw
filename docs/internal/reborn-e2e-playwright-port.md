@@ -1005,6 +1005,28 @@ Behavior adjustment:
   invalidation are host-runtime endpoint contracts and remain open until a
   standalone Reborn product-auth endpoint fixture exists for those paths.
 
+### Step 27: Legacy Usage Event Rendering Guard Port
+
+Extended `tests/e2e/scenarios/test_reborn_webui_v2_legacy_sse_history.py`.
+
+Ported legacy `test_turn_cost_event_does_not_render_message_badge` to Reborn's
+WebChat v2 event stream:
+
+- seeded a Reborn thread with an assistant message;
+- dispatched a non-chat `turn_cost` frame through the EventSource `message`
+  fallback path;
+- asserted the transcript still contains exactly one assistant message;
+- asserted no `.turn-cost-badge`, token count, or cost text appears in the
+  message body.
+
+Behavior adjustment:
+
+- Legacy v1 had a named `turn_cost` SSE event and a historical badge renderer.
+  Reborn WebChat v2 does not render per-message cost badges from chat-stream
+  events; usage belongs to the admin usage surfaces. The migrated test protects
+  the matching user-visible invariant that accounting frames do not mutate the
+  chat transcript.
+
 ## Open Migration Buckets
 
 Not yet ported:
