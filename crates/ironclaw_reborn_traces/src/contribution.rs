@@ -5039,8 +5039,22 @@ fn trace_upload_claim_cache_key(
             .unwrap_or_default(),
         TraceUploadAuthMode::WorkloadTokenEnv => String::new(),
     };
+    // Under instance enrollment every user shares the SAME instance device-key
+    // dir (scope `None`), so `scope_dir_key` is identical across users — the
+    // per-user `subject` is what distinguishes their minted claims. Omitting it
+    // would let a claim minted for one subject be served from cache to another,
+    // mis-attributing traces / leaking across users. Hash it for parity with the
+    // other key components (the subject is already an opaque pseudonym, but the
+    // hash keeps the cache key uniform and bounded).
+    let subject_key = context
+        .subject
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("sha256:{}", hex::encode(Sha256::digest(s.as_bytes()))))
+        .unwrap_or_default();
     Ok(format!(
-        "{}|tenant={}|audience={}|scopes={}|uses={}|workload_env={}|invite_code={}|scope_dir={}",
+        "{}|tenant={}|audience={}|scopes={}|uses={}|workload_env={}|invite_code={}|scope_dir={}|subject={}",
         issuer,
         policy.upload_token_tenant_id.as_deref().unwrap_or_default(),
         policy.upload_token_audience.as_deref().unwrap_or_default(),
@@ -5052,6 +5066,7 @@ fn trace_upload_claim_cache_key(
             .unwrap_or_default(),
         invite_code_key,
         scope_dir_key,
+        subject_key,
     ))
 }
 
@@ -15183,6 +15198,60 @@ mod tests {
         let req = build_trace_upload_claim_issuer_request(&policy, &ctx);
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["subject"], "sha256:deadbeef");
+    }
+
+    #[test]
+    fn upload_claim_cache_key_separates_subjects_sharing_a_scope_dir() {
+        // Instance enrollment: all users share the SAME instance device-key dir
+        // (scope None), distinguished only by their per-user subject. The cache
+        // key MUST differ per subject, or a claim minted for one user would be
+        // served from cache to another (cross-user trace mis-attribution).
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            auth_mode: TraceUploadAuthMode::DeviceKey,
+            upload_token_issuer_url: Some(
+                "https://issuer.example/v1/trace-upload-claim".to_string(),
+            ),
+            upload_token_tenant_id: Some("tenant-a".to_string()),
+            upload_token_audience: Some("trace-commons".to_string()),
+            ..Default::default()
+        };
+        let shared_dir = std::path::PathBuf::from("/instance/trace_contributions");
+        let ctx_for = |subject: &str| TraceUploadClaimContext {
+            trace_id: None,
+            submission_id: None,
+            consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+            allowed_uses: Vec::new(),
+            scope_dir: Some(shared_dir.clone()),
+            subject: Some(subject.to_string()),
+        };
+
+        let alice = trace_upload_claim_cache_key(&policy, &ctx_for("sha256:alice")).unwrap();
+        let bob = trace_upload_claim_cache_key(&policy, &ctx_for("sha256:bob")).unwrap();
+        let alice_again = trace_upload_claim_cache_key(&policy, &ctx_for("sha256:alice")).unwrap();
+
+        assert_ne!(
+            alice, bob,
+            "distinct subjects sharing a scope_dir must get distinct cache keys"
+        );
+        assert_eq!(
+            alice, alice_again,
+            "same subject must produce a stable cache key"
+        );
+
+        // A no-subject context (personal-invite path) must also differ from the
+        // subject-bearing keys so the two models never collide on cache.
+        let no_subject = TraceUploadClaimContext {
+            trace_id: None,
+            submission_id: None,
+            consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+            allowed_uses: Vec::new(),
+            scope_dir: Some(shared_dir.clone()),
+            subject: None,
+        };
+        let none_key = trace_upload_claim_cache_key(&policy, &no_subject).unwrap();
+        assert_ne!(alice, none_key);
+        assert_ne!(bob, none_key);
     }
 
     #[test]
