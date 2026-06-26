@@ -22,7 +22,7 @@
 
 // arch-exempt: large_file, needs Reborn runtime helper extraction, plan #4471
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -32,7 +32,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use ironclaw_events::{DurableAuditLog, DurableEventLog, InMemoryAuditSink, RuntimeEvent};
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_first_party_extension_ports::{
@@ -525,13 +525,20 @@ pub struct RebornRuntime {
 }
 
 struct RegistryPersistentApprovalGranteeResolver {
-    registry: Arc<ExtensionRegistry>,
+    registry: Arc<SharedExtensionRegistry>,
+    cached_registry: StdMutex<CachedExtensionRegistrySnapshot>,
     outbound_delivery_target_set_provider: ExtensionId,
+}
+
+struct CachedExtensionRegistrySnapshot {
+    version: u64,
+    snapshot: Arc<ExtensionRegistry>,
 }
 
 impl PersistentApprovalGranteeResolver for RegistryPersistentApprovalGranteeResolver {
     fn persistent_approval_grantee(&self, capability_id: &CapabilityId) -> Option<Principal> {
-        if let Some(descriptor) = self.registry.get_capability(capability_id) {
+        let registry = self.cached_snapshot();
+        if let Some(descriptor) = registry.get_capability(capability_id) {
             return Some(Principal::Extension(descriptor.provider.clone()));
         }
         if capability_id.as_str() == OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID {
@@ -544,15 +551,30 @@ impl PersistentApprovalGranteeResolver for RegistryPersistentApprovalGranteeReso
 }
 
 impl RegistryPersistentApprovalGranteeResolver {
-    fn new(registry: Arc<ExtensionRegistry>) -> Result<Self, RebornRuntimeError> {
+    fn new(registry: Arc<SharedExtensionRegistry>) -> Result<Self, RebornRuntimeError> {
+        let version = registry.version();
+        let snapshot = registry.snapshot();
         let outbound_delivery_target_set_provider = outbound_delivery_synthetic_provider()
             .map_err(|error| RebornRuntimeError::InvalidArgument {
                 reason: format!("outbound delivery synthetic provider id is invalid: {error}"),
             })?;
         Ok(Self {
             registry,
+            cached_registry: StdMutex::new(CachedExtensionRegistrySnapshot { version, snapshot }),
             outbound_delivery_target_set_provider,
         })
+    }
+
+    fn cached_snapshot(&self) -> Arc<ExtensionRegistry> {
+        let version = self.registry.version();
+        let Ok(mut cached) = self.cached_registry.lock() else {
+            return self.registry.snapshot();
+        };
+        if cached.version != version {
+            cached.snapshot = self.registry.snapshot();
+            cached.version = version;
+        }
+        Arc::clone(&cached.snapshot)
     }
 }
 
@@ -3168,9 +3190,15 @@ pub async fn build_reborn_runtime(
                 )
                 .with_persistent_policy_store(local_runtime.persistent_approval_policies.clone())
                 .with_persistent_grantee_resolver(Arc::new(
-                    RegistryPersistentApprovalGranteeResolver::new(Arc::clone(
-                        &local_runtime.extension_registry,
-                    ))?,
+                    RegistryPersistentApprovalGranteeResolver::new(
+                        local_runtime
+                            .shared_extension_registry
+                            .clone()
+                            .ok_or_else(|| RebornRuntimeError::InvalidArgument {
+                                reason: "canonical shared extension registry is required"
+                                    .to_string(),
+                            })?,
+                    )?,
                 ))
                 .with_tool_permission_override_store(
                     local_runtime.tool_permission_overrides.clone(),
@@ -3915,7 +3943,9 @@ mod tests {
 
     #[test]
     fn persistent_grantee_resolver_maps_outbound_delivery_target_set_to_synthetic_provider() {
-        let registry = Arc::new(ironclaw_extensions::ExtensionRegistry::new());
+        let registry = Arc::new(ironclaw_extensions::SharedExtensionRegistry::new(
+            ironclaw_extensions::ExtensionRegistry::new(),
+        ));
         let resolver = super::RegistryPersistentApprovalGranteeResolver::new(registry)
             .expect("resolver builds");
         let capability_id = CapabilityId::new(
@@ -3933,6 +3963,105 @@ mod tests {
             ),
             Some(Principal::Extension(expected_provider))
         );
+    }
+
+    #[test]
+    fn persistent_grantee_resolver_reads_shared_registry_capability_providers() {
+        let registry = Arc::new(ironclaw_extensions::SharedExtensionRegistry::new(
+            ironclaw_extensions::ExtensionRegistry::new(),
+        ));
+        for (extension_id, capabilities) in [
+            ("nearai", &["web_search"][..]),
+            ("github", &["get_repo"][..]),
+            ("google-calendar", &["list_events"][..]),
+        ] {
+            registry
+                .insert(test_extension_package(extension_id, capabilities))
+                .expect("insert test package");
+        }
+        let resolver = super::RegistryPersistentApprovalGranteeResolver::new(Arc::clone(&registry))
+            .expect("resolver builds");
+
+        for (capability_id, extension_id) in [
+            ("nearai.web_search", "nearai"),
+            ("github.get_repo", "github"),
+            ("google-calendar.list_events", "google-calendar"),
+        ] {
+            assert_eq!(
+                ironclaw_product_workflow::PersistentApprovalGranteeResolver::persistent_approval_grantee(
+                    &resolver,
+                    &CapabilityId::new(capability_id).expect("capability id")
+                ),
+                Some(Principal::Extension(
+                    ExtensionId::new(extension_id).expect("extension id")
+                ))
+            );
+        }
+
+        registry
+            .insert(test_extension_package("google-drive", &["list_files"]))
+            .expect("insert later package");
+        assert_eq!(
+            ironclaw_product_workflow::PersistentApprovalGranteeResolver::persistent_approval_grantee(
+                &resolver,
+                &CapabilityId::new("google-drive.list_files").expect("capability id")
+            ),
+            Some(Principal::Extension(
+                ExtensionId::new("google-drive").expect("extension id")
+            ))
+        );
+    }
+
+    fn test_extension_package(
+        extension_id: &str,
+        capabilities: &[&str],
+    ) -> ironclaw_extensions::ExtensionPackage {
+        let capability_blocks = capabilities
+            .iter()
+            .map(|name| {
+                format!(
+                    r#"
+[[capabilities]]
+id = "{extension_id}.{name}"
+description = "{name}"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/{name}.input.json"
+output_schema_ref = "schemas/{name}.output.json"
+"#
+                )
+            })
+            .collect::<String>();
+        let manifest_toml = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{extension_id}"
+name = "{extension_id}"
+version = "0.1.0"
+description = "test extension"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "stdio"
+command = "test"
+
+{capability_blocks}
+"#
+        );
+        let manifest = ironclaw_extensions::ExtensionManifest::parse(
+            &manifest_toml,
+            ironclaw_extensions::ManifestSource::HostBundled,
+            &ironclaw_host_api::HostPortCatalog::empty(),
+        )
+        .expect("manifest parses");
+        ironclaw_extensions::ExtensionPackage::from_manifest(
+            manifest,
+            ironclaw_host_api::VirtualPath::new(format!("/system/extensions/{extension_id}"))
+                .expect("root"),
+        )
+        .expect("package builds")
     }
 
     /// Wiring guard: the `regex_skill_activation_enabled` flag from
@@ -4205,7 +4334,7 @@ mod tests {
     use ironclaw_host_api::ProjectId;
     use ironclaw_host_api::{
         Action, AgentId, ApprovalRequest, ApprovalRequestId, AuditStage, CapabilityId,
-        CorrelationId, EffectKind, InvocationFingerprint, InvocationId, Principal,
+        CorrelationId, EffectKind, ExtensionId, InvocationFingerprint, InvocationId, Principal,
         ResourceEstimate, ResourceScope, TenantId, ThreadId, UserId,
         runtime_policy::{
             ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy,

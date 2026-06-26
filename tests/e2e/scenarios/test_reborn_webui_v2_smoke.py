@@ -31,6 +31,7 @@ import re
 import signal
 import socket
 import uuid
+from enum import StrEnum
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -42,6 +43,12 @@ from playwright.async_api import async_playwright, expect
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, wait_for_ready
 
 USER_ID = "reborn-v2-e2e-user"
+
+
+class ToolPermissionState(StrEnum):
+    DEFAULT = "default"
+    DISABLED = "disabled"
+    ASK_EACH_TIME = "ask_each_time"
 
 
 def _find_free_port() -> int:
@@ -256,6 +263,49 @@ async def _send_message(
     assert response.status_code in (200, 202), response.text
 
 
+async def _set_tool_permission(
+    client: httpx.AsyncClient,
+    base_url: str,
+    capability_id: str,
+    state: ToolPermissionState,
+) -> None:
+    response = await client.post(
+        f"{base_url}/api/webchat/v2/settings/tools/{capability_id}",
+        json={"state": state.value},
+        timeout=15,
+    )
+    assert response.status_code == 200, (
+        f"Failed to set {capability_id} to {state}: "
+        f"{response.status_code} {response.text}"
+    )
+
+
+async def _get_timeline(
+    client: httpx.AsyncClient, base_url: str, thread_id: str
+) -> dict:
+    response = await client.get(
+        f"{base_url}/api/webchat/v2/threads/{thread_id}/timeline",
+        timeout=15,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+async def _restore_disabled_tool_policy(client: httpx.AsyncClient, base_url: str) -> None:
+    errors = []
+    for capability_id in ("builtin.echo", "builtin.shell"):
+        try:
+            await _set_tool_permission(
+                client,
+                base_url,
+                capability_id,
+                ToolPermissionState.DEFAULT,
+            )
+        except Exception as error:
+            errors.append(f"{capability_id}: {error}")
+    assert not errors, "Failed to restore tool permission defaults: " + "; ".join(errors)
+
+
 async def _wait_for_assistant_message(
     client: httpx.AsyncClient,
     base_url: str,
@@ -287,6 +337,28 @@ async def _wait_for_assistant_message(
         f"Timed out waiting for a finalized assistant message in thread {thread_id}. "
         f"Last timeline: {last_timeline}"
     )
+
+
+@pytest.fixture
+async def disabled_echo_shell_ask_policy(reborn_v2_server):
+    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    async with httpx.AsyncClient(headers=headers) as client:
+        try:
+            await _set_tool_permission(
+                client,
+                reborn_v2_server,
+                "builtin.echo",
+                ToolPermissionState.DISABLED,
+            )
+            await _set_tool_permission(
+                client,
+                reborn_v2_server,
+                "builtin.shell",
+                ToolPermissionState.ASK_EACH_TIME,
+            )
+            yield
+        finally:
+            await _restore_disabled_tool_policy(client, reborn_v2_server)
 
 
 async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2_browser):
@@ -337,6 +409,32 @@ async def test_reborn_v2_text_turn_persists(reborn_v2_server):
         assert len(finalized) == 1, (
             f"Expected one finalized assistant message, got {len(finalized)}: {finalized}"
         )
+
+
+@pytest.mark.usefixtures("disabled_echo_shell_ask_policy")
+async def test_reborn_v2_disabled_tool_does_not_route_through_shell(
+    reborn_v2_server,
+):
+    """A named unavailable tool request should not route through another tool."""
+    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    async with httpx.AsyncClient(headers=headers) as client:
+        thread_id = await _create_thread(client, reborn_v2_server)
+        prompt = "Use builtin.echo to print: disabled-test"
+        await _send_message(client, reborn_v2_server, thread_id, prompt)
+
+        assistant = await _wait_for_assistant_message(
+            client,
+            reborn_v2_server,
+            thread_id,
+            timeout=45,
+        )
+        assert "will not route it through another tool" in assistant.get("content", "")
+
+        timeline = await _get_timeline(client, reborn_v2_server, thread_id)
+        timeline_text = json.dumps(timeline, sort_keys=True)
+        assert "builtin_shell" not in timeline_text
+        assert "builtin.shell" not in timeline_text
+        assert "echo \\\"disabled-test\\\"" not in timeline_text
 
 
 async def test_reborn_v2_ui_send_renders_reply(reborn_v2_page, reborn_v2_server):
