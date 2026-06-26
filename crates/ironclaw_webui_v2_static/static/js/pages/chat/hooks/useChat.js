@@ -400,24 +400,29 @@ export function useChat(threadId) {
       if (pendingGate || pendingGateRef.current) {
         throw approvalGatePendingSendError();
       }
-      // Block a duplicate send only when the *destination* thread already
-      // has a run in flight. The destination is `targetThreadId` when the
-      // caller names one, otherwise the open thread — the same
-      // `targetThreadId || threadId` resolution used below. A send with no
-      // destination yet (starting a new chat) or one addressed to a
-      // different thread must NOT be blocked just because some other thread
-      // — e.g. the one currently on screen — is still running. Keying the
-      // guard on the viewed thread (or on the mere absence of a target) is
-      // what broke parallel threads and "new chat while a run is active".
+      // Admission: block a send only when the *destination* thread is the one
+      // that's busy. The destination is `targetThreadId` when the caller names
+      // one, otherwise the open thread (the same `targetThreadId || threadId`
+      // resolved below). BOTH the in-flight-run guard and the viewed-thread
+      // `isProcessing` flag must key on that destination — a running thread
+      // carries both, so narrowing only one still drops a parallel send to
+      // another thread, or a new chat, just because the thread on screen is
+      // running. Keying either guard on the viewed thread (or on the mere
+      // absence of a target) is what broke parallel threads and "new chat
+      // while a run is active".
       const sendTargetThreadId = targetThreadId || threadId;
       const activeRunForSend = activeRunRef.current;
       const activeRunBlocksSend =
         Boolean(activeRunForSend) &&
         Boolean(sendTargetThreadId) &&
         activeRunForSend.threadId === sendTargetThreadId;
+      const processingBlocksSend =
+        isProcessingRef.current &&
+        Boolean(sendTargetThreadId) &&
+        sendTargetThreadId === threadId;
       if (
         submitBusyRef.current ||
-        isProcessingRef.current ||
+        processingBlocksSend ||
         activeRunBlocksSend
       ) {
         return null;

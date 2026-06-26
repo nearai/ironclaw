@@ -2584,6 +2584,7 @@ test("useChat.resolveGate: approved also keeps isProcessing true", async () => {
 function createParallelSendContext({
   threadId,
   activeRun,
+  isProcessing,
   createdThreadId = "thread-created",
   stateUpdates = [],
 } = {}) {
@@ -2592,11 +2593,18 @@ function createParallelSendContext({
   let currentMessages = [];
   const seededByThread = new Map();
   const initialByIndex = new Map();
+  // State slot order: cooldownUntil(0), now(1), activeRun(2),
+  // channelConnectAction(3), isProcessing(4), pendingGate(5),
+  // busyGateNotice(6), stateThreadId(7).
   if (activeRun !== undefined) {
-    // State slot order: cooldownUntil(0), now(1), activeRun(2),
-    // channelConnectAction(3), isProcessing(4), pendingGate(5),
-    // busyGateNotice(6), stateThreadId(7).
     initialByIndex.set(2, activeRun);
+  }
+  // A thread with an in-flight run carries BOTH activeRun and isProcessing.
+  // Seeding isProcessing for the viewed-thread cases is what makes these
+  // fixtures reproduce the real busy state rather than a half-state the
+  // `isProcessing` early-return would never trip.
+  if (isProcessing !== undefined) {
+    initialByIndex.set(4, isProcessing);
   }
 
   const context = {
@@ -2693,12 +2701,14 @@ test("useChat.send: starts a new chat while another thread's run is active", asy
 });
 
 test("useChat.send: addresses a second thread in parallel while viewing a running thread", async () => {
-  // Viewing thread-a (its run is active); send is explicitly addressed to a
-  // different thread-b. The active run on the viewed thread must not block
-  // delivery to thread-b.
+  // Viewing thread-a while its run is genuinely in flight — so BOTH activeRun
+  // and isProcessing are set, the real busy state. A send explicitly addressed
+  // to a different thread-b must still be delivered; neither the viewed
+  // thread's active run nor its isProcessing flag may block a parallel thread.
   const { context, sentBody } = createParallelSendContext({
     threadId: "thread-a",
     activeRun: { runId: "run-a", threadId: "thread-a", status: "running" },
+    isProcessing: true,
   });
 
   runUseChatSource(context);
@@ -2715,10 +2725,12 @@ test("useChat.send: addresses a second thread in parallel while viewing a runnin
 
 test("useChat.send: still blocks a duplicate send into the already-running thread", async () => {
   // The one case the gate must keep blocking: a second send into the SAME
-  // thread that already has a run in flight.
+  // thread that already has a run in flight (both activeRun and isProcessing
+  // set — the real busy state).
   const { context, sentBody, createThreadCalls } = createParallelSendContext({
     threadId: "thread-a",
     activeRun: { runId: "run-a", threadId: "thread-a", status: "running" },
+    isProcessing: true,
   });
 
   runUseChatSource(context);
