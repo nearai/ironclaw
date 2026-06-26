@@ -74,6 +74,12 @@ pub struct WebUiAuthenticatedCaller {
     pub project_id: Option<ProjectId>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub operator_webui_config: bool,
+    /// Resolved role of the authenticated caller. Default is the
+    /// least-privilege `Member`; the env-bearer operator authenticates as
+    /// `Owner`. Carried so the facade can gate admin operations via
+    /// [`Self::is_admin`].
+    #[serde(default)]
+    pub role: ironclaw_host_api::UserRole,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -93,12 +99,29 @@ impl WebUiAuthenticatedCaller {
             agent_id,
             project_id,
             operator_webui_config: false,
+            role: ironclaw_host_api::UserRole::Member,
         }
     }
 
     pub fn with_operator_webui_config(mut self, operator_webui_config: bool) -> Self {
         self.operator_webui_config = operator_webui_config;
         self
+    }
+
+    /// Override the caller's role (the default from [`Self::new`] is the
+    /// least-privilege `Member`).
+    #[must_use]
+    pub fn with_role(mut self, role: ironclaw_host_api::UserRole) -> Self {
+        self.role = role;
+        self
+    }
+
+    /// `true` when the caller may perform admin operations: either a role with
+    /// admin privileges (`Owner` / `Admin`), or the legacy operator-config
+    /// bearer (kept as a compat shim while per-user role population rolls out
+    /// across the authenticators).
+    pub fn is_admin(&self) -> bool {
+        self.role.is_admin() || self.operator_webui_config
     }
 
     pub fn actor(&self) -> TurnActor {

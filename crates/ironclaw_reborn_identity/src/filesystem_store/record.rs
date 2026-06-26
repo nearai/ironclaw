@@ -8,6 +8,10 @@
 pub(super) struct StoredUser {
     pub(super) email: Option<String>,
     pub(super) display_name: Option<String>,
+    #[serde(default)]
+    pub(super) role: crate::UserRole,
+    #[serde(default)]
+    pub(super) status: crate::UserStatus,
     pub(super) created_at: String,
     pub(super) updated_at: String,
 }

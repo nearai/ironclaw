@@ -100,19 +100,26 @@ pub struct ExternalIdentityKey {
     pub external_subject_id: ExternalSubjectId,
 }
 
+// `UserRole` / `UserStatus` are shared identity vocabulary owned by
+// `ironclaw_host_api` (alongside `UserId` / `TenantId`), re-exported here so
+// `crate::UserRole` and `UserRecord`'s fields resolve without every consumer
+// depending on this store crate.
+pub use ironclaw_host_api::{UserRole, UserStatus};
+
 /// A persisted canonical user.
 ///
-/// `status` and `role` are intentionally absent: the store has no typed
-/// semantics for them yet, so the `users` table carries them as columns
-/// with DB-level defaults (`active` / `member`) rather than threading
-/// stringly-typed values through this record (see `.claude/rules/types.md`
-/// — fixed small sets must be enums, not strings). Reintroduce them as
-/// `UserStatus` / `UserRole` enums when a caller actually reads them.
+/// `role` and `status` are typed via [`UserRole`] / [`UserStatus`] (see
+/// `.claude/rules/types.md` — fixed small sets are enums, not strings).
+/// Records persisted before these fields existed rehydrate to the
+/// least-privilege defaults (`member` / `active`) via `#[serde(default)]` on
+/// the stored row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRecord {
     pub id: UserId,
     pub email: Option<String>,
     pub display_name: Option<String>,
+    pub role: UserRole,
+    pub status: UserStatus,
     pub created_at: String,
     pub updated_at: String,
 }

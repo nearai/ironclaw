@@ -288,6 +288,8 @@ where
             &StoredUser {
                 email: identity.email.clone(),
                 display_name: identity.display_name.clone(),
+                role: crate::UserRole::default(),
+                status: crate::UserStatus::default(),
                 created_at: now.clone(),
                 updated_at: now.clone(),
             },
