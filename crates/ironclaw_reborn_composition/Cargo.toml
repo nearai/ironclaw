@@ -12,6 +12,14 @@ publish = false
 
 [features]
 default = []
+# Per-(tenant, user) capability *availability* policy at the dispatch seam
+# (issue #5267): swaps the local-dev `AllowAll` capability-surface resolver for
+# one that reads admin grants from #4544's scoped-lifecycle installation store.
+# Off by default so substrate-only / non-policy builds keep the prior behaviour
+# and carry no `ironclaw_product_workflow_storage` dependency. The standalone
+# `ironclaw-reborn serve` build (and the four-dimension admin surface, #5268)
+# opt in.
+capability-policy = ["dep:ironclaw_product_workflow_storage"]
 # Wire a host-managed LLM model gateway into the assembled runtime via
 # ironclaw_reborn's `LlmProviderModelGateway`. Off by default so this crate
 # stays substrate-only when callers don't want a model gateway in the

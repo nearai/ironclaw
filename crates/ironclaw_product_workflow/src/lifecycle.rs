@@ -89,6 +89,15 @@ pub enum LifecyclePackageKind {
     Wasm,
 }
 
+pub fn lifecycle_package_kind_label(kind: LifecyclePackageKind) -> &'static str {
+    match kind {
+        LifecyclePackageKind::Extension => "extension",
+        LifecyclePackageKind::Skill => "skill",
+        LifecyclePackageKind::Mcp => "mcp",
+        LifecyclePackageKind::Wasm => "wasm",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifecyclePackageRef {
     pub kind: LifecyclePackageKind,

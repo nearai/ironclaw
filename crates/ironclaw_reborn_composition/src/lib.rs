@@ -32,6 +32,8 @@ mod available_extensions;
 mod budget;
 mod budget_events;
 mod bundled_skills;
+#[cfg(feature = "capability-policy")]
+mod capability_surface_policy;
 mod communication_context;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod credential_refresh_worker;
