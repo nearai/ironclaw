@@ -47,12 +47,41 @@ identity / approval is the `CapabilityPolicyDelta` surface (#5273, to come).
 | PUT | `/api/webchat/v2/admin/extensions/{package_id}` | Bearer + admin role | install a tenant-shared extension (optional `{config}` body) |
 | DELETE | `/api/webchat/v2/admin/extensions/{package_id}` | Bearer + admin role | uninstall the tenant-shared extension |
 
-Planned (with #5273 enforcement):
+### Per-user capability policy deltas (`capability_user_policy_routes.rs`)
 
-| Method | Path | Effect |
-|---|---|---|
-| PUT | `/api/webchat/v2/admin/users/{user_id}/capabilities/{capability_id}` | set a per-user delta (availability / config / identity-mode / approval) |
-| GET | `/api/webchat/v2/admin/users/{user_id}/capabilities` | read a user's effective policy |
+Admin-gated (`WebUiAuthenticatedCaller::is_admin()`). Mounted via
+`WebuiServeConfig::with_protected_route_mount` when the `capability-policy`
+feature is built in and the policy is activated
+(`IRONCLAW_REBORN_CAPABILITY_POLICY`). Writes per-user
+`CapabilityPolicyDelta` rows at `PolicyScope::User` into the **same** durable
+`CapabilityPolicyDeltaStore` the dispatch `PolicyResolver` reads (#5261 D3), so
+a grant here is immediately visible to enforcement and durable across restart.
+One row per `(user, capability)` carries all four optional dimensions
+(availability / identity / approval / config_patch); an absent field inherits
+the layer above.
+
+| Method | Path | Auth | Effect |
+|---|---|---|---|
+| PUT | `/api/webchat/v2/admin/users/{user_id}/capabilities/{capability_id}` | Bearer + admin role | upsert the per-user delta (body: optional `availability` / `identity` / `approval` / `config_patch`) |
+| DELETE | `/api/webchat/v2/admin/users/{user_id}/capabilities/{capability_id}` | Bearer + admin role | revoke the per-user delta (idempotent → 204) |
+| GET | `/api/webchat/v2/admin/users/{user_id}/capabilities` | Bearer + admin role | list the user's effective deltas (`list_subject_deltas`) |
+
+## Local user directory admin surface (#5272 — `local_user_directory.rs`)
+
+Admin-gated (`WebUiAuthenticatedCaller::is_admin()`). Mounted via
+`WebuiServeConfig::with_protected_route_mount` when the `capability-policy`
+feature is built in. The **identity** side of the local-dev multi-user model:
+REST-created users, roles, and the bearer tokens that
+`LocalUserDirectoryAuthenticator` resolves through the durable user directory.
+Tokens are stored hashed; `create` returns the raw bearer once (a local-dev
+affordance).
+
+| Method | Path | Auth | Effect |
+|---|---|---|---|
+| GET | `/api/webchat/v2/admin/users` | Bearer + admin role | list the tenant's users |
+| POST | `/api/webchat/v2/admin/users` | Bearer + admin role | create a user (body `{user_id, role?}`), mint + return its bearer token once |
+| DELETE | `/api/webchat/v2/admin/users/{user_id}` | Bearer + admin role | delete the user (and its token index entry) |
+| PUT | `/api/webchat/v2/admin/users/{user_id}/role` | Bearer + admin role | set the user's role (body `{role}`) |
 
 ## Product-auth + SSO (host-supplied mounts)
 

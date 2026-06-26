@@ -523,6 +523,8 @@ impl ServeCommand {
             let capability_admin_tenant_id = tenant_id.clone();
             #[cfg(feature = "capability-policy")]
             let local_user_admin_tenant_id = tenant_id.clone();
+            #[cfg(feature = "capability-policy")]
+            let capability_user_policy_tenant_id = tenant_id.clone();
             let mut serve_config = WebuiServeConfig::new(tenant_id, authenticator, allowed_origins)
                 .with_default_agent_id(default_agent_id.clone());
             if let Some(project_id) = default_project_id.clone() {
@@ -558,6 +560,23 @@ impl ServeCommand {
                 eprintln!(
                     "ironclaw-reborn: local user admin routes mounted \
                      (GET/POST/PUT/DELETE /api/webchat/v2/admin/users...)"
+                );
+            }
+            // Per-user capability policy admin surface (#5268): admin-gated
+            // PUT/DELETE/GET writing per-user CapabilityPolicyDelta rows into the
+            // SAME shared delta store the dispatch PolicyResolver reads, so a grant
+            // here is immediately visible to enforcement.
+            #[cfg(feature = "capability-policy")]
+            if let Some(mount) =
+                ironclaw_reborn_composition::build_capability_user_policy_route_mount(
+                    &runtime,
+                    capability_user_policy_tenant_id,
+                )
+            {
+                serve_config = serve_config.with_protected_route_mount(mount);
+                eprintln!(
+                    "ironclaw-reborn: per-user capability policy admin routes mounted \
+                     (PUT/DELETE/GET /api/webchat/v2/admin/users/{{user_id}}/capabilities...)"
                 );
             }
             #[cfg(feature = "openai-compat-beta")]
