@@ -1852,6 +1852,28 @@ Behavior adjustment:
   listing remains a lower-level/non-stub Reborn surface gap until a v2 pending
   pairing list endpoint exists.
 
+### Step 55: Legacy Pending-Approval Send Block Port
+
+Extended `test_reborn_webui_v2_legacy_approval.py`.
+
+Ported the user-facing invariant behind legacy
+`test_waiting_for_approval_message_no_error_prefix`:
+
+- an open Reborn approval gate disables message sending;
+- the composer shows the non-error status text `Resolve the approval request
+  before sending another message.`;
+- pressing Enter while the gate is open keeps the draft intact;
+- no optimistic user message, assistant message, system error message, or
+  `/api/webchat/v2/threads/{thread_id}/messages` request is produced.
+
+Behavior adjustment:
+
+- Legacy v1 accepted the second send and returned a non-error assistant/status
+  message from `/api/chat/send`. Reborn blocks the send locally while a gate is
+  pending, so the port asserts the equivalent operator contract at the current
+  WebChat v2 boundary: the user sees a non-error waiting state and the blocked
+  input does not become a failed chat message.
+
 ## Open Migration Buckets
 
 Not yet ported:

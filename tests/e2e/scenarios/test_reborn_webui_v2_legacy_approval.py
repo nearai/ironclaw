@@ -254,6 +254,67 @@ async def test_reborn_legacy_approval_buttons_resolve_gate(
         await context.close()
 
 
+async def test_reborn_legacy_pending_approval_blocks_send_without_error_message(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Port pending-approval send rejection to Reborn's local gate blocker."""
+    context, page, _resolve_requests = await _open_stubbed_approval_thread(
+        reborn_v2_server, reborn_v2_browser
+    )
+    send_requests: list[dict] = []
+
+    async def handle_send(route):
+        send_requests.append(json.loads(route.request.post_data or "{}"))
+        await route.fulfill(
+            status=500,
+            content_type="application/json",
+            body=json.dumps({"error": "send should stay locally blocked"}),
+        )
+
+    await page.route(f"**/api/webchat/v2/threads/{THREAD_ID}/messages", handle_send)
+
+    try:
+        await _emit_approval_gate(page, allow_always=False, gate_ref="gate-block-send")
+        await expect(page.locator(SEL_V2["approval_card"]).first).to_be_visible(
+            timeout=5000
+        )
+
+        status_text = page.get_by_text(
+            "Resolve the approval request before sending another message.",
+            exact=True,
+        ).first
+        await expect(status_text).to_be_visible(timeout=5000)
+        await expect(page.locator(SEL_V2["busy_gate_notice"])).to_have_count(0)
+        await expect(
+            page.locator(SEL_V2["msg_system"]).filter(
+                has_text="Resolve the approval request"
+            )
+        ).to_have_count(0)
+        await expect(
+            page.locator(SEL_V2["msg_assistant"]).filter(
+                has_text="Resolve the approval request"
+            )
+        ).to_have_count(0)
+        await expect(
+            page.locator(SEL_V2["msg_user"]).filter(
+                has_text="Resolve the approval request"
+            )
+        ).to_have_count(0)
+
+        composer = page.locator(SEL_V2["chat_composer"])
+        await expect(composer).to_have_attribute("data-send-disabled", "true")
+        await composer.fill("send while approval is pending")
+        await composer.press("Enter")
+
+        await expect(composer).to_have_value("send while approval is pending")
+        await expect(page.locator(SEL_V2["msg_user"])).to_have_count(1)
+        await expect(page.locator(SEL_V2["msg_system"])).to_have_count(0)
+        await expect(page.locator(SEL_V2["msg_assistant"])).to_have_count(0)
+        assert send_requests == []
+    finally:
+        await context.close()
+
+
 async def test_reborn_legacy_bare_approval_keywords_send_as_chat_without_gate(
     reborn_v2_page,
 ):
