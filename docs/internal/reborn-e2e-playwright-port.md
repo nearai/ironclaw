@@ -778,6 +778,50 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the project overview port in
   the Reborn WebUI v2 Playwright job.
 
+### Step 22: Legacy Responses API Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_responses_api.py`.
+
+Ported the API-level intent from legacy `test_responses_api.py` to the
+standalone Reborn OpenAI-compatible route mount:
+
+- `/v1/responses` accepts non-streaming text input and returns a completed
+  `response` object with a `resp_` id;
+- `/api/v1/responses` works as the route alias for typed Responses message
+  input;
+- `previous_response_id` continues a conversation and `GET
+  /api/v1/responses/{id}` retrieves the resulting response;
+- streaming requests return an SSE lifecycle on the Reborn projection stream;
+- unauthenticated requests are rejected before side effects;
+- invalid empty input-item arrays return a field-scoped `400` error.
+
+Behavior adjustment:
+
+- Legacy tests sent `input=[{"role": "user", "content": "..."}]`. Reborn's
+  OpenAI-compatible DTO uses the typed Responses item shape, so the migrated
+  test sends `{"type": "message", "role": "user", "content": [...]}`.
+- The legacy streaming assertion only required raw SSE events. Reborn can
+  complete a fast response with `response.created` and `response.completed`
+  events without an intermediate `response.output_text.delta`, so the migrated
+  test asserts the lifecycle events rather than requiring a delta.
+- Legacy `x_context.notification_response` injection has no matching Reborn
+  OpenAI-compatible Responses DTO field yet, so those approval/rejection context
+  cases remain open until a Reborn route-level context contract lands.
+
+Harness adjustment:
+
+- Added a scenario-local binary fixture that builds `ironclaw-reborn` with
+  `openai-compat-beta` before starting `serve`. The existing WebUI v2 harness
+  remains on `webui-v2-beta`; this test opts into the extra feature only where
+  the Responses route mount is required.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the Responses API port in the
+  Reborn WebUI v2 Playwright job and raises the per-test timeout to 180 seconds
+  so the feature-gated binary build in this scenario does not flake on slower
+  runners.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -807,6 +851,9 @@ Not yet ported:
 - legacy project mission/thread/widget drill-in parity, because the current
   Reborn project page maps real project entities but still uses TODO client
   stubs for per-project missions, threads, widgets, and detail actions;
+- legacy Responses API context-injection parity for
+  `x_context.notification_response`, because the Reborn OpenAI-compatible
+  Responses DTO does not currently expose a matching context field;
 - Emulate provider full-path scenarios against standalone Reborn where the
   current test still routes through legacy `/api/chat/*`.
 
@@ -887,3 +934,10 @@ entities, but its missions, threads, widgets, mission detail, and thread detail
 client functions still return TODO stubs. The migrated test therefore covers
 list/search/open-workspace behavior and leaves the legacy engine-v2 drill-in
 tests open until matching Reborn endpoints land.
+
+The Responses API port confirmed a route-contract difference: Reborn's
+OpenAI-compatible Responses API accepts typed Responses input items and rejects
+empty item arrays, while legacy coverage used an untyped message list and empty
+text input. The migrated test follows Reborn's DTO and leaves legacy
+`x_context.notification_response` context-injection behavior open until the
+Reborn Responses surface defines an equivalent field.
