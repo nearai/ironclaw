@@ -22,7 +22,7 @@ use ironclaw_reborn_composition::{
     SlackOperatorRouteVisibility, build_slack_host_beta_runtime_mounts,
     build_webui_services_with_slack_host_beta_mounts,
 };
-use ironclaw_reborn_config::{IdentitySection, RebornProfile, seed_default_config_file_if_missing};
+use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
 use ironclaw_reborn_webui_ingress::{
     DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
     RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2,
@@ -357,7 +357,7 @@ impl ServeCommand {
         rt.block_on(async move {
             let trigger_poller_enabled = runtime_input.trigger_poller.enabled;
             let sso_enabled = sso_startup.is_some();
-            let startup_serve = if profile == RebornProfile::HostedSingleTenant {
+            let startup_serve = if profile.starts_hosted_single_tenant_listener() {
                 Some(start_hosted_single_tenant_startup_listener(listen_addr).await?)
             } else {
                 None
