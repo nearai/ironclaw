@@ -227,6 +227,7 @@ pub struct CapabilityActivityView {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    pub error_summary: Option<String>,
     /// Inline primary-argument detail for the activity row, surfaced while the
     /// invocation is still running (the completed card carries its own).
     pub subtitle: Option<String>,
@@ -258,6 +259,8 @@ impl Serialize for CapabilityActivityView {
             output_bytes: Option<u64>,
             error_kind: &'a Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            error_summary: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             subtitle: &'a Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
             input_summary: &'a Option<String>,
@@ -277,6 +280,7 @@ impl Serialize for CapabilityActivityView {
             process_id: &self.process_id,
             output_bytes: self.output_bytes,
             error_kind: &self.error_kind,
+            error_summary: &self.error_summary,
             subtitle: &self.subtitle,
             input_summary: &self.input_summary,
             updated_at: &self.updated_at,
@@ -299,6 +303,7 @@ impl CapabilityActivityView {
             process_id: input.process_id,
             output_bytes: input.output_bytes,
             error_kind: input.error_kind,
+            error_summary: input.error_summary,
             subtitle: input.subtitle,
             input_summary: input.input_summary,
             updated_at: input.updated_at,
@@ -316,6 +321,11 @@ impl CapabilityActivityView {
         // re-validate them at the product boundary (as `error_kind` is) so an
         // upstream regression can't leak unbounded/control-char text to the
         // browser.
+        validate_optional_display_text(
+            "capability_activity_error_summary",
+            self.error_summary.as_deref(),
+            CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+        )?;
         validate_optional_display_text(
             "capability_activity_subtitle",
             self.subtitle.as_deref(),
@@ -342,6 +352,7 @@ pub struct CapabilityActivityViewInput {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    pub error_summary: Option<String>,
     pub subtitle: Option<String>,
     pub input_summary: Option<String>,
     pub updated_at: DateTime<Utc>,
@@ -367,6 +378,8 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             output_bytes: Option<u64>,
             error_kind: Option<String>,
             #[serde(default)]
+            error_summary: Option<String>,
+            #[serde(default)]
             subtitle: Option<String>,
             #[serde(default)]
             input_summary: Option<String>,
@@ -385,6 +398,7 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             process_id: wire.process_id,
             output_bytes: wire.output_bytes,
             error_kind: wire.error_kind,
+            error_summary: wire.error_summary,
             subtitle: wire.subtitle,
             input_summary: wire.input_summary,
             updated_at: wire.updated_at,
@@ -1574,6 +1588,7 @@ mod tests {
                     process_id: None,
                     output_bytes: None,
                     error_kind: None,
+                    error_summary: None,
                     subtitle: None,
                     input_summary: None,
                     updated_at: Utc::now(),
@@ -1978,6 +1993,7 @@ mod tests {
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            error_summary: None,
             subtitle: None,
             input_summary: None,
             updated_at: Utc::now(),
@@ -2234,6 +2250,7 @@ mod tests {
             process_id: None,
             output_bytes: None,
             error_kind: Some("/tmp/private-host-path".to_string()),
+            error_summary: None,
             subtitle: None,
             input_summary: None,
             updated_at: Utc::now(),
@@ -2278,6 +2295,7 @@ mod tests {
             process_id: None,
             output_bytes: None,
             error_kind: None,
+            error_summary: None,
             subtitle: None,
             input_summary: None,
             updated_at: Utc::now(),

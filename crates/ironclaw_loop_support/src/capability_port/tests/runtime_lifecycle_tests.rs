@@ -280,7 +280,8 @@ async fn runtime_capability_batch_returns_runtime_unavailable_as_failed_outcome(
             capability_id: actual,
             provider: Some(provider),
             runtime: Some(RuntimeKind::FirstParty),
-            reason_kind
+            reason_kind,
+            ..
         } if actual == &capability_id
             && provider == &provider_id
             && reason_kind == &CapabilityFailureKind::Unavailable
@@ -451,10 +452,11 @@ async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones(
             ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
                 activity_id: _,
                 capability_id: actual,
-                provider: Some(provider),
-                runtime: Some(RuntimeKind::FirstParty),
-                reason_kind
-            } if actual == &capability_id && provider == &provider_id && reason_kind == &expected_kind
+            provider: Some(provider),
+            runtime: Some(RuntimeKind::FirstParty),
+            reason_kind,
+            ..
+        } if actual == &capability_id && provider == &provider_id && reason_kind == &expected_kind
         ));
     }
 }
@@ -813,7 +815,8 @@ async fn runtime_capability_unavailable_returns_failed_outcome_and_emits_failure
             capability_id: actual,
             provider: Some(provider),
             runtime: Some(RuntimeKind::FirstParty),
-            reason_kind
+            reason_kind,
+            ..
         } if actual == &capability_id
             && provider == &provider_id
             && reason_kind == &CapabilityFailureKind::Unavailable
@@ -856,7 +859,8 @@ async fn runtime_capability_invalid_request_preserves_host_error_and_emits_failu
             capability_id: actual,
             provider: Some(provider),
             runtime: Some(RuntimeKind::FirstParty),
-            reason_kind
+            reason_kind,
+            ..
         } if actual == &capability_id
             && provider == &provider_id
             && reason_kind.as_str() == AgentLoopHostErrorKind::InvalidInvocation.as_str()

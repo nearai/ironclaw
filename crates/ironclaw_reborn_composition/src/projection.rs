@@ -956,6 +956,7 @@ async fn runtime_payload_from_candidate(
                 process_id: activity.process_id,
                 output_bytes: activity.output_bytes,
                 error_kind: activity.error_kind,
+                error_summary: None,
                 subtitle: running.as_ref().and_then(|input| input.subtitle.clone()),
                 input_summary: running.and_then(|input| input.input_summary),
                 updated_at: activity.updated_at,

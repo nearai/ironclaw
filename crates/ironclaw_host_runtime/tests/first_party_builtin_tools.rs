@@ -3461,6 +3461,23 @@ async fn builtin_json_stringify_rejects_invalid_json_strings() {
 }
 
 #[tokio::test]
+async fn builtin_json_parse_rejects_non_string_data_with_safe_summary() {
+    let failure = invoke_failure_with_context(
+        &runtime(),
+        JSON_CAPABILITY_ID,
+        json!({"operation": "parse", "data": [{"name": "alpha"}]}),
+        execution_context([JSON_CAPABILITY_ID]),
+    )
+    .await;
+
+    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+    assert_eq!(
+        failure.safe_summary().as_deref(),
+        Some("json parse expected data to be a JSON string")
+    );
+}
+
+#[tokio::test]
 async fn builtin_json_rejects_v1_tool_output_stash_refs_without_leaking_input() {
     let outcome = runtime()
         .invoke_capability(RuntimeCapabilityRequest::new(

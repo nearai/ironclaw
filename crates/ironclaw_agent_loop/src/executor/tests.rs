@@ -6048,6 +6048,7 @@ async fn capability_stage_denied_approval_resume_surfaces_gate_declined_failure_
                 activity_id,
                 capability_id: emitted_capability_id,
                 reason_kind: CapabilityFailureKind::GateDeclined,
+                ..
             } if *activity_id == denied_activity_id && *emitted_capability_id == capability_id()
         )),
         "denied approval resume must emit a persistent failed capability activity"
@@ -6158,6 +6159,7 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
                 activity_id,
                 capability_id: emitted_capability_id,
                 reason_kind: CapabilityFailureKind::GateDeclined,
+                ..
             } if *activity_id == denied_activity_id && *emitted_capability_id == capability_id()
         )),
         "denied auth resume must emit a persistent failed capability activity"
@@ -6299,6 +6301,7 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
                 activity_id,
                 capability_id: emitted_capability_id,
                 reason_kind: CapabilityFailureKind::GateDeclined,
+                ..
             } if *activity_id == blocked_activity_id && *emitted_capability_id == capability_id()
         )),
         "denied tokenless auth gate must emit CapabilityActivityFailed for the original activity"
@@ -6635,6 +6638,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
                 activity_id,
                 capability_id: emitted_capability_id,
                 reason_kind: CapabilityFailureKind::GateDeclined,
+                ..
             } if *activity_id == denied_activity_id && *emitted_capability_id == capability_id()
         )),
         "only the parked activity should receive the gate-declined failure"

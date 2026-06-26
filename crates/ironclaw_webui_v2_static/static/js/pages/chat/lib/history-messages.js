@@ -193,9 +193,10 @@ export function toolCardFromPreview(preview) {
       ? null
       : preview.output_preview || preview.output_summary || null,
     toolError: failed
-      ? toolErrorText(errorKind) ||
+      ? preview.error_summary ||
         preview.output_summary ||
         preview.output_preview ||
+        toolErrorText(errorKind) ||
         preview.result_ref ||
         null
       : null,
@@ -230,7 +231,7 @@ export function toolCardFromActivity(activity) {
     toolDetail: activity.subtitle || null,
     toolParameters: activity.input_summary || null,
     toolResultPreview: null,
-    toolError: toolErrorText(errorKind),
+    toolError: activity.error_summary || toolErrorText(errorKind),
     toolErrorKind: errorKind,
     toolDurationMs: null,
     updatedAt: activity.updated_at || null,

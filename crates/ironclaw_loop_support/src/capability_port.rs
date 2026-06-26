@@ -1809,6 +1809,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     provider: Some(provider),
                     runtime: Some(runtime),
                     reason_kind: capability_failure_kind(host_error.kind.as_str())?,
+                    safe_summary: LoopSafeSummary::new(host_error.safe_summary.clone()).ok(),
                 };
                 guard.commit();
                 return self
@@ -2472,6 +2473,7 @@ fn runtime_terminal_milestone(
                 provider: Some(provider),
                 runtime: Some(runtime),
                 reason_kind: runtime_failure_kind_to_loop(failure.kind)?,
+                safe_summary: runtime_failure_loop_safe_summary(failure),
             })
         }
         RuntimeCapabilityOutcome::Unknown(unknown) => {
@@ -2481,6 +2483,10 @@ fn runtime_terminal_milestone(
                 provider: Some(provider),
                 runtime: Some(runtime),
                 reason_kind: capability_failure_kind(unknown.kind.clone())?,
+                safe_summary: runtime_loop_safe_summary(
+                    unknown.message.clone(),
+                    "capability invocation returned an unknown outcome",
+                ),
             })
         }
         RuntimeCapabilityOutcome::ApprovalRequired(_)
@@ -2685,6 +2691,13 @@ fn runtime_safe_summary(message: Option<String>, fallback: &'static str) -> Stri
         .unwrap_or_else(|| fallback.to_string())
 }
 
+fn runtime_loop_safe_summary(
+    message: Option<String>,
+    fallback: &'static str,
+) -> Option<LoopSafeSummary> {
+    LoopSafeSummary::new(runtime_safe_summary(message, fallback)).ok()
+}
+
 fn runtime_failure_safe_summary(
     failure: &RuntimeCapabilityFailure,
     fallback: &'static str,
@@ -2694,6 +2707,16 @@ fn runtime_failure_safe_summary(
         .and_then(|summary| LoopSafeSummary::new(summary).ok())
         .map(|summary| summary.to_string())
         .unwrap_or_else(|| fallback.to_string())
+}
+
+fn runtime_failure_loop_safe_summary(
+    failure: &RuntimeCapabilityFailure,
+) -> Option<LoopSafeSummary> {
+    LoopSafeSummary::new(runtime_failure_safe_summary(
+        failure,
+        "capability invocation failed",
+    ))
+    .ok()
 }
 
 fn loop_gate_ref(kind: &str, id: String) -> Result<LoopGateRef, AgentLoopHostError> {

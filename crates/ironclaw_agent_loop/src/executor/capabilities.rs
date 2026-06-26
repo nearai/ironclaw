@@ -8,7 +8,8 @@ use ironclaw_turns::{
         AuthResumeApprovalIdentity, CapabilityActivityId, CapabilityApprovalResume,
         CapabilityAuthResume, CapabilityAuthResumeReplay, CapabilityBatchInvocation,
         CapabilityCallCandidate, CapabilityFailureKind, CapabilityOutcome, CapabilityProgress,
-        CapabilityResultMessage, LoopDriverNoteKind, LoopProgressEvent, VisibleCapabilitySurface,
+        CapabilityResultMessage, LoopDriverNoteKind, LoopProgressEvent, LoopSafeSummary,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -1126,6 +1127,7 @@ impl CapabilityStage {
                         activity_id: denied_activity_id,
                         capability_id: call.capability_id.clone(),
                         reason_kind: CapabilityFailureKind::GateDeclined,
+                        safe_summary: LoopSafeSummary::new(planner_summary).ok(),
                     },
                 )
                 .await;

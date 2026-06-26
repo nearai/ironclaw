@@ -2112,6 +2112,8 @@ pub enum LoopProgressEvent {
         activity_id: CapabilityActivityId,
         capability_id: CapabilityId,
         reason_kind: CapabilityFailureKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        safe_summary: Option<LoopSafeSummary>,
     },
     GateBlocked {
         iteration: u32,

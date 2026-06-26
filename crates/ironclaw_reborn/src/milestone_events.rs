@@ -240,6 +240,7 @@ impl DurableLoopHostMilestoneSink {
                 provider,
                 runtime,
                 reason_kind,
+                ..
             } => {
                 let mut scope = scope;
                 scope.invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
@@ -533,6 +534,7 @@ mod tests {
                 provider: Some(provider.clone()),
                 runtime: Some(RuntimeKind::Script),
                 reason_kind: CapabilityFailureKind::OperationFailed,
+                safe_summary: None,
             });
 
         let sink = projector_for(thread_id, run_id);
@@ -580,6 +582,7 @@ mod tests {
                 provider: Some(provider.clone()),
                 runtime: Some(RuntimeKind::Script),
                 reason_kind: CapabilityFailureKind::OperationFailed,
+                safe_summary: None,
             },
         ] {
             let (mut milestone, thread_id, run_id) = fixture_milestone(kind);

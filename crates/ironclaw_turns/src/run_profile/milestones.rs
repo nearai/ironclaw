@@ -106,6 +106,8 @@ pub enum LoopHostMilestoneKind {
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
         reason_kind: CapabilityFailureKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        safe_summary: Option<LoopSafeSummary>,
     },
     CapabilityBatchStarted {
         iteration: u32,
@@ -498,6 +500,7 @@ where
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
         reason_kind: CapabilityFailureKind,
+        safe_summary: Option<LoopSafeSummary>,
     ) -> Result<(), AgentLoopHostError> {
         self.publish(LoopHostMilestoneKind::CapabilityFailed {
             activity_id,
@@ -505,6 +508,7 @@ where
             provider,
             runtime,
             reason_kind,
+            safe_summary,
         })
         .await
     }

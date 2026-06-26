@@ -4,7 +4,7 @@ use ironclaw_turns::{
     CapabilityActivityId, TurnId,
     run_profile::{
         CapabilityFailureKind, InMemoryLoopHostMilestoneSink, LoopDriverId, LoopHostMilestone,
-        LoopHostMilestoneKind, LoopHostMilestoneSink,
+        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopSafeSummary,
     },
 };
 use std::sync::Arc;
@@ -403,6 +403,8 @@ async fn webui_event_stream_projects_live_tool_failure() {
                 provider: None,
                 runtime: Some(RuntimeKind::FirstParty),
                 reason_kind: CapabilityFailureKind::Authorization,
+                safe_summary: LoopSafeSummary::new("json parse expected data to be a JSON string")
+                    .ok(),
             },
         })
         .await
@@ -441,4 +443,8 @@ async fn webui_event_stream_projects_live_tool_failure() {
     assert_eq!(activity.status, CapabilityActivityStatusView::Failed);
     assert_eq!(activity.runtime.as_ref(), Some(&RuntimeKind::FirstParty));
     assert_eq!(activity.error_kind.as_deref(), Some("authorization"));
+    assert_eq!(
+        activity.error_summary.as_deref(),
+        Some("json parse expected data to be a JSON string")
+    );
 }
