@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
 
-use crate::backend::EventRecord;
+use crate::backend::{EventRecord, StorageTxn};
 use crate::db::{
     child_path_like_pattern, direct_children, directory_append_error, directory_write_error,
     escape_like_literal, escape_like_with_trailing_wildcard, infrastructure_libsql_error,
@@ -14,13 +14,39 @@ use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
     BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
     FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexSpec,
-    IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
+    IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, TxnCapability,
+    VersionedEntry,
 };
+
+/// Whether the bundled libSQL build can read back an assigned `version` via a
+/// statement-level `RETURNING` clause inside a `BEGIN IMMEDIATE` transaction.
+///
+/// Probed once at [`run_migrations`](LibSqlRootFilesystem::run_migrations) time
+/// (see [`probe_returning_in_txn`]). Only the `CasExpectation::Any` write path
+/// needs a real readback — the `Absent`/`Version` modes return their version
+/// arithmetically — so this gates that one path; the governor never depends on
+/// it. Either mode keeps `put_batch` fully atomic; the difference is one extra
+/// in-transaction `SELECT` when `RETURNING` is unavailable.
+#[cfg(feature = "libsql")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadbackMode {
+    /// `INSERT … RETURNING version` works inside `BEGIN IMMEDIATE`.
+    Returning,
+    /// No `RETURNING`; read the assigned version with a `SELECT version …`
+    /// inside the same `BEGIN IMMEDIATE` before `COMMIT`.
+    SelectReadback,
+}
 
 #[cfg(feature = "libsql")]
 /// libSQL-backed [`RootFilesystem`] storing file contents by virtual path.
 pub struct LibSqlRootFilesystem {
     db: Arc<libsql::Database>,
+    /// Version-readback mechanism for the `Any` CAS path, established once by
+    /// the init-time probe in `run_migrations`. `None` until probed (the
+    /// CAS-only floor still works; `begin`/`put_batch` default to the
+    /// always-available `SelectReadback`). Shared via `Arc` so cheap clones of
+    /// the handle observe the same probe result.
+    readback: Arc<std::sync::OnceLock<ReadbackMode>>,
 }
 
 #[cfg(feature = "libsql")]
@@ -30,8 +56,28 @@ const LIBSQL_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
 
 #[cfg(feature = "libsql")]
 impl LibSqlRootFilesystem {
+    /// Virtual path used by the init-time `RETURNING`-support probe. The probe
+    /// inserts a scratch row at this path inside a transaction and then rolls
+    /// that transaction back, so the path must never hold a persisted row.
+    /// Exposed so tests can assert the probe leaves nothing behind.
+    pub const RETURNING_PROBE_PATH: &'static str = "/tmp/__ironclaw_rfs_returning_probe__";
+
     pub fn new(db: Arc<libsql::Database>) -> Self {
-        Self { db }
+        Self {
+            db,
+            readback: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
+    /// Readback mode for the `Any` CAS path. Defaults to the always-available
+    /// `SelectReadback` until the init-time probe runs, so `begin`/`put_batch`
+    /// remain correct even if called before `run_migrations` (in practice the
+    /// table would not yet exist, so a write would fail first either way).
+    fn readback_mode(&self) -> ReadbackMode {
+        self.readback
+            .get()
+            .copied()
+            .unwrap_or(ReadbackMode::SelectReadback)
     }
 
     pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
@@ -50,13 +96,21 @@ impl LibSqlRootFilesystem {
         })?;
         let result = run_libsql_migrations_inner(&conn).await;
         match result {
-            Ok(()) => conn
-                .execute("COMMIT", ())
-                .await
-                .map(|_| ())
-                .map_err(|error| {
+            Ok(()) => {
+                conn.execute("COMMIT", ()).await.map_err(|error| {
                     infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error)
-                }),
+                })?;
+                // Migrations committed: probe once whether this libSQL build
+                // supports `RETURNING` inside `BEGIN IMMEDIATE`, then cache the
+                // result so `capabilities()` can advertise `BatchPut`/`MultiKey`
+                // and the `Any` write path can pick its readback mechanism. The
+                // probe rolls back its own scratch txn, so nothing persists.
+                let mode = probe_returning_in_txn(&conn).await?;
+                // First writer wins; idempotent re-runs of run_migrations keep
+                // the original probe result.
+                let _ = self.readback.set(mode);
+                Ok(())
+            }
             Err(err) => {
                 // Best-effort rollback. If ROLLBACK itself fails (e.g. the
                 // connection is already aborted) we still surface the
@@ -133,10 +187,24 @@ impl RootFilesystem for LibSqlRootFilesystem {
         // place so Events is on; FTS5 is built into libSQL and a brute-force
         // cosine ranker for vectors is implemented in Rust, so IndexFts and
         // IndexVector are advertised here too.
-        BackendCapabilities::sql_typical()
+        let base = BackendCapabilities::sql_typical()
             .with(Capability::Events)
             .with(Capability::IndexFts)
-            .with(Capability::IndexVector)
+            .with(Capability::IndexVector);
+        // Advertise the multi-key transaction plane only once the init-time
+        // probe has confirmed a working `BEGIN IMMEDIATE` + version-readback
+        // mechanism (PR-3). The probe always lands on a working `ReadbackMode`
+        // when `BEGIN IMMEDIATE` works — and `BEGIN IMMEDIATE` failing is a
+        // Fail-Loud infrastructure error surfaced by `run_migrations` — so
+        // after a successful init this is always `MultiKey`. Before the probe
+        // (e.g. `run_migrations` not yet called) we stay at the CAS-only floor
+        // rather than advertise a `begin` we have not verified.
+        match self.readback.get() {
+            Some(_) => base
+                .with(Capability::BatchPut)
+                .with_txn(TxnCapability::MultiKey),
+            None => base,
+        }
     }
 
     async fn put(
@@ -170,12 +238,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 let conn = self.connect().await?;
                 let rows = conn
                     .execute(
-                        r#"
-                        INSERT INTO root_filesystem_entries
-                            (path, contents, is_dir, content_type, kind, indexed, version, updated_at)
-                        VALUES (?1, ?2, 0, ?3, ?4, ?5, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                        ON CONFLICT (path) DO NOTHING
-                        "#,
+                        PUT_ABSENT_SQL,
                         libsql::params![
                             path.as_str(),
                             libsql::Value::Blob(body),
@@ -203,16 +266,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 let expected_raw = record_version_to_i64(path, expected)?;
                 let rows = conn
                     .execute(
-                        r#"
-                        UPDATE root_filesystem_entries
-                        SET contents = ?1,
-                            content_type = ?2,
-                            kind = ?3,
-                            indexed = ?4,
-                            version = version + 1,
-                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                        WHERE path = ?5 AND is_dir = 0 AND version = ?6
-                        "#,
+                        PUT_VERSION_SQL,
                         libsql::params![
                             libsql::Value::Blob(body),
                             content_type_str,
@@ -240,19 +294,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 let conn = self.connect().await?;
                 let rows = conn
                     .execute(
-                        r#"
-                        INSERT INTO root_filesystem_entries
-                            (path, contents, is_dir, content_type, kind, indexed, version, updated_at)
-                        VALUES (?1, ?2, 0, ?3, ?4, ?5, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                        ON CONFLICT (path) DO UPDATE SET
-                            contents = excluded.contents,
-                            content_type = excluded.content_type,
-                            kind = excluded.kind,
-                            indexed = excluded.indexed,
-                            version = root_filesystem_entries.version + 1,
-                            updated_at = excluded.updated_at
-                        WHERE root_filesystem_entries.is_dir = 0
-                        "#,
+                        PUT_ANY_SQL,
                         libsql::params![
                             path.as_str(),
                             libsql::Value::Blob(body),
@@ -283,50 +325,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
 
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
         let conn = self.connect().await?;
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT contents, is_dir, content_type, kind, indexed, version
-                FROM root_filesystem_entries
-                WHERE path = ?1
-                "#,
-                libsql::params![path.as_str()],
-            )
-            .await
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?
-        else {
-            return Ok(None);
-        };
-        let is_dir: i64 = row
-            .get(1)
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
-        if is_dir != 0 {
-            // Directories are not addressable as Entries.
-            return Ok(None);
-        }
-        let body: Vec<u8> = row
-            .get(0)
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
-        let content_type_raw: String = row
-            .get(2)
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
-        let kind_raw: Option<String> = row.get(3).ok();
-        let indexed_raw: String = row
-            .get(4)
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
-        let version_raw: i64 = row
-            .get(5)
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
-        let entry = build_entry(path, body, content_type_raw, kind_raw, indexed_raw)?;
-        Ok(Some(VersionedEntry {
-            path: path.clone(),
-            entry,
-            version: record_version_from_i64(path, version_raw)?,
-        }))
+        libsql_get_on_conn(&conn, path).await
     }
 
     async fn ensure_index(
@@ -880,17 +879,27 @@ impl RootFilesystem for LibSqlRootFilesystem {
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let conn = self.connect().await?;
-        let deleted = conn
-            .execute(
-                "DELETE FROM root_filesystem_entries WHERE path = ?1 OR path LIKE ?2 ESCAPE '!'",
-                libsql::params![path.as_str(), child_path_like_pattern(path)],
-            )
+        libsql_delete_on_conn(&conn, path).await
+    }
+
+    async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        let conn = self.connect().await?;
+        // `BEGIN IMMEDIATE` (NOT deferred): take the database write lock up
+        // front. A deferred txn upgrades to a write lock lazily on the first
+        // write statement, and that upgrade can fail with `SQLITE_BUSY`
+        // *after* earlier statements in the batch already ran — which would
+        // violate all-or-nothing. Acquiring the write lock here means the
+        // whole `BEGIN IMMEDIATE … COMMIT` either holds the lock for its
+        // duration or fails before any leg runs.
+        conn.execute("BEGIN IMMEDIATE", ())
             .await
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
-        if deleted == 0 {
-            return Err(not_found(path.clone(), FilesystemOperation::Delete));
-        }
-        Ok(())
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::BeginTxn, error))?;
+        Ok(Box::new(LibSqlStorageTxn {
+            conn: Some(conn),
+            prefix: path.clone(),
+            readback: self.readback_mode(),
+            active: true,
+        }))
     }
 
     async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
@@ -1149,6 +1158,471 @@ async fn run_libsql_migrations_inner(conn: &libsql::Connection) -> Result<(), Fi
     ensure_libsql_index_specs_table(conn).await?;
     ensure_libsql_events_table(conn).await?;
     Ok(())
+}
+
+/// Probe whether the bundled libSQL build supports statement-level `RETURNING`
+/// inside `BEGIN IMMEDIATE`, returning the readback mode to cache.
+///
+/// Runs `INSERT … RETURNING version` against a scratch row inside a real
+/// `BEGIN IMMEDIATE` transaction (the exact dialect `begin`/`put_batch` use),
+/// then **always ROLLBACKs** so no scratch row persists. A `RETURNING`-
+/// unsupported build surfaces an error on the probe statement, which leaves the
+/// txn open for the clean ROLLBACK and selects `SelectReadback`.
+///
+/// `BEGIN IMMEDIATE` itself failing is a genuine infrastructure fault — it is
+/// the mechanism that lets libSQL advertise `MultiKey` — so it is surfaced
+/// (Fail Loud, Rule 12), not silently downgraded. (It is already exercised by
+/// the migration wrapper, so this is belt-and-suspenders.)
+#[cfg(feature = "libsql")]
+async fn probe_returning_in_txn(
+    conn: &libsql::Connection,
+) -> Result<ReadbackMode, FilesystemError> {
+    conn.execute("BEGIN IMMEDIATE", ())
+        .await
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::BeginTxn, error))?;
+    let returning_supported = probe_returning_attempt(conn).await;
+    // Always discard the probe's scratch write. A ROLLBACK that itself fails is
+    // an infrastructure fault worth surfacing rather than leaking a row.
+    conn.execute("ROLLBACK", ())
+        .await
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::BeginTxn, error))?;
+    Ok(if returning_supported {
+        ReadbackMode::Returning
+    } else {
+        ReadbackMode::SelectReadback
+    })
+}
+
+/// Attempt the `RETURNING version` readback against the scratch probe row.
+/// Returns `true` only when the statement parses, executes, and yields the
+/// expected version row. Any error (e.g. `RETURNING` unsupported) ⇒ `false`,
+/// selecting the in-txn `SELECT` readback fallback. Must be called inside an
+/// open `BEGIN IMMEDIATE`; the caller ROLLBACKs afterwards.
+#[cfg(feature = "libsql")]
+async fn probe_returning_attempt(conn: &libsql::Connection) -> bool {
+    let sql = format!("{PUT_ABSENT_SQL} RETURNING version");
+    let Ok(mut rows) = conn
+        .query(
+            &sql,
+            libsql::params![
+                LibSqlRootFilesystem::RETURNING_PROBE_PATH,
+                libsql::Value::Blob(Vec::new()),
+                "application/octet-stream",
+                Option::<String>::None,
+                "{}",
+            ],
+        )
+        .await
+    else {
+        return false;
+    };
+    matches!(rows.next().await, Ok(Some(_)))
+}
+
+/// Per-leg CAS put against an already-open libSQL connection, used by both
+/// `begin`/`StorageTxn` and the native `put_batch`. Mirrors
+/// [`LibSqlRootFilesystem::put`] but runs every statement — directory guard,
+/// the write, and the version readback — on the *same* connection so they
+/// observe the in-flight `BEGIN IMMEDIATE` write set. (Opening a second
+/// connection mid-transaction would block on SQLite's file-global write lock.)
+#[cfg(feature = "libsql")]
+async fn libsql_put_on_conn(
+    conn: &libsql::Connection,
+    readback: ReadbackMode,
+    path: &VirtualPath,
+    entry: Entry,
+    cas: CasExpectation,
+) -> Result<RecordVersion, FilesystemError> {
+    // Reject writes that would clobber a directory or an implicit-directory
+    // path (parity with the non-txn `put`).
+    if is_directory_on_conn(conn, path).await? || has_child_entry_on_conn(conn, path).await? {
+        return Err(directory_write_error(path.clone()));
+    }
+    let indexed_json =
+        serde_json::to_string(&entry.indexed).map_err(|_| FilesystemError::SerializeIndexed {
+            path: path.clone(),
+            operation: FilesystemOperation::WriteFile,
+        })?;
+    let kind_str = entry.kind.as_ref().map(|k| k.as_str().to_string());
+    let content_type_str = entry.content_type.as_str().to_string();
+    let body = entry.body;
+
+    match cas {
+        CasExpectation::Absent => {
+            let rows = conn
+                .execute(
+                    PUT_ABSENT_SQL,
+                    libsql::params![
+                        path.as_str(),
+                        libsql::Value::Blob(body),
+                        content_type_str,
+                        kind_str,
+                        indexed_json,
+                    ],
+                )
+                .await
+                .map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
+                })?;
+            if rows == 0 {
+                let found = current_version_on_conn(conn, path).await?;
+                return Err(FilesystemError::VersionMismatch {
+                    path: path.clone(),
+                    expected: None,
+                    found,
+                });
+            }
+            // Absent ⇒ version 1, known arithmetically (no readback needed).
+            Ok(RecordVersion::from_backend(1))
+        }
+        CasExpectation::Version(expected) => {
+            let expected_raw = record_version_to_i64(path, expected)?;
+            let rows = conn
+                .execute(
+                    PUT_VERSION_SQL,
+                    libsql::params![
+                        libsql::Value::Blob(body),
+                        content_type_str,
+                        kind_str,
+                        indexed_json,
+                        path.as_str(),
+                        expected_raw,
+                    ],
+                )
+                .await
+                .map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
+                })?;
+            if rows == 0 {
+                let found = current_version_on_conn(conn, path).await?;
+                return Err(FilesystemError::VersionMismatch {
+                    path: path.clone(),
+                    expected: Some(expected),
+                    found,
+                });
+            }
+            // Version(v) ⇒ v+1, known arithmetically (no readback needed).
+            Ok(expected.next())
+        }
+        CasExpectation::Any => {
+            // `Any` is the one mode whose assigned version is not known
+            // arithmetically (an upsert may insert *or* bump). Read it back
+            // inside the same `BEGIN IMMEDIATE`: via `RETURNING` when the
+            // build supports it, else a follow-up `SELECT`.
+            match readback {
+                ReadbackMode::Returning => {
+                    let sql = format!("{PUT_ANY_SQL} RETURNING version");
+                    let mut rows = conn
+                        .query(
+                            &sql,
+                            libsql::params![
+                                path.as_str(),
+                                libsql::Value::Blob(body),
+                                content_type_str,
+                                kind_str,
+                                indexed_json,
+                            ],
+                        )
+                        .await
+                        .map_err(|error| {
+                            libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
+                        })?;
+                    let Some(row) = rows.next().await.map_err(|error| {
+                        libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
+                    })?
+                    else {
+                        // 0 rows ⇒ the upsert was blocked by a directory at
+                        // `path` (the `WHERE is_dir = 0` guard).
+                        return Err(directory_write_error(path.clone()));
+                    };
+                    let version_raw: i64 = row.get(0).map_err(|error| {
+                        libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
+                    })?;
+                    record_version_from_i64(path, version_raw)
+                }
+                ReadbackMode::SelectReadback => {
+                    let rows = conn
+                        .execute(
+                            PUT_ANY_SQL,
+                            libsql::params![
+                                path.as_str(),
+                                libsql::Value::Blob(body),
+                                content_type_str,
+                                kind_str,
+                                indexed_json,
+                            ],
+                        )
+                        .await
+                        .map_err(|error| {
+                            libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
+                        })?;
+                    if rows == 0 {
+                        return Err(directory_write_error(path.clone()));
+                    }
+                    current_version_on_conn(conn, path).await?.ok_or_else(|| {
+                        FilesystemError::Backend {
+                            path: path.clone(),
+                            operation: FilesystemOperation::WriteFile,
+                            reason: "put succeeded but version lookup found no row".to_string(),
+                        }
+                    })
+                }
+            }
+        }
+    }
+}
+
+/// `true` when an explicit directory row occupies `path` (`is_dir = 1`). Runs
+/// on the supplied (possibly mid-transaction) connection.
+#[cfg(feature = "libsql")]
+async fn is_directory_on_conn(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+) -> Result<bool, FilesystemError> {
+    let mut rows = conn
+        .query(
+            "SELECT is_dir FROM root_filesystem_entries WHERE path = ?1",
+            libsql::params![path.as_str()],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Stat, error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Stat, error))?
+    else {
+        return Ok(false);
+    };
+    let is_dir: i64 = row
+        .get(0)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Stat, error))?;
+    Ok(is_dir != 0)
+}
+
+/// `true` when any descendant row exists under `path` (making it an implicit
+/// directory). Runs on the supplied (possibly mid-transaction) connection.
+#[cfg(feature = "libsql")]
+async fn has_child_entry_on_conn(
+    conn: &libsql::Connection,
+    parent: &VirtualPath,
+) -> Result<bool, FilesystemError> {
+    let pattern = child_path_like_pattern(parent);
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM root_filesystem_entries WHERE path LIKE ?1 ESCAPE '!' LIMIT 1",
+            libsql::params![pattern],
+        )
+        .await
+        .map_err(|error| libsql_db_error(parent.clone(), FilesystemOperation::Stat, error))?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|error| libsql_db_error(parent.clone(), FilesystemOperation::Stat, error))?
+        .is_some())
+}
+
+/// Current `version` for a file row at `path`, or `None` when absent. Runs on
+/// the supplied (possibly mid-transaction) connection.
+#[cfg(feature = "libsql")]
+async fn current_version_on_conn(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+) -> Result<Option<RecordVersion>, FilesystemError> {
+    let mut rows = conn
+        .query(
+            "SELECT version FROM root_filesystem_entries WHERE path = ?1 AND is_dir = 0",
+            libsql::params![path.as_str()],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?
+    else {
+        return Ok(None);
+    };
+    let version: i64 = row
+        .get(0)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    Ok(Some(record_version_from_i64(path, version)?))
+}
+
+/// Read a [`VersionedEntry`] at `path` on the supplied (possibly
+/// mid-transaction) connection. Mirrors [`LibSqlRootFilesystem::get`].
+#[cfg(feature = "libsql")]
+async fn libsql_get_on_conn(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+) -> Result<Option<VersionedEntry>, FilesystemError> {
+    let mut rows = conn
+        .query(
+            r#"
+            SELECT contents, is_dir, content_type, kind, indexed, version
+            FROM root_filesystem_entries
+            WHERE path = ?1
+            "#,
+            libsql::params![path.as_str()],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?
+    else {
+        return Ok(None);
+    };
+    let is_dir: i64 = row
+        .get(1)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    if is_dir != 0 {
+        return Ok(None);
+    }
+    let body: Vec<u8> = row
+        .get(0)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    let content_type_raw: String = row
+        .get(2)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    let kind_raw: Option<String> = row.get(3).ok();
+    let indexed_raw: String = row
+        .get(4)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    let version_raw: i64 = row
+        .get(5)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    let entry = build_entry(path, body, content_type_raw, kind_raw, indexed_raw)?;
+    Ok(Some(VersionedEntry {
+        path: path.clone(),
+        entry,
+        version: record_version_from_i64(path, version_raw)?,
+    }))
+}
+
+/// Delete the row (and any descendants) at `path` on the supplied (possibly
+/// mid-transaction) connection. Mirrors [`LibSqlRootFilesystem::delete`].
+#[cfg(feature = "libsql")]
+async fn libsql_delete_on_conn(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+) -> Result<(), FilesystemError> {
+    let deleted = conn
+        .execute(
+            "DELETE FROM root_filesystem_entries WHERE path = ?1 OR path LIKE ?2 ESCAPE '!'",
+            libsql::params![path.as_str(), child_path_like_pattern(path)],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+    if deleted == 0 {
+        return Err(not_found(path.clone(), FilesystemOperation::Delete));
+    }
+    Ok(())
+}
+
+/// libSQL [`StorageTxn`]: a held connection inside an open `BEGIN IMMEDIATE`.
+///
+/// Every op scopes to the `prefix` that produced the transaction (fail-closed
+/// with [`FilesystemError::PathOutsideMount`]), matching the Postgres and
+/// scoped txns. Must be `commit`-ed or `rollback`-ed exactly once; a dropped
+/// handle rolls back (the explicit `Drop` below, plus SQLite's auto-rollback on
+/// connection close as a final net).
+#[cfg(feature = "libsql")]
+struct LibSqlStorageTxn {
+    conn: Option<libsql::Connection>,
+    prefix: VirtualPath,
+    readback: ReadbackMode,
+    active: bool,
+}
+
+#[cfg(feature = "libsql")]
+impl LibSqlStorageTxn {
+    fn conn(&self) -> Result<&libsql::Connection, FilesystemError> {
+        self.conn.as_ref().ok_or_else(|| FilesystemError::Backend {
+            path: self.prefix.clone(),
+            operation: FilesystemOperation::BeginTxn,
+            reason: "libsql transaction already finished".to_string(),
+        })
+    }
+
+    fn check_path(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        if crate::path_prefix_matches(self.prefix.as_str(), path.as_str()) {
+            Ok(())
+        } else {
+            Err(FilesystemError::PathOutsideMount { path: path.clone() })
+        }
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[async_trait]
+impl StorageTxn for LibSqlStorageTxn {
+    async fn put(
+        &mut self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.check_path(path)?;
+        libsql_put_on_conn(self.conn()?, self.readback, path, entry, cas).await
+    }
+
+    async fn get(&mut self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.check_path(path)?;
+        libsql_get_on_conn(self.conn()?, path).await
+    }
+
+    async fn delete(&mut self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.check_path(path)?;
+        libsql_delete_on_conn(self.conn()?, path).await
+    }
+
+    async fn commit(mut self: Box<Self>) -> Result<(), FilesystemError> {
+        let conn = self.conn.take().ok_or_else(|| FilesystemError::Backend {
+            path: self.prefix.clone(),
+            operation: FilesystemOperation::BeginTxn,
+            reason: "libsql transaction already finished".to_string(),
+        })?;
+        match conn.execute("COMMIT", ()).await {
+            Ok(_) => {
+                self.active = false;
+                Ok(())
+            }
+            Err(error) => {
+                let mapped =
+                    libsql_db_error(self.prefix.clone(), FilesystemOperation::BeginTxn, error);
+                let _ = conn.execute("ROLLBACK", ()).await;
+                self.active = false;
+                Err(mapped)
+            }
+        }
+    }
+
+    async fn rollback(mut self: Box<Self>) {
+        if let Some(conn) = self.conn.take()
+            && self.active
+        {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            self.active = false;
+        }
+    }
+}
+
+#[cfg(feature = "libsql")]
+impl Drop for LibSqlStorageTxn {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Some(conn) = self.conn.take() {
+            // Dropping an un-committed handle must not leave the write lock
+            // held. Spawn a best-effort ROLLBACK; SQLite also auto-rolls-back
+            // when the connection itself is dropped.
+            tokio::spawn(async move {
+                let _ = conn.execute("ROLLBACK", ()).await;
+            });
+        }
+    }
 }
 
 #[cfg(feature = "libsql")]
@@ -1824,6 +2298,51 @@ async fn add_column_if_missing(
         .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))?;
     Ok(())
 }
+
+/// `CasExpectation::Absent` put: insert a fresh file row, no-op on conflict.
+/// Params: `?1`=path, `?2`=contents, `?3`=content_type, `?4`=kind,
+/// `?5`=indexed. A 0-row outcome means the path already holds a row.
+#[cfg(feature = "libsql")]
+const PUT_ABSENT_SQL: &str = r#"
+INSERT INTO root_filesystem_entries
+    (path, contents, is_dir, content_type, kind, indexed, version, updated_at)
+VALUES (?1, ?2, 0, ?3, ?4, ?5, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+ON CONFLICT (path) DO NOTHING
+"#;
+
+/// `CasExpectation::Version` put: CAS update of an existing file row. Params:
+/// `?1`=contents, `?2`=content_type, `?3`=kind, `?4`=indexed, `?5`=path,
+/// `?6`=expected version. A 0-row outcome means the version did not match
+/// (or the row is a directory / missing).
+#[cfg(feature = "libsql")]
+const PUT_VERSION_SQL: &str = r#"
+UPDATE root_filesystem_entries
+SET contents = ?1,
+    content_type = ?2,
+    kind = ?3,
+    indexed = ?4,
+    version = version + 1,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE path = ?5 AND is_dir = 0 AND version = ?6
+"#;
+
+/// `CasExpectation::Any` put: upsert a file row, rejecting an explicit
+/// directory at `path`. Params: `?1`=path, `?2`=contents, `?3`=content_type,
+/// `?4`=kind, `?5`=indexed. A 0-row outcome means a directory occupies `path`.
+#[cfg(feature = "libsql")]
+const PUT_ANY_SQL: &str = r#"
+INSERT INTO root_filesystem_entries
+    (path, contents, is_dir, content_type, kind, indexed, version, updated_at)
+VALUES (?1, ?2, 0, ?3, ?4, ?5, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+ON CONFLICT (path) DO UPDATE SET
+    contents = excluded.contents,
+    content_type = excluded.content_type,
+    kind = excluded.kind,
+    indexed = excluded.indexed,
+    version = root_filesystem_entries.version + 1,
+    updated_at = excluded.updated_at
+WHERE root_filesystem_entries.is_dir = 0
+"#;
 
 #[cfg(feature = "libsql")]
 const LIBSQL_ROOT_FILESYSTEM_SCHEMA: &str = r#"
