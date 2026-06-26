@@ -1931,6 +1931,19 @@ ${$e}`;if(je.current.gateKey!==k&&(je.current={gateKey:k,credentialRef:null,inFl
       <div className="flex min-w-0 flex-1 flex-col">
         <${L1} status=${x} />
 
+        ${c&&!d&&Cn&&u`
+          <div className="flex justify-end border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)] px-4 py-1.5">
+            <${wn}
+              to=${Cn}
+              className="inline-flex h-8 items-center gap-1.5 rounded-[8px] px-2.5 text-xs font-semibold text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+              title=${o("nav.logs")}
+            >
+              <${M} name="list" className="h-3.5 w-3.5" />
+              ${o("nav.logs")}
+            <//>
+          </div>
+        `}
+
         ${$&&u`
           <div
             className="mx-4 mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300"
@@ -1971,19 +1984,7 @@ ${$e}`;if(je.current.gateKey!==k&&(je.current={gateKey:k,credentialRef:null,inFl
                 onRecover=${L}
               />
             `}
-            ${c&&!d&&u`
-              <div className="flex flex-wrap items-center gap-3">
-                <${p2} />
-                ${Cn&&u`
-                  <${wn}
-                    to=${Cn}
-                    className="text-xs font-medium text-signal hover:underline"
-                  >
-                    ${o("nav.logs")}
-                  <//>
-                `}
-              </div>
-            `}
+            ${c&&!d&&u`<${p2} />`}
             ${f&&u`
               <${D1}
                 connectAction=${f}
@@ -7822,7 +7823,7 @@ ${$e}`;if(je.current.gateKey!==k&&(je.current={gateKey:k,credentialRef:null,inFl
       <span className="max-w-[18rem] truncate text-[var(--v2-text-base)]">${t}</span>
     </span>
   `}function oR(){let e=R(),{isAdmin:t=!1,threadsState:a}=ba()||{},{entries:n,totalCount:r,paused:s,togglePause:i,clearEntries:o,levelFilter:l,setLevelFilter:c,targetFilter:d,setTargetFilter:m,autoScroll:f,setAutoScroll:h,serverLevel:x,changeServerLevel:y,scope:$,isLoading:g,error:v,needsThreadScope:b}=rR({isAdmin:t,defaultThreadId:t?null:a?.activeThreadId||null}),w=p.default.useRef(null),S=p.default.useRef(!0);p.default.useEffect(()=>{f&&S.current&&w.current&&(w.current.scrollTop=0)},[n,f]);let C=p.default.useCallback(L=>{S.current=L.currentTarget.scrollTop<=48},[]),N=n.length>0,E=$?.active||[];return u`
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <!-- Toolbar -->
       <div
         className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)] px-4 py-2"
