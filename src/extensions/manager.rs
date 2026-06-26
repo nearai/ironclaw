@@ -8135,6 +8135,16 @@ impl ExtensionManager {
                 if secret_def.optional {
                     continue;
                 }
+                // OAuth-resolvable secrets are satisfied by the OAuth `auth_url`
+                // flow initiated below (the WasmChannel branch), not by a
+                // directly submitted/stored value. A missing one must fall
+                // through to that flow rather than hard-failing here — otherwise
+                // configuring an OAuth channel with empty secrets (the expected
+                // first step) returns ValidationFailed instead of an auth_url.
+                // Mirrors the WasmTool path's `is_auto_resolved_oauth_field`.
+                if self.secret_supports_oauth(user_id, &secret_def.name).await {
+                    continue;
+                }
                 let submitted = secrets
                     .get(&secret_def.name)
                     .is_some_and(|v| !v.trim().is_empty());
