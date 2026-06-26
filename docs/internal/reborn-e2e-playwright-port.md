@@ -2002,6 +2002,28 @@ Behavior adjustment:
   legacy admin-created multi-user greeting flows in the product-gap bucket until
   Reborn exposes equivalent v2 admin/user provisioning behavior.
 
+### Step 61: Legacy Pending Welcome Suppression Port
+
+Extended `test_reborn_webui_v2_legacy_pending_messages.py`.
+
+Ported the user-facing invariant from legacy
+`test_welcome_card_hidden_when_pending` to Reborn's empty landing state:
+
+- opened an empty Reborn thread through the real chat route with mocked v2
+  session/thread/timeline endpoints;
+- asserted the empty landing headline is visible before the user sends;
+- held the send request in flight so the optimistic pending message remains
+  active;
+- asserted the pending user message renders and the empty landing headline is
+  removed while the send is still unresolved.
+
+Behavior adjustment:
+
+- Legacy v1 manipulated `_pendingUserMessages` and `.welcome-card` directly.
+  Reborn's equivalent is the React `showLanding` branch: pending optimistic
+  messages increase `messages.length`, so the empty landing is replaced by the
+  message list without relying on v1 globals.
+
 ## Open Migration Buckets
 
 Not yet ported:

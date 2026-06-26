@@ -231,6 +231,44 @@ async def test_reborn_legacy_pending_message_visible_while_send_is_in_flight(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_empty_landing_hidden_when_message_pending(
+    reborn_v2_server, reborn_v2_browser
+):
+    release_send = asyncio.Event()
+
+    async def handle_delayed_send(route, _payload, fulfill_json):
+        await release_send.wait()
+        await fulfill_json(route, _submitted_response(), status=202)
+
+    harness = await _open_mocked_pending_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        send_handler=handle_delayed_send,
+    )
+    try:
+        page = harness["page"]
+        await expect(
+            page.get_by_text("Hello, what do you need help with?")
+        ).to_be_visible(timeout=5000)
+
+        composer = page.locator(SEL_V2["chat_composer"])
+        await composer.fill("Welcome card suppression test")
+        await composer.press("Enter")
+
+        await expect(
+            page.locator(SEL_V2["msg_user"]).filter(
+                has_text="Welcome card suppression test"
+            )
+        ).to_have_count(1, timeout=5000)
+        await expect(
+            page.get_by_text("Hello, what do you need help with?")
+        ).to_have_count(0)
+        assert harness["send_requests"][0]["content"] == "Welcome card suppression test"
+    finally:
+        release_send.set()
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_pending_message_reconciles_with_confirmed_timeline(
     reborn_v2_server, reborn_v2_browser
 ):
