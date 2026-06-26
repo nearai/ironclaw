@@ -182,7 +182,7 @@ jobs:
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         package: ${{ fromJSON(needs.package-matrix.outputs.packages) }}
     steps:
@@ -255,7 +255,7 @@ jobs:
       REBORN_ROOT_TEST_TIMEOUT: 28m
       CARGO_INCREMENTAL: "0"
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         partition: [0, 1, 2, 3]
     steps:
