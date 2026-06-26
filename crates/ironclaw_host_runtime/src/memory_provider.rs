@@ -135,9 +135,20 @@ impl MemoryServiceResolver {
             )),
             // A registered third-party provider (e.g. mem0) backs the binding.
             // Third-party providers are remote/REST-backed and do not consume the
-            // per-invocation filesystem or the prompt-write-safety sink — those
-            // are native-construction inputs — so both are intentionally unused
-            // on this arm. An unregistered third-party id fails closed.
+            // per-invocation filesystem; an unregistered third-party id fails closed.
+            //
+            // SECURITY LIMITATION (tracked in #5264): the prompt-write-safety
+            // engine (write-time prompt-injection rejection + per-write audit
+            // events) lives inside `NativeMemoryService`, so the
+            // `prompt_write_safety_event_sink` is intentionally unused on this arm
+            // — a third-party document_store binding does NOT get write-time
+            // prompt-write-safety enforcement or audit. This is acceptable for the
+            // current off-by-default surface because a third-party provider cannot
+            // reach the *trusted* prompt surface (identity files
+            // AGENTS.md/SOUL.md/… are native-filesystem-only) and all retrieved
+            // content is host-wrapped as untrusted before it can enter a prompt.
+            // Hoisting prompt-write-safety host-side (provider-agnostic, before
+            // dispatch) is the proper fix and is deferred to #5264.
             DocumentStoreResolution::ThirdParty(extension_id) => self
                 .third_party_document_store
                 .get(&extension_id)
