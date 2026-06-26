@@ -1367,6 +1367,92 @@ Behavior adjustment:
   ports become appropriate only when standalone Reborn exposes channel-specific
   setup, pairing, and webhook/DM approval flows as first-class v2 surfaces.
 
+### Step 37: Legacy Engine-v2, WASM Lifecycle, and Provider-Fixture Review
+
+Reviewed the remaining legacy/general scenario files that had not been named
+explicitly in this work log:
+
+- `test_agent_loop_recovery.py`
+- `test_emulate_reborn_provider_contracts.py`
+- `test_mission_gmail_3133.py`
+- `test_routines_tab_after_v2_upgrade.py`
+- `test_v2_activity_shell.py`
+- `test_v2_auth_oauth_matrix.py`
+- `test_v2_engine_approval_flow.py`
+- `test_v2_engine_auth_cancel.py`
+- `test_v2_engine_auth_flow.py`
+- `test_v2_engine_error_handling.py`
+- `test_v2_engine_oauth_google.py`
+- `test_v2_engine_tool_lifecycle.py`
+- `test_v2_github_pat_flow.py`
+- `test_v2_gsuite_oauth_flow.py`
+- `test_v2_kernel_auth_gateway_flow.py`
+- `test_v2_notion_mcp_oauth_flow.py`
+- `test_wasm_lifecycle.py`
+
+Current Reborn coverage:
+
+- `test_agent_loop_recovery.py` is represented by Step 34's Reborn tool-loop
+  recovery ports, except for the empty-model-reply UX decision documented there;
+- `test_emulate_reborn_provider_contracts.py` is already a provider-fixture
+  contract suite for Reborn-capable Google/GitHub/Slack integrations. It is not
+  a browser/WebUI migration target;
+- WebChat v2 approval, auth, tool execution, activity-card persistence,
+  product-auth card rendering, OAuth URL safety, and manual-token submission
+  behavior are covered by the migrated Reborn WebUI v2 Playwright tests plus
+  Reborn/product-workflow Rust contract tests;
+- the Reborn OpenAI-compatible Responses API has direct migrated coverage in
+  `test_reborn_webui_v2_legacy_responses_api.py`;
+- the current full migrated standalone Reborn WebUI v2 suite is passing at 102
+  tests.
+
+Current blocker:
+
+- most remaining `test_v2_*` files are not standalone Reborn WebUI v2 tests.
+  They start the old gateway with `ENGINE_V2=true` and exercise legacy
+  `/api/chat/*`, `/api/engine/*`, `/api/chat/approval`,
+  `/api/chat/gate/resolve`, `/oauth/callback`, and old hash/tab shell behavior;
+- `test_v2_activity_shell.py` and `test_routines_tab_after_v2_upgrade.py`
+  target the old browser shell's tab-routing decisions and legacy routines
+  fallback. Reborn has a different sidebar/application shell and the current
+  routines page still uses TODO client stubs;
+- `test_mission_gmail_3133.py` targets the legacy mission/routine bridge,
+  `/api/engine/missions`, legacy extension Gmail OAuth setup, and the legacy
+  `/oauth/callback` resume path. Current Reborn WebUI v2 has no equivalent
+  first-class mission detail/fire/resume browser surface;
+- `test_v2_engine_approval_flow.py`, `test_v2_engine_tool_lifecycle.py`, and
+  `test_v2_engine_error_handling.py` are valuable old engine-v2 gateway
+  contract tests, but their history DTO, tool names, and approval endpoints are
+  not the standalone Reborn WebChat v2 DTOs. Native Reborn parity should be
+  covered through the Reborn runner/driver/executor and WebChat v2 timeline
+  contracts rather than copying the legacy gateway harness;
+- `test_v2_engine_auth_flow.py`, `test_v2_engine_auth_cancel.py`,
+  `test_v2_engine_oauth_google.py`, `test_v2_auth_oauth_matrix.py`,
+  `test_v2_kernel_auth_gateway_flow.py`, `test_v2_github_pat_flow.py`,
+  `test_v2_gsuite_oauth_flow.py`, and `test_v2_notion_mcp_oauth_flow.py`
+  mix old gateway chat/history endpoints with newer product-auth route probes.
+  The route-level product-auth checks are useful, but the skipped browser tests
+  explicitly require a `webui-v2-beta`/Reborn-native harness and should be
+  converted only after those flows are exposed through standalone Reborn's
+  `/api/webchat/v2/*` contracts;
+- `test_wasm_lifecycle.py` validates legacy `/api/extensions/*` registry,
+  install, setup, activate, remove, reinstall, and response-field semantics for
+  WASM extensions. Reborn WebUI v2 currently covers the browser install/manage
+  surface and extension setup/auth URL safety, but not the exact legacy
+  registry/install/remove API shape or `secrets` table side effects.
+
+Behavior adjustment:
+
+- Keep the old `ENGINE_V2=true` gateway tests as legacy compatibility or
+  historical contract coverage until each behavior has a Reborn-native boundary.
+  A functional Reborn port means re-expressing those scenarios against the
+  Reborn runner/driver/executor, product-auth services, adapter crates, and
+  `/api/webchat/v2/*` DTOs. It is not a mechanical endpoint rename.
+- Porting the WASM lifecycle suite requires either Reborn v2 extension lifecycle
+  endpoints with real install/remove/setup contracts, or lower-level Reborn
+  extension-service contract tests that assert the new API shape instead of the
+  old `/api/extensions/*` responses.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -1430,6 +1516,17 @@ Not yet ported:
 - legacy empty-model-reply visible-error parity, because Reborn currently treats
   model `InvalidOutput` as a failed run without writing an assistant transcript
   row;
+- legacy `ENGINE_V2=true` gateway contract parity for old `/api/chat/*`,
+  `/api/engine/*`, `/api/chat/approval`, `/api/chat/gate/resolve`, and
+  `/oauth/callback` scenarios. These should be replaced with Reborn-native
+  runner/driver/executor, product-auth, and `/api/webchat/v2/*` coverage rather
+  than copied to the standalone WebUI harness;
+- legacy WASM lifecycle API parity, because `test_wasm_lifecycle.py` asserts
+  exact `/api/extensions/*` registry/install/setup/remove/reinstall response
+  fields and old extension auth state;
+- provider-fixture full-path parity for Google/GitHub/Slack/Notion flows where
+  the current tests still use old gateway chat/history endpoints or remain
+  browser-skipped pending a Reborn-native `webui-v2-beta` harness;
 - legacy Responses API context-injection parity for
   `x_context.notification_response`, because the Reborn OpenAI-compatible
   Responses DTO does not currently expose a matching context field;
