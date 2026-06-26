@@ -1072,7 +1072,8 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_host_api::{AgentId, CapabilityId, TenantId, ThreadId, UserId};
     use ironclaw_loop_support::{
-        AwaitedChildSetRecord, CapabilityResultWrite, SubagentGateResolutionStore, SubagentKindId,
+        AwaitedChildSetRecord, CapabilityResultWrite, CapabilityWriteResult,
+        SubagentGateResolutionStore, SubagentKindId,
     };
     use ironclaw_threads::{
         AppendAssistantDraftRequest, AppendToolResultReferenceRequest, EnsureThreadRequest,
@@ -1318,9 +1319,14 @@ mod tests {
         async fn write_capability_result(
             &self,
             write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            let output = write.output.clone();
             self.writes.lock().unwrap().push(write.output);
-            Ok((self.result_ref.clone(), 0))
+            Ok(CapabilityWriteResult::from_output(
+                self.result_ref.clone(),
+                0,
+                &output,
+            ))
         }
 
         async fn update_capability_result(
@@ -1365,9 +1371,14 @@ mod tests {
         async fn write_capability_result(
             &self,
             write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            let output = write.output.clone();
             self.writes.lock().unwrap().push(write.output);
-            Ok((self.result_ref.clone(), 0))
+            Ok(CapabilityWriteResult::from_output(
+                self.result_ref.clone(),
+                0,
+                &output,
+            ))
         }
 
         async fn update_capability_result(
@@ -1787,6 +1798,7 @@ mod tests {
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
@@ -1815,6 +1827,7 @@ mod tests {
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
@@ -1847,6 +1860,7 @@ mod tests {
             resolved_model_route: None,
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
@@ -1887,6 +1901,7 @@ mod tests {
             resolved_model_route: None,
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
@@ -2379,6 +2394,7 @@ mod tests {
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
@@ -4355,8 +4371,11 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
-            Ok((self.result_ref.clone(), self.byte_len))
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            Ok(CapabilityWriteResult::without_output_digest(
+                self.result_ref.clone(),
+                self.byte_len,
+            ))
         }
 
         async fn update_capability_result(

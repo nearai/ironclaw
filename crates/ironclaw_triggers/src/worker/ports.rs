@@ -112,7 +112,16 @@ pub struct TriggerActiveRunStateRequest {
 pub enum TriggerActiveRunState {
     Missing,
     Nonterminal,
-    Terminal { status: TriggerRunHistoryStatus },
+    /// The run is parked on a gate that needs human interaction (tool-approval
+    /// or auth) which an unattended scheduled fire cannot satisfy. Cleanup keeps
+    /// the active fire locked until the underlying turn reaches a terminal state;
+    /// clearing it earlier would need to atomically terminate the turn as well,
+    /// otherwise the run could later resume after failed trigger history was
+    /// recorded.
+    Blocked,
+    Terminal {
+        status: TriggerRunHistoryStatus,
+    },
 }
 
 #[async_trait]

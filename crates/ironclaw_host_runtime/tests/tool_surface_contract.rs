@@ -543,6 +543,138 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     assert_schema_has_property(&surface, "builtin.skill_install", "url");
     assert_schema_has_property(&surface, "builtin.skill_install", "name");
 
+    let apply_patch_schema = &surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id == capability_id("builtin.apply_patch"))
+        .expect("builtin.apply_patch should be visible")
+        .descriptor
+        .parameters_schema;
+    let apply_patch_validator =
+        jsonschema::validator_for(apply_patch_schema).expect("apply_patch schema is valid");
+    apply_patch_validator
+        .validate(&json!({
+            "path": "/workspace/main.rs",
+            "old_string": "old",
+            "new_string": "new"
+        }))
+        .expect("apply_patch schema should accept canonical single-edit input");
+    apply_patch_validator
+        .validate(&json!({
+            "path": "/workspace/main.rs",
+            "edits": [{"old_string": "old", "new_string": "new"}]
+        }))
+        .expect("apply_patch schema should accept canonical multi-edit input");
+    apply_patch_validator
+        .validate(&json!({
+            "path": "/workspace/main.rs",
+            "edits": [{"old_string": "old", "new_string": "new"}],
+            "replace_all": true
+        }))
+        .expect("apply_patch schema should accept replace_all with one edit");
+    apply_patch_validator
+        .validate(&json!({
+            "path": "/workspace/main.rs",
+            "old_string": "old",
+            "new_string": "new",
+            "edits": null
+        }))
+        .expect("apply_patch schema should accept null edits placeholder with single edit");
+    apply_patch_validator
+        .validate(&json!({
+            "path": "/workspace/main.rs",
+            "old_string": "old",
+            "new_string": "new",
+            "edits": "null"
+        }))
+        .expect("apply_patch schema should accept string null edits placeholder with single edit");
+    apply_patch_validator
+        .validate(&json!({
+            "path": "/workspace/main.rs",
+            "old_string": "null",
+            "new_string": null,
+            "edits": [{"old_string": "old", "new_string": "new"}]
+        }))
+        .expect("apply_patch schema should accept inactive single-edit placeholders with edits");
+    assert!(
+        apply_patch_validator
+            .validate(&json!({
+                "path": "/workspace/main.rs",
+                "edits": []
+            }))
+            .is_err(),
+        "apply_patch schema should reject empty edits"
+    );
+    assert!(
+        apply_patch_validator
+            .validate(&json!({
+                "path": "/workspace/main.rs",
+                "old_string": "null",
+                "new_string": "new"
+            }))
+            .is_err(),
+        "apply_patch schema should reject active string null old_string placeholder"
+    );
+    assert!(
+        apply_patch_validator
+            .validate(&json!({
+                "path": "/workspace/main.rs",
+                "old_string": "old",
+                "new_string": "null"
+            }))
+            .is_err(),
+        "apply_patch schema should reject active string null new_string placeholder"
+    );
+    assert!(
+        apply_patch_validator
+            .validate(&json!({
+                "path": "/workspace/main.rs",
+                "edits": [
+                    {"old_string": "old", "new_string": "new"},
+                    {"old_string": "other", "new_string": "replacement"}
+                ],
+                "replace_all": true
+            }))
+            .is_err(),
+        "apply_patch schema should reject replace_all with multiple edits"
+    );
+    assert!(
+        apply_patch_validator
+            .validate(&json!({
+                "path": "/workspace/main.rs",
+                "old_string": "null",
+                "new_string": null,
+                "edits": [
+                    {"old_string": "old", "new_string": "new"},
+                    {"old_string": "other", "new_string": "replacement"}
+                ],
+                "replace_all": true
+            }))
+            .is_err(),
+        "apply_patch schema should reject replace_all multi-edit even with placeholders"
+    );
+    assert!(
+        apply_patch_validator
+            .validate(&json!({
+                "path": "/workspace/main.rs",
+                "old_string": "old",
+                "new_string": "new",
+                "edits": [{"old_string": "old", "new_string": "new"}]
+            }))
+            .is_err(),
+        "apply_patch schema should reject complete single-edit shape mixed with edits array"
+    );
+    assert!(
+        apply_patch_validator
+            .validate(&json!({
+                "path": "/workspace/main.rs",
+                "old_string": "old",
+                "edits": [{"old_string": "old", "new_string": "new"}]
+            }))
+            .is_err(),
+        "apply_patch schema should reject mixed top-level edit shapes"
+    );
+
     let trigger_create = surface
         .capabilities
         .iter()

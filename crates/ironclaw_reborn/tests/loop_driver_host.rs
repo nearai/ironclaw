@@ -32,21 +32,22 @@ use ironclaw_host_runtime::{
     RuntimeApprovalGate, RuntimeAuthGate, RuntimeBlockedReason, RuntimeCapabilityCompleted,
     RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
     RuntimeCapabilityResumeRequest, RuntimeCapabilityUnknown, RuntimeFailureKind, RuntimeGateId,
-    RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest, SurfaceKind,
-    VisibleCapability, VisibleCapabilityAccess,
+    RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest, SurfaceKind, TurnRunScheduler,
+    TurnRunSchedulerConfig, VisibleCapability, VisibleCapabilityAccess,
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, EmptyUserProfileSource,
-    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
-    HostIdentityMessageContent, HostInputBatch, HostInputEnvelope, HostInputQueue,
-    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
-    HostRuntimeLoopCapabilityPort, HostSkillContextBuildError, HostSkillContextCandidate,
-    HostSkillContextSource, HostUserProfileSource, IdentityApplicability, IdentityFileName,
-    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
-    RunCancellationHandle, identity_message_ref, loop_driver_execution_extension_id,
+    CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
+    EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
+    HostIdentityContextSource, HostIdentityMessageContent, HostInputBatch, HostInputEnvelope,
+    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
+    HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
+    HostManagedModelResponse, HostRuntimeLoopCapabilityPort, HostSkillContextBuildError,
+    HostSkillContextCandidate, HostSkillContextSource, HostUserProfileSource,
+    IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
+    identity_message_ref, loop_driver_execution_extension_id,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::driver_registry::{
@@ -69,17 +70,16 @@ use ironclaw_reborn::planned_driver_factory::{
     SUBAGENT_PLANNED_PROFILE_ID, default_planned_run_profile_resolver,
 };
 use ironclaw_reborn::runtime::{
-    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, build_default_planned_runtime,
-    build_product_live_planned_runtime,
+    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, SchedulerWakeWiring,
+    build_default_planned_runtime, build_product_live_planned_runtime,
 };
 use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
 use ironclaw_reborn::text_loop_driver::TextOnlyModelReplyDriver;
-use ironclaw_reborn::turn_runner::{
-    HostFactory, HostFactoryError, TurnRunnerWakeReceiver, TurnRunnerWorker, TurnRunnerWorkerConfig,
-};
+use ironclaw_reborn::turn_run_executor::RebornTurnRunExecutor;
+use ironclaw_reborn::turn_runner::{HostFactory, HostFactoryError};
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
@@ -1540,23 +1540,20 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
         )
         .unwrap();
 
-    let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
-    let worker = TurnRunnerWorker::new(
-        TurnRunnerWorkerConfig {
-            heartbeat_interval: std::time::Duration::from_millis(20),
-            poll_interval: std::time::Duration::from_millis(10),
-            scope_filter: Some(fixture.context.scope.clone()),
-        },
-        reopened_turn_store.clone(),
+    let executor = Arc::new(RebornTurnRunExecutor::new(
         loop_exit_applier_for_fixture(&fixture, reopened_turn_store.clone()),
         Arc::new(registry),
-        Arc::new(fixture.factory_with_loop_checkpoint_store(reopened_turn_store.clone())),
-        wake_receiver,
-    );
-
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let cancel_clone = cancel.clone();
-    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+        Arc::new(fixture.factory_with_loop_checkpoint_store(reopened_turn_store.clone()))
+            as Arc<dyn HostFactory>,
+    ));
+    let scheduler_handle = TurnRunScheduler::new(
+        reopened_turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        TurnRunSchedulerConfig::default()
+            .with_runner_heartbeat_interval(std::time::Duration::from_millis(20))
+            .with_poll_interval(std::time::Duration::from_millis(10)),
+    )
+    .start();
 
     let completed_state = wait_for_run_status(
         reopened_turn_store.as_ref(),
@@ -1566,8 +1563,7 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
         "reopened turn store worker should complete queued run",
     )
     .await;
-    cancel.cancel();
-    handle.await.unwrap();
+    scheduler_handle.shutdown().await;
 
     assert_eq!(completed_state.run_id, run_id);
     assert!(completed_state.failure.is_none());
@@ -1601,6 +1597,97 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
             && message.content.as_deref() == Some("model says hi")
             && message.turn_run_id.as_deref() == Some(expected_run_id.as_str())
     }));
+}
+
+/// Verifies that `TurnRunScheduler` emits a "turn run started" debug event with
+/// `thread_id` and `run_id` correlation fields so the operator Logs panel can
+/// scope entries to a specific run.
+///
+/// # Why `#[traced_test]` instead of `set_default`
+///
+/// `tracing::dispatcher::set_default` is thread-local and subject to a global
+/// `SCOPED_COUNT` fast-path race in `tracing-core`: when parallel tests
+/// decrement the count to 0, spawned async tasks silently fall back to the
+/// no-op global dispatcher even though a thread-local subscriber is still
+/// active. `#[traced_test]` registers a global subscriber instead, which
+/// correctly captures events from `tokio::spawn`'d tasks regardless of
+/// parallelism. The `no-env-filter` feature is required because the scheduler
+/// event originates in `ironclaw_host_runtime`, not in the test crate.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn turn_runner_worker_emits_thread_run_correlated_operator_log() {
+    let fixture =
+        HostFixture::new_unsubmitted("thread-runner-operator-log", "hello operator log").await;
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let resolver = InMemoryRunProfileResolver::default();
+    let resolved = resolver
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    let descriptor = resolved.loop_driver.clone();
+    let run_id =
+        queue_fixture_turn(&fixture, turn_store.as_ref(), &resolver, "idem-runner-log").await;
+
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            Arc::new(TextOnlyFinalReplyDriver { descriptor }),
+            DriverRequirements::all_required(),
+            DriverKind::Reference,
+        )
+        .unwrap();
+
+    let executor = Arc::new(RebornTurnRunExecutor::new(
+        loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
+        Arc::new(registry),
+        Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone()))
+            as Arc<dyn HostFactory>,
+    ));
+    let scheduler_handle = TurnRunScheduler::new(
+        turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        TurnRunSchedulerConfig::default()
+            .with_runner_heartbeat_interval(std::time::Duration::from_millis(20))
+            .with_poll_interval(std::time::Duration::from_millis(10)),
+    )
+    .start();
+
+    wait_for_run_status(
+        turn_store.as_ref(),
+        &fixture.context.scope,
+        run_id,
+        TurnStatus::Completed,
+        "turn runner should complete queued run for operator log correlation",
+    )
+    .await;
+    scheduler_handle.shutdown().await;
+
+    let thread_id_str = fixture.context.scope.thread_id.to_string();
+    let run_id_str = run_id.to_string();
+    // `logs_assert` gives access to all captured log lines from this test.
+    // We verify that at least one line contains the "turn run started" message
+    // together with the expected thread_id and run_id correlation fields, which
+    // are emitted as explicit event fields on the `debug!` call in
+    // `ironclaw_host_runtime::turn_scheduler::spawn_executor_task`.
+    logs_assert(|lines: &[&str]| {
+        let found = lines.iter().any(|line| {
+            line.contains("turn run started")
+                && line.contains(&format!("thread_id={thread_id_str}"))
+                && line.contains(&format!("run_id={run_id_str}"))
+        });
+        if found {
+            Ok(())
+        } else {
+            let matching: Vec<_> = lines
+                .iter()
+                .filter(|l| l.contains("turn run started"))
+                .collect();
+            Err(format!(
+                "no log line found with 'turn run started', thread_id={thread_id_str}, run_id={run_id_str}; \
+                 lines_with_message={matching:?}"
+            ))
+        }
+    });
 }
 
 #[cfg(feature = "libsql-restart-tests")]
@@ -1762,23 +1849,19 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
             DriverKind::Reference,
         )
         .unwrap();
-    let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
-    let worker = TurnRunnerWorker::new(
-        TurnRunnerWorkerConfig {
-            heartbeat_interval: std::time::Duration::from_millis(20),
-            poll_interval: std::time::Duration::from_millis(10),
-            scope_filter: Some(turn_scope.clone()),
-        },
-        turn_store.clone(),
+    let executor = Arc::new(RebornTurnRunExecutor::new(
         applier,
         Arc::new(registry),
-        Arc::new(factory),
-        wake_receiver,
-    );
-
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let cancel_clone = cancel.clone();
-    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+        Arc::new(factory) as Arc<dyn HostFactory>,
+    ));
+    let scheduler_handle = TurnRunScheduler::new(
+        turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        TurnRunSchedulerConfig::default()
+            .with_runner_heartbeat_interval(std::time::Duration::from_millis(20))
+            .with_poll_interval(std::time::Duration::from_millis(10)),
+    )
+    .start();
     let completed_state = wait_for_run_status(
         turn_store.as_ref(),
         &turn_scope,
@@ -1787,8 +1870,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
         "reopened libSQL turn/thread services should complete queued run",
     )
     .await;
-    cancel.cancel();
-    handle.await.unwrap();
+    scheduler_handle.shutdown().await;
 
     assert_eq!(completed_state.run_id, run_id);
     assert!(completed_state.failure.is_none());
@@ -1901,23 +1983,20 @@ async fn turn_runner_worker_drives_full_text_only_model_transcript_completion_af
         )
         .unwrap();
 
-    let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
-    let worker = TurnRunnerWorker::new(
-        TurnRunnerWorkerConfig {
-            heartbeat_interval: std::time::Duration::from_millis(20),
-            poll_interval: std::time::Duration::from_millis(10),
-            scope_filter: Some(fixture.context.scope.clone()),
-        },
-        turn_store.clone(),
+    let executor = Arc::new(RebornTurnRunExecutor::new(
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
-        Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone())),
-        wake_receiver,
-    );
-
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let cancel_clone = cancel.clone();
-    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+        Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone()))
+            as Arc<dyn HostFactory>,
+    ));
+    let scheduler_handle = TurnRunScheduler::new(
+        turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        TurnRunSchedulerConfig::default()
+            .with_runner_heartbeat_interval(std::time::Duration::from_millis(20))
+            .with_poll_interval(std::time::Duration::from_millis(10)),
+    )
+    .start();
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
@@ -1933,12 +2012,11 @@ async fn turn_runner_worker_drives_full_text_only_model_transcript_completion_af
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "worker should complete queued run via fallback polling after missed wake"
+            "scheduler should complete queued run via fallback polling after missed wake"
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    cancel.cancel();
-    handle.await.unwrap();
+    scheduler_handle.shutdown().await;
 
     let final_state = turn_store
         .get_run_state(GetRunStateRequest {
@@ -2052,23 +2130,19 @@ async fn turn_runner_worker_drives_script_capability_through_real_host_runtime()
         io: io.clone(),
     };
 
-    let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
-    let worker = TurnRunnerWorker::new(
-        TurnRunnerWorkerConfig {
-            heartbeat_interval: std::time::Duration::from_millis(20),
-            poll_interval: std::time::Duration::from_millis(10),
-            scope_filter: Some(fixture.context.scope.clone()),
-        },
-        turn_store.clone(),
+    let executor = Arc::new(RebornTurnRunExecutor::new(
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
-        Arc::new(factory),
-        wake_receiver,
-    );
-
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let cancel_clone = cancel.clone();
-    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+        Arc::new(factory) as Arc<dyn HostFactory>,
+    ));
+    let scheduler_handle = TurnRunScheduler::new(
+        turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        TurnRunSchedulerConfig::default()
+            .with_runner_heartbeat_interval(std::time::Duration::from_millis(20))
+            .with_poll_interval(std::time::Duration::from_millis(10)),
+    )
+    .start();
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
@@ -2084,15 +2158,14 @@ async fn turn_runner_worker_drives_script_capability_through_real_host_runtime()
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "worker should complete queued run through script capability and final reply; last status={:?} failure={:?} milestones={:?}",
+            "scheduler should complete queued run through script capability and final reply; last status={:?} failure={:?} milestones={:?}",
             state.status,
             state.failure,
             fixture.milestone_names()
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    cancel.cancel();
-    handle.await.unwrap();
+    scheduler_handle.shutdown().await;
 
     let expected_result_ref = format!("result:{run_id}-{}", e2e_script_capability_id().as_str());
     assert_eq!(io.results(), vec![(e2e_script_capability_id(), input)]);
@@ -2169,23 +2242,20 @@ async fn turn_runner_rejects_driver_fabricated_approval_block_without_durable_ga
         )
         .unwrap();
 
-    let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
-    let worker = TurnRunnerWorker::new(
-        TurnRunnerWorkerConfig {
-            heartbeat_interval: std::time::Duration::from_millis(20),
-            poll_interval: std::time::Duration::from_millis(10),
-            scope_filter: Some(fixture.context.scope.clone()),
-        },
-        turn_store.clone(),
+    let executor = Arc::new(RebornTurnRunExecutor::new(
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
-        Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone())),
-        wake_receiver,
-    );
-
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let cancel_clone = cancel.clone();
-    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+        Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone()))
+            as Arc<dyn HostFactory>,
+    ));
+    let scheduler_handle = TurnRunScheduler::new(
+        turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        TurnRunSchedulerConfig::default()
+            .with_runner_heartbeat_interval(std::time::Duration::from_millis(20))
+            .with_poll_interval(std::time::Duration::from_millis(10)),
+    )
+    .start();
 
     let failed_state = wait_for_run_status(
         turn_store.as_ref(),
@@ -2195,8 +2265,7 @@ async fn turn_runner_rejects_driver_fabricated_approval_block_without_durable_ga
         "production-like evidence must reject fabricated approval block",
     )
     .await;
-    cancel.cancel();
-    handle.await.unwrap();
+    scheduler_handle.shutdown().await;
 
     assert_eq!(failed_state.run_id, run_id);
     assert_eq!(failed_state.gate_ref, None);
@@ -2251,26 +2320,23 @@ async fn turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_r
         )
         .unwrap();
 
-    let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
-    let worker = TurnRunnerWorker::new(
-        TurnRunnerWorkerConfig {
-            heartbeat_interval: std::time::Duration::from_millis(20),
-            poll_interval: std::time::Duration::from_millis(10),
-            scope_filter: Some(fixture.context.scope.clone()),
-        },
-        turn_store.clone(),
+    let executor = Arc::new(RebornTurnRunExecutor::new(
         Arc::new(LoopExitApplier::new(
-            turn_store.clone(),
+            turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
             Arc::new(AlwaysVerifiedLoopExitEvidence),
         )),
         Arc::new(registry),
-        Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone())),
-        wake_receiver,
-    );
-
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let cancel_clone = cancel.clone();
-    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+        Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone()))
+            as Arc<dyn HostFactory>,
+    ));
+    let scheduler_handle = TurnRunScheduler::new(
+        turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        TurnRunSchedulerConfig::default()
+            .with_runner_heartbeat_interval(std::time::Duration::from_millis(20))
+            .with_poll_interval(std::time::Duration::from_millis(10)),
+    )
+    .start();
 
     let blocked_state = wait_for_run_status(
         turn_store.as_ref(),
@@ -2323,8 +2389,7 @@ async fn turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_r
         "resumed approval-blocked run should complete through driver resume",
     )
     .await;
-    cancel.cancel();
-    handle.await.unwrap();
+    scheduler_handle.shutdown().await;
 
     assert_eq!(completed_state.run_id, run_id);
     assert_eq!(completed_state.checkpoint_id, Some(checkpoint_id));
@@ -2510,23 +2575,19 @@ async fn turn_runner_worker_fails_when_real_host_factory_rejects_claimed_scope()
         InstructionSafetyContext::local_development_noop(),
     );
 
-    let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
-    let worker = TurnRunnerWorker::new(
-        TurnRunnerWorkerConfig {
-            heartbeat_interval: std::time::Duration::from_millis(20),
-            poll_interval: std::time::Duration::from_millis(10),
-            scope_filter: Some(fixture.context.scope.clone()),
-        },
-        turn_store.clone(),
+    let executor = Arc::new(RebornTurnRunExecutor::new(
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
-        Arc::new(rejecting_factory),
-        wake_receiver,
-    );
-
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let cancel_clone = cancel.clone();
-    let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
+        Arc::new(rejecting_factory) as Arc<dyn HostFactory>,
+    ));
+    let scheduler_handle = TurnRunScheduler::new(
+        turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        TurnRunSchedulerConfig::default()
+            .with_runner_heartbeat_interval(std::time::Duration::from_millis(20))
+            .with_poll_interval(std::time::Duration::from_millis(10)),
+    )
+    .start();
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
@@ -2547,8 +2608,7 @@ async fn turn_runner_worker_fails_when_real_host_factory_rejects_claimed_scope()
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    cancel.cancel();
-    handle.await.unwrap();
+    scheduler_handle.shutdown().await;
 
     assert!(fixture.gateway.requests().is_empty());
     let history = fixture
@@ -2668,6 +2728,7 @@ async fn planned_host_factory_create_host_uses_profiled_capabilities() {
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: denied_id,
             input_ref: CapabilityInputRef::new("input:denied-from-planned-host").unwrap(),
@@ -2928,11 +2989,8 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         loop_exit_evidence: evidence,
         config: DefaultPlannedRuntimeConfig {
-            worker: TurnRunnerWorkerConfig {
-                heartbeat_interval: std::time::Duration::from_millis(20),
-                poll_interval: std::time::Duration::from_millis(10),
-                scope_filter: Some(fixture.context.scope.clone()),
-            },
+            heartbeat_interval: std::time::Duration::from_millis(20),
+            poll_interval: std::time::Duration::from_millis(10),
             ..DefaultPlannedRuntimeConfig::default()
         },
         model_route_resolver: None,
@@ -2948,6 +3006,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: Some(event_sink.clone()),
+        scheduler_wake_wiring: None,
     })
     .unwrap();
 
@@ -2978,7 +3037,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
 
     let claimed = turn_store
         .claim_next_run(ClaimRunRequest {
-            runner_id: composition.worker.runner_id(),
+            runner_id: TurnRunnerId::new(),
             lease_token: TurnLeaseToken::new(),
             scope_filter: Some(fixture.context.scope.clone()),
         })
@@ -3004,6 +3063,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: denied_id,
             input_ref: CapabilityInputRef::new("input:runtime-denied").unwrap(),
@@ -3018,6 +3078,146 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
             if denied.reason_kind.as_str() == "surface_profile_denied"
     ));
     assert!(runtime.invocations().is_empty());
+}
+
+/// Regression guard: when `DefaultPlannedRuntimeParts.scheduler_wake_wiring` is
+/// `Some(wiring)`, the pre-minted notifier must reach the started scheduler so
+/// that a wake fired by the coordinator (via `submit_turn`) drives the scheduler
+/// loop — not just the fallback poller.
+///
+/// The invariant being tested: the scheduler is started with
+/// `SchedulerWakeWiring::start`, which calls `start_with_channel(notifier,
+/// channel)` using the *same* notifier/channel pair minted before this function
+/// runs. `DefaultTurnCoordinator` receives that notifier and fires it on every
+/// `submit_turn`. If the pre-minted channel were dropped or replaced, the wake
+/// would be lost and the run would stay Queued until the fallback poll fires.
+///
+/// The test uses a 60-second poll interval to ensure the scheduler cannot advance
+/// the run via polling — only a wake delivered through the pre-minted channel
+/// will complete the run within the 5-second assertion window.
+#[tokio::test]
+async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit() {
+    // Mint the wiring BEFORE building the runtime so we can inspect the
+    // notifier identity and verify that the composition threads it through.
+    let wiring = SchedulerWakeWiring::channel();
+
+    let fixture = HostFixture::new_unsubmitted("thread-preminted-wake", "hello preminted").await;
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let allowed_id = CapabilityId::new("demo.preminted").unwrap();
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor(allowed_id.as_str()),
+    ])));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    let capability_factory = Arc::new(TestHostRuntimeCapabilityFactory {
+        runtime: runtime.clone(),
+        visible_request: host_runtime_visible_request(&fixture, ["demo"]),
+        io: io.clone(),
+        milestone_sink: fixture.milestone_sink.clone(),
+    });
+    let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
+        CapabilityAllowSet::allowlist([allowed_id.clone()]),
+    ));
+    let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
+        fixture.thread_service.clone(),
+        turn_store.clone(),
+        turn_store.clone(),
+    ));
+    // A 60-second poll interval ensures the scheduler cannot advance the run
+    // via fallback polling within the 5-second assertion window. Only a wake
+    // delivered through the pre-minted channel can complete the run in time.
+    let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
+        attachment_read_port: None,
+        turn_state: turn_store.clone(),
+        thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
+        thread_scope: fixture.thread_scope.clone(),
+        model_gateway: fixture.gateway.clone(),
+        checkpoint_state_store: fixture.checkpoint_state_store.clone(),
+        loop_checkpoint_store: turn_store.clone(),
+        milestone_sink: fixture.milestone_sink.clone(),
+        capability_factory,
+        capability_surface_resolver: surface_resolver,
+        capability_result_writer: io.clone(),
+        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
+        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
+        subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        loop_exit_evidence: evidence,
+        config: DefaultPlannedRuntimeConfig {
+            heartbeat_interval: std::time::Duration::from_millis(20),
+            // 60 s: the poller must not fire within the 5 s assertion window.
+            poll_interval: std::time::Duration::from_secs(60),
+            ..DefaultPlannedRuntimeConfig::default()
+        },
+        model_route_resolver: None,
+        cancellation_factory: None,
+        skill_context_source: None,
+        input_queue: None,
+        identity_context_source: Arc::new(StaticIdentityContextSource::new(Vec::new())),
+        user_profile_source: Arc::new(EmptyUserProfileSource),
+        model_policy_guard: None,
+        model_budget_accountant: None,
+        safety_context: None,
+        hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
+        hook_security_audit_sink: None,
+        turn_event_sink: None,
+        // Hand the pre-minted wiring to the runtime so the coordinator and
+        // the scheduler share the exact same channel.
+        scheduler_wake_wiring: Some(wiring),
+    })
+    .unwrap();
+
+    // submit_turn via the coordinator, which internally fires the pre-minted
+    // notifier on success (DefaultTurnCoordinator::notify_queued_run_best_effort).
+    // If the scheduler loop is consuming the same channel, it will wake
+    // immediately and execute the run to Completed.
+    let SubmitTurnResponse::Accepted { run_id, .. } = composition
+        .coordinator
+        .submit_turn(SubmitTurnRequest {
+            scope: fixture.context.scope.clone(),
+            actor: TurnActor::new(UserId::new("user-preminted-wake").unwrap()),
+            accepted_message_ref: AcceptedMessageRef::new("accepted-preminted").unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+            requested_run_profile: None,
+            idempotency_key: IdempotencyKey::new("idem-preminted").unwrap(),
+            received_at: Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+        })
+        .await
+        .unwrap();
+
+    // Wait up to 5 s for Completed. The 60-second poll interval ensures this
+    // can only succeed if the pre-minted notifier actually woke the scheduler.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let state = turn_store
+                .get_run_state(GetRunStateRequest {
+                    scope: fixture.context.scope.clone(),
+                    run_id,
+                })
+                .await
+                .unwrap();
+            if state.status == TurnStatus::Completed {
+                return;
+            }
+            assert!(
+                !matches!(state.status, TurnStatus::Failed),
+                "run unexpectedly failed: {:?}",
+                state
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("run did not reach Completed within 5 s — pre-minted notifier did not drive the scheduler loop");
+
+    composition.scheduler_handle.shutdown().await;
 }
 
 // ─── Hook framework activation (#3934) e2e through build_default_planned_runtime ──
@@ -3123,6 +3323,7 @@ async fn build_runtime_host_with_optional_hooks(
         turn_event_sink: None,
         hook_dispatcher_builder_factory: hook_factory,
         communication_context_provider: None,
+        scheduler_wake_wiring: None,
     })
     .unwrap();
 
@@ -3239,6 +3440,7 @@ async fn hooks_flag_off_capability_invocation_is_unaffected() {
     )));
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version,
             capability_id: allowed_id.clone(),
             input_ref,
@@ -3282,6 +3484,7 @@ async fn hooks_flag_on_first_party_only_does_not_change_outcome() {
     )));
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version,
             capability_id: allowed_id.clone(),
             input_ref,
@@ -3318,6 +3521,7 @@ async fn hooks_flag_on_extension_deny_hook_denies_through_composed_runtime() {
     // capability port resolves input or reaches the inner runtime.
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version,
             capability_id: allowed_id.clone(),
             input_ref: CapabilityInputRef::new("input:hooks-deny").unwrap(),
@@ -3354,6 +3558,7 @@ async fn hooks_are_isolated_per_tenant_runtime() {
     .await;
     let outcome_a = host_a
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_a,
             capability_id: allowed_id.clone(),
             input_ref: CapabilityInputRef::new("input:tenant-a").unwrap(),
@@ -3383,6 +3588,7 @@ async fn hooks_are_isolated_per_tenant_runtime() {
     )));
     let outcome_b = host_b
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface_b,
             capability_id: allowed_id.clone(),
             input_ref: input_ref_b,
@@ -3466,6 +3672,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
+        scheduler_wake_wiring: None,
     })
     .expect("all product-live adapters should satisfy readiness");
 
@@ -3581,6 +3788,7 @@ async fn product_live_parts_for_gate_test(
         communication_context_provider: None,
         hook_security_audit_sink: None,
         turn_event_sink: None,
+        scheduler_wake_wiring: None,
     }
 }
 
@@ -4981,6 +5189,7 @@ async fn text_only_host_skill_context_does_not_expand_capability_surface() {
     let outcome = host
         .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
             invocations: vec![CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque-tool-input").unwrap(),
@@ -5108,6 +5317,7 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version.clone(),
             capability_id: capability_id.clone(),
             input_ref,
@@ -5173,6 +5383,7 @@ async fn text_only_host_profiled_capabilities_filter_surface_and_invocation() {
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: denied_id,
             input_ref: CapabilityInputRef::new("input:denied-profile").unwrap(),
@@ -5249,6 +5460,7 @@ async fn default_strategy_filter_all_loses_to_host_profile_filter() {
     // strategy's implicit `All` permit.
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: tool_b_id,
             input_ref: CapabilityInputRef::new("input:tool-b-denied").unwrap(),
@@ -5323,6 +5535,7 @@ async fn text_only_host_uses_fresh_execution_context_per_capability_invocation()
     for input_ref in [first_input, second_input] {
         let outcome = host
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: capability_id.clone(),
                 input_ref,
@@ -5412,6 +5625,7 @@ async fn text_only_host_rejects_outside_surface_capability_before_host_runtime()
         .unwrap();
     let denied = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: hidden_id,
             input_ref: CapabilityInputRef::new("input:hidden-request").unwrap(),
@@ -5429,6 +5643,7 @@ async fn text_only_host_rejects_outside_surface_capability_before_host_runtime()
 
     let stale = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("sha256:stale").unwrap(),
             capability_id: visible_id,
             input_ref: CapabilityInputRef::new("input:stale-request").unwrap(),
@@ -5484,6 +5699,7 @@ async fn text_only_host_sanitizes_runtime_failure_message_before_driver_output()
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
             input_ref,
@@ -5590,6 +5806,7 @@ async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
     for (capability_id, input_ref) in cases {
         outcomes.push(
             host.invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id,
                 input_ref,
@@ -5676,6 +5893,7 @@ async fn text_only_host_maps_explicit_unknown_runtime_outcome_to_failure() {
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
             input_ref,
@@ -5745,6 +5963,7 @@ async fn text_only_host_preserves_invalid_request_and_returns_unavailable_as_fai
 
     let invalid = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version.clone(),
             capability_id: capability_id.clone(),
             input_ref: first_input,
@@ -5755,6 +5974,7 @@ async fn text_only_host_preserves_invalid_request_and_returns_unavailable_as_fai
         .unwrap_err();
     let unavailable = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
             input_ref: second_input,
@@ -5831,6 +6051,7 @@ async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations
         .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
             invocations: vec![
                 CapabilityInvocation {
+                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version: surface.version.clone(),
                     capability_id: approval_id,
                     input_ref: approval_input,
@@ -5838,6 +6059,7 @@ async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations
                     auth_resume: None,
                 },
                 CapabilityInvocation {
+                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version: surface.version,
                     capability_id: echo_id,
                     input_ref: echo_input,
@@ -5897,6 +6119,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_failed_outcome_retry() {
         .await
         .unwrap();
     let invocation = CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface.version,
         capability_id: capability_id.clone(),
         input_ref,
@@ -6020,6 +6243,7 @@ async fn text_only_host_waits_for_concurrent_duplicate_invocation_result() {
         .await
         .unwrap();
     let invocation = CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface.version,
         capability_id: capability_id.clone(),
         input_ref,
@@ -6101,6 +6325,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
     for input_ref in input_refs.iter().cloned() {
         let outcome = host
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: capability_id.clone(),
                 input_ref,
@@ -6113,6 +6338,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
     }
     let retried = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
             input_ref: input_refs[0].clone(),
@@ -6216,6 +6442,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_result_write_failure_ret
         .await
         .unwrap();
     let invocation = CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface.version,
         capability_id: capability_id.clone(),
         input_ref,
@@ -6285,6 +6512,7 @@ async fn text_only_host_rejects_runtime_outcome_for_different_capability() {
 
     let error = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: requested_id,
             input_ref,
@@ -6356,6 +6584,7 @@ async fn text_only_host_rejects_previous_surface_after_refetch() {
 
     let stale = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: first_surface.version,
             capability_id: first_id,
             input_ref,
@@ -6381,6 +6610,7 @@ async fn text_only_host_empty_capability_surface_denies_invocation() {
     let outcome = host
         .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
             invocations: vec![CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 input_ref: CapabilityInputRef::new("input:opaque-tool-input").unwrap(),
@@ -6399,6 +6629,7 @@ async fn text_only_host_empty_capability_surface_denies_invocation() {
 
     let stale = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("other:v1").unwrap(),
             capability_id: CapabilityId::new("demo.echo").unwrap(),
             input_ref: CapabilityInputRef::new("input:opaque-tool-input").unwrap(),
@@ -6469,6 +6700,7 @@ async fn text_only_host_e2e_invokes_script_capability_through_real_host_runtime(
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: e2e_script_capability_id(),
             input_ref,
@@ -6523,6 +6755,7 @@ async fn text_only_host_denies_capability_without_provider_trust_before_host_run
 
     let denied = host
         .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
             input_ref,
@@ -6582,6 +6815,7 @@ async fn text_only_host_allows_retry_after_missing_capability_input_is_staged() 
         .await
         .unwrap();
     let invocation = CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface.version,
         capability_id: capability_id.clone(),
         input_ref: input_ref.clone(),
@@ -6948,7 +7182,7 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
     async fn write_capability_result(
         &self,
         write: CapabilityResultWrite<'_>,
-    ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+    ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
         let mut remaining_failures = self.fail_result_writes_remaining.lock().unwrap();
         if *remaining_failures > 0 {
             *remaining_failures -= 1;
@@ -6958,6 +7192,7 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
             ));
         }
         drop(remaining_failures);
+        let output = write.output.clone();
         self.results
             .lock()
             .unwrap()
@@ -6974,7 +7209,7 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
                 "capability result ref could not be represented",
             )
         })?;
-        Ok((result_ref, 0))
+        Ok(CapabilityWriteResult::from_output(result_ref, 0, &output))
     }
 }
 
@@ -7452,6 +7687,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
             .map_err(driver_host_error)?;
         let capability = host
             .invoke_capability(CapabilityInvocation {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: self.capability_id.clone(),
                 input_ref: self.input_ref.clone(),
@@ -7542,6 +7778,7 @@ impl AgentLoopDriver for ApprovalBlockThenFinalReplyDriver {
         Ok(LoopExit::Blocked(LoopBlocked {
             kind: LoopBlockedKind::Approval,
             gate_ref: LoopGateRef::new("gate:approval-resume-e2e").unwrap(),
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             checkpoint_id: ironclaw_turns::TurnCheckpointId::new(),
             state_ref: LoopCheckpointStateRef::new("checkpoint:approval-resume-state").unwrap(),
@@ -7858,6 +8095,7 @@ impl HostFixture {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
@@ -8123,6 +8361,7 @@ impl RecordingGateway {
             usage: None,
             output: ParentLoopOutput::CapabilityCalls(vec![
                 ironclaw_turns::run_profile::CapabilityCallCandidate {
+                    activity_id: ironclaw_turns::CapabilityActivityId::new(),
                     surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
                     capability_id: CapabilityId::new("demo.echo").unwrap(),
                     input_ref: CapabilityInputRef::new("input:opaque-tool-call").unwrap(),

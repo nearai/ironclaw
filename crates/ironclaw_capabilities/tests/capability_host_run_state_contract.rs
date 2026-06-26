@@ -954,6 +954,7 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
         CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
             safe_summary: None,
+            detail: None,
         }
     ));
     // Per PR #4236 disposition policy, the capability host no longer

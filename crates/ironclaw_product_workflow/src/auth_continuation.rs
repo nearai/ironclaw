@@ -495,6 +495,7 @@ mod tests {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: gate_ref.map(|value| GateRef::new(value).unwrap()),
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor::default(),

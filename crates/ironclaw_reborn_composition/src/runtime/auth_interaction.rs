@@ -57,14 +57,20 @@ impl LocalDevAuthInteractionReadModel {
     }
 
     async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, ProductWorkflowError> {
-        #[cfg(feature = "libsql")]
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
         {
             self.turn_state
                 .persistence_snapshot()
                 .await
-                .map_err(|_| auth_read_model_unavailable())
+                .map_err(|error| {
+                    tracing::debug!(
+                        %error,
+                        "auth interaction read model could not read turn persistence snapshot"
+                    );
+                    auth_read_model_unavailable()
+                })
         }
-        #[cfg(not(feature = "libsql"))]
+        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         {
             Ok(self.turn_state.persistence_snapshot())
         }

@@ -9,7 +9,7 @@ use ironclaw_turns::run_profile::{
     AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityCallCandidate,
     CapabilityDescriptorView, CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
     ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolDefinition,
-    VisibleCapabilityRequest, VisibleCapabilitySurface,
+    RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 
 pub(super) fn wrap_local_dev_surface_disclosure(
@@ -54,9 +54,9 @@ impl LoopCapabilityPort for LocalDevSurfaceDisclosurePort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(tool_call).await
+        self.inner.register_provider_tool_call(request).await
     }
 
     async fn visible_capabilities(

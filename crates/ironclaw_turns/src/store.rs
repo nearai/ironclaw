@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 use ironclaw_host_api::{AgentId, ProjectId, RuntimeCredentialAuthRequirement, TenantId};
 
 use crate::{
-    AcceptedMessageRef, AdmissionRejection, CancelRunRequest, CancelRunResponse, GateRef,
-    GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord, ReplyTargetBindingRef,
-    ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver, SourceBindingRef,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
+    AcceptedMessageRef, AdmissionRejection, CancelRunRequest, CancelRunResponse,
+    CapabilityActivityId, GateRef, GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord,
+    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
+    SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
     TurnActiveRunRefState, TurnActor, TurnAdmissionPolicy, TurnAdmissionReservationRecord,
     TurnCapacityResource, TurnCheckpointId, TurnError, TurnErrorCategory, TurnId, TurnLeaseToken,
     TurnLifecycleEvent, TurnRunId, TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope,
@@ -175,6 +175,8 @@ pub struct TurnRunRecord {
     pub resolved_model_route: Option<LoopModelRouteSnapshot>,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_activity_id: Option<CapabilityActivityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     pub failure: Option<crate::SanitizedFailure>,
@@ -499,6 +501,7 @@ mod tests {
             resolved_model_route: None,
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: vec![],
             failure: None,
             event_cursor: EventCursor(0),

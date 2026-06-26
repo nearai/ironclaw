@@ -1,20 +1,92 @@
 import { apiFetch } from "../../../lib/api.js";
 
-// Settings endpoints depend on v1 `/api/settings/*`, `/api/tools/*`, etc.
-// LLM, extension, and skills reads use v2 endpoints. Remaining settings APIs
-// are TODO stubs.
+const OPERATOR_CONFIG_BASE = "/api/webchat/v2/operator/config";
+const SETTINGS_TOOLS_BASE = "/api/webchat/v2/settings/tools";
+const AUTO_APPROVE_KEY = "agent.auto_approve_tools";
+const TOOL_PREFIX = "tool.";
+const TOOL_PERMISSION_STATES = new Set(["always_allow", "ask_each_time", "disabled"]);
+const TOOL_PERMISSION_UPDATE_STATES = new Set([
+  "default",
+  "always_allow",
+  "ask_each_time",
+  "disabled",
+]);
 
-export function fetchSettingsExport() {
-  return Promise.resolve({ settings: {}, todo: true });
+function normalizeToolState(state) {
+  if (state === "ask") return "ask_each_time";
+  return TOOL_PERMISSION_STATES.has(state) ? state : "ask_each_time";
 }
-export function fetchSetting(_key) {
-  return Promise.resolve(null);
+
+function normalizeToolUpdateState(state) {
+  if (state === "ask") return "ask_each_time";
+  return TOOL_PERMISSION_UPDATE_STATES.has(state) ? state : "default";
 }
-export function updateSetting(_key, _value) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 settings endpoint" });
+
+function normalizeEffectiveSource(source) {
+  return ["default", "global", "override"].includes(source) ? source : "default";
 }
-export function importSettings(_payload) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 settings endpoint" });
+
+export function toolFromConfigEntry(entry) {
+  if (!entry?.key?.startsWith(TOOL_PREFIX)) return null;
+  const value = entry.value || {};
+  const name = value.name || entry.key.slice(TOOL_PREFIX.length);
+  return {
+    name,
+    description: value.description || "",
+    state: normalizeToolState(value.state),
+    default_state: normalizeToolState(value.default_state),
+    locked: Boolean(value.locked || entry.mutable === false),
+    effective_source: normalizeEffectiveSource(value.effective_source || entry.source),
+  };
+}
+
+export function settingsFromOperatorConfig(data) {
+  const settings = {};
+  for (const entry of data.entries || []) {
+    if (entry?.key === AUTO_APPROVE_KEY) {
+      settings[AUTO_APPROVE_KEY] = Boolean(entry.value);
+    }
+  }
+  return settings;
+}
+
+export async function fetchSettingsExport() {
+  const data = await apiFetch(SETTINGS_TOOLS_BASE);
+  return {
+    settings: settingsFromOperatorConfig(data),
+    diagnostics: data.diagnostics || [],
+    precedence: data.precedence || [],
+  };
+}
+export async function fetchSetting(key) {
+  if (key === AUTO_APPROVE_KEY) {
+    const data = await fetchSettingsExport();
+    return data.settings[AUTO_APPROVE_KEY] ?? false;
+  }
+  const data = await apiFetch(`${OPERATOR_CONFIG_BASE}/${encodeURIComponent(key)}`);
+  return data.entry?.value ?? null;
+}
+export async function updateSetting(key, value) {
+  if (key === AUTO_APPROVE_KEY) {
+    const data = await apiFetch(SETTINGS_TOOLS_BASE, {
+      method: "POST",
+      body: JSON.stringify({ enabled: Boolean(value) }),
+    });
+    return { success: true, entry: data.entry, value: data.entry?.value };
+  }
+  const data = await apiFetch(`${OPERATOR_CONFIG_BASE}/${encodeURIComponent(key)}`, {
+    method: "POST",
+    body: JSON.stringify({ value }),
+  });
+  return { success: true, entry: data.entry, value: data.entry?.value };
+}
+export async function importSettings(payload) {
+  const settings = payload?.settings || {};
+  const imported = [];
+  if (Object.prototype.hasOwnProperty.call(settings, AUTO_APPROVE_KEY)) {
+    imported.push(await updateSetting(AUTO_APPROVE_KEY, Boolean(settings[AUTO_APPROVE_KEY])));
+  }
+  return { success: true, imported: imported.length, results: imported };
 }
 // LLM provider configuration — v2 native endpoints. The snapshot is the single
 // source of truth: a unified provider list (built-in + operator-defined) plus
@@ -79,11 +151,20 @@ export function startCodexLogin() {
     method: "POST",
   });
 }
-export function fetchTools() {
-  return Promise.resolve({ tools: [], todo: true });
+export async function fetchTools() {
+  const data = await apiFetch(SETTINGS_TOOLS_BASE);
+  return {
+    tools: (data.entries || []).map(toolFromConfigEntry).filter(Boolean),
+    diagnostics: data.diagnostics || [],
+  };
 }
-export function updateToolPermission(_name, _state) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 tools endpoint" });
+export async function updateToolPermission(name, state) {
+  const normalized = normalizeToolUpdateState(state);
+  const data = await apiFetch(`${SETTINGS_TOOLS_BASE}/${encodeURIComponent(name)}`, {
+    method: "POST",
+    body: JSON.stringify({ state: normalized }),
+  });
+  return { success: true, tool: toolFromConfigEntry(data.entry), entry: data.entry };
 }
 export function fetchExtensions() {
   return apiFetch("/api/webchat/v2/extensions");
@@ -115,6 +196,22 @@ export function removeSkill(name) {
   return apiFetch(`/api/webchat/v2/skills/${encodeURIComponent(name)}`, {
     method: "DELETE",
     headers: { "X-Confirm-Action": "true" },
+  });
+}
+export function setSkillAutoActivate(name, enabled) {
+  return apiFetch(`/api/webchat/v2/skills/${encodeURIComponent(name)}/auto-activate`, {
+    method: "POST",
+    headers: { "X-Confirm-Action": "true" },
+    body: JSON.stringify({ enabled }),
+  });
+}
+// Global "auto-activate learned skills" master switch. When disabled, learned
+// skills activate only via an explicit /name mention.
+export function setAutoActivateLearned(enabled) {
+  return apiFetch(`/api/webchat/v2/skills/auto-activate-learned`, {
+    method: "POST",
+    headers: { "X-Confirm-Action": "true" },
+    body: JSON.stringify({ enabled }),
   });
 }
 // Trace Commons credits — read-only, scoped server-side to the

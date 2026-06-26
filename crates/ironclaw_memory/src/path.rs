@@ -1,8 +1,5 @@
 //! Memory path grammar, scope, and validation.
 
-use std::sync::OnceLock;
-
-use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 use ironclaw_host_api::{HostApiError, VirtualPath};
 
 /// Tenant/user/agent/project scope for DB-backed memory documents exposed as virtual files.
@@ -75,7 +72,7 @@ impl MemoryDocumentScope {
         self.project_id.as_deref()
     }
 
-    pub(crate) fn virtual_prefix(&self) -> Result<VirtualPath, HostApiError> {
+    pub fn virtual_prefix(&self) -> Result<VirtualPath, HostApiError> {
         VirtualPath::new(format!(
             "/memory/tenants/{}/users/{}/agents/{}/projects/{}",
             self.tenant_id,
@@ -118,6 +115,23 @@ impl MemoryDocumentPath {
         })
     }
 
+    /// Build a path from an already-validated [`MemoryDocumentScope`] plus a
+    /// relative path that is validated here. The scope is a validated newtype,
+    /// so only the relative path needs re-checking; this keeps the public
+    /// constructor from ever producing a `MemoryDocumentPath` with traversal,
+    /// control characters, or reserved-sidecar segments, even if a caller in
+    /// another crate passes an unchecked path.
+    pub fn from_scope(
+        scope: MemoryDocumentScope,
+        relative_path: impl Into<String>,
+    ) -> Result<Self, HostApiError> {
+        let relative_path = validated_memory_relative_path(relative_path.into())?;
+        Ok(Self {
+            scope,
+            relative_path,
+        })
+    }
+
     pub fn scope(&self) -> &MemoryDocumentScope {
         &self.scope
     }
@@ -142,7 +156,7 @@ impl MemoryDocumentPath {
         &self.relative_path
     }
 
-    pub(crate) fn virtual_path(&self) -> Result<VirtualPath, HostApiError> {
+    pub fn virtual_path(&self) -> Result<VirtualPath, HostApiError> {
         VirtualPath::new(format!(
             "{}/{}",
             self.scope.virtual_prefix()?.as_str(),
@@ -151,109 +165,7 @@ impl MemoryDocumentPath {
     }
 }
 
-pub(crate) struct ParsedMemoryPath {
-    pub(crate) scope: MemoryDocumentScope,
-    pub(crate) relative_path: Option<String>,
-}
-
-impl ParsedMemoryPath {
-    pub(crate) fn from_virtual_path(
-        path: &VirtualPath,
-        operation: FilesystemOperation,
-    ) -> Result<Self, FilesystemError> {
-        let segments: Vec<&str> = path.as_str().trim_matches('/').split('/').collect();
-        if segments.len() < 7
-            || segments.first() != Some(&"memory")
-            || segments.get(1) != Some(&"tenants")
-            || segments.get(3) != Some(&"users")
-        {
-            return Err(memory_error(
-                path.clone(),
-                operation,
-                "expected /memory/tenants/{tenant}/users/{user}/agents/{agent}/projects/{project}/{path}",
-            ));
-        }
-
-        let tenant_id = *segments.get(2).ok_or_else(|| {
-            memory_error(path.clone(), operation, "memory tenant segment is missing")
-        })?;
-        let user_id = *segments.get(4).ok_or_else(|| {
-            memory_error(path.clone(), operation, "memory user segment is missing")
-        })?;
-
-        let (agent_id, raw_project_id, relative_start) = if segments.get(5) == Some(&"agents") {
-            if segments.len() < 9 || segments.get(7) != Some(&"projects") {
-                return Err(memory_error(
-                    path.clone(),
-                    operation,
-                    "expected /memory/tenants/{tenant}/users/{user}/agents/{agent}/projects/{project}/{path}",
-                ));
-            }
-            let raw_agent_id = *segments.get(6).ok_or_else(|| {
-                memory_error(path.clone(), operation, "memory agent segment is missing")
-            })?;
-            let agent_id = if raw_agent_id == "_none" {
-                None
-            } else {
-                Some(raw_agent_id)
-            };
-            let raw_project_id = *segments.get(8).ok_or_else(|| {
-                memory_error(path.clone(), operation, "memory project segment is missing")
-            })?;
-            (agent_id, raw_project_id, 9)
-        } else if segments.get(5) == Some(&"projects") {
-            let raw_project_id = *segments.get(6).ok_or_else(|| {
-                memory_error(path.clone(), operation, "memory project segment is missing")
-            })?;
-            (None, raw_project_id, 7)
-        } else {
-            return Err(memory_error(
-                path.clone(),
-                operation,
-                "expected /memory/tenants/{tenant}/users/{user}/agents/{agent}/projects/{project}/{path}",
-            ));
-        };
-
-        let project_id = if raw_project_id == "_none" {
-            None
-        } else {
-            Some(raw_project_id)
-        };
-        let scope = MemoryDocumentScope::new_with_agent(tenant_id, user_id, agent_id, project_id)
-            .map_err(|error| {
-            memory_error(
-                path.clone(),
-                operation,
-                format!("invalid memory document scope: {error}"),
-            )
-        })?;
-        let relative_path = if segments.len() > relative_start {
-            Some(
-                validated_memory_relative_path(segments[relative_start..].join("/")).map_err(
-                    |error| {
-                        memory_error(
-                            path.clone(),
-                            operation,
-                            format!("invalid memory document path: {error}"),
-                        )
-                    },
-                )?,
-            )
-        } else {
-            None
-        };
-
-        Ok(Self {
-            scope,
-            relative_path,
-        })
-    }
-}
-
-pub(crate) fn validated_memory_segment(
-    kind: &'static str,
-    value: String,
-) -> Result<String, HostApiError> {
+pub fn validated_memory_segment(kind: &'static str, value: String) -> Result<String, HostApiError> {
     if value.trim().is_empty() {
         return Err(HostApiError::InvalidId {
             kind,
@@ -296,7 +208,7 @@ pub(crate) fn validated_memory_segment(
     Ok(value)
 }
 
-pub(crate) fn validated_memory_relative_path(value: String) -> Result<String, HostApiError> {
+pub fn validated_memory_relative_path(value: String) -> Result<String, HostApiError> {
     if value.trim().is_empty() {
         return Err(HostApiError::InvalidPath {
             value,
@@ -347,81 +259,6 @@ pub(crate) fn validated_memory_relative_path(value: String) -> Result<String, Ho
         }
     }
     Ok(value)
-}
-
-pub(crate) fn memory_backend_unsupported(
-    scope: &MemoryDocumentScope,
-    operation: FilesystemOperation,
-    reason: impl Into<String>,
-) -> FilesystemError {
-    memory_error(
-        scope
-            .virtual_prefix()
-            .unwrap_or_else(|_| valid_memory_path()),
-        operation,
-        reason,
-    )
-}
-
-pub(crate) fn memory_not_found(
-    path: VirtualPath,
-    operation: FilesystemOperation,
-) -> FilesystemError {
-    memory_error(path, operation, "not found")
-}
-
-pub(crate) fn memory_error(
-    path: VirtualPath,
-    operation: FilesystemOperation,
-    reason: impl Into<String>,
-) -> FilesystemError {
-    let reason = sanitize_memory_backend_reason(reason.into());
-    FilesystemError::Backend {
-        path,
-        operation,
-        reason,
-    }
-}
-
-const MEMORY_BACKEND_DETAIL_MARKERS: &[&str] = &[
-    "no such table",
-    "drop table",
-    "sql",
-    "sqlite",
-    "libsql",
-    "postgres error",
-    "database error",
-    "connection refused",
-    "timeout",
-    "host=",
-    "port=",
-    "reborn_memory_",
-    "/tmp/",
-    "/var/folders/",
-    "/private/",
-    "\\appdata\\",
-];
-
-fn sanitize_memory_backend_reason(reason: String) -> String {
-    let lower = reason.to_ascii_lowercase();
-    if MEMORY_BACKEND_DETAIL_MARKERS
-        .iter()
-        .any(|marker| lower.as_str().contains(marker))
-    {
-        "memory backend operation failed".to_string()
-    } else {
-        reason
-    }
-}
-
-pub(crate) fn valid_memory_path() -> VirtualPath {
-    static MEMORY_PATH: OnceLock<VirtualPath> = OnceLock::new();
-    // safety: `/memory` is a registered VIRTUAL_ROOT in ironclaw_host_api::path.
-    // If construction fails, host_api's VIRTUAL_ROOTS list is out of sync with
-    // this crate at build time, which is a build-system invariant violation.
-    MEMORY_PATH
-        .get_or_init(|| VirtualPath::new("/memory").expect("/memory is a registered VIRTUAL_ROOT")) // safety: `/memory` is a registered VIRTUAL_ROOT.
-        .clone()
 }
 
 #[cfg(test)]

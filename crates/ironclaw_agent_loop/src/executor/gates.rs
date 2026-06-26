@@ -67,25 +67,36 @@ impl ExecutorStage<GateInput> for GateStage {
                 let auth_resume_token = auth_resume.map(|r| r.resume_token.clone());
                 let auth_replay = auth_resume.and_then(|r| r.replay.clone());
                 let auth_prior_approval = auth_resume.and_then(|r| r.prior_approval.clone());
-                let approval_resume = input.approval_resume;
-                state.pending_approval_resume =
-                    approval_resume.map(|resume| PendingApprovalResume {
-                        gate_ref: gate_ref.clone(),
-                        capability_id: call.capability_id.clone(),
-                        approval_request_id: resume.approval_request_id,
-                        resume_token: resume.resume_token,
-                        correlation_id: resume.correlation_id,
-                        surface_version: call.surface_version.clone(),
-                        input_ref: resume.input_ref,
-                        effective_capability_ids: call.effective_capability_ids.clone(),
-                        provider_replay: call.provider_replay.clone(),
-                        input: resume.input,
-                        estimate: resume.estimate,
-                        // Disposition is stamped by PlannedDriver at resume time;
-                        // GateStage writes the initial (blocking) checkpoint where
-                        // no denial has occurred yet.
-                        disposition: None,
+                if matches!(kind, GateKind::Approval) {
+                    let approval_resume = input.approval_resume;
+                    state.pending_approval_resume = approval_resume.map(|resume| {
+                        PendingApprovalResume {
+                            gate_ref: gate_ref.clone(),
+                            capability_id: call.capability_id.clone(),
+                            approval_request_id: resume.approval_request_id,
+                            resume_token: resume.resume_token,
+                            activity_id: call.activity_id,
+                            correlation_id: resume.correlation_id,
+                            surface_version: call.surface_version.clone(),
+                            input_ref: resume.input_ref,
+                            effective_capability_ids: call.effective_capability_ids.clone(),
+                            provider_replay: call.provider_replay.clone(),
+                            input: resume.input,
+                            estimate: resume.estimate,
+                            // Disposition is stamped by PlannedDriver at resume time;
+                            // GateStage writes the initial (blocking) checkpoint where
+                            // no denial has occurred yet.
+                            disposition: None,
+                        }
                     });
+                } else if matches!(kind, GateKind::Auth) {
+                    // Auth gates fold any prior approval identity into
+                    // pending_auth_resume.prior_approval below. Keeping a
+                    // pending approval slot for the same gate makes resume
+                    // disposition stamping ambiguous and can re-dispatch the
+                    // approval path before the auth denial is consumed.
+                    state.pending_approval_resume = None;
+                }
                 if matches!(kind, GateKind::Auth) {
                     // CapabilityStage shapes auth-resume metadata; GateStage
                     // only persists it at the blocking checkpoint.
@@ -97,6 +108,7 @@ impl ExecutorStage<GateInput> for GateStage {
                         effective_capability_ids: call.effective_capability_ids.clone(),
                         provider_replay: call.provider_replay.clone(),
                         resume_token: auth_resume_token,
+                        activity_id: call.activity_id,
                         prior_approval: auth_prior_approval,
                         replay: auth_replay,
                         disposition: None,
@@ -125,6 +137,7 @@ impl ExecutorStage<GateInput> for GateStage {
                 Ok(BatchStep::Exit(LoopExit::Blocked(LoopBlocked {
                     kind: blocked_kind(kind),
                     gate_ref,
+                    blocked_activity_id: Some(call.activity_id),
                     credential_requirements: input.credential_requirements,
                     checkpoint_id: checked.checkpoint_id,
                     state_ref: checked.state_ref,
@@ -221,6 +234,7 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
                 Ok(BatchStep::Exit(LoopExit::Blocked(LoopBlocked {
                     kind: blocked_kind(GateKind::AwaitDependentRun),
                     gate_ref,
+                    blocked_activity_id: Some(call.activity_id),
                     credential_requirements: Vec::new(),
                     checkpoint_id: checked.checkpoint_id,
                     state_ref: checked.state_ref,

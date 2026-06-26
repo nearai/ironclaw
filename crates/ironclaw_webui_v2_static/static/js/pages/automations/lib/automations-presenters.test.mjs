@@ -5,7 +5,10 @@ import {
   automationSummary,
   filterAutomations,
   normalizeAutomations as normalizeAutomationsRaw,
+  runStatusBreakdown,
+  runSummaryView,
   scheduleLabel as scheduleLabelRaw,
+  summarizeRuns,
 } from "./automations-presenters.js";
 
 // Schedule labels are now localized: the presenter takes a translator + locale.
@@ -21,6 +24,7 @@ const EN_SCHEDULE = {
   "automations.schedule.weekdayAt": "{weekday} at {time}",
   "automations.schedule.monthlyAt": "Day {day} of each month at {time}",
   "automations.schedule.dateAt": "{date} at {time}",
+  "automations.schedule.onceAt": "Once on {datetime}",
   // Status / state / date-fallback labels are now localized too; mirror en.js
   // so assertions read human English.
   "automations.state.active": "Active",
@@ -38,6 +42,8 @@ const EN_SCHEDULE = {
   "automations.runStatus.error": "Error",
   "automations.runStatus.running": "Running",
   "automations.runStatus.unknown": "Unknown",
+  "automations.status.running": "Running",
+  "automations.status.needsReview": "Needs review",
   "automations.date.unknown": "Unknown",
   "automations.date.notScheduled": "Not scheduled",
   "automations.date.noRuns": "No runs yet",
@@ -47,6 +53,13 @@ const EN_SCHEDULE = {
   "automations.untitled": "Untitled automation",
   "automations.successRate.none": "No completed runs",
   "automations.successRate.visible": "{percent}% visible runs",
+  "automations.filter.completed": "Completed",
+  // Run-summary labels (mirror en.js) so runSummaryView assertions read English.
+  "automations.runs.total": "Recent runs: {count}",
+  "automations.runs.ok": "OK: {count}",
+  "automations.runs.error": "Failed: {count}",
+  "automations.runs.running": "Running: {count}",
+  "automations.runs.unknown": "Unknown: {count}",
 };
 const t = (key, params = {}) =>
   (EN_SCHEDULE[key] || key).replace(/\{(\w+)\}/g, (m, k) =>
@@ -64,7 +77,7 @@ const normalizeAutomations = (response, locale = "en") =>
     schedule_label: norm(automation.schedule_label),
   }));
 
-test("normalizeAutomations keeps only schedule rows and avoids raw schedule text", () => {
+test("normalizeAutomations keeps schedule and once rows, drops unknown", () => {
   const automations = normalizeAutomations({
     automations: [
       {
@@ -78,6 +91,14 @@ test("normalizeAutomations keeps only schedule rows and avoids raw schedule text
         last_status: "ok",
       },
       {
+        automation_id: "fire-once",
+        name: "One-shot task",
+        source: { type: "once", at: "2026-06-25T14:00:00Z", timezone: "America/New_York" },
+        state: "scheduled",
+        is_active: false,
+        next_run_at: "2026-06-25T14:00:00Z",
+      },
+      {
         automation_id: "future-webhook",
         name: "Future webhook",
         source: { type: "webhook" },
@@ -87,11 +108,24 @@ test("normalizeAutomations keeps only schedule rows and avoids raw schedule text
     ],
   });
 
-  assert.equal(automations.length, 1);
-  assert.equal(automations[0].display_name, "Daily summary");
-  assert.equal(automations[0].schedule_label, "Weekdays at 9:00 AM (America/New_York)");
-  assert.equal(automations[0].schedule_timezone, "America/New_York");
-  assert.equal(automations[0].last_status_label, "Done");
+  // webhook row is dropped; schedule + once rows are kept
+  assert.equal(automations.length, 2);
+
+  const scheduleRow = automations.find((a) => a.automation_id === "daily");
+  assert.ok(scheduleRow, "schedule row must be present");
+  assert.equal(scheduleRow.schedule_label, "Weekdays at 9:00 AM (America/New_York)");
+  assert.equal(scheduleRow.schedule_timezone, "America/New_York");
+  assert.equal(scheduleRow.last_status_label, "Done");
+
+  const onceRow = automations.find((a) => a.automation_id === "fire-once");
+  assert.ok(onceRow, "once row must be present");
+  // Must contain the localized date AND the tz parenthetical
+  assert.match(onceRow.schedule_label, /Once on /);
+  assert.match(onceRow.schedule_label, /\(America\/New_York\)/);
+  assert.notEqual(onceRow.schedule_label, "Custom schedule");
+
+  // unknown (webhook) must be dropped
+  assert.ok(!automations.find((a) => a.automation_id === "future-webhook"), "webhook row must be dropped");
 });
 
 test("normalizeAutomations defaults schedule_timezone to UTC when absent", () => {
@@ -353,6 +387,8 @@ test("normalizeAutomations presents bounded recent run history", () => {
   assert.match(automations[0].last_run_label, /Jun 4/);
   assert.equal(automations[0].last_status_label, "Error");
   assert.equal(automations[0].last_status_tone, "danger");
+  assert.equal(automations[0].primary_status_label, "Running");
+  assert.equal(automations[0].primary_status_tone, "info");
   // Post-acceptance statuses (running/ok/error) must produce a chat_path.
   assert.equal(automations[0].recent_runs[0].chat_path, "/chat/thread-running");
   assert.equal(automations[0].recent_runs[1].chat_path, "/chat/thread-error");
@@ -372,6 +408,44 @@ test("normalizeAutomations presents bounded recent run history", () => {
   assert.deepEqual(
     filterAutomations(automations, "failures").map((automation) => automation.automation_id),
     ["daily"],
+  );
+});
+
+test("normalizeAutomations keeps paused primary status even with a running recent run", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "paused-with-run",
+        name: "Paused with run",
+        source: { type: "schedule", cron: "* * * * *" },
+        state: "paused",
+        next_run_at: "2026-06-06T16:00:00Z",
+        recent_runs: [
+          {
+            status: "running",
+            fired_at: "2026-06-05T16:00:00Z",
+            submitted_at: "2026-06-05T16:00:01Z",
+            thread_id: "thread-running",
+            run_id: "run-running",
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(automations[0].state_label, "Paused");
+  assert.equal(automations[0].state_tone, "warning");
+  assert.equal(automations[0].has_running_run, true);
+  assert.equal(automations[0].current_run.run_id, "run-running");
+  assert.equal(automations[0].primary_status_label, "Paused");
+  assert.equal(automations[0].primary_status_tone, "warning");
+  assert.deepEqual(
+    filterAutomations(automations, "paused").map((automation) => automation.automation_id),
+    ["paused-with-run"],
+  );
+  assert.deepEqual(
+    filterAutomations(automations, "running").map((automation) => automation.automation_id),
+    ["paused-with-run"],
   );
 });
 
@@ -449,4 +523,255 @@ test("normalizeAutomations emits chat_path for any status when thread_id is pres
     "/chat/550e8400-e29b-41d4-a716-446655440000",
     "accepted run with thread_id must produce a chat_path",
   );
+});
+
+test("summarizeRuns counts runs by normalized status", () => {
+  const counts = summarizeRuns([
+    { status: "ok" },
+    { status: "ok" },
+    { status: "error" },
+    { status: "running" },
+    { status: "weird-unknown-status" },
+    {},
+  ]);
+  assert.deepEqual(counts, {
+    total: 6,
+    ok: 2,
+    error: 1,
+    running: 1,
+    // both the unrecognized status and the missing status fold into "unknown"
+    unknown: 2,
+  });
+});
+
+test("summarizeRuns tolerates non-array input", () => {
+  assert.deepEqual(summarizeRuns(undefined), {
+    total: 0,
+    ok: 0,
+    error: 0,
+    running: 0,
+    unknown: 0,
+  });
+});
+
+// Regression for #4988: the recent-run summary chips render straight from
+// runStatusBreakdown. Every counted status — including the `unknown` bucket
+// produced by unrecognized/missing statuses — must appear, so a future edit
+// can't silently drop a bucket from what the UI shows.
+test("runStatusBreakdown surfaces every non-empty bucket incl. unknown", () => {
+  const parts = runStatusBreakdown([
+    { status: "ok" },
+    { status: "ok" },
+    { status: "error" },
+    { status: "running" },
+    { status: "mystery-status" }, // unrecognized -> unknown
+    {}, // missing -> unknown
+  ]);
+  const byKey = Object.fromEntries(parts.map((part) => [part.key, part.count]));
+  assert.deepEqual(byKey, { ok: 2, error: 1, running: 1, unknown: 2 });
+  assert.ok(
+    parts.some((part) => part.key === "unknown"),
+    "unknown bucket must be present when unknown-status runs exist",
+  );
+  // Chips must sum to the same total the summary header shows.
+  const total = parts.reduce((sum, part) => sum + part.count, 0);
+  assert.equal(total, summarizeRuns([
+    { status: "ok" },
+    { status: "ok" },
+    { status: "error" },
+    { status: "running" },
+    { status: "mystery-status" },
+    {},
+  ]).total);
+});
+
+test("runStatusBreakdown omits zero-count buckets", () => {
+  const parts = runStatusBreakdown([{ status: "ok" }]);
+  assert.deepEqual(parts.map((part) => part.key), ["ok"]);
+});
+
+// Drives the exact data RunHistorySummary renders (the component maps this 1:1,
+// with no logic of its own). With an unrecognized + a missing status present,
+// the rendered chips must include the localized unknown chip and must sum to
+// the total shown in the header. Guards #4988 at the render path, not just the
+// counting helper.
+test("runSummaryView renders the unknown chip and chips sum to total", () => {
+  const runs = [
+    { status: "ok" },
+    { status: "ok" },
+    { status: "error" },
+    { status: "running" },
+    { status: "mystery-status" }, // unrecognized -> unknown
+    {}, // missing -> unknown
+  ];
+  const view = runSummaryView(runs, t);
+
+  assert.equal(view.total, 6);
+  assert.equal(view.totalText, "Recent runs: 6");
+
+  const unknownChip = view.chips.find((chip) => chip.key === "unknown");
+  assert.ok(unknownChip, "rendered chips must include the unknown bucket");
+  assert.equal(unknownChip.text, "Unknown: 2");
+
+  const renderedTexts = view.chips.map((chip) => chip.text);
+  assert.deepEqual(renderedTexts, [
+    "OK: 2",
+    "Failed: 1",
+    "Running: 1",
+    "Unknown: 2",
+  ]);
+
+  const chipSum = view.chips.reduce((sum, chip) => sum + chip.count, 0);
+  assert.equal(chipSum, view.total, "displayed chips must sum to the total");
+});
+
+test("runSummaryView reports zero total for an empty history", () => {
+  const view = runSummaryView([], t);
+  assert.equal(view.total, 0);
+  assert.deepEqual(view.chips, []);
+});
+
+test("once automation with valid at produces label with date and tz, not Custom schedule", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "once-valid",
+        name: "Send report",
+        source: { type: "once", at: "2026-06-25T14:00:00Z", timezone: "Europe/Berlin" },
+        state: "scheduled",
+        is_active: false,
+        next_run_at: "2026-06-25T14:00:00Z",
+      },
+    ],
+  });
+
+  assert.equal(automations.length, 1);
+  const label = automations[0].schedule_label;
+  assert.match(label, /Once on /);
+  assert.match(label, /\(Europe\/Berlin\)/);
+  assert.notEqual(label, "Custom schedule");
+});
+
+test("once automation with missing at falls back to Custom schedule", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "once-no-at",
+        name: "Missing at",
+        source: { type: "once", timezone: "UTC" },
+        state: "scheduled",
+        is_active: false,
+      },
+    ],
+  });
+
+  assert.equal(automations.length, 1);
+  assert.equal(automations[0].schedule_label, "Custom schedule");
+});
+
+test("AUTOMATION_FILTERS contains a completed entry whose predicate matches only completed rows", () => {
+  // Drive via filterAutomations (which delegates to the predicate in AUTOMATION_FILTERS)
+  // so the test exercises the full filter dispatch without re-importing the module.
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "scheduled-one",
+        name: "Scheduled",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "scheduled",
+        is_active: false,
+        next_run_at: "2026-06-25T09:00:00Z",
+      },
+      {
+        automation_id: "completed-one",
+        name: "Completed one-shot",
+        source: { type: "once", at: "2026-06-10T12:00:00Z", timezone: "UTC" },
+        state: "completed",
+        is_active: false,
+      },
+    ],
+  });
+
+  const completedOnly = filterAutomations(automations, "completed");
+  assert.equal(completedOnly.length, 1, "predicate must keep only completed rows");
+  assert.equal(completedOnly[0].automation_id, "completed-one");
+
+  const scheduledOnly = filterAutomations(automations, "active");
+  assert.ok(
+    !scheduledOnly.some((a) => a.automation_id === "completed-one"),
+    "completed row must not appear in the active filter",
+  );
+});
+
+test("automationSummary excludes completed rows from scheduled count", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "scheduled-active",
+        name: "Active schedule",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "scheduled",
+        is_active: false,
+        next_run_at: "2026-06-25T09:00:00Z",
+      },
+      {
+        automation_id: "soft-completed",
+        name: "Fired one-shot",
+        source: { type: "once", at: "2026-06-10T12:00:00Z", timezone: "UTC" },
+        state: "completed",
+        is_active: false,
+      },
+    ],
+  });
+
+  const summary = automationSummary(automations);
+  assert.equal(summary.scheduled, 1, "completed row must not count toward scheduled total");
+});
+
+test("once label reflects source timezone wall-clock, not UTC", () => {
+  // at="2026-06-24T00:30:00Z" is Jun 23 (previous evening) in LA (UTC-7 in
+  // summer), so the LA wall-clock label must differ from the UTC-rendered label.
+  const at = "2026-06-24T00:30:00Z";
+  const timezone = "America/Los_Angeles";
+
+  const automationsLa = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "once-la",
+        name: "LA once",
+        source: { type: "once", at, timezone },
+        state: "scheduled",
+        is_active: false,
+        next_run_at: at,
+      },
+    ],
+  });
+
+  const automationsUtc = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "once-utc",
+        name: "UTC once",
+        source: { type: "once", at, timezone: "UTC" },
+        state: "scheduled",
+        is_active: false,
+        next_run_at: at,
+      },
+    ],
+  });
+
+  const laLabel = automationsLa[0].schedule_label;
+  const utcLabel = automationsUtc[0].schedule_label;
+
+  // Both are valid once labels (not fallbacks)
+  assert.match(laLabel, /Once on /);
+  assert.match(utcLabel, /Once on /);
+
+  // The rendered date/time portion must differ because the tz wall-clocks differ
+  // (Jun 23 evening in LA vs Jun 24 morning in UTC). This proves timeZone is
+  // applied, not just the runner's local tz.
+  assert.notEqual(laLabel, utcLabel, "LA and UTC labels must differ for a cross-midnight instant");
+
+  // LA label must carry the LA tz parenthetical
+  assert.match(laLabel, /\(America\/Los_Angeles\)/);
 });

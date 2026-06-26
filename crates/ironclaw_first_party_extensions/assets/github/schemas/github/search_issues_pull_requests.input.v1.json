@@ -50,18 +50,23 @@
     },
     "state": {
       "type": "string",
-      "enum": ["open", "closed"],
+      "enum": [
+        "open",
+        "closed"
+      ],
       "description": "Optional issue state qualifier."
     },
     "type": {
       "type": "string",
-      "enum": ["issue", "pr"],
+      "enum": [
+        "issue",
+        "pr"
+      ],
       "description": "Optional result type qualifier."
     },
     "page": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 100,
       "default": 1,
       "description": "1-based results page."
     },
@@ -74,12 +79,27 @@
     },
     "sort": {
       "type": "string",
-      "enum": ["comments", "created", "updated"],
+      "enum": [
+        "comments",
+        "created",
+        "updated",
+        "reactions",
+        "reactions-+1",
+        "reactions--1",
+        "reactions-smile",
+        "reactions-thinking_face",
+        "reactions-heart",
+        "reactions-tada",
+        "interactions"
+      ],
       "description": "Optional GitHub issue search sort field."
     },
     "order": {
       "type": "string",
-      "enum": ["asc", "desc"],
+      "enum": [
+        "asc",
+        "desc"
+      ],
       "default": "desc",
       "description": "Sort order when sort is supplied."
     }
@@ -87,7 +107,9 @@
   "allOf": [
     {
       "if": {
-        "required": ["repository"]
+        "required": [
+          "repository"
+        ]
       },
       "then": {
         "properties": {
@@ -99,10 +121,14 @@
     },
     {
       "if": {
-        "required": ["owner"]
+        "required": [
+          "owner"
+        ]
       },
       "then": {
-        "required": ["repo"],
+        "required": [
+          "repo"
+        ],
         "properties": {
           "repo": {
             "maxLength": 100,
@@ -112,7 +138,9 @@
       },
       "else": {
         "if": {
-          "required": ["repo"]
+          "required": [
+            "repo"
+          ]
         },
         "then": {
           "properties": {
@@ -126,25 +154,40 @@
   ],
   "anyOf": [
     {
-      "required": ["query"]
+      "required": [
+        "query"
+      ]
     },
     {
-      "required": ["repository"]
+      "required": [
+        "repository"
+      ]
     },
     {
-      "required": ["owner", "repo"]
+      "required": [
+        "owner",
+        "repo"
+      ]
     },
     {
-      "required": ["repo"]
+      "required": [
+        "repo"
+      ]
     },
     {
-      "required": ["author"]
+      "required": [
+        "author"
+      ]
     },
     {
-      "required": ["assignee"]
+      "required": [
+        "assignee"
+      ]
     },
     {
-      "required": ["involves"]
+      "required": [
+        "involves"
+      ]
     }
   ]
 }

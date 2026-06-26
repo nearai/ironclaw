@@ -1,20 +1,18 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 #[cfg(feature = "slack-v2-host-beta")]
 use std::sync::OnceLock;
 use std::time::Duration;
 
+#[cfg(feature = "slack-v2-host-beta")]
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_triggers::{
-    ScheduleTriggerSourceProvider, TriggerActiveRunLookup, TriggerActiveRunState,
-    TriggerActiveRunStateRequest, TriggerError, TriggerPollerWorker, TriggerPollerWorkerDeps,
-    TriggerPromptMaterializer, TriggerRepository, TriggerRunHistoryStatus,
+    ScheduleTriggerSourceProvider, TriggerActiveRunLookup, TriggerError, TriggerPollerWorker,
+    TriggerPollerWorkerDeps, TriggerPromptMaterializer, TriggerRepository,
     TrustedTriggerFireSubmitter,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_triggers::{TrustedTriggerFireSubmitOutcome, TrustedTriggerSubmitRequest};
-use ironclaw_turns::{TurnPersistenceSnapshot, TurnStatus};
 use rand::Rng;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -26,6 +24,11 @@ pub(crate) use crate::trigger_poller_trusted_submit::AccessCheckerTriggerFireAut
 pub(crate) use crate::trigger_poller_trusted_submit::ConversationContentRefMaterializer;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use crate::trigger_poller_trusted_submit::TenantScopedTrustedTriggerFireAuthorizer;
+
+mod active_run_lookup;
+pub(crate) use active_run_lookup::{
+    LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup, TriggerTurnSnapshotSource,
+};
 
 pub(crate) const TRIGGER_POLLER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -112,10 +115,12 @@ pub(crate) fn spawn_trigger_poller(
     Ok(Some(TriggerPollerRuntimeHandle { cancel, handle }))
 }
 
-/// Wraps a `TrustedTriggerFireSubmitter` to invoke a post-submit hook after
-/// each successful fire submission. The hook is stored in a `OnceLock` slot so
-/// it can be wired after the poller is spawned (late-binding). If the slot is
-/// empty at submit time the hook is simply skipped.
+/// Wraps a `TrustedTriggerFireSubmitter` to start a post-submit hook after each
+/// successful fire submission. The hook is detached from the poller tick so
+/// delivery latency cannot delay fire settlement. The hook is stored in a
+/// `OnceLock` slot so it can be wired after the poller is spawned
+/// (late-binding). If the slot is empty at submit time the hook is simply
+/// skipped.
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) struct PostSubmitHookWrappedSubmitter {
     pub(crate) inner: Arc<dyn TrustedTriggerFireSubmitter>,
@@ -140,10 +145,13 @@ impl TrustedTriggerFireSubmitter for PostSubmitHookWrappedSubmitter {
         {
             // Cheap atomic read: if the slot is not yet filled the hook simply
             // doesn't fire — the poller is not restarted.
-            if let Some(hook) = self.hook_slot.get() {
-                hook.on_trigger_submitted(fire, run_id, scope.clone()).await;
+            if let Some(hook) = self.hook_slot.get().cloned() {
+                let scope = scope.clone();
+                tokio::spawn(async move {
+                    hook.on_trigger_submitted(fire, run_id, scope).await;
+                });
             } else {
-                tracing::warn!(
+                tracing::debug!(
                     target = "ironclaw::reborn::trigger_poller",
                     %run_id,
                     "triggered run accepted but post-submit hook slot not yet set (startup window); delivery skipped for this fire"
@@ -204,220 +212,10 @@ fn jitter_delay(max: Duration) -> Duration {
     Duration::from_nanos(nanos)
 }
 
-pub(crate) struct SnapshotActiveRunLookup {
-    snapshot_source: Arc<dyn TriggerTurnSnapshotSource>,
-}
-
-impl SnapshotActiveRunLookup {
-    pub(crate) fn new(snapshot_source: Arc<dyn TriggerTurnSnapshotSource>) -> Self {
-        Self { snapshot_source }
-    }
-}
-
-#[async_trait]
-impl TriggerActiveRunLookup for SnapshotActiveRunLookup {
-    async fn active_run_state(
-        &self,
-        request: TriggerActiveRunStateRequest,
-    ) -> Result<TriggerActiveRunState, TriggerError> {
-        let snapshot = self.snapshot_source.snapshot().await?;
-        let run_index = active_run_index(&snapshot);
-        Ok(active_run_state_from_index(&run_index, &request))
-    }
-
-    async fn active_run_states(
-        &self,
-        requests: Vec<TriggerActiveRunStateRequest>,
-    ) -> Vec<Result<TriggerActiveRunState, TriggerError>> {
-        if requests.is_empty() {
-            return Vec::new();
-        }
-        let snapshot = match self.snapshot_source.snapshot().await {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                let reason = error.to_string();
-                return requests
-                    .into_iter()
-                    .map(|_| {
-                        Err(TriggerError::Backend {
-                            reason: reason.clone(),
-                        })
-                    })
-                    .collect();
-            }
-        };
-        let run_index = active_run_index(&snapshot);
-        requests
-            .iter()
-            .map(|request| Ok(active_run_state_from_index(&run_index, request)))
-            .collect()
-    }
-}
-
-fn active_run_index(
-    snapshot: &TurnPersistenceSnapshot,
-) -> HashMap<(ironclaw_host_api::TenantId, ironclaw_turns::TurnRunId), TriggerActiveRunState> {
-    snapshot
-        .runs
-        .iter()
-        .map(|run| {
-            let state = if run.status.is_terminal() {
-                TriggerActiveRunState::Terminal {
-                    status: terminal_run_history_status(run.status),
-                }
-            } else {
-                TriggerActiveRunState::Nonterminal
-            };
-            ((run.scope.tenant_id.clone(), run.run_id), state)
-        })
-        .collect()
-}
-
-fn active_run_state_from_index(
-    run_index: &HashMap<
-        (ironclaw_host_api::TenantId, ironclaw_turns::TurnRunId),
-        TriggerActiveRunState,
-    >,
-    request: &TriggerActiveRunStateRequest,
-) -> TriggerActiveRunState {
-    run_index
-        .get(&(request.tenant_id.clone(), request.run_id))
-        .copied()
-        .unwrap_or(TriggerActiveRunState::Missing)
-}
-
-fn terminal_run_history_status(status: TurnStatus) -> TriggerRunHistoryStatus {
-    debug_assert!(
-        status.is_terminal(),
-        "only terminal turn statuses should be normalized into run-history status"
-    );
-    match status {
-        TurnStatus::Completed => TriggerRunHistoryStatus::Ok,
-        TurnStatus::Cancelled | TurnStatus::Failed | TurnStatus::RecoveryRequired => {
-            TriggerRunHistoryStatus::Error
-        }
-        TurnStatus::Queued
-        | TurnStatus::Running
-        | TurnStatus::BlockedApproval
-        | TurnStatus::BlockedAuth
-        | TurnStatus::BlockedResource
-        | TurnStatus::BlockedDependentRun
-        | TurnStatus::CancelRequested => TriggerRunHistoryStatus::Error,
-    }
-}
-
-#[async_trait]
-pub(crate) trait TriggerTurnSnapshotSource: Send + Sync {
-    async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, TriggerError>;
-}
-
-pub(crate) struct LocalTriggerTurnSnapshotSource<S> {
-    store: Arc<S>,
-}
-
-impl<S> LocalTriggerTurnSnapshotSource<S> {
-    pub(crate) fn new(store: Arc<S>) -> Self {
-        Self { store }
-    }
-}
-
-#[cfg(feature = "libsql")]
-#[async_trait]
-impl<F> TriggerTurnSnapshotSource
-    for LocalTriggerTurnSnapshotSource<ironclaw_turns::FilesystemTurnStateStore<F>>
-where
-    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
-{
-    async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, TriggerError> {
-        self.store
-            .persistence_snapshot()
-            .await
-            .map_err(trigger_backend_error)
-    }
-}
-
-#[cfg(not(feature = "libsql"))]
-#[async_trait]
-impl TriggerTurnSnapshotSource
-    for LocalTriggerTurnSnapshotSource<ironclaw_turns::InMemoryTurnStateStore>
-{
-    async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, TriggerError> {
-        Ok(self.store.persistence_snapshot())
-    }
-}
-
-#[cfg(feature = "libsql")]
-fn trigger_backend_error(error: impl std::fmt::Display) -> TriggerError {
-    TriggerError::Backend {
-        reason: error.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::TenantId;
-    use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
-    use ironclaw_turns::{
-        AcceptedMessageRef, AgentLoopDriverDescriptor, CancellationPolicy,
-        CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
-        ContextProfileId, EventCursor, LoopDriverId, ModelProfileId, RedactedRunProfileProvenance,
-        ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
-        RunProfileFingerprint, RunProfileId, RunProfileVersion, RuntimeProfileConstraints,
-        SchedulingClass, SourceBindingRef, SteeringPolicy, TurnId, TurnPersistenceSnapshot,
-        TurnRunId, TurnRunProfile, TurnRunRecord, TurnScope, TurnStatus,
-    };
-
-    #[derive(Default)]
-    struct CountingSnapshotSource {
-        calls: std::sync::Mutex<usize>,
-    }
-
-    impl CountingSnapshotSource {
-        fn calls(&self) -> usize {
-            *self.calls.lock().expect("snapshot calls lock")
-        }
-    }
-
-    #[async_trait]
-    impl TriggerTurnSnapshotSource for CountingSnapshotSource {
-        async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, TriggerError> {
-            *self.calls.lock().expect("snapshot calls lock") += 1;
-            Ok(TurnPersistenceSnapshot::default())
-        }
-    }
-
-    struct StaticSnapshotSource {
-        snapshot: TurnPersistenceSnapshot,
-    }
-
-    #[async_trait]
-    impl TriggerTurnSnapshotSource for StaticSnapshotSource {
-        async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, TriggerError> {
-            Ok(self.snapshot.clone())
-        }
-    }
-
-    #[derive(Default)]
-    struct FailingSnapshotSource {
-        calls: std::sync::Mutex<usize>,
-    }
-
-    impl FailingSnapshotSource {
-        fn calls(&self) -> usize {
-            *self.calls.lock().expect("snapshot calls lock")
-        }
-    }
-
-    #[async_trait]
-    impl TriggerTurnSnapshotSource for FailingSnapshotSource {
-        async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, TriggerError> {
-            *self.calls.lock().expect("snapshot calls lock") += 1;
-            Err(TriggerError::Backend {
-                reason: "snapshot failed".to_string(),
-            })
-        }
-    }
+    use ironclaw_triggers::TriggerPollerWorkerConfig;
 
     #[test]
     fn jitter_is_disabled_when_max_is_zero() {
@@ -451,20 +249,6 @@ mod tests {
         assert_eq!(settings.worker, TriggerPollerWorkerConfig::default());
     }
 
-    #[test]
-    fn terminal_turn_statuses_map_to_run_history_statuses() {
-        let cases = [
-            (TurnStatus::Completed, TriggerRunHistoryStatus::Ok),
-            (TurnStatus::Cancelled, TriggerRunHistoryStatus::Error),
-            (TurnStatus::Failed, TriggerRunHistoryStatus::Error),
-            (TurnStatus::RecoveryRequired, TriggerRunHistoryStatus::Error),
-        ];
-
-        for (turn_status, expected) in cases {
-            assert_eq!(terminal_run_history_status(turn_status), expected);
-        }
-    }
-
     #[tokio::test]
     async fn trigger_poller_runtime_handle_aborts_when_join_times_out() {
         let cancel = CancellationToken::new();
@@ -478,241 +262,11 @@ mod tests {
         runtime_handle.shutdown(Duration::from_millis(1)).await;
     }
 
-    #[tokio::test]
-    async fn active_run_batch_lookup_uses_one_snapshot_for_page() {
-        let snapshot_source = Arc::new(CountingSnapshotSource::default());
-        let lookup = SnapshotActiveRunLookup::new(snapshot_source.clone());
-        let tenant_id = TenantId::new("trigger-active-batch-tenant").expect("tenant id");
-        let fire_slot = Utc::now();
-
-        let results = lookup
-            .active_run_states(vec![
-                TriggerActiveRunStateRequest {
-                    tenant_id: tenant_id.clone(),
-                    trigger_id: TriggerId::new(),
-                    fire_slot,
-                    run_id: TurnRunId::new(),
-                },
-                TriggerActiveRunStateRequest {
-                    tenant_id,
-                    trigger_id: TriggerId::new(),
-                    fire_slot,
-                    run_id: TurnRunId::new(),
-                },
-            ])
-            .await;
-
-        assert_eq!(snapshot_source.calls(), 1);
-        assert_eq!(results.len(), 2);
-        assert!(
-            results
-                .into_iter()
-                .all(|result| matches!(result, Ok(TriggerActiveRunState::Missing)))
-        );
-    }
-
-    #[tokio::test]
-    async fn active_run_batch_lookup_returns_nonterminal_and_terminal_states_from_snapshot() {
-        let tenant_id = TenantId::new("trigger-active-state-tenant").expect("tenant id");
-        let nonterminal_run_id = TurnRunId::new();
-        let terminal_run_id = TurnRunId::new();
-        let missing_run_id = TurnRunId::new();
-        let snapshot_source = Arc::new(StaticSnapshotSource {
-            snapshot: TurnPersistenceSnapshot {
-                runs: vec![
-                    turn_run_record(&tenant_id, nonterminal_run_id, TurnStatus::Running),
-                    turn_run_record(&tenant_id, terminal_run_id, TurnStatus::Completed),
-                ],
-                ..TurnPersistenceSnapshot::default()
-            },
-        });
-        let lookup = SnapshotActiveRunLookup::new(snapshot_source);
-        let fire_slot = Utc::now();
-
-        let results = lookup
-            .active_run_states(vec![
-                TriggerActiveRunStateRequest {
-                    tenant_id: tenant_id.clone(),
-                    trigger_id: TriggerId::new(),
-                    fire_slot,
-                    run_id: nonterminal_run_id,
-                },
-                TriggerActiveRunStateRequest {
-                    tenant_id: tenant_id.clone(),
-                    trigger_id: TriggerId::new(),
-                    fire_slot,
-                    run_id: terminal_run_id,
-                },
-                TriggerActiveRunStateRequest {
-                    tenant_id,
-                    trigger_id: TriggerId::new(),
-                    fire_slot,
-                    run_id: missing_run_id,
-                },
-            ])
-            .await;
-
-        assert!(matches!(results[0], Ok(TriggerActiveRunState::Nonterminal)));
-        assert!(matches!(
-            results[1],
-            Ok(TriggerActiveRunState::Terminal {
-                status: TriggerRunHistoryStatus::Ok
-            })
-        ));
-        assert!(matches!(results[2], Ok(TriggerActiveRunState::Missing)));
-    }
-
-    #[tokio::test]
-    async fn active_run_batch_lookup_returns_empty_without_snapshot() {
-        let snapshot_source = Arc::new(CountingSnapshotSource::default());
-        let lookup = SnapshotActiveRunLookup::new(snapshot_source.clone());
-
-        let results = lookup.active_run_states(Vec::new()).await;
-
-        assert!(results.is_empty());
-        assert_eq!(snapshot_source.calls(), 0);
-    }
-
-    #[tokio::test]
-    async fn snapshot_source_error_fans_out_to_all_batch_results() {
-        let snapshot_source = Arc::new(FailingSnapshotSource::default());
-        let lookup = SnapshotActiveRunLookup::new(snapshot_source.clone());
-        let tenant_id = TenantId::new("trigger-active-error-tenant").expect("tenant id");
-        let fire_slot = Utc::now();
-
-        let results = lookup
-            .active_run_states(vec![
-                TriggerActiveRunStateRequest {
-                    tenant_id: tenant_id.clone(),
-                    trigger_id: TriggerId::new(),
-                    fire_slot,
-                    run_id: TurnRunId::new(),
-                },
-                TriggerActiveRunStateRequest {
-                    tenant_id,
-                    trigger_id: TriggerId::new(),
-                    fire_slot,
-                    run_id: TurnRunId::new(),
-                },
-            ])
-            .await;
-
-        assert_eq!(snapshot_source.calls(), 1);
-        assert_eq!(results.len(), 2);
-        assert!(results.into_iter().all(|result| matches!(
-            result,
-            Err(TriggerError::Backend { reason }) if reason.contains("snapshot failed")
-        )));
-    }
-
-    fn turn_run_record(
-        tenant_id: &TenantId,
-        run_id: TurnRunId,
-        status: TurnStatus,
-    ) -> TurnRunRecord {
-        let scope = TurnScope::new(
-            tenant_id.clone(),
-            None,
-            None,
-            ironclaw_host_api::ThreadId::new(format!("thread-{run_id}")).expect("thread id"),
-        );
-        TurnRunRecord {
-            run_id,
-            turn_id: TurnId::new(),
-            scope,
-            accepted_message_ref: AcceptedMessageRef::new(format!("message:{run_id}"))
-                .expect("message ref"),
-            source_binding_ref: SourceBindingRef::new(format!("source:{run_id}"))
-                .expect("source binding ref"),
-            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(format!(
-                "reply:{run_id}"
-            ))
-            .expect("reply target binding ref"),
-            status,
-            profile: TurnRunProfile::from_resolved(resolved_run_profile()),
-            resolved_model_route: None,
-            checkpoint_id: None,
-            gate_ref: None,
-            credential_requirements: Vec::new(),
-            failure: None,
-            event_cursor: EventCursor(1),
-            runner_id: None,
-            lease_token: None,
-            lease_expires_at: None,
-            last_heartbeat_at: None,
-            claim_count: 0,
-            received_at: Utc::now(),
-            parent_run_id: None,
-            subagent_depth: 0,
-            spawn_tree_root_run_id: None,
-            product_context: None,
-            resume_disposition: None,
-        }
-    }
-
-    fn resolved_run_profile() -> ResolvedRunProfile {
-        let checkpoint_schema_id =
-            CheckpointSchemaId::new("trigger_active_checkpoint").expect("checkpoint schema");
-        ResolvedRunProfile {
-            run_class_id: RunClassId::new("trigger_active").expect("run class"),
-            profile_id: RunProfileId::default_profile(),
-            profile_version: RunProfileVersion::new(1),
-            loop_driver: AgentLoopDriverDescriptor {
-                id: LoopDriverId::new("trigger_active_loop").expect("loop driver"),
-                version: RunProfileVersion::new(1),
-                checkpoint_schema_id: Some(checkpoint_schema_id.clone()),
-                checkpoint_schema_version: Some(RunProfileVersion::new(1)),
-            },
-            checkpoint_schema_id,
-            checkpoint_schema_version: RunProfileVersion::new(1),
-            model_profile_id: ModelProfileId::new("trigger_active_model").expect("model profile"),
-            capability_surface_profile_id: CapabilitySurfaceProfileId::new("trigger_active_caps")
-                .expect("capability surface profile"),
-            context_profile_id: ContextProfileId::new("trigger_active_context")
-                .expect("context profile"),
-            steering_policy: SteeringPolicy {
-                allow_steering: false,
-                allow_interrupt: true,
-                allow_driver_specific_nudges: false,
-            },
-            cancellation_policy: CancellationPolicy {
-                allow_cancel: true,
-                require_checkpoint_before_cancel: false,
-            },
-            checkpoint_policy: CheckpointPolicy {
-                require_before_model: false,
-                require_before_side_effect: true,
-                require_before_block: true,
-                max_checkpoint_bytes: 64 * 1024,
-                require_final_checkpoint: false,
-                allow_no_reply_completion: false,
-            },
-            resource_budget_policy: ResourceBudgetPolicy {
-                tier: ResourceBudgetTier::new("trigger_active_budget").expect("budget tier"),
-                max_model_calls: 1,
-                max_capability_invocations: 1,
-            },
-            personal_context_policy: Default::default(),
-            runtime_constraints: RuntimeProfileConstraints {
-                allow_raw_runtime_backend_selection: false,
-                allow_broad_capability_surface: false,
-            },
-            runner_pool_id: None,
-            scheduling_class: SchedulingClass::new("trigger_active").expect("scheduling class"),
-            concurrency_class: ConcurrencyClass::new("trigger_active").expect("concurrency class"),
-            resolution_fingerprint: RunProfileFingerprint::new("trigger-active-profile-v1")
-                .expect("run profile fingerprint"),
-            provenance: RedactedRunProfileProvenance {
-                sources: Vec::new(),
-                effective_privileges: Vec::new(),
-            },
-        }
-    }
-
     // ── PostSubmitHookWrappedSubmitter tests ────────────────────────────────
 
     #[cfg(feature = "slack-v2-host-beta")]
     mod hook_wrapper {
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, Mutex, OnceLock};
         use std::time::Duration;
 
@@ -721,14 +275,15 @@ mod tests {
         use ironclaw_host_api::{AgentId, TenantId, ThreadId, Timestamp, UserId};
         use ironclaw_triggers::{
             InMemoryTriggerRepository, TriggerActiveRunLookup, TriggerActiveRunState,
-            TriggerActiveRunStateRequest, TriggerCompletionPolicy, TriggerError, TriggerFire,
-            TriggerId, TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPollerWorker,
+            TriggerActiveRunStateRequest, TriggerError, TriggerFire, TriggerId,
+            TriggerInboundContentRef, TriggerMaterializedPrompt, TriggerPollerWorker,
             TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerPromptMaterializer,
             TriggerRecord, TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
             TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
             TrustedTriggerSubmitRequest,
         };
         use ironclaw_turns::{TurnRunId, TurnScope};
+        use tokio::sync::Notify;
 
         use super::super::PostSubmitHookWrappedSubmitter;
         use crate::slack_delivery::PostSubmitDeliveryHook;
@@ -799,11 +354,25 @@ mod tests {
         #[derive(Default)]
         struct RecordingHook {
             calls: Mutex<Vec<(TriggerFire, TurnRunId, TurnScope)>>,
+            notify: Notify,
         }
 
         impl RecordingHook {
             fn calls(&self) -> Vec<(TriggerFire, TurnRunId, TurnScope)> {
                 self.calls.lock().unwrap_or_else(|p| p.into_inner()).clone()
+            }
+
+            async fn wait_for_calls(
+                &self,
+                expected: usize,
+            ) -> Vec<(TriggerFire, TurnRunId, TurnScope)> {
+                loop {
+                    let calls = self.calls();
+                    if calls.len() >= expected {
+                        return calls;
+                    }
+                    self.notify.notified().await;
+                }
             }
         }
 
@@ -819,6 +388,27 @@ mod tests {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .push((fire, run_id, scope));
+                self.notify.notify_one();
+            }
+        }
+
+        struct BlockingHook {
+            entered: Arc<Notify>,
+            release: Arc<Notify>,
+            completed: Arc<AtomicBool>,
+        }
+
+        #[async_trait]
+        impl PostSubmitDeliveryHook for BlockingHook {
+            async fn on_trigger_submitted(
+                &self,
+                _fire: TriggerFire,
+                _run_id: TurnRunId,
+                _scope: TurnScope,
+            ) {
+                self.entered.notify_one();
+                self.release.notified().await;
+                self.completed.store(true, Ordering::SeqCst);
             }
         }
 
@@ -847,7 +437,6 @@ mod tests {
                 name: "hook-wrapper-trigger".to_string(),
                 source: TriggerSourceKind::Schedule,
                 schedule: TriggerSchedule::cron("* * * * *").expect("cron"),
-                completion_policy: TriggerCompletionPolicy::Recurring,
                 prompt: "hook wrapper test prompt".to_string(),
                 state: TriggerState::Scheduled,
                 next_run_at: fire_slot,
@@ -874,6 +463,7 @@ mod tests {
                     poll_interval: Duration::from_millis(50),
                     fires_per_tick: 1,
                     max_concurrent_fires_per_trigger: 1,
+                    ..TriggerPollerWorkerConfig::default()
                 },
                 TriggerPollerWorkerDeps {
                     repository: repo,
@@ -960,7 +550,9 @@ mod tests {
             assert_eq!(report.due_records, 1, "one due trigger must be processed");
 
             // Hook was invoked exactly once.
-            let calls = recording.calls();
+            let calls = tokio::time::timeout(Duration::from_secs(1), recording.wait_for_calls(1))
+                .await
+                .expect("hook should be invoked asynchronously");
             assert_eq!(calls.len(), 1, "hook must fire exactly once");
 
             let (recorded_fire, called_run_id, called_scope) = &calls[0];
@@ -978,6 +570,75 @@ mod tests {
                 Some(&recorded_fire.creator_user_id),
                 "post-submit hook must receive a TurnScope owned by the trigger creator"
             );
+        }
+
+        /// A slow hook must not delay the poller from persisting the accepted
+        /// run id; otherwise the trigger remains claim-only active and blocks
+        /// later slots until the delivery task finishes.
+        #[tokio::test]
+        async fn filled_slot_slow_hook_does_not_block_trigger_settlement() {
+            let repo = Arc::new(InMemoryTriggerRepository::default());
+            let fire_slot = Utc::now() - chrono::Duration::seconds(1);
+            let trigger_id = seed_due_trigger(&repo, fire_slot).await;
+
+            let run_id = TurnRunId::new();
+            let inner = Arc::new(FixedAcceptedSubmitter { run_id });
+            let hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>> =
+                Arc::new(OnceLock::new());
+
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let completed = Arc::new(AtomicBool::new(false));
+            hook_slot
+                .set(Arc::new(BlockingHook {
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                    completed: Arc::clone(&completed),
+                }) as Arc<dyn PostSubmitDeliveryHook>)
+                .unwrap_or_else(|_| panic!("slot set should succeed on first call"));
+
+            let wrapper = Arc::new(PostSubmitHookWrappedSubmitter {
+                inner: inner as Arc<dyn TrustedTriggerFireSubmitter>,
+                hook_slot: Arc::clone(&hook_slot),
+            });
+
+            let worker = build_worker_with_repo(
+                Arc::clone(&repo),
+                wrapper as Arc<dyn TrustedTriggerFireSubmitter>,
+            );
+            let report = tokio::time::timeout(Duration::from_secs(1), worker.tick_once(Utc::now()))
+                .await
+                .expect("slow post-submit hook must not block tick_once")
+                .expect("tick_once succeeds");
+            assert_eq!(report.due_records, 1, "one due trigger must be processed");
+
+            tokio::time::timeout(Duration::from_secs(1), entered.notified())
+                .await
+                .expect("hook task should have started");
+            assert!(
+                !completed.load(Ordering::SeqCst),
+                "hook must still be blocked until the test releases it"
+            );
+
+            let persisted = repo
+                .get_trigger(wrapper_tenant(), trigger_id)
+                .await
+                .expect("load trigger")
+                .expect("trigger present");
+            assert_eq!(
+                persisted.active_run_ref,
+                Some(run_id),
+                "accepted run id must be persisted before delivery hook completes"
+            );
+
+            release.notify_one();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !completed.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("hook task should complete after release");
         }
     }
 }

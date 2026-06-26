@@ -9,6 +9,7 @@
 //! store is introduced.
 
 mod compaction;
+mod content_digest;
 mod context_budget;
 mod driver;
 mod host;
@@ -36,6 +37,7 @@ pub use compaction::{
     CompactionInitiator, LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome,
     LoopCompactionPort, LoopCompactionRequest, LoopCompactionResponse, LoopSummaryArtifactId,
 };
+pub use content_digest::{ContentDigest, ContentDigestError, normalize_for_hash};
 pub use context_budget::PromptContextTokenBudget;
 pub use driver::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
@@ -65,9 +67,9 @@ pub use host::{
     LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort,
     LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, ProcessHandleSummary,
     PromptMode, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReference,
-    ProviderToolCallReplay, ProviderToolDefinition, StageCheckpointPayloadRequest,
-    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    sanitize_model_visible_text, validate_model_route_component_value,
+    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, sanitize_model_visible_text, validate_model_route_component_value,
 };
 pub use instruction_bundle::{
     InMemoryInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,

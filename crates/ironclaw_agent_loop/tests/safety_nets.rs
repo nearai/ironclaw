@@ -9,7 +9,10 @@ use ironclaw_agent_loop::{
         ScriptedCapabilityOutcome, ScriptedModelResponse,
     },
 };
-use ironclaw_turns::{LoopExit, LoopFailureKind, run_profile::LoopRunInfoPort};
+use ironclaw_turns::{
+    LoopExit, LoopFailureKind,
+    run_profile::{ContentDigest, LoopRunInfoPort},
+};
 
 #[tokio::test]
 async fn repeated_signature_warns_before_allowing_final_reply() {
@@ -86,13 +89,13 @@ async fn repeated_signature_stops_after_rendered_warning_and_no_progress_result(
         .expect("loop execution should succeed");
 
     match exit {
-        LoopExit::Completed(completed) => {
-            assert_eq!(completed.reply_message_refs.len(), 1);
-            assert!(completed.final_checkpoint_id.is_some());
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
+            assert!(failed.checkpoint_id.is_some());
         }
-        other => panic!("expected no-progress fallback completion, got {other:?}"),
+        other => panic!("expected typed no-progress failure, got {other:?}"),
     }
-    assert_no_progress_fallback(&host);
+    assert_no_progress_typed_failure(&host);
     assert_eq!(host.model_call_count(), 4);
     assert_eq!(repeated_call_warning_prompt_count(&host), 1);
 }
@@ -150,6 +153,121 @@ async fn repeated_signature_made_progress_after_warning_clears_warning_and_conti
 }
 
 #[tokio::test]
+async fn repeated_identical_output_digest_trips_no_progress() {
+    // PR3: the same call producing the SAME output (identical content digest)
+    // every turn is genuine no-progress — the guard fires (typed
+    // NoProgressDetected, nudge gate off), even though the host tags each
+    // completed result MadeProgress. This is the load-bearing output-aware case.
+    let digest = ContentDigest(7);
+    let script = ScenarioScript {
+        model_responses: VecDeque::from([
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Reply {
+                text: "done after identical output digests".to_string(),
+            },
+        ]),
+        capability_outcomes: VecDeque::from([
+            vec![ScriptedCapabilityOutcome::completed_with_output_digest(
+                "result:repeat-digest-1",
+                digest,
+            )],
+            vec![ScriptedCapabilityOutcome::completed_with_output_digest(
+                "result:repeat-digest-2",
+                digest,
+            )],
+            vec![ScriptedCapabilityOutcome::completed_with_output_digest(
+                "result:repeat-digest-3",
+                digest,
+            )],
+            vec![ScriptedCapabilityOutcome::completed_with_output_digest(
+                "result:repeat-digest-4",
+                digest,
+            )],
+        ]),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    };
+    let (host, _) = MockAgentLoopDriverHost::builder().script(script).build();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should succeed");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
+            assert!(failed.checkpoint_id.is_some());
+        }
+        other => panic!("expected typed no-progress failure, got {other:?}"),
+    }
+    assert_no_progress_typed_failure(&host);
+}
+
+#[tokio::test]
+async fn changing_output_digests_do_not_trip_no_progress() {
+    // PR3 counterpart: the SAME call returning DIFFERENT output each turn
+    // (polling / pagination that advances) is real progress — every new digest
+    // is MadeProgress, so the guard never fires and the run completes normally,
+    // even though the call signature repeats. This is exactly the false positive
+    // the output-aware signal removes.
+    let script = ScenarioScript {
+        model_responses: VecDeque::from([
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Reply {
+                text: "done after advancing output".to_string(),
+            },
+        ]),
+        capability_outcomes: VecDeque::from([
+            vec![ScriptedCapabilityOutcome::completed_with_output_digest(
+                "result:poll-1",
+                ContentDigest(1),
+            )],
+            vec![ScriptedCapabilityOutcome::completed_with_output_digest(
+                "result:poll-2",
+                ContentDigest(2),
+            )],
+            vec![ScriptedCapabilityOutcome::completed_with_output_digest(
+                "result:poll-3",
+                ContentDigest(3),
+            )],
+            vec![ScriptedCapabilityOutcome::completed_with_output_digest(
+                "result:poll-4",
+                ContentDigest(4),
+            )],
+        ]),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    };
+    let (host, _) = MockAgentLoopDriverHost::builder().script(script).build();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should succeed");
+
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs.len(), 1);
+            assert!(completed.final_checkpoint_id.is_some());
+        }
+        other => panic!("changing output is progress; expected completion, got {other:?}"),
+    }
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["done after advancing output"]
+    );
+}
+
+#[tokio::test]
 async fn typed_no_progress_results_escape_without_repeated_call_signature() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([
@@ -180,23 +298,30 @@ async fn typed_no_progress_results_escape_without_repeated_call_signature() {
         .expect("loop execution should succeed");
 
     match exit {
-        LoopExit::Completed(completed) => {
-            assert_eq!(completed.reply_message_refs.len(), 1);
-            assert!(completed.final_checkpoint_id.is_some());
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
+            assert!(failed.checkpoint_id.is_some());
         }
-        other => panic!("expected no-progress fallback completion, got {other:?}"),
+        other => panic!("expected typed no-progress failure, got {other:?}"),
     }
-    assert_no_progress_fallback(&host);
+    assert_no_progress_typed_failure(&host);
     assert_eq!(host.model_call_count(), 3);
 }
 
 #[tokio::test]
-async fn typed_blocked_results_escape_without_repeated_call_signature() {
+async fn typed_blocked_results_do_not_escape_via_no_progress() {
+    // PR3: blocked/failed results are NOT no-progress (only a repeated identical
+    // output is). Three blocked batches (distinct inputs, so no repeated-call
+    // signature either) do not fire NoProgressDetected; the run continues and
+    // completes once the model recovers with a reply.
     let script = ScenarioScript {
         model_responses: VecDeque::from([
             ScriptedModelResponse::Calls(vec![call_with_input("input:blocked-1")]),
             ScriptedModelResponse::Calls(vec![call_with_input("input:blocked-2")]),
             ScriptedModelResponse::Calls(vec![call_with_input("input:blocked-3")]),
+            ScriptedModelResponse::Reply {
+                text: "recovered after blocked tools".to_string(),
+            },
         ]),
         capability_outcomes: VecDeque::from([
             vec![ScriptedCapabilityOutcome::completed_blocked(
@@ -225,10 +350,14 @@ async fn typed_blocked_results_escape_without_repeated_call_signature() {
             assert_eq!(completed.reply_message_refs.len(), 1);
             assert!(completed.final_checkpoint_id.is_some());
         }
-        other => panic!("expected no-progress fallback completion, got {other:?}"),
+        other => {
+            panic!("blocked failures must not trip no-progress; expected completion, got {other:?}")
+        }
     }
-    assert_no_progress_fallback(&host);
-    assert_eq!(host.model_call_count(), 3);
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["recovered after blocked tools"]
+    );
 }
 
 #[tokio::test]
@@ -332,11 +461,15 @@ async fn recovery_budget_exhaustion_uses_single_call_retry() {
     );
 }
 
-fn assert_no_progress_fallback(host: &MockAgentLoopDriverHost) {
-    let messages = host.finalized_assistant_messages();
-    assert_eq!(messages.len(), 1);
-    assert!(messages[0].contains("repeating the same step without making progress"));
-    assert!(messages[0].contains("repeated calls, results, and any failure summaries"));
+fn assert_no_progress_typed_failure(host: &MockAgentLoopDriverHost) {
+    // A no-progress stop with the nudge gate off finalizes NO assistant reply —
+    // the run ends as a typed `NoProgressDetected` failure, not a canned
+    // "I stopped" message masquerading as a completed turn.
+    assert!(
+        host.finalized_assistant_messages().is_empty(),
+        "no-progress failure must not finalize an assistant reply, got {:?}",
+        host.finalized_assistant_messages()
+    );
 }
 
 fn call_with_input(input_ref: &str) -> ScriptedCapabilityCall {

@@ -27,8 +27,8 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CorrelationId,
-    ExecutionContext, ExtensionId, ProcessId, ResourceEstimate, ResourceScope, ResourceUsage,
-    RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
+    DispatchFailureDetail, ExecutionContext, ExtensionId, ProcessId, ResourceEstimate,
+    ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
     runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
 };
 use ironclaw_trust::TrustDecision;
@@ -37,6 +37,7 @@ use std::{collections::BTreeMap, env, fmt};
 use thiserror::Error;
 
 mod capability_catalog;
+mod document_output;
 mod egress;
 mod extension_contracts;
 mod first_party;
@@ -87,9 +88,13 @@ pub use first_party_tools::{
     TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
     TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
-    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
-    TriggerCreateHook, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
-    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TriggerCreateHook,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_handlers_for_process_backend,
+    builtin_first_party_handlers_with_trigger_create_hook,
+    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
+    builtin_first_party_package, builtin_first_party_package_for_process_backend,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{
@@ -126,7 +131,7 @@ pub use services::{
 pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
 pub use turn_scheduler::{
     SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
-    TurnRunSchedulerConfig, TurnRunSchedulerHandle,
+    TurnRunSchedulerConfig, TurnRunSchedulerHandle, TurnRunWakeChannel,
 };
 
 /// Stable, validated idempotency key supplied by upper turn/loop services.
@@ -579,6 +584,7 @@ pub struct RuntimeCapabilityFailure {
     pub capability_id: CapabilityId,
     pub kind: RuntimeFailureKind,
     pub message: Option<String>,
+    pub detail: Option<DispatchFailureDetail>,
 }
 
 /// Explicit fallback for outcome categories that the loop adapter cannot handle
@@ -758,7 +764,13 @@ impl RuntimeCapabilityFailure {
             capability_id,
             kind,
             message,
+            detail: None,
         }
+    }
+
+    pub fn with_detail(mut self, detail: DispatchFailureDetail) -> Self {
+        self.detail = Some(detail);
+        self
     }
 
     pub fn safe_summary(&self) -> Option<String> {

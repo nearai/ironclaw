@@ -1,9 +1,12 @@
-use crate::{ActiveTriggerScanCursor, ClearActiveFireRequest, TriggerError, TriggerRecord};
+use crate::{
+    ActiveTriggerScanCursor, ClearActiveFireRequest, TriggerError, TriggerRecord,
+    TriggerRunHistoryStatus,
+};
 
 use super::{
     TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerPollerFailureReason,
     TriggerPollerFireOutcome, TriggerPollerFireReport, TriggerPollerTickReport,
-    TriggerPollerWorker,
+    TriggerPollerWorker, failure::classify_failure,
 };
 
 struct ActiveLookupItem {
@@ -37,22 +40,33 @@ impl TriggerPollerWorker {
                 continue;
             };
             let Some(run_id) = record.active_run_ref else {
-                // Keep claim-only rows blocked until recovery has lease or age
-                // evidence that clearing cannot double-submit after a crash.
-                // Still advance the scan cursor: otherwise one claim-only row
-                // at the front of a page can starve every later active run.
-                if first_unadvanced_cursor.is_none() {
-                    next_cursor = Some(record_cursor);
-                }
+                let outcome = match self
+                    .recover_stale_claim_only_fire(record.clone(), fire_slot, report.now)
+                    .await
+                {
+                    Ok(Some(outcome)) => outcome,
+                    Ok(None) => TriggerPollerFireOutcome::SkippedAlreadyActive {
+                        active_fire_slot: fire_slot,
+                        active_run_ref: None,
+                    },
+                    Err(error) => {
+                        let classification = classify_failure(&error);
+                        TriggerPollerFireOutcome::DueFireFailed {
+                            reason: classification.reason,
+                        }
+                    }
+                };
                 report.results.push(TriggerPollerFireReport {
                     tenant_id: record.tenant_id,
                     trigger_id: record.trigger_id,
                     fire_slot,
-                    outcome: TriggerPollerFireOutcome::SkippedAlreadyActive {
-                        active_fire_slot: fire_slot,
-                        active_run_ref: None,
-                    },
+                    outcome,
                 });
+                // Advance the scan cursor even when recovery is deferred or
+                // fails, so one claim-only row cannot starve later active runs.
+                if first_unadvanced_cursor.is_none() {
+                    next_cursor = Some(record_cursor);
+                }
                 continue;
             };
             let result_index = lookup_requests.len();
@@ -111,9 +125,27 @@ impl TriggerPollerWorker {
                     continue;
                 }
             };
-            match state {
-                TriggerActiveRunState::Terminal { status } => {
-                    if self
+            // Map the run state to "should this active fire be cleared, and if
+            // so with what status". Human-interaction gates keep active
+            // back-pressure here: clearing a blocked active fire without
+            // atomically terminating the underlying turn can let the same run
+            // resume after a failed trigger-history entry has already been
+            // recorded. Terminal runs clear with whatever status they reached.
+            // Exhaustive (no wildcard) so a new variant forces a compile error.
+            let clear: Option<(TriggerPollerFireOutcome, TriggerRunHistoryStatus)> = match state {
+                TriggerActiveRunState::Terminal { status } => Some((
+                    TriggerPollerFireOutcome::ClearedTerminalActive { run_id },
+                    status,
+                )),
+                // Missing remains conservative until recovery can prove the
+                // active run lookup is not merely stale or temporarily empty.
+                TriggerActiveRunState::Blocked
+                | TriggerActiveRunState::Missing
+                | TriggerActiveRunState::Nonterminal => None,
+            };
+            match clear {
+                Some((cleared_outcome, status)) => {
+                    let outcome = if self
                         .deps
                         .repository
                         .clear_active_fire(ClearActiveFireRequest {
@@ -126,24 +158,18 @@ impl TriggerPollerWorker {
                         .await?
                         .is_some()
                     {
-                        report.results.push(TriggerPollerFireReport {
-                            tenant_id: record.tenant_id,
-                            trigger_id: record.trigger_id,
-                            fire_slot,
-                            outcome: TriggerPollerFireOutcome::ClearedTerminalActive { run_id },
-                        });
+                        cleared_outcome
                     } else {
-                        report.results.push(TriggerPollerFireReport {
-                            tenant_id: record.tenant_id,
-                            trigger_id: record.trigger_id,
-                            fire_slot,
-                            outcome: TriggerPollerFireOutcome::SkippedAlreadyCleared { run_id },
-                        });
-                    }
+                        TriggerPollerFireOutcome::SkippedAlreadyCleared { run_id }
+                    };
+                    report.results.push(TriggerPollerFireReport {
+                        tenant_id: record.tenant_id,
+                        trigger_id: record.trigger_id,
+                        fire_slot,
+                        outcome,
+                    });
                 }
-                TriggerActiveRunState::Missing | TriggerActiveRunState::Nonterminal => {
-                    // Missing remains conservative until recovery can prove the
-                    // active run lookup is not merely stale or temporarily empty.
+                None => {
                     report.results.push(TriggerPollerFireReport {
                         tenant_id: record.tenant_id,
                         trigger_id: record.trigger_id,
@@ -161,6 +187,32 @@ impl TriggerPollerWorker {
         }
         self.set_active_scan_cursor(next_cursor)?;
         Ok(())
+    }
+
+    async fn recover_stale_claim_only_fire(
+        &self,
+        record: TriggerRecord,
+        fire_slot: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<TriggerPollerFireOutcome>, TriggerError> {
+        let runs = self
+            .deps
+            .repository
+            .list_trigger_run_history(record.tenant_id.clone(), record.trigger_id, 1)
+            .await?;
+        let Some(run) = runs.into_iter().find(|run| run.fire_slot == fire_slot) else {
+            return Ok(None);
+        };
+        let Ok(age) = now.signed_duration_since(run.submitted_at).to_std() else {
+            return Ok(None);
+        };
+        if age < self.config.claim_only_recovery_grace {
+            return Ok(None);
+        }
+
+        self.process_claimed_fire(record, fire_slot, now)
+            .await
+            .map(Some)
     }
 
     async fn list_active_cleanup_page(

@@ -54,13 +54,14 @@ pub use capability_allow_set::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
 };
 pub use capability_port::{
-    CapabilityResultWrite, CapabilityTrajectoryObserver, DecoratingLoopCapabilityPortFactory,
-    HostRuntimeLoopCapabilityPort, HostRuntimeLoopCapabilityPortFactory,
-    LoopCapabilityInputResolver, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, concurrency_hint_from_effects, loop_driver_execution_extension_id,
+    CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult,
+    DecoratingLoopCapabilityPortFactory, HostRuntimeLoopCapabilityPort,
+    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortDecorator,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, concurrency_hint_from_effects,
+    loop_driver_execution_extension_id,
 };
 pub use capability_surface_filter::{
-    CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
+    CapabilitySurfaceDenyFilter, CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
 };
 pub use compaction_task::{
     ACTIVE_TASK_COMPACTION_PROMPT_ID, DEFAULT_COMPACTION_PROMPT_ID, HostManagedLoopCompactionPort,

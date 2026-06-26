@@ -1,3 +1,4 @@
+import { useOutletContext } from "react-router";
 import { React, html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
 import { useLogs } from "./hooks/useLogs.js";
@@ -113,6 +114,7 @@ function ScopeChip({ label, value, scopeKey }) {
 
 export function LogsPage() {
   const t = useT();
+  const { isAdmin = false, threadsState } = useOutletContext() || {};
   const {
     entries,
     totalCount,
@@ -130,7 +132,11 @@ export function LogsPage() {
     scope,
     isLoading,
     error,
-  } = useLogs();
+    needsThreadScope,
+  } = useLogs({
+    isAdmin,
+    defaultThreadId: isAdmin ? null : threadsState?.activeThreadId || null,
+  });
 
   const outputRef = React.useRef(null);
   const followLatestRef = React.useRef(true);
@@ -149,7 +155,7 @@ export function LogsPage() {
   const activeScope = scope?.active || [];
 
   return html`
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <!-- Toolbar -->
       <div
         className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)] px-4 py-2"
@@ -269,7 +275,16 @@ export function LogsPage() {
               </div>
             `
           : null}
-        ${error && !hasEntries
+        ${needsThreadScope
+          ? html`
+              <div
+                data-testid="logs-select-thread-state"
+                className="flex h-full items-center justify-center text-sm text-[var(--v2-text-muted)]"
+              >
+                ${t("chat.selectConversation")}
+              </div>
+            `
+          : error && !hasEntries
           ? html`
               <div
                 className="flex h-full items-center justify-center px-6 text-center text-sm text-red-300"

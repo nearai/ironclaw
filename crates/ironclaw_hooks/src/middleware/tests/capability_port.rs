@@ -78,6 +78,7 @@ impl LoopCapabilityPort for AlwaysCompletedPort {
             safe_summary: format!("ran {}", request.capability_id),
             terminate_hint: false,
             byte_len: 0,
+            output_digest: None,
         }))
     }
 
@@ -230,6 +231,7 @@ const SNAPSHOT_FIXTURE_DIGEST_HEX: &str =
 
 fn snapshot_fixture_invocation() -> CapabilityInvocation {
     CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion::new("snapshot:v1")
             .expect("surface version literal is valid"),
         capability_id: CapabilityId::new("cap.snapshot.fixture")
@@ -365,12 +367,14 @@ fn invocation_arguments_digest_differs_for_different_input_refs() {
     let cap_id = CapabilityId::new("cap.x").expect("ok");
     let surface = ironclaw_turns::run_profile::CapabilitySurfaceVersion::new("v").expect("ok");
     let a = CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface.clone(),
         capability_id: cap_id.clone(),
         input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:a").expect("ok"),
         approval_resume: None,
     };
     let b = CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface,
         capability_id: cap_id,
         input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:b").expect("ok"),
@@ -389,12 +393,14 @@ fn invocation_arguments_digest_differs_for_different_capability_ids() {
     let input_ref =
         ironclaw_turns::run_profile::CapabilityInputRef::new("input:shared").expect("ok");
     let a = CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface.clone(),
         capability_id: CapabilityId::new("cap.alpha").expect("ok"),
         input_ref: input_ref.clone(),
         approval_resume: None,
     };
     let b = CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface,
         capability_id: CapabilityId::new("cap.beta").expect("ok"),
         input_ref,
@@ -411,6 +417,7 @@ fn invocation_arguments_digest_differs_for_different_capability_ids() {
 
 fn invocation(capability: &str) -> CapabilityInvocation {
     CapabilityInvocation {
+        activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: CapabilitySurfaceVersion::new("v1").expect("ok"),
         capability_id: CapabilityId::new(capability).expect("ok"),
         input_ref: CapabilityInputRef::new(format!("input:{capability}")).expect("ok"),
