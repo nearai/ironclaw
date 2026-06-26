@@ -286,6 +286,41 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the SSE/history port in the
   Reborn WebUI v2 Playwright job.
 
+### Step 8: Legacy Skills Settings Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_skills.py`.
+
+Ported the lifecycle intent from legacy `test_skills.py` to the standalone
+Reborn WebUI v2 Settings route:
+
+- Skills settings renders the add-skill form and learned auto-activation
+  default control;
+- adding a user-managed skill posts `name` and `content` to the v2 install
+  endpoint with `X-Confirm-Action: true`;
+- editing loads SKILL.md content, saves updated content with
+  `X-Confirm-Action: true`, and exits edit mode;
+- deleting a user-managed skill shows the native confirm dialog, posts DELETE
+  with `X-Confirm-Action: true`, and removes the card after the query reload;
+- system and workspace skills remain visible but hide edit, delete, and
+  auto-activation controls.
+
+Behavior adjustment:
+
+- The existing legacy tests already mocked `/api/webchat/v2/skills`, but still
+  drove the legacy web shell. The port moves those assertions to
+  `/v2/settings/skills` under `ironclaw-reborn serve`.
+- Reborn's form labels render visibly through the shared design-system field
+  component, but the current DOM does not expose those labels to Playwright's
+  `get_by_label`. The port uses the stable Reborn placeholders instead.
+- The Playwright version in this repo does not expose `page.expect_dialog`, so
+  the delete-confirm assertion records and accepts the dialog from the
+  `dialog` event handler.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the Skills settings port in
+  the Reborn WebUI v2 Playwright job.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -297,7 +332,7 @@ Not yet ported:
 - DOM pruning/resource-limit scenarios;
 - deeper tool approval scenarios that need real Reborn runtime/tool execution,
   persistence, or recovery beyond the browser approval-card contract;
-- skills/settings/extension lifecycle scenarios;
+- remaining settings/extension lifecycle scenarios beyond Skills;
 - OAuth/product-auth flows;
 - Slack/Telegram/channel pairing scenarios;
 - routines/automations/admin/operator flows;
