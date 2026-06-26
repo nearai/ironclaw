@@ -441,6 +441,8 @@ coverage to the standalone Reborn Automations page:
 - the scheduler-disabled response flag surfaces the visible warning;
 - outbound delivery defaults render current/available targets and save the
   selected final-reply target through `/api/webchat/v2/outbound/preferences`;
+- recent run history renders status, thread id, run id, current-run metadata,
+  log navigation, and run-thread navigation through the Reborn detail panel;
 - pause, resume, and delete actions post to the v2 mutation endpoints, with
   delete protected by the native confirm dialog.
 
@@ -2687,6 +2689,31 @@ Issue found and fixed:
   `AwaitingApproval` to needs-attention, and failed/interrupted states to the
   failed presentation, while local live state still takes precedence.
 
+### Step 91: Legacy Automation Run History Navigation Port
+
+Extended `test_reborn_webui_v2_legacy_automations.py`.
+
+Ported the visible run-history intent from legacy routine execution/failure UI
+coverage to the Reborn Automations detail panel:
+
+- selected a failed scheduled automation and asserted the detail panel exposes
+  the needs-review status, failed success rate, recent-runs section, error
+  status, thread id, and run id;
+- clicked the run's Logs action and asserted navigation to the scoped Reborn
+  logs route with both `thread_id` and `run_id`;
+- selected a running automation, asserted the current-run id and backing thread
+  are visible, then opened the run's chat thread through the detail action.
+
+Behavior mapping:
+
+- Legacy routine tests inspected `/api/routines/*`, `/api/jobs/*`, and legacy
+  routine/job pages. Reborn's portable browser surface is the Automations detail
+  panel: it receives `recent_runs` from `/api/webchat/v2/automations`, maps
+  terminal/running status into the panel, and links accepted runs to Reborn
+  chat and logs routes. Routine event triggers, full-job endpoints, and
+  routine-scoped OAuth credential injection remain open because they still lack
+  a non-stub Reborn v2 routines surface.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -2740,9 +2767,10 @@ Not yet ported:
 - legacy extension uninstall secret-table cleanup parity, because those tests
   inspect legacy `secrets` rows behind `/api/extensions/*` rather than Reborn
   product-auth/extension service contracts;
-- legacy routine event/full-job/OAuth-credential parity, because those tests
-  target legacy `/api/routines/*`, `/api/jobs/*`, HTTP-channel triggers, and the
-  legacy routines tab;
+- legacy routine event/full-job/OAuth-credential parity beyond the Reborn
+  Automations run-history panel, because those tests target legacy
+  `/api/routines/*`, `/api/jobs/*`, HTTP-channel triggers, routine-scoped OAuth
+  fallback, and the legacy routines tab;
 - legacy project mission/thread/widget drill-in parity, because the current
   Reborn project page maps real project entities but still uses TODO client
   stubs for per-project missions, threads, widgets, and detail actions;

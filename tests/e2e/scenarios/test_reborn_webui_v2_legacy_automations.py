@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from copy import deepcopy
 from urllib.parse import parse_qs, urlparse
 
@@ -401,6 +402,52 @@ async def test_reborn_legacy_automations_filters_and_completed_query(
         assert any(
             request.get("include_completed") == ["true"]
             for request in harness["list_requests"]
+        )
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_automations_recent_run_history_links_to_logs_and_thread(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_automations_page(reborn_v2_server, reborn_v2_browser)
+    try:
+        page = harness["page"]
+
+        await _select_automation(page, "Failing sync")
+        await expect(page.get_by_role("heading", name="Failing sync")).to_be_visible()
+        await expect(page.get_by_text("Needs review").first).to_be_visible()
+        await expect(page.get_by_text("0% visible runs")).to_be_visible()
+        await expect(page.get_by_role("heading", name="Recent runs")).to_be_visible()
+        await expect(page.get_by_text("Error").first).to_be_visible()
+        await expect(page.get_by_text("Thread thread-failing-sync")).to_be_visible()
+        await expect(
+            page.get_by_text("Run 22222222-2222-2222-2222-222222222222")
+        ).to_be_visible()
+
+        await page.get_by_role("button", name="Logs").click()
+        await expect(page).to_have_url(
+            re.compile(
+                r".*/v2/logs\?thread_id=thread-failing-sync&run_id=22222222-2222-2222-2222-222222222222"
+            ),
+            timeout=10000,
+        )
+
+        await page.goto(f"{reborn_v2_server}/v2/automations?token={REBORN_V2_AUTH_TOKEN}")
+        await _select_automation(page, "Running import")
+        await expect(page.get_by_role("heading", name="Running import")).to_be_visible(
+            timeout=10000
+        )
+        await expect(page.get_by_text("Current run")).to_be_visible()
+        await expect(
+            page.get_by_text("33333333-3333-3333-3333-333333333333").first
+        ).to_be_visible()
+        await expect(page.get_by_text("Thread thread-running-import")).to_be_visible()
+
+        await page.get_by_role("button", name="Open run").click()
+        await expect(page).to_have_url(
+            re.compile(r".*/v2/chat/thread-running-import.*"),
+            timeout=10000,
         )
     finally:
         await harness["context"].close()
