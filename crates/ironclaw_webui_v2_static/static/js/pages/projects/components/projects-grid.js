@@ -12,6 +12,8 @@ import {
 function ProjectCard({ project, onOpen, t }) {
   return html`
     <article
+      data-testid="project-card"
+      data-project-id=${project.id}
       onClick=${() => onOpen(project.id)}
       role="button"
       tabIndex=${0}
@@ -72,6 +74,7 @@ function ProjectCard({ project, onOpen, t }) {
           <div className="mt-1 text-xs uppercase tracking-[0.16em] text-iron-500">${formatProjectRelativeTime(project.last_activity)}</div>
         </div>
         <${Button}
+          data-testid="project-open-workspace"
           variant="secondary"
           onClick=${(event) => {
             event.stopPropagation();
@@ -86,6 +89,8 @@ function ProjectCard({ project, onOpen, t }) {
 function GeneralProjectCard({ project, onOpen, t }) {
   return html`
     <${Panel}
+      data-testid="project-card"
+      data-project-id=${project.id}
       onClick=${() => onOpen(project.id)}
       role="button"
       tabIndex=${0}
@@ -115,6 +120,7 @@ function GeneralProjectCard({ project, onOpen, t }) {
             ${compactCount(project.threads_today || 0, "thread")} today
           </div>
           <${Button}
+            data-testid="project-open-workspace"
             variant="secondary"
             onClick=${(event) => {
               event.stopPropagation();
@@ -140,16 +146,7 @@ export function ProjectsGrid({
   const defaultProject = projects.find((project) => project.name === "default");
   const scopedProjects = projects.filter((project) => project.name !== "default");
 
-  if (!projects.length && totalProjects > 0) {
-    return html`
-      <${EmptyPanel}
-        title=${t("projects.empty.noMatchTitle")}
-        description=${t("projects.empty.noMatchDesc")}
-      />
-    `;
-  }
-
-  if (!projects.length) {
+  if (!totalProjects) {
     return html`
       <${EmptyPanel}
         title=${t("projects.empty.noneTitle")}
@@ -161,7 +158,7 @@ export function ProjectsGrid({
   }
 
   return html`
-    <div className="space-y-5">
+    <div data-testid="projects-grid" className="space-y-5">
       ${defaultProject && html`<${GeneralProjectCard} project=${defaultProject} onOpen=${onOpenProject} t=${t} />`}
 
       <${Panel} className="p-4 sm:p-5">
@@ -175,6 +172,7 @@ export function ProjectsGrid({
           </div>
           <div className="flex gap-2">
             <input
+              data-testid="projects-search-input"
               value=${search}
               onInput=${(event) => onSearchChange(event.target.value)}
               placeholder=${t("projects.searchPlaceholder")}
@@ -189,6 +187,13 @@ export function ProjectsGrid({
         ? html`<div className="grid gap-4 xl:grid-cols-2 2xl:grid-cols-3">
             ${scopedProjects.map((project) => html`<${ProjectCard} key=${project.id} project=${project} onOpen=${onOpenProject} t=${t} />`)}
           </div>`
+        : !projects.length
+          ? html`
+              <${EmptyPanel}
+                title=${t("projects.empty.noMatchTitle")}
+                description=${t("projects.empty.noMatchDesc")}
+              />
+            `
         : html`
             <${EmptyPanel}
               title=${t("projects.scoped.onlyGeneralTitle")}

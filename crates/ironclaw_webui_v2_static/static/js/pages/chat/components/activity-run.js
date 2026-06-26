@@ -14,11 +14,12 @@ export function ActivityRun({ activity }) {
   }, [shouldAutoExpand]);
 
   return html`
-    <div className="mr-auto flex w-full max-w-[85%] flex-col">
+    <div className="mr-auto flex w-full max-w-[85%] flex-col" data-testid="activity-run">
       <button
         type="button"
         onClick=${() => setExpanded((value) => !value)}
         aria-expanded=${expanded ? "true" : "false"}
+        data-testid="activity-run-toggle"
         className=${[
           "v2-button flex w-full items-center gap-2 border-0 bg-transparent px-1 py-1.5 text-left text-sm",
           summary.hasError
@@ -36,7 +37,7 @@ export function ActivityRun({ activity }) {
 
       ${expanded &&
       html`
-        <div className="mt-2 flex flex-col gap-3">
+        <div className="mt-2 flex flex-col gap-3" data-testid="activity-run-items">
           ${activity.map((item, index) => html`
             <${ActivityItem}
               key=${item.id || `${item.role || "activity"}-${index}`}

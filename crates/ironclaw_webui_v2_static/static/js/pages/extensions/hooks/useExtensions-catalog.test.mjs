@@ -44,6 +44,8 @@ function useExtensionsForTest({ extensions, registry }) {
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
+    isChannelExtensionKind: (kind) =>
+      kind === "wasm_channel" || kind === "channel",
     listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
