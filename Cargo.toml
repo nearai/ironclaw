@@ -65,7 +65,7 @@ tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 eventsource-stream = "0.2"
 
 # Agent Client Protocol (ACP) — standard communication with coding agents
-agent-client-protocol = "1.0"
+agent-client-protocol = "0.10"
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }

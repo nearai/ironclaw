@@ -68,6 +68,7 @@ ironclaw_turns = { path = "../ironclaw_turns" }
 # mint real signed JWTs without relying on a checked-in private key.
 rsa = { version = "0.9", features = ["sha2"] }
 rand = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"

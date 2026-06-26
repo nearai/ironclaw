@@ -5166,7 +5166,7 @@ fn spawn_post_park_continuation(
                     created_at: chrono::Utc::now(),
                     expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
                     original_message: Some(message.content.clone()),
-                    resume_output: resume_output.clone(),
+                    resume_output: resume_output.as_deref().cloned(),
                     paused_lease: paused_lease.as_deref().cloned(),
                     approval_already_granted: false,
                 };
@@ -5787,7 +5787,7 @@ async fn await_thread_outcome(
                 created_at: chrono::Utc::now(),
                 expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
                 original_message: Some(message.content.clone()),
-                resume_output,
+                resume_output: resume_output.map(|b| *b),
                 // Unbox: `ThreadOutcome::GatePaused.paused_lease` is
                 // `Option<Box<CapabilityLease>>` to keep the outcome
                 // enum compact; `PendingGate` stores it unboxed.

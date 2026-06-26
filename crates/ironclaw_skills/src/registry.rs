@@ -335,7 +335,7 @@ impl SkillRegistry {
         hasher.update(tenant_id.as_bytes());
         hasher.update([0]);
         hasher.update(user_id.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     /// Discover and load skills from all configured directories.
@@ -1134,8 +1134,7 @@ async fn checked_file_content_hash(
 fn compute_hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    let result = hasher.finalize();
-    format!("sha256:{:x}", result)
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 fn read_file_bytes_limited<R: io::Read>(

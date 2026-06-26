@@ -34,11 +34,12 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 eventsource-stream = "0.2"
 futures = "0.3"
+hex = "0.4"
 open = "5"
 rand = "0.10"
 urlencoding = "2"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["form", "json", "multipart", "rustls", "stream", "system-proxy"] }
 rig-core = { version = "0.33", default-features = false, features = ["reqwest-rustls"] }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
 rust_decimal_macros = "1"

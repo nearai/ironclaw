@@ -119,10 +119,9 @@ pub(crate) fn build_csp_with_nonce(nonce: &str) -> String {
 /// (32 chars) — well above the 128-bit minimum recommended for nonces and
 /// matching the `OsRng + hex` pattern used elsewhere in this module.
 pub(crate) fn generate_csp_nonce() -> String {
-    use rand::RngCore;
-    use rand::rngs::OsRng;
+    use rand::RngExt as _;
     let mut bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut bytes);
+    rand::rng().fill(&mut bytes);
     hex::encode(bytes)
 }
 

@@ -289,15 +289,15 @@ struct PKCEParams {
 }
 
 fn generate_pkce_params() -> PKCEParams {
-    use rand::Rng;
+    use rand::RngExt as _;
 
     let code_verifier = ironclaw_common::pkce::generate_code_verifier();
     let code_challenge = ironclaw_common::pkce::s256_challenge(code_verifier.as_bytes());
 
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = rand::rng();
     let state: String = (0..32)
         .map(|_| {
-            let idx = rng.gen_range(0..STATE_CHARSET.len());
+            let idx = rng.random_range(0..STATE_CHARSET.len());
             STATE_CHARSET[idx] as char
         })
         .collect();

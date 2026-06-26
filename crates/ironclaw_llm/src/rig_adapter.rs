@@ -636,8 +636,22 @@ fn extract_response(
                     arguments_parse_error: None,
                 });
             }
-            AssistantContent::Reasoning(r) if !r.reasoning.is_empty() => {
-                reasoning_parts.push(r.reasoning.join("\n"));
+            AssistantContent::Reasoning(r) if !r.content.is_empty() => {
+                let content = r
+                    .content
+                    .iter()
+                    .map(|content| match content {
+                        rig::message::ReasoningContent::Text { text, .. } => text.as_str(),
+                        rig::message::ReasoningContent::Encrypted(text)
+                        | rig::message::ReasoningContent::Summary(text) => text.as_str(),
+                        rig::message::ReasoningContent::Redacted { data } => data.as_str(),
+                        _ => "",
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !content.is_empty() {
+                    reasoning_parts.push(content);
+                }
             }
             // Image variants are not mapped to IronClaw types
             _ => {}
@@ -771,6 +785,8 @@ fn build_rig_request(
         max_tokens: max_tokens.map(|t| t as u64),
         tool_choice,
         additional_params,
+        model: None,
+        output_schema: None,
     })
 }
 
@@ -2717,6 +2733,8 @@ mod tests {
             max_tokens: None,
             tool_choice: None,
             additional_params,
+            model: None,
+            output_schema: None,
         }
     }
 
@@ -3010,7 +3028,15 @@ mod tests {
         for c in content.iter() {
             match c {
                 AssistantContent::Reasoning(r) => {
-                    assert_eq!(r.reasoning, vec!["Let me check the weather first."]);
+                    let reasoning = r
+                        .content
+                        .iter()
+                        .map(|content| match content {
+                            rig::message::ReasoningContent::Text { text, .. } => text.as_str(),
+                            _ => "",
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(reasoning, vec!["Let me check the weather first."]);
                     found_reasoning = true;
                 }
                 AssistantContent::ToolCall(tc) => {

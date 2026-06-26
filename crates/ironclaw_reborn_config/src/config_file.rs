@@ -917,8 +917,6 @@ pub fn begin_default_llm_slot_update(
 }
 
 fn acquire_update_lock(path: &Path) -> Result<fs::File, RebornConfigFileUpdateError> {
-    use fs4::FileExt as _;
-
     let lock_path = config_update_lock_path(path);
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent).map_err(|source| RebornConfigFileUpdateError::Lock {
@@ -936,7 +934,7 @@ fn acquire_update_lock(path: &Path) -> Result<fs::File, RebornConfigFileUpdateEr
             path: lock_path.clone(),
             source,
         })?;
-    file.lock_exclusive()
+    file.lock()
         .map_err(|source| RebornConfigFileUpdateError::Lock {
             path: lock_path,
             source,
