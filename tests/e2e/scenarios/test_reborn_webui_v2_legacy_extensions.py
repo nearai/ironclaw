@@ -324,16 +324,18 @@ async def _open_mocked_extensions_page(
                 path.removeprefix("/api/webchat/v2/extensions/").removesuffix("/activate")
             )
             activate_requests.append(package_id)
-            for extension in installed_extensions:
-                if extension.get("package_ref", {}).get("id") == package_id:
-                    extension["active"] = True
-                    extension["activation_status"] = "active"
+            response = activate_responses_by_id.get(
+                package_id,
+                {"success": True, "message": f"{package_id} activated"},
+            )
+            if response.get("success") is not False:
+                for extension in installed_extensions:
+                    if extension.get("package_ref", {}).get("id") == package_id:
+                        extension["active"] = True
+                        extension["activation_status"] = "active"
             await fulfill_json(
                 route,
-                activate_responses_by_id.get(
-                    package_id,
-                    {"success": True, "message": f"{package_id} activated"},
-                ),
+                response,
             )
             return
 
@@ -622,6 +624,40 @@ async def test_reborn_legacy_extensions_null_tools_render_no_capabilities(
         card = _card_by_title(page, "Active Tool")
         await expect(card).to_be_visible(timeout=5000)
         await expect(card.get_by_text("No capabilities")).to_be_visible()
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_activate_failure_keeps_extension_inactive(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[INACTIVE_MCP],
+        activate_responses={
+            "inactive-mcp": {
+                "success": False,
+                "message": "Configure credentials before activation.",
+            }
+        },
+        tab="mcp",
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, "Inactive MCP")
+        await expect(card).to_be_visible(timeout=5000)
+        await expect(card.get_by_text("installed", exact=True)).to_be_visible()
+        await card.get_by_role("button", name="Activate").click()
+
+        await expect(
+            page.get_by_text("Configure credentials before activation.")
+        ).to_be_visible(timeout=5000)
+        assert harness["activate_requests"] == ["inactive-mcp"]
+
+        await expect(card.get_by_text("installed", exact=True)).to_be_visible(timeout=5000)
+        await expect(card.get_by_role("button", name="Activate")).to_have_count(1)
+        await expect(card.get_by_text("active", exact=True)).to_have_count(0)
     finally:
         await harness["context"].close()
 

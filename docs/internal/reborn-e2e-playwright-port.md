@@ -1495,6 +1495,28 @@ Behavior adjustment:
   the port asserts the boundary payload emitted by the modal. The lower-level
   service remains responsible for preserving omitted secrets.
 
+### Step 40: Legacy Activation Failure Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the user-facing invariant from legacy
+`test_activate_before_configure_rejected`:
+
+- activating an installed extension can return `success: false` with an
+  actionable setup/configuration message;
+- Reborn surfaces that message in the Extensions page action toast;
+- the failed activation does not mutate the card to active;
+- the extension remains in the installed state with the `Activate` action still
+  available.
+
+Behavior adjustment:
+
+- The port uses Reborn's v2 activate envelope from
+  `/api/webchat/v2/extensions/{package_id}/activate` and browser card state,
+  rather than the legacy `/api/extensions/{name}/activate` response shape.
+  The test harness now applies active-state mutation only after a successful
+  activation response.
+
 ## Open Migration Buckets
 
 Not yet ported:
