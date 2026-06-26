@@ -482,6 +482,33 @@ async def test_reborn_legacy_extensions_registry_search_and_install(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_extensions_registry_search_no_match(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        registry=[REGISTRY_TOOL, REGISTRY_MCP],
+    )
+    try:
+        page = harness["page"]
+        await expect(page.get_by_text("Registry Tool")).to_be_visible(timeout=5000)
+        await expect(page.get_by_text("Registry MCP Server")).to_be_visible()
+
+        await page.locator('input[placeholder^="Search extensions"]').fill(
+            "xyznonexistent999"
+        )
+
+        await expect(page.get_by_text("No extensions match the filter.")).to_be_visible(
+            timeout=5000
+        )
+        await expect(page.get_by_text("Registry Tool")).to_have_count(0)
+        await expect(page.get_by_text("Registry MCP Server")).to_have_count(0)
+        assert harness["install_requests"] == []
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_extensions_install_failure_keeps_registry_entry_available(
     reborn_v2_server, reborn_v2_browser
 ):

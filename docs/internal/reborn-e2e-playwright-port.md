@@ -1600,6 +1600,25 @@ Behavior adjustment:
   the current browser state and v2 activation envelope rather than legacy tools
   registry rows.
 
+### Step 45: Legacy Registry No-Match Search Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the user-visible invariant from legacy
+`test_registry_search_no_match`:
+
+- a registry search for a nonsense token clears previously visible registry
+  cards;
+- Reborn renders the Registry tab's no-match empty state;
+- no install request is emitted while the filtered registry is empty.
+
+Behavior adjustment:
+
+- The legacy test asserted the raw `/api/extensions/registry?query=...`
+  response body. Reborn's browser currently fetches the registry once and
+  filters client-side, so the port asserts the visible no-match state in
+  `/v2/extensions/registry` instead of a query-parameter API response.
+
 ## Open Migration Buckets
 
 Not yet ported:
