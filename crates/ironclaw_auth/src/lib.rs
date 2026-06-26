@@ -34,6 +34,7 @@ pub use credential::{
     CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
     CredentialRecoveryState, CredentialRefreshReport, CredentialRefreshRequest,
     CredentialSetupService, NewCredentialAccount, ProviderBackedCredentialAccountService,
+    binding_scope_owns_account,
 };
 pub use domain::select_latest_duplicate_user_reusable_account;
 pub use error::{AuthErrorCode, AuthProductError};

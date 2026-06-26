@@ -623,7 +623,7 @@ mod reborn_support_tests {
             },
             expected_tool_results: vec![ExpectedToolResult {
                 tool_call_id: "call-1".to_string(),
-                name: "test.echo".to_string(),
+                name: "test__echo".to_string(),
                 content: "tool output".to_string(),
             }],
         };
@@ -656,6 +656,7 @@ mod reborn_support_tests {
             substring
                 .stream_model(model_request(vec![tool_result_message(
                     "call-1",
+                    "test__echo",
                     "test.echo",
                     "tool output with suffix",
                 )]))
@@ -674,6 +675,7 @@ mod reborn_support_tests {
         matched
             .stream_model(model_request(vec![tool_result_message(
                 "call-1",
+                "test__echo",
                 "test.echo",
                 "tool output",
             )]))
@@ -689,7 +691,7 @@ mod reborn_support_tests {
                 response: HostManagedModelResponse::assistant_reply("after tool"),
                 expected_tool_results: vec![ExpectedToolResult {
                     tool_call_id: "call-scripted".to_string(),
-                    name: "builtin.write_file".to_string(),
+                    name: "builtin__write_file".to_string(),
                     content: "result:ref-123".to_string(),
                 }],
             }]);
@@ -707,6 +709,7 @@ mod reborn_support_tests {
         gateway
             .stream_model(model_request(vec![tool_result_message(
                 "call-scripted",
+                "builtin__write_file",
                 "builtin.write_file",
                 "result:ref-123",
             )]))
@@ -866,7 +869,7 @@ mod reborn_support_tests {
         };
         let replay = calls[0].provider_replay.as_ref().expect("provider replay");
         assert_eq!(replay.provider_call_id, "provider-call-9");
-        assert_eq!(replay.provider_tool_name, "test.search");
+        assert_eq!(replay.provider_tool_name.as_str(), "test__search");
         assert_eq!(replay.arguments, serde_json::json!({"q": "near"}));
     }
 
@@ -1146,6 +1149,7 @@ mod reborn_support_tests {
             .invoke_capability_batch(CapabilityBatchInvocation {
                 invocations: vec![
                     CapabilityInvocation {
+                        activity_id: ironclaw_turns::CapabilityActivityId::new(),
                         surface_version: surface.version.clone(),
                         capability_id: capability_id.clone(),
                         input_ref: CapabilityInputRef::new("input:first").expect("first input"),
@@ -1153,6 +1157,7 @@ mod reborn_support_tests {
                         auth_resume: None,
                     },
                     CapabilityInvocation {
+                        activity_id: ironclaw_turns::CapabilityActivityId::new(),
                         surface_version: surface.version,
                         capability_id,
                         input_ref: CapabilityInputRef::new("input:second").expect("second input"),
@@ -2121,12 +2126,13 @@ mod reborn_support_tests {
     fn tool_result_message(
         provider_call_id: &str,
         provider_tool_name: &str,
+        capability_id: &str,
         content: &str,
     ) -> HostManagedModelMessage {
         tool_result_message_with_capability_id(
             provider_call_id,
             provider_tool_name,
-            provider_tool_name,
+            capability_id,
             content,
         )
     }
@@ -2146,7 +2152,8 @@ mod reborn_support_tests {
                 provider_model_id: "trace_replay".to_string(),
                 provider_turn_id: "trace-turn".to_string(),
                 provider_call_id: provider_call_id.to_string(),
-                provider_tool_name: provider_tool_name.to_string(),
+                provider_tool_name: ironclaw_host_api::ProviderToolName::new(provider_tool_name)
+                    .expect("provider tool name"),
                 capability_id: CapabilityId::new(capability_id).expect("capability id"),
                 arguments: serde_json::json!({}),
                 response_reasoning: None,
@@ -2156,6 +2163,7 @@ mod reborn_support_tests {
             tool_result_content: Some(HostManagedToolResultContent::Resolved {
                 safe_summary: ToolResultSafeSummary::new("tool completed").expect("safe summary"),
             }),
+            image_parts: Vec::new(),
         }
     }
 

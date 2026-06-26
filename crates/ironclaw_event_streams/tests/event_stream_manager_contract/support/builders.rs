@@ -274,6 +274,7 @@ fn capability_activity(scope: &ProjectionScope, cursor: u64) -> CapabilityActivi
         process_id: None,
         output_bytes: Some(12),
         error_kind: None,
+        first_cursor: EventCursor::new(cursor),
         last_cursor: EventCursor::new(cursor),
         updated_at: chrono::Utc::now(),
     }

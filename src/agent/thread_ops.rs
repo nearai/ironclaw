@@ -1351,6 +1351,9 @@ impl Agent {
                         messages: &messages,
                         policy: &policy,
                         max_turns: 5,
+                        // v1 message transcripts carry structured outcome
+                        // payloads in tool_calls rows; no caller override.
+                        outcome_override: None,
                     },
                 )
                 .await
@@ -1359,15 +1362,44 @@ impl Agent {
                     Some(*envelope)
                 }
                 Ok(crate::trace_client::TraceClientAutonomousCaptureOutcome::Held {
-                    submission_id,
+                    kind,
                     reason,
+                    envelope,
                 }) => {
-                    tracing::debug!(
-                        %thread_id,
-                        %submission_id,
-                        reason = %reason,
-                        "Skipping autonomous trace queue by trace contribution policy"
-                    );
+                    let submission_id = envelope.submission_id;
+                    // Only manual-review holds (e.g. High residual-PII-risk) are
+                    // retained for the user to authorize; policy/value gates are
+                    // dropped as before (just logged). Mirrors the Reborn capture
+                    // path in `ironclaw_reborn_composition::trace_capture`.
+                    if matches!(
+                        kind,
+                        ironclaw_reborn_traces::contribution::TraceQueueHoldKind::ManualReview
+                    ) {
+                        match trace_host.queue_held_envelope_for_scope(
+                            &trace_scope,
+                            &envelope,
+                            &reason,
+                        ) {
+                            Ok(_) => tracing::debug!(
+                                %thread_id,
+                                %submission_id,
+                                reason = %reason,
+                                "Retained autonomous trace for manual review"
+                            ),
+                            Err(error) => tracing::debug!(
+                                %error,
+                                %thread_id,
+                                "Failed to retain held autonomous trace for manual review"
+                            ),
+                        }
+                    } else {
+                        tracing::debug!(
+                            %thread_id,
+                            %submission_id,
+                            reason = %reason,
+                            "Skipping autonomous trace queue by trace contribution policy gate"
+                        );
+                    }
                     None
                 }
                 Ok(crate::trace_client::TraceClientAutonomousCaptureOutcome::Skipped) => return,

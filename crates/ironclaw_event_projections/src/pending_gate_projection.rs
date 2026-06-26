@@ -26,6 +26,7 @@ pub enum PendingGateKind {
     Auth,
     Resource,
     AwaitDependentRun,
+    ExternalTool,
 }
 
 impl From<TurnBlockedGateKind> for PendingGateKind {
@@ -35,6 +36,7 @@ impl From<TurnBlockedGateKind> for PendingGateKind {
             TurnBlockedGateKind::Auth => Self::Auth,
             TurnBlockedGateKind::Resource => Self::Resource,
             TurnBlockedGateKind::AwaitDependentRun => Self::AwaitDependentRun,
+            TurnBlockedGateKind::ExternalTool => Self::ExternalTool,
         }
     }
 }

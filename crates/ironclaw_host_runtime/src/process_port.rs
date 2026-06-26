@@ -17,6 +17,7 @@ use tokio::process::Command;
 
 use crate::process_aliases::{
     LocalHostWorkdirAlias, resolve_local_host_workdir, rewrite_local_host_command_aliases,
+    rewrite_local_host_output_aliases,
 };
 use crate::process_output::{
     CapturedCommandOutput, SavedCommandOutput, StreamCapture, capture_command_output,
@@ -241,8 +242,15 @@ impl RuntimeProcessPort for LocalHostProcessPort {
             self.env_mode,
         )
         .await?;
+        // The command was rewritten alias->host before execution, so any host
+        // path the program echoed back is now in the captured output. Map it
+        // back to the virtual alias so the model-facing preview speaks in
+        // `/workspace` terms and never leaks the host layout into the reply.
+        // (The saved-output full result is a separate, non-model-facing UI
+        // surface and is left to the result-fetch path.)
+        let preview = rewrite_local_host_output_aliases(&output.preview, &self.workdir_aliases);
         Ok(CommandExecutionOutput {
-            output: output.preview,
+            output: preview,
             saved_output: output.saved_output,
             exit_code: i64::from(exit_code),
             sandboxed: false,
@@ -603,10 +611,18 @@ mod tests {
     #[tokio::test]
     async fn local_host_process_port_translates_workspace_workdir_when_configured() {
         let workspace = tempfile::tempdir().expect("workspace tempdir");
-        let nested = workspace.path().join("qa-coding-smoke");
-        std::fs::create_dir_all(&nested).expect("nested workspace dir");
+        // Production canonicalizes the workspace root before wiring the alias
+        // (`LocalHostWorkdirAlias::try_new` requires a canonical host_path);
+        // honor that here so the alias prefix matches the canonical `$PWD` the
+        // OS reports (macOS resolves `/var/...` -> `/private/var/...`).
+        let workspace_root = workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace");
+        std::fs::create_dir_all(workspace_root.join("qa-coding-smoke"))
+            .expect("nested workspace dir");
         let port = LocalHostProcessPort::new_inherited_env()
-            .with_workdir_alias("/workspace", workspace.path().to_path_buf());
+            .with_workdir_alias("/workspace", workspace_root);
 
         let output = port
             .run_command(CommandExecutionRequest {
@@ -621,14 +637,37 @@ mod tests {
             .expect("command succeeds");
 
         assert_eq!(output.exit_code, 0);
-        assert_eq!(
-            output.output,
-            nested
-                .canonicalize()
-                .expect("canonical nested")
-                .display()
-                .to_string()
-        );
+        // `$PWD` is the real host workspace path at exec time; the reverse output
+        // rewrite maps it back to the virtual alias before it reaches the model,
+        // so the caller never sees the host layout.
+        assert_eq!(output.output, "/workspace/qa-coding-smoke");
+    }
+
+    #[tokio::test]
+    async fn local_host_process_port_virtualizes_host_paths_in_output() {
+        // Regression for the produced-file path leak: the command is rewritten
+        // `/workspace` -> host path before exec, so a program that echoes a path
+        // it was handed (`printf '... %s' /workspace/out.pdf`) prints the host
+        // path. The reverse output rewrite must restore the `/workspace` form so
+        // the model reports a downloadable workspace path, not the host layout.
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let port = LocalHostProcessPort::new_inherited_env()
+            .with_workdir_alias("/workspace", workspace.path().to_path_buf());
+
+        let output = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: None,
+                command: "printf 'saved to %s\\n' /workspace/out.pdf".to_string(),
+                workdir: None,
+                timeout_secs: Some(5),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .expect("command succeeds");
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.output, "saved to /workspace/out.pdf\n");
     }
 
     #[tokio::test]

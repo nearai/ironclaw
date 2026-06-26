@@ -90,6 +90,8 @@ impl RebornServicesApi for RecordingServices {
                 title: None,
                 metadata_json: None,
                 goal: None,
+                created_at: None,
+                updated_at: None,
             },
         })
     }

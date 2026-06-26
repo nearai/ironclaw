@@ -31,9 +31,14 @@ pub trait ProductOutboundTargetResolver: Send + Sync {
     ///
     /// Implementations must use a trusted conversation-binding lookup keyed by
     /// the sealed target. They must not choose or substitute a reply target.
+    ///
+    /// When `require_direct_message` is true, implementations must return
+    /// [`ProductWorkflowError::OutboundTargetNotDirectMessage`] if the resolved
+    /// target is not a personal direct message.
     async fn resolve_product_outbound_target_metadata(
         &self,
         target: &ValidatedReplyTargetBinding,
+        require_direct_message: bool,
     ) -> Result<VerifiedProductOutboundTargetMetadata, ProductWorkflowError>;
 }
 
@@ -45,6 +50,11 @@ pub struct ProductOutboundDeliveryRequest<'a> {
     pub adapter: &'a dyn ProductAdapter,
     pub egress: &'a dyn ProtocolHttpEgress,
     pub delivery_sink: &'a dyn OutboundDeliverySink,
+    /// When true, the target resolver must enforce that the resolved outbound
+    /// target is a personal direct message. Payloads carrying an OAuth
+    /// `authorization_url` must set this to `true` to prevent the URL from
+    /// being delivered to a shared channel.
+    pub require_direct_message_target: bool,
 }
 
 /// Non-fatal failure while recording a post-render delivery status.
@@ -113,6 +123,7 @@ pub async fn prepare_and_render_product_outbound(
 ) -> Result<ProductOutboundDeliveryOutcome, ProductOutboundDeliveryError> {
     let delivery_kind = OutboundPushKind::from(request.delivery.resolution_request.delivery_kind());
     let payload_kind = outbound_push_kind_for_payload(&request.payload);
+    let require_direct_message = request.require_direct_message_target;
 
     let Some(decision) = outbound_policy
         .prepare_communication_delivery_attempt(request.delivery, communication_preferences)
@@ -139,7 +150,7 @@ pub async fn prepare_and_render_product_outbound(
     }
 
     let metadata = match target_resolver
-        .resolve_product_outbound_target_metadata(&target)
+        .resolve_product_outbound_target_metadata(&target, require_direct_message)
         .await
     {
         Ok(metadata) => metadata,
@@ -286,7 +297,8 @@ fn delivery_failure_kind_for_workflow_error(error: &ProductWorkflowError) -> Del
         ProductWorkflowError::BindingAccessDenied
         | ProductWorkflowError::BindingRequired { .. }
         | ProductWorkflowError::UnknownInstallation
-        | ProductWorkflowError::InvalidBindingRequest { .. } => DeliveryFailureKind::Rejected,
+        | ProductWorkflowError::InvalidBindingRequest { .. }
+        | ProductWorkflowError::OutboundTargetNotDirectMessage => DeliveryFailureKind::Rejected,
         _ => DeliveryFailureKind::Unknown,
     }
 }

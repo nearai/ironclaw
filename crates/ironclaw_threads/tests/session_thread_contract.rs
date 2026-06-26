@@ -1,7 +1,7 @@
 use chrono::Utc;
 use futures::future::join_all;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, ProjectId, TenantId, ThreadId, UserId,
+    AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,
@@ -36,7 +36,7 @@ fn provider_call_reference() -> ProviderToolCallReferenceEnvelope {
         provider_model_id: "test-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: ProviderToolName::new("demo__echo").expect("provider tool name"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"hello"}),
         response_reasoning: Some("provider response reasoning".to_string()),
@@ -60,6 +60,7 @@ fn preview_envelope(invocation_id: InvocationId) -> CapabilityDisplayPreviewEnve
         result_ref: Some("result:demo-preview".to_string()),
         truncated: false,
         updated_at: Utc::now(),
+        activity_order: None,
     })
     .unwrap()
 }
@@ -419,7 +420,8 @@ async fn append_tool_result_reference_accepts_multiline_provider_arguments() {
         .unwrap();
     let mut provider_call = provider_call_reference();
     provider_call.capability_id = CapabilityId::new("builtin.skill_install").unwrap();
-    provider_call.provider_tool_name = "builtin__skill_install".to_string();
+    provider_call.provider_tool_name =
+        ProviderToolName::new("builtin__skill_install").expect("provider tool name");
     provider_call.arguments = serde_json::json!({
         "content": "---\nname: pasted-skill\n---\n\nUse multiline Markdown.\n"
     });
@@ -502,7 +504,8 @@ async fn append_tool_result_reference_backfills_provider_metadata_on_idempotent_
             .tool_result_provider_call
             .as_ref()
             .expect("model context preserves backfilled metadata")
-            .provider_tool_name,
+            .provider_tool_name
+            .as_str(),
         "demo__echo"
     );
 }
@@ -1393,7 +1396,8 @@ async fn redaction_removes_tool_result_provider_metadata() {
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
                 provider_call_id: "call_1".to_string(),
-                provider_tool_name: "demo__echo".to_string(),
+                provider_tool_name: ProviderToolName::new("demo__echo")
+                    .expect("provider tool name"),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 arguments: serde_json::json!({"secret":"raw-provider-argument"}),
                 response_reasoning: Some("provider response reasoning".to_string()),
@@ -1463,7 +1467,8 @@ async fn thread_message_serialization_omits_provider_replay_metadata() {
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
                 provider_call_id: "call_1".to_string(),
-                provider_tool_name: "demo__echo".to_string(),
+                provider_tool_name: ProviderToolName::new("demo__echo")
+                    .expect("provider tool name"),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 arguments: serde_json::json!({"secret":"raw-provider-argument"}),
                 response_reasoning: Some("provider response reasoning".to_string()),
@@ -1507,7 +1512,8 @@ async fn exact_context_message_lookup_preserves_provider_metadata_while_history_
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
                 provider_call_id: "call_1".to_string(),
-                provider_tool_name: "demo__echo".to_string(),
+                provider_tool_name: ProviderToolName::new("demo__echo")
+                    .expect("provider tool name"),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
                 arguments: serde_json::json!({"message":"hello"}),
                 response_reasoning: Some("provider response reasoning".to_string()),
@@ -1543,7 +1549,7 @@ async fn exact_context_message_lookup_preserves_provider_metadata_while_history_
     assert_eq!(provider_call.provider_id, "test-provider");
     assert_eq!(provider_call.provider_model_id, "test-model");
     assert_eq!(provider_call.provider_call_id, "call_1");
-    assert_eq!(provider_call.provider_tool_name, "demo__echo");
+    assert_eq!(provider_call.provider_tool_name.as_str(), "demo__echo");
 }
 
 #[tokio::test]
@@ -2490,6 +2496,16 @@ fn message_ids_are_stable_values() {
     assert_eq!(ThreadMessageId::parse(&id.to_string()).unwrap(), id);
 }
 
+/// Wait until the wall clock is strictly past `floor`, so the next thread
+/// created/used gets a later activity timestamp — deterministic regardless
+/// of clock resolution. Uses async sleep to avoid blocking the test runtime
+/// (`std::thread::sleep` would block the tokio executor).
+async fn wait_until_after(floor: chrono::DateTime<Utc>) {
+    while Utc::now() <= floor {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+}
+
 #[tokio::test]
 async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
     let service = InMemorySessionThreadService::default();
@@ -2510,9 +2526,12 @@ async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
 
     // Seed: 3 threads in scope A with deterministic ids so the
     // pagination assertion is stable. 1 thread in scope B that the
-    // scope-A enumeration must not see.
+    // scope-A enumeration must not see. Waiting until the clock passes
+    // each thread's activity stamp guarantees strictly increasing
+    // `created_at`, so the activity-desc ordering is deterministic
+    // (003 newest → first).
     for id in ["t-a-001", "t-a-002", "t-a-003"] {
-        service
+        let record = service
             .ensure_thread(EnsureThreadRequest {
                 scope: scope_a.clone(),
                 thread_id: Some(ThreadId::new(id).unwrap()),
@@ -2522,6 +2541,7 @@ async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
             })
             .await
             .unwrap();
+        wait_until_after(record.updated_at.expect("new thread has activity stamp")).await;
     }
     service
         .ensure_thread(EnsureThreadRequest {
@@ -2534,7 +2554,7 @@ async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
         .await
         .unwrap();
 
-    // Scope filter: A sees only A's threads, sorted deterministically.
+    // Scope filter: A sees only A's threads, newest activity first.
     let scope_a_all = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
             scope: scope_a.clone(),
@@ -2548,13 +2568,13 @@ async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
         .iter()
         .map(|record| record.thread_id.as_str())
         .collect();
-    assert_eq!(ids, ["t-a-001", "t-a-002", "t-a-003"]);
+    assert_eq!(ids, ["t-a-003", "t-a-002", "t-a-001"]);
     assert!(
         scope_a_all.next_cursor.is_none(),
         "no more pages when page size > total",
     );
 
-    // Pagination: limit=2 → first page is [001, 002] with cursor=002.
+    // Pagination: limit=2 → first page is [003, 002] with cursor=002.
     let page_1 = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
             scope: scope_a.clone(),
@@ -2568,10 +2588,10 @@ async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
         .iter()
         .map(|record| record.thread_id.as_str())
         .collect();
-    assert_eq!(page_1_ids, ["t-a-001", "t-a-002"]);
+    assert_eq!(page_1_ids, ["t-a-003", "t-a-002"]);
     assert_eq!(page_1.next_cursor.as_deref(), Some("t-a-002"));
 
-    // Follow-up: cursor=002 → next page is [003] with no further cursor.
+    // Follow-up: cursor=002 → next page is [001] with no further cursor.
     let page_2 = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
             scope: scope_a.clone(),
@@ -2585,7 +2605,7 @@ async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
         .iter()
         .map(|record| record.thread_id.as_str())
         .collect();
-    assert_eq!(page_2_ids, ["t-a-003"]);
+    assert_eq!(page_2_ids, ["t-a-001"]);
     assert!(page_2.next_cursor.is_none());
 
     // Cross-scope safety: scope B sees only its own thread, never A's.

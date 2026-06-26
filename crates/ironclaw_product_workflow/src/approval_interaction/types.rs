@@ -4,7 +4,7 @@ use ironclaw_host_api::{
 use ironclaw_product_adapters::ProductWorkflowRejectionKind;
 use ironclaw_run_state::ApprovalStatus;
 use ironclaw_turns::{
-    CancelRunResponse, GateRef, IdempotencyKey, ResumeTurnResponse, TurnActor, TurnRunId, TurnScope,
+    GateRef, IdempotencyKey, ResumeTurnResponse, TurnActor, TurnRunId, TurnScope,
 };
 use serde::{Deserialize, Serialize};
 
@@ -282,7 +282,7 @@ pub struct ResolveApprovalInteractionRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveApprovalInteractionResponse {
     Approved(ResumeTurnResponse),
-    Denied(CancelRunResponse),
+    Resumed(ResumeTurnResponse),
 }
 
 fn display_safe_summary() -> String {

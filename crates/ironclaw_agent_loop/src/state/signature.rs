@@ -1,4 +1,5 @@
 use ironclaw_host_api::CapabilityId;
+use ironclaw_turns::run_profile::{ContentDigest, normalize_for_hash};
 
 /// Stable identity for a capability call, suitable for repetition detection
 /// without retaining raw arguments (per turns-agent-loop.md §6: no raw tool
@@ -10,6 +11,12 @@ use ironclaw_host_api::CapabilityId;
 pub struct CapabilityCallSignature {
     pub name: CapabilityId,
     pub args_hash: ArgsHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct CapabilityOutputObservation {
+    pub signature: CapabilityCallSignature,
+    pub output_digest: ContentDigest,
 }
 
 /// 64-bit non-cryptographic hash over JCS-canonicalized argument bytes.
@@ -51,10 +58,8 @@ impl CapabilityCallSignature {
         // request-id / correlation-id / embedded UUID / ISO-8601 timestamp
         // collapse to the same hash. Without this, the surrounding
         // `recent_call_signatures` window false-negatives stuck-loop runs
-        // because random per-call IDs make every signature unique. The
-        // normalization rules live in `strategies::progress` (#3841
-        // follow-up F1: stuck-loop ProgressStrategy).
-        let normalized = crate::strategies::progress::normalize_for_hash(args);
+        // because random per-call IDs make every signature unique.
+        let normalized = normalize_for_hash(args);
         let canonical = serde_jcs::to_vec(&normalized).map_err(|error| {
             CapabilityCallSignatureError::CanonicalizationFailed {
                 reason: error.to_string(),

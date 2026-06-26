@@ -5,17 +5,18 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_approvals::AutoApproveSettingInput;
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExtensionId, GrantConstraints, NetworkPolicy, Principal, RuntimeKind, TenantId, ThreadId,
-    TrustClass, UserId,
+    ExtensionId, GrantConstraints, InvocationId, NetworkPolicy, Principal, ResourceScope,
+    RuntimeKind, TenantId, ThreadId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostInputBatch, HostInputQueue, HostInputQueueError,
-    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    EmptyLoopCapabilityPort, EmptyUserProfileSource, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputQueue,
+    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
     RunCancellationFactory, RunCancellationHandle,
@@ -66,7 +67,6 @@ use ironclaw_turns::{
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
-use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
@@ -83,8 +83,6 @@ pub struct ProductLiveAgentLoopHarness {
     capability_results: Arc<Mutex<Vec<serde_json::Value>>>,
     model_release: Option<CancellationToken>,
     _host_runtime_root: Option<tempfile::TempDir>,
-    worker_cancel: CancellationToken,
-    worker_handle: JoinHandle<()>,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +132,35 @@ pub struct HostRuntimeCapabilityConfig {
     pub input: serde_json::Value,
 }
 
+async fn enable_host_runtime_auto_approve_for_harness_user(
+    services: &RebornServices,
+    binding: &ResolvedBinding,
+) {
+    let auto_approve = services
+        .local_dev_auto_approve_settings_for_test()
+        .expect("local-dev host runtime auto-approve settings");
+    let scope = ResourceScope {
+        tenant_id: binding.tenant_id.clone(),
+        user_id: binding
+            .subject_user_id
+            .clone()
+            .expect("harness subject user id"),
+        agent_id: binding.agent_id.clone(),
+        project_id: binding.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
+    auto_approve
+        .set(AutoApproveSettingInput {
+            updated_by: Principal::User(scope.user_id.clone()),
+            scope,
+            enabled: true,
+        })
+        .await
+        .expect("enable host runtime auto-approve for harness user");
+}
+
 pub fn capability_call_response(
     capability_id: impl Into<String>,
     input_ref: impl Into<String>,
@@ -143,6 +170,7 @@ pub fn capability_call_response(
         safe_reasoning_deltas: Vec::new(),
         usage: None,
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: harness_surface_version(),
             capability_id: harness_capability_id(capability_id.into()),
             input_ref: CapabilityInputRef::new(input_ref.into()).expect("valid harness input ref"),
@@ -184,14 +212,14 @@ impl ProductLiveAgentLoopHarness {
             .as_ref()
             .map(|_| tempfile::tempdir().expect("host runtime harness tempdir"));
         let host_runtime_services = if let Some(root) = &host_runtime_root {
-            Some(Arc::new(
-                build_reborn_services(RebornBuildInput::local_dev(
-                    "planned-harness-host-runtime",
-                    root.path().join("local-dev"),
-                ))
-                .await
-                .expect("host runtime harness services"),
+            let services = build_reborn_services(RebornBuildInput::local_dev(
+                "planned-harness-host-runtime",
+                root.path().join("local-dev"),
             ))
+            .await
+            .expect("host runtime harness services");
+            enable_host_runtime_auto_approve_for_harness_user(&services, &binding).await;
+            Some(Arc::new(services))
         } else {
             None
         };
@@ -259,6 +287,7 @@ impl ProductLiveAgentLoopHarness {
             Arc::new(ProductLiveCapabilityIo::default());
         let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
+            attachment_read_port: None,
             turn_state: turn_state_for_runtime,
             thread_service: Arc::new(thread_service.clone()),
             thread_scope: thread_scope.clone(),
@@ -298,6 +327,7 @@ impl ProductLiveAgentLoopHarness {
             skill_context_source: None,
             input_queue: Some(Arc::new(EmptyInputQueue)),
             identity_context_source: Arc::new(EmptyIdentityContextSource),
+            user_profile_source: Arc::new(EmptyUserProfileSource),
             model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
             model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
             safety_context: Some(test_safety_context()),
@@ -305,13 +335,11 @@ impl ProductLiveAgentLoopHarness {
             communication_context_provider: None,
             hook_security_audit_sink: None,
             turn_event_sink: None,
+            scheduler_wake_wiring: None,
         })
         .expect("product-live planned AgentLoop harness should build");
 
-        let worker_cancel = CancellationToken::new();
-        let worker = Arc::clone(&composition.worker);
-        let worker_cancel_clone = worker_cancel.clone();
-        let worker_handle = tokio::spawn(async move { worker.run(worker_cancel_clone).await });
+        // The scheduler is started automatically inside build_product_live_planned_runtime.
 
         Self {
             binding_service,
@@ -326,8 +354,6 @@ impl ProductLiveAgentLoopHarness {
             capability_results,
             model_release,
             _host_runtime_root: host_runtime_root,
-            worker_cancel,
-            worker_handle,
         }
     }
 
@@ -462,10 +488,7 @@ impl ProductLiveAgentLoopHarness {
     }
 
     pub async fn shutdown(self) {
-        self.worker_cancel.cancel();
-        self.worker_handle
-            .await
-            .expect("harness worker should stop cleanly");
+        self.composition.scheduler_handle.shutdown().await;
     }
 
     fn turn_scope(&self) -> TurnScope {
@@ -556,6 +579,7 @@ impl ScriptedHostRuntimeToolCall {
             safe_reasoning_deltas: Vec::new(),
             usage: None,
             output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version,
                 capability_id: self.capability_id.clone(),
                 input_ref,
@@ -816,6 +840,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
             terminate_hint: self.capability.terminate_hint,
             byte_len: 0,
+            output_digest: None,
         }))
     }
 

@@ -37,15 +37,27 @@ pub struct SecretsCrypto {
     master_key: SecretString,
 }
 
+/// Validate raw master-key bytes against the same rules [`SecretsCrypto::new`]
+/// enforces, without constructing a crypto instance.
+///
+/// Callers that resolve key material from a *named* source (a local-dev key
+/// file, the `SECRETS_MASTER_KEY` env var) use this to fail loud with a
+/// source-naming error instead of the opaque [`SecretError::InvalidMasterKey`]
+/// that surfaces when an already-wrapped key reaches `new` several layers
+/// deep. See `ironclaw_reborn_composition::factory::resolve_local_dev_secret_master_key`.
+pub fn validate_master_key_material(bytes: &[u8]) -> Result<(), SecretError> {
+    if bytes.len() < KEY_SIZE {
+        return Err(SecretError::InvalidMasterKey);
+    }
+    if distinct_byte_count(bytes) < KEY_MIN_DISTINCT_BYTES {
+        return Err(SecretError::InvalidMasterKey);
+    }
+    Ok(())
+}
+
 impl SecretsCrypto {
     pub fn new(master_key: SecretString) -> Result<Self, SecretError> {
-        let bytes = master_key.expose_secret().as_bytes();
-        if bytes.len() < KEY_SIZE {
-            return Err(SecretError::InvalidMasterKey);
-        }
-        if distinct_byte_count(bytes) < KEY_MIN_DISTINCT_BYTES {
-            return Err(SecretError::InvalidMasterKey);
-        }
+        validate_master_key_material(master_key.expose_secret().as_bytes())?;
         Ok(Self { master_key })
     }
 

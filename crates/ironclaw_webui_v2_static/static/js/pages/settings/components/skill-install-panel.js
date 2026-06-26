@@ -9,26 +9,34 @@ export function SkillInstallPanel({ onInstall, isInstalling }) {
   const t = useT();
   const [name, setName] = React.useState("");
   const [content, setContent] = React.useState("");
-  const [error, setError] = React.useState("");
+  const [fieldErrors, setFieldErrors] = React.useState({ name: "", content: "" });
+  const [formError, setFormError] = React.useState("");
   const [result, setResult] = React.useState("");
+
+  const clearFieldErrorIfValid = React.useCallback((field, value) => {
+    setFieldErrors((current) => {
+      if (!current[field] || !value.trim()) return current;
+      return { ...current, [field]: "" };
+    });
+  }, []);
 
   const submit = React.useCallback(async () => {
     const payload = buildPayload({ name, content });
-    if (!payload.name) {
-      setError(t("skills.nameRequired"));
-      return;
-    }
-    if (!payload.content) {
-      setError(t("skills.contentRequired"));
+    const validationErrors = validatePayload(payload, t);
+    if (validationErrors.name || validationErrors.content) {
+      setFieldErrors(validationErrors);
+      setFormError("");
+      setResult("");
       return;
     }
 
-    setError("");
+    setFieldErrors({ name: "", content: "" });
+    setFormError("");
     setResult("");
     try {
       const response = await onInstall(payload);
       if (!response?.success) {
-        setError(response?.message || t("skills.installFailed"));
+        setFormError(response?.message || t("skills.installFailed"));
         return;
       }
 
@@ -36,7 +44,7 @@ export function SkillInstallPanel({ onInstall, isInstalling }) {
       setContent("");
       setResult(response.message || t("skills.installedSuccess", { name: payload.name }));
     } catch (err) {
-      setError(err.message || t("skills.installFailed"));
+      setFormError(err.message || t("skills.installFailed"));
     }
   }, [content, name, onInstall, t]);
 
@@ -53,26 +61,44 @@ export function SkillInstallPanel({ onInstall, isInstalling }) {
         </div>
       </div>
 
-      <${FormField} label=${t("skills.name")} error=${error && !name.trim() ? error : ""}>
+      <${FormField} label=${t("skills.name")} error=${fieldErrors.name} required>
         <${Input}
           size="sm"
+          error=${Boolean(fieldErrors.name)}
+          aria-invalid=${fieldErrors.name ? "true" : undefined}
           value=${name}
           placeholder=${t("skills.namePlaceholder")}
-          onInput=${(event) => setName(event.currentTarget.value)}
+          onInput=${(event) => {
+            const nextName = event.currentTarget.value;
+            setName(nextName);
+            clearFieldErrorIfValid("name", nextName);
+          }}
         />
       <//>
 
-      <${FormField} className="mt-3" label=${t("skills.content")} hint=${t("skills.contentHint")}>
+      <${FormField}
+        className="mt-3"
+        label=${t("skills.content")}
+        error=${fieldErrors.content}
+        hint=${t("skills.contentHint")}
+        required
+      >
         <${Textarea}
           rows=${5}
+          error=${Boolean(fieldErrors.content)}
+          aria-invalid=${fieldErrors.content ? "true" : undefined}
           value=${content}
           placeholder=${t("skills.contentPlaceholder")}
-          onInput=${(event) => setContent(event.currentTarget.value)}
+          onInput=${(event) => {
+            const nextContent = event.currentTarget.value;
+            setContent(nextContent);
+            clearFieldErrorIfValid("content", nextContent);
+          }}
         />
       <//>
 
-      ${error &&
-      html`<p className="mt-3 text-sm text-[var(--v2-danger-text)]">${error}</p>`}
+      ${formError &&
+      html`<p className="mt-3 text-sm text-[var(--v2-danger-text)]">${formError}</p>`}
       ${result &&
       html`<p className="mt-3 text-sm text-[var(--v2-positive-text)]">${result}</p>`}
 
@@ -90,4 +116,11 @@ function buildPayload({ name, content }) {
   const payload = { name: name.trim() };
   if (content.trim()) payload.content = content.trim();
   return payload;
+}
+
+function validatePayload(payload, t) {
+  return {
+    name: payload.name ? "" : t("skills.nameRequired"),
+    content: payload.content ? "" : t("skills.contentRequired"),
+  };
 }

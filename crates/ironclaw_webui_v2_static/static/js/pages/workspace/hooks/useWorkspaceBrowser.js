@@ -1,20 +1,17 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { React } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
-import {
-  listWorkspace,
-  readWorkspaceFile,
-  searchWorkspace,
-  writeWorkspaceFile,
-} from "../lib/workspace-api.js";
+import { listWorkspace, readWorkspaceFile } from "../lib/workspace-api.js";
 
+// Read-only browser state for the agent filesystem viewer. The tree is rooted
+// at the mount list (empty path); selecting a file loads a preview, selecting a
+// folder loads its listing into the main pane. There is intentionally no
+// edit/save path — this surface is navigation + preview/download only.
 export function useWorkspaceBrowser(selectedPath) {
   const t = useT();
   const queryClient = useQueryClient();
   const [expandedPaths, setExpandedPaths] = React.useState(new Set());
-  const [search, setSearch] = React.useState("");
-  const [editing, setEditing] = React.useState(false);
-  const [draft, setDraft] = React.useState("");
+  const [filter, setFilter] = React.useState("");
   const [result, setResult] = React.useState(null);
 
   const rootQuery = useQuery({
@@ -22,87 +19,79 @@ export function useWorkspaceBrowser(selectedPath) {
     queryFn: () => listWorkspace(""),
   });
 
+  // Stat/preview of the current selection. For a directory this resolves to
+  // `{ kind: "directory" }` (one stat); disabled at the root, which is always
+  // a directory.
   const fileQuery = useQuery({
     queryKey: ["workspace-file", selectedPath],
     queryFn: () => readWorkspaceFile(selectedPath),
     enabled: Boolean(selectedPath),
   });
 
-  const searchQuery = useQuery({
-    queryKey: ["workspace-search", search.trim()],
-    queryFn: () => searchWorkspace(search.trim(), 20),
-    enabled: search.trim().length > 0,
+  const selectionIsDirectory =
+    selectedPath === "" || fileQuery.data?.kind === "directory";
+
+  // Contents of the selected directory for the main-pane listing. Shares the
+  // tree's cache key so an already-expanded folder is served from cache.
+  const listingQuery = useQuery({
+    queryKey: ["workspace-list", selectedPath],
+    queryFn: () => listWorkspace(selectedPath),
+    enabled: selectionIsDirectory,
   });
 
   React.useEffect(() => {
-    if (fileQuery.data?.content != null && !editing) {
-      setDraft(fileQuery.data.content);
-    }
-  }, [editing, fileQuery.data?.content]);
-
-  React.useEffect(() => {
-    setEditing(false);
     setResult(null);
   }, [selectedPath]);
 
   const loadDirectory = React.useCallback(
-    (path) => queryClient.fetchQuery({
-      queryKey: ["workspace-list", path],
-      queryFn: () => listWorkspace(path),
-    }),
+    (path) =>
+      queryClient.fetchQuery({
+        queryKey: ["workspace-list", path],
+        queryFn: () => listWorkspace(path),
+      }),
     [queryClient]
   );
 
-  const toggleDirectory = React.useCallback(async (path) => {
-    const next = new Set(expandedPaths);
-    if (next.has(path)) {
-      next.delete(path);
+  const toggleDirectory = React.useCallback(
+    async (path) => {
+      const next = new Set(expandedPaths);
+      if (next.has(path)) {
+        next.delete(path);
+        setExpandedPaths(next);
+        return;
+      }
+      next.add(path);
       setExpandedPaths(next);
-      return;
-    }
-    next.add(path);
-    setExpandedPaths(next);
-    try {
-      await loadDirectory(path);
-    } catch (error) {
-      setResult({ type: "error", message: error.message || t("workspace.unableOpenDirectory") });
-    }
-  }, [expandedPaths, loadDirectory]);
-
-  const saveMutation = useMutation({
-    mutationFn: () => writeWorkspaceFile({ path: selectedPath, content: draft }),
-    onSuccess: () => {
-      setEditing(false);
-      setResult({ type: "success", message: t("workspace.savedPath", { path: selectedPath }) });
-      queryClient.invalidateQueries({ queryKey: ["workspace-file", selectedPath] });
-      queryClient.invalidateQueries({ queryKey: ["workspace-list"] });
+      try {
+        await loadDirectory(path);
+      } catch (error) {
+        setResult({
+          type: "error",
+          message: error.message || t("workspace.unableOpenDirectory"),
+        });
+      }
     },
-    onError: (error) => {
-      setResult({ type: "error", message: error.message || t("workspace.unableSaveFile") });
-    },
-  });
+    [expandedPaths, loadDirectory, t]
+  );
 
   return {
     rootEntries: rootQuery.data?.entries || [],
     file: fileQuery.data || null,
-    searchResults: searchQuery.data?.results || [],
+    selectionIsDirectory,
+    currentEntries: listingQuery.data?.entries || [],
     expandedPaths,
-    search,
-    setSearch,
-    editing,
-    setEditing,
-    draft,
-    setDraft,
+    filter,
+    setFilter,
     result,
     clearResult: () => setResult(null),
     isLoadingTree: rootQuery.isLoading,
     isLoadingFile: fileQuery.isLoading,
-    isSearching: searchQuery.isFetching,
-    isSaving: saveMutation.isPending,
-    error: rootQuery.error || fileQuery.error || searchQuery.error || null,
+    isLoadingListing: listingQuery.isLoading,
+    isFetching:
+      rootQuery.isFetching || fileQuery.isFetching || listingQuery.isFetching,
+    error: rootQuery.error || fileQuery.error || listingQuery.error || null,
     loadDirectory,
     toggleDirectory,
-    save: saveMutation.mutateAsync,
     refresh: () => {
       queryClient.invalidateQueries({ queryKey: ["workspace-list"] });
       queryClient.invalidateQueries({ queryKey: ["workspace-file", selectedPath] });

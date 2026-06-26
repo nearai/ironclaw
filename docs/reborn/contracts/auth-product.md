@@ -46,6 +46,46 @@ Low-level encrypted storage, leases, host-mediated HTTP credential injection,
 approval interaction UI, and no-exposure enforcement remain owned by their
 respective Reborn substrate contracts.
 
+### Credential ownership granularity (#4935)
+
+Credential accounts are owned at **durable owner granularity** —
+`tenant_id` / `user_id` / `agent_id` / `project_id`. `thread_id`,
+`mission_id`, and `invocation_id` are **transient invocation provenance**, not
+ownership: a credential a user authorizes in one chat thread stays resolvable
+from every other thread/mission/invocation of the same owner. `session_id` and
+the `surface` are **path-segmenting** — both are part of the durable storage
+key (`/secrets/.../product-auth/{surface}/accounts/{id}.json`), so they are
+matched *exactly* for bind/update writes (a reconnect binds only within its own
+session and surface), while runtime resolution reads enumerate across the
+owner's sessions and surfaces.
+
+Concretely:
+
+- Owner matching uses `CredentialAccountOwnerScope` (tenant/user/agent/project
+  hard-required; mission/thread wildcarded when absent). The shared primitives
+  are `ResourceScope::without_thread_and_mission` (a *neutral* scope-narrowing
+  helper in `ironclaw_host_api`, with no credential semantics) and
+  `AuthProductScope::credential_owner` / `to_credential_owner` (the
+  credential-ownership contract, owned by `ironclaw_auth`). Resolvers and route
+  construction must route through these rather than re-deriving the field strip
+  inline.
+- OAuth/manual-token bind **and the subsequent bound-account apply/update**
+  resolve through `ironclaw_auth::binding_scope_owns_account`, which clears
+  `thread_id`/`mission_id` and ignores `invocation_id` (not part of the owner
+  comparison) but requires exact `session_id` and `surface` equality. Using full
+  scope equality here (the prior `scope_matches`) forked a duplicate
+  `UserReusable` account on every reconnect and bound credentials to the thread
+  they were authorized in. The apply step must use the owner-granularity check on
+  *both* transports: the OAuth callback (`update_bound_oauth_account`) and the
+  manual-token submit (`validate_bound_account_update_target`). Validating the
+  setup binding at owner granularity but applying it with full `scope_matches`
+  accepts a reconnect at setup and then rejects it at apply — re-forking the
+  account on the manual-token path.
+- Requester authorization — which extension may *use* a non-`UserReusable`
+  account — is enforced separately by
+  `CredentialAccount::is_authorized_for_requester` and the runtime visibility
+  policy, never by the thread/mission a credential was authorized in.
+
 `RebornProductAuthServices` is the single composition bundle for the product
 auth ports above. WebUI/setup/extension surfaces should call this bundle once
 routes are migrated instead of reconstructing auth-flow stores, credential

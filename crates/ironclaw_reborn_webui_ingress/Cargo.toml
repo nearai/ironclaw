@@ -40,6 +40,7 @@ sha2 = "0.10"
 subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 url = "2"
 urlencoding = "2"
@@ -63,7 +64,6 @@ http-body-util = "0.1"
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns" }
-tower = { version = "0.5", features = ["util"] }
 # Generate test RSA keypairs at test time so the OIDC e2e test can
 # mint real signed JWTs without relying on a checked-in private key.
 rsa = { version = "0.9", features = ["sha2"] }

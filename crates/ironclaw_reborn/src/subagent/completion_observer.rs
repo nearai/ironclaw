@@ -480,6 +480,7 @@ where
                 // termination cannot unblock a parent that is actually
                 // waiting on an unrelated approval/auth/resource gate.
                 precondition: ResumeTurnPrecondition::BlockedDependentRunGate,
+                resume_disposition: None,
             })
             .await
             .map(|_| ())
@@ -1030,6 +1031,7 @@ fn status_label(status: TurnStatus) -> &'static str {
         TurnStatus::BlockedAuth => "blocked_auth",
         TurnStatus::BlockedResource => "blocked_resource",
         TurnStatus::BlockedDependentRun => "blocked_dependent_run",
+        TurnStatus::BlockedExternalTool => "blocked_external_tool",
         TurnStatus::CancelRequested => "cancel_requested",
         TurnStatus::Cancelled => "cancelled",
         TurnStatus::Completed => "completed",
@@ -1071,7 +1073,8 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_host_api::{AgentId, CapabilityId, TenantId, ThreadId, UserId};
     use ironclaw_loop_support::{
-        AwaitedChildSetRecord, CapabilityResultWrite, SubagentGateResolutionStore, SubagentKindId,
+        AwaitedChildSetRecord, CapabilityResultWrite, CapabilityWriteResult,
+        SubagentGateResolutionStore, SubagentKindId,
     };
     use ironclaw_threads::{
         AppendAssistantDraftRequest, AppendToolResultReferenceRequest, EnsureThreadRequest,
@@ -1317,9 +1320,14 @@ mod tests {
         async fn write_capability_result(
             &self,
             write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            let output = write.output.clone();
             self.writes.lock().unwrap().push(write.output);
-            Ok((self.result_ref.clone(), 0))
+            Ok(CapabilityWriteResult::from_output(
+                self.result_ref.clone(),
+                0,
+                &output,
+            ))
         }
 
         async fn update_capability_result(
@@ -1364,9 +1372,14 @@ mod tests {
         async fn write_capability_result(
             &self,
             write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            let output = write.output.clone();
             self.writes.lock().unwrap().push(write.output);
-            Ok((self.result_ref.clone(), 0))
+            Ok(CapabilityWriteResult::from_output(
+                self.result_ref.clone(),
+                0,
+                &output,
+            ))
         }
 
         async fn update_capability_result(
@@ -1786,10 +1799,12 @@ mod tests {
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
             product_context: None,
+            resume_disposition: None,
         }
     }
 
@@ -1813,10 +1828,12 @@ mod tests {
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
             product_context: None,
+            resume_disposition: None,
         }
     }
 
@@ -1844,6 +1861,7 @@ mod tests {
             resolved_model_route: None,
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
@@ -1857,6 +1875,7 @@ mod tests {
             subagent_depth,
             spawn_tree_root_run_id,
             product_context: None,
+            resume_disposition: None,
         }
     }
 
@@ -1883,6 +1902,7 @@ mod tests {
             resolved_model_route: None,
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
@@ -1896,6 +1916,7 @@ mod tests {
             subagent_depth: 1,
             spawn_tree_root_run_id: None,
             product_context: None,
+            resume_disposition: None,
         }
     }
 
@@ -2374,10 +2395,12 @@ mod tests {
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
             product_context: None,
+            resume_disposition: None,
         };
         let observer = SubagentCompletionObserver::new(
             Arc::new(BoundedSubagentGateResolutionStore::new()),
@@ -4349,8 +4372,11 @@ mod tests {
         async fn write_capability_result(
             &self,
             _write: CapabilityResultWrite<'_>,
-        ) -> Result<(LoopResultRef, u64), AgentLoopHostError> {
-            Ok((self.result_ref.clone(), self.byte_len))
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            Ok(CapabilityWriteResult::without_output_digest(
+                self.result_ref.clone(),
+                self.byte_len,
+            ))
         }
 
         async fn update_capability_result(

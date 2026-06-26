@@ -241,7 +241,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `browser` | ✅ | ❌ | P3 | Browser automation |
 | `sandbox` | ✅ | ✅ | - | WASM sandbox |
 | `doctor` | ✅ | 🚧 | P2 | 16 subsystem checks |
-| `logs` | ✅ | 🚧 | P3 | `logs` (gateway.log tail), `--follow` (SSE live stream), `--level` (get/set). WebUI v2 operator logs expose bounded in-memory entries with level/target and run/thread/turn/tool/source scoped filters. No DB-persisted log history. |
+| `logs` | ✅ | 🚧 | P3 | `logs` (gateway.log tail), `--follow` (SSE live stream), `--level` (get/set). WebUI v2 exposes bounded in-memory log projection at `/api/webchat/v2/logs` for non-operators and `/api/webchat/v2/operator/logs` for operators, both with level/target and run/thread/turn/tool/source scoped filters. No DB-persisted log history. |
 | `traces` | ➖ | 🚧 | - | <ul><li>IronClaw-native Trace Commons client MVP, not an OpenClaw parity feature.</li><li>Local opt-in capture, redaction, queueing, queue-status diagnostics, scoped web APIs, revocation, and periodic credit notices.</li><li>CLI opt-in writes the runtime/web user-scope policy that autonomous capture reads, and credentialed submit/status/revoke calls use bounded no-redirect HTTP.</li><li>Authenticated web paths are user-scoped and keep ingestion endpoint/credential settings out of user-managed policy updates.</li><li>Private TraceDAO server ingest/review/export/audit/retention/vector/credit infrastructure now lives in the standalone `tracedao-server` repository, with IronClaw retaining CLI/client integration wrappers.</li></ul> |
 | `update` | ✅ | ❌ | P3 | Self-update; `OPENCLAW_NO_AUTO_UPDATE=1` kill-switch |
 | `completion` | ✅ | ✅ | - | Shell completion |
@@ -338,8 +338,8 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Plugin tools | ✅ | ✅ | WASM tools |
 | GSuite WASM tools | ✅ | 🚧 | Reborn bundles operation-level Google Drive/Docs/Sheets/Slides WASM packages with host-mediated HTTP egress, product-auth scoped bearer injection, and manifest-declared Google OAuth setup metadata; full live-recorded parity remains follow-up |
 | Hosted MCP extensions | ✅ | 🚧 | Reborn composes host-mediated MCP runtime, bundles the current Notion MCP supported tool set, wires Notion ProductAuth OAuth exchange/refresh, can use Reborn ProductAuth DCR OAuth setup through the host callback origin, and can activate hosted MCP packages with live `tools/list` schema discovery through host-staged product-auth credentials |
-| NEAR AI MCP extension | ✅ | 🚧 | Host-bundled Reborn MCP extension exposes `nearai.web_search` via host-mediated HTTP and `llm_nearai_api_key`; local-dev startup now auto-seeds product-auth and activates the bundled MCP extension when `NEARAI_BASE_URL` plus `NEARAI_API_KEY` are configured, while NEAR remains a static supported-tool adapter |
-| Tool policies (allow/deny) | ✅ | ✅ | Reborn now stores scoped persistent `AlwaysAllow` approval policies for manifest-allow capabilities and replays them at the current sandbox scope; product-facing revoke paths remain follow-up while the policy-store revoke interface is available |
+| NEAR AI MCP extension | ✅ | 🚧 | Host-bundled Reborn MCP extension exposes `nearai.web_search` via host-mediated HTTP and `llm_nearai_api_key`; local-dev startup now auto-seeds product-auth and activates the bundled MCP extension when `NEARAI_BASE_URL` plus `NEARAI_API_KEY` are configured, and WebChat v2 no longer projects that host-managed credential as extension setup work while NEAR remains a static supported-tool adapter |
+| Tool policies (allow/deny) | ✅ | ✅ | Reborn now stores scoped persistent `AlwaysAllow` approval policies for manifest-allow capabilities and replays them at the current sandbox scope; WebChat v2 exposes authenticated caller-scoped tool approval settings at `/api/webchat/v2/settings/tools` so regular multi-user sessions do not need operator config access; product-facing revoke paths remain follow-up while the policy-store revoke interface is available |
 | Exec approvals (`/approve`) | ✅ | ✅ | TUI approval overlay |
 | Tool inventory cache | ✅ | ❌ | Coalesced effective-tool inventory cache with channel-registry invalidation |
 | Pending exec approval `errorMessage` cleanup | ✅ | ❌ | Failed restart-interrupted approval-pending sessions instead of replaying stale ids |
@@ -472,7 +472,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Audio transcription | ✅ | ❌ | P2 | Multiple providers (see TTS/STT subsection in Section 6) |
 | Video support | ✅ | ❌ | P3 | OpenRouter native video gen, MiniMax video, Google Veo, fal Seedance, OpenAI Sora |
 | PDF analysis tool | ✅ | ❌ | P2 | Native Anthropic/Gemini path with text/image extraction fallback; bundled `document-extract` plugin owns `pdfjs-dist` |
-| PDF parsing | ✅ | 🚧 | P2 | Uploaded document attachments parse via `pdf-extract`; no `pdfjs-dist` fallback path |
+| PDF parsing | ✅ | 🚧 | P2 | Uploaded document attachments and Reborn `builtin.read_file` parse PDFs via `pdf-extract`; no `pdfjs-dist` fallback path |
 | MIME detection | ✅ | ❌ | P2 | Bounded MIME sniff + ZIP archive preflight |
 | Media caching | ✅ | ❌ | P3 | |
 | Vision model integration | ✅ | ❌ | P2 | Image understanding; `agents.defaults.imageModel`, Codex app-server image turns, configured-provider exact match |
@@ -674,7 +674,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Feature | OpenClaw | IronClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
 | Cron jobs | ✅ | ✅ | - | Routines with cron trigger; runtime state split into `jobs-state.json`; `sessionTarget: "current"`/`session:<id>` bindings |
-| Reborn scheduled trigger loop | ➖ | 🚧 | P2 | Reborn-native trigger persistence, backend parity, atomic fire claim/update APIs, poller core, caller-level harness, first-party `trigger_*` capabilities, and composition-owned worker lifecycle are in progress; automation panel runs now link canonical thread ids; trigger-owned threads are openable, watchable, approvable, and cancelable by automation owners via automation-visibility authorization; remaining follow-ups: one-shot `completion_policy` work, legacy pre-fix rows without a stored thread_id remain unopenable, external result delivery, production readiness policy, active-run retention/tombstone semantics, and production jitter source selection |
+| Reborn scheduled trigger loop | ➖ | 🚧 | P2 | Reborn-native trigger persistence, backend parity, atomic fire claim/update APIs, poller core, caller-level harness, first-party `trigger_*` capabilities, and composition-owned worker lifecycle are in progress; automation panel runs now link canonical thread ids; trigger-owned threads are openable, watchable, approvable, and cancelable by automation owners via automation-visibility authorization; scoped pause/resume/delete state transitions are available through first-party capabilities and WebUI v2 controls; first-class one-shot triggers (`TriggerSchedule::Once`, `schedule.kind = once`) are implemented (completion is derived from the schedule; the old year-pinned-cron + `completion_policy` workaround was removed); remaining follow-ups: legacy pre-fix rows without a stored thread_id remain unopenable, external result delivery, production readiness policy, active-run retention/tombstone semantics, and production jitter source selection |
 | Per-job model fallback override | ✅ | ❌ | P2 | `payload.fallbacks` overrides agent-level fallbacks |
 | Cron stagger controls | ✅ | ❌ | P3 | Default stagger for scheduled jobs |
 | Cron finished-run webhook | ✅ | ❌ | P3 | Webhook on job completion |
@@ -684,7 +684,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Cron `nested` lane | ✅ | ❌ | P3 | `cron.maxConcurrentRuns` applies to dedicated `cron-nested` lane; non-cron flows keep their own lane |
 | Cron stuck-session timeout | ✅ | ❌ | P3 | Aborts/cleans timed-out isolated turns before recording timeout |
 | Timezone support | ✅ | ✅ | - | Via cron expressions; `--at` honors local wall-clock time across DST |
-| One-shot/recurring jobs | ✅ | ✅ | - | Manual + cron triggers |
+| One-shot/recurring jobs | ✅ | ✅ | - | Manual + cron triggers; Reborn one-shot uses first-class `TriggerSchedule::Once` (`schedule.kind = once`); completion is derived from the schedule |
 | Channel health monitor | ✅ | ❌ | P2 | Auto-restart with configurable interval |
 | `beforeInbound` hook | ✅ | ✅ | P2 | |
 | `beforeOutbound` hook | ✅ | ✅ | P2 | |

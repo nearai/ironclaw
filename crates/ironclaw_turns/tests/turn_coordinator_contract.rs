@@ -92,6 +92,7 @@ fn approval_blocked_mapping(
         reason: BlockedReason::Approval {
             gate_ref: GateRef::new(gate_ref.as_str()).unwrap(),
         },
+        blocked_activity_id: None,
     })
 }
 
@@ -106,6 +107,7 @@ fn dependent_blocked_mapping(
         reason: BlockedReason::AwaitDependentRun {
             gate_ref: GateRef::new(gate_ref.as_str()).unwrap(),
         },
+        blocked_activity_id: None,
     })
 }
 
@@ -816,6 +818,7 @@ async fn blocked_dependent_run_can_resume_and_cancel_directly() {
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-dependent-resume").unwrap(),
             precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedDependentRunGate,
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -940,6 +943,7 @@ async fn default_turn_coordinator_dedupes_idempotency_replay_events_by_cursor() 
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
         idempotency_key: IdempotencyKey::new("idem-event-replay-resume").unwrap(),
         precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedDependentRunGate,
+        resume_disposition: None,
     };
     coordinator.resume_turn(resume.clone()).await.unwrap();
     coordinator.resume_turn(resume).await.unwrap();
@@ -1657,6 +1661,7 @@ async fn lifecycle_publishing_store_propagates_required_observer_error_on_resume
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-required-resume-error").unwrap(),
             precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedDependentRunGate,
+            resume_disposition: None,
         })
         .await
         .unwrap_err();
@@ -1862,6 +1867,7 @@ async fn turn_lifecycle_projection_replays_submit_block_resume_complete_without_
             )
             .unwrap(),
             idempotency_key: IdempotencyKey::new("idem-turn-events-resume").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -2489,6 +2495,7 @@ async fn resume_turn_wakes_runner_for_same_run_after_requeue() {
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -2615,6 +2622,7 @@ async fn resume_turn_ignores_wake_notification_panic_after_requeue() {
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -3818,6 +3826,7 @@ async fn blocked_resume_then_recovery_failure_releases_admission_reservation() {
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -4118,6 +4127,7 @@ async fn resume_updates_persisted_run_binding_refs_and_replay_envelope() {
         source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
         idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+        resume_disposition: None,
     };
 
     let resumed = coordinator
@@ -4465,6 +4475,7 @@ async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity()
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -4563,6 +4574,7 @@ async fn idempotency_replay_helpers_require_matching_operation_kind() {
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap();
@@ -5364,6 +5376,7 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
         source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
         idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+        resume_disposition: None,
     };
     let resumed = coordinator
         .resume_turn(resume_request.clone())
@@ -5421,6 +5434,7 @@ async fn resume_turn_rejects_unexpected_blocked_status_without_requeueing_run() 
             source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-wrong-status").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap_err();
@@ -5488,6 +5502,7 @@ async fn resume_turn_from_foreign_actor_is_denied_without_requeueing_run() {
             source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-foreign-actor").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap_err();
@@ -5630,6 +5645,7 @@ async fn resume_turn_with_wrong_gate_resolution_ref_is_invalid_request() {
             source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-wrong-gate").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap_err();
@@ -6058,6 +6074,7 @@ async fn any_blocked_gate_resume_does_not_resume_dependent_run_gate() {
             source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-dependent-resume-any").unwrap(),
+            resume_disposition: None,
         })
         .await
         .unwrap_err();
@@ -6459,7 +6476,8 @@ fn event_from_state_for_recording(state: &TurnRunState) -> TurnLifecycleEvent {
         TurnStatus::BlockedApproval
         | TurnStatus::BlockedAuth
         | TurnStatus::BlockedResource
-        | TurnStatus::BlockedDependentRun => TurnEventKind::Blocked,
+        | TurnStatus::BlockedDependentRun
+        | TurnStatus::BlockedExternalTool => TurnEventKind::Blocked,
         TurnStatus::Completed => TurnEventKind::Completed,
         TurnStatus::Cancelled => TurnEventKind::Cancelled,
         TurnStatus::Failed => TurnEventKind::Failed,
@@ -6591,10 +6609,12 @@ impl TurnRunTransitionPort for AtomicLoopExitPort {
             received_at: received_at(),
             checkpoint_id: None,
             gate_ref: None,
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
             product_context: None,
+            resume_disposition: None,
         })
     }
 }
@@ -7227,6 +7247,149 @@ async fn submit_child_run_inherits_parent_product_context() {
         child_record.product_context,
         Some(product_context),
         "child run record must carry the parent's product_context verbatim"
+    );
+}
+
+// Persistence path: resume_turn with resume_disposition writes the field onto the run
+// record, and claim_next_run returns a TurnRunState that carries the same value.
+#[tokio::test]
+async fn resume_turn_resume_disposition_is_persisted_and_visible_on_claim() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-auth-deny-persist",
+                "idem-auth-deny-persist-submit",
+            ))
+            .await
+            .unwrap(),
+    );
+
+    // Claim the run so we can block it on an auth gate.
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-auth-deny-persist")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Drive the run into BlockedAuth via block_run with BlockedReason::Auth.
+    let gate_ref = GateRef::new("auth-deny-gate").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Auth {
+                gate_ref: gate_ref.clone(),
+                credential_requirements: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+
+    // Verify we are now in BlockedAuth.
+    let blocked_state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-auth-deny-persist"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        blocked_state.status,
+        TurnStatus::BlockedAuth,
+        "run must be in BlockedAuth before resume"
+    );
+
+    // Resume with Denied disposition — this is the auth-deny path.
+    let denied_disposition = ironclaw_turns::GateResumeDisposition::Denied;
+    coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-auth-deny-persist"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_ref,
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedAuthGate,
+            source_binding_ref: SourceBindingRef::new("source-auth-deny").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth-deny").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-auth-deny-persist-resume").unwrap(),
+            resume_disposition: Some(denied_disposition.clone()),
+        })
+        .await
+        .unwrap();
+
+    // Claim the re-queued run and assert resume_disposition is propagated.
+    let claimed = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-auth-deny-persist")),
+        })
+        .await
+        .unwrap()
+        .expect("run must be claimable after auth-deny resume");
+
+    assert_eq!(
+        claimed.state.resume_disposition,
+        Some(denied_disposition),
+        "resume_disposition must be visible on the claimed TurnRunState"
+    );
+
+    // Self-clearing contract: a subsequent normal resume (disposition: None) clears the field.
+    // First drive back to BlockedAuth again via block_run.
+    let gate_ref2 = GateRef::new("auth-deny-gate-2").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id: claimed.runner_id,
+            lease_token: claimed.lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Auth {
+                gate_ref: gate_ref2.clone(),
+                credential_requirements: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+
+    // Resume again, this time with no disposition.
+    coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-auth-deny-persist"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_ref2,
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedAuthGate,
+            source_binding_ref: SourceBindingRef::new("source-auth-deny-2").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth-deny-2").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-auth-deny-persist-resume-2").unwrap(),
+            resume_disposition: None,
+        })
+        .await
+        .unwrap();
+
+    let claimed2 = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-auth-deny-persist")),
+        })
+        .await
+        .unwrap()
+        .expect("run must be claimable after second resume");
+
+    assert_eq!(
+        claimed2.state.resume_disposition, None,
+        "resume_disposition must be None after a resume that supplies no disposition"
     );
 }
 

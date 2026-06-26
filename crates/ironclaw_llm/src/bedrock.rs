@@ -13,11 +13,12 @@ use aws_config::{BehaviorVersion, Region};
 use aws_sdk_bedrockruntime::Client;
 use aws_sdk_bedrockruntime::operation::converse::ConverseError;
 use aws_sdk_bedrockruntime::types::{
-    AnyToolChoice, AutoToolChoice, ContentBlock, ConversationRole, InferenceConfiguration, Message,
-    StopReason, SystemContentBlock, Tool, ToolChoice, ToolConfiguration, ToolInputSchema,
-    ToolResultBlock, ToolResultContentBlock, ToolResultStatus, ToolSpecification, ToolUseBlock,
+    AnyToolChoice, AutoToolChoice, ContentBlock, ConversationRole, ImageBlock, ImageFormat,
+    ImageSource, InferenceConfiguration, Message, StopReason, SystemContentBlock, Tool, ToolChoice,
+    ToolConfiguration, ToolInputSchema, ToolResultBlock, ToolResultContentBlock, ToolResultStatus,
+    ToolSpecification, ToolUseBlock,
 };
-use aws_smithy_types::Document;
+use aws_smithy_types::{Blob, Document};
 use rust_decimal::Decimal;
 
 use crate::config::BedrockConfig;
@@ -329,6 +330,52 @@ fn strip_tool_blocks(messages: &mut [crate::provider::ChatMessage]) {
 // Message conversion
 // ---------------------------------------------------------------------------
 
+/// Map a MIME type to the Converse API [`ImageFormat`]. Bedrock supports only
+/// these four; an unsupported type yields `None` so the image is skipped (the
+/// text still reaches the model) rather than failing the turn.
+fn bedrock_image_format(mime_type: &str) -> Option<ImageFormat> {
+    // MIME types are case-insensitive; normalize before matching.
+    match mime_type.to_ascii_lowercase().as_str() {
+        "image/png" => Some(ImageFormat::Png),
+        "image/jpeg" | "image/jpg" => Some(ImageFormat::Jpeg),
+        "image/gif" => Some(ImageFormat::Gif),
+        "image/webp" => Some(ImageFormat::Webp),
+        _ => None,
+    }
+}
+
+/// Build a Converse `image` content block from an inline base64 `data:` URL.
+/// Returns `None` for a remote URL, an unsupported format, or undecodable
+/// base64 — the caller drops the image and keeps the text.
+fn bedrock_image_block(image_url: &crate::provider::ImageUrl) -> Option<ContentBlock> {
+    use base64::Engine;
+    let (mime_type, data) = image_url.decode_data_url()?;
+    let format = bedrock_image_format(mime_type)?;
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(data) {
+        Ok(bytes) => bytes,
+        // silent-ok: a malformed inline image payload shouldn't fail the turn —
+        // the text still goes through; log the cause so the drop is diagnosable.
+        Err(error) => {
+            tracing::debug!(%error, "dropping malformed inline image data URL for Bedrock");
+            return None;
+        }
+    };
+    let block = match ImageBlock::builder()
+        .format(format)
+        .source(ImageSource::Bytes(Blob::new(bytes)))
+        .build()
+    {
+        Ok(block) => block,
+        // silent-ok: an image the Bedrock builder rejects shouldn't fail the
+        // turn; log the cause and drop just the image.
+        Err(error) => {
+            tracing::debug!(%error, "dropping inline image rejected by the Bedrock block builder");
+            return None;
+        }
+    };
+    Some(ContentBlock::Image(block))
+}
+
 /// Convert IronClaw `ChatMessage` list into Bedrock system blocks + messages.
 ///
 /// Key differences from OpenAI/Anthropic protocol:
@@ -356,7 +403,16 @@ fn convert_messages(
                 // Flush any pending tool results as a User message first
                 flush_tool_results(&mut pending_tool_results, &mut bedrock_messages)?;
 
-                let content = vec![ContentBlock::Text(msg.content.clone())];
+                let mut content = vec![ContentBlock::Text(msg.content.clone())];
+                // Forward inline base64 images as Converse `image` blocks so a
+                // vision model receives the pixels.
+                for part in &msg.content_parts {
+                    if let crate::provider::ContentPart::ImageUrl { image_url } = part
+                        && let Some(block) = bedrock_image_block(image_url)
+                    {
+                        content.push(block);
+                    }
+                }
                 push_message(&mut bedrock_messages, ConversationRole::User, content)?;
             }
             Role::Assistant => {
@@ -794,6 +850,58 @@ mod tests {
         assert_eq!(system.len(), 2);
         assert_eq!(msgs.len(), 1);
         assert_eq!(*msgs[0].role(), ConversationRole::User);
+    }
+
+    #[test]
+    fn test_convert_messages_user_image_becomes_image_block() {
+        let messages = vec![ChatMessage::user_with_parts(
+            "what is this?",
+            vec![crate::provider::ContentPart::ImageUrl {
+                image_url: crate::provider::ImageUrl {
+                    // base64 of bytes [1,2,3,4]
+                    url: "data:image/png;base64,AQIDBA==".to_string(),
+                    detail: None,
+                },
+            }],
+        )];
+
+        let (_system, msgs) = convert_messages(&messages).unwrap();
+        assert_eq!(msgs.len(), 1);
+        let content = msgs[0].content();
+        // Text block first, then the decoded image block.
+        assert_eq!(content.len(), 2);
+        assert!(matches!(content[0], ContentBlock::Text(_)));
+        match &content[1] {
+            ContentBlock::Image(image) => {
+                assert_eq!(image.format(), &ImageFormat::Png);
+                match image.source() {
+                    Some(ImageSource::Bytes(blob)) => {
+                        assert_eq!(blob.as_ref(), &[1, 2, 3, 4]);
+                    }
+                    other => panic!("expected inline image bytes, got {other:?}"),
+                }
+            }
+            other => panic!("expected an image block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_convert_messages_unsupported_image_format_is_skipped() {
+        // An SVG (unsupported by Bedrock) is dropped; the text still survives.
+        let messages = vec![ChatMessage::user_with_parts(
+            "look",
+            vec![crate::provider::ContentPart::ImageUrl {
+                image_url: crate::provider::ImageUrl {
+                    url: "data:image/svg+xml;base64,PHN2Zy8+".to_string(),
+                    detail: None,
+                },
+            }],
+        )];
+
+        let (_system, msgs) = convert_messages(&messages).unwrap();
+        let content = msgs[0].content();
+        assert_eq!(content.len(), 1);
+        assert!(matches!(content[0], ContentBlock::Text(_)));
     }
 
     #[test]

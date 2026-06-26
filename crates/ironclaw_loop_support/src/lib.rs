@@ -38,6 +38,7 @@ mod subagent_spawn_port;
 mod system_inference;
 mod token_estimator;
 mod turn_event_publisher;
+pub mod user_profile_context;
 
 pub use budget_accountant::GovernorBackedAccountant;
 pub use budget_cost_table::{ModelCost, ModelCostTable, StaticModelCostTable, ZeroCostTable};
@@ -53,13 +54,14 @@ pub use capability_allow_set::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
 };
 pub use capability_port::{
-    CapabilityResultWrite, DecoratingLoopCapabilityPortFactory, HostRuntimeLoopCapabilityPort,
+    CapabilityResultWrite, CapabilityTrajectoryObserver, CapabilityWriteResult,
+    DecoratingLoopCapabilityPortFactory, HostRuntimeLoopCapabilityPort,
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortDecorator,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, concurrency_hint_from_effects,
     loop_driver_execution_extension_id,
 };
 pub use capability_surface_filter::{
-    CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
+    CapabilitySurfaceDenyFilter, CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
 };
 pub use compaction_task::{
     ACTIVE_TASK_COMPACTION_PROMPT_ID, DEFAULT_COMPACTION_PROMPT_ID, HostManagedLoopCompactionPort,
@@ -104,6 +106,7 @@ pub use subagent_spawn_port::{
     SubagentThreadKind, SubagentThreadMetadata, build_spawn_subagent_parameters_schema,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
+pub use user_profile_context::{EmptyUserProfileSource, HostUserProfileSource};
 pub const COMPACTION_SYSTEM_PROMPT: &str =
     include_str!("../prompts/compaction_summarizer_fresh.md");
 pub const ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT: &str = concat!(
@@ -129,7 +132,7 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    LoopMessageRef, TurnId, TurnRunId,
+    LoopGateRef, LoopMessageRef, TurnId, TurnRunId,
     run_profile::ModelProfileId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
@@ -887,6 +890,7 @@ where
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
+    attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -915,6 +919,7 @@ where
             skill_context_source: None,
             instruction_materialization_store: None,
             identity_context_source: None,
+            attachment_read_port: None,
         }
     }
 
@@ -940,6 +945,7 @@ where
             skill_context_source: None,
             instruction_materialization_store: None,
             identity_context_source: None,
+            attachment_read_port: None,
         }
     }
 
@@ -985,6 +991,67 @@ where
     pub fn with_capability_port(mut self, capabilities: Arc<dyn LoopCapabilityPort>) -> Self {
         self.capabilities = Some(capabilities);
         self
+    }
+
+    pub fn with_attachment_read_port(mut self, port: Arc<dyn LoopAttachmentReadPort>) -> Self {
+        self.attachment_read_port = Some(port);
+        self
+    }
+
+    /// Read the raw bytes of a model-visible message's image attachments so the
+    /// gateway can attach them as multimodal parts for a vision model. Returns
+    /// the bytes only — base64/`data:` URL formatting is a provider concern that
+    /// lives in the gateway, so this neutral adapter stays format-agnostic.
+    /// Empty when no read port is wired or the message has no images.
+    ///
+    /// The read is deliberately *not* gated on model vision capability here. The
+    /// authoritative model identity is `model_override`, resolved inside the
+    /// gateway from its routing policy, which can diverge from the run-context
+    /// route snapshot this port holds. Gating the read on the snapshot would
+    /// risk silently dropping images whenever the two disagree, so the single
+    /// authoritative vision gate lives in the gateway's `convert_messages`: a
+    /// text-only model simply discards these parts and keeps the `<attachments>`
+    /// text pointer. The only cost is a bounded read for the rare text-only +
+    /// image case.
+    ///
+    /// Read failures are logged and skipped — the image is dropped rather than
+    /// failing the turn; the textual `<attachments>` pointer remains either way.
+    async fn read_image_parts(
+        &self,
+        attachments: &[ironclaw_threads::ContextImageAttachment],
+    ) -> Vec<HostManagedModelImagePart> {
+        if attachments.is_empty() {
+            return Vec::new();
+        }
+        let Some(port) = self.attachment_read_port.as_ref() else {
+            return Vec::new();
+        };
+        let scope = self.thread_scope.to_resource_scope();
+        let mut parts = Vec::with_capacity(attachments.len());
+        for attachment in attachments {
+            match port
+                .read_attachment_bytes(&scope, &attachment.storage_key)
+                .await
+            {
+                Ok(bytes) => {
+                    parts.push(HostManagedModelImagePart {
+                        mime_type: attachment.mime_type.clone(),
+                        bytes,
+                    });
+                }
+                // silent-ok: an unreadable attachment is dropped, not fatal — the
+                // model still gets the text and the `<attachments>` pointer; the
+                // cause is logged here for diagnosis.
+                Err(error) => {
+                    tracing::debug!(
+                        storage_key = %attachment.storage_key,
+                        %error,
+                        "skipping image attachment that could not be read for the model"
+                    );
+                }
+            }
+        }
+        parts
     }
 }
 
@@ -1159,12 +1226,14 @@ where
                     continue;
                 };
                 let tool_result_content = tool_result_content_for_context_message(&message)?;
+                let image_parts = self.read_image_parts(&message.image_attachments).await;
                 messages.push(HostManagedModelMessage {
                     role: model_role_for_kind(message.kind),
                     content: message.content,
                     content_ref,
                     tool_result_provider_call: message.tool_result_provider_call,
                     tool_result_content,
+                    image_parts,
                 });
             }
             return Ok(messages);
@@ -1262,6 +1331,7 @@ where
                     content_ref: message.content_ref,
                     tool_result_provider_call: None,
                     tool_result_content: None,
+                    image_parts: Vec::new(),
                 });
                 continue;
             }
@@ -1284,6 +1354,7 @@ where
                     content_ref: message.content_ref,
                     tool_result_provider_call: None,
                     tool_result_content: None,
+                    image_parts: Vec::new(),
                 });
                 continue;
             }
@@ -1316,12 +1387,16 @@ where
                     "model message role does not match transcript message",
                 ));
             }
+            let image_parts = self
+                .read_image_parts(&context_message.image_attachments)
+                .await;
             resolved.push(HostManagedModelMessage {
                 role: durable_role,
                 content: context_message.content.clone(),
                 content_ref: message.content_ref,
                 tool_result_provider_call: context_message.tool_result_provider_call.clone(),
                 tool_result_content: tool_result_content_for_context_message(context_message)?,
+                image_parts,
             });
         }
         Ok(resolved)
@@ -1376,6 +1451,7 @@ where
                     content_ref,
                     tool_result_provider_call: None,
                     tool_result_content: None,
+                    image_parts: Vec::new(),
                 },
             );
         }
@@ -1418,6 +1494,52 @@ pub struct HostManagedModelRequest {
 /// snapshot DTO here.
 pub type HostManagedModelRouteSnapshot = ironclaw_turns::run_profile::LoopModelRouteSnapshot;
 
+/// An image attachment read back as raw bytes, ready to become a multimodal
+/// content part for a vision-capable model. The bytes are carried undecorated;
+/// base64 / `data:` URL formatting is a provider concern the model gateway owns
+/// (it turns each into a `ContentPart::ImageUrl` data URL) and only for a model
+/// that actually accepts images.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostManagedModelImagePart {
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Reads attachment bytes for the current turn so the model port can build
+/// multimodal image parts. Host composition implements this over the
+/// project-scoped workspace filesystem (the same authority that landed the
+/// attachment) and injects it into the model port. Deliberately narrow — bytes
+/// for one scoped `storage_key` — so it carries no provider/runtime authority.
+#[async_trait::async_trait]
+pub trait LoopAttachmentReadPort: Send + Sync {
+    async fn read_attachment_bytes(
+        &self,
+        scope: &ironclaw_host_api::ResourceScope,
+        storage_key: &str,
+    ) -> Result<Vec<u8>, LoopAttachmentReadError>;
+}
+
+/// Failure reading attachment bytes for the multimodal path. Non-fatal: the
+/// model port skips the image (the text `<attachments>` pointer remains).
+#[derive(Debug)]
+pub enum LoopAttachmentReadError {
+    NotFound,
+    Forbidden,
+    Backend(String),
+}
+
+impl std::fmt::Display for LoopAttachmentReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "attachment not found"),
+            Self::Forbidden => write!(f, "attachment read forbidden"),
+            Self::Backend(reason) => write!(f, "attachment read backend error: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for LoopAttachmentReadError {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostManagedModelMessage {
     pub role: HostManagedModelMessageRole,
@@ -1427,6 +1549,13 @@ pub struct HostManagedModelMessage {
     pub tool_result_provider_call: Option<ProviderToolCallReferenceEnvelope>,
     #[serde(default, skip)]
     pub tool_result_content: Option<HostManagedToolResultContent>,
+    /// Raw image-attachment bytes for the multimodal path, populated for any
+    /// message that carries landed images. The gateway encodes and attaches
+    /// them only for a vision-capable model (text-only models discard them and
+    /// keep the `<attachments>` text pointer). Not serialized (transient turn
+    /// data).
+    #[serde(default, skip)]
+    pub image_parts: Vec<HostManagedModelImagePart>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1555,6 +1684,7 @@ pub enum HostManagedModelErrorKind {
     PolicyDenied,
     ConfigurationError,
     BudgetExceeded,
+    BudgetApprovalRequired,
     /// Provider credentials are missing, expired, or otherwise unavailable.
     CredentialUnavailable,
     Unavailable,
@@ -1567,6 +1697,7 @@ pub struct HostManagedModelError {
     pub kind: HostManagedModelErrorKind,
     pub safe_summary: String,
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
+    pub gate_ref: Option<LoopGateRef>,
 }
 
 impl HostManagedModelError {
@@ -1575,6 +1706,7 @@ impl HostManagedModelError {
             kind,
             safe_summary: safe_model_summary(kind).to_string(),
             reason_kind: None,
+            gate_ref: None,
         }
     }
 
@@ -1583,11 +1715,17 @@ impl HostManagedModelError {
             kind,
             safe_summary: safe_summary.into(),
             reason_kind: None,
+            gate_ref: None,
         }
     }
 
     pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
         self.reason_kind = Some(reason_kind);
+        self
+    }
+
+    pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
+        self.gate_ref = Some(gate_ref);
         self
     }
 }
@@ -1682,6 +1820,7 @@ fn history_summaries_by_ref(summaries: Vec<SummaryArtifact>) -> HashMap<String, 
                 kind: MessageKind::Summary,
                 tool_result_provider_call: None,
                 content: summary.content,
+                image_attachments: Vec::new(),
             };
             message_ref_from_context(&context_message)
                 .map(|message_ref| (message_ref.as_str().to_string(), context_message))
@@ -1889,6 +2028,9 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
     if let Some(reason_kind) = error.reason_kind {
         host_error = host_error.with_reason_kind(reason_kind);
     }
+    if let Some(gate_ref) = error.gate_ref {
+        host_error = host_error.with_gate_ref(gate_ref);
+    }
     host_error
 }
 
@@ -1899,6 +2041,9 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
         HostManagedModelErrorKind::PolicyDenied => AgentLoopHostErrorKind::PolicyDenied,
         HostManagedModelErrorKind::ConfigurationError => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::BudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
+        HostManagedModelErrorKind::BudgetApprovalRequired => {
+            AgentLoopHostErrorKind::BudgetApprovalRequired
+        }
         HostManagedModelErrorKind::CredentialUnavailable => {
             AgentLoopHostErrorKind::CredentialUnavailable
         }
@@ -1914,6 +2059,7 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
         HostManagedModelErrorKind::PolicyDenied => "model profile is not permitted",
         HostManagedModelErrorKind::ConfigurationError => "model route configuration is invalid",
         HostManagedModelErrorKind::BudgetExceeded => "model request exceeded its budget",
+        HostManagedModelErrorKind::BudgetApprovalRequired => "model request needs budget approval",
         HostManagedModelErrorKind::CredentialUnavailable => "model credentials are unavailable",
         HostManagedModelErrorKind::Unavailable => "model service is unavailable",
         HostManagedModelErrorKind::Cancelled => "model request was cancelled",
@@ -1923,6 +2069,41 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_gateway_error_sanitizes_raw_detail_without_losing_budget_gate() {
+        let gate_ref = LoopGateRef::new("gate:budget-static-check").expect("gate ref");
+        let raw_detail = format!(
+            "provider 500: {} tool temporarily unavailable; api_key=secret; /private/path",
+            "System"
+        );
+
+        let error = HostManagedModelError::new(
+            HostManagedModelErrorKind::BudgetApprovalRequired,
+            raw_detail.as_str(),
+        )
+        .with_gate_ref(gate_ref.clone());
+
+        assert_eq!(error.safe_summary, "model request needs budget approval");
+        assert!(!error.safe_summary.contains("System tool"));
+        assert!(!error.safe_summary.contains("secret"));
+        assert!(!error.safe_summary.contains("/private/path"));
+
+        let host_error = model_gateway_error(error);
+
+        assert_eq!(
+            host_error.kind,
+            AgentLoopHostErrorKind::BudgetApprovalRequired
+        );
+        assert_eq!(host_error.gate_ref, Some(gate_ref));
+        assert_eq!(
+            host_error.safe_summary,
+            "model request needs budget approval"
+        );
+        assert!(!host_error.safe_summary.contains("System tool"));
+        assert!(!host_error.safe_summary.contains("secret"));
+        assert!(!host_error.safe_summary.contains("/private/path"));
+    }
 
     #[test]
     fn personal_context_admitted_summary_empty_paths_uses_count_only() {

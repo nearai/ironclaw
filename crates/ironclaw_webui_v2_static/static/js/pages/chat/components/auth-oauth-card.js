@@ -28,6 +28,7 @@ import { AuthGateShell } from "./auth-gate-shell.js";
 export function AuthOauthCard({ gate, onCancel }) {
   const t = useT();
   const [opened, setOpened] = React.useState(false);
+  const [error, setError] = React.useState("");
   const hasHttpsAuthorizationUrl = React.useMemo(() => {
     if (!gate.authorizationUrl) return false;
     try {
@@ -36,6 +37,9 @@ export function AuthOauthCard({ gate, onCancel }) {
       return false;
     }
   }, [gate.authorizationUrl]);
+  React.useEffect(() => {
+    setError("");
+  }, [gate.authorizationUrl, gate.gateRef, gate.runId]);
 
   const providerLabel = gate.provider
     ? gate.provider.charAt(0).toUpperCase() + gate.provider.slice(1)
@@ -45,9 +49,13 @@ export function AuthOauthCard({ gate, onCancel }) {
     // Guard: reject missing or non-HTTPS URLs before window.open so that
     // custom protocol handlers (javascript:, tel:, ms-msdt:, slack:) are
     // never opened even if a future code path writes an unexpected scheme.
-    if (!hasHttpsAuthorizationUrl) return;
+    if (!hasHttpsAuthorizationUrl) {
+      setError(t("authGate.serviceUnavailable"));
+      return;
+    }
     // Must be called synchronously in a click handler to be treated as a
     // user-gesture popup by the browser (not blocked by popup blockers).
+    setError("");
     window.open(gate.authorizationUrl, "_blank", "noopener,noreferrer");
     setOpened(true);
   }, [gate.authorizationUrl, hasHttpsAuthorizationUrl]);
@@ -74,7 +82,6 @@ export function AuthOauthCard({ gate, onCancel }) {
           rel="noopener noreferrer"
           className="auth-oauth"
           variant="primary"
-          disabled=${!hasHttpsAuthorizationUrl}
           onClick=${(event) => {
             event.preventDefault();
             openAuth();
@@ -92,6 +99,15 @@ export function AuthOauthCard({ gate, onCancel }) {
         <//>
       </div>
 
+      ${error &&
+      html`
+        <div
+          className="mt-3 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
+          role="alert"
+        >
+          ${error}
+        </div>
+      `}
       ${opened &&
       html`
         <p className="mt-2 text-xs text-iron-300">${t("authGate.oauthWaiting")}</p>

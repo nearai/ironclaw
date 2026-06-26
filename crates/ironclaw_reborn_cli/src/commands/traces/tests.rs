@@ -151,6 +151,7 @@ fn trace_queue_envelope_fixture(
         hindsight: None,
         training_dynamics: None,
         process_evaluation: None,
+        manual_review_authorized: false,
     }
 }
 
@@ -424,6 +425,92 @@ fn opt_in_invite_code_defaults_to_none_when_absent() {
     };
 
     assert!(upload_token_invite_code.is_none());
+}
+
+#[test]
+fn profile_token_flags_parse_through_cli() {
+    let cli = parse_cli([
+        "ironclaw-reborn",
+        "traces",
+        "profile",
+        "token",
+        "--user-scope",
+        "tenant-a:user-alice",
+        "--json",
+    ]);
+
+    let TracesSubcommand::Profile {
+        command: TracesProfileSubcommand::Token { user_scope, json },
+    } = unwrap_traces_command(cli)
+    else {
+        panic!("expected traces profile token command");
+    };
+
+    assert_eq!(user_scope.as_deref(), Some("tenant-a:user-alice"));
+    assert!(json);
+}
+
+#[test]
+fn profile_set_flags_parse_through_cli() {
+    let cli = parse_cli([
+        "ironclaw-reborn",
+        "traces",
+        "profile",
+        "set",
+        "--handle",
+        "pilot_zaki",
+        "--bio",
+        "Pilot contributor",
+        "--user-scope",
+        "tenant-a:user-alice",
+    ]);
+
+    let TracesSubcommand::Profile {
+        command:
+            TracesProfileSubcommand::Set {
+                handle,
+                bio,
+                user_scope,
+            },
+    } = unwrap_traces_command(cli)
+    else {
+        panic!("expected traces profile set command");
+    };
+
+    assert_eq!(handle, "pilot_zaki");
+    assert_eq!(bio.as_deref(), Some("Pilot contributor"));
+    assert_eq!(user_scope.as_deref(), Some("tenant-a:user-alice"));
+}
+
+#[test]
+fn profile_set_requires_handle_flag() {
+    let error = parse_cli_result(["ironclaw-reborn", "traces", "profile", "set"])
+        .expect_err("profile set without --handle must fail to parse");
+    assert_eq!(
+        error.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument
+    );
+}
+
+#[test]
+fn profile_withdraw_flags_parse_through_cli() {
+    let cli = parse_cli([
+        "ironclaw-reborn",
+        "traces",
+        "profile",
+        "withdraw",
+        "--user-scope",
+        "tenant-a:user-alice",
+    ]);
+
+    let TracesSubcommand::Profile {
+        command: TracesProfileSubcommand::Withdraw { user_scope },
+    } = unwrap_traces_command(cli)
+    else {
+        panic!("expected traces profile withdraw command");
+    };
+
+    assert_eq!(user_scope.as_deref(), Some("tenant-a:user-alice"));
 }
 
 #[test]

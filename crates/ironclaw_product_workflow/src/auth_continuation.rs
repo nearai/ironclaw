@@ -106,6 +106,7 @@ impl ProductAuthTurnGateResumeDispatcher {
                 reply_target_binding_ref,
                 idempotency_key,
                 precondition: ResumeTurnPrecondition::BlockedAuthGate,
+                resume_disposition: None,
             })
             .await
             .map_err(map_auth_resume_error)?;
@@ -494,10 +495,12 @@ mod tests {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: gate_ref.map(|value| GateRef::new(value).unwrap()),
+            blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor::default(),
             product_context: None,
+            resume_disposition: None,
         }
     }
 
@@ -894,6 +897,40 @@ mod tests {
                 kind: AuthContinuationRejectionKind::MissingThreadScope
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_auth_continuation_skips_coordinator_for_non_turn_continuations() {
+        use ironclaw_auth::{LifecyclePackageRef, ProductActionRef};
+
+        let non_turn_continuations = [
+            AuthContinuationRef::SetupOnly,
+            AuthContinuationRef::LifecycleActivation {
+                package_ref: LifecyclePackageRef::new("github").unwrap(),
+            },
+            AuthContinuationRef::ProductActionResume {
+                action_ref: ProductActionRef::new("action:install").unwrap(),
+            },
+        ];
+
+        for continuation in non_turn_continuations {
+            let coordinator = Arc::new(RecordingTurnCoordinator::default());
+            let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
+            // No set_state — any get_run_state call would return ScopeNotFound,
+            // causing dispatch_auth_continuation to return Err rather than Ok(()).
+            let event = scoped_event(continuation);
+
+            let result = dispatcher.dispatch_auth_continuation(event).await;
+
+            assert!(
+                result.is_ok(),
+                "non-turn continuation should return Ok(()), got: {result:?}"
+            );
+            assert!(
+                coordinator.resumes().is_empty(),
+                "non-turn continuation must not call resume_turn on the coordinator"
+            );
+        }
     }
 
     #[test]

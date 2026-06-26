@@ -31,30 +31,28 @@ async fn reborn_agent_scope_isolation_parity() {
         Some("project-e2e"),
     );
 
-    let mut agent_a =
-        RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage_unscoped_worker(
-            ROOM,
-            RebornTraceReplayModelGateway::with_responses([
-                HostManagedModelResponse::assistant_reply("agent alpha isolated reply"),
-            ]),
-            RecordingTestCapabilityPort::echo(),
-            agent_a_scope,
-            shared_storage.clone(),
-        )
-        .await
-        .expect("agent A harness");
-    let mut agent_b =
-        RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage_unscoped_worker(
-            ROOM,
-            RebornTraceReplayModelGateway::with_responses([
-                HostManagedModelResponse::assistant_reply("agent beta isolated reply"),
-            ]),
-            RecordingTestCapabilityPort::echo(),
-            agent_b_scope,
-            shared_storage,
-        )
-        .await
-        .expect("agent B harness");
+    let mut agent_a = RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage(
+        ROOM,
+        RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
+            "agent alpha isolated reply",
+        )]),
+        RecordingTestCapabilityPort::echo(),
+        agent_a_scope,
+        shared_storage.clone(),
+    )
+    .await
+    .expect("agent A harness");
+    let mut agent_b = RebornBinaryE2EHarness::with_model_gateway_scope_shared_storage(
+        ROOM,
+        RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
+            "agent beta isolated reply",
+        )]),
+        RecordingTestCapabilityPort::echo(),
+        agent_b_scope,
+        shared_storage,
+    )
+    .await
+    .expect("agent B harness");
 
     let alpha = agent_a
         .submit_text_for(ROOM, "alice", EVENT, "agent alpha turn")

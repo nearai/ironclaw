@@ -28,6 +28,39 @@ export function attachmentKindFromMime(mime) {
   return "document";
 }
 
+// How the preview modal should render an attachment, derived from its MIME
+// type (the kind enum is too coarse — a "document" may be a PDF, CSV, or
+// arbitrary binary). Each mode maps to a CSP-allowed representation:
+//   image    → <img src=data:>           (img-src 'self' data:)
+//   audio    → <audio src=data:>         (media-src 'self' data:)
+//   video    → <video src=data:>         (media-src 'self' data:)
+//   pdf      → <iframe src=blob:>        (frame-src 'self' blob:)
+//   text     → fetched text in <pre>     (no media src needed)
+//   download → metadata + download link  (binary we won't render inline)
+export function attachmentPreviewMode(mime) {
+  const normalized = (mime || "").toLowerCase();
+  if (normalized.startsWith("image/")) return "image";
+  if (normalized.startsWith("audio/")) return "audio";
+  if (normalized.startsWith("video/")) return "video";
+  if (normalized === "application/pdf") return "pdf";
+  if (isTextLikeMime(normalized)) return "text";
+  return "download";
+}
+
+// Text-renderable MIME types: anything `text/*` plus the common structured
+// text formats that are not served as `text/*` (JSON/XML and their `+json` /
+// `+xml` suffixes, CSV).
+function isTextLikeMime(normalized) {
+  return (
+    normalized.startsWith("text/") ||
+    normalized === "application/json" ||
+    normalized === "application/xml" ||
+    normalized === "application/csv" ||
+    normalized.endsWith("+json") ||
+    normalized.endsWith("+xml")
+  );
+}
+
 export function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes < 0) return "";
   if (bytes < 1024) return `${bytes} B`;

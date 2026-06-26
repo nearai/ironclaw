@@ -97,6 +97,66 @@ pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<S
     }
 }
 
+/// Outcome of running the type-aware extractor over a document's bytes.
+/// Centralizes the extract+trim+empty classification so the consumers
+/// (chat attachments, agent file reads, capability download output) cannot
+/// drift as extractor behavior changes. Callers render their own model-facing
+/// text/markers and apply their own truncation from this outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocumentExtraction {
+    /// Non-empty extracted text, trimmed. NOT truncated — callers apply their own cap.
+    Text(String),
+    /// The extractor succeeded but produced no usable text.
+    Empty,
+    /// The extractor failed (unsupported/corrupt). Carries the error reason for
+    /// logging only; callers render a model-safe marker, never this string.
+    Failed(String),
+}
+
+/// Run the type-aware extractor and classify the outcome. See [`extract_text`].
+pub fn extract_document(data: &[u8], mime: &str, filename: Option<&str>) -> DocumentExtraction {
+    match extract_text(data, mime, filename) {
+        Ok(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                DocumentExtraction::Empty
+            } else {
+                DocumentExtraction::Text(trimmed.to_string())
+            }
+        }
+        Err(error) => DocumentExtraction::Failed(error),
+    }
+}
+
+/// Extract text from non-plain-text document formats inferred from a filename.
+///
+/// This deliberately excludes UTF-8 passthrough formats such as `.txt`, `.json`,
+/// and source files. Callers that already have a normal text read path can use
+/// this as a fallback without letting a misleading extension override readable
+/// text bytes.
+pub fn extract_document_text_by_filename(
+    data: &[u8],
+    filename: Option<&str>,
+) -> Result<Option<String>, String> {
+    let ext = filename
+        .and_then(|filename| filename.rsplit('.').next())
+        .map(str::to_lowercase);
+    let Some(ext) = ext else {
+        return Ok(None);
+    };
+
+    let text = match ext.as_str() {
+        "pdf" => extract_pdf(data)?,
+        "docx" => extract_docx(data)?,
+        "pptx" => extract_pptx(data)?,
+        "xlsx" => extract_xlsx(data)?,
+        "doc" | "ppt" | "xls" => extract_binary_strings(data)?,
+        "rtf" => extract_rtf(data)?,
+        _ => return Ok(None),
+    };
+    Ok(Some(text))
+}
+
 /// Read a zip entry into a string with configurable decompressed size limits.
 fn bounded_read_zip_entry_with_limits(
     file: &mut zip::read::ZipFile<'_>,
@@ -558,15 +618,12 @@ fn parse_xlsx_sheet(xml: &str, shared_strings: &[String]) -> String {
 
 /// Try to extract text based on filename extension when MIME type is generic.
 fn try_extract_by_extension(data: &[u8], filename: Option<&str>) -> Option<String> {
+    if let Ok(Some(text)) = extract_document_text_by_filename(data, filename) {
+        return Some(text);
+    }
     let ext = filename?.rsplit('.').next()?.to_lowercase();
 
     match ext.as_str() {
-        "pdf" => extract_pdf(data).ok(),
-        "docx" => extract_docx(data).ok(),
-        "pptx" => extract_pptx(data).ok(),
-        "xlsx" => extract_xlsx(data).ok(),
-        "doc" | "ppt" | "xls" => extract_binary_strings(data).ok(),
-        "rtf" => extract_rtf(data).ok(),
         "txt" | "csv" | "tsv" | "json" | "xml" | "yaml" | "yml" | "toml" | "md" | "markdown"
         | "py" | "js" | "ts" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp" | "rb" | "sh"
         | "bash" | "zsh" | "fish" | "css" | "html" | "htm" | "sql" | "log" | "ini" | "cfg"
@@ -660,9 +717,59 @@ mod tests {
     }
 
     #[test]
+    fn extract_document_classifies_text() {
+        // A supported text format with content yields Text(trimmed).
+        let outcome = extract_document(b"  name,age\nAlice,30  ", "text/csv", Some("data.csv"));
+        assert_eq!(
+            outcome,
+            DocumentExtraction::Text("name,age\nAlice,30".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_document_classifies_empty() {
+        // The extractor succeeds (UTF-8 passthrough) but the text is all
+        // whitespace, so after trimming there is nothing usable.
+        let outcome = extract_document(b"   \n\t  ", "text/plain", None);
+        assert_eq!(outcome, DocumentExtraction::Empty);
+    }
+
+    #[test]
+    fn extract_document_classifies_failed() {
+        // An unsupported/opaque binary (PNG header bytes under image/png) is not
+        // a document type the extractor handles, so it fails.
+        let outcome = extract_document(
+            &[0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02],
+            "image/png",
+            Some("image.png"),
+        );
+        assert!(
+            matches!(outcome, DocumentExtraction::Failed(reason) if !reason.is_empty()),
+            "unsupported binary must classify as Failed with a reason"
+        );
+    }
+
+    #[test]
     fn extract_by_extension_txt() {
         let result = try_extract_by_extension(b"content", Some("notes.txt"));
         assert_eq!(result, Some("content".to_string()));
+    }
+
+    #[test]
+    fn extract_document_text_by_filename_ignores_text_extensions() {
+        let result = extract_document_text_by_filename(b"content", Some("notes.txt")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_document_text_by_filename_extracts_pdf() {
+        let result = extract_document_text_by_filename(
+            include_bytes!("../../../tests/fixtures/hello.pdf"),
+            Some("hello.pdf"),
+        )
+        .unwrap()
+        .expect("pdf text");
+        assert!(result.contains("Hello"));
     }
 
     #[test]

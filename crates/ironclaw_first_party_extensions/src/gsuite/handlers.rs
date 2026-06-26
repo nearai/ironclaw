@@ -145,8 +145,10 @@ impl GsuiteExecutor {
                     CapabilityExecutionOutcome::AuthExpired {
                         network_egress_bytes: retry_network_egress_bytes,
                     } => {
-                        return Err(GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
-                            .with_reason(GsuiteCredentialDispatchReason::BackendAuth)
+                        return Err(GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
+                            .with_reason(GsuiteCredentialDispatchReason::AuthRequired {
+                                required_secrets: vec![refreshed.access_secret.clone()],
+                            })
                             .with_usage(ResourceUsage {
                                 network_egress_bytes: network_egress_bytes
                                     .saturating_add(retry_network_egress_bytes),

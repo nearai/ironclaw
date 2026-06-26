@@ -7,6 +7,7 @@ import { useSidebar } from "../hooks/useSidebar.js";
 import { html } from "../lib/html.js";
 import { useT } from "../lib/i18n.js";
 import { toast } from "../lib/toast.js";
+import { deleteThreadErrorMessage } from "../lib/thread-errors.js";
 import { useThreads } from "../pages/chat/hooks/useThreads.js";
 import { Sidebar } from "../components/sidebar.js";
 import { PageHeader } from "../components/page-header.js";
@@ -15,7 +16,14 @@ import { ToastViewport } from "../components/toast-viewport.js";
 import { React } from "../lib/html.js";
 import { cn } from "../utils/cn.js";
 
-export function GatewayLayout({ token, profile, isChecking = false, isAdmin, onSignOut }) {
+export function GatewayLayout({
+  token,
+  profile,
+  isChecking = false,
+  isAdmin,
+  rebornProjectsEnabled = false,
+  onSignOut,
+}) {
   const t = useT();
   const { theme, toggleTheme } = useInterfaceTheme();
   const statusQuery = useGatewayStatus(token);
@@ -75,10 +83,10 @@ export function GatewayLayout({ token, profile, isChecking = false, isAdmin, onS
         }
       } catch (error) {
         console.error("Failed to delete thread:", error);
-        toast(error?.message || "Unable to delete thread", { tone: "error" });
+        toast(deleteThreadErrorMessage(error, t), { tone: "error" });
       }
     },
-    [navigate, threadsState]
+    [navigate, threadsState, t]
   );
   if (needsOnboarding && !onboardingExempt) {
     return html`<${Navigate} to="/welcome" replace />`;
@@ -86,7 +94,7 @@ export function GatewayLayout({ token, profile, isChecking = false, isAdmin, onS
 
   return html`
     <div className="flex h-[100dvh] overflow-hidden bg-[var(--v2-canvas)]">
-      ${sidebar.open &&
+      ${sidebar.mobileOpen &&
       html`<button
         type="button"
         aria-label=${t("nav.close")}
@@ -97,15 +105,18 @@ export function GatewayLayout({ token, profile, isChecking = false, isAdmin, onS
       <div
         className=${cn(
           "fixed inset-y-0 left-0 z-50 md:relative md:z-auto",
-          sidebar.open ? "flex" : "hidden md:flex"
+          sidebar.mobileOpen ? "flex" : "hidden",
+          sidebar.desktopOpen ? "md:flex" : "md:hidden"
         )}
       >
         <${Sidebar}
+          id="gateway-sidebar"
           threadsState=${threadsState}
           theme=${theme}
           toggleTheme=${toggleTheme}
           profile=${profile}
           isAdmin=${isAdmin}
+          rebornProjectsEnabled=${rebornProjectsEnabled}
           onSignOut=${onSignOut}
           onClose=${sidebar.close}
           onNewChat=${sidebar.newChat}
@@ -118,6 +129,7 @@ export function GatewayLayout({ token, profile, isChecking = false, isAdmin, onS
         <${PageHeader}
           threadsState=${threadsState}
           onToggleSidebar=${sidebar.toggle}
+          sidebarOpen=${sidebar.currentOpen}
         />
         <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
           ${statusQuery.error &&

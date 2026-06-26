@@ -7,7 +7,7 @@ import {
   useOauthSetup,
   useSetupSubmit,
 } from "../hooks/useExtensions.js";
-import { setupReadyForActivation } from "../lib/extension-actions.js";
+import { extensionIsActive, setupReadyForActivation } from "../lib/extension-actions.js";
 
 export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const t = useT();
@@ -45,7 +45,8 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     (secret) => (secret.setup?.kind || "manual_token") === "manual_token"
   );
   const canSave = manualSecrets.length > 0 || fields.length > 0;
-  const canActivate = setupReadyForActivation({ secrets, fields });
+  const isActive = extensionIsActive(extension);
+  const canActivate = setupReadyForActivation({ extension, secrets, fields });
 
   if (isLoading) {
     return html`
@@ -208,6 +209,14 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
         <p className="mt-4 text-xs leading-5 text-iron-300">
           ${onboarding.credential_next_step}
         </p>
+      `}
+      ${isActive &&
+      html`
+        <div
+          className="mt-4 rounded-md border border-mint/20 bg-mint/10 px-3 py-2 text-xs text-mint"
+        >
+          ${t("extensions.activeConfigured")}
+        </div>
       `}
       ${submitMutation.error &&
       html`

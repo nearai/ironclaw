@@ -9,6 +9,7 @@ import { NetworkingTab } from "./components/networking-tab.js";
 import { RestartBanner } from "./components/restart-banner.js";
 import { SkillsTab } from "./components/skills-tab.js";
 import { ToolsTab } from "./components/tools-tab.js";
+import { TraceCommonsTab } from "./components/trace-commons-tab.js";
 import { UsersTab } from "./components/users-tab.js";
 import { useSettings } from "./hooks/useSettings.js";
 
@@ -51,8 +52,15 @@ export function SettingsPage() {
       isLoading=${isLoading}
       searchQuery=${searchQuery}
     />`,
-    tools: html`<${ToolsTab} searchQuery=${searchQuery} />`,
+    tools: html`<${ToolsTab}
+      settings=${settings}
+      onSave=${save}
+      savedKeys=${savedKeys}
+      isLoading=${isLoading}
+      searchQuery=${searchQuery}
+    />`,
     skills: html`<${SkillsTab} searchQuery=${searchQuery} />`,
+    traces: html`<${TraceCommonsTab} searchQuery=${searchQuery} />`,
     users: html`<${UsersTab} searchQuery=${searchQuery} />`,
     language: html`<${LanguageTab} searchQuery=${searchQuery} />`,
   };

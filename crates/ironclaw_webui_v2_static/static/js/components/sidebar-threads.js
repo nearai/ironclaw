@@ -1,3 +1,4 @@
+import { NavLink } from "react-router";
 import { React, html } from "../lib/html.js";
 import { Icon } from "../design-system/icons.js";
 import { useT } from "../lib/i18n.js";
@@ -30,7 +31,10 @@ const STATE_PRESENTATION = Object.freeze({
     label: "Needs your attention",
     textClass: "text-[var(--v2-warning-text)]",
     dotClass: "bg-[var(--v2-warning-text)]",
-    borderClass: "border-[var(--v2-warning-text)]",
+    // The colored dot + label badge already signals attention; the solid
+    // left border felt visually heavy, so this state carries no border
+    // accent. The reserved border-l-2 width stays transparent.
+    borderClass: "border-transparent",
   },
   [THREAD_STATE.RUNNING]: {
     label: "Running",
@@ -174,7 +178,14 @@ function ThreadGroup({ label, items, activeThreadId, states, pinnedIds, onSelect
   `;
 }
 
-export function SidebarThreads({ threads, activeThreadId, onSelect, onDelete }) {
+export function SidebarThreads({
+  threads,
+  activeThreadId,
+  rebornProjectsEnabled = false,
+  onSelect,
+  onDelete,
+  onNavigate,
+}) {
   const [collapsed, setCollapsed] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const states = useThreadStates();
@@ -253,6 +264,23 @@ export function SidebarThreads({ threads, activeThreadId, onSelect, onDelete }) 
             placeholder=${t("common.searchChats")}
             className="h-8 w-full rounded-[8px] border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] pl-8 pr-2 text-[12px] text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
           />
+        </div>`}
+        ${rebornProjectsEnabled &&
+        html`<div className="mb-1 px-1">
+          <${NavLink}
+            to="/projects"
+            onClick=${onNavigate}
+            className=${({ isActive }) =>
+              cn(
+                "flex items-center gap-3 rounded-[10px] px-3 py-2 text-[13px] font-medium",
+                isActive
+                  ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
+                  : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+              )}
+          >
+            <${Icon} name="folder" className="h-4 w-4 shrink-0" />
+            <span className="min-w-0 truncate">${t("nav.projects")}</span>
+          <//>
         </div>`}
         <div
           className="mt-1 flex flex-col gap-2 overflow-y-auto [scrollbar-width:thin]"

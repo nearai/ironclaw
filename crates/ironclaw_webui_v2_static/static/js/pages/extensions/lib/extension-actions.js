@@ -1,10 +1,7 @@
 import { isChannelExtensionKind } from "./extensions-schema.js";
 
 export function primaryExtensionAction(ext) {
-  const state =
-    ext?.onboarding_state ||
-    ext?.activation_status ||
-    (ext?.active ? "active" : "installed");
+  const state = extensionLifecycleState(ext);
 
   if (!ext?.package_ref || state === "active" || state === "ready") {
     return null;
@@ -30,7 +27,25 @@ export function primaryExtensionAction(ext) {
   return "activate";
 }
 
-export function setupReadyForActivation({ secrets = [], fields = [] } = {}) {
+export function extensionLifecycleState(ext) {
+  return (
+    ext?.onboarding_state ||
+    ext?.onboardingState ||
+    ext?.activation_status ||
+    ext?.activationStatus ||
+    (ext?.active ? "active" : "installed")
+  );
+}
+
+export function extensionIsActive(ext) {
+  const state = extensionLifecycleState(ext);
+  return state === "active" || state === "ready";
+}
+
+export function setupReadyForActivation({ extension, secrets = [], fields = [] } = {}) {
+  if (extensionIsActive(extension)) {
+    return false;
+  }
   if (fields.length > 0 || secrets.length === 0) {
     return false;
   }

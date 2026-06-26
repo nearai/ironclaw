@@ -90,10 +90,11 @@ function sameActivityRun(referenceRunId, msg) {
 
 function appendActivityRun(items, activity) {
   if (activity.length === 0) return;
+  const orderedActivity = orderActivityRun(activity);
   items.push({
     type: "activity-run",
-    id: `activity-run-${activity[0].id}`,
-    activity,
+    id: `activity-run-${orderedActivity[0].id}`,
+    activity: orderedActivity,
   });
 }
 
@@ -121,4 +122,43 @@ function hasToolCalls(msg) {
 
 function turnRunIdForMessage(msg) {
   return msg?.turnRunId || null;
+}
+
+function orderActivityRun(activity) {
+  return [...activity].sort((left, right) => {
+    if (left?.role !== "tool_activity" || right?.role !== "tool_activity") {
+      return 0;
+    }
+    return compareToolActivityOrder(left, right);
+  });
+}
+
+function compareToolActivityOrder(left, right) {
+  if (Number.isFinite(left.activityOrder) && Number.isFinite(right.activityOrder)) {
+    const explicitOrder = left.activityOrder - right.activityOrder;
+    if (explicitOrder !== 0) return explicitOrder;
+  }
+
+  const timestampOrder = compareNullableNumber(
+    timestampMs(left.updatedAt || left.timestamp),
+    timestampMs(right.updatedAt || right.timestamp),
+  );
+  if (timestampOrder !== 0) return timestampOrder;
+
+  return compareNullableNumber(left.sequence, right.sequence);
+}
+
+function compareNullableNumber(left, right) {
+  const leftNumber = Number.isFinite(left) ? left : null;
+  const rightNumber = Number.isFinite(right) ? right : null;
+  if (leftNumber === null && rightNumber === null) return 0;
+  if (leftNumber === null) return 1;
+  if (rightNumber === null) return -1;
+  return leftNumber - rightNumber;
+}
+
+function timestampMs(value) {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }

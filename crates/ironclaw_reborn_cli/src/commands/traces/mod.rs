@@ -19,11 +19,12 @@ use ironclaw_reborn_traces::contribution::{
     TraceCreditEventKind, TraceSubmissionReceipt, TraceSubmissionStatusUpdate,
     acknowledge_trace_credit_notice_for_scope, estimate_initial_credit,
     fetch_trace_submission_statuses_with_policy, mark_trace_credit_notice_due_for_scope,
-    normalize_trace_selected_tools, preflight_trace_contribution_policy,
-    read_trace_policy_for_scope, revoke_trace_submission_at_endpoint_with_policy,
+    mint_profile_attribution_token_for_scope, normalize_trace_selected_tools,
+    preflight_trace_contribution_policy, read_trace_policy_for_scope,
+    revoke_trace_submission_at_endpoint_with_policy, set_community_profile_for_scope,
     snooze_trace_credit_notice_for_scope, submit_trace_envelope_to_endpoint_with_policy,
     trace_credit_summary, trace_queue_diagnostics_for_scope, trace_submission_status_endpoint,
-    write_trace_policy_for_scope,
+    withdraw_community_profile_for_scope, write_trace_policy_for_scope,
 };
 
 mod contributor;
@@ -280,6 +281,51 @@ enum TracesSubcommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// Manage the optional public community profile (second opt-in)
+    Profile {
+        #[command(subcommand)]
+        command: TracesProfileSubcommand,
+    },
+}
+
+/// Sub-subcommands for `traces profile`. The community profile is a second,
+/// separate opt-in: a profile token carries only the `public_attribution`
+/// consent scope with no allowed uses, so it cannot submit traces.
+#[derive(Subcommand, Debug, Clone)]
+enum TracesProfileSubcommand {
+    /// Mint a short-lived profile token for the Trace Commons web profile page
+    Token {
+        /// Runtime/web user scope; defaults to this instance's owner_id
+        #[arg(long)]
+        user_scope: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Create or update the public community profile
+    Set {
+        /// Pseudonymous display handle (3-32 chars: ASCII letters, digits, '-', '_')
+        #[arg(long)]
+        handle: String,
+
+        /// Optional short bio (max 280 bytes)
+        #[arg(long)]
+        bio: Option<String>,
+
+        /// Runtime/web user scope; defaults to this instance's owner_id
+        #[arg(long)]
+        user_scope: Option<String>,
+    },
+
+    /// Withdraw the public community profile
+    Withdraw {
+        /// Runtime/web user scope; defaults to this instance's owner_id
+        #[arg(long)]
+        user_scope: Option<String>,
+    },
 }
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceScopeArg {
@@ -363,6 +409,7 @@ async fn run_traces(cmd: TracesSubcommand) -> anyhow::Result<()> {
         v @ TracesSubcommand::ListSubmissions { .. } => contributor::dispatch(v).await,
         v @ TracesSubcommand::Revoke { .. } => contributor::dispatch(v).await,
         v @ TracesSubcommand::IngestHealth { .. } => contributor::dispatch(v).await,
+        v @ TracesSubcommand::Profile { .. } => contributor::dispatch(v).await,
     }
 }
 
@@ -578,6 +625,56 @@ fn show_policy_status(json: bool, user_scope: Option<&str>) -> anyhow::Result<()
         None => queued_envelope_paths()?.len(),
     };
     println!("  queued envelopes: {queued_count}");
+    Ok(())
+}
+
+async fn profile_token(user_scope: Option<&str>, json: bool) -> anyhow::Result<()> {
+    let runtime_scope = trace_runtime_user_scope(user_scope)?;
+    let token = mint_profile_attribution_token_for_scope(Some(&runtime_scope)).await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "access_token": token.access_token,
+                "expires_at": token.expires_at,
+                "expires_in": token.expires_in,
+            }))
+            .map_err(|e| anyhow::anyhow!("failed to serialize profile token: {}", e))?
+        );
+        return Ok(());
+    }
+    println!("{}", token.access_token);
+    if let Some(expires_at) = token.expires_at {
+        println!("Expires at: {expires_at}");
+    } else if let Some(expires_in) = token.expires_in {
+        println!("Expires in: {expires_in} second(s)");
+    }
+    println!();
+    println!(
+        "Paste this token (without any 'Bearer ' prefix) into the Trace Commons profile page."
+    );
+    println!("It only authorizes community-profile management and cannot submit traces.");
+    Ok(())
+}
+
+async fn profile_set(
+    user_scope: Option<&str>,
+    handle: &str,
+    bio: Option<&str>,
+) -> anyhow::Result<()> {
+    let runtime_scope = trace_runtime_user_scope(user_scope)?;
+    set_community_profile_for_scope(Some(&runtime_scope), handle, bio).await?;
+    println!("Community profile set: display handle '{}'.", handle.trim());
+    println!("Withdraw anytime with 'ironclaw-reborn traces profile withdraw'.");
+    Ok(())
+}
+
+async fn profile_withdraw(user_scope: Option<&str>) -> anyhow::Result<()> {
+    let runtime_scope = trace_runtime_user_scope(user_scope)?;
+    withdraw_community_profile_for_scope(Some(&runtime_scope)).await?;
+    println!(
+        "Community profile withdrawn. Your handle no longer appears on the public community surface."
+    );
     Ok(())
 }
 

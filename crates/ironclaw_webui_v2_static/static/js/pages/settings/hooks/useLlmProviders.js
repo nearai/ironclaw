@@ -54,8 +54,17 @@ export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = 
   // operator snapshot, but also honor runtime/env-configured LLMs surfaced by
   // gateway status so first-run onboarding does not mask an already-live model.
   const hasActiveProvider = Boolean(snapshot.active?.provider_id || gatewayStatus?.llm_backend);
-  const activeProviderId =
-    snapshot.active?.provider_id || gatewayStatus?.llm_backend || "nearai";
+  // The honest active selection: null when nothing is configured. The grouping,
+  // sort, and per-card "active" badge must key off this — otherwise a clean
+  // install renders NEAR AI under the "ACTIVE" section even though no provider
+  // is selected (#4857). The `nearai` fallback below is for downstream *default*
+  // selection only and must never leak into active-state display.
+  const activeProviderId = hasActiveProvider
+    ? snapshot.active?.provider_id || gatewayStatus?.llm_backend
+    : null;
+  // Default provider id used when the user activates/saves without a prior
+  // selection. Intentionally falls back to `nearai`; never used for grouping.
+  const defaultProviderId = activeProviderId || "nearai";
   const selectedModel = snapshot.active?.model || gatewayStatus?.llm_model || "";
   const builtinProviders = allProviders.filter((provider) => provider.builtin);
   const customProviders = allProviders.filter((provider) => !provider.builtin);
@@ -102,7 +111,7 @@ export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = 
       if (apiKey.trim()) {
         payload.api_key = apiKey.trim();
       }
-      if ((editingProvider || provider)?.id === activeProviderId && payload.default_model) {
+      if ((editingProvider || provider)?.id === defaultProviderId && payload.default_model) {
         payload.set_active = true;
         payload.model = payload.default_model;
       }

@@ -406,4 +406,3 @@ Before WU-A opens its PR:
 6. Caller-level tests pass `cargo test -p ironclaw_agent_loop`; boundary test passes `cargo test -p ironclaw_architecture`.
 
 WU-F merge gate: snapshot-path only this round; live-update path follow-up. `TurnSpawnTreeStateStore` injected at composition, not projections crate.
-

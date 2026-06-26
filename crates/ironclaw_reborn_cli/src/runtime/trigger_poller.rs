@@ -2,40 +2,9 @@ use std::time::Duration;
 
 use ironclaw_reborn_composition::TriggerPollerSettings;
 
-use super::RuntimeInputCaller;
+use crate::operator_env::{strict_bool_env_var, strict_env_var, truncate_env_value_for_display};
 
-/// Read a trigger-poller env var with **strict** presence semantics.
-///
-/// `IRONCLAW_TRIGGER_POLLER_*` env vars are operator-control knobs: presence
-/// is authoritative, not just non-empty content. Treat the var as
-///
-/// - unset → `Ok(None)` (fall through to the config/default layer)
-/// - set, empty or all-whitespace → fatal (operator must unset or fix)
-/// - set, non-empty → `Ok(Some(value))` (caller validates content)
-///
-/// Distinct from the broader `optional_nonempty_env` used by optional-config
-/// callers (OAuth, etc.), which intentionally collapses present-blank to
-/// absent. Here, a present-but-blank env slot is almost always a bug — a
-/// shell typo, a half-set deployment template, or a credential injector
-/// that failed to populate the slot — and falling through silently would
-/// drop the operator's intended kill-switch or interval override with no
-/// visible signal.
-fn strict_env_var(name: &str) -> anyhow::Result<Option<String>> {
-    match std::env::var(name) {
-        Ok(value) => {
-            if value.trim().is_empty() {
-                anyhow::bail!(
-                    "{name} is set but empty or whitespace-only; either unset it or provide a valid value"
-                );
-            }
-            Ok(Some(value))
-        }
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
-            "{name} contains non-UTF-8 bytes; either unset it or provide a valid value"
-        ),
-    }
-}
+use super::RuntimeInputCaller;
 
 /// Upper bound on `poll_interval_secs` (config) and
 /// `IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS` (env). One hour caps the
@@ -53,21 +22,6 @@ const MAX_JITTER_SECS: u64 = 3600;
 /// leaves plenty of headroom for a future high-throughput deployment
 /// while rejecting accidents like `u32::MAX` (~4B dispatches per tick).
 const MAX_FIRES_PER_TICK: u32 = 1000;
-
-/// Truncate an env-var value to a bounded length before echoing it in an
-/// error message. Prevents the value from blowing up startup logs if the
-/// operator accidentally pastes a long string (e.g. a credential) into the
-/// env slot. Char-aware so we cannot split a multi-byte UTF-8 codepoint.
-fn truncate_env_value_for_display(raw: &str) -> String {
-    const MAX_CHARS: usize = 64;
-    let mut iter = raw.chars();
-    let truncated: String = iter.by_ref().take(MAX_CHARS).collect();
-    if iter.next().is_some() {
-        format!("{truncated}…")
-    } else {
-        truncated
-    }
-}
 
 /// Build [`TriggerPollerSettings`] by merging three layers of configuration.
 ///
@@ -170,19 +124,8 @@ pub(super) fn trigger_poller_settings(
     // Layer 1: environment variable overrides. Uses strict presence
     // semantics — a present-but-blank value is fatal, not a silent
     // fall-through to config/default.
-    if let Some(raw) = strict_env_var("IRONCLAW_TRIGGER_POLLER_ENABLED")? {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" => settings.enabled = true,
-            "0" | "false" => settings.enabled = false,
-            _ => {
-                // Display the operator's original value (case preserved), not the
-                // lowercased match key — they need to find it in their config.
-                let display = truncate_env_value_for_display(&raw);
-                anyhow::bail!(
-                    "IRONCLAW_TRIGGER_POLLER_ENABLED must be one of 1, true, 0, false (got {display:?})"
-                )
-            }
-        }
+    if let Some(enabled) = strict_bool_env_var("IRONCLAW_TRIGGER_POLLER_ENABLED")? {
+        settings.enabled = enabled;
     }
 
     if let Some(raw) = strict_env_var("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS")? {

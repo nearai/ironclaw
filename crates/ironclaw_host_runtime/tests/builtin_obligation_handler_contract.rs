@@ -697,6 +697,7 @@ async fn builtin_obligation_handler_leases_consumes_and_stages_secret_once() {
             context.resource_scope.clone(),
             handle.clone(),
             SecretMaterial::from("runtime-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -731,6 +732,7 @@ async fn builtin_obligation_handler_removes_staged_secret_on_abort() {
             context.resource_scope.clone(),
             handle.clone(),
             SecretMaterial::from("runtime-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -781,6 +783,7 @@ async fn builtin_obligation_handler_satisfy_preserves_staged_handoffs_when_relea
             context.resource_scope.clone(),
             handle.clone(),
             SecretMaterial::from("runtime-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -827,6 +830,7 @@ async fn builtin_obligation_handler_cleans_unused_staged_handoffs_after_dispatch
             context.resource_scope.clone(),
             handle.clone(),
             SecretMaterial::from("runtime-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -1404,6 +1408,7 @@ async fn inject_credential_account_once_resolves_and_stages_secret() {
                 .clone(),
             access_handle.clone(),
             ironclaw_secrets::SecretMaterial::from("test-github-token"),
+            None,
         )
         .await
         .unwrap();
@@ -1453,6 +1458,7 @@ async fn inject_credential_account_once_reads_from_resolved_source_scope() {
             source_scope.clone(),
             access_handle.clone(),
             ironclaw_secrets::SecretMaterial::from("test-github-token"),
+            None,
         )
         .await
         .unwrap();

@@ -4,10 +4,10 @@ use thiserror::Error;
 use ironclaw_host_api::RuntimeCredentialAuthRequirement;
 
 use crate::{
-    AcceptedMessageRef, GateRef, ProductTurnContext, ReplyTargetBindingRef, ResolvedRunProfile,
-    RunProfileId, RunProfileVersion, SourceBindingRef, TurnActor, TurnAdmissionClass,
-    TurnCheckpointId, TurnId, TurnRunId, TurnScope, events::EventCursor, request::TurnTimestamp,
-    run_profile::LoopModelRouteSnapshot,
+    AcceptedMessageRef, CapabilityActivityId, GateRef, ProductTurnContext, ReplyTargetBindingRef,
+    ResolvedRunProfile, RunProfileId, RunProfileVersion, SourceBindingRef, TurnActor,
+    TurnAdmissionClass, TurnCheckpointId, TurnId, TurnRunId, TurnScope, events::EventCursor,
+    request::TurnTimestamp, run_profile::LoopModelRouteSnapshot,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,6 +18,11 @@ pub enum TurnStatus {
     BlockedAuth,
     BlockedResource,
     BlockedDependentRun,
+    /// Blocked on a client-supplied ("external") tool call: the model invoked a
+    /// caller-declared tool that the agent loop does not execute. The run is
+    /// parked, control returns to the API client, and the client resumes the run
+    /// by submitting the tool output. Non-terminal; keeps the active lock.
+    BlockedExternalTool,
     CancelRequested,
     Cancelled,
     Completed,
@@ -130,6 +135,9 @@ pub enum BlockedReason {
     AwaitDependentRun {
         gate_ref: GateRef,
     },
+    ExternalTool {
+        gate_ref: GateRef,
+    },
 }
 
 impl BlockedReason {
@@ -139,6 +147,7 @@ impl BlockedReason {
             Self::Auth { .. } => TurnStatus::BlockedAuth,
             Self::Resource { .. } => TurnStatus::BlockedResource,
             Self::AwaitDependentRun { .. } => TurnStatus::BlockedDependentRun,
+            Self::ExternalTool { .. } => TurnStatus::BlockedExternalTool,
         }
     }
 
@@ -147,7 +156,8 @@ impl BlockedReason {
             Self::Approval { gate_ref }
             | Self::Auth { gate_ref, .. }
             | Self::Resource { gate_ref }
-            | Self::AwaitDependentRun { gate_ref } => gate_ref,
+            | Self::AwaitDependentRun { gate_ref }
+            | Self::ExternalTool { gate_ref } => gate_ref,
         }
     }
 
@@ -316,12 +326,20 @@ pub struct TurnRunState {
     pub received_at: TurnTimestamp,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_activity_id: Option<CapabilityActivityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     pub failure: Option<SanitizedFailure>,
     pub event_cursor: EventCursor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_context: Option<ProductTurnContext>,
+    #[serde(
+        rename = "auth_resume_disposition",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub resume_disposition: Option<crate::GateResumeDisposition>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -434,5 +452,40 @@ impl TurnError {
             TurnErrorCategory::InvalidRequest => 400,
             TurnErrorCategory::Unavailable => 503,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blocked_external_tool_status_is_non_terminal_and_keeps_lock() {
+        assert!(!TurnStatus::BlockedExternalTool.is_terminal());
+        assert!(TurnStatus::BlockedExternalTool.keeps_active_lock());
+    }
+
+    #[test]
+    fn blocked_external_tool_status_round_trips() {
+        let json = serde_json::to_string(&TurnStatus::BlockedExternalTool).expect("serialize");
+        assert_eq!(json, "\"BlockedExternalTool\"");
+        let decoded: TurnStatus = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, TurnStatus::BlockedExternalTool);
+    }
+
+    #[test]
+    fn blocked_reason_external_tool_maps_status_and_exposes_gate_ref() {
+        let gate_ref = GateRef::new("gate:ext-tool").expect("valid gate ref");
+        let reason = BlockedReason::ExternalTool {
+            gate_ref: gate_ref.clone(),
+        };
+        assert_eq!(reason.status(), TurnStatus::BlockedExternalTool);
+        assert_eq!(reason.gate_ref(), &gate_ref);
+        assert!(reason.credential_requirements().is_empty());
+
+        // Round-trips through the untagged-by-variant-name BlockedReason enum.
+        let json = serde_json::to_string(&reason).expect("serialize");
+        let decoded: BlockedReason = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, reason);
     }
 }

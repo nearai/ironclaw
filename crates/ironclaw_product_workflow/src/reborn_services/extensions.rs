@@ -76,7 +76,7 @@ pub(super) async fn list_extension_registry(
         entries: registry_entries
             .iter()
             .cloned()
-            .map(|summary| registry_entry(summary, &installed_ids))
+            .map(|extension| registry_entry(extension.summary, &installed_ids))
             .collect(),
     })
 }
@@ -369,8 +369,8 @@ mod tests {
         LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
         LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
         LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-        ProductWorkflowError, RebornExtensionOnboardingState, RebornServicesErrorCode,
-        RebornServicesErrorKind,
+        LifecycleSearchExtensionSummary, ProductWorkflowError, RebornExtensionOnboardingState,
+        RebornServicesErrorCode, RebornServicesErrorKind,
     };
 
     #[tokio::test]
@@ -479,6 +479,34 @@ mod tests {
         );
         assert!(!extension.needs_setup);
         assert!(extension.onboarding_state.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_marks_active_host_managed_credential_extension_ready_without_setup_prompt() {
+        let facade = ListingFacade {
+            extension: LifecycleInstalledExtensionSummary {
+                summary: summary_without_browser_setup_credentials(),
+                phase: LifecyclePhase::Active,
+            },
+        };
+        let credentials = Arc::new(RecordingCredentials::default());
+        let credentials_service: Arc<dyn ExtensionCredentialSetupService> = credentials.clone();
+
+        let response = list_extensions(Arc::new(facade), Some(credentials_service), caller())
+            .await
+            .expect("list extensions");
+        let extension = response.extensions.first().expect("one extension");
+
+        assert!(extension.active);
+        assert!(extension.authenticated);
+        assert!(!extension.needs_setup);
+        assert!(!extension.has_auth);
+        assert!(extension.onboarding_state.is_none());
+        assert!(extension.onboarding.is_none());
+        assert!(
+            credentials.status_requests.lock().expect("lock").is_empty(),
+            "host-managed credentials must not trigger browser credential status checks"
+        );
     }
 
     #[tokio::test]
@@ -599,7 +627,10 @@ mod tests {
                 summary: installed_summary,
                 phase: LifecyclePhase::Active,
             },
-            registry: vec![registry_installed_summary, registry_uninstalled_summary],
+            registry: vec![
+                search_extension_summary(registry_installed_summary),
+                search_extension_summary(registry_uninstalled_summary),
+            ],
             calls: Mutex::new(Vec::new()),
         };
 
@@ -791,7 +822,7 @@ mod tests {
 
     struct RegistryListingFacade {
         installed: LifecycleInstalledExtensionSummary,
-        registry: Vec<LifecycleExtensionSummary>,
+        registry: Vec<LifecycleSearchExtensionSummary>,
         calls: Mutex<Vec<(LifecycleProductContext, LifecycleProductAction)>>,
     }
 
@@ -940,6 +971,44 @@ mod tests {
                     "After saving the token, activate Fixture to publish its tools.".to_string(),
                 ),
             }),
+        }
+    }
+
+    fn summary_without_browser_setup_credentials() -> LifecycleExtensionSummary {
+        LifecycleExtensionSummary {
+            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai")
+                .expect("valid package ref"),
+            name: "NEAR AI".to_string(),
+            version: "1.0.0".to_string(),
+            description: "host-managed MCP extension".to_string(),
+            source: LifecycleExtensionSource::HostBundled,
+            runtime_kind: LifecycleExtensionRuntimeKind::McpServer,
+            surface_kinds: Vec::new(),
+            visible_capability_ids: vec!["nearai.web_search".to_string()],
+            visible_read_only_capability_ids: vec!["nearai.web_search".to_string()],
+            credential_requirements: Vec::new(),
+            onboarding: Some(LifecycleExtensionOnboarding {
+                instructions: "NEAR AI MCP uses the NEAR AI credentials configured for the assistant. If NEAR AI is not configured yet, add a NEAR AI API key in assistant inference settings before activating this extension."
+                    .to_string(),
+                credential_instructions: Some(
+                    "Configure NEAR AI for the assistant with an API key; MCP reuses that credential."
+                        .to_string(),
+                ),
+                setup_url: None,
+                credential_next_step: Some(
+                    "After NEAR AI is configured for the assistant, activate NEAR AI MCP to publish its tools."
+                        .to_string(),
+                ),
+            }),
+        }
+    }
+
+    fn search_extension_summary(
+        summary: LifecycleExtensionSummary,
+    ) -> LifecycleSearchExtensionSummary {
+        LifecycleSearchExtensionSummary {
+            summary,
+            installation_phase: None,
         }
     }
 }

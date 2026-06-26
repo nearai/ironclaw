@@ -28,6 +28,10 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
+use ironclaw_reborn::runtime::{
+    DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
+    DEFAULT_TURN_RUNNER_WORKER_COUNT,
+};
 use ironclaw_reborn_config::BudgetDefaults;
 #[cfg(feature = "root-llm-provider")]
 use ironclaw_reborn_config::RebornBootConfig;
@@ -123,11 +127,37 @@ pub trait TriggerFireAccessChecker: Send + Sync {
 }
 
 #[cfg(feature = "root-llm-provider")]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ResolvedRebornLlm {
     provider_id: String,
     model: String,
     pub(crate) config: ironclaw_llm::LlmConfig,
+    /// Optional decorator applied to the provider the gateway builds from
+    /// `config`. `config` is always the construction source (so it stays the
+    /// single source of truth for `provider_id`/`model` and budget cost-table
+    /// derivation); the factory only *wraps* the built provider — e.g. a
+    /// benchmark harness layering token/reasoning instrumentation over it.
+    /// When `None` the gateway uses the config-built provider as-is.
+    pub(crate) provider_factory: Option<RebornProviderFactory>,
+}
+
+/// Decorator over the config-built LLM provider. See
+/// [`ResolvedRebornLlm::with_provider_factory`].
+#[cfg(feature = "root-llm-provider")]
+pub type RebornProviderFactory = Arc<
+    dyn Fn(Arc<dyn ironclaw_llm::LlmProvider>) -> Arc<dyn ironclaw_llm::LlmProvider> + Send + Sync,
+>;
+
+// `LlmProvider` is not `Debug`, so derive can't see through `provider_override`.
+#[cfg(feature = "root-llm-provider")]
+impl std::fmt::Debug for ResolvedRebornLlm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedRebornLlm")
+            .field("provider_id", &self.provider_id)
+            .field("model", &self.model)
+            .field("provider_factory", &self.provider_factory.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(feature = "root-llm-provider")]
@@ -145,7 +175,24 @@ impl ResolvedRebornLlm {
             provider_id: config.active_provider_id(),
             model: config.active_model_name(),
             config,
+            provider_factory: None,
         }
+    }
+
+    /// Wrap the config-built provider with `factory` before the gateway drives
+    /// it — e.g. to layer token/reasoning/cost instrumentation over the real
+    /// provider.
+    ///
+    /// This is the instrumentation seam (feature-gated on `root-llm-provider`).
+    /// The composition still constructs the provider from `config` and hands it
+    /// to the factory, so `config` remains the single source of truth and the
+    /// raw `ironclaw_llm::LlmProvider` substrate handle is never accepted
+    /// wholesale through the facade — the caller only supplies a decorator over
+    /// a provider the composition built. `build_llm_gateway` applies the factory
+    /// and never re-exposes the provider.
+    pub fn with_provider_factory(mut self, factory: RebornProviderFactory) -> Self {
+        self.provider_factory = Some(factory);
+        self
     }
 }
 
@@ -154,6 +201,17 @@ impl ResolvedRebornLlm {
 pub struct TurnRunnerSettings {
     pub heartbeat_interval: Duration,
     pub poll_interval: Duration,
+    /// Number of concurrent turn-runner worker tasks.
+    pub worker_count: std::num::NonZeroUsize,
+    /// Max runs in `TurnStatus::Running` per (tenant_id, owner user_id).
+    /// `None` = unlimited. Owner-less / actor-fallback runs are never counted.
+    pub max_concurrent_runs_per_user: Option<std::num::NonZeroU32>,
+    /// Max runs in `TurnStatus::Running` for `ScheduledTrigger` origin.
+    /// `None` = unlimited.
+    pub max_concurrent_trigger_runs: Option<std::num::NonZeroU32>,
+    /// Max runs in `TurnStatus::Running` for `Inbound` or `WebUi` origin.
+    /// `None` = unlimited.
+    pub max_concurrent_conversation_runs: Option<std::num::NonZeroU32>,
 }
 
 impl Default for TurnRunnerSettings {
@@ -161,6 +219,11 @@ impl Default for TurnRunnerSettings {
         Self {
             heartbeat_interval: DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
             poll_interval: DEFAULT_TURN_RUNNER_POLL_INTERVAL,
+            worker_count: DEFAULT_TURN_RUNNER_WORKER_COUNT,
+            max_concurrent_runs_per_user: Some(DEFAULT_MAX_CONCURRENT_RUNS_PER_USER),
+            max_concurrent_trigger_runs: Some(DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS),
+            // `None` = conversations may use every slot not held by triggers.
+            max_concurrent_conversation_runs: None,
         }
     }
 }
@@ -177,6 +240,74 @@ impl Default for PollSettings {
         Self {
             interval: Duration::from_millis(100),
             max_total: Duration::from_secs(180),
+        }
+    }
+}
+
+/// Configuration for the background Google OAuth credential keepalive worker.
+///
+/// The worker handles background keepalive refreshes (B2/B3): it periodically
+/// refreshes Google OAuth accounts that are idle (by `updated_at`) to prevent
+/// the 7-day refresh-token death window from expiring during periods of
+/// inactivity.
+///
+/// The inline access-token expiry gate is controlled by the fixed
+/// `DEFAULT_ACCESS_REFRESH_MARGIN` constant in
+/// `product_auth_runtime_credentials.rs`; it is not configurable here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialRefreshSettings {
+    /// Whether the worker is enabled. Defaults to `false`; use
+    /// `CredentialRefreshSettings::enabled()` to turn on.
+    pub enabled: bool,
+    /// How often the worker wakes and sweeps for idle accounts.
+    ///
+    /// Default: 6 hours.
+    pub interval: Duration,
+    /// How old (by `updated_at`) an account must be before it is considered
+    /// idle and eligible for a proactive refresh.
+    ///
+    /// Default: 2 days — well under the 7-day refresh-token idle-death window,
+    /// with headroom for downtime or deployment gaps.
+    pub idle_threshold: Duration,
+    /// Maximum random jitter applied once at worker startup before the first
+    /// tick. Spreading startup jitter across the multi-process deployment
+    /// prevents a thundering herd at first boot. The advisory-lock wrapper
+    /// (A4) serializes concurrent refreshes, but jitter reduces unnecessary
+    /// contention. Default: `Duration::ZERO`.
+    pub startup_jitter_max: Duration,
+    /// Maximum random jitter appended to each inter-tick sleep.
+    /// Default: `Duration::ZERO`.
+    pub tick_jitter_max: Duration,
+    /// Maximum number of candidate accounts processed per tick. Bounds the
+    /// work done in a single sweep to avoid a large initial backfill
+    /// overloading the token endpoint.
+    ///
+    /// Default: 5.
+    pub max_per_tick: usize,
+}
+
+impl Default for CredentialRefreshSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval: Duration::from_secs(6 * 3600),
+            idle_threshold: Duration::from_secs(2 * 24 * 3600),
+            startup_jitter_max: Duration::ZERO,
+            tick_jitter_max: Duration::ZERO,
+            max_per_tick: 5,
+        }
+    }
+}
+
+impl CredentialRefreshSettings {
+    /// Return a settings value with the worker enabled and all other fields at
+    /// their defaults.
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            // 5-minute spread prevents fleet-wide sweep storms on simultaneous startup.
+            startup_jitter_max: Duration::from_secs(300),
+            ..Self::default()
         }
     }
 }
@@ -254,6 +385,7 @@ pub struct RebornRuntimeInput {
     pub boot: Option<RebornBootConfig>,
     pub runner: TurnRunnerSettings,
     pub trigger_poller: TriggerPollerSettings,
+    pub credential_refresh: CredentialRefreshSettings,
     pub trigger_fire_access_checker: Option<Arc<dyn TriggerFireAccessChecker>>,
     pub poll: PollSettings,
     pub identity: RebornRuntimeIdentity,
@@ -282,6 +414,10 @@ pub struct RebornRuntimeInput {
     /// supply their own observer (SSE projection, WS fan-out,
     /// telemetry export) here.
     pub budget_event_observer: Option<Arc<dyn crate::BudgetEventObserver>>,
+    /// Observer that receives each capability/tool invocation + result during a
+    /// run, so a downstream caller can reconstruct the full step-by-step
+    /// trajectory (the sealed runtime otherwise exposes only the final reply).
+    pub trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
     /// Cost table to pair with the model-gateway override. Without this,
@@ -307,6 +443,7 @@ impl RebornRuntimeInput {
             boot: None,
             runner: TurnRunnerSettings::default(),
             trigger_poller: TriggerPollerSettings::default(),
+            credential_refresh: CredentialRefreshSettings::default(),
             trigger_fire_access_checker: None,
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
@@ -316,6 +453,7 @@ impl RebornRuntimeInput {
             hooks: HooksActivationConfig::default(),
             budget_defaults: None,
             budget_event_observer: None,
+            trajectory_observer: None,
             #[cfg(any(test, feature = "test-support"))]
             model_gateway_override: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -347,6 +485,51 @@ impl RebornRuntimeInput {
         self
     }
 
+    /// Install a trajectory observer that receives each capability/tool call +
+    /// result during a run (for downstream step-by-step trajectory capture).
+    ///
+    /// The observer receives a **bounded safe preview** of arguments/results
+    /// (long strings truncated, large arrays capped — see
+    /// [`crate::trajectory_observer`]), keeping a downstream logs/UI/telemetry
+    /// sink within the same boundary the model-visible display path enforces.
+    /// A consumer that needs the unbounded raw payloads (and owns its own
+    /// redaction/access control) must opt in via
+    /// [`Self::with_raw_trajectory_observer`].
+    ///
+    /// **Local-dev / bench only.** The observer is wired through the local-dev
+    /// capability path; it has no effect on production-profile runtimes, which
+    /// have no capability/result hook to forward to. `build_reborn_runtime`
+    /// fails fast with `InvalidArgument` if an observer is supplied for a
+    /// profile without a local runtime, rather than silently dropping it.
+    pub fn with_trajectory_observer(
+        mut self,
+        observer: Arc<dyn crate::RebornTrajectoryObserver>,
+    ) -> Self {
+        self.trajectory_observer =
+            Some(crate::trajectory_observer::SafePreviewTrajectoryObserver::wrap(observer));
+        self
+    }
+
+    /// Install a trajectory observer that receives the **raw, unbounded**
+    /// capability arguments and results — no safe-preview truncation.
+    ///
+    /// Capability results can contain file contents, command output, or
+    /// credentials, so this bypasses the truncation boundary that
+    /// [`Self::with_trajectory_observer`] applies by default. Use it only for a
+    /// trusted, in-process consumer that needs the verbatim trajectory (e.g. a
+    /// benchmark harness rendering exact tool I/O) and owns its own redaction
+    /// and access control for whatever sink it projects to.
+    ///
+    /// **Local-dev / bench only**, with the same fail-fast contract as
+    /// [`Self::with_trajectory_observer`].
+    pub fn with_raw_trajectory_observer(
+        mut self,
+        observer: Arc<dyn crate::RebornTrajectoryObserver>,
+    ) -> Self {
+        self.trajectory_observer = Some(observer);
+        self
+    }
+
     #[cfg(feature = "root-llm-provider")]
     pub fn with_resolved_llm(mut self, llm: ResolvedRebornLlm) -> Self {
         self.llm = Some(llm);
@@ -368,6 +551,14 @@ impl RebornRuntimeInput {
 
     pub fn with_trigger_poller_settings(mut self, trigger_poller: TriggerPollerSettings) -> Self {
         self.trigger_poller = trigger_poller;
+        self
+    }
+
+    pub fn with_credential_refresh_settings(
+        mut self,
+        credential_refresh: CredentialRefreshSettings,
+    ) -> Self {
+        self.credential_refresh = credential_refresh;
         self
     }
 

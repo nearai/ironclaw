@@ -1,42 +1,41 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_approvals::ToolPermissionOverride;
 use ironclaw_authorization::{CapabilityLeaseError, CapabilityLeaseStatus, CapabilityLeaseStore};
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId,
     InvocationFingerprint, InvocationId, Principal, ResourceEstimate, ResourceScope, UserId,
 };
-use ironclaw_loop_support::{CapabilityResultWrite, loop_driver_execution_extension_id};
+use ironclaw_loop_support::CapabilityResultWrite;
 use ironclaw_product_workflow::{
     OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetId, RebornServicesError,
-    RebornServicesErrorCode, RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
+    RebornServicesErrorCode, WebUiAuthenticatedCaller,
 };
 use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, RunStateError};
 use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityInputRef,
-        CapabilityOutcome, CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken,
-        ConcurrencyHint, LoopRunContext,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityFailure,
+        CapabilityFailureKind, CapabilityInputRef, CapabilityOutcome, CapabilityProgress,
+        CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint, LoopRunContext,
     },
 };
 
+use crate::outbound_delivery_capability_surface::{
+    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION,
+    OUTBOUND_DELIVERY_TARGET_SET_PROVIDER_TOOL_NAME, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
+    OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION, OUTBOUND_DELIVERY_TARGETS_LIST_PROVIDER_TOOL_NAME,
+    OutboundDeliveryCapabilityInputError, list_outbound_delivery_targets_for_model,
+    outbound_delivery_synthetic_provider, outbound_delivery_target_set_input_schema,
+    outbound_delivery_targets_list_input_schema, parse_outbound_delivery_target_set_input,
+    parse_outbound_delivery_targets_list_input, set_outbound_delivery_target_for_model,
+};
+use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::local_dev::synthetic_capability::{
     LocalDevSyntheticCapability, LocalDevSyntheticCapabilityDescriptor,
     LocalDevSyntheticCapabilityHandler, LocalDevSyntheticCapabilityInvocation,
 };
-
-pub(crate) const OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID: &str =
-    "builtin.outbound_delivery_targets_list";
-const OUTBOUND_DELIVERY_TARGETS_LIST_PROVIDER_TOOL_NAME: &str =
-    "builtin__outbound_delivery_targets_list";
-const OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION: &str = "List available outbound delivery targets for final replies and routine/trigger results, such as Slack DMs or Slack channels. Use before saying a delivery product is unavailable or asking the user to reconnect it.";
-
-pub(crate) const OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID: &str =
-    "builtin.outbound_delivery_target_set";
-const OUTBOUND_DELIVERY_TARGET_SET_PROVIDER_TOOL_NAME: &str =
-    "builtin__outbound_delivery_target_set";
-const OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION: &str = "Set the current user's final-reply outbound delivery target, such as a Slack DM or Slack channel. Approval may be required before the preference is changed.";
 
 pub(super) fn outbound_delivery_capabilities(
     facade: Arc<dyn OutboundPreferencesProductFacade>,
@@ -44,6 +43,7 @@ pub(super) fn outbound_delivery_capabilities(
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
     target_set_requires_approval: bool,
+    approval_settings: Arc<dyn ApprovalSettingsProvider>,
 ) -> Result<Vec<LocalDevSyntheticCapability>, AgentLoopHostError> {
     Ok(vec![
         LocalDevSyntheticCapability::new(
@@ -73,6 +73,7 @@ pub(super) fn outbound_delivery_capabilities(
                 approval_requests,
                 capability_leases,
                 requires_approval: target_set_requires_approval,
+                approval_settings,
             }),
         ),
     ])
@@ -89,29 +90,22 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetsListHandler {
         &self,
         arguments: &serde_json::Value,
     ) -> Result<(), AgentLoopHostError> {
-        parse_optional_channel(arguments).map(|_| ())
+        parse_outbound_delivery_targets_list_input(arguments)
+            .map(|_| ())
+            .map_err(input_error)
     }
 
     async fn invoke(
         &self,
         invocation: LocalDevSyntheticCapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        let channel_filter = parse_optional_channel(&invocation.input)?;
+        let input =
+            parse_outbound_delivery_targets_list_input(&invocation.input).map_err(input_error)?;
         let caller = caller_for_run(&invocation, &self.fallback_user_id);
-        let mut response = self
-            .facade
-            .list_outbound_delivery_targets(caller)
-            .await
-            .map_err(|error| outbound_delivery_host_error("list_targets", error))?;
-        if let Some(channel_filter) = channel_filter {
-            response.targets.retain(|option| {
-                option
-                    .target
-                    .channel
-                    .as_str()
-                    .eq_ignore_ascii_case(channel_filter.as_str())
-            });
-        }
+        let response =
+            list_outbound_delivery_targets_for_model(self.facade.as_ref(), caller, input)
+                .await
+                .map_err(|error| outbound_delivery_host_error("list_targets", error))?;
         let count = response.targets.len();
         let output = serde_json::to_value(response).map_err(|error| {
             AgentLoopHostError::new(
@@ -134,11 +128,18 @@ struct OutboundDeliveryTargetSetHandler {
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
     requires_approval: bool,
+    approval_settings: Arc<dyn ApprovalSettingsProvider>,
 }
 
 struct ApprovedDispatchLease {
     scope: ResourceScope,
     lease_id: CapabilityGrantId,
+}
+
+enum OutboundDeliveryApprovalSettingsDecision {
+    Allow,
+    Ask,
+    Deny,
 }
 
 #[async_trait]
@@ -147,7 +148,9 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
         &self,
         arguments: &serde_json::Value,
     ) -> Result<(), AgentLoopHostError> {
-        parse_target_id(arguments).map(|_| ())
+        parse_outbound_delivery_target_set_input(arguments)
+            .map(|_| ())
+            .map_err(input_error)
     }
 
     async fn invoke(
@@ -162,14 +165,29 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
         }
 
         let input = invocation_replay_input(&invocation).clone();
-        let target_id = parse_target_id(&input)?;
+        let target_input = parse_outbound_delivery_target_set_input(&input).map_err(input_error)?;
+        let capability_id = outbound_delivery_target_set_capability_id()?;
         let approved_lease = if self.requires_approval {
             match invocation.request.approval_resume.clone() {
                 Some(resume) => Some(
                     self.verify_approved_resume(&invocation, &resume, &input)
                         .await?,
                 ),
-                None => return self.request_approval(&invocation, &input, &target_id).await,
+                None => match self.settings_decision(&invocation, &capability_id).await? {
+                    OutboundDeliveryApprovalSettingsDecision::Allow => None,
+                    OutboundDeliveryApprovalSettingsDecision::Ask => {
+                        return self
+                            .request_approval(&invocation, &input, target_input.target_id())
+                            .await;
+                    }
+                    OutboundDeliveryApprovalSettingsDecision::Deny => {
+                        return Ok(CapabilityOutcome::Failed(CapabilityFailure {
+                            error_kind: CapabilityFailureKind::PolicyDenied,
+                            safe_summary: "outbound delivery target setter is disabled by tool approval settings".to_string(),
+                            detail: None,
+                        }));
+                    }
+                },
             }
         } else {
             if invocation.request.approval_resume.is_some() {
@@ -181,7 +199,7 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
             None
         };
 
-        let target_summary = target_id.as_str().to_string();
+        let target_summary = target_input.target_id().as_str().to_string();
         let caller = caller_for_run(&invocation, &self.fallback_user_id);
         if let Some(approved_lease) = approved_lease {
             self.capability_leases
@@ -189,16 +207,10 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
                 .await
                 .map_err(|error| approval_lease_error("consume_approval_lease", error))?;
         }
-        let response = self
-            .facade
-            .set_outbound_preferences(
-                caller,
-                RebornSetOutboundPreferencesRequest {
-                    final_reply_target_id: Some(target_id),
-                },
-            )
-            .await
-            .map_err(|error| outbound_delivery_host_error("set_target", error))?;
+        let response =
+            set_outbound_delivery_target_for_model(self.facade.as_ref(), caller, target_input)
+                .await
+                .map_err(|error| outbound_delivery_host_error("set_target", error))?;
         let output = serde_json::to_value(response).map_err(|error| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Internal,
@@ -215,6 +227,37 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
 }
 
 impl OutboundDeliveryTargetSetHandler {
+    async fn settings_decision(
+        &self,
+        invocation: &LocalDevSyntheticCapabilityInvocation,
+        capability_id: &CapabilityId,
+    ) -> Result<OutboundDeliveryApprovalSettingsDecision, AgentLoopHostError> {
+        let scope = settings_scope_for_run(&invocation.run_context, &self.fallback_user_id);
+        let grantee = outbound_delivery_target_set_grantee()?;
+        match self
+            .approval_settings
+            .tool_override(&scope, capability_id)
+            .await
+        {
+            Some(ToolPermissionOverride::Disabled) => {
+                return Ok(OutboundDeliveryApprovalSettingsDecision::Deny);
+            }
+            Some(ToolPermissionOverride::AskEachTime) => {
+                return Ok(OutboundDeliveryApprovalSettingsDecision::Ask);
+            }
+            None => {}
+        }
+        if self
+            .approval_settings
+            .tool_always_allow(&scope, capability_id, &grantee)
+            .await
+            || self.approval_settings.global_auto_approve(&scope).await
+        {
+            return Ok(OutboundDeliveryApprovalSettingsDecision::Allow);
+        }
+        Ok(OutboundDeliveryApprovalSettingsDecision::Ask)
+    }
+
     async fn request_approval(
         &self,
         invocation: &LocalDevSyntheticCapabilityInvocation,
@@ -238,9 +281,7 @@ impl OutboundDeliveryTargetSetHandler {
                 ApprovalRequest {
                     id: approval_request_id,
                     correlation_id,
-                    requested_by: Principal::Extension(loop_driver_execution_extension_id(
-                        &invocation.run_context,
-                    )?),
+                    requested_by: outbound_delivery_target_set_grantee()?,
                     action: Box::new(Action::Dispatch {
                         capability: capability_id,
                         estimated_resources: estimate.clone(),
@@ -363,7 +404,7 @@ async fn write_completed_result(
     output: serde_json::Value,
     safe_summary: String,
 ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-    let (result_ref, byte_len) = invocation
+    let write_result = invocation
         .result_writer
         .write_capability_result(CapabilityResultWrite {
             run_context: &invocation.run_context,
@@ -375,11 +416,12 @@ async fn write_completed_result(
         })
         .await?;
     Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-        result_ref,
+        result_ref: write_result.result_ref,
         safe_summary,
         progress: CapabilityProgress::MadeProgress,
         terminate_hint: false,
-        byte_len,
+        byte_len: write_result.byte_len,
+        output_digest: write_result.output_digest,
     }))
 }
 
@@ -428,6 +470,21 @@ fn resource_scope_for_run(
     scope
 }
 
+fn settings_scope_for_run(
+    run_context: &LoopRunContext,
+    fallback_user_id: &UserId,
+) -> ResourceScope {
+    ResourceScope {
+        tenant_id: run_context.scope.tenant_id.clone(),
+        user_id: effective_user_id(run_context, fallback_user_id),
+        agent_id: None,
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
 fn effective_user_id(run_context: &LoopRunContext, fallback_user_id: &UserId) -> UserId {
     run_context
         .scope
@@ -442,95 +499,6 @@ fn effective_user_id(run_context: &LoopRunContext, fallback_user_id: &UserId) ->
         .unwrap_or_else(|| fallback_user_id.clone())
 }
 
-fn outbound_delivery_targets_list_input_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "channel": {
-                "type": "string",
-                "description": "Optional product/channel filter such as slack."
-            }
-        },
-        "additionalProperties": false
-    })
-}
-
-fn outbound_delivery_target_set_input_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "target_id": {
-                "type": "string",
-                "description": "Target id returned by builtin__outbound_delivery_targets_list."
-            }
-        },
-        "required": ["target_id"],
-        "additionalProperties": false
-    })
-}
-
-fn parse_optional_channel(input: &serde_json::Value) -> Result<Option<String>, AgentLoopHostError> {
-    let input = input_object(input, "outbound delivery target list", &["channel"])?;
-    match input.get("channel") {
-        None => Ok(None),
-        Some(value) => value
-            .as_str()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| Some(value.to_string()))
-            .ok_or_else(|| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "outbound delivery target list channel must be a non-empty string",
-                )
-            }),
-    }
-}
-
-fn parse_target_id(
-    input: &serde_json::Value,
-) -> Result<RebornOutboundDeliveryTargetId, AgentLoopHostError> {
-    let input = input_object(input, "outbound delivery target set", &["target_id"])?;
-    let value = input
-        .get("target_id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "outbound delivery target set target_id must be a string",
-            )
-        })?;
-    RebornOutboundDeliveryTargetId::new(value).map_err(|reason| {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            format!("outbound delivery target set target_id is invalid: {reason}"),
-        )
-    })
-}
-
-fn input_object<'a>(
-    input: &'a serde_json::Value,
-    capability_name: &'static str,
-    allowed_fields: &[&str],
-) -> Result<&'a serde_json::Map<String, serde_json::Value>, AgentLoopHostError> {
-    let object = input.as_object().ok_or_else(|| {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            format!("{capability_name} input must be an object"),
-        )
-    })?;
-    if let Some(field) = object
-        .keys()
-        .find(|field| !allowed_fields.contains(&field.as_str()))
-    {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            format!("{capability_name} input contains unsupported field `{field}`"),
-        ));
-    }
-    Ok(object)
-}
-
 fn outbound_delivery_target_set_capability_id() -> Result<CapabilityId, AgentLoopHostError> {
     CapabilityId::new(OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID).map_err(|error| {
         AgentLoopHostError::new(
@@ -538,6 +506,17 @@ fn outbound_delivery_target_set_capability_id() -> Result<CapabilityId, AgentLoo
             format!("outbound delivery target set capability id is invalid: {error}"),
         )
     })
+}
+
+fn outbound_delivery_target_set_grantee() -> Result<Principal, AgentLoopHostError> {
+    outbound_delivery_synthetic_provider()
+        .map(Principal::Extension)
+        .map_err(|error| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                format!("outbound delivery synthetic provider id is invalid: {error}"),
+            )
+        })
 }
 
 fn approval_fingerprint(
@@ -587,6 +566,10 @@ fn invocation_id_from_resume_token(
             format!("outbound delivery target approval resume token is invalid: {error}"),
         )
     })
+}
+
+fn input_error(error: OutboundDeliveryCapabilityInputError) -> AgentLoopHostError {
+    AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, error.to_string())
 }
 
 fn outbound_delivery_host_error(
@@ -654,51 +637,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_optional_channel_rejects_empty_channel() {
-        let error = parse_optional_channel(&serde_json::json!({"channel": "  "}))
-            .expect_err("empty channel should fail");
+    fn parse_outbound_delivery_targets_list_input_rejects_empty_channel() {
+        let error =
+            parse_outbound_delivery_targets_list_input(&serde_json::json!({"channel": "  "}))
+                .expect_err("empty channel should fail");
 
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(error.to_string().contains("must be a non-empty string"));
     }
 
     #[test]
-    fn parse_optional_channel_rejects_non_object_input() {
-        let error = parse_optional_channel(&serde_json::Value::Null)
+    fn parse_outbound_delivery_targets_list_input_rejects_non_object_input() {
+        let error = parse_outbound_delivery_targets_list_input(&serde_json::Value::Null)
             .expect_err("non-object input should fail");
 
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(error.to_string().contains("input must be an object"));
     }
 
     #[test]
-    fn parse_optional_channel_rejects_unknown_fields() {
-        let error = parse_optional_channel(&serde_json::json!({"unexpected": "value"}))
-            .expect_err("unknown fields should fail");
-
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
-    }
-
-    #[test]
-    fn parse_target_id_requires_target_id() {
+    fn parse_outbound_delivery_targets_list_input_rejects_unknown_fields() {
         let error =
-            parse_target_id(&serde_json::json!({})).expect_err("missing target id should fail");
-
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
-    }
-
-    #[test]
-    fn parse_target_id_rejects_malformed_target_id() {
-        let error = parse_target_id(&serde_json::json!({"target_id": "bad\nid"}))
-            .expect_err("malformed target id should fail");
-
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
-    }
-
-    #[test]
-    fn parse_target_id_rejects_unknown_fields() {
-        let error =
-            parse_target_id(&serde_json::json!({"target_id": "slack:test", "unexpected": "value"}))
+            parse_outbound_delivery_targets_list_input(&serde_json::json!({"unexpected": "value"}))
                 .expect_err("unknown fields should fail");
 
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(error.to_string().contains("unsupported field `unexpected`"));
+    }
+
+    #[test]
+    fn parse_outbound_delivery_target_set_input_requires_target_id() {
+        let error = parse_outbound_delivery_target_set_input(&serde_json::json!({}))
+            .expect_err("missing target id should fail");
+
+        assert!(error.to_string().contains("target_id must be a string"));
+    }
+
+    #[test]
+    fn parse_outbound_delivery_target_set_input_rejects_malformed_target_id() {
+        let error = parse_outbound_delivery_target_set_input(&serde_json::json!({
+            "target_id": "bad\nid"
+        }))
+        .expect_err("malformed target id should fail");
+
+        assert!(error.to_string().contains("target_id is invalid"));
+    }
+
+    #[test]
+    fn parse_outbound_delivery_target_set_input_rejects_unknown_fields() {
+        let error = parse_outbound_delivery_target_set_input(&serde_json::json!({
+            "target_id": "slack:test",
+            "unexpected": "value"
+        }))
+        .expect_err("unknown fields should fail");
+
+        assert!(error.to_string().contains("unsupported field `unexpected`"));
     }
 }

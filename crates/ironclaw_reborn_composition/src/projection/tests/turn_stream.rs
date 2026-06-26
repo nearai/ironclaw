@@ -67,6 +67,8 @@ async fn webui_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
     let thread_id = ThreadId::new("webui-events-thread").unwrap();
     let runtime_run = InvocationId::new();
     let turn_run = TurnRunId::new();
+    let blocked_activity_id = ironclaw_turns::CapabilityActivityId::new();
+    let blocked_invocation_id = InvocationId::from_uuid(blocked_activity_id.as_uuid());
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     event_log
         .append(RuntimeEvent::model_started(
@@ -101,13 +103,17 @@ async fn webui_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: GateRef::new("gate:auth-required").unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
+                    activity_id: Some(blocked_activity_id),
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("GitHub authentication required".to_string()),
             }],
         }),
         Arc::new(FakeTurnCoordinator {
-            state: turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1)),
+            state: TurnRunState {
+                blocked_activity_id: Some(blocked_activity_id),
+                ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
+            },
         }),
     );
 
@@ -121,14 +127,32 @@ async fn webui_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
         .await
         .unwrap();
 
-    assert_eq!(first.len(), 2);
+    assert_eq!(first.len(), 3);
     assert!(matches!(
         first[0].payload(),
         ProductOutboundPayload::ProjectionSnapshot { .. }
     ));
     assert!(matches!(
         first[1].payload(),
-        ProductOutboundPayload::AuthPrompt(_)
+        ProductOutboundPayload::ProjectionUpdate { state }
+            if state.items.iter().any(|item| matches!(
+                item,
+                ProductProjectionItem::Gate {
+                    run_id,
+                    gate_kind,
+                    gate_ref,
+                    invocation_id,
+                    ..
+                } if *run_id == turn_run
+                    && *gate_kind == ProductGateKind::Auth
+                    && gate_ref == "gate:auth-required"
+                    && *invocation_id == Some(blocked_invocation_id)
+            ))
+    ));
+    assert!(matches!(
+        first[2].payload(),
+        ProductOutboundPayload::AuthPrompt(prompt)
+            if prompt.invocation_id == Some(blocked_invocation_id)
     ));
 
     let resumed = services
@@ -141,12 +165,30 @@ async fn webui_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
         .await
         .unwrap();
 
-    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed.len(), 2);
     assert!(matches!(
         resumed[0].payload(),
+        ProductOutboundPayload::ProjectionUpdate { state }
+            if state.items.iter().any(|item| matches!(
+                item,
+                ProductProjectionItem::Gate {
+                    run_id,
+                    gate_kind,
+                    gate_ref,
+                    invocation_id,
+                    ..
+                } if *run_id == turn_run
+                    && *gate_kind == ProductGateKind::Auth
+                    && gate_ref == "gate:auth-required"
+                    && *invocation_id == Some(blocked_invocation_id)
+            ))
+    ));
+    assert!(matches!(
+        resumed[1].payload(),
         ProductOutboundPayload::AuthPrompt(prompt)
             if prompt.turn_run_id == turn_run
                 && prompt.auth_request_ref == "gate:auth-required"
+                && prompt.invocation_id == Some(blocked_invocation_id)
     ));
 }
 
@@ -167,6 +209,7 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
     let gate_ref = GateRef::new(format!("gate:approval-{approval_request_id}")).unwrap();
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability = CapabilityId::new("builtin.http").unwrap();
+    let blocked_invocation = InvocationId::new();
     approval_requests
         .save_pending(
             resource_scope(
@@ -174,7 +217,7 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
                 &user_id,
                 &agent_id,
                 &thread_id,
-                InvocationId::new(),
+                blocked_invocation,
             ),
             ApprovalRequest {
                 id: approval_request_id,
@@ -215,6 +258,7 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: gate_ref.clone(),
                     gate_kind: TurnBlockedGateKind::Approval,
+                    activity_id: None,
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("capability requires approval".to_string()),
@@ -249,6 +293,7 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
 
     assert_eq!(prompt.turn_run_id, turn_run);
     assert_eq!(prompt.gate_ref, gate_ref.as_str());
+    assert_eq!(prompt.invocation_id, Some(blocked_invocation));
     assert_eq!(prompt.headline, "Approval required");
     assert_eq!(prompt.body, "capability requires approval");
     assert!(prompt.allow_always);
@@ -263,6 +308,25 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
     assert!(context.details.iter().any(|detail| {
         detail.label == "Estimated network egress" && detail.value == "4096 bytes"
     }));
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        ProductOutboundPayload::ProjectionUpdate { state }
+            if state.items.iter().any(|item| matches!(
+                item,
+                ProductProjectionItem::Gate {
+                    run_id,
+                    gate_kind,
+                    gate_ref: projected_gate_ref,
+                    invocation_id,
+                    body,
+                    ..
+                } if *run_id == turn_run
+                    && *gate_kind == ProductGateKind::Approval
+                    && projected_gate_ref == gate_ref.as_str()
+                    && *invocation_id == Some(blocked_invocation)
+                    && body.as_deref() == Some("capability requires approval")
+            ))
+    )));
 }
 
 #[tokio::test]
@@ -334,6 +398,7 @@ async fn webui_event_stream_projects_network_approval_context() {
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: network_gate_ref.clone(),
                     gate_kind: TurnBlockedGateKind::Approval,
+                    activity_id: None,
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("network requires approval".to_string()),
@@ -451,6 +516,7 @@ async fn webui_event_stream_projects_spawn_approval_context() {
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: gate_ref.clone(),
                     gate_kind: TurnBlockedGateKind::Approval,
+                    activity_id: None,
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("spawn requires approval".to_string()),
@@ -527,6 +593,7 @@ async fn webui_event_stream_keeps_approval_prompt_when_request_lookup_fails() {
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: gate_ref.clone(),
                     gate_kind: TurnBlockedGateKind::Approval,
+                    activity_id: None,
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("capability requires approval".to_string()),
@@ -565,6 +632,91 @@ async fn webui_event_stream_keeps_approval_prompt_when_request_lookup_fails() {
 }
 
 #[tokio::test]
+async fn webui_event_stream_fails_closed_for_projection_allow_always_without_prompt() {
+    let tenant_id = TenantId::new("webui-events-approval-no-prompt-tenant").unwrap();
+    let user_id = UserId::new("webui-events-approval-no-prompt-user").unwrap();
+    let agent_id = AgentId::new("webui-events-approval-no-prompt-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-approval-no-prompt-thread").unwrap();
+    let turn_run = TurnRunId::new();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let approval_request_id = ApprovalRequestId::new();
+    let gate_ref = GateRef::new(format!("gate:approval-{approval_request_id}")).unwrap();
+    let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let actor = TurnActor::new(user_id.clone());
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-events-approval-no-prompt-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![TurnLifecycleEvent {
+                cursor: TurnEventCursor(1),
+                scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(user_id.clone()),
+                run_id: turn_run,
+                status: TurnStatus::BlockedApproval,
+                kind: TurnEventKind::Blocked,
+                blocked_gate: Some(TurnBlockedGateMetadata {
+                    gate_ref: gate_ref.clone(),
+                    gate_kind: TurnBlockedGateKind::Approval,
+                    activity_id: None,
+                    credential_requirements: Vec::new(),
+                }),
+                sanitized_reason: Some("capability requires approval".to_string()),
+            }],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: TurnRunState {
+                status: TurnStatus::BlockedApproval,
+                gate_ref: Some(gate_ref.clone()),
+                // Cursor mismatch suppresses the transient prompt payload; the
+                // durable projection still needs to fail closed on affordances.
+                ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(2))
+            },
+        }),
+    );
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.payload(), ProductOutboundPayload::GatePrompt(_)))
+    );
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        ProductOutboundPayload::ProjectionUpdate { state }
+            if state.items.iter().any(|item| matches!(
+                item,
+                ProductProjectionItem::Gate {
+                    run_id,
+                    gate_kind,
+                    gate_ref: projected_gate_ref,
+                    allow_always,
+                    ..
+                } if *run_id == turn_run
+                    && *gate_kind == ProductGateKind::Approval
+                    && projected_gate_ref == gate_ref.as_str()
+                    && !*allow_always
+            ))
+    )));
+}
+
+#[tokio::test]
 async fn webui_event_stream_does_not_offer_always_for_generic_approval_gate() {
     let tenant_id = TenantId::new("webui-events-generic-approval-tenant").unwrap();
     let user_id = UserId::new("webui-events-generic-approval-user").unwrap();
@@ -597,6 +749,7 @@ async fn webui_event_stream_does_not_offer_always_for_generic_approval_gate() {
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: gate_ref.clone(),
                     gate_kind: TurnBlockedGateKind::Approval,
+                    activity_id: None,
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("generic approval required".to_string()),
@@ -666,6 +819,7 @@ async fn webui_event_stream_projects_blocked_dependent_run_status() {
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: GateRef::new("gate:await-dependent-run").unwrap(),
                     gate_kind: TurnBlockedGateKind::AwaitDependentRun,
+                    activity_id: None,
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("Waiting for dependent run".to_string()),
@@ -760,6 +914,91 @@ async fn webui_event_stream_tolerates_initial_turn_event_rebase() {
     assert_eq!(
         parsed.turn,
         Some(TurnEventProjectionCursor::for_scope(scope, turn_cursor))
+    );
+}
+
+#[tokio::test]
+async fn webui_event_stream_recovers_from_turn_event_rebase_on_reconnect() {
+    // Regression for the SSE "disconnected" loop: a reconnecting stream carries
+    // a non-`None` resume cursor whose turn component has fallen below the
+    // projection's retention floor. The drain must jump forward to the earliest
+    // replayable cursor instead of surfacing a retryable rebase error. Before
+    // the fix, recovery only happened when the resume cursor was `None` (first
+    // connect); on reconnect the drain returned 503 ReplayUnavailable, the
+    // browser auto-reconnected via `Last-Event-ID` with the same stale cursor,
+    // and the stream looped forever — appearing as a permanently disconnected
+    // session that could no longer send messages.
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-thread").unwrap();
+    let runtime_run = InvocationId::new();
+    let turn_run = TurnRunId::new();
+    let retention_floor = TurnEventCursor(7);
+    let stale_turn_cursor = TurnEventCursor(3);
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::model_started(
+            resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, runtime_run),
+            CapabilityId::new("loop.model").unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let actor = TurnActor::new(user_id.clone());
+    let event_log_dyn: Arc<dyn DurableEventLog> = event_log;
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(RebaseTurnEventSource {
+            cursor: retention_floor,
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: turn_run_state(&scope, &user_id, turn_run, retention_floor),
+        }),
+    );
+
+    let stale_cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
+        runtime: Some(EventProjectionCursor::origin_for_scope(
+            runtime_projection_scope(&actor, &scope),
+        )),
+        live: None,
+        runtime_item: None,
+        turn: Some(TurnEventProjectionCursor::for_scope(
+            scope.clone(),
+            stale_turn_cursor,
+        )),
+        runtime_payloads_delivered: 0,
+    })
+    .unwrap();
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope: scope.clone(),
+            after_cursor: Some(stale_cursor),
+        })
+        .await
+        .expect("reconnect rebase must recover, not surface a retryable error");
+
+    // The stream stays alive: the runtime event is still delivered ...
+    assert!(contains_run_status(&events, runtime_run, "running"));
+    // ... and the turn cursor is advanced to the earliest replayable cursor, so
+    // the next reconnect resumes at/above the floor and the loop terminates.
+    let parsed =
+        parse_webui_projection_cursor(events.last().unwrap().projection_cursor().as_str()).unwrap();
+    assert_eq!(
+        parsed.turn,
+        Some(TurnEventProjectionCursor::for_scope(scope, retention_floor))
     );
 }
 
@@ -938,6 +1177,8 @@ async fn webui_event_stream_reads_past_filtered_turn_event_pages() {
         thread_id.clone(),
     );
     let run_id = TurnRunId::new();
+    let blocked_activity_id = ironclaw_turns::CapabilityActivityId::new();
+    let blocked_invocation_id = InvocationId::from_uuid(blocked_activity_id.as_uuid());
     let mut events = (1..=WEBUI_TURN_EVENT_PAGE_LIMIT as u64)
         .map(|cursor| TurnLifecycleEvent {
             cursor: TurnEventCursor(cursor),
@@ -962,6 +1203,7 @@ async fn webui_event_stream_reads_past_filtered_turn_event_pages() {
         blocked_gate: Some(TurnBlockedGateMetadata {
             gate_ref: GateRef::new("gate:auth-required").unwrap(),
             gate_kind: TurnBlockedGateKind::Auth,
+            activity_id: Some(blocked_activity_id),
             credential_requirements: Vec::new(),
         }),
         sanitized_reason: Some("GitHub authentication required".to_string()),
@@ -974,12 +1216,15 @@ async fn webui_event_stream_reads_past_filtered_turn_event_pages() {
     .with_turn_events(
         Arc::new(FakeTurnEventSource { events }),
         Arc::new(FakeTurnCoordinator {
-            state: turn_run_state(
-                &scope,
-                &user_id,
-                run_id,
-                TurnEventCursor(WEBUI_TURN_EVENT_PAGE_LIMIT as u64 + 1),
-            ),
+            state: TurnRunState {
+                blocked_activity_id: Some(blocked_activity_id),
+                ..turn_run_state(
+                    &scope,
+                    &user_id,
+                    run_id,
+                    TurnEventCursor(WEBUI_TURN_EVENT_PAGE_LIMIT as u64 + 1),
+                )
+            },
         }),
     );
 
@@ -993,13 +1238,30 @@ async fn webui_event_stream_reads_past_filtered_turn_event_pages() {
         .await
         .unwrap();
 
-    assert_eq!(events.len(), 1);
-    assert!(matches!(
-        events[0].payload(),
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        ProductOutboundPayload::ProjectionUpdate { state }
+            if state.items.iter().any(|item| matches!(
+                item,
+                ProductProjectionItem::Gate {
+                    run_id: projected_run_id,
+                    gate_kind,
+                    gate_ref,
+                    invocation_id,
+                    ..
+                } if *projected_run_id == run_id
+                    && *gate_kind == ProductGateKind::Auth
+                    && gate_ref == "gate:auth-required"
+                    && *invocation_id == Some(blocked_invocation_id)
+            ))
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
         ProductOutboundPayload::AuthPrompt(prompt)
             if prompt.turn_run_id == run_id
                 && prompt.body == "GitHub authentication required"
-    ));
+    )));
 }
 
 #[tokio::test]
@@ -1015,6 +1277,8 @@ async fn webui_event_stream_does_not_prompt_for_stale_blocked_event() {
         thread_id.clone(),
     );
     let run_id = TurnRunId::new();
+    let blocked_activity_id = ironclaw_turns::CapabilityActivityId::new();
+    let blocked_invocation_id = InvocationId::from_uuid(blocked_activity_id.as_uuid());
     let mut state = turn_run_state(&scope, &user_id, run_id, TurnEventCursor(1));
     state.event_cursor = TurnEventCursor(2);
     let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
@@ -1035,6 +1299,7 @@ async fn webui_event_stream_does_not_prompt_for_stale_blocked_event() {
                 blocked_gate: Some(TurnBlockedGateMetadata {
                     gate_ref: GateRef::new("gate:auth-required").unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
+                    activity_id: Some(blocked_activity_id),
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("stale auth gate".to_string()),
@@ -1056,7 +1321,20 @@ async fn webui_event_stream_does_not_prompt_for_stale_blocked_event() {
     assert_eq!(events.len(), 1);
     assert!(matches!(
         events[0].payload(),
-        ProductOutboundPayload::ProjectionUpdate { .. }
+        ProductOutboundPayload::ProjectionUpdate { state }
+            if state.items.iter().any(|item| matches!(
+                item,
+                ProductProjectionItem::Gate {
+                    run_id: projected_run_id,
+                    gate_kind,
+                    gate_ref,
+                    invocation_id,
+                    ..
+                } if *projected_run_id == run_id
+                    && *gate_kind == ProductGateKind::Auth
+                    && gate_ref == "gate:auth-required"
+                    && *invocation_id == Some(blocked_invocation_id)
+            ))
     ));
 }
 

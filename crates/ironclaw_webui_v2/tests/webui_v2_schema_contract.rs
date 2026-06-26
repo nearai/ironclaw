@@ -42,7 +42,10 @@ fn capability_activity() -> CapabilityActivityView {
         process_id: None,
         output_bytes: None,
         error_kind: None,
+        subtitle: Some("src/main.rs".to_string()),
+        input_summary: Some("path: src/main.rs".to_string()),
         updated_at: Utc::now(),
+        activity_order: Some(42),
     }
 }
 
@@ -61,9 +64,11 @@ fn capability_display_preview() -> CapabilityDisplayPreviewView {
         output_preview: Some("fn main() {}".to_string()),
         output_kind: Some("text".to_string()),
         output_bytes: Some(12),
+        error_kind: None,
         result_ref: Some("result:tool-output".to_string()),
         truncated: false,
         updated_at: Utc::now(),
+        activity_order: Some(43),
     }
 }
 
@@ -79,6 +84,7 @@ fn gate_prompt() -> GatePromptView {
     GatePromptView {
         turn_run_id: run_id(),
         gate_ref: "gate:approval".to_string(),
+        invocation_id: None,
         headline: "Approve action".to_string(),
         body: "Review the requested action.".to_string(),
         allow_always: true,
@@ -90,6 +96,7 @@ fn auth_prompt() -> AuthPromptView {
     AuthPromptView {
         turn_run_id: run_id(),
         auth_request_ref: "auth:oauth".to_string(),
+        invocation_id: None,
         headline: "Connect account".to_string(),
         body: "Connect before continuing.".to_string(),
         challenge_kind: None,
@@ -184,6 +191,16 @@ fn capability_display_preview_event_serializes_timeline_message_id() {
 
     let json = serde_json::to_value(&frame).expect("serialize frame");
     assert_eq!(json["preview"]["timeline_message_id"], "timeline-message-1");
+    assert_eq!(json["preview"]["activity_order"], 43);
+
+    let frame = WebChatV2EventFrame {
+        cursor: cursor(),
+        event: WebChatV2Event::CapabilityActivity {
+            activity: capability_activity(),
+        },
+    };
+    let json = serde_json::to_value(&frame).expect("serialize frame");
+    assert_eq!(json["activity"]["activity_order"], 42);
 }
 
 #[test]

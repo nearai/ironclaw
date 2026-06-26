@@ -47,7 +47,11 @@ export function Badge({ tone = "muted", label, dot = true, size = "md", classNam
   return html`
     <span
       className=${cn(
-        "inline-flex items-center border font-mono uppercase",
+        // `whitespace-nowrap` + `shrink-0` keep the chip on one line: CJK and
+        // other space-free scripts wrap between any two characters, so a
+        // translated tone label like "信号" would otherwise stack vertically
+        // inside the fixed-height pill.
+        "inline-flex shrink-0 items-center whitespace-nowrap border font-mono uppercase",
         sizeClasses[size] ?? sizeClasses.md,
         toneClasses[tone] ?? toneClasses.muted,
         className

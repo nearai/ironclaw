@@ -110,5 +110,18 @@ pub(super) async fn dispatch(cmd: TracesSubcommand) -> anyhow::Result<()> {
         TracesSubcommand::IngestHealth { endpoint, json } => {
             trace_commons_ingest_health(&endpoint, json).await
         }
+        TracesSubcommand::Profile { command } => match command {
+            TracesProfileSubcommand::Token { user_scope, json } => {
+                profile_token(user_scope.as_deref(), json).await
+            }
+            TracesProfileSubcommand::Set {
+                handle,
+                bio,
+                user_scope,
+            } => profile_set(user_scope.as_deref(), &handle, bio.as_deref()).await,
+            TracesProfileSubcommand::Withdraw { user_scope } => {
+                profile_withdraw(user_scope.as_deref()).await
+            }
+        },
     }
 }

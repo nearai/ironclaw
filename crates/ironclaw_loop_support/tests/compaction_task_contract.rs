@@ -969,6 +969,7 @@ impl CompactionFixture {
                         result_ref: None,
                         truncated: false,
                         updated_at: Utc::now(),
+                        activity_order: None,
                     },
                 )
                 .unwrap(),

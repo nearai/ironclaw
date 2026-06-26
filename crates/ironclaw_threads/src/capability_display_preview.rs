@@ -38,6 +38,8 @@ pub struct CapabilityDisplayPreviewEnvelope {
     pub result_ref: Option<String>,
     pub truncated: bool,
     pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_order: Option<u64>,
 }
 
 impl CapabilityDisplayPreviewEnvelope {
@@ -57,6 +59,7 @@ impl CapabilityDisplayPreviewEnvelope {
             result_ref: input.result_ref,
             truncated: input.truncated,
             updated_at: input.updated_at,
+            activity_order: input.activity_order,
         };
         envelope.validate()?;
         Ok(envelope)
@@ -120,6 +123,7 @@ pub struct CapabilityDisplayPreviewEnvelopeInput {
     pub result_ref: Option<String>,
     pub truncated: bool,
     pub updated_at: DateTime<Utc>,
+    pub activity_order: Option<u64>,
 }
 
 fn validate_optional_display_text(
@@ -234,6 +238,7 @@ mod tests {
             result_ref: Some("result:demo".to_string()),
             truncated: false,
             updated_at: Utc::now(),
+            activity_order: None,
         }
     }
 }

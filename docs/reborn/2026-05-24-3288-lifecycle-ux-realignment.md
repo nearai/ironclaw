@@ -52,6 +52,10 @@ of truth remains the owning service.
 - Runtime/composition PRs on `reborn-integration` may prove execution paths, but
   #3288 still requires production lifecycle stores, cleanup plans, and concrete
   facade services before it is complete.
+- Model-visible extension search may include the redacted installation phase
+  when local lifecycle state already knows it. It must not invent auth phases,
+  and configured or active search results must not repeat stale credential setup
+  metadata or onboarding copy.
 
 ## Follow-ups
 

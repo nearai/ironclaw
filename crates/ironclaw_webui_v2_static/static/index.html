@@ -22,14 +22,10 @@
     />
     <meta name="apple-mobile-web-app-title" content="IronClaw" />
     <link rel="manifest" href="/v2/assets/site.webmanifest" />
-    <link rel="preconnect" href="https://cdn.jsdelivr.net" />
-    <link rel="preconnect" href="https://esm.sh" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap"
-      rel="stylesheet"
-    />
+    <!-- Fonts vendored locally (Geist / Geist Mono / Newsreader). The
+         woff2 files and this CSS are downloaded by frontend/vendor.sh;
+         no fonts.googleapis.com / fonts.gstatic.com round-trip. -->
+    <link rel="stylesheet" href="/v2/vendor/fonts/fonts.css" />
     <script nonce="__IRONCLAW_CSP_NONCE__">
       (() => {
         try {
@@ -48,21 +44,10 @@
         }
       })();
     </script>
-    <script type="importmap" nonce="__IRONCLAW_CSP_NONCE__">
-      {
-        "imports": {
-          "@tanstack/react-query": "https://esm.sh/@tanstack/react-query@5.87.4?external=react,react-dom",
-          "htm": "https://esm.sh/htm@3.1.1",
-          "react": "https://esm.sh/react@19.1.0",
-          "react/jsx-runtime": "https://esm.sh/react@19.1.0/jsx-runtime",
-          "react-dom": "https://esm.sh/react-dom@19.1.0?external=react",
-          "react-dom/client": "https://esm.sh/react-dom@19.1.0/client?external=react",
-          "react-router": "https://esm.sh/react-router@7?external=react,react-dom",
-          "react-hook-form": "https://esm.sh/react-hook-form@7.62.0?external=react,react-dom"
-        }
-      }
-    </script>
-    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <!-- The React ecosystem (react, react-dom, react-router, react-query,
+         react-hook-form, htm) is bundled into /v2/dist/app.js by esbuild
+         (frontend/build.mjs) — no esm.sh importmap, no runtime CDN. -->
+    <script src="/v2/vendor/tailwindcss-browser.js"></script>
     <style type="text/tailwindcss">
       @theme {
         /* ── Fonts ─────────────────────────────────────────────────── */
@@ -89,12 +74,15 @@
       }
     </style>
     <link rel="stylesheet" href="/v2/styles/app.css" />
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.3/purify.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/marked@17.0.2/lib/marked.umd.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+    <!-- Vendored UMD globals (window.DOMPurify / window.marked / window.hljs),
+         consumed by lib/markdown.js + chat markdown-renderer. Loaded
+         synchronously so they exist before the deferred module bundle runs. -->
+    <script src="/v2/vendor/purify.min.js"></script>
+    <script src="/v2/vendor/marked.umd.min.js"></script>
+    <script src="/v2/vendor/highlight.min.js"></script>
   </head>
   <body class="min-h-[100dvh] bg-iron-950 text-iron-100 antialiased">
     <div id="v2-root"></div>
-    <script type="module" src="/v2/js/main.js"></script>
+    <script type="module" src="/v2/dist/app.js"></script>
   </body>
 </html>

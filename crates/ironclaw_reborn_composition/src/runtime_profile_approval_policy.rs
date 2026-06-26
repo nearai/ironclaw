@@ -1,5 +1,5 @@
 use ironclaw_host_api::{
-    EffectKind,
+    CapabilityId, EffectKind,
     runtime_policy::{ApprovalPolicy, RuntimeProfile},
 };
 
@@ -24,6 +24,7 @@ impl RuntimeProfileApprovalGateEffectSets {
 pub(crate) struct RuntimeProfileApprovalGatePolicy {
     resolved_profile: RuntimeProfile,
     effects: RuntimeProfileApprovalGateEffectSets,
+    exempt_capabilities: Vec<CapabilityId>,
 }
 
 impl RuntimeProfileApprovalGatePolicy {
@@ -34,7 +35,16 @@ impl RuntimeProfileApprovalGatePolicy {
         Self {
             resolved_profile,
             effects,
+            exempt_capabilities: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_exempt_capabilities(
+        mut self,
+        exempt_capabilities: Vec<CapabilityId>,
+    ) -> Self {
+        self.exempt_capabilities = exempt_capabilities;
+        self
     }
 
     fn profile_allows_minimal_bypass(&self) -> bool {
@@ -43,6 +53,24 @@ impl RuntimeProfileApprovalGatePolicy {
 }
 
 impl ProfileApprovalGatePolicy for RuntimeProfileApprovalGatePolicy {
+    fn capability_exempt_from_approval(&self, capability: &CapabilityId) -> bool {
+        self.exempt_capabilities.contains(capability)
+    }
+
+    fn effects_force_approval(&self, effects: &[EffectKind]) -> bool {
+        // Hard floor (#4776): the highest-risk effects always require an
+        // explicit approval gate and can never be auto-approved or satisfied by
+        // a stored always-allow grant — independent of profile or policy. Kept
+        // deliberately narrow so the yolo/Minimal-bypass behaviour for ordinary
+        // write/spawn effects is unchanged.
+        effects.iter().any(|effect| {
+            matches!(
+                effect,
+                EffectKind::Financial | EffectKind::ModifyApproval | EffectKind::ModifyBudget
+            )
+        })
+    }
+
     fn effects_require_approval(
         &self,
         approval_policy: ApprovalPolicy,

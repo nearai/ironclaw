@@ -13,13 +13,14 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::sha256_digest_token;
+use ironclaw_host_api::{CapabilityId, ProviderToolName, sha256_digest_token};
 use ironclaw_llm::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
-    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, clean_response,
-    contains_codex_text_tool_call_syntax,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
+    LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
     costs::{default_cost, model_cost},
     recover_codex_text_tool_calls_from_tool_names,
+    vision_models::is_vision_model,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -42,6 +43,7 @@ use ironclaw_turns::{
         LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelRequest,
         LoopModelResponse, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
         LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall, ProviderToolDefinition,
+        RegisterProviderToolCallRequest,
     },
 };
 use tracing::debug;
@@ -57,6 +59,7 @@ use crate::{
 const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of credits";
 const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
     "arguments omitted because they exceeded the host provider-tool limit";
+const UNAVAILABLE_CAPABILITY_REPLY: &str = "That capability is unavailable or disabled for this request, so I will not route it through another tool.";
 
 /// Fail-closed routing policy from resolved Reborn model profile ids to the
 /// host-selected provider/model envelope.
@@ -701,17 +704,22 @@ fn map_model_route_error(error: ModelRouteError) -> HostManagedModelError {
 fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGatewayError {
     let diagnostic_ref = error.diagnostic_ref;
     let reason_kind = error.reason_kind;
+    let gate_ref = error.gate_ref;
     let mut converted = match LoopModelGatewayError::new(error.kind, error.safe_summary) {
         Ok(error) => error,
         Err(_) => LoopModelGatewayError {
             kind: error.kind,
             safe_summary: LoopSafeSummary::model_gateway_failed(),
             reason_kind: None,
+            gate_ref: None,
             diagnostic_ref: None,
         },
     };
     if let Some(reason_kind) = reason_kind {
         converted = converted.with_reason_kind(reason_kind);
+    }
+    if let Some(gate_ref) = gate_ref {
+        converted = converted.with_gate_ref(gate_ref);
     }
     if let Some(diagnostic_ref) = diagnostic_ref {
         converted = converted.with_diagnostic_ref(diagnostic_ref);
@@ -826,11 +834,13 @@ where
             );
         }
         if !tool_definitions.is_empty() {
+            let unavailable_capability_guard =
+                unavailable_requested_capability_guard(&completion.messages, &tool_definitions);
             let mut recovery_tool_names = Vec::with_capacity(tool_definitions.len());
             let llm_tool_definitions = tool_definitions
                 .into_iter()
                 .map(|definition| {
-                    recovery_tool_names.push(definition.name.clone());
+                    recovery_tool_names.push(definition.name.as_str().to_string());
                     provider_tool_definition_to_llm(definition)
                 })
                 .collect::<Vec<_>>();
@@ -850,6 +860,7 @@ where
                     .as_deref()
                     .unwrap_or("model_call=unknown"),
                 &replay_identity,
+                unavailable_capability_guard.as_ref(),
             )
             .await
             {
@@ -883,6 +894,7 @@ where
                             .as_deref()
                             .unwrap_or("model_call=unknown"),
                         &replay_identity,
+                        unavailable_capability_guard.as_ref(),
                     )
                     .await;
                 }
@@ -968,7 +980,7 @@ fn recover_textual_tool_calls_from_tool_response(
 
 fn provider_tool_definition_to_llm(definition: ProviderToolDefinition) -> ToolDefinition {
     ToolDefinition {
-        name: definition.name,
+        name: definition.name.into_string(),
         description: definition.description,
         parameters: definition.parameters,
     }
@@ -988,6 +1000,7 @@ async fn tool_response_to_host(
     capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     provider_turn_scope: &str,
     replay_identity: &ProviderReplayIdentity,
+    unavailable_capability_guard: Option<&UnavailableCapabilityGuard>,
 ) -> Result<HostManagedModelResponse, HostManagedModelError> {
     if tracing::enabled!(tracing::Level::DEBUG) {
         let tool_call_name_sample = response
@@ -1010,22 +1023,27 @@ async fn tool_response_to_host(
             FinishReason::ToolUse | FinishReason::Stop
         )
     {
+        if let Some(guard) = unavailable_capability_guard {
+            debug!(
+                requested_capability_id = %guard.capability_id,
+                tool_call_count = response.tool_calls.len(),
+                "reborn model gateway suppressed provider tool calls after unavailable named capability request"
+            );
+            return Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
+                UNAVAILABLE_CAPABILITY_REPLY,
+                response.reasoning,
+            )
+            .with_usage(LoopModelUsage {
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+            }));
+        }
         let advertised_tool_names = capabilities
             .tool_definitions()
             .map_err(map_capability_host_error)?
             .into_iter()
             .map(|definition| definition.name)
             .collect::<HashSet<_>>();
-        if response
-            .tool_calls
-            .iter()
-            .any(|tool_call| !advertised_tool_names.contains(&tool_call.name))
-        {
-            return Err(HostManagedModelError::safe(
-                HostManagedModelErrorKind::InvalidOutput,
-                "model returned a tool call outside the advertised capability surface",
-            ));
-        }
         let mut candidates = Vec::with_capacity(response.tool_calls.len());
         let provider_turn_id = provider_turn_id(provider_turn_scope, &response.tool_calls);
         let provider_calls = response
@@ -1039,7 +1057,16 @@ async fn tool_response_to_host(
                     replay_identity,
                 )
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, HostManagedModelError>>()?;
+        if provider_calls
+            .iter()
+            .any(|provider_call| !advertised_tool_names.contains(&provider_call.name))
+        {
+            return Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidOutput,
+                "model returned a tool call outside the advertised capability surface",
+            ));
+        }
         for provider_call in &provider_calls {
             capabilities
                 .validate_provider_tool_call(provider_call)
@@ -1047,7 +1074,7 @@ async fn tool_response_to_host(
         }
         for provider_call in provider_calls {
             let candidate = capabilities
-                .register_provider_tool_call(provider_call)
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call))
                 .await
                 .map_err(map_provider_tool_output_error)?;
             candidates.push(candidate);
@@ -1108,23 +1135,133 @@ async fn tool_response_to_host(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnavailableCapabilityGuard {
+    capability_id: CapabilityId,
+}
+
+fn unavailable_requested_capability_guard(
+    messages: &[ChatMessage],
+    tool_definitions: &[ProviderToolDefinition],
+) -> Option<UnavailableCapabilityGuard> {
+    let latest_user = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::User)?;
+    let visible_capability_ids = tool_definitions
+        .iter()
+        .map(|definition| definition.capability_id.as_str())
+        .collect::<HashSet<_>>();
+
+    extract_explicit_capability_request_ids(&latest_user.content)
+        .into_iter()
+        .find(|capability_id| !visible_capability_ids.contains(capability_id.as_str()))
+        .map(|capability_id| UnavailableCapabilityGuard { capability_id })
+}
+
+fn extract_explicit_capability_request_ids(content: &str) -> Vec<CapabilityId> {
+    let mut ids = Vec::new();
+    let mut token_start = None;
+    for (index, character) in content.char_indices() {
+        if is_capability_token_char(character) {
+            token_start.get_or_insert(index);
+            continue;
+        }
+        if let Some(start) = token_start.take() {
+            push_explicit_capability_request_token(content, start, index, &mut ids);
+        }
+    }
+    if let Some(start) = token_start {
+        push_explicit_capability_request_token(content, start, content.len(), &mut ids);
+    }
+    ids
+}
+
+fn is_capability_token_char(character: char) -> bool {
+    character.is_ascii_lowercase()
+        || character.is_ascii_digit()
+        || matches!(character, '_' | '-' | '.')
+}
+
+fn push_explicit_capability_request_token(
+    content: &str,
+    start: usize,
+    end: usize,
+    ids: &mut Vec<CapabilityId>,
+) {
+    let token = &content[start..end];
+    if !is_likely_capability_reference(token)
+        || !is_explicit_capability_request_token(content, start, end)
+    {
+        return;
+    }
+    if let Ok(capability_id) = CapabilityId::new(token)
+        && !ids.iter().any(|existing| existing == &capability_id)
+    {
+        ids.push(capability_id);
+    }
+}
+
+fn is_likely_capability_reference(token: &str) -> bool {
+    token.starts_with("builtin.") || token.split('.').count() == 2
+}
+
+fn is_explicit_capability_request_token(content: &str, start: usize, end: usize) -> bool {
+    let previous_word = content[..start]
+        .trim_end()
+        .rsplit(|character: char| !is_capability_request_word_char(character))
+        .find(|word| !word.is_empty());
+    if previous_word.is_some_and(is_capability_request_verb) {
+        return true;
+    }
+
+    let next_word = content[end..]
+        .trim_start()
+        .split(|character: char| !is_capability_request_word_char(character))
+        .find(|word| !word.is_empty());
+    previous_word.is_some_and(is_capability_request_noun)
+        || next_word.is_some_and(is_capability_request_noun)
+}
+
+fn is_capability_request_word_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+}
+
+fn is_capability_request_verb(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "use" | "using" | "call" | "run" | "execute" | "invoke"
+    )
+}
+
+fn is_capability_request_noun(word: &str) -> bool {
+    matches!(word.to_ascii_lowercase().as_str(), "tool" | "capability")
+}
+
 fn provider_tool_call_from_llm(
     tool_call: ToolCall,
     response_reasoning: Option<String>,
     provider_turn_id: String,
     replay_identity: &ProviderReplayIdentity,
-) -> ProviderToolCall {
-    ProviderToolCall {
+) -> Result<ProviderToolCall, HostManagedModelError> {
+    let name = ProviderToolName::new(tool_call.name).map_err(|error| {
+        debug!(%error, "reborn model gateway rejected invalid provider tool name");
+        HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidOutput,
+            "model returned an invalid provider tool name",
+        )
+    })?;
+    Ok(ProviderToolCall {
         provider_id: replay_identity.provider_id.clone(),
         provider_model_id: replay_identity.provider_model_id.clone(),
         turn_id: Some(provider_turn_id),
         id: tool_call.id,
-        name: tool_call.name,
+        name,
         arguments: tool_call.arguments,
         response_reasoning,
         reasoning: tool_call.reasoning,
         signature: tool_call.signature,
-    }
+    })
 }
 
 fn provider_turn_id(provider_turn_scope: &str, tool_calls: &[ToolCall]) -> String {
@@ -1193,10 +1330,11 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         AgentLoopHostErrorKind::Unauthorized | AgentLoopHostErrorKind::PolicyDenied => {
             HostManagedModelErrorKind::PolicyDenied
         }
-        AgentLoopHostErrorKind::BudgetExceeded
-        | AgentLoopHostErrorKind::BudgetApprovalRequired
-        | AgentLoopHostErrorKind::BudgetAccountingFailed => {
+        AgentLoopHostErrorKind::BudgetExceeded | AgentLoopHostErrorKind::BudgetAccountingFailed => {
             HostManagedModelErrorKind::BudgetExceeded
+        }
+        AgentLoopHostErrorKind::BudgetApprovalRequired => {
+            HostManagedModelErrorKind::BudgetApprovalRequired
         }
         AgentLoopHostErrorKind::Cancelled => HostManagedModelErrorKind::Cancelled,
         AgentLoopHostErrorKind::Invalid
@@ -1208,7 +1346,11 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         | AgentLoopHostErrorKind::TranscriptWriteFailed
         | AgentLoopHostErrorKind::Internal => HostManagedModelErrorKind::Unavailable,
     };
-    HostManagedModelError::safe(kind, error.safe_summary)
+    let mut converted = HostManagedModelError::safe(kind, error.safe_summary);
+    if let Some(gate_ref) = error.gate_ref {
+        converted = converted.with_gate_ref(gate_ref);
+    }
+    converted
 }
 
 fn map_provider_tool_output_error(error: AgentLoopHostError) -> HostManagedModelError {
@@ -1277,6 +1419,18 @@ fn provider_tool_call_for_repair(tool_call: &ToolCall) -> ToolCall {
     }
 }
 
+/// Encode raw image bytes as a base64 `data:` URL a vision model can read
+/// inline. The model port carries undecorated bytes; this provider-format
+/// concern lives at the gateway boundary.
+fn image_data_url(mime_type: &str, bytes: &[u8]) -> String {
+    use base64::Engine;
+    format!(
+        "data:{};base64,{}",
+        mime_type,
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
 fn convert_messages(
     messages: Vec<HostManagedModelMessage>,
     replay_identity: &ProviderReplayIdentity,
@@ -1290,7 +1444,31 @@ fn convert_messages(
                 converted.push(ChatMessage::system(message.content.clone()))
             }
             HostManagedModelMessageRole::User => {
-                converted.push(ChatMessage::user(message.content.clone()))
+                // Attach images only for a vision-capable model. A text-only
+                // model can't accept image parts (it would error or ignore
+                // them), so it keeps just the text — the durable transcript
+                // still carries the `<attachments>` pointer for those models.
+                let vision = is_vision_model(&replay_identity.provider_model_id);
+                if message.image_parts.is_empty() || !vision {
+                    converted.push(ChatMessage::user(message.content.clone()));
+                } else {
+                    // Multimodal: the text rides in `content`; `content_parts`
+                    // carries only the image parts (the provider adapters
+                    // prepend the text). Encoding to a base64 `data:` URL is a
+                    // provider-format concern, so it happens here at the gateway
+                    // — the model port carries only the raw bytes.
+                    let parts = message
+                        .image_parts
+                        .iter()
+                        .map(|image| ContentPart::ImageUrl {
+                            image_url: ImageUrl {
+                                url: image_data_url(&image.mime_type, &image.bytes),
+                                detail: None,
+                            },
+                        })
+                        .collect();
+                    converted.push(ChatMessage::user_with_parts(message.content.clone(), parts));
+                }
             }
             HostManagedModelMessageRole::Assistant => {
                 converted.push(ChatMessage::assistant(message.content.clone()));
@@ -1476,7 +1654,7 @@ fn provider_tool_roundtrip_messages(
                 .map(|(provider_call, summary)| {
                     ChatMessage::tool_result(
                         provider_call.provider_call_id,
-                        provider_call.provider_tool_name,
+                        provider_call.provider_tool_name.into_string(),
                         summary,
                     )
                 }),
@@ -1489,7 +1667,7 @@ fn provider_tool_call_from_reference(
 ) -> ToolCall {
     ToolCall {
         id: provider_call.provider_call_id.clone(),
-        name: provider_call.provider_tool_name.clone(),
+        name: provider_call.provider_tool_name.as_str().to_string(),
         arguments: provider_call.arguments.clone(),
         reasoning: provider_call.reasoning.clone(),
         signature: provider_call.signature.clone(),
@@ -1651,6 +1829,7 @@ mod tests {
             .expect("valid message ref"),
             tool_result_provider_call: None,
             tool_result_content: Some(HostManagedToolResultContent::Reference { envelope }),
+            image_parts: Vec::new(),
         };
 
         let replay = tool_result_replay_message(&message).expect("replay message");
@@ -1659,6 +1838,86 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&replay.model_content).unwrap(),
             observation
+        );
+    }
+
+    fn user_message_with_images(
+        content: &str,
+        image_parts: Vec<ironclaw_loop_support::HostManagedModelImagePart>,
+    ) -> HostManagedModelMessage {
+        HostManagedModelMessage {
+            role: HostManagedModelMessageRole::User,
+            content: content.to_string(),
+            content_ref: ironclaw_turns::LoopMessageRef::new(
+                "msg:11111111-1111-1111-1111-111111111111",
+            )
+            .expect("valid message ref"),
+            tool_result_provider_call: None,
+            tool_result_content: None,
+            image_parts,
+        }
+    }
+
+    #[test]
+    fn convert_messages_emits_image_url_parts_for_user_image_attachments() {
+        let message = user_message_with_images(
+            "what is in this image?",
+            vec![ironclaw_loop_support::HostManagedModelImagePart {
+                mime_type: "image/png".to_string(),
+                bytes: vec![1, 2, 3, 4],
+            }],
+        );
+        let identity = ProviderReplayIdentity::new("openai", "gpt-4o").expect("identity");
+
+        let converted = convert_messages(vec![message], &identity).expect("convert");
+
+        assert_eq!(converted.len(), 1);
+        let chat = &converted[0];
+        assert_eq!(chat.role, Role::User);
+        // Text rides in `content`; the raw bytes are base64-encoded here at the
+        // gateway into a `data:` ImageUrl part.
+        assert_eq!(chat.content, "what is in this image?");
+        assert_eq!(chat.content_parts.len(), 1);
+        match &chat.content_parts[0] {
+            ContentPart::ImageUrl { image_url } => {
+                assert_eq!(image_url.url, "data:image/png;base64,AQIDBA==");
+            }
+            other => panic!("expected an ImageUrl part, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn convert_messages_text_only_user_carries_no_content_parts() {
+        let message = user_message_with_images("hello", Vec::new());
+        let identity = ProviderReplayIdentity::new("openai", "gpt-4o").expect("identity");
+
+        let converted = convert_messages(vec![message], &identity).expect("convert");
+
+        assert_eq!(converted[0].content, "hello");
+        assert!(converted[0].content_parts.is_empty());
+    }
+
+    #[test]
+    fn convert_messages_drops_image_parts_for_non_vision_model() {
+        // Even with image bytes present, a text-only model must not receive
+        // image content (it would error or ignore it); it keeps the text and
+        // relies on the transcript's `<attachments>` pointer.
+        let message = user_message_with_images(
+            "what is in this image?",
+            vec![ironclaw_loop_support::HostManagedModelImagePart {
+                mime_type: "image/png".to_string(),
+                bytes: vec![1, 2, 3, 4],
+            }],
+        );
+        let identity =
+            ProviderReplayIdentity::new("mistral", "mistral-7b-instruct").expect("identity");
+
+        let converted = convert_messages(vec![message], &identity).expect("convert");
+
+        assert_eq!(converted[0].content, "what is in this image?");
+        assert!(
+            converted[0].content_parts.is_empty(),
+            "a non-vision model must not receive image parts"
         );
     }
 }

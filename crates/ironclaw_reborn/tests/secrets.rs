@@ -83,6 +83,7 @@ async fn reborn_secret_store_fails_closed_on_consume_when_existing_rows_use_anot
             scope.clone(),
             handle.clone(),
             SecretMaterial::from("sk-live-existing-secret"),
+            None,
         )
         .await
         .unwrap();
@@ -170,6 +171,7 @@ async fn reborn_secret_store_health_is_ready_for_empty_and_existing_rows_with_sa
             sample_scope(),
             SecretHandle::new("openai_key").unwrap(),
             SecretMaterial::from("sk-live-health-ready-existing"),
+            None,
         )
         .await
         .unwrap();
@@ -207,6 +209,7 @@ async fn reborn_secret_store_reopens_with_scope_isolation_and_one_shot_leases() 
             scope_a.clone(),
             handle.clone(),
             SecretMaterial::from("sk-live-scope-a"),
+            None,
         )
         .await
         .unwrap();
@@ -215,6 +218,7 @@ async fn reborn_secret_store_reopens_with_scope_isolation_and_one_shot_leases() 
             scope_b.clone(),
             handle.clone(),
             SecretMaterial::from("sk-live-scope-b"),
+            None,
         )
         .await
         .unwrap();
@@ -309,6 +313,7 @@ async fn reborn_secret_store_active_lease_survives_secret_rotation() {
             scope.clone(),
             handle.clone(),
             SecretMaterial::from("sk-live-before-rotation"),
+            None,
         )
         .await
         .unwrap();
@@ -318,6 +323,7 @@ async fn reborn_secret_store_active_lease_survives_secret_rotation() {
             scope.clone(),
             handle,
             SecretMaterial::from("sk-live-after-rotation"),
+            None,
         )
         .await
         .unwrap();
@@ -347,6 +353,7 @@ async fn reborn_secret_store_persists_material_encrypted_and_exposes_only_throug
             scope.clone(),
             handle.clone(),
             SecretMaterial::from("sk-live-reborn-secret-parity"),
+            None,
         )
         .await
         .unwrap();

@@ -79,6 +79,7 @@ pub(crate) async fn invoke_with_local_dev_approval(
                 &local_runtime.workspace_mounts,
                 &local_runtime.skill_mounts,
                 &local_runtime.memory_mounts,
+                &local_runtime.system_extensions_lifecycle_mounts,
             ) {
                 Ok(approval) => approval,
                 Err(LocalDevCapabilityPolicyError::MissingGrant { .. }) => {

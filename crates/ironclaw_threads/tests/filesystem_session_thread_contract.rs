@@ -7,24 +7,37 @@
 //! `crates/ironclaw_run_state/tests/run_state_contract.rs` and
 //! `crates/ironclaw_processes/tests/process_store_contract.rs`.
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
+use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{
+    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
+    FilesystemOperation, Filter, InMemoryBackend, Page, RecordVersion, RootFilesystem,
+    ScopedFilesystem, StorageTxn, TxnCapability, VersionedEntry,
+};
 use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
     ProjectId, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,
-    AppendCapabilityDisplayPreviewRequest, AttachmentKind, AttachmentRef,
-    CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
+    AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest, AttachmentKind,
+    AttachmentRef, CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    FilesystemSessionThreadService, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
-    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadScope, UpdateAssistantDraftRequest,
+    FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
+    MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
+    ThreadScope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
+use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
 
 #[tokio::test]
 async fn filesystem_delete_thread_removes_owned_thread_and_hides_missing_or_wrong_scope() {
@@ -131,6 +144,192 @@ async fn filesystem_delete_thread_removes_inbound_idempotency_records() {
         .expect("deleted thread must not leave stale idempotency records");
 
     assert!(replay.is_none());
+}
+
+#[tokio::test]
+async fn filesystem_finalized_assistant_lookup_by_run_uses_persisted_message() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-finalized-by-run", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("finalized-by-run");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-finalized-by-run").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let draft = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized-lookup".into(),
+            content: MessageContent::text("draft"),
+        })
+        .await
+        .unwrap();
+
+    let before_finalize = service
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized-lookup".into(),
+        })
+        .await
+        .unwrap();
+    assert!(before_finalize.is_none());
+
+    service
+        .finalize_assistant_message(
+            &scope,
+            &thread.thread_id,
+            draft.message_id,
+            MessageContent::text("final"),
+        )
+        .await
+        .unwrap();
+
+    let finalized = service
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope,
+            thread_id: thread.thread_id,
+            turn_run_id: "run-finalized-lookup".into(),
+        })
+        .await
+        .unwrap()
+        .expect("finalized assistant message is indexed by run");
+    assert_eq!(finalized.message_id, draft.message_id);
+    assert_eq!(finalized.status, MessageStatus::Finalized);
+    assert_eq!(finalized.content.as_deref(), Some("final"));
+}
+
+#[tokio::test]
+async fn filesystem_lookup_index_write_failure_does_not_fail_message_contract() {
+    let backend = Arc::new(LookupIndexWriteFailureBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-lookup-index-failure", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("lookup-index-failure");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-lookup-index-failure").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let draft = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-lookup-index-failure".into(),
+            content: MessageContent::text("draft"),
+        })
+        .await
+        .expect("message append must not depend on lookup-index write success");
+
+    service
+        .finalize_assistant_message(
+            &scope,
+            &thread.thread_id,
+            draft.message_id,
+            MessageContent::text("final"),
+        )
+        .await
+        .expect("message update must not depend on lookup-index write success");
+
+    let finalized = service
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope,
+            thread_id: thread.thread_id,
+            turn_run_id: "run-lookup-index-failure".into(),
+        })
+        .await
+        .expect("lookup should scan when lookup-index backfill fails")
+        .expect("finalized assistant message should be found without lookup index");
+    assert_eq!(finalized.message_id, draft.message_id);
+    assert_eq!(finalized.status, MessageStatus::Finalized);
+    assert_eq!(finalized.content.as_deref(), Some("final"));
+}
+
+#[tokio::test]
+async fn filesystem_lookup_index_read_failure_falls_back_to_transcript_scan() {
+    let backend = Arc::new(LookupIndexReadFailureBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-lookup-index-read-failure", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("lookup-index-read-failure");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-lookup-index-read-failure").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let draft = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-lookup-index-read-failure".into(),
+            content: MessageContent::text("draft"),
+        })
+        .await
+        .unwrap();
+    service
+        .finalize_assistant_message(
+            &scope,
+            &thread.thread_id,
+            draft.message_id,
+            MessageContent::text("final"),
+        )
+        .await
+        .unwrap();
+
+    let finalized = service
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-lookup-index-read-failure".into(),
+        })
+        .await
+        .expect("assistant lookup should scan after lookup-index read failure")
+        .expect("finalized assistant message should be found");
+    assert_eq!(finalized.message_id, draft.message_id);
+
+    let first_tool_result = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-lookup-index-read-failure".into(),
+            result_ref: "result:lookup-index-read-failure".into(),
+            safe_summary: ToolResultSafeSummary::new("safe tool result").unwrap(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    let duplicate_tool_result = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope,
+            thread_id: thread.thread_id,
+            turn_run_id: "run-lookup-index-read-failure".into(),
+            result_ref: "result:lookup-index-read-failure".into(),
+            safe_summary: ToolResultSafeSummary::new("retry content ignored").unwrap(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .expect("tool-result lookup should scan after lookup-index read failure");
+    assert_eq!(
+        duplicate_tool_result.message_id,
+        first_tool_result.message_id
+    );
 }
 
 #[tokio::test]
@@ -499,6 +698,94 @@ async fn filesystem_preview_append_retries_converge_on_one_message() {
     assert_eq!(preview_count, 1);
 }
 
+#[tokio::test]
+async fn filesystem_transactional_accept_concurrent_duplicate_replays_existing_message() {
+    let backend = Arc::new(TransactionalRaceBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-accept-race", "alice");
+    let service = Arc::new(FilesystemSessionThreadService::new(scoped));
+    let scope = scope("accept-race");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-accept-race").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let left = {
+        let service = Arc::clone(&service);
+        let scope = scope.clone();
+        let thread_id = thread.thread_id.clone();
+        async move {
+            service
+                .accept_inbound_message(AcceptInboundMessageRequest {
+                    scope,
+                    thread_id,
+                    actor_id: "actor-a".into(),
+                    source_binding_id: Some("binding-accept-race".into()),
+                    reply_target_binding_id: None,
+                    external_event_id: Some("event-accept-race".into()),
+                    content: MessageContent::text("first payload"),
+                })
+                .await
+        }
+    };
+    let right = {
+        let service = Arc::clone(&service);
+        let scope = scope.clone();
+        let thread_id = thread.thread_id.clone();
+        async move {
+            service
+                .accept_inbound_message(AcceptInboundMessageRequest {
+                    scope,
+                    thread_id,
+                    actor_id: "actor-a".into(),
+                    source_binding_id: Some("binding-accept-race".into()),
+                    reply_target_binding_id: None,
+                    external_event_id: Some("event-accept-race".into()),
+                    content: MessageContent::text("retry payload ignored"),
+                })
+                .await
+        }
+    };
+
+    let (left, right) = tokio::join!(left, right);
+    let left = left.unwrap();
+    let right = right.unwrap();
+    assert_eq!(left.message_id, right.message_id);
+    assert_ne!(left.idempotent_replay, right.idempotent_replay);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].message_id, left.message_id);
+
+    let follow_up = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: history.thread.scope.clone(),
+            thread_id: history.thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("real follow-up"),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        follow_up.sequence, 2,
+        "losing duplicate accept must not reserve a durable sequence"
+    );
+}
+
 /// Regression for the ScopedFilesystem migration: two stores share one
 /// underlying [`RootFilesystem`] but each is constructed with a
 /// [`MountView`] whose `/threads` alias resolves to a different
@@ -819,6 +1106,16 @@ async fn assert_reopened_history(
     assert!(wrong_scope.is_err());
 }
 
+/// Wait until the wall clock is strictly past `floor`, so the next thread
+/// created/used gets a later activity timestamp — deterministic regardless
+/// of clock resolution. Uses async sleep to avoid blocking the test runtime
+/// (`std::thread::sleep` would block the tokio executor).
+async fn wait_until_after(floor: chrono::DateTime<Utc>) {
+    while Utc::now() <= floor {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+}
+
 #[tokio::test]
 async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
     use ironclaw_threads::ListThreadsForScopeRequest;
@@ -849,7 +1146,7 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
     // encodes scope axes, this also verifies the directory walk
     // doesn't leak across `(agent, project, owner)` cells.
     for id in ["t-a-001", "t-a-002", "t-a-003"] {
-        service
+        let record = service
             .ensure_thread(EnsureThreadRequest {
                 scope: scope_a.clone(),
                 thread_id: Some(ThreadId::new(id).unwrap()),
@@ -859,6 +1156,9 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
             })
             .await
             .unwrap();
+        // Wait past this thread's activity stamp → strictly increasing
+        // `created_at`, so the activity-desc ordering below is deterministic.
+        wait_until_after(record.updated_at.expect("new thread has activity stamp")).await;
     }
     service
         .ensure_thread(EnsureThreadRequest {
@@ -871,7 +1171,11 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
         .await
         .unwrap();
 
-    // Scope filter: A sees only A's threads, sorted deterministically.
+    // Scope filter: A sees only A's threads, newest activity first.
+    // The threads were created sequentially (with real backend I/O
+    // between each `ensure_thread`), so their `created_at`/`updated_at`
+    // stamps strictly increase — the activity-desc ordering therefore
+    // surfaces the last-created thread (003) first.
     let scope_a_all = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
             scope: scope_a.clone(),
@@ -885,13 +1189,13 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
         .iter()
         .map(|record| record.thread_id.as_str())
         .collect();
-    assert_eq!(ids, ["t-a-001", "t-a-002", "t-a-003"]);
+    assert_eq!(ids, ["t-a-003", "t-a-002", "t-a-001"]);
     assert!(
         scope_a_all.next_cursor.is_none(),
         "no more pages when page size > total",
     );
 
-    // Pagination: limit=2 → first page is [001, 002] with cursor=002.
+    // Pagination: limit=2 → first page is [003, 002] with cursor=002.
     let page_1 = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
             scope: scope_a.clone(),
@@ -905,10 +1209,10 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
         .iter()
         .map(|record| record.thread_id.as_str())
         .collect();
-    assert_eq!(page_1_ids, ["t-a-001", "t-a-002"]);
+    assert_eq!(page_1_ids, ["t-a-003", "t-a-002"]);
     assert_eq!(page_1.next_cursor.as_deref(), Some("t-a-002"));
 
-    // Follow-up: cursor=002 → next page is [003] with no further cursor.
+    // Follow-up: cursor=002 → next page is [001] with no further cursor.
     let page_2 = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
             scope: scope_a.clone(),
@@ -922,7 +1226,7 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
         .iter()
         .map(|record| record.thread_id.as_str())
         .collect();
-    assert_eq!(page_2_ids, ["t-a-003"]);
+    assert_eq!(page_2_ids, ["t-a-001"]);
     assert!(page_2.next_cursor.is_none());
 
     // Cross-scope safety: scope B sees only its own thread, never A's.
@@ -943,6 +1247,89 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
         .map(|record| record.thread_id.as_str())
         .collect();
     assert_eq!(ids_b, ["t-b-001"]);
+}
+
+/// Regression: the "Recent" list must order by last interaction, not by
+/// creation time or thread id. Appending a message to the *older* thread
+/// has to bump it ahead of a more recently *created* one. Before this
+/// fix, records carried no timestamp and the backend sorted by random
+/// UUID, so a freshly-used thread could land anywhere in the list.
+#[tokio::test]
+async fn filesystem_list_threads_orders_by_last_activity_not_creation() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-activity-fs", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope_a = scope("activity");
+
+    // Create "older" first, then "newer" — newer has the later
+    // `created_at`. Waiting past each stamp keeps them strictly ordered.
+    let mut newer_stamp = None;
+    for id in ["t-older", "t-newer"] {
+        let record = service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope_a.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        let stamp = record.updated_at.expect("new thread has activity stamp");
+        newer_stamp = Some(stamp);
+        wait_until_after(stamp).await;
+    }
+
+    // Initially newest-created is first.
+    let before = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let before_ids: Vec<&str> = before
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(before_ids, ["t-newer", "t-older"]);
+
+    // Interact with the older thread — appending a message must bump its
+    // last-activity stamp above the newer thread's creation time. Wait
+    // past the newer thread's stamp so the append is unambiguously later.
+    wait_until_after(newer_stamp.expect("created both threads")).await;
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope_a.clone(),
+            thread_id: ThreadId::new("t-older").unwrap(),
+            actor_id: "actor-a".into(),
+            source_binding_id: Some("binding-activity".into()),
+            reply_target_binding_id: None,
+            external_event_id: Some("event-activity".into()),
+            content: MessageContent::text("ping the old thread"),
+        })
+        .await
+        .unwrap();
+
+    // The freshly-used thread now leads the Recent list.
+    let after = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let after_ids: Vec<&str> = after
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(after_ids, ["t-older", "t-newer"]);
 }
 
 #[tokio::test]
@@ -1396,6 +1783,7 @@ fn preview_envelope(invocation_id: InvocationId) -> CapabilityDisplayPreviewEnve
         result_ref: Some("result:demo-preview".to_string()),
         truncated: false,
         updated_at: Utc::now(),
+        activity_order: None,
     })
     .unwrap()
 }
@@ -1419,6 +1807,315 @@ where
     )])
     .expect("mount view");
     Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+}
+
+struct LookupIndexWriteFailureBackend {
+    inner: InMemoryBackend,
+}
+
+impl LookupIndexWriteFailureBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+        }
+    }
+
+    fn is_lookup_index_path(path: &VirtualPath) -> bool {
+        path.as_str().contains("/indexes/assistant-runs/")
+            || path.as_str().contains("/indexes/tool-results/")
+    }
+}
+
+struct LookupIndexReadFailureBackend {
+    inner: InMemoryBackend,
+}
+
+impl LookupIndexReadFailureBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+        }
+    }
+}
+
+struct TransactionalRaceBackend {
+    inner: Arc<InMemoryBackend>,
+    txn_lock: Arc<Mutex<()>>,
+    idempotency_get_barrier: Arc<Barrier>,
+    idempotency_get_count: AtomicUsize,
+}
+
+impl TransactionalRaceBackend {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(InMemoryBackend::new()),
+            txn_lock: Arc::new(Mutex::new(())),
+            idempotency_get_barrier: Arc::new(Barrier::new(2)),
+            idempotency_get_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn is_idempotency_path(path: &VirtualPath) -> bool {
+        path.as_str().contains("/threads/idempotency/")
+    }
+}
+
+struct TransactionalRaceTxn {
+    inner: Arc<InMemoryBackend>,
+    prefix: VirtualPath,
+    _guard: OwnedMutexGuard<()>,
+    staged_puts: HashMap<VirtualPath, (Entry, RecordVersion)>,
+}
+
+impl TransactionalRaceTxn {
+    fn check_path(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        if std::path::Path::new(path.as_str())
+            .starts_with(std::path::Path::new(self.prefix.as_str()))
+        {
+            Ok(())
+        } else {
+            Err(FilesystemError::PathOutsideMount { path: path.clone() })
+        }
+    }
+
+    async fn current_version(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<RecordVersion>, FilesystemError> {
+        if let Some((_, version)) = self.staged_puts.get(path) {
+            return Ok(Some(*version));
+        }
+        Ok(self
+            .inner
+            .get(path)
+            .await?
+            .map(|versioned| versioned.version))
+    }
+
+    fn check_cas(
+        path: &VirtualPath,
+        cas: CasExpectation,
+        current: Option<RecordVersion>,
+    ) -> Result<RecordVersion, FilesystemError> {
+        match (cas, current) {
+            (CasExpectation::Any, current) => Ok(current
+                .map(|version| version.next())
+                .unwrap_or_else(|| RecordVersion::from_backend(1))),
+            (CasExpectation::Absent, None) => Ok(RecordVersion::from_backend(1)),
+            (CasExpectation::Absent, found @ Some(_)) => Err(FilesystemError::VersionMismatch {
+                path: path.clone(),
+                expected: None,
+                found,
+            }),
+            (CasExpectation::Version(expected), Some(found)) if expected == found => {
+                Ok(expected.next())
+            }
+            (CasExpectation::Version(expected), found) => Err(FilesystemError::VersionMismatch {
+                path: path.clone(),
+                expected: Some(expected),
+                found,
+            }),
+        }
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for LookupIndexWriteFailureBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        if Self::is_lookup_index_path(path) {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+                reason: "lookup index writes disabled by contract test".to_string(),
+            });
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for LookupIndexReadFailureBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        if LookupIndexWriteFailureBackend::is_lookup_index_path(path) {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "lookup index reads disabled by contract test".to_string(),
+            });
+        }
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for TransactionalRaceBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities().with_txn(TxnCapability::MultiKey)
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        if Self::is_idempotency_path(path)
+            && self.idempotency_get_count.fetch_add(1, Ordering::SeqCst) < 2
+        {
+            let result = self.inner.get(path).await?;
+            self.idempotency_get_barrier.wait().await;
+            return Ok(result);
+        }
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        let guard = Arc::clone(&self.txn_lock).lock_owned().await;
+        Ok(Box::new(TransactionalRaceTxn {
+            inner: Arc::clone(&self.inner),
+            prefix: path.clone(),
+            _guard: guard,
+            staged_puts: HashMap::new(),
+        }))
+    }
+}
+
+#[async_trait]
+impl StorageTxn for TransactionalRaceTxn {
+    async fn put(
+        &mut self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.check_path(path)?;
+        let version = Self::check_cas(path, cas, self.current_version(path).await?)?;
+        self.staged_puts.insert(path.clone(), (entry, version));
+        Ok(version)
+    }
+
+    async fn get(&mut self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.check_path(path)?;
+        if let Some((entry, version)) = self.staged_puts.get(path) {
+            return Ok(Some(VersionedEntry {
+                path: path.clone(),
+                entry: entry.clone(),
+                version: *version,
+            }));
+        }
+        self.inner.get(path).await
+    }
+
+    async fn delete(&mut self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.check_path(path)?;
+        Err(FilesystemError::Unsupported {
+            path: path.clone(),
+            operation: FilesystemOperation::Delete,
+        })
+    }
+
+    async fn commit(self: Box<Self>) -> Result<(), FilesystemError> {
+        let txn = *self;
+        for (path, (entry, _)) in txn.staged_puts {
+            txn.inner.put(&path, entry, CasExpectation::Any).await?;
+        }
+        Ok(())
+    }
+
+    async fn rollback(self: Box<Self>) {}
 }
 
 #[tokio::test]
@@ -1575,6 +2272,7 @@ async fn filesystem_persists_multiple_attachment_refs_in_order() {
 
 #[tokio::test]
 async fn filesystem_accept_rejects_duplicate_attachment_ids() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
     // The accept path validates attachment refs before persisting. Drive the
     // real caller (not just the helper) so a regression that drops the check
     // would fail here, and assert nothing was written on rejection.
@@ -1592,6 +2290,12 @@ async fn filesystem_accept_rejects_duplicate_attachment_ids() {
         })
         .await
         .unwrap();
+
+    // Capture the creation activity stamp and let the clock advance, so a
+    // spurious activity bump on the rejected accept would be strictly later
+    // and therefore observable below.
+    let created_activity = thread.updated_at.expect("new thread has activity stamp");
+    wait_until_after(created_activity).await;
 
     let dup = AttachmentRef {
         id: "att-dup".into(),
@@ -1619,12 +2323,34 @@ async fn filesystem_accept_rejects_duplicate_attachment_ids() {
     // Rejection must not leave a half-written message behind.
     let history = service
         .list_thread_history(ThreadHistoryRequest {
-            scope,
-            thread_id: thread.thread_id,
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
         })
         .await
         .unwrap();
     assert!(history.messages.is_empty());
+
+    // Rejection must also not bump the thread's last-activity stamp —
+    // otherwise an invalid message would float the thread to the top of
+    // the sidebar without ever being appended.
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let record = listed
+        .threads
+        .iter()
+        .find(|record| record.thread_id == thread.thread_id)
+        .expect("thread is still listed");
+    assert_eq!(
+        record.updated_at,
+        Some(created_activity),
+        "rejected attachment must not bump last-activity",
+    );
 }
 
 /// Mirrors `summary_spanning_interior_rejected_busy_is_applied` from the

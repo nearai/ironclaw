@@ -47,6 +47,12 @@
 - Blocked run-state approval/auth gate rendering and resume belongs to #3094;
   keep this crate's #3811 auth seam reusable by that layer without implementing
   a second gate-resolution path.
+- Local-dev/WebUI capability result plumbing may stage results in memory, but any
+  durable thread append keyed by `LoopRunContext` (for example capability display
+  preview timeline messages) must resolve the thread scope through
+  `ironclaw_reborn::thread_scope::ThreadScopeResolver::resolve_for_turn` before
+  calling `SessionThreadService`; do not append with the runtime/base
+  `ThreadScope` directly in multi-user WebUI paths.
 
 ## WebUI v2 native surface (`webui-v2-beta` feature)
 
@@ -290,8 +296,8 @@ rows are inventoried here, not implemented in the current PR.
 | Extensions registry/list/install/activate/remove/setup | `GET\|POST /api/extensions/*` | `GET /api/webchat/v2/extensions`, `GET /api/webchat/v2/extensions/registry`, `POST /api/webchat/v2/extensions/install`, `POST /api/webchat/v2/extensions/{package_id}/{activate,remove,setup}` | Mapped to lifecycle package refs and registry projections; setup projects credential requirements and product-auth OAuth start is mounted under the extension setup surface |
 | LLM provider config | v1 settings/provider config surface | `GET /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers/{provider_id}/delete`, `POST /api/webchat/v2/llm/active`, `POST /api/webchat/v2/llm/{test-connection,list-models}` | Mapped for trusted operator-token deployments; left unmounted for multi-user authenticators until an admin role boundary exists |
 | Operator status/readiness | v1 doctor/readiness surfaces | `GET /api/webchat/v2/operator/status` | Mapped to Reborn readiness projection through the product facade; left unmounted with other operator routes for multi-user authenticators |
-| Operator logs | `src/cli/logs.rs` command path | `GET /api/webchat/v2/operator/logs` | Route and facade shell mapped; default runtime returns unavailable until a log backend is wired |
-| Operator service lifecycle | `src/cli/service.rs` command path | `POST /api/webchat/v2/operator/service` | Route and facade shell mapped; default runtime reports unsupported until a platform lifecycle backend is wired |
+| Operator logs | `src/cli/logs.rs` command path | `GET /api/webchat/v2/operator/logs` | Mapped to the in-process operator log buffer with bounded query, tail, follow, filter, cursor, and redaction behavior |
+| Operator service lifecycle | `src/cli/service.rs` command path | `POST /api/webchat/v2/operator/service` | Mapped to a Reborn composition lifecycle backend; launchd/systemd user services are supported, other OS targets report unsupported |
 | SSO login (Google) | `GET /auth/providers`, `GET /auth/login/{p}`, `GET /auth/callback/{p}`, `POST /auth/logout` | Same paths on the v2 listener via `ironclaw_reborn_webui_ingress::webui_v2_auth_router`, merged into `webui_v2_app` through [`WebuiServeConfig::with_public_route_mount`] (typed `{ router, descriptors }` so the per-route body-limit / rate-limit middleware applies) | Mapped (Google); GitHub + NEAR follow under #4116 |
 
 ### Security invariants on every "Mapped" row

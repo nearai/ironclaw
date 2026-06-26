@@ -17,7 +17,7 @@ use ironclaw_auth::{
     CredentialAccountStatus, CredentialOwnership, CredentialSelectionInput,
     ManualTokenCompletionInput, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
     OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderExchange, ProviderCallbackOutcome,
-    TurnGateAuthFlowQuery, flow_matches_turn_gate_query,
+    TurnGateAuthFlowQuery, binding_scope_owns_account, flow_matches_turn_gate_query,
 };
 
 #[async_trait]
@@ -183,7 +183,15 @@ where
             .await?
             .map(|(account, _)| account)
             .ok_or(AuthProductError::CredentialMissing)?;
-        if !scope_matches(&record.scope, &account.scope)
+        // Use owner-granularity for the scope check (#4935 parity with
+        // complete_manual_token): the flow record may carry a different
+        // invocation_id/thread_id/mission_id than the credential account was
+        // originally created with. Full `scope_matches` equality would reject a
+        // legitimate cross-invocation selection. The meaningful ownership boundary
+        // (tenant/user/agent/project + surface + session) is enforced by
+        // `binding_scope_owns_account`; see the canonical docstring at
+        // crates/ironclaw_auth/src/credential.rs.
+        if !binding_scope_owns_account(&record.scope, &account)
             || account.provider != record.provider
             || account.status != CredentialAccountStatus::Configured
         {
@@ -240,7 +248,17 @@ where
             .await?
             .map(|(account, _)| account)
             .ok_or(AuthProductError::CredentialMissing)?;
-        if !scope_matches(&record.scope, &account.scope)
+        // Use owner-granularity for the scope check (#4935 defect A, unbound/reusable path):
+        // the flow record's scope carries a fresh per-request `invocation_id` (minted
+        // by the submit handler for each HTTP call) while the credential account was
+        // created under a different `invocation_id`, `thread_id`, or `mission_id` in
+        // an earlier flow — all three are ephemeral and intentionally ignored for
+        // owner-reusable accounts.  Full `scope_matches` equality would always fail
+        // across requests.  The enforced ownership boundary is
+        // tenant/user/agent/project + surface + session; see the canonical docstring
+        // on `binding_scope_owns_account` at
+        // crates/ironclaw_auth/src/credential.rs.
+        if !binding_scope_owns_account(&record.scope, &account)
             || account.provider != record.provider
             || account.status != CredentialAccountStatus::Configured
         {
@@ -503,7 +521,13 @@ where
             .read_account(scope, account_id)
             .await?
             .ok_or(AuthProductError::CredentialMissing)?;
-        if !scope_matches(scope, &account.scope) {
+        // Owner-granularity guard (#4935 defect A): the callback `scope` is the
+        // flow's stored scope, whose per-flow `invocation_id` (and any
+        // thread/mission) the bound account does not share. The old
+        // `scope_matches` full-equality rejected the legitimate update and left
+        // the forked account in place; the owner boundary
+        // (tenant/user/agent/project + session) is what must hold here.
+        if !binding_scope_owns_account(scope, &account) {
             return Err(AuthProductError::CrossScopeDenied);
         }
         if account.provider != exchange.provider {

@@ -88,6 +88,8 @@ pub struct RebornLogQueryRequest {
     pub source: Option<String>,
     #[serde(default)]
     pub tail: bool,
+    #[serde(default)]
+    pub follow: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,6 +280,27 @@ pub struct RebornTimelineResponse {
     pub next_cursor: Option<String>,
 }
 
+/// Request the raw bytes of one landed attachment, addressed by the thread and
+/// message that carry it plus the attachment's per-message id. The triple is
+/// required because an attachment id is only unique within its message, not
+/// across a thread. The caller's authority comes from the authenticated session
+/// (the scope is derived server-side), never from these path values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAttachmentRequest {
+    pub thread_id: String,
+    pub message_id: String,
+    pub attachment_id: String,
+}
+
+/// Raw bytes of one landed attachment plus the metadata a browser needs to
+/// render or download it. Returned by [`super::RebornServicesApi::read_attachment`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebornAttachmentBytes {
+    pub mime_type: String,
+    pub filename: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornStreamEventsRequest {
     pub thread_id: String,
@@ -407,6 +430,13 @@ pub struct RebornListAutomationsResponse {
     /// wire so an older payload without the field is not misreported as off.
     #[serde(default = "default_scheduler_enabled")]
     pub scheduler_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationMutationResponse {
+    pub updated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<RebornAutomationInfo>,
 }
 
 fn default_scheduler_enabled() -> bool {
@@ -973,6 +1003,13 @@ pub enum RebornAutomationSource {
         /// (e.g. "America/New_York"). Always "UTC" for legacy rows.
         timezone: String,
     },
+    /// A one-time trigger that fires once at `at`, then completes.
+    Once {
+        /// One-shot fire time as an RFC3339 UTC timestamp.
+        at: String,
+        /// IANA timezone the one-shot was scheduled in (for display).
+        timezone: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -984,6 +1021,11 @@ pub struct RebornExtensionListResponse {
 pub struct RebornSkillListResponse {
     pub skills: Vec<RebornSkillInfo>,
     pub count: usize,
+    /// Global default criteria-based skill auto-activation master switch. When
+    /// `false`, skills activate only via an explicit `/name` mention. Defaults
+    /// to `true` for back-compat with producers that predate the flag.
+    #[serde(default = "default_true")]
+    pub auto_activate_learned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1036,6 +1078,14 @@ pub struct RebornSkillInfo {
     pub can_edit: bool,
     #[serde(default)]
     pub can_delete: bool,
+    /// Whether the skill auto-activates on matching requests. `false` means it
+    /// only runs when explicitly invoked with `/name`. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub auto_activate: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1320,6 +1370,8 @@ pub struct RebornOperatorLogsQuery {
     pub source: Option<String>,
     #[serde(default)]
     pub tail: bool,
+    #[serde(default)]
+    pub follow: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

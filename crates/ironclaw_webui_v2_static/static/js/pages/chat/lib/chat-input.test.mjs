@@ -48,7 +48,39 @@ function componentProps(node, component) {
   return props;
 }
 
-function renderChatInput({ onCancel, setCalls = [] } = {}) {
+function templateProps(node) {
+  const props = {};
+  for (let index = 0; index < node.values.length; index += 1) {
+    const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9]*)=\s*$/)?.[1];
+    if (name) props[name] = node.values[index];
+  }
+  return props;
+}
+
+function findNode(node, predicate) {
+  if (!node || typeof node !== "object") return null;
+  if (Array.isArray(node.strings) && predicate(node)) return node;
+  if (!Array.isArray(node.values)) return null;
+  for (const value of node.values) {
+    const found = findNode(value, predicate);
+    if (found) return found;
+  }
+  return null;
+}
+
+async function flushAsyncHandlers() {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+function renderChatInput({
+  onSend = async () => {},
+  onCancel,
+  setCalls = [],
+  disabled = true,
+  sendDisabled,
+  canCancel = true,
+  draft = "",
+} = {}) {
   const components = {
     Button() {},
     Icon() {},
@@ -75,15 +107,31 @@ function renderChatInput({ onCancel, setCalls = [] } = {}) {
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     useT: () => (key) => key,
+    authScope: () => "test-scope",
+    stageFiles: async () => ({ staged: [], errors: [] }),
+    useAttachmentConfig: () => ({
+      accept: [],
+      maxCount: 10,
+      maxFileBytes: 1024,
+      maxTotalBytes: 2048,
+    }),
+    NEW_DRAFT_KEY: "__new__",
+    clearDraft: () => {},
+    clearStagedAttachments: () => {},
+    getDraft: () => draft,
+    getStagedAttachments: () => [],
+    setDraft: () => {},
+    setStagedAttachments: () => {},
     window: { requestAnimationFrame: (fn) => fn() },
   };
 
   vm.runInNewContext(chatInputSourceForTest(), context);
   const tree = context.globalThis.__testExports.ChatInput({
-    onSend: async () => {},
+    onSend,
     onCancel,
-    disabled: true,
-    canCancel: true,
+    disabled,
+    sendDisabled,
+    canCancel,
   });
   return { tree, components };
 }
@@ -106,12 +154,12 @@ test("ChatInput cancel button invokes onCancel and resets cancelling state", asy
   const cancelPromise = props.onClick();
 
   assert.equal(cancelCalls, 1);
-  assert.deepEqual(setCalls.slice(0, 1), [{ index: 2, value: true }]);
+  assert.deepEqual(setCalls.slice(0, 1), [{ index: 4, value: true }]);
 
   resolveCancel();
   await cancelPromise;
 
-  assert.deepEqual(setCalls.slice(-1), [{ index: 2, value: false }]);
+  assert.deepEqual(setCalls.slice(-1), [{ index: 4, value: false }]);
 });
 
 test("ChatInput cancel button resets cancelling state after rejection", async () => {
@@ -128,7 +176,96 @@ test("ChatInput cancel button resets cancelling state after rejection", async ()
   await assert.rejects(props.onClick(), /cancel failed/);
 
   assert.deepEqual(setCalls, [
-    { index: 2, value: true },
-    { index: 2, value: false },
+    { index: 4, value: true },
+    { index: 4, value: false },
   ]);
+});
+
+test("ChatInput keeps the textarea editable when only submit is disabled", () => {
+  const { tree, components } = renderChatInput({
+    disabled: false,
+    sendDisabled: true,
+    canCancel: false,
+    draft: "next thought",
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  assert.equal(textareaProps.disabled, false);
+  assert.equal(textareaProps.value, "next thought");
+
+  const sendButton = findComponent(tree, components.Button);
+  const sendProps = componentProps(sendButton, components.Button);
+  assert.equal(sendProps.disabled, true);
+});
+
+test("ChatInput blocks Enter send when only submit is disabled", async () => {
+  let sendCalls = 0;
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: true,
+    canCancel: false,
+    draft: "draft while busy",
+    onSend: async () => {
+      sendCalls += 1;
+    },
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  let prevented = false;
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+  await Promise.resolve();
+
+  assert.equal(prevented, true);
+  assert.equal(sendCalls, 0);
+});
+
+test("ChatInput preserves draft when caller refuses send", async () => {
+  const setCalls = [];
+  let sendCalls = 0;
+  const { tree } = renderChatInput({
+    setCalls,
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "draft while busy",
+    onSend: async () => {
+      sendCalls += 1;
+      return null;
+    },
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {},
+  });
+  await flushAsyncHandlers();
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    preventDefault: () => {},
+  });
+  await flushAsyncHandlers();
+
+  assert.equal(sendCalls, 2);
+  assert.equal(
+    setCalls.some((call) => call.index === 0 && call.value === ""),
+    false,
+  );
 });

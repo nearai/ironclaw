@@ -3,29 +3,23 @@ use std::sync::OnceLock;
 use crate::LeakDetector;
 
 pub const PROVIDER_TOOL_NAME_MAX_BYTES: usize = 64;
-pub const PROVIDER_ARGUMENTS_MAX_BYTES: usize = 16 * 1024;
+/// Max serialized size of a single provider tool call's JSON arguments.
+///
+/// This is a bound on *model output*, not a provider request limit, so raising
+/// it cannot cause provider-side rejection. 64 KiB covers legitimate large tool
+/// calls (writing an analyzed CSV/report, a multi-hunk `apply_patch`) that the
+/// previous 16 KiB cap rejected, which left the model unable to comply and
+/// retrying the same call into a give-up loop. It stays bounded — aligned with
+/// the 64 KiB checkpoint-state budget and far below the 4 MiB capability-I/O
+/// staging cap — and the per-string leak scan and depth guard below are
+/// unchanged. See nearai/benchmarks pinchbench failure taxonomy (bucket B).
+pub const PROVIDER_ARGUMENTS_MAX_BYTES: usize = 64 * 1024;
+/// Max size of model-emitted metadata text (reasoning / response reasoning /
+/// signature). Raised from 4 KiB, which truncated legitimate reasoning on
+/// analysis-heavy tasks and forced retries (taxonomy bucket C). Same rationale
+/// as `PROVIDER_ARGUMENTS_MAX_BYTES`: it bounds model output, not a request.
+pub const PROVIDER_METADATA_TEXT_MAX_BYTES: usize = 16 * 1024;
 const PROVIDER_ARGUMENTS_MAX_DEPTH: usize = 16;
-
-const SENSITIVE_PROVIDER_TEXT_MARKERS: [&str; 18] = [
-    "access token",
-    "api key",
-    "api_key",
-    "apikey",
-    "authorization:",
-    "bearer ",
-    "host path",
-    "invalid api key",
-    "invalid_api_key",
-    "password",
-    "passwd",
-    "provider error",
-    "raw runtime",
-    "secret",
-    "stack trace",
-    "tool input",
-    "tool_input",
-    "traceback",
-];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
@@ -212,10 +206,14 @@ fn validate_provider_metadata_text(
             "{label} must not contain NUL/control characters"
         )));
     }
-    let lower = value.to_ascii_lowercase();
-    for forbidden in SENSITIVE_PROVIDER_TEXT_MARKERS {
-        reject_sensitive_provider_text_marker(&lower, label, forbidden)?;
-    }
+    // Sensitive content is gated by the entropy-based LeakDetector below, NOT by
+    // crude substring markers. Words like "password" / "traceback" / "secret"
+    // legitimately appear in model reasoning when analyzing logs, security
+    // findings, or auth flows; blocking the bare words produced false-positive
+    // rejections that the model could not satisfy, driving retry/give-up loops
+    // (nearai/benchmarks pinchbench taxonomy bucket D). The LeakDetector still
+    // catches actual secret-like tokens (API keys, high-entropy values), which
+    // is the real guard here.
     reject_provider_secret_leaks(value, label)
 }
 
@@ -231,19 +229,6 @@ fn validate_provider_argument_text(
         )));
     }
     reject_provider_secret_leaks(value, label)
-}
-
-fn reject_sensitive_provider_text_marker(
-    lower_value: &str,
-    label: &str,
-    forbidden: &'static str,
-) -> Result<(), ProviderValidationError> {
-    if lower_value.contains(forbidden) {
-        return Err(ProviderValidationError::new(format!(
-            "{label} must not contain sensitive marker `{forbidden}`"
-        )));
-    }
-    Ok(())
 }
 
 fn reject_provider_secret_leaks(value: &str, label: &str) -> Result<(), ProviderValidationError> {
@@ -290,19 +275,18 @@ mod tests {
     }
 
     #[test]
-    fn provider_metadata_rejects_sensitive_markers() {
-        let error = validate_optional_provider_metadata_text(
-            Some("provider error included traceback"),
+    fn provider_metadata_allows_sensitive_words_gated_only_by_leak_detector() {
+        // Bucket D fix: bare English words like "provider error" / "traceback" /
+        // "password" are no longer rejected by crude substring markers. They
+        // legitimately appear in model reasoning about logs, security findings,
+        // or auth flows. The entropy-based LeakDetector remains the sole guard
+        // and still catches actual secret-like tokens.
+        validate_optional_provider_metadata_text(
+            Some("provider error included a traceback; the user's password had expired"),
             "provider reasoning",
-            4096,
+            PROVIDER_METADATA_TEXT_MAX_BYTES,
         )
-        .expect_err("sensitive marker should fail");
-
-        assert!(
-            error
-                .to_string()
-                .contains("sensitive marker `provider error`")
-        );
+        .expect("sensitive English words must pass; only the LeakDetector gates real secrets");
     }
 
     #[test]

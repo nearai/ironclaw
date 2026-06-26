@@ -39,6 +39,8 @@ export function cx(...classes) {
  *   label      string
  *   value      string | number
  *   tone       Badge tone
+ *   badgeLabel string (optional) — Badge text; defaults to the tone keyword.
+ *     Pass a translated label so the chip is not an English tone name.
  *   detail     string (optional sub-text)
  *   showDivider boolean
  *   className  string
@@ -52,6 +54,7 @@ export function StatCard({
   label,
   value,
   tone = "muted",
+  badgeLabel,
   detail,
   showDivider = true,
   className = "",
@@ -85,7 +88,7 @@ export function StatCard({
             ${detail}
           </div>`}
         </div>
-        <${Badge} tone=${tone} label=${tone} />
+        <${Badge} tone=${tone} label=${badgeLabel ?? tone} />
       </div>
     </div>
   `;

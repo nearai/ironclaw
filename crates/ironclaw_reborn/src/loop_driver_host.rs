@@ -18,14 +18,14 @@ use ironclaw_hooks::middleware::{
 use ironclaw_host_api::ExtensionId;
 use ironclaw_loop_support::{
     ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, CapabilityResolveError, CapabilitySurfaceProfileFilter,
-    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, GuardedSystemInferencePort,
-    HostIdentityContextSource, HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort,
-    HostSkillContextSource, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
-    ModelGatewayBackedSystemInferencePort, RunCancellationFactory, RunCancellationObservationKind,
-    RunStateLoopCancellationPort, SubagentLoopPromptPort, SubagentPromptComposer,
-    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
-    TurnStateRunCancellationFactory, active_task_compaction_prompt_id,
-    host_managed_loop_compaction_port_with_prompt_id,
+    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, EmptyUserProfileSource,
+    GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue, HostManagedModelGateway,
+    HostQueueLoopInputPort, HostSkillContextSource, HostUserProfileSource, LoopAttachmentReadPort,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, ModelGatewayBackedSystemInferencePort,
+    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
+    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
+    ThreadBackedLoopTranscriptPort, ThreadContextWindowCache, TurnStateRunCancellationFactory,
+    active_task_compaction_prompt_id, host_managed_loop_compaction_port_with_prompt_id,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -74,8 +74,9 @@ use ironclaw_turns::{
         LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort,
         LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort,
         NoOpBudgetAccountant, NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition,
-        RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
-        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        RegisterProviderToolCallRequest, RunScopedHookMilestoneSink, StageCheckpointPayloadRequest,
+        SystemInferencePort, UpdateAssistantDraft, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -199,9 +200,9 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
-        self.inner.register_provider_tool_call(tool_call).await
+        self.inner.register_provider_tool_call(request).await
     }
 
     async fn visible_capabilities(
@@ -899,6 +900,7 @@ where
     cancellation_factory: Arc<dyn RunCancellationFactory>,
     config: TextOnlyLoopHostConfig,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     /// Optional hook dispatcher factory. When set, the factory invokes the
     /// closure on every `build_text_only_host*` call to obtain a fresh
     /// `HookDispatcher`, wraps it in `Arc`, and then plumbs it through
@@ -947,6 +949,11 @@ where
     event_subscription: Option<EventTriggeredHookSubscription>,
     safety_context: InstructionSafetyContext,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
+    /// Per-run user agent-context profile source. Resolved once at loop start;
+    /// result is stamped into `LoopRuntimeContext.user_profile`. Defaults to
+    /// `EmptyUserProfileSource` (returns `None`) so callers that do not wire a
+    /// profile source degrade gracefully rather than failing.
+    user_profile_source: Arc<dyn HostUserProfileSource>,
     communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
     profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
@@ -1002,6 +1009,7 @@ where
             cancellation_factory,
             config,
             skill_context_source: None,
+            attachment_read_port: None,
             hook_dispatcher_factory: None,
             hook_dispatcher_builder_factory: None,
             hook_security_audit_sink: None,
@@ -1011,6 +1019,7 @@ where
             event_subscription: None,
             safety_context,
             identity_context_source: None,
+            user_profile_source: Arc::new(EmptyUserProfileSource),
             communication_context_provider: None,
             input_queue: None,
             profiled_capabilities: None,
@@ -1074,6 +1083,11 @@ where
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
+        self
+    }
+
+    pub fn with_attachment_read_port(mut self, port: Arc<dyn LoopAttachmentReadPort>) -> Self {
+        self.attachment_read_port = Some(port);
         self
     }
 
@@ -1268,6 +1282,15 @@ where
         source: Arc<dyn HostIdentityContextSource>,
     ) -> Self {
         self.identity_context_source = Some(source);
+        self
+    }
+
+    /// Installs the per-user profile source. The source is resolved once at
+    /// loop start; its result is stamped into `LoopRuntimeContext.user_profile`
+    /// so the model sees the user's timezone/locale/location every turn.
+    /// When not called the factory defaults to `EmptyUserProfileSource`.
+    pub fn with_user_profile_source(mut self, source: Arc<dyn HostUserProfileSource>) -> Self {
+        self.user_profile_source = source;
         self
     }
 
@@ -1540,6 +1563,15 @@ where
             Some(fetch) => fetch.resolve(delivery_tools_visible).await,
             None => None,
         };
+        // Resolve the per-user profile once at loop start (a single bounded
+        // memory read). Performance: acceptable here — the existing
+        // `communication` slice already does backend fetches at loop start.
+        // If this becomes a critical-path concern a follow-up can move it
+        // onto the same concurrent fetch budget as `CommunicationContextProvider`.
+        let user_profile = self
+            .user_profile_source
+            .resolve_user_profile(&run_context)
+            .await;
         let prompt_authority = LoopPromptBundleAuthority::shared();
         let surface_state_for_prompt = Arc::clone(&surface_state);
         let prompt_port = HostManagedLoopPromptPort::new(
@@ -1555,9 +1587,9 @@ where
         // Stamped once per loop spawn; a resume creates a new host and restamps.
         .with_runtime_context(LoopRuntimeContext {
             loop_started_at_utc: chrono::Utc::now(),
-            user_timezone: None,
             communication,
             product_context: run_context.product_context.clone(),
+            user_profile,
         });
         let mut prompt: Arc<dyn LoopPromptPort> = Arc::new(prompt_port);
         if let Some(dispatcher) = per_build_dispatcher.as_ref() {
@@ -1612,6 +1644,7 @@ where
             capabilities: Some(Arc::clone(&capabilities)),
             prompt_authority,
             context_window_cache: Some(context_window_cache),
+            attachment_read_port: self.attachment_read_port.clone(),
         });
         let mut model: Arc<dyn LoopModelPort> = Arc::new(HostManagedLoopModelPort::with_guards(
             run_context.clone(),
@@ -1837,11 +1870,9 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
 
     async fn register_provider_tool_call(
         &self,
-        tool_call: ProviderToolCall,
+        request: RegisterProviderToolCallRequest,
     ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
-        self.capabilities
-            .register_provider_tool_call(tool_call)
-            .await
+        self.capabilities.register_provider_tool_call(request).await
     }
 
     async fn visible_capabilities(
@@ -2362,6 +2393,7 @@ mod hook_resolver_adapter_tests {
 
     fn invocation(input_ref: &str) -> CapabilityInvocation {
         CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("v1")
                 .expect("surface version literal valid"),
             capability_id: CapabilityId::new("cap.test").expect("capability id literal valid"),
