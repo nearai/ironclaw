@@ -6,8 +6,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ResourceEstimate,
-    RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
+    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ProviderToolName,
+    ResourceEstimate, RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -1268,7 +1268,7 @@ pub struct ProviderToolCallReplay {
     /// Provider call id referenced by the matching tool result.
     pub provider_call_id: String,
     /// Provider-facing tool name advertised to the model.
-    pub provider_tool_name: String,
+    pub provider_tool_name: ProviderToolName,
     /// Provider-facing tool arguments captured from the model tool call.
     pub arguments: serde_json::Value,
     /// Provider response-level reasoning attached to the tool-call batch.
@@ -1334,7 +1334,7 @@ pub struct ProviderToolDefinition {
     /// Canonical IronClaw capability id backing this provider tool.
     pub capability_id: CapabilityId,
     /// Provider-safe tool name sent to the model.
-    pub name: String,
+    pub name: ProviderToolName,
     /// Provider-safe tool description sent to the model.
     pub description: String,
     /// JSON object schema for provider tool arguments.
@@ -1354,7 +1354,7 @@ pub struct ProviderToolCall {
     /// Provider call id referenced by the matching tool result.
     pub id: String,
     /// Provider-facing tool name returned by the model.
-    pub name: String,
+    pub name: ProviderToolName,
     /// Provider-facing tool arguments returned by the model.
     pub arguments: serde_json::Value,
     /// Provider response-level reasoning attached to the tool-call batch.
@@ -1380,7 +1380,7 @@ pub struct ProviderToolCallReference {
     /// Provider call id referenced by the matching tool result.
     pub provider_call_id: String,
     /// Provider-facing tool name returned by the model.
-    pub provider_tool_name: String,
+    pub provider_tool_name: ProviderToolName,
     /// Canonical IronClaw capability id backing this provider tool.
     pub capability_id: CapabilityId,
     /// Provider-facing tool arguments returned by the model.
@@ -2336,7 +2336,7 @@ mod tests {
             provider_model_id: "model".to_string(),
             turn_id: Some("turn".to_string()),
             id: "call".to_string(),
-            name: name.to_string(),
+            name: ProviderToolName::new(name).expect("provider tool name"),
             arguments: serde_json::json!({}),
             response_reasoning: None,
             reasoning: None,
@@ -2349,7 +2349,7 @@ mod tests {
         let port = DefinitionPort {
             definitions: vec![ProviderToolDefinition {
                 capability_id: CapabilityId::new("demo.allowed").expect("valid capability id"),
-                name: "demo__allowed".to_string(),
+                name: ProviderToolName::new("demo__allowed").expect("provider tool name"),
                 description: "allowed".to_string(),
                 parameters: serde_json::json!({"type": "object"}),
             }],

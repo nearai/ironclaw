@@ -679,6 +679,59 @@ fn reborn_loop_support_llm_wiring_stays_out_of_root_src() {
     );
 }
 
+#[test]
+fn provider_tool_names_stay_at_model_protocol_boundaries() {
+    let root = workspace_root();
+    let mut uses = Vec::new();
+    collect_provider_tool_name_boundary_uses(&root.join("crates"), &root, &mut uses);
+
+    let allowed = BTreeSet::from([
+        // Type definition and provider-wire validation.
+        "crates/ironclaw_host_api/src/ids.rs",
+        "crates/ironclaw_safety/src/lib.rs",
+        "crates/ironclaw_safety/src/provider_validation.rs",
+        // Host loop/run/thread protocol structs that preserve exact model
+        // provider names for tool-result roundtrips and historical replay.
+        "crates/ironclaw_turns/src/run_profile/host.rs",
+        "crates/ironclaw_threads/src/tool_result_reference.rs",
+        // Loop support owns capability-id <-> provider-name surface snapshots,
+        // synthetic provider tools, provider-call registration, and replay refs.
+        "crates/ironclaw_loop_support/src/lib.rs",
+        "crates/ironclaw_loop_support/src/capability_info.rs",
+        "crates/ironclaw_loop_support/src/capability_port.rs",
+        "crates/ironclaw_loop_support/src/capability_port/provider_validation.rs",
+        "crates/ironclaw_loop_support/src/capability_port/surface_snapshot.rs",
+        "crates/ironclaw_loop_support/src/subagent_spawn_port.rs",
+        // The model gateway is the LLM wire boundary. Executor helpers may
+        // rebuild provider calls only from stored replay metadata.
+        "crates/ironclaw_reborn/src/model_gateway.rs",
+        "crates/ironclaw_agent_loop/src/executor/capability_helpers.rs",
+        // Composition-local protocol surfaces that reconstruct provider-shaped
+        // output or local-dev synthetic provider tools.
+        "crates/ironclaw_reborn_composition/src/openai_compat_serve.rs",
+        "crates/ironclaw_reborn_composition/src/runtime/local_dev/synthetic_capability.rs",
+        "crates/ironclaw_reborn_composition/src/trace_capture.rs",
+    ]);
+    let violations = uses
+        .into_iter()
+        .filter(|use_site| !allowed.contains(use_site.path.as_str()))
+        .map(|use_site| {
+            format!(
+                "{}:{} contains `{}`",
+                use_site.path, use_site.line_number, use_site.pattern
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        violations.is_empty(),
+        "ProviderToolName/provider_tool_name is provider-protocol identity, not canonical \
+         capability identity. Product, frontend, workflow, and ordinary routing code must use \
+         CapabilityId and convert only at model-provider/replay boundaries. Unexpected uses:\n{}",
+        violations.join("\n")
+    );
+}
+
 /// Lock the narrowed `ironclaw_reborn` public surface in place.
 ///
 /// `ironclaw_reborn` previously exposed ~25 types as a wall of `pub use`
@@ -1599,6 +1652,106 @@ fn collect_forbidden_string_uses(
             );
         }
     }
+}
+
+struct ProviderToolNameUse {
+    path: String,
+    line_number: usize,
+    pattern: &'static str,
+}
+
+fn collect_provider_tool_name_boundary_uses(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    uses: &mut Vec<ProviderToolNameUse>,
+) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|err| panic!("failed to read dir entry: {err}"));
+        let path = entry.path();
+        if path.is_dir() {
+            collect_provider_tool_name_boundary_uses(&path, root, uses);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
+        if is_rust_test_source_path(&relative) {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        collect_provider_tool_name_uses_in_source(&relative, &contents, uses);
+    }
+}
+
+fn is_rust_test_source_path(relative: &str) -> bool {
+    relative.contains("/tests/")
+        || relative.ends_with("/tests.rs")
+        || relative.ends_with("_tests.rs")
+}
+
+fn collect_provider_tool_name_uses_in_source(
+    relative: &str,
+    contents: &str,
+    uses: &mut Vec<ProviderToolNameUse>,
+) {
+    let mut pending_cfg_test = false;
+    let mut skipping_test_module_depth: Option<usize> = None;
+    for (index, line) in contents.lines().enumerate() {
+        let line_number = index + 1;
+        if let Some(depth) = skipping_test_module_depth {
+            let next_depth = update_brace_depth(depth, line);
+            if next_depth == 0 {
+                skipping_test_module_depth = None;
+            } else {
+                skipping_test_module_depth = Some(next_depth);
+            }
+            continue;
+        }
+
+        let trimmed = line.trim();
+        if trimmed.starts_with("#[cfg(test)]") {
+            pending_cfg_test = true;
+            continue;
+        }
+        if pending_cfg_test {
+            if trimmed.starts_with("#[") || trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with("mod tests") && trimmed.contains('{') {
+                let depth = update_brace_depth(0, line);
+                if depth > 0 {
+                    skipping_test_module_depth = Some(depth);
+                }
+                pending_cfg_test = false;
+                continue;
+            }
+            pending_cfg_test = false;
+        }
+
+        for pattern in ["ProviderToolName", "provider_tool_name"] {
+            if line.contains(pattern) {
+                uses.push(ProviderToolNameUse {
+                    path: relative.to_string(),
+                    line_number,
+                    pattern,
+                });
+            }
+        }
+    }
+}
+
+fn update_brace_depth(depth: usize, line: &str) -> usize {
+    let opens = line.chars().filter(|character| *character == '{').count();
+    let closes = line.chars().filter(|character| *character == '}').count();
+    depth.saturating_add(opens).saturating_sub(closes)
 }
 
 struct BoundaryRule {

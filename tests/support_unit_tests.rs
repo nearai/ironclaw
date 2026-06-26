@@ -866,7 +866,7 @@ mod reborn_support_tests {
         };
         let replay = calls[0].provider_replay.as_ref().expect("provider replay");
         assert_eq!(replay.provider_call_id, "provider-call-9");
-        assert_eq!(replay.provider_tool_name, "test.search");
+        assert_eq!(replay.provider_tool_name.as_str(), "test__search");
         assert_eq!(replay.arguments, serde_json::json!({"q": "near"}));
     }
 
@@ -2148,7 +2148,8 @@ mod reborn_support_tests {
                 provider_model_id: "trace_replay".to_string(),
                 provider_turn_id: "trace-turn".to_string(),
                 provider_call_id: provider_call_id.to_string(),
-                provider_tool_name: provider_tool_name.to_string(),
+                provider_tool_name: ironclaw_host_api::ProviderToolName::new(provider_tool_name)
+                    .expect("provider tool name"),
                 capability_id: CapabilityId::new(capability_id).expect("capability id"),
                 arguments: serde_json::json!({}),
                 response_reasoning: None,

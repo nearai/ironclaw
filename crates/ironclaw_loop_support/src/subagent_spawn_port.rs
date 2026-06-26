@@ -10,7 +10,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{CapabilityId, InvocationId, RuntimeKind, ThreadId};
+use ironclaw_host_api::{CapabilityId, InvocationId, ProviderToolName, RuntimeKind, ThreadId};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, SessionThreadService,
     ThreadMessageId, ThreadScope,
@@ -535,14 +535,15 @@ impl SubagentSpawnCapabilityPort {
         capability_id == &self.spawn_id
     }
 
-    fn is_spawn_provider_tool_name(&self, tool_name: &str) -> bool {
-        tool_name == SPAWN_SUBAGENT_PROVIDER_TOOL_NAME
+    fn is_spawn_provider_tool_name(&self, tool_name: &ProviderToolName) -> bool {
+        tool_name.as_str() == SPAWN_SUBAGENT_PROVIDER_TOOL_NAME
     }
 
     fn spawn_tool_definition(&self) -> ProviderToolDefinition {
         ProviderToolDefinition {
             capability_id: self.spawn_id.clone(),
-            name: SPAWN_SUBAGENT_PROVIDER_TOOL_NAME.to_string(),
+            name: ProviderToolName::new(SPAWN_SUBAGENT_PROVIDER_TOOL_NAME)
+                .expect("spawn_subagent provider tool name is static and provider-safe"),
             description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
             parameters: (*self.parameters_schema).clone(),
         }

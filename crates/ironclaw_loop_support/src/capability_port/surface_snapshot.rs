@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use ironclaw_host_api::{CapabilityId, EffectKind, ExtensionId, ResourceEstimate, RuntimeKind};
+use ironclaw_host_api::{
+    CapabilityId, EffectKind, ExtensionId, ProviderToolName, ResourceEstimate, RuntimeKind,
+};
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView, ConcurrencyHint,
     ProviderToolCall, ProviderToolDefinition,
@@ -16,12 +18,12 @@ pub(super) struct RuntimeSurfaceCapabilitySnapshot {
     pub(super) safe_description: String,
     pub(super) parameters_schema: serde_json::Value,
     pub(super) effects: Vec<EffectKind>,
-    pub(super) provider_tool_name: String,
+    pub(super) provider_tool_name: ProviderToolName,
 }
 
 #[derive(Clone)]
 pub(super) struct SyntheticSurfaceCapabilitySnapshot {
-    provider_tool_name: String,
+    provider_tool_name: ProviderToolName,
     safe_description: String,
     parameters_schema: serde_json::Value,
     kind: SyntheticCapabilityKind,
@@ -41,7 +43,7 @@ pub(super) enum SurfaceCapabilitySnapshot {
 #[derive(Clone, Default)]
 pub(super) struct SurfaceSnapshot {
     pub(super) capabilities: HashMap<CapabilityId, SurfaceCapabilitySnapshot>,
-    pub(super) provider_names: HashMap<String, CapabilityId>,
+    pub(super) provider_names: HashMap<ProviderToolName, CapabilityId>,
 }
 
 pub(super) struct PreparedSurfaceCapabilityCall {
@@ -60,14 +62,13 @@ impl SurfaceSnapshot {
 
     fn insert_synthetic_capabilities(&mut self) -> Result<(), AgentLoopHostError> {
         let capability_id = capability_info::capability_id()?;
-        self.provider_names.insert(
-            capability_info::TOOL_NAME.to_string(),
-            capability_id.clone(),
-        );
+        let provider_tool_name = capability_info::provider_tool_name()?;
+        self.provider_names
+            .insert(provider_tool_name.clone(), capability_id.clone());
         self.capabilities.insert(
             capability_id,
             SurfaceCapabilitySnapshot::Synthetic(SyntheticSurfaceCapabilitySnapshot {
-                provider_tool_name: capability_info::TOOL_NAME.to_string(),
+                provider_tool_name,
                 safe_description: capability_info::tool_definition()?.description,
                 parameters_schema: capability_info::schema(),
                 kind: SyntheticCapabilityKind::CapabilityInfo,
@@ -77,9 +78,11 @@ impl SurfaceSnapshot {
     }
 
     pub(super) fn capability_info(&self, requested: &str) -> Option<CapabilityInfoEntry<'_>> {
-        if let Some(capability_id) = self.provider_names.get(requested) {
-            let capability = self.capabilities.get(capability_id)?;
-            return Some(capability.capability_info(capability_id));
+        if let Ok(provider_name) = ProviderToolName::new(requested) {
+            if let Some(capability_id) = self.provider_names.get(&provider_name) {
+                let capability = self.capabilities.get(capability_id)?;
+                return Some(capability.capability_info(capability_id));
+            }
         }
         let requested_id = CapabilityId::new(requested).ok()?;
         self.capabilities
@@ -89,7 +92,7 @@ impl SurfaceSnapshot {
 
     pub(super) fn provider_capability(
         &self,
-        provider_tool_name: &str,
+        provider_tool_name: &ProviderToolName,
     ) -> Result<(&CapabilityId, &SurfaceCapabilitySnapshot), AgentLoopHostError> {
         let Some(capability_id) = self.provider_names.get(provider_tool_name) else {
             return Err(AgentLoopHostError::new(
@@ -247,7 +250,7 @@ impl SyntheticSurfaceCapabilitySnapshot {
                     capability_id: capability_id.clone(),
                     provider: None,
                     runtime: RuntimeKind::System,
-                    safe_name: self.provider_tool_name.clone(),
+                    safe_name: self.provider_tool_name.as_str().to_string(),
                     safe_description: self.safe_description.clone(),
                     concurrency_hint: ConcurrencyHint::SafeForParallel,
                     parameters_schema: self.parameters_schema.clone(),

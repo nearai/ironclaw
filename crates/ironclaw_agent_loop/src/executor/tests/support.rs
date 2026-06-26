@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, RuntimeKind, TenantId, ThreadId};
+use ironclaw_host_api::{CapabilityId, ProviderToolName, RuntimeKind, TenantId, ThreadId};
 use ironclaw_turns::{
     AgentLoopDriverDescriptor, LoopFailureKind, LoopMessageRef, RunProfileId, RunProfileVersion,
     TurnCheckpointId, TurnId, TurnRunId, TurnScope,
@@ -936,7 +936,8 @@ pub(super) fn provider_calls_response() -> LoopModelResponse {
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
                 provider_call_id: "call_1".to_string(),
-                provider_tool_name: "demo__echo".to_string(),
+                provider_tool_name: ProviderToolName::new("demo__echo")
+                    .expect("provider tool name"),
                 arguments: serde_json::json!({"message":"hello"}),
                 response_reasoning: Some("response reasoning".to_string()),
                 reasoning: Some("call reasoning".to_string()),
@@ -964,7 +965,8 @@ pub(super) fn provider_two_calls_response() -> LoopModelResponse {
                     provider_model_id: "test-model".to_string(),
                     provider_turn_id: "turn_1".to_string(),
                     provider_call_id: "call_1".to_string(),
-                    provider_tool_name: "demo__echo".to_string(),
+                    provider_tool_name: ProviderToolName::new("demo__echo")
+                        .expect("provider tool name"),
                     arguments: serde_json::json!({"message":"first"}),
                     response_reasoning: Some("response reasoning".to_string()),
                     reasoning: Some("first call reasoning".to_string()),
@@ -982,7 +984,8 @@ pub(super) fn provider_two_calls_response() -> LoopModelResponse {
                     provider_model_id: "test-model".to_string(),
                     provider_turn_id: "turn_1".to_string(),
                     provider_call_id: "call_2".to_string(),
-                    provider_tool_name: "demo__echo".to_string(),
+                    provider_tool_name: ProviderToolName::new("demo__echo")
+                        .expect("provider tool name"),
                     arguments: serde_json::json!({"message":"second"}),
                     response_reasoning: Some("response reasoning".to_string()),
                     reasoning: Some("second call reasoning".to_string()),

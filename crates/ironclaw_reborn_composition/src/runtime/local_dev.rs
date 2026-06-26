@@ -524,7 +524,7 @@ impl LoopCapabilityInputResolver for LocalDevCapabilityIo {
         self.display_previews.record_input(
             &run_context.run_id.to_string(),
             &input_ref,
-            &tool_call.name,
+            tool_call.name.as_str(),
             &tool_call.arguments,
         );
         Ok(input_ref)

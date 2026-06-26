@@ -1,5 +1,5 @@
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, TenantId, UserId};
+use ironclaw_host_api::{AgentId, ProviderToolName, TenantId, UserId};
 use ironclaw_threads::{
     AcceptedInboundMessage, AcceptedInboundMessageReplay, AppendAssistantDraftRequest,
     AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest, ContextMessages,
@@ -931,7 +931,7 @@ fn provider_tool_call(name: &str) -> ProviderToolCall {
         provider_model_id: "test-model".to_string(),
         turn_id: Some("provider-turn:test".to_string()),
         id: "call-spawn".to_string(),
-        name: name.to_string(),
+        name: ProviderToolName::new(name).expect("provider tool name"),
         arguments: json!({
             "flavor_id": "general",
             "task": "investigate"
@@ -949,7 +949,7 @@ fn spawn_provider_tool_call() -> ProviderToolCall {
 fn spawn_tool_definition() -> ProviderToolDefinition {
     ProviderToolDefinition {
         capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
-        name: SPAWN_SUBAGENT_PROVIDER_TOOL_NAME.to_string(),
+        name: ProviderToolName::new(SPAWN_SUBAGENT_PROVIDER_TOOL_NAME).expect("provider tool name"),
         description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
         parameters: build_spawn_subagent_parameters_schema(&[]),
     }
@@ -958,7 +958,7 @@ fn spawn_tool_definition() -> ProviderToolDefinition {
 fn custom_tool_definition() -> ProviderToolDefinition {
     ProviderToolDefinition {
         capability_id: CapabilityId::new("builtin.custom_tool").unwrap(),
-        name: "demo__custom".to_string(),
+        name: ProviderToolName::new("demo__custom").expect("provider tool name"),
         description: "Custom delegated tool".to_string(),
         parameters: json!({"type": "object"}),
     }
@@ -1333,7 +1333,7 @@ async fn spawn_tool_definition_is_present_in_structured_tools() {
         })
         .expect("spawn tool definition");
 
-    assert_eq!(definition.name, SPAWN_SUBAGENT_PROVIDER_TOOL_NAME);
+    assert_eq!(definition.name.as_str(), SPAWN_SUBAGENT_PROVIDER_TOOL_NAME);
     assert_eq!(
         definition.parameters["required"],
         json!(["subagent_type", "task"])

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
+};
 use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
 use ironclaw_loop_support::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
@@ -41,7 +43,7 @@ fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
         provider_model_id: "test-model".to_string(),
         turn_id: Some("provider-turn-1".to_string()),
         id: "call-1".to_string(),
-        name: "builtin_shell".to_string(),
+        name: ProviderToolName::new("builtin_shell").expect("provider tool name"),
         arguments,
         response_reasoning: None,
         reasoning: None,

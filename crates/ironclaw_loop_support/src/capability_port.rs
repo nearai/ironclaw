@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId,
     DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, EffectKind,
-    ExecutionContext, ExtensionId, InvocationId, MountView, Principal, ResourceEstimate,
-    RuntimeKind, sha256_digest_token,
+    ExecutionContext, ExtensionId, InvocationId, MountView, Principal, ProviderToolName,
+    ResourceEstimate, RuntimeKind, sha256_digest_token,
 };
 use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
@@ -1951,15 +1951,15 @@ fn provider_schema_is_usable(schema: &serde_json::Value) -> bool {
 
 fn provider_tool_name(
     capability_id: &CapabilityId,
-    existing: &HashMap<String, CapabilityId>,
-) -> String {
+    existing: &HashMap<ProviderToolName, CapabilityId>,
+) -> ProviderToolName {
     let base = provider_tool_name_base(capability_id.as_str());
-    if base.len() <= PROVIDER_TOOL_NAME_MAX_BYTES
+    if let Ok(name) = ProviderToolName::new(base.clone())
         && existing
-            .get(&base)
+            .get(&name)
             .is_none_or(|existing_id| existing_id == capability_id)
     {
-        return base;
+        return name;
     }
     provider_tool_name_with_digest(&base, capability_id.as_str(), existing, 0)
 }
@@ -1967,9 +1967,9 @@ fn provider_tool_name(
 fn provider_tool_name_with_digest(
     base: &str,
     capability_id: &str,
-    existing: &HashMap<String, CapabilityId>,
+    existing: &HashMap<ProviderToolName, CapabilityId>,
     attempt: u16,
-) -> String {
+) -> ProviderToolName {
     let digest_input = if attempt == 0 {
         capability_id.to_string()
     } else {
@@ -1991,6 +1991,8 @@ fn provider_tool_name_with_digest(
         &base[..prefix_end] // safety: prefix_end comes from char_indices(), so it is a UTF-8 boundary.
     };
     let candidate = format!("{prefix}__{suffix}");
+    let candidate = ProviderToolName::new(candidate)
+        .expect("provider tool name generator must produce provider-safe names");
     if existing
         .get(&candidate)
         .is_none_or(|existing_id| existing_id.as_str() == capability_id)
@@ -3208,18 +3210,18 @@ mod tests {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let mut existing = HashMap::new();
         existing.insert(
-            "demo__echo".to_string(),
+            ProviderToolName::new("demo__echo").expect("provider tool name"),
             CapabilityId::new("demo.other").expect("valid capability id"),
         );
         let name = provider_tool_name(&capability_id, &existing);
 
-        assert!(name.len() <= PROVIDER_TOOL_NAME_MAX_BYTES);
+        assert!(name.as_str().len() <= PROVIDER_TOOL_NAME_MAX_BYTES);
         assert!(
-            name.chars().all(
+            name.as_str().chars().all(
                 |character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
             )
         );
-        let suffix = name.rsplit("__").next().expect("digest suffix");
+        let suffix = name.as_str().rsplit("__").next().expect("digest suffix");
         assert_eq!(suffix.len(), PROVIDER_TOOL_NAME_DIGEST_BYTES);
         assert!(
             suffix
@@ -3233,8 +3235,9 @@ mod tests {
         let capability_id = CapabilityId::new("demo.echo.v1").expect("valid capability id");
         let name = provider_tool_name(&capability_id, &HashMap::new());
 
-        assert_eq!(name, "demo__echo__v1");
-        provider_validation::validate_provider_tool_name(&name).expect("provider-safe name");
+        assert_eq!(name.as_str(), "demo__echo__v1");
+        provider_validation::validate_provider_tool_name(name.as_str())
+            .expect("provider-safe name");
     }
 
     #[test]
@@ -4049,7 +4052,7 @@ mod tests {
             provider_model_id: "model".to_string(),
             turn_id: Some("turn_1".to_string()),
             id: "call_1".to_string(),
-            name: "demo__echo".to_string(),
+            name: ProviderToolName::new("demo__echo").expect("provider tool name"),
             arguments: serde_json::json!({"message":"hello"}),
             response_reasoning: None,
             reasoning: None,
@@ -4589,18 +4592,18 @@ mod tests {
         assert!(
             filtered_tool_definitions
                 .iter()
-                .any(|definition| definition.name == capability_info::TOOL_NAME),
+                .any(|definition| definition.name.as_str() == capability_info::TOOL_NAME),
             "capability_info must survive the ordinary model-visible capability filter"
         );
         let tool_definitions = port.tool_definitions().expect("tool definitions");
         assert!(
             tool_definitions
                 .iter()
-                .any(|definition| definition.name == capability_info::TOOL_NAME)
+                .any(|definition| definition.name.as_str() == capability_info::TOOL_NAME)
         );
         let capability_info_definition = tool_definitions
             .iter()
-            .find(|definition| definition.name == capability_info::TOOL_NAME)
+            .find(|definition| definition.name.as_str() == capability_info::TOOL_NAME)
             .expect("capability_info definition is advertised");
         assert_eq!(
             capability_info_definition.parameters["required"],
@@ -4613,7 +4616,7 @@ mod tests {
         );
 
         let mut call = provider_tool_call();
-        call.name = capability_info::TOOL_NAME.to_string();
+        call.name = capability_info::provider_tool_name().expect("provider tool name");
         call.arguments = serde_json::json!({
             "capability_id": capability_id.as_str(),
             "include_schema": true
@@ -4687,7 +4690,7 @@ mod tests {
             .await
             .expect("visible capabilities load");
         let mut call = provider_tool_call();
-        call.name = capability_info::TOOL_NAME.to_string();
+        call.name = capability_info::provider_tool_name().expect("provider tool name");
         call.arguments = serde_json::json!({ "name": capability_id.as_str() });
         let candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
@@ -4881,7 +4884,7 @@ mod tests {
             .await
             .expect("first visible surface loads");
         let mut provider_call = provider_tool_call();
-        provider_call.name = "demo__a__b".to_string();
+        provider_call.name = ProviderToolName::new("demo__a__b").expect("provider tool name");
         let first = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(
                 provider_call.clone(),
@@ -5095,7 +5098,7 @@ mod tests {
             .name;
 
         let mut call = provider_tool_call();
-        call.name = capability_info::TOOL_NAME.to_string();
+        call.name = capability_info::provider_tool_name().expect("provider tool name");
         call.arguments = serde_json::json!({
             "name": provider_tool_name,
             "detail": "summary"
@@ -5170,7 +5173,7 @@ mod tests {
         {
             let mut call = provider_tool_call();
             call.id = format!("call_invalid_detail_{index}");
-            call.name = capability_info::TOOL_NAME.to_string();
+            call.name = capability_info::provider_tool_name().expect("provider tool name");
             call.arguments = arguments;
 
             port.validate_provider_tool_call(&call).expect(
@@ -5257,7 +5260,7 @@ mod tests {
         {
             let mut call = provider_tool_call();
             call.id = format!("call_invalid_name_{index}");
-            call.name = capability_info::TOOL_NAME.to_string();
+            call.name = capability_info::provider_tool_name().expect("provider tool name");
             call.arguments = arguments;
 
             port.validate_provider_tool_call(&call)
@@ -5327,7 +5330,7 @@ mod tests {
             .expect("visible capabilities load");
 
         let mut call = provider_tool_call();
-        call.name = capability_info::TOOL_NAME.to_string();
+        call.name = capability_info::provider_tool_name().expect("provider tool name");
         call.arguments = serde_json::json!({ "name": "demo.missing" });
         let error = port
             .provider_tool_call_capability_ids(&call)
@@ -5336,7 +5339,7 @@ mod tests {
 
         let mut malformed_call = provider_tool_call();
         malformed_call.id = "call_malformed_unknown_target".to_string();
-        malformed_call.name = capability_info::TOOL_NAME.to_string();
+        malformed_call.name = capability_info::provider_tool_name().expect("provider tool name");
         malformed_call.arguments =
             serde_json::json!({ "name": "demo.missing", "detail": "everything" });
         let error = port
@@ -5802,7 +5805,7 @@ mod tests {
 
         // Query by provider tool name
         let mut call = provider_tool_call();
-        call.name = capability_info::TOOL_NAME.to_string();
+        call.name = capability_info::provider_tool_name().expect("provider tool name");
         call.arguments = serde_json::json!({ "name": capability_info::TOOL_NAME });
         port.register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
             .await
@@ -5811,7 +5814,7 @@ mod tests {
         // Query by canonical capability id
         let mut call2 = provider_tool_call();
         call2.id = "call_2".to_string();
-        call2.name = capability_info::TOOL_NAME.to_string();
+        call2.name = capability_info::provider_tool_name().expect("provider tool name");
         call2.arguments = serde_json::json!({ "name": capability_info::CAPABILITY_ID });
         port.register_provider_tool_call(RegisterProviderToolCallRequest::new(call2))
             .await
@@ -5861,7 +5864,7 @@ mod tests {
 
         for (detail, expected_summary) in [(None, false), (Some("summary"), true)] {
             let mut call = provider_tool_call();
-            call.name = capability_info::TOOL_NAME.to_string();
+            call.name = capability_info::provider_tool_name().expect("provider tool name");
             call.arguments = serde_json::json!({ "name": capability_id.as_str() });
             if let Some(detail) = detail {
                 call.arguments["detail"] = serde_json::json!(detail);
@@ -6735,7 +6738,7 @@ mod tests {
             safe_description: "demo capability".to_string(),
             parameters_schema: serde_json::json!({"type":"object"}),
             effects: vec![EffectKind::ReadFilesystem],
-            provider_tool_name: "demo__echo".to_string(),
+            provider_tool_name: ProviderToolName::new("demo__echo").expect("provider tool name"),
         };
 
         let err = invocation_context_from_visible(VisibleInvocationContextRequest {
@@ -6788,7 +6791,7 @@ mod tests {
             safe_description: "demo capability".to_string(),
             parameters_schema: serde_json::json!({"type":"object"}),
             effects: vec![EffectKind::ReadFilesystem],
-            provider_tool_name: "demo__echo".to_string(),
+            provider_tool_name: ProviderToolName::new("demo__echo").expect("provider tool name"),
         };
 
         let invocation_context = invocation_context_from_visible(VisibleInvocationContextRequest {
@@ -6838,7 +6841,7 @@ mod tests {
             safe_description: "demo capability".to_string(),
             parameters_schema: serde_json::json!({"type":"object"}),
             effects: vec![EffectKind::ReadFilesystem],
-            provider_tool_name: "demo__echo".to_string(),
+            provider_tool_name: ProviderToolName::new("demo__echo").expect("provider tool name"),
         };
 
         let invocation_context = invocation_context_from_visible(VisibleInvocationContextRequest {
@@ -6889,7 +6892,7 @@ mod tests {
             safe_description: "demo echo".to_string(),
             parameters_schema: serde_json::json!({ "type": "object" }),
             effects: vec![EffectKind::DispatchCapability],
-            provider_tool_name: "demo_echo".to_string(),
+            provider_tool_name: ProviderToolName::new("demo_echo").expect("provider tool name"),
         };
 
         let invocation_context = invocation_context_from_visible(VisibleInvocationContextRequest {
@@ -6973,7 +6976,7 @@ mod tests {
             safe_description: "demo capability".to_string(),
             parameters_schema: serde_json::json!({"type":"object"}),
             effects: vec![EffectKind::ExecuteCode],
-            provider_tool_name: "demo__echo".to_string(),
+            provider_tool_name: ProviderToolName::new("demo__echo").expect("provider tool name"),
         };
 
         let invocation_context = invocation_context_from_visible(VisibleInvocationContextRequest {

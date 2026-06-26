@@ -548,7 +548,7 @@ fn push_tool_output_items(
                 id: format!("fc_{call_id}"),
                 status: Some(OpenAiResponseOutputItemStatus::Completed),
                 call_id: call_id.clone(),
-                name: provider_call.provider_tool_name.clone(),
+                name: provider_call.provider_tool_name.as_str().to_string(),
                 arguments,
             });
             items.push(OpenAiResponseOutputItem::FunctionCallOutput {

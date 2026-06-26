@@ -909,7 +909,7 @@ mod learning {
                 && let Some(call) = message.tool_result_provider_call.as_ref()
             {
                 out.push_str("tool_call: ");
-                out.push_str(&call.provider_tool_name);
+                out.push_str(call.capability_id.as_str());
                 out.push('\n');
             }
             out.push_str(role);

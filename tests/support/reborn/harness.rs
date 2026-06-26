@@ -42,8 +42,8 @@ use ironclaw_host_api::{
     CapabilityId, CapabilitySet, CredentialStageError, Decision, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, HostPath, InvocationId, MountAlias, MountGrant,
     MountPermissions, MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
-    Obligations, PackageId, Principal, ProjectId, ResourceEstimate, ResourceScope,
-    RuntimeCredentialAccountProviderId, RuntimeHttpEgress, RuntimeHttpEgressError,
+    Obligations, PackageId, Principal, ProjectId, ProviderToolName, ResourceEstimate,
+    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeHttpEgress, RuntimeHttpEgressError,
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId,
     ThreadId, TrustClass, UserId, VirtualPath,
 };
@@ -3388,7 +3388,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let definitions = vec![ProviderToolDefinition {
             capability_id: self.primary_capability_id(),
-            name: self.primary_tool_name().to_string(),
+            name: ProviderToolName::new(self.primary_tool_name()).expect("provider tool name"),
             description: "Echo a test payload".to_string(),
             parameters: json!({
                 "type": "object",
@@ -3720,7 +3720,7 @@ pub fn trace_tool_call_response() -> ironclaw_loop_support::HostManagedModelResp
                 provider_model_id: "trace_replay".to_string(),
                 provider_turn_id: "trace-turn".to_string(),
                 provider_call_id: "call-1".to_string(),
-                provider_tool_name: "test_echo".to_string(),
+                provider_tool_name: ProviderToolName::new("test_echo").expect("provider tool name"),
                 arguments: json!({"message": "hi"}),
                 response_reasoning: None,
                 reasoning: None,

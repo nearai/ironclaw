@@ -13,7 +13,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::sha256_digest_token;
+use ironclaw_host_api::{ProviderToolName, sha256_digest_token};
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
     LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
@@ -832,7 +832,7 @@ where
             let llm_tool_definitions = tool_definitions
                 .into_iter()
                 .map(|definition| {
-                    recovery_tool_names.push(definition.name.clone());
+                    recovery_tool_names.push(definition.name.as_str().to_string());
                     provider_tool_definition_to_llm(definition)
                 })
                 .collect::<Vec<_>>();
@@ -970,7 +970,7 @@ fn recover_textual_tool_calls_from_tool_response(
 
 fn provider_tool_definition_to_llm(definition: ProviderToolDefinition) -> ToolDefinition {
     ToolDefinition {
-        name: definition.name,
+        name: definition.name.into_string(),
         description: definition.description,
         parameters: definition.parameters,
     }
@@ -1018,16 +1018,6 @@ async fn tool_response_to_host(
             .into_iter()
             .map(|definition| definition.name)
             .collect::<HashSet<_>>();
-        if response
-            .tool_calls
-            .iter()
-            .any(|tool_call| !advertised_tool_names.contains(&tool_call.name))
-        {
-            return Err(HostManagedModelError::safe(
-                HostManagedModelErrorKind::InvalidOutput,
-                "model returned a tool call outside the advertised capability surface",
-            ));
-        }
         let mut candidates = Vec::with_capacity(response.tool_calls.len());
         let provider_turn_id = provider_turn_id(provider_turn_scope, &response.tool_calls);
         let provider_calls = response
@@ -1041,7 +1031,16 @@ async fn tool_response_to_host(
                     replay_identity,
                 )
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, HostManagedModelError>>()?;
+        if provider_calls
+            .iter()
+            .any(|provider_call| !advertised_tool_names.contains(&provider_call.name))
+        {
+            return Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidOutput,
+                "model returned a tool call outside the advertised capability surface",
+            ));
+        }
         for provider_call in &provider_calls {
             capabilities
                 .validate_provider_tool_call(provider_call)
@@ -1115,18 +1114,24 @@ fn provider_tool_call_from_llm(
     response_reasoning: Option<String>,
     provider_turn_id: String,
     replay_identity: &ProviderReplayIdentity,
-) -> ProviderToolCall {
-    ProviderToolCall {
+) -> Result<ProviderToolCall, HostManagedModelError> {
+    let name = ProviderToolName::new(tool_call.name).map_err(|_| {
+        HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidOutput,
+            "model returned an invalid provider tool name",
+        )
+    })?;
+    Ok(ProviderToolCall {
         provider_id: replay_identity.provider_id.clone(),
         provider_model_id: replay_identity.provider_model_id.clone(),
         turn_id: Some(provider_turn_id),
         id: tool_call.id,
-        name: tool_call.name,
+        name,
         arguments: tool_call.arguments,
         response_reasoning,
         reasoning: tool_call.reasoning,
         signature: tool_call.signature,
-    }
+    })
 }
 
 fn provider_turn_id(provider_turn_scope: &str, tool_calls: &[ToolCall]) -> String {
@@ -1514,7 +1519,7 @@ fn provider_tool_roundtrip_messages(
                 .map(|(provider_call, summary)| {
                     ChatMessage::tool_result(
                         provider_call.provider_call_id,
-                        provider_call.provider_tool_name,
+                        provider_call.provider_tool_name.into_string(),
                         summary,
                     )
                 }),
@@ -1527,7 +1532,7 @@ fn provider_tool_call_from_reference(
 ) -> ToolCall {
     ToolCall {
         id: provider_call.provider_call_id.clone(),
-        name: provider_call.provider_tool_name.clone(),
+        name: provider_call.provider_tool_name.as_str().to_string(),
         arguments: provider_call.arguments.clone(),
         reasoning: provider_call.reasoning.clone(),
         signature: provider_call.signature.clone(),
