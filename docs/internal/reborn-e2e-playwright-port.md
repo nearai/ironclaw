@@ -1922,6 +1922,35 @@ Behavior adjustment:
   target is id-based dedupe during the terminal timeline refresh that follows a
   replayed or stale projection sequence.
 
+### Step 58: Legacy Extensions Revisit Reload Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported legacy `test_extensions_tab_reloads_on_revisit` to the Reborn
+Extensions page:
+
+- opened the route-mocked Reborn Extensions Registry surface;
+- recorded the initial `/api/webchat/v2/extensions` and registry requests;
+- navigated away through the real SPA sidebar route;
+- returned to Extensions through the real sidebar route;
+- asserted the installed-extension and registry queries refetch on remount.
+
+Issue found and fixed:
+
+- Reborn's global React Query default keeps data fresh for 10 seconds. The
+  Extensions page inherited that default, so a quick revisit showed cached
+  installed/registry/connectable-channel state and did not hit the v2 endpoints.
+  `useExtensions` now sets `refetchOnMount: "always"` for mutable extension
+  catalog queries so install/remove/setup changes made outside the current tab
+  are visible when operators return to the page.
+
+Behavior adjustment:
+
+- Legacy v1 called `loadExtensions()` whenever the Settings Extensions subtab
+  was revisited. Reborn's equivalent is remounting `/v2/extensions/*`; the port
+  asserts query refetches at that SPA boundary instead of old `/api/extensions`
+  globals.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -1943,9 +1972,10 @@ Not yet ported:
   and persisted activity-card contracts; legacy text-alias interception is v1
   behavior superseded by Reborn's disabled-composer gate flow;
 - remaining settings/extension lifecycle scenarios beyond Settings search,
-  Skills, tool permissions, channel label regressions, and the top-level
-  extension install/manage/configure surface, including any future
-  persistence-backed extension-service contracts not visible in the browser;
+  Skills, tool permissions, channel label regressions, extension revisit
+  refetch, and the top-level extension install/manage/configure surface,
+  including any future persistence-backed extension-service contracts not
+  visible in the browser;
 - deeper OAuth/product-auth install/callback flows beyond browser prompt
   handling, extension OAuth-start URL safety, and existing Rust callback
   contracts, including hosted provider refresh and provider-backed extension/MCP

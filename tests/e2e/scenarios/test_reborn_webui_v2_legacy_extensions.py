@@ -181,6 +181,8 @@ async def _open_mocked_extensions_page(
     remove_requests: list[str] = []
     setup_submit_requests: list[dict] = []
     oauth_start_requests: list[dict] = []
+    extension_list_requests: list[str] = []
+    registry_requests: list[str] = []
 
     async def fulfill_json(route, payload, status=200):
         await route.fulfill(
@@ -196,10 +198,12 @@ async def _open_mocked_extensions_page(
         path = urlparse(request.url).path
 
         if path == "/api/webchat/v2/extensions" and request.method == "GET":
+            extension_list_requests.append(request.url)
             await fulfill_json(route, {"extensions": installed_extensions})
             return
 
         if path == "/api/webchat/v2/extensions/registry" and request.method == "GET":
+            registry_requests.append(request.url)
             await fulfill_json(route, {"entries": registry_entries})
             return
 
@@ -397,6 +401,8 @@ async def _open_mocked_extensions_page(
         "remove_requests": remove_requests,
         "setup_submit_requests": setup_submit_requests,
         "oauth_start_requests": oauth_start_requests,
+        "extension_list_requests": extension_list_requests,
+        "registry_requests": registry_requests,
     }
 
 
@@ -446,6 +452,15 @@ async def _capture_next_confirm(page, *, accept: bool):
     return dialog_future
 
 
+async def _wait_for_request_count(requests: list, count: int, *, timeout: float = 5.0):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if len(requests) > count:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"Timed out waiting for request count > {count}; got {len(requests)}")
+
+
 async def test_reborn_legacy_extensions_registry_search_and_install(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -478,6 +493,43 @@ async def test_reborn_legacy_extensions_registry_search_and_install(
             {"package_ref": _package_ref("registry-tool")}
         ]
         await expect(page.get_by_text("Installed").first).to_be_visible(timeout=5000)
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_extensions_page_refetches_on_revisit(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        registry=[REGISTRY_TOOL],
+    )
+    try:
+        page = harness["page"]
+        await expect(page.get_by_text("Registry Tool")).to_be_visible(timeout=5000)
+        first_extension_fetches = len(harness["extension_list_requests"])
+        first_registry_fetches = len(harness["registry_requests"])
+        assert first_extension_fetches >= 1
+        assert first_registry_fetches >= 1
+
+        await page.get_by_role("link", name="Settings").first.click()
+        await page.wait_for_function(
+            "() => location.pathname.startsWith('/v2/settings')",
+            timeout=5000,
+        )
+
+        await page.get_by_role("link", name="Extensions").first.click()
+        await expect(page.get_by_text("Registry Tool")).to_be_visible(timeout=5000)
+
+        await _wait_for_request_count(
+            harness["extension_list_requests"],
+            first_extension_fetches,
+        )
+        await _wait_for_request_count(
+            harness["registry_requests"],
+            first_registry_fetches,
+        )
     finally:
         await harness["context"].close()
 

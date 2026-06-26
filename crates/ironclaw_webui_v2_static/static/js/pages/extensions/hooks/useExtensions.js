@@ -70,16 +70,19 @@ export function useExtensions() {
   const extensionsQuery = useQuery({
     queryKey: ["extensions"],
     queryFn: fetchExtensions,
+    refetchOnMount: "always",
   });
 
   const registryQuery = useQuery({
     queryKey: ["extension-registry"],
     queryFn: fetchExtensionRegistry,
+    refetchOnMount: "always",
   });
 
   const connectableChannelsQuery = useQuery({
     queryKey: ["connectable-channels"],
     queryFn: listConnectableChannels,
+    refetchOnMount: "always",
   });
 
   const invalidate = React.useCallback(() => {
