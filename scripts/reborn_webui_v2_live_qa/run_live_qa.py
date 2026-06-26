@@ -2462,6 +2462,64 @@ async def case_webui_live_llm_chat(ctx: LiveQaContext) -> ProbeResult:
         return _result(case_name, False, started, {"error": str(exc), "marker": marker})
 
 
+async def case_webui_mobile_live_llm_chat(ctx: LiveQaContext) -> ProbeResult:
+    from playwright.async_api import expect
+
+    started = time.monotonic()
+    case_name = "webui_mobile_live_llm_chat"
+    marker = "REBORN_WEBUI_V2_MOBILE_LIVE_QA_OK"
+
+    async def action(page: object) -> None:
+        await page.set_viewport_size({"width": 390, "height": 844})  # type: ignore[attr-defined]
+        await page.goto(
+            f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
+            wait_until="domcontentloaded",
+        )  # type: ignore[attr-defined]
+        composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
+        await expect(composer).to_be_visible(timeout=15000)
+        prompt = (
+            "Mobile live QA verification. Reply with exactly this token and no extra words: "
+            f"{marker}"
+        )
+        await composer.fill(prompt)
+        await composer.press("Enter")
+        await expect(page.locator("[data-testid='msg-assistant']").last).to_contain_text(  # type: ignore[attr-defined]
+            marker,
+            timeout=120000,
+        )
+        await expect(composer).to_be_visible(timeout=15000)
+        has_horizontal_overflow = await page.evaluate(  # type: ignore[attr-defined]
+            "() => document.documentElement.scrollWidth > document.documentElement.clientWidth"
+        )
+        if has_horizontal_overflow:
+            raise LiveQaError("mobile viewport has document-level horizontal overflow")
+
+    try:
+        await _with_page(ctx.output_dir, case_name, action)
+        return _result(
+            case_name,
+            True,
+            started,
+            {
+                "marker": marker,
+                "viewport": {"width": 390, "height": 844},
+                "qa_matrix_test_ids": ["REBCLI-065-TC-20", "REBCLI-065-TC-21"],
+            },
+        )
+    except Exception as exc:
+        return _result(
+            case_name,
+            False,
+            started,
+            {
+                "error": str(exc),
+                "marker": marker,
+                "viewport": {"width": 390, "height": 844},
+                "qa_matrix_test_ids": ["REBCLI-065-TC-20", "REBCLI-065-TC-21"],
+            },
+        )
+
+
 async def case_webui_core_routes(ctx: LiveQaContext) -> ProbeResult:
     from playwright.async_api import expect
 
@@ -4777,6 +4835,7 @@ class CaseSpec:
         requires_github_auth: bool = False,
         default_enabled: bool = True,
         implemented: bool = True,
+        qa_matrix_test_ids: list[str] | None = None,
     ) -> None:
         self.fn = fn
         self.requires_slack = requires_slack
@@ -4787,6 +4846,7 @@ class CaseSpec:
         self.requires_github_auth = requires_github_auth
         self.default_enabled = default_enabled
         self.implemented = implemented
+        self.qa_matrix_test_ids = qa_matrix_test_ids or []
 
 
 CASES: dict[str, CaseSpec] = {
@@ -4840,9 +4900,22 @@ CASES: dict[str, CaseSpec] = {
         case_qa_3a_slack_connect,
         requires_slack=True,
     ),
-    "webui_auth_gate": CaseSpec(case_webui_auth_gate),
-    "webui_live_llm_chat": CaseSpec(case_webui_live_llm_chat),
-    "webui_core_routes": CaseSpec(case_webui_core_routes),
+    "webui_auth_gate": CaseSpec(
+        case_webui_auth_gate,
+        qa_matrix_test_ids=["REBCLI-055-TC-02", "REBCLI-055-TC-05"],
+    ),
+    "webui_live_llm_chat": CaseSpec(
+        case_webui_live_llm_chat,
+        qa_matrix_test_ids=["REBCLI-065-TC-21"],
+    ),
+    "webui_mobile_live_llm_chat": CaseSpec(
+        case_webui_mobile_live_llm_chat,
+        qa_matrix_test_ids=["REBCLI-065-TC-20", "REBCLI-065-TC-21"],
+    ),
+    "webui_core_routes": CaseSpec(
+        case_webui_core_routes,
+        qa_matrix_test_ids=["REBCLI-063-TC-01"],
+    ),
     "qa_3b_endpoint_status_live_chat": CaseSpec(case_qa_3b_endpoint_status_live_chat),
     "qa_3c_endpoint_status_slack_routine": CaseSpec(
         case_qa_3c_endpoint_status_slack_routine,
@@ -4976,6 +5049,14 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
         },
         key=_qa_row_sort_key,
     )
+    represented_test_ids = sorted(
+        {
+            test_id
+            for spec in CASES.values()
+            for test_id in spec.qa_matrix_test_ids
+            if test_id
+        }
+    )
     manifest = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "selected_cases": selected_cases,
@@ -4987,11 +5068,14 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
             "path": qa_matrix_path or None,
             "represented_rows": represented_rows,
             "represented_row_count": len(represented_rows),
+            "represented_test_ids": represented_test_ids,
+            "represented_test_id_count": len(represented_test_ids),
         },
         "cases": [
             {
                 "case": name,
                 "qa_rows": QA_SHEET_CASES.get(name, {}).get("rows", []),
+                "qa_matrix_test_ids": spec.qa_matrix_test_ids,
                 "feature": QA_SHEET_CASES.get(name, {}).get("feature"),
                 "gate": QA_SHEET_CASES.get(name, {}).get("gate"),
                 "default_enabled": spec.default_enabled,
