@@ -2732,3 +2732,26 @@ test("useChat.send: still blocks a duplicate send into the already-running threa
   assert.equal(sentBody(), null, "sendMessage must not be called for a busy thread");
   assert.equal(createThreadCalls(), 0);
 });
+
+test("useChat.send: blocks a send addressed to a busy thread that is NOT the viewed one", async () => {
+  // The block must key on the *destination* thread, not the viewed one:
+  // viewing thread-a, but the active run is on thread-b, and the send is
+  // addressed to thread-b — that destination is busy, so it must be blocked.
+  // This complements the parallel-send test (viewed busy, different target →
+  // allowed) so the pair pins the block on destination identity alone.
+  const { context, sentBody, createThreadCalls } = createParallelSendContext({
+    threadId: "thread-a",
+    activeRun: { runId: "run-b", threadId: "thread-b", status: "running" },
+  });
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat("thread-a");
+  const result = await chat.send("into the busy non-viewed thread", {
+    threadId: "thread-b",
+  });
+
+  assert.equal(result, null, "send into the busy destination thread is rejected");
+  assert.equal(sentBody(), null, "sendMessage must not be called for the busy destination");
+  assert.equal(createThreadCalls(), 0);
+});
