@@ -91,16 +91,13 @@ impl ToolSpec {
         }
     }
 
-    fn tool_definition(
-        &self,
-        capability_id: &CapabilityId,
-    ) -> Result<ProviderToolDefinition, AgentLoopHostError> {
-        Ok(ProviderToolDefinition::from_typed_parts(
+    fn tool_definition(&self, capability_id: &CapabilityId) -> ProviderToolDefinition {
+        ProviderToolDefinition::from_typed_parts(
             capability_id.clone(),
             self.tool_name.clone(),
             self.description.clone(),
             self.parameters_schema.clone(),
-        ))
+        )
     }
 }
 
@@ -250,7 +247,7 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
                     .iter()
                     .any(|definition| &definition.capability_id == capability_id)
                 {
-                    definitions.push(spec.tool_definition(capability_id)?);
+                    definitions.push(spec.tool_definition(capability_id));
                 }
             }
             definitions.sort_by(|left, right| left.name.cmp(&right.name));
