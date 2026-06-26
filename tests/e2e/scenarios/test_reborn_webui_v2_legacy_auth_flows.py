@@ -396,6 +396,37 @@ async def test_reborn_legacy_notion_oauth_prompt_renders_provider_label(
         await context.close()
 
 
+async def test_reborn_legacy_gsuite_oauth_prompt_renders_authorization_action(
+    reborn_v2_server, reborn_v2_browser
+):
+    context, page, _manual_token_requests, _resolve_requests = await _open_stubbed_auth_thread(
+        reborn_v2_server, reborn_v2_browser
+    )
+    try:
+        await _emit_auth_prompt(
+            page,
+            challenge_kind="oauth_url",
+            gate_ref="gsuite-oauth-gate",
+            authorization_url="https://accounts.google.com/o/oauth2/v2/auth?state=gsuite-state",
+            provider="google",
+            account_label="Google Workspace",
+            headline="Connect Google Workspace",
+            body="Google Workspace needs authorization before this run can continue.",
+        )
+
+        gate = page.locator(SEL_V2["auth_gate_for"].format(kind="oauth_url")).first
+        await expect(gate).to_be_visible(timeout=5000)
+        await expect(gate).to_contain_text("Connect Google Workspace")
+        await expect(gate).to_contain_text("Google Workspace")
+        await expect(gate.locator(SEL_V2["auth_oauth_open"])).to_have_attribute(
+            "href",
+            "https://accounts.google.com/o/oauth2/v2/auth?state=gsuite-state",
+        )
+        await expect(gate).to_contain_text("Open Google authorization")
+    finally:
+        await context.close()
+
+
 async def test_reborn_legacy_oauth_callback_completion_clears_matching_gate(
     reborn_v2_server, reborn_v2_browser
 ):

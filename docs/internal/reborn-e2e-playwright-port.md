@@ -2119,6 +2119,30 @@ Behavior adjustment:
   lower-level runtime/product-auth concern until a standalone Reborn provider
   harness exposes that full path through `/api/webchat/v2/*`.
 
+### Step 66: Legacy GSuite OAuth Card Render Port
+
+Extended `test_reborn_webui_v2_legacy_auth_flows.py`.
+
+Ported the skipped browser render assertion from
+`test_v2_gsuite_oauth_flow.py` that the OAuth card exposes a visible
+authorization action when a Google Workspace credential is required:
+
+- emitted a Reborn WebChat v2 `auth_required` prompt with
+  `challenge_kind=oauth_url`;
+- supplied Google Workspace provider/account metadata and an HTTPS Google OAuth
+  authorization URL;
+- asserted the Reborn OAuth gate renders the Google Workspace label, keeps the
+  authorization action visible, and writes the expected HTTPS `href`.
+
+Behavior adjustment:
+
+- The legacy skipped test triggered the prompt by sending chat through the old
+  GSuite provider fixture. The Reborn port protects the browser projection and
+  URL-safety contract for provider-labelled OAuth gates. Full Google provider
+  execution, token exchange, and per-user provider isolation remain service or
+  adapter-level Reborn follow-ups until standalone WebChat v2 exposes that
+  provider harness directly.
+
 ## Open Migration Buckets
 
 Not yet ported:
