@@ -15,6 +15,11 @@ use thiserror::Error;
 use crate::error::Mem0Error;
 use crate::url_check::check_base_url;
 
+/// Upper bound on any single mem0 request. Context retrieval sits on the turn's
+/// critical path, so a hung or unreachable mem0 must fail fast rather than stall
+/// the turn; the provider degrades a retrieval timeout to "no memory context".
+const REQUEST_TIMEOUT_SECS: u64 = 30;
+
 /// HTTP method for a mem0 request. mem0's memory API uses only `POST` (add,
 /// search) and `GET` (list).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,10 +120,12 @@ pub trait Mem0Transport: Send + Sync {
 /// The production mem0 transport: a real `reqwest` client.
 ///
 /// Built the same way the embedding providers build their outbound clients — a
-/// direct `reqwest::Client` with the API key baked into a sensitive
-/// `Authorization: Token <key>` default header, guarded at construction by the
-/// baseline `check_base_url` SSRF check. The raw key is consumed into the
-/// header at construction and never stored on the struct.
+/// direct `reqwest::Client` guarded at construction by the baseline
+/// `check_base_url` SSRF check, with a bounded request timeout and redirects
+/// disabled. The API key is **optional**: a self-hosted mem0 OSS server with
+/// `AUTH_DISABLED=true` needs none; when one is supplied it is baked into a
+/// sensitive `Authorization: Token <key>` default header, consumed at
+/// construction and never stored on the struct.
 pub struct Mem0HttpTransport {
     client: reqwest::Client,
     /// Base URL with any trailing slash trimmed so `base_url + path` (where
@@ -137,25 +144,40 @@ impl std::fmt::Debug for Mem0HttpTransport {
 }
 
 impl Mem0HttpTransport {
-    /// Build the real transport for `base_url`, authenticating with `api_key`.
+    /// Build the real transport for `base_url`, optionally authenticating with
+    /// `api_key`.
+    ///
+    /// `api_key` is `None` for a self-hosted mem0 OSS server running with
+    /// `AUTH_DISABLED=true` (the default local deployment); `Some` for the hosted
+    /// cloud or a self-hosted server with auth enabled.
     ///
     /// Fails closed with [`Mem0Error::InvalidUrl`] when `base_url` does not pass
-    /// the baseline SSRF check, or [`Mem0Error::Client`] when the API key is not
-    /// a valid HTTP header value or the TLS backend cannot be built.
-    pub fn new(base_url: &str, api_key: &str) -> Result<Self, Mem0Error> {
+    /// the baseline SSRF check, or [`Mem0Error::Client`] when a supplied API key is
+    /// not a valid HTTP header value or the TLS backend cannot be built.
+    pub fn new(base_url: &str, api_key: Option<&str>) -> Result<Self, Mem0Error> {
         check_base_url(base_url)?;
 
         let mut headers = reqwest::header::HeaderMap::new();
-        let mut authorization = reqwest::header::HeaderValue::from_str(&format!("Token {api_key}"))
+        if let Some(api_key) = api_key {
+            let mut authorization = reqwest::header::HeaderValue::from_str(&format!(
+                "Token {api_key}"
+            ))
             .map_err(|error| Mem0Error::Client {
                 reason: format!("API key is not a valid Authorization header value: {error}"),
             })?;
-        // Redact the API key from any reqwest header logging.
-        authorization.set_sensitive(true);
-        headers.insert(reqwest::header::AUTHORIZATION, authorization);
+            // Redact the API key from any reqwest header logging.
+            authorization.set_sensitive(true);
+            headers.insert(reqwest::header::AUTHORIZATION, authorization);
+        }
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
+            // Bound every request so an unreachable/hung mem0 fails fast.
+            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            // Never follow redirects: a compromised or misconfigured mem0 must not
+            // be able to bounce a request to an internal endpoint (SSRF defense in
+            // depth, on top of the construction-time base-URL check).
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| Mem0Error::Client {
                 reason: error.to_string(),
@@ -293,30 +315,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn real_transport_builds_with_a_normal_endpoint() {
-        let transport = Mem0HttpTransport::new("https://api.mem0.ai", "m0-secret")
+    fn real_transport_builds_for_a_local_endpoint_without_a_key() {
+        // The default self-hosted mem0 OSS deployment: localhost, no API key.
+        let transport = Mem0HttpTransport::new("http://localhost:8888", None)
+            .expect("a local http endpoint with no key builds");
+        assert_eq!(transport.base_url, "http://localhost:8888");
+    }
+
+    #[test]
+    fn real_transport_builds_with_an_api_key() {
+        let transport = Mem0HttpTransport::new("https://api.mem0.ai", Some("m0-secret"))
             .expect("a normal https endpoint + key builds");
         assert_eq!(transport.base_url, "https://api.mem0.ai");
     }
 
     #[test]
     fn real_transport_trims_trailing_slash() {
-        let transport = Mem0HttpTransport::new("https://api.mem0.ai/", "m0-secret")
+        let transport = Mem0HttpTransport::new("http://localhost:8888/", None)
             .expect("builds with a trailing slash");
-        // Trimmed so `base_url + "/v1/memories/"` is not double-slashed.
-        assert_eq!(transport.base_url, "https://api.mem0.ai");
+        // Trimmed so `base_url + "/memories"` is not double-slashed.
+        assert_eq!(transport.base_url, "http://localhost:8888");
     }
 
     #[test]
     fn real_transport_rejects_a_blocked_url() {
-        let error = Mem0HttpTransport::new("https://169.254.169.254", "m0-secret")
+        let error = Mem0HttpTransport::new("https://169.254.169.254", None)
             .expect_err("cloud-metadata IP must be refused at construction");
         assert!(matches!(error, Mem0Error::InvalidUrl { .. }));
     }
 
     #[test]
     fn real_transport_rejects_a_non_http_scheme() {
-        let error = Mem0HttpTransport::new("file:///etc/passwd", "m0-secret")
+        let error = Mem0HttpTransport::new("file:///etc/passwd", None)
             .expect_err("non-http scheme refused");
         assert!(matches!(error, Mem0Error::InvalidUrl { .. }));
     }
@@ -324,7 +354,7 @@ mod tests {
     #[test]
     fn real_transport_rejects_an_invalid_header_api_key() {
         // A control character cannot be encoded into an Authorization header.
-        let error = Mem0HttpTransport::new("https://api.mem0.ai", "bad\nkey")
+        let error = Mem0HttpTransport::new("https://api.mem0.ai", Some("bad\nkey"))
             .expect_err("an un-encodable API key is refused");
         assert!(matches!(error, Mem0Error::Client { .. }));
     }

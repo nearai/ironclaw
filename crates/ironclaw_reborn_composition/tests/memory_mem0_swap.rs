@@ -30,8 +30,9 @@ use ironclaw_reborn_config::{MemoryAdminOverride, MemoryProfileBinding, MemorySe
 use serde_json::json;
 
 const DOCUMENT_STORE_PROFILE: &str = "memory.document_store.v1";
-const ADD_PATH: &str = "/v1/memories/";
-const SEARCH_PATH: &str = "/v1/memories/search/";
+// Self-hosted mem0 OSS REST paths (no `/v1/` prefix; no trailing slash).
+const ADD_PATH: &str = "/memories";
+const SEARCH_PATH: &str = "/search";
 
 fn invocation() -> MemoryInvocation {
     MemoryInvocation {
@@ -164,16 +165,17 @@ async fn mem0_binding_without_connection_or_transport_fails_closed() {
 }
 
 #[tokio::test]
-async fn mem0_binding_with_real_connection_registers_a_provider() {
+async fn mem0_binding_with_a_local_connection_and_no_key_registers_a_provider() {
     // No transport override: the factory builds the real reqwest-backed provider
-    // from the connection config (base URL + API key) and registers it, so the
-    // document-store profile resolves to mem0.
+    // from the connection config and registers it, so the document-store profile
+    // resolves to mem0. This is the default self-hosted mem0 OSS deployment — a
+    // localhost base URL and NO API key (the server runs with AUTH_DISABLED=true).
     let policy =
         resolve_memory_binding_policy(Some(&mem0_section()), RebornCompositionProfile::Production)
             .expect("policy resolves");
     let deps = MemoryProviderDeps::for_third_party(Mem0ConnectionConfig {
-        base_url: Some("https://api.mem0.ai".to_string()),
-        api_key: Some(secrecy::SecretString::from("m0-test-key".to_string())),
+        base_url: Some("http://localhost:8888".to_string()),
+        api_key: None,
         app_id: None,
     });
     let resolver = build_memory_service_resolver(Some(policy), &deps);
@@ -181,7 +183,7 @@ async fn mem0_binding_with_real_connection_registers_a_provider() {
         resolver
             .resolve_document_store(filesystem(), None)
             .is_some(),
-        "a real mem0 connection must register a provider for the binding"
+        "a local mem0 connection (no key) must register a provider for the binding"
     );
 }
 

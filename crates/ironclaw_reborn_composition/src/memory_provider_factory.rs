@@ -44,11 +44,14 @@ const LOG_TARGET: &str = "ironclaw_reborn::memory";
 /// carries the chosen provider's connection details.
 #[derive(Clone, Default)]
 pub struct Mem0ConnectionConfig {
-    /// mem0 base URL (e.g. `https://api.mem0.ai`). From `[memory].mem0_base_url`
-    /// or the `MEMORY_MEM0_BASE_URL` env override.
+    /// mem0 base URL. Defaults to the self-hosted mem0 OSS server at
+    /// `http://localhost:8888`; overridable via `[memory].mem0_base_url` or the
+    /// `MEMORY_MEM0_BASE_URL` env var.
     pub base_url: Option<String>,
-    /// mem0 API key, from `MEMORY_MEM0_API_KEY`. Held as a [`SecretString`] so it
-    /// is redacted in `Debug`/logs and exposed only when building the transport.
+    /// Optional mem0 API key, from `MEMORY_MEM0_API_KEY`. `None` for a self-hosted
+    /// server with `AUTH_DISABLED=true` (the default). When set, held as a
+    /// [`SecretString`] so it is redacted in `Debug`/logs and exposed only when
+    /// building the transport.
     pub api_key: Option<SecretString>,
     /// Optional mem0 `app_id` partition, from `MEMORY_MEM0_APP_ID`.
     pub app_id: Option<String>,
@@ -166,15 +169,14 @@ fn create_mem0_provider(deps: &MemoryProviderDeps) -> Option<Arc<dyn MemoryServi
         );
         return None;
     };
-    let Some(api_key) = deps.mem0.api_key.as_ref() else {
-        tracing::warn!(
-            target: LOG_TARGET,
-            "mem0 memory binding selected but MEMORY_MEM0_API_KEY is not set; failing closed"
-        );
-        return None;
-    };
+    // The API key is OPTIONAL: a self-hosted mem0 OSS server with
+    // `AUTH_DISABLED=true` (the default local deployment) needs none, so an unset
+    // `MEMORY_MEM0_API_KEY` is no longer fail-closed. When set, it is forwarded as
+    // an `Authorization: Token <key>` header (the hosted cloud / an auth-enabled
+    // self-hosted server).
+    let api_key = deps.mem0.api_key.as_ref().map(|key| key.expose_secret());
 
-    match Mem0HttpTransport::new(base_url, api_key.expose_secret()) {
+    match Mem0HttpTransport::new(base_url, api_key) {
         Ok(transport) => Some(Arc::new(Mem0MemoryService::new(
             Arc::new(transport) as Arc<dyn Mem0Transport>,
             config,
@@ -289,6 +291,19 @@ mod tests {
             base_url: Some("https://api.mem0.ai".to_string()),
             api_key: Some(SecretString::from("m0-key".to_string())),
             app_id: Some("ironclaw-test".to_string()),
+        });
+        assert!(create_document_store_provider(&mem0_binding(), &deps).is_some());
+    }
+
+    #[test]
+    fn mem0_binding_with_a_local_base_url_and_no_key_builds_a_provider() {
+        // The default self-hosted mem0 OSS deployment: a localhost base URL and NO
+        // API key (the server runs with AUTH_DISABLED=true). The key is optional,
+        // so this must build a provider rather than fail closed.
+        let deps = MemoryProviderDeps::for_third_party(Mem0ConnectionConfig {
+            base_url: Some("http://localhost:8888".to_string()),
+            api_key: None,
+            app_id: None,
         });
         assert!(create_document_store_provider(&mem0_binding(), &deps).is_some());
     }

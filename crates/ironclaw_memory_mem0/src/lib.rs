@@ -14,8 +14,10 @@
 //!   directly; it speaks to mem0 through this trait. The production
 //!   implementation [`Mem0HttpTransport`] is a real `reqwest` client (built the
 //!   same way the embedding providers build theirs), guarded by a
-//!   `check_base_url`-style SSRF check and authenticated with an
-//!   `Authorization: Token <key>` header. Tests substitute an in-memory mock.
+//!   `check_base_url`-style SSRF check, with a bounded request timeout and
+//!   redirects disabled, and *optionally* authenticated with an
+//!   `Authorization: Token <key>` header — the key is omitted for a self-hosted
+//!   mem0 OSS server running with `AUTH_DISABLED=true`. Tests substitute a mock.
 //!   This keeps the `MemoryService` mapping unit-testable without network and
 //!   keeps the crate inside its narrow internal-dependency boundary
 //!   (`ironclaw_memory` + `ironclaw_host_api` only).
@@ -26,15 +28,19 @@
 //!
 //! ## mem0 REST surface targeted
 //!
-//! This adapter targets mem0's stable v1 REST surface — `POST /v1/memories/`
-//! (add), `POST /v1/memories/search/` (semantic search), and
-//! `GET /v1/memories/?user_id=…` (list) — which keys memories by a top-level
-//! `user_id`. mem0 has since added a v2/v3 surface that nests entity ids under a
-//! `filters` object (`POST /v3/memories/add/`, `POST /v3/memories/search/`); the
-//! endpoint paths and request shaping are isolated to a handful of constants and
-//! helpers in [`service`], so retargeting is a localized change. The tolerant
-//! response parsing already accepts both a bare array and the `results` /
-//! `memories` / `data` envelopes either surface returns.
+//! This adapter targets the **self-hosted mem0 OSS** REST surface — `POST
+//! /memories` (add), `POST /search` (semantic search), and `GET /memories?user_id=…`
+//! (list) — which keys memories by a top-level `user_id`. This is the surface a
+//! `mem0.Memory` engine exposes behind a thin FastAPI (mem0's own `server/`
+//! shape), run fully locally against a self-hosted embedder/LLM (e.g. Ollama) and
+//! vector store (e.g. Qdrant); the default base URL is `http://localhost:8888`
+//! and no API key is required. Every add sets `infer=false` so content is stored
+//! verbatim (document-store semantics), needing only the embedder. The hosted
+//! cloud's `/v1/memories/…` paths and bearer key are *not* used. The endpoint
+//! paths and request shaping are isolated to a handful of constants and helpers
+//! in [`service`], so retargeting another surface is a localized change. The
+//! tolerant response parsing accepts a bare array or the `results` / `memories` /
+//! `data` envelopes.
 //!
 //! ## Boundary
 //!
@@ -51,8 +57,9 @@ mod url_check;
 /// Reserved extension id under which a deployment binds the mem0 provider to the
 /// `memory.document_store.v1` profile (third-party; in production-shaped
 /// deployments this binding requires an admin override). Valid against the
-/// host-api `ExtensionId` grammar (lowercase, dot-segmented).
-pub const MEM0_MEMORY_EXTENSION_ID: &str = "mem0.cloud.memory";
+/// host-api `ExtensionId` grammar (lowercase, dot-segmented). `local` because
+/// this provider targets a self-hosted mem0 OSS server, not the hosted cloud.
+pub const MEM0_MEMORY_EXTENSION_ID: &str = "mem0.local.memory";
 
 pub use config::Mem0Config;
 pub use error::Mem0Error;

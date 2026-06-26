@@ -1,8 +1,8 @@
 //! The mem0-backed [`MemoryService`] adapter.
 //!
 //! `Mem0MemoryService` maps the provider-neutral IronClaw memory operations onto
-//! the mem0 REST API (`POST /v1/memories/`, `POST /v1/memories/search/`,
-//! `GET /v1/memories/`). It owns no HTTP client: every call goes through the
+//! the self-hosted mem0 OSS REST API (`POST /memories`, `POST /search`,
+//! `GET /memories`). It owns no HTTP client: every call goes through the
 //! injected [`Mem0Transport`], so the same provider is exercised by the real
 //! [`crate::Mem0HttpTransport`] in production and an in-memory mock in tests.
 //!
@@ -15,15 +15,26 @@
 //!
 //! | IronClaw op        | mem0 mapping                                   | fidelity |
 //! |--------------------|------------------------------------------------|----------|
-//! | `search`           | `POST /search/`                                | clean    |
-//! | `retrieve_context` | `POST /search/` → snippets                     | clean    |
-//! | `write` (add)      | `POST /memories/` add                          | good     |
-//! | `read`             | `GET /memories/` + filter by `target` metadata | loose    |
-//! | `tree`             | `GET /memories/` → distinct `target` tags      | loose    |
+//! | `search`           | `POST /search`                                 | clean    |
+//! | `retrieve_context` | `POST /search` → snippets                      | clean    |
+//! | `write` (add)      | `POST /memories` add (`infer=false`, verbatim) | good     |
+//! | `read`             | `GET /memories` + filter by `target` metadata  | loose    |
+//! | `tree`             | `GET /memories` → distinct `target` tags       | loose    |
 //! | `write` (patch)    | unsupported (no substring patch in mem0)       | none     |
 //! | `write` (clear)    | unsupported (no addressable doc to truncate)   | none     |
-//! | `profile_set`      | add a `kind=profile` memory (no merge / CAS)   | loose    |
+//! | `profile_set`      | read-merge-write a `kind=profile` memory       | good     |
 //! | `profile_read`     | latest `kind=profile` memory bytes             | loose    |
+//!
+//! ## `infer=false` (verbatim) document-store mapping
+//!
+//! mem0's `add` defaults to running an LLM to *extract facts* from the message
+//! (e.g. "I love pizza" → "Likes pizza"). For a **document store** that must
+//! round-trip exactly — `read` reconstructs a document from the memories tagged
+//! with a `target`, and `profile_set`/`profile_read` round-trip a structured JSON
+//! blob — that rewrite is lossy. Every add this provider issues therefore sets
+//! `infer=false`, so mem0 stores the content **verbatim** and uses only its
+//! embedder (a self-hosted Ollama embedder in the all-local deployment), never an
+//! LLM. Semantic `search` still works over the verbatim text.
 
 use std::sync::Arc;
 
@@ -38,15 +49,17 @@ use ironclaw_memory::{
     MemoryServiceWriteRequest, MemoryServiceWriteResponse, MemoryWriteStatus,
     memory_context_disabled,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::config::Mem0Config;
 use crate::error::Mem0Error;
 use crate::transport::{Mem0HttpRequest, Mem0HttpResponse, Mem0Transport};
 
-const ADD_PATH: &str = "/v1/memories/";
-const SEARCH_PATH: &str = "/v1/memories/search/";
-const LIST_PATH: &str = "/v1/memories/";
+// Self-hosted mem0 OSS REST paths (no `/v1/` prefix; the hosted cloud used
+// `/v1/memories/…`). `add` and `list` share `/memories`; search is `/search`.
+const ADD_PATH: &str = "/memories";
+const SEARCH_PATH: &str = "/search";
+const LIST_PATH: &str = "/memories";
 const USER_ID_QUERY: &str = "user_id";
 const TARGET_KEY: &str = "target";
 const SOURCE_KEY: &str = "source";
@@ -84,6 +97,10 @@ impl Mem0MemoryService {
             "messages": [{ "role": "user", "content": content }],
             "user_id": namespace,
             "metadata": metadata,
+            // Document-store semantics: store the content verbatim. `infer=false`
+            // disables mem0's LLM fact-extraction so `read`/`profile_read` round-trip
+            // the exact bytes and the all-local deployment needs only an embedder.
+            "infer": false,
         });
         self.stamp_app_id(&mut body);
         body
@@ -100,6 +117,29 @@ impl Mem0MemoryService {
         {
             object.insert("app_id".to_string(), json!(app_id));
         }
+    }
+
+    /// Fetch the latest `kind=profile` memory for `namespace` and parse it as a
+    /// JSON object, for the read step of `profile_set`'s read-merge-write. Returns
+    /// an empty object when there is no prior profile (first write) or the stored
+    /// blob does not parse; surfaces a backend/list failure as an error so a
+    /// transient outage never silently drops the existing fields.
+    async fn fetch_latest_profile_object(
+        &self,
+        namespace: &str,
+    ) -> Result<Map<String, Value>, MemoryServiceError> {
+        let response = self
+            .transport
+            .execute(Mem0HttpRequest::get(
+                LIST_PATH,
+                vec![(USER_ID_QUERY.to_string(), namespace.to_string())],
+            ))
+            .await
+            .map_err(MemoryServiceError::operation_from)?;
+        ensure_success(&response, "profile_set").map_err(MemoryServiceError::operation_from)?;
+        Ok(latest_profile_text(&response_items(&response.body))
+            .and_then(|text| serde_json::from_str::<Map<String, Value>>(text).ok())
+            .unwrap_or_default())
     }
 }
 
@@ -246,13 +286,21 @@ impl MemoryService for Mem0MemoryService {
         invocation: MemoryInvocation,
         request: MemoryServiceProfileSetRequest,
     ) -> Result<MemoryServiceProfileSetResponse, MemoryServiceError> {
-        // MAPPING GAP: mem0 has no structured profile document and no
-        // compare-and-set. Best-effort: serialize the supplied fields and add
-        // them as a `kind=profile` memory. This is last-writer-wins with NO
-        // field-level merge, unlike the native provider's read-modify-write of
-        // `context/profile.json`.
+        // Field-preserving read-merge-write, matching the native provider's
+        // read-modify-write of `context/profile.json` (rather than last-writer-wins
+        // dropping unspecified fields): read the latest profile blob, merge the
+        // supplied fields over it, and write the union as a new `kind=profile`
+        // memory (`infer=false`, so the JSON round-trips verbatim). mem0 is
+        // additive, so the newest memory carries the merged object and
+        // `profile_read` (which returns the latest) sees every preserved field.
+        // mem0 has no compare-and-set, so concurrent writers still race; this
+        // closes the unconditional-drop gap, not the CAS gap.
         let namespace = owner_namespace(&invocation.scope);
-        let serialized = Value::Object(request.fields).to_string();
+        let mut merged = self.fetch_latest_profile_object(&namespace).await?;
+        for (key, value) in request.fields {
+            merged.insert(key, value);
+        }
+        let serialized = Value::Object(merged).to_string();
         let metadata = json!({
             KIND_KEY: PROFILE_KIND,
             TARGET_KEY: PROFILE_TARGET,
@@ -284,13 +332,10 @@ impl MemoryService for Mem0MemoryService {
             .await
             .map_err(MemoryServiceError::operation_from)?;
         ensure_success(&response, "profile_read").map_err(MemoryServiceError::operation_from)?;
-        // MAPPING GAP: return the last-listed `kind=profile` memory's raw bytes,
-        // if any. The host parses + size-caps them, exactly as for native.
-        let document = response_items(&response.body)
-            .into_iter()
-            .filter(|item| item_metadata_str(item, KIND_KEY) == Some(PROFILE_KIND))
-            .filter_map(item_text)
-            .next_back()
+        // MAPPING GAP: return the newest `kind=profile` memory's raw bytes, if any
+        // (newest by `created_at`, since mem0 list order is not chronological). The
+        // host parses + size-caps them, exactly as for native.
+        let document = latest_profile_text(&response_items(&response.body))
             .map(|text| text.as_bytes().to_vec());
         Ok(MemoryServiceProfileReadResponse { document })
     }
@@ -406,6 +451,25 @@ fn item_metadata_str<'a>(item: &'a Value, key: &str) -> Option<&'a str> {
         .and_then(Value::as_str)
 }
 
+/// mem0 returns an ISO-8601 `created_at` on each memory. Used to pick the newest
+/// profile memory deterministically: mem0/Qdrant `get_all` does not guarantee
+/// chronological order, so a `read-merge-write` must not assume "last in list".
+fn item_created_at(item: &Value) -> &str {
+    item.get("created_at").and_then(Value::as_str).unwrap_or("")
+}
+
+/// The text of the newest `kind=profile` memory in a list response, chosen by max
+/// `created_at` (ISO-8601 sorts lexicographically). With timestamps absent (e.g.
+/// unit-test fixtures) all keys tie and `max_by` returns the last element, which
+/// preserves the prior "last memory wins" fallback.
+fn latest_profile_text<'a>(items: &[&'a Value]) -> Option<&'a str> {
+    items
+        .iter()
+        .filter(|item| item_metadata_str(item, KIND_KEY) == Some(PROFILE_KIND))
+        .max_by(|left, right| item_created_at(left).cmp(item_created_at(right)))
+        .and_then(|item| item_text(item))
+}
+
 fn item_id(item: &Value) -> Option<&str> {
     item.get("id").and_then(Value::as_str)
 }
@@ -481,6 +545,8 @@ mod tests {
         assert_eq!(body["user_id"], json!("tenant-mem0/user-mem0"));
         assert_eq!(body["messages"][0]["content"], json!("alpha mem0 marker"));
         assert_eq!(body["metadata"]["target"], json!("notes/alpha.md"));
+        // Document-store writes are verbatim: mem0's LLM fact-extraction is off.
+        assert_eq!(body["infer"], json!(false));
     }
 
     #[tokio::test]
@@ -684,6 +750,60 @@ mod tests {
             .await
             .expect("profile_read should succeed");
         assert_eq!(read.document, Some(b"{\"timezone\":\"UTC\"}".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn profile_set_merges_over_existing_fields_instead_of_dropping_them() {
+        // The existing profile has two fields; the caller sets only one. A
+        // field-preserving read-merge-write must keep the untouched field and
+        // update the supplied one — never last-writer-wins drop `language`.
+        let transport = Arc::new(MockMem0Transport::new(Box::new(|request| {
+            match request.method {
+                // The read step lists the current profile memory.
+                Mem0HttpMethod::Get => Some(Mem0HttpResponse {
+                    status: 200,
+                    body: json!([{
+                        "memory": "{\"timezone\":\"UTC\",\"language\":\"en\"}",
+                        "metadata": { "kind": "profile", "target": "context/profile.json" }
+                    }]),
+                }),
+                // The write step (the add) just succeeds.
+                Mem0HttpMethod::Post => Some(Mem0HttpResponse {
+                    status: 200,
+                    body: json!({ "results": [{ "id": "p-1", "event": "ADD" }] }),
+                }),
+            }
+        })));
+        let service = Mem0MemoryService::new(
+            Arc::clone(&transport) as Arc<dyn Mem0Transport>,
+            Mem0Config::new(),
+        );
+
+        let mut fields = Map::new();
+        fields.insert("timezone".to_string(), json!("PST"));
+        service
+            .profile_set(invocation(), MemoryServiceProfileSetRequest { fields })
+            .await
+            .expect("profile_set should succeed");
+
+        // The add carried the *merged* object: the untouched `language` is kept
+        // and `timezone` is updated. Parse the body so field order is irrelevant.
+        let posts: Vec<_> = transport
+            .recorded()
+            .into_iter()
+            .filter(|request| request.method == Mem0HttpMethod::Post)
+            .collect();
+        assert_eq!(posts.len(), 1, "exactly one add (the merged write)");
+        let written = posts[0].body.as_ref().expect("add body");
+        let content = written["messages"][0]["content"]
+            .as_str()
+            .expect("serialized profile string");
+        let merged: serde_json::Value =
+            serde_json::from_str(content).expect("merged profile is valid JSON");
+        assert_eq!(merged["timezone"], json!("PST"), "supplied field updated");
+        assert_eq!(merged["language"], json!("en"), "untouched field preserved");
+        // And the write is verbatim so the JSON round-trips for profile_read.
+        assert_eq!(written["infer"], json!(false));
     }
 
     #[tokio::test]

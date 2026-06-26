@@ -684,15 +684,21 @@ pub(crate) fn build_services_input_with_options(
 
     // Connection settings for a third-party memory provider (issue #5264), read
     // the same way the embedding providers read theirs: base URL from the
-    // `[memory]` config section or the `MEMORY_MEM0_BASE_URL` env override, and
-    // the API key as a secret from `MEMORY_MEM0_API_KEY`. Inert unless a binding
-    // selects a provider that needs them — the binding policy owns selection.
-    let mem0_base_url = optional_nonempty_env("MEMORY_MEM0_BASE_URL").or_else(|| {
-        config_file
-            .as_ref()
-            .and_then(|file| file.memory.as_ref())
-            .and_then(|memory| memory.mem0_base_url.clone())
-    });
+    // `[memory]` config section or the `MEMORY_MEM0_BASE_URL` env override,
+    // defaulting to the self-hosted mem0 OSS server on localhost (never the hosted
+    // cloud). The API key is OPTIONAL (a self-hosted server with
+    // `AUTH_DISABLED=true` needs none) and, when set, comes as a secret from
+    // `MEMORY_MEM0_API_KEY`. Inert unless a binding selects mem0 — the binding
+    // policy owns selection.
+    const DEFAULT_MEM0_BASE_URL: &str = "http://localhost:8888";
+    let mem0_base_url = optional_nonempty_env("MEMORY_MEM0_BASE_URL")
+        .or_else(|| {
+            config_file
+                .as_ref()
+                .and_then(|file| file.memory.as_ref())
+                .and_then(|memory| memory.mem0_base_url.clone())
+        })
+        .or_else(|| Some(DEFAULT_MEM0_BASE_URL.to_string()));
     let memory_provider_connection = ironclaw_reborn_composition::Mem0ConnectionConfig {
         base_url: mem0_base_url,
         api_key: optional_nonempty_env("MEMORY_MEM0_API_KEY").map(SecretString::from),
