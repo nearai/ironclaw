@@ -57,6 +57,10 @@ openai-compat-beta = [
 postgres = [
     "ironclaw_reborn_composition/postgres",
 ]
+# Enable embedded libSQL storage composition for volume-backed hosted previews.
+libsql = [
+    "ironclaw_reborn_composition/libsql",
+]
 # Compile in the (off-by-default) mem0 third-party memory provider so an
 # `ironclaw-reborn` binary can bind `memory.document_store.v1` to a self-hosted
 # mem0 OSS server. Mirrors the same feature on `ironclaw_reborn_composition`;

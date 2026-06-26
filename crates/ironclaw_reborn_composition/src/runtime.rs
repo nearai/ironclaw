@@ -290,6 +290,17 @@ fn enforce_runtime_cutover_gate(
             }
             Ok(())
         }
+        RebornCompositionProfile::HostedSingleTenantVolume => {
+            if readiness.state != RebornReadinessState::HostedSingleTenantVolumePreviewValidated {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason: format!(
+                        "profile=hosted-single-tenant-volume cannot start Reborn runtime before hosted volume preview readiness is validated; required_state=HostedSingleTenantVolumePreviewValidated, state={:?}",
+                        readiness.state
+                    ),
+                });
+            }
+            Ok(())
+        }
         RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => Ok(()),
     }
 }
@@ -1983,8 +1994,9 @@ impl RebornRuntime {
     }
 
     /// Like [`Self::wait_for_terminal`], but also returns when the run parks on
-    /// a user-resolvable gate (auth/approval/resource) instead of polling until
-    /// those non-terminal states either resolve or hit `RunTimeout`.
+    /// a user-/client-resolvable gate (auth/approval/resource/external-tool)
+    /// instead of polling until those non-terminal states either resolve or hit
+    /// `RunTimeout`.
     /// `BlockedDependentRun` is deliberately excluded — it is an internal wait
     /// on a child run, not facade-resolvable, so it keeps polling. The returned
     /// state carries the `Blocked*` status and
@@ -2011,7 +2023,8 @@ impl RebornRuntime {
                 .await?;
             // Exhaustive on purpose: a new `TurnStatus` variant must force a
             // compile error here rather than silently defaulting to "not a
-            // gate". Only the user-resolvable gates short-circuit recording.
+            // gate". Only the user-/client-resolvable gates
+            // (auth/approval/resource/external-tool) short-circuit recording.
             // `BlockedDependentRun` is an internal wait on a child run (the
             // upstream contract names it `AwaitDependentRun`) — it is not
             // resolvable through the gate facade, so it keeps polling like
@@ -2020,6 +2033,10 @@ impl RebornRuntime {
             let blocked_on_gate = match state.status {
                 TurnStatus::BlockedApproval
                 | TurnStatus::BlockedAuth
+                // External-tool gates are resolved by the API client submitting
+                // tool output, not by the runtime — short-circuit the wait and
+                // return the parked state instead of polling forever.
+                | TurnStatus::BlockedExternalTool
                 | TurnStatus::BlockedResource => true,
                 TurnStatus::BlockedDependentRun
                 | TurnStatus::Queued
@@ -2365,7 +2382,8 @@ impl RebornRuntime {
 ///
 /// **Currently supported profiles:** `RebornCompositionProfile::LocalDev`,
 /// `RebornCompositionProfile::LocalDevYolo`,
-/// `RebornCompositionProfile::HostedSingleTenant`, and
+/// `RebornCompositionProfile::HostedSingleTenant`,
+/// `RebornCompositionProfile::HostedSingleTenantVolume`, and
 /// `RebornCompositionProfile::Production` are wired end-to-end here. Production
 /// starts only after readiness diagnostics validate that live traffic can be
 /// exposed without a partial cutover.
@@ -2402,23 +2420,22 @@ pub async fn build_reborn_runtime(
     })?;
 
     let profile = services_input.profile();
-    match profile {
-        RebornCompositionProfile::LocalDev
-        | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenant
-        | RebornCompositionProfile::Production => {}
-        RebornCompositionProfile::MigrationDryRun => {
+    if !profile.starts_live_runtime() {
+        if profile == RebornCompositionProfile::MigrationDryRun {
             return Err(RebornRuntimeError::InvalidArgument {
                 reason:
                     "profile=migration-dry-run validates production-shaped wiring but must not start live Reborn runtime traffic"
                         .to_string(),
             });
         }
-        RebornCompositionProfile::Disabled => {
+        if profile == RebornCompositionProfile::Disabled {
             return Err(RebornRuntimeError::InvalidArgument {
                 reason: "profile=disabled must not start live Reborn runtime traffic".to_string(),
             });
         }
+        return Err(RebornRuntimeError::InvalidArgument {
+            reason: format!("profile={profile} must not start live Reborn runtime traffic"),
+        });
     }
     if services_input.runtime_policy().is_none() {
         return Err(RebornRuntimeError::InvalidArgument {
@@ -2502,9 +2519,7 @@ pub async fn build_reborn_runtime(
     let production_scheduler_wake: Option<ironclaw_reborn::runtime::SchedulerWakeWiring> = None;
 
     let runtime_parts = match profile {
-        RebornCompositionProfile::LocalDev
-        | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenant => {
+        profile if profile.uses_local_runtime_substrate() => {
             let local_runtime =
                 services
                     .local_runtime
@@ -4094,6 +4109,21 @@ mod tests {
     }
 
     #[test]
+    fn runtime_cutover_gate_allows_hosted_volume_preview_readiness() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            RebornReadinessState::HostedSingleTenantVolumePreviewValidated,
+            vec![crate::RebornReadinessDiagnostic::hosted_single_tenant_volume()],
+        );
+
+        super::enforce_runtime_cutover_gate(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            &readiness,
+        )
+        .expect("validated hosted volume preview runtime can start");
+    }
+
+    #[test]
     fn runtime_cutover_gate_rejects_local_dev_readiness_for_hosted_single_tenant() {
         let readiness = readiness_for_runtime_gate(
             RebornCompositionProfile::HostedSingleTenant,
@@ -4112,6 +4142,32 @@ mod tests {
         assert!(reason.contains("hosted-single-tenant"), "reason: {reason}");
         assert!(
             reason.contains("HostedSingleTenantValidated"),
+            "reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn runtime_cutover_gate_rejects_local_dev_readiness_for_hosted_volume() {
+        let readiness = readiness_for_runtime_gate(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            RebornReadinessState::DevOnly,
+            vec![crate::RebornReadinessDiagnostic::local_dev()],
+        );
+
+        let error = super::enforce_runtime_cutover_gate(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            &readiness,
+        )
+        .expect_err("hosted volume runtime requires preview readiness");
+        let RebornRuntimeError::InvalidArgument { reason } = error else {
+            panic!("expected invalid argument, got {error:?}");
+        };
+        assert!(
+            reason.contains("hosted-single-tenant-volume"),
+            "reason: {reason}"
+        );
+        assert!(
+            reason.contains("HostedSingleTenantVolumePreviewValidated"),
             "reason: {reason}"
         );
     }

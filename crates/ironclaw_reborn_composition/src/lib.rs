@@ -224,8 +224,10 @@ pub use llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
 pub use llm_key_store::{LlmKeyStore, LlmKeyStoreError};
 pub use local_runtime_profile::{
     RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions,
-    hosted_single_tenant_runtime_policy, local_dev_runtime_policy, local_dev_yolo_runtime_policy,
-    local_runtime_build_input, local_runtime_build_input_with_options,
+    hosted_single_tenant_runtime_policy, hosted_single_tenant_volume_build_input,
+    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
+    local_dev_yolo_runtime_policy, local_runtime_build_input,
+    local_runtime_build_input_with_options,
 };
 pub use memory_binding::{memory_binding_diagnostics, resolve_memory_binding_policy};
 pub use memory_provider_factory::{

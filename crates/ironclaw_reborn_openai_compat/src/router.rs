@@ -4,13 +4,14 @@ use axum::Router;
 use axum::routing::{get, post};
 
 use crate::descriptors::{
-    OPENAI_COMPAT_PATTERN_CHAT_COMPLETIONS, OPENAI_COMPAT_PATTERN_RESPONSES_API_CREATE,
+    OPENAI_COMPAT_PATTERN_CHAT_COMPLETIONS, OPENAI_COMPAT_PATTERN_MODELS_API_LIST,
+    OPENAI_COMPAT_PATTERN_MODELS_LIST, OPENAI_COMPAT_PATTERN_RESPONSES_API_CREATE,
     OPENAI_COMPAT_PATTERN_RESPONSES_API_ITEM, OPENAI_COMPAT_PATTERN_RESPONSES_API_ITEM_CANCEL,
     OPENAI_COMPAT_PATTERN_RESPONSES_V1_CREATE, OPENAI_COMPAT_PATTERN_RESPONSES_V1_ITEM,
     OPENAI_COMPAT_PATTERN_RESPONSES_V1_ITEM_CANCEL,
 };
 use crate::handlers;
-use crate::{OpenAiChatCompletionsWorkflow, OpenAiResponsesWorkflow};
+use crate::{OpenAiChatCompletionsWorkflow, OpenAiCompatModelCatalog, OpenAiResponsesWorkflow};
 
 #[derive(Clone, Default)]
 pub struct OpenAiCompatRouterState {
@@ -24,6 +25,12 @@ pub struct OpenAiCompatRouterState {
     /// arch-exempt: optional Arc, genuinely optional by design; default
     /// fail-closed behavior is intentional until host composition wires #4445.
     responses: Option<Arc<OpenAiResponsesWorkflow>>,
+    /// Wired by host composition when `openai-compat-beta` is active.
+    /// When `None`, `GET /v1/models` returns 501 fail-closed.
+    /// arch-exempt: optional Arc, genuinely optional by design; default
+    /// fail-closed behavior is intentional until host composition wires the
+    /// model catalog.
+    models: Option<Arc<dyn OpenAiCompatModelCatalog>>,
 }
 
 impl OpenAiCompatRouterState {
@@ -52,12 +59,25 @@ impl OpenAiCompatRouterState {
         self
     }
 
+    pub fn with_models(models: Arc<dyn OpenAiCompatModelCatalog>) -> Self {
+        Self::default().with_models_catalog(models)
+    }
+
+    pub fn with_models_catalog(mut self, models: Arc<dyn OpenAiCompatModelCatalog>) -> Self {
+        self.models = Some(models);
+        self
+    }
+
     pub(crate) fn chat_completions(&self) -> Option<Arc<OpenAiChatCompletionsWorkflow>> {
         self.chat_completions.clone()
     }
 
     pub(crate) fn responses(&self) -> Option<Arc<OpenAiResponsesWorkflow>> {
         self.responses.clone()
+    }
+
+    pub(crate) fn models(&self) -> Option<Arc<dyn OpenAiCompatModelCatalog>> {
+        self.models.clone()
     }
 }
 
@@ -74,6 +94,14 @@ fn openai_compat_routes() -> Router<OpenAiCompatRouterState> {
         .route(
             OPENAI_COMPAT_PATTERN_CHAT_COMPLETIONS,
             post(handlers::chat_completions),
+        )
+        .route(
+            OPENAI_COMPAT_PATTERN_MODELS_LIST,
+            get(handlers::models_list),
+        )
+        .route(
+            OPENAI_COMPAT_PATTERN_MODELS_API_LIST,
+            get(handlers::models_list),
         )
         .route(
             OPENAI_COMPAT_PATTERN_RESPONSES_API_CREATE,

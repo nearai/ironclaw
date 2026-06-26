@@ -24,7 +24,13 @@ fn deployment_profile(profile: RebornCompositionProfile) -> MemoryDeploymentProf
             MemoryDeploymentProfile::LocalDev
         }
         RebornCompositionProfile::LocalDevYolo => MemoryDeploymentProfile::LocalDevYolo,
-        RebornCompositionProfile::HostedSingleTenant => MemoryDeploymentProfile::HostedSingleTenant,
+        // Volume-backed hosted single-tenant shares the same single-tenant trust
+        // model as plain hosted-single-tenant, so it gets the same memory
+        // deployment classification (and the same binding-certification rules).
+        RebornCompositionProfile::HostedSingleTenant
+        | RebornCompositionProfile::HostedSingleTenantVolume => {
+            MemoryDeploymentProfile::HostedSingleTenant
+        }
         RebornCompositionProfile::Production => MemoryDeploymentProfile::Production,
         RebornCompositionProfile::MigrationDryRun => MemoryDeploymentProfile::MigrationDryRun,
     }
