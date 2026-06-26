@@ -14,14 +14,44 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::UserId;
 use ironclaw_host_api::VirtualPath;
 use ironclaw_turns::run_profile::LoopRunContext;
+use ironclaw_turns::scope::{TurnActor, TurnScope};
 
 use ironclaw_capability_policy::{
     CapabilityPolicyDeltaStore, PolicyResolver, PolicySubject, StaticCapabilityDefaultPolicySource,
     StoreBackedPolicyResolver,
 };
 use ironclaw_product_workflow_storage::FilesystemCapabilityPolicyDeltaStore;
+
+/// The acting principal for capability policy: the turn's actor (the user
+/// driving it) first, then the explicit thread owner. A shared (room-agent)
+/// account resolves to its own `UserId` here when a turn is driven as it.
+/// Returns `None` for an ownerless / actor-fallback turn.
+///
+/// SUBJECT INVARIANT (epic #5261): all four policy dimensions must resolve the
+/// same `PolicySubject` for a given turn or an admin grant applies
+/// inconsistently. Availability and configuration key off this helper
+/// (actor-first, then explicit owner); approval (`PolicyResolverAdminApprovalSource`)
+/// and identity (`resolve_identity_mandate`) key off the dispatch
+/// `ResourceScope.user_id`. Those agree whenever the actor IS the acting user —
+/// which is every path the hand-driven Acme walkthrough exercises (you drive as
+/// each user directly, including the shared `engineering@` account). They could
+/// diverge only on a future delegated turn where `actor != resource_scope owner`;
+/// aligning the dispatch `ResourceScope` with this helper for that case is a
+/// deferred follow-up (not exercised by the milestone). Lives here (the
+/// #4544-independent engine) so both the availability resolver
+/// (`crate::capability_surface_policy`) and the config adapter below share one
+/// copy.
+pub(crate) fn principal_user_id<'a>(
+    scope: &'a TurnScope,
+    actor: Option<&'a TurnActor>,
+) -> Option<&'a UserId> {
+    actor
+        .map(|actor| &actor.user_id)
+        .or_else(|| scope.explicit_owner_user_id())
+}
 
 /// Durable virtual root for the local-dev capability-policy **delta** store
 /// (#5273). Sits under the SAME mounted prefix as the installation store
@@ -87,10 +117,8 @@ impl ironclaw_loop_support::LoopCapabilityConfigSource for PolicyResolverConfigS
         capability_id: &CapabilityId,
     ) -> Result<Option<serde_json::Value>, ironclaw_turns::run_profile::AgentLoopHostError> {
         // Use the SAME acting-principal derivation the availability seam uses.
-        let Some(user_id) = crate::capability_surface_policy::principal_user_id(
-            &run_context.scope,
-            run_context.actor.as_ref(),
-        ) else {
+        let Some(user_id) = principal_user_id(&run_context.scope, run_context.actor.as_ref())
+        else {
             // Ownerless / actor-fallback turn: no subject, so no admin config to
             // overlay. Fail-OPEN — the model input dispatches un-merged.
             return Ok(None);
