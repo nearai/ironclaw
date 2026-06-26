@@ -138,6 +138,17 @@ OAUTH_TOOL = {
     "onboarding_state": "setup_required",
 }
 
+CONFIG_TOOL_REGISTRY = {
+    "package_ref": _package_ref("config-tool"),
+    "display_name": "Config Tool",
+    "kind": "wasm_tool",
+    "description": "A registry tool that requires manual setup.",
+    "keywords": ["config"],
+    "installed": True,
+    "has_auth": True,
+    "needs_setup": True,
+}
+
 
 async def _open_mocked_extensions_page(
     reborn_v2_server,
@@ -274,18 +285,34 @@ async def _open_mocked_extensions_page(
                 extension.get("package_ref", {}).get("id") == package_id
                 for extension in installed_extensions
             ):
+                requires_setup = bool(entry.get("needs_setup") or entry.get("has_auth"))
                 installed = dict(entry)
                 installed.update(
                     {
                         "active": False,
                         "authenticated": False,
-                        "activation_status": "installed",
+                        "has_auth": bool(entry.get("has_auth") or requires_setup),
+                        "needs_setup": requires_setup,
+                        "activation_status": (
+                            "setup_required" if requires_setup else "installed"
+                        ),
+                        "onboarding_state": (
+                            "setup_required" if requires_setup else "installed"
+                        ),
                         "tools": entry.get("tools") or [],
                     }
                 )
                 installed.pop("installed", None)
                 installed_extensions.append(installed)
-            await fulfill_json(route, {"success": True, "message": "Registry Tool installed"})
+            if entry:
+                entry["installed"] = True
+            await fulfill_json(
+                route,
+                {
+                    "success": True,
+                    "message": f"{(entry or {}).get('display_name') or package_id} installed",
+                },
+            )
             return
 
         if (
@@ -324,6 +351,9 @@ async def _open_mocked_extensions_page(
                 for extension in installed_extensions
                 if extension.get("package_ref", {}).get("id") != package_id
             ]
+            for entry in registry_entries:
+                if entry.get("package_ref", {}).get("id") == package_id:
+                    entry["installed"] = False
             await fulfill_json(route, {"success": True, "message": f"{package_id} removed"})
             return
 
@@ -489,6 +519,90 @@ async def test_reborn_legacy_extensions_remove_cancel_keeps_card(
 
         await expect(active_card).to_be_visible(timeout=5000)
         assert harness["remove_requests"] == []
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_extensions_reinstall_after_remove_requires_setup_again(
+    reborn_v2_server, reborn_v2_browser
+):
+    configured_tool = {
+        **CONFIG_TOOL,
+        "active": True,
+        "authenticated": True,
+        "needs_setup": False,
+        "activation_status": "active",
+        "onboarding_state": "ready",
+    }
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[configured_tool],
+        registry=[CONFIG_TOOL_REGISTRY],
+        setup_payloads={"config-tool": _manual_config_setup_payload()},
+        tab="installed",
+    )
+    try:
+        page = harness["page"]
+        configured_card = _card_by_title(page, "Config Tool")
+        await expect(configured_card).to_be_visible(timeout=5000)
+        await _open_card_menu(configured_card)
+        await expect(
+            page.get_by_role("menuitem", name="Reconfigure", exact=True)
+        ).to_have_count(1)
+
+        dialog_future = await _capture_next_confirm(page, accept=True)
+        await page.get_by_role("menuitem", name="Remove").click()
+        dialog = await asyncio.wait_for(dialog_future, timeout=5)
+        assert dialog["type"] == "confirm"
+        assert "Config Tool" in dialog["message"]
+        await expect(page.get_by_text("Config Tool removed")).to_be_visible(timeout=5000)
+        assert harness["remove_requests"] == ["config-tool"]
+
+        await page.goto(
+            f"{reborn_v2_server}/v2/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        available_card = _card_by_title(page, "Config Tool")
+        await expect(available_card).to_be_visible(timeout=5000)
+        await expect(available_card.get_by_role("button", name="Install")).to_be_visible()
+        await available_card.get_by_role("button", name="Install").click()
+        await expect(page.get_by_text("Config Tool installed")).to_be_visible(timeout=5000)
+        assert harness["install_requests"] == [
+            {"package_ref": _package_ref("config-tool")}
+        ]
+
+        reinstalled_card = _card_by_title(page, "Config Tool")
+        await expect(reinstalled_card.get_by_text("setup needed")).to_be_visible(
+            timeout=5000
+        )
+        await expect(reinstalled_card.get_by_role("button", name="Configure")).to_have_count(
+            1
+        )
+        await expect(
+            reinstalled_card.get_by_role("button", name="Reconfigure")
+        ).to_have_count(0)
+
+        await reinstalled_card.get_by_role("button", name="Configure").click()
+        await expect(
+            page.get_by_role("heading", name="Configure Config Tool")
+        ).to_be_visible(timeout=5000)
+        await page.locator('input[type="password"]').first.fill("fresh-token")
+        await page.get_by_role("button", name="Save").click()
+        await expect(
+            page.get_by_role("heading", name="Configure Config Tool")
+        ).to_have_count(0)
+        assert harness["setup_submit_requests"] == [
+            {
+                "package_id": "config-tool",
+                "body": {
+                    "action": "submit",
+                    "payload": {
+                        "secrets": {"API_TOKEN": "fresh-token"},
+                        "fields": {},
+                    },
+                },
+            }
+        ]
     finally:
         await harness["context"].close()
 

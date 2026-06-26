@@ -1453,6 +1453,28 @@ Behavior adjustment:
   extension-service contract tests that assert the new API shape instead of the
   old `/api/extensions/*` responses.
 
+### Step 38: Legacy Extension Reinstall-State Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the user-visible remove/reinstall invariant from legacy
+`test_wasm_lifecycle.py` to Reborn's `/v2/extensions` UI:
+
+- a configured extension can be removed through the installed extension card;
+- after removal, the same registry entry returns to the available install list;
+- reinstalling the extension produces a fresh unconfigured card with the
+  `setup_required` state instead of reusing the previous authenticated state;
+- the reinstalled card exposes `Configure`, not `Reconfigure`;
+- saving a fresh token after reinstall posts the new setup payload through the
+  Reborn v2 extension setup endpoint.
+
+Behavior adjustment:
+
+- The port asserts Reborn's current lifecycle DTOs and browser states
+  (`/api/webchat/v2/extensions/*`, `package_ref`, `needs_setup`,
+  `onboarding_state`) instead of the legacy `/api/extensions/*` response field
+  names and secret-table assertions.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -1523,7 +1545,9 @@ Not yet ported:
   than copied to the standalone WebUI harness;
 - legacy WASM lifecycle API parity, because `test_wasm_lifecycle.py` asserts
   exact `/api/extensions/*` registry/install/setup/remove/reinstall response
-  fields and old extension auth state;
+  fields and old extension auth state. Reborn browser coverage now includes the
+  remove/reinstall fresh-setup invariant, but not the legacy API shape or
+  secret-table side effects;
 - provider-fixture full-path parity for Google/GitHub/Slack/Notion flows where
   the current tests still use old gateway chat/history endpoints or remain
   browser-skipped pending a Reborn-native `webui-v2-beta` harness;
