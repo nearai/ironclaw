@@ -288,10 +288,7 @@ impl RebornBuildInput {
         owner_id: impl Into<String>,
         root: PathBuf,
     ) -> Self {
-        debug_assert!(matches!(
-            profile,
-            RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo
-        ));
+        debug_assert!(profile.uses_local_dev_storage_input());
         Self::new(
             profile,
             owner_id,
