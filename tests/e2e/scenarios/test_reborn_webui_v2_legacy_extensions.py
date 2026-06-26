@@ -590,6 +590,64 @@ async def test_reborn_legacy_extensions_install_failure_keeps_registry_entry_ava
         await harness["context"].close()
 
 
+async def test_reborn_legacy_install_setup_required_channel_opens_configure_modal(
+    reborn_v2_server, reborn_v2_browser
+):
+    setup_channel = {
+        **AVAILABLE_CHANNEL,
+        "has_auth": True,
+        "needs_setup": True,
+    }
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        registry=[setup_channel],
+        setup_payloads={
+            "slack-channel": {
+                "name": "slack-channel",
+                "kind": "wasm_channel",
+                "secrets": [
+                    {
+                        "name": "SLACK_BOT_TOKEN",
+                        "prompt": "Slack bot token",
+                        "provided": False,
+                        "optional": False,
+                        "auto_generate": False,
+                    }
+                ],
+                "fields": [],
+                "onboarding": {
+                    "credential_instructions": "Enter the Slack channel token.",
+                    "credential_next_step": "Save to continue pairing.",
+                },
+            }
+        },
+        tab="channels",
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, "Slack Channel")
+        await expect(card).to_be_visible(timeout=5000)
+
+        await card.get_by_role("button", name="Install").click()
+
+        await expect(page.get_by_text("Slack Channel installed")).to_be_visible(
+            timeout=5000
+        )
+        assert harness["install_requests"] == [
+            {"package_ref": _package_ref("slack-channel")}
+        ]
+        await expect(
+            page.get_by_role("heading", name="Configure Slack Channel")
+        ).to_be_visible(timeout=5000)
+        await expect(page.get_by_text("Enter the Slack channel token.")).to_be_visible()
+        await expect(page.get_by_text("Slack bot token")).to_be_visible()
+        await expect(page.locator('input[type="password"]')).to_have_count(1)
+        assert harness["setup_submit_requests"] == []
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_extensions_installed_actions(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -828,7 +886,6 @@ async def test_reborn_legacy_extensions_reinstall_after_remove_requires_setup_ag
             reinstalled_card.get_by_role("button", name="Reconfigure")
         ).to_have_count(0)
 
-        await reinstalled_card.get_by_role("button", name="Configure").click()
         await expect(
             page.get_by_role("heading", name="Configure Config Tool")
         ).to_be_visible(timeout=5000)

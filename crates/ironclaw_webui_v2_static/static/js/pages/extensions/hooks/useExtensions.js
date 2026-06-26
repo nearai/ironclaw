@@ -95,7 +95,7 @@ export function useExtensions() {
 
   const installMutation = useMutation({
     mutationFn: ({ packageRef }) => installExtension(packageRef),
-    onSuccess: (res, { displayName }) => {
+    onSuccess: (res, { displayName, configureAfterInstall, onNeedsSetup, packageRef }) => {
       if (res.success) {
         setActionResult({
           type: "success",
@@ -108,6 +108,18 @@ export function useExtensions() {
           setActionResult({
             type: "error",
             message: "Authentication URL must use HTTPS.",
+          });
+        } else if (
+          !res.auth_url &&
+          configureAfterInstall &&
+          typeof onNeedsSetup === "function"
+        ) {
+          onNeedsSetup({
+            packageRef,
+            displayName,
+            active: false,
+            activationStatus: "setup_required",
+            onboardingState: "setup_required",
           });
         }
       } else {

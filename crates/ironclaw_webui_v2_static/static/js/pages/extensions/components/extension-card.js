@@ -267,6 +267,9 @@ export function RegistryCard({ entry, onInstall, isBusy, statusLabel }) {
   const kindLabel = t(`extensions.kind.${entry.kind}`) || KIND_LABELS[entry.kind] || entry.kind;
   const displayName = entry.display_name || packageId(entry);
   const canInstall = Boolean(entry.package_ref && onInstall);
+  const configureAfterInstall = Boolean(
+    entry.needs_setup || entry.has_auth || isChannelExtensionKind(entry.kind)
+  );
   const keywords = entry.keywords || [];
   const [kwOpen, setKwOpen] = React.useState(false);
 
@@ -314,7 +317,12 @@ export function RegistryCard({ entry, onInstall, isBusy, statusLabel }) {
           <${Button}
             variant="outline"
             size="sm"
-            onClick=${() => onInstall({ packageRef: entry.package_ref, displayName })}
+            onClick=${() =>
+              onInstall({
+                packageRef: entry.package_ref,
+                displayName,
+                configureAfterInstall,
+              })}
             disabled=${isBusy}
           >
             <${Icon} name="plus" className="mr-1.5 h-3.5 w-3.5" />

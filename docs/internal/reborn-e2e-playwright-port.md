@@ -1785,6 +1785,38 @@ Behavior adjustment:
   the equivalent WebUI contract: operators see a terminal failure bubble with a
   sanitized summary and can continue the conversation.
 
+### Step 53: Legacy Setup-Required Install Prompt Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py` and fixed the Reborn
+Extensions install flow.
+
+Ported the operator-facing behavior behind legacy
+`test_install_wasm_channel_triggers_configure` to Reborn's
+`/v2/extensions/channels` surface:
+
+- installing a registry channel that requires setup submits the v2 install
+  request with its `package_ref`;
+- the success toast still renders;
+- the Configure modal opens immediately after the successful install;
+- the modal fetches and renders the v2 setup schema without submitting anything
+  until the operator saves.
+
+Real issue fixed:
+
+- `useExtensions.installMutation` only showed the install result and invalidated
+  extension queries. Setup-required installs left the operator on the registry
+  card and required a second manual Configure click. Registry cards now pass a
+  `configureAfterInstall` hint for setup/auth/channel entries, and
+  `ExtensionsPage` opens the existing Configure modal after successful installs
+  that do not return an immediate `auth_url`.
+
+Behavior adjustment:
+
+- Legacy tested old `/api/extensions/install` plus a v1 configure modal on the
+  Settings Channels tab. The Reborn port exercises the current top-level
+  `/v2/extensions` Channels tab and `/api/webchat/v2/extensions/*` setup
+  contract.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -1805,7 +1837,8 @@ Not yet ported:
   behavior superseded by Reborn's disabled-composer gate flow;
 - remaining settings/extension lifecycle scenarios beyond Settings search,
   Skills, tool permissions, channel label regressions, and the top-level
-  extension install/manage/configure surface;
+  extension install/manage/configure surface, including any future
+  persistence-backed extension-service contracts not visible in the browser;
 - deeper OAuth/product-auth install/callback flows beyond browser prompt
   handling, extension OAuth-start URL safety, and existing Rust callback
   contracts, including hosted provider refresh and provider-backed extension/MCP
