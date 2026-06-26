@@ -1,0 +1,482 @@
+#!/usr/bin/env python3
+"""Hermetic QA matrix runner for Reborn WebUI v2 and OpenAI-compatible rows.
+
+This lane executes local cargo regressions that correspond to QA matrix test
+case IDs. It intentionally does not start ``ironclaw-reborn serve`` and does
+not call live providers; browser/live coverage belongs in
+``scripts/reborn_webui_v2_live_qa``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_OUTPUT_DIR = ROOT / "artifacts" / "reborn-qa-matrix-hermetic"
+DEFAULT_TIMEOUT_SECONDS = 45 * 60
+PROVIDER = "reborn-qa-matrix"
+MODE = "hermetic"
+
+
+@dataclass(frozen=True)
+class CommandSpec:
+    name: str
+    argv: list[str]
+    env: dict[str, str] = field(default_factory=dict)
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class CaseSpec:
+    name: str
+    feature: str
+    category: str
+    qa_matrix_test_ids: list[str]
+    commands: list[CommandSpec]
+    default_enabled: bool = True
+    notes: str = ""
+
+
+OPENAI_OWNER_CRATE_COMMAND = CommandSpec(
+    name="openai_compat_owner_crates",
+    description=(
+        "Owner-crate regression for Reborn traces, WebUI ingress, "
+        "OpenAI-compatible routes/storage, and Slack adapter contracts."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_traces",
+        "-p",
+        "ironclaw_reborn_webui_ingress",
+        "-p",
+        "ironclaw_reborn_openai_compat",
+        "-p",
+        "ironclaw_reborn_openai_compat_storage",
+        "-p",
+        "ironclaw_slack_v2_adapter",
+        "--all-features",
+        "--jobs",
+        "2",
+    ],
+)
+
+PRODUCT_WORKFLOW_LEDGER_COMMAND = CommandSpec(
+    name="product_workflow_storage_durable_ledger",
+    description=(
+        "Focused durable product-workflow idempotency ledger contract used "
+        "below OpenAI-compatible chat completion reservations and replay."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_product_workflow_storage",
+        "--test",
+        "durable_ledger_contract",
+        "--all-features",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+SUPPORT_SUBSTRATE_COMMAND = CommandSpec(
+    name="support_substrate_regression",
+    description=(
+        "Broad hermetic support-substrate sweep for WebUI v2 attachments, "
+        "threads, events/projections/streams, skills, trust, safety, and "
+        "product-workflow storage."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_attachments",
+        "-p",
+        "ironclaw_extractors",
+        "-p",
+        "ironclaw_events",
+        "-p",
+        "ironclaw_event_projections",
+        "-p",
+        "ironclaw_event_streams",
+        "-p",
+        "ironclaw_prompt_envelope",
+        "-p",
+        "ironclaw_threads",
+        "-p",
+        "ironclaw_product_workflow_storage",
+        "-p",
+        "ironclaw_skills",
+        "-p",
+        "ironclaw_trust",
+        "-p",
+        "ironclaw_safety",
+        "--all-features",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+CASES: dict[str, CaseSpec] = {
+    "openai_compat_owner_crate_regression": CaseSpec(
+        name="openai_compat_owner_crate_regression",
+        feature="OpenAI-compatible Chat Completions and Responses API",
+        category="Hermetic Owner-Crate Regression",
+        qa_matrix_test_ids=["REBCLI-056-TC-07"],
+        commands=[OPENAI_OWNER_CRATE_COMMAND],
+        notes=(
+            "Matches the QA matrix owner-crate command for REBCLI-056-TC-07; "
+            "the same cargo command also exercises Responses API owner-crate "
+            "behavior, but only the explicit spreadsheet row is counted here."
+        ),
+    ),
+    "support_substrate_product_workflow_regression": CaseSpec(
+        name="support_substrate_product_workflow_regression",
+        feature="WebUI v2 support substrates and product workflow idempotency",
+        category="Hermetic Support Substrate Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-043-TC-12",
+            "REBCLI-044-TC-07",
+            "REBCLI-045-TC-10",
+            "REBCLI-047-TC-07",
+            "REBCLI-056-TC-08",
+        ],
+        commands=[
+            PRODUCT_WORKFLOW_LEDGER_COMMAND,
+            SUPPORT_SUBSTRATE_COMMAND,
+        ],
+        notes=(
+            "Runs the focused durable ledger contract first, then the broad "
+            "iteration-182 support-substrate command referenced by the QA matrix."
+        ),
+    ),
+}
+
+
+def parse_duration_seconds(raw: str | None) -> int:
+    if raw is None or not raw.strip():
+        return DEFAULT_TIMEOUT_SECONDS
+    value = raw.strip().lower()
+    match = re.fullmatch(r"(\d+)([smh]?)", value)
+    if not match:
+        raise ValueError(f"invalid duration {raw!r}; use seconds, 30s, 45m, or 1h")
+    amount = int(match.group(1))
+    unit = match.group(2)
+    if unit == "h":
+        return amount * 60 * 60
+    if unit == "m":
+        return amount * 60
+    return amount
+
+
+def render_command(command: CommandSpec) -> str:
+    prefix = " ".join(
+        f"{name}={shlex.quote(value)}" for name, value in sorted(command.env.items())
+    )
+    rendered = " ".join(shlex.quote(part) for part in command.argv)
+    if prefix:
+        return f"{prefix} {rendered}"
+    return rendered
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _safe_log_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
+
+
+def _selected_case_names(args: argparse.Namespace) -> list[str]:
+    if not args.case:
+        return [name for name, spec in CASES.items() if spec.default_enabled]
+    names: list[str] = []
+    for name in args.case:
+        if name not in CASES:
+            raise SystemExit(f"unknown case {name!r}; valid cases: {', '.join(CASES)}")
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def _test_ids_for(cases: list[CaseSpec]) -> list[str]:
+    return sorted({test_id for case in cases for test_id in case.qa_matrix_test_ids})
+
+
+def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    selected_specs = [CASES[name] for name in selected_cases]
+    all_specs = list(CASES.values())
+    matrix_path = os.environ.get("REBORN_QA_MATRIX_PATH", "").strip()
+    manifest = {
+        "generated_at": _now_iso(),
+        "selected_cases": selected_cases,
+        "default_cases": [
+            name for name, spec in CASES.items() if spec.default_enabled
+        ],
+        "qa_matrix": {
+            "source": "local_xlsx",
+            "path": matrix_path or None,
+            "represented_test_ids": _test_ids_for(all_specs),
+            "represented_test_id_count": len(_test_ids_for(all_specs)),
+            "selected_represented_test_ids": _test_ids_for(selected_specs),
+            "selected_represented_test_id_count": len(_test_ids_for(selected_specs)),
+        },
+        "cases": [
+            {
+                "case": name,
+                "feature": spec.feature,
+                "category": spec.category,
+                "qa_matrix_test_ids": spec.qa_matrix_test_ids,
+                "default_enabled": spec.default_enabled,
+                "mode": MODE,
+                "notes": spec.notes,
+                "commands": [
+                    {
+                        "name": command.name,
+                        "description": command.description,
+                        "command": render_command(command),
+                    }
+                    for command in spec.commands
+                ],
+            }
+            for name, spec in CASES.items()
+        ],
+    }
+    path = output_dir / "case-manifest.json"
+    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def run_command(
+    command: CommandSpec,
+    *,
+    output_dir: Path,
+    case_name: str,
+    timeout_seconds: int,
+    dry_run: bool,
+) -> dict[str, Any]:
+    log_base = f"{_safe_log_name(case_name)}.{_safe_log_name(command.name)}"
+    stdout_log = output_dir / f"{log_base}.stdout.log"
+    stderr_log = output_dir / f"{log_base}.stderr.log"
+    details: dict[str, Any] = {
+        "name": command.name,
+        "description": command.description,
+        "command": render_command(command),
+        "stdout_log": str(stdout_log),
+        "stderr_log": str(stderr_log),
+        "dry_run": dry_run,
+    }
+    if dry_run:
+        stdout_log.write_text("", encoding="utf-8")
+        stderr_log.write_text("", encoding="utf-8")
+        details.update({"success": True, "returncode": None, "latency_ms": 0})
+        return details
+
+    env = os.environ.copy()
+    env.update(command.env)
+    started = time.monotonic()
+    with stdout_log.open("w", encoding="utf-8") as stdout, stderr_log.open(
+        "w", encoding="utf-8"
+    ) as stderr:
+        try:
+            completed = subprocess.run(
+                command.argv,
+                cwd=ROOT,
+                env=env,
+                stdout=stdout,
+                stderr=stderr,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+            returncode: int | None = completed.returncode
+            success = completed.returncode == 0
+            error = None
+        except subprocess.TimeoutExpired:
+            stderr.write(
+                f"\nTimed out after {timeout_seconds} seconds: "
+                f"{render_command(command)}\n"
+            )
+            returncode = None
+            success = False
+            error = "timeout"
+    details.update(
+        {
+            "success": success,
+            "returncode": returncode,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+        }
+    )
+    if error:
+        details["error"] = error
+    return details
+
+
+def run_case(
+    case: CaseSpec,
+    *,
+    output_dir: Path,
+    timeout_seconds: int,
+    dry_run: bool,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    command_results: list[dict[str, Any]] = []
+    failed = False
+    for command in case.commands:
+        if failed:
+            command_results.append(
+                {
+                    "name": command.name,
+                    "description": command.description,
+                    "command": render_command(command),
+                    "success": False,
+                    "skipped": True,
+                    "reason": "previous command failed",
+                }
+            )
+            continue
+        result = run_command(
+            command,
+            output_dir=output_dir,
+            case_name=case.name,
+            timeout_seconds=timeout_seconds,
+            dry_run=dry_run,
+        )
+        command_results.append(result)
+        failed = not bool(result["success"])
+
+    success = all(bool(result.get("success")) for result in command_results)
+    return {
+        "provider": PROVIDER,
+        "mode": MODE,
+        "case": case.name,
+        "feature": case.feature,
+        "category": case.category,
+        "success": success,
+        "latency_ms": int((time.monotonic() - started) * 1000),
+        "details": {
+            "qa_matrix_test_ids": case.qa_matrix_test_ids,
+            "commands": command_results,
+            "notes": case.notes,
+        },
+    }
+
+
+def write_results(
+    output_dir: Path,
+    *,
+    selected_cases: list[str],
+    timeout_seconds: int,
+    dry_run: bool,
+    results: list[dict[str, Any]],
+) -> Path:
+    passed = sum(1 for result in results if result["success"])
+    failed = len(results) - passed
+    payload = {
+        "provider": PROVIDER,
+        "mode": MODE,
+        "generated_at": _now_iso(),
+        "success": failed == 0,
+        "dry_run": dry_run,
+        "selected_cases": selected_cases,
+        "timeout_seconds": timeout_seconds,
+        "summary": {
+            "passed": passed,
+            "failed": failed,
+            "total": len(results),
+            "qa_matrix_test_ids": _test_ids_for([CASES[name] for name in selected_cases]),
+        },
+        "results": results,
+    }
+    path = output_dir / "results.json"
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+        help=f"artifact directory (default: {DEFAULT_OUTPUT_DIR})",
+    )
+    parser.add_argument(
+        "--case",
+        action="append",
+        help="case name to execute; may be repeated; defaults to all default cases",
+    )
+    parser.add_argument(
+        "--timeout",
+        default=os.environ.get("COMMAND_TIMEOUT"),
+        help="per-command timeout, e.g. 1800, 30m, or 1h",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="write manifest/results without executing cargo commands",
+    )
+    parser.add_argument(
+        "--list-cases",
+        action="store_true",
+        help="print available cases and exit",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.list_cases:
+        for name, spec in CASES.items():
+            default = "default" if spec.default_enabled else "targeted"
+            print(f"{name}\t{default}\t{','.join(spec.qa_matrix_test_ids)}")
+        return 0
+    timeout_seconds = parse_duration_seconds(args.timeout)
+    selected_cases = _selected_case_names(args)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    write_case_manifest(args.output_dir, selected_cases)
+    results = [
+        run_case(
+            CASES[name],
+            output_dir=args.output_dir,
+            timeout_seconds=timeout_seconds,
+            dry_run=args.dry_run,
+        )
+        for name in selected_cases
+    ]
+    results_path = write_results(
+        args.output_dir,
+        selected_cases=selected_cases,
+        timeout_seconds=timeout_seconds,
+        dry_run=args.dry_run,
+        results=results,
+    )
+    print(str(results_path))
+    return 0 if all(result["success"] for result in results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -499,8 +499,8 @@ async fn stream_true_without_wired_streamer_returns_not_wired() {
 #[tokio::test]
 async fn chat_stream_idempotency_replay_uses_recorded_ack_without_resubmit() {
     let streamer = Arc::new(QueuedStreamer::new());
-    streamer.push_chat(vec![run_status_envelope("first-done", "completed")]);
-    streamer.push_chat(vec![run_status_envelope("replay-done", "completed")]);
+    streamer.push_chat(vec![final_reply_envelope("first-done", "hello final")]);
+    streamer.push_chat(vec![final_reply_envelope("replay-done", "hello final")]);
     let workflow = Arc::new(FakeProductWorkflow::new());
     workflow.program_projection_resolution(sample_projection_subscription_request());
     let router = router_with_workflow(streamer.clone(), workflow.clone());
@@ -520,14 +520,22 @@ async fn chat_stream_idempotency_replay_uses_recorded_ack_without_resubmit() {
         .await
         .expect("first");
     assert_eq!(first.status(), http::StatusCode::OK);
-    let _ = read_until(first, "[DONE]").await;
+    let first_raw = read_until(first, "[DONE]").await;
+    assert!(
+        first_raw.contains("\"content\":\"hello final\""),
+        "raw SSE: {first_raw}"
+    );
 
     let replay = router
         .oneshot(post_json_with_key("/v1/chat/completions", body, "same-key"))
         .await
         .expect("replay");
     assert_eq!(replay.status(), http::StatusCode::OK);
-    let _ = read_until(replay, "[DONE]").await;
+    let replay_raw = read_until(replay, "[DONE]").await;
+    assert!(
+        replay_raw.contains("\"content\":\"hello final\""),
+        "raw SSE: {replay_raw}"
+    );
 
     assert_eq!(workflow.accepted_count(), 1);
     let requests = streamer.chat_requests();
