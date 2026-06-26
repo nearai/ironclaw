@@ -13,6 +13,12 @@ publish = false
 [features]
 default = []
 root-llm-provider = ["dep:ironclaw_llm", "dep:base64"]
+# Bare libSQL dependency toggle, mirroring the root `ironclaw` crate's `libsql`
+# feature. CI lints/builds the whole workspace with `--all --features libsql`
+# (e.g. code_style's `libsql-only` leg and platform-and-compat); without this,
+# feature resolution fails because `ironclaw_reborn` is the lone workspace
+# member that enables libSQL only through the more specific features below.
+libsql = ["dep:libsql"]
 libsql-secrets = [
     "dep:ironclaw_secrets",
     "dep:libsql",

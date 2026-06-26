@@ -1,5 +1,7 @@
 use std::io::{IsTerminal, Write};
-use std::path::{Path, PathBuf};
+#[cfg(feature = "webui-v2-beta")]
+use std::path::Path;
+use std::path::PathBuf;
 #[cfg(feature = "webui-v2-beta")]
 use std::sync::Arc;
 use std::time::Duration;

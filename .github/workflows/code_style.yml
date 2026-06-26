@@ -147,7 +147,7 @@ jobs:
     if: needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.clippy-matrix.outputs.matrix) }}
     steps:
@@ -174,7 +174,7 @@ jobs:
     if: needs.changes.outputs.has_code == 'true' && github.event_name == 'push'
     runs-on: windows-latest
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.clippy-matrix.outputs.matrix) }}
     steps:
