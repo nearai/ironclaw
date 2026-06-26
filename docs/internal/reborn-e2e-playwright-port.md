@@ -2743,6 +2743,42 @@ Behavior mapping:
   the implemented project-thread boundary: a project workspace can create and
   open a chat thread scoped to that project through the v2 thread API.
 
+### Step 93: Legacy Project Creation Draft Port
+
+Extended `test_reborn_webui_v2_legacy_projects.py` and fixed the remaining
+Projects-to-chat navigation path.
+
+Ported the top-level project creation intent from the legacy Projects UI onto
+the current Reborn Projects overview:
+
+- opened `/v2/projects` with real v2 project-list fixtures;
+- clicked the overview `New project` action;
+- asserted the v2 thread-create request is an unscoped chat thread creation
+  with a `client_action_id`;
+- asserted the browser lands on `/v2/chat/{thread_id}` with the project
+  creation prompt seeded into the composer.
+
+Issue found and fixed:
+
+- The Projects overview `New project` action created a thread but navigated to
+  `/chat` with the thread id only in router state. `ChatPage` clears active
+  thread state whenever the URL has no `:threadId`, so the seeded project
+  creation draft could be attached to no active thread. The action now
+  navigates directly to `/chat/{newThreadId}` and keeps only the composer draft
+  in router state.
+
+Validation:
+
+- `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_projects.py -q`
+  -> `4 passed`
+
+Behavior mapping:
+
+- Legacy project creation was intertwined with the old engine project and
+  mission surfaces. Reborn's implemented equivalent is the guided chat entry
+  point for creating a project; child mission/thread/widget drill-in remains
+  open until the v2 project child endpoints replace the current TODO stubs.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -2941,6 +2977,11 @@ widgets, mission detail, and thread detail client functions still return TODO
 stubs. The migrated tests therefore cover list/search/open-workspace and
 project-scoped chat creation behavior while leaving the legacy engine-v2
 mission/thread/widget drill-in tests open until matching Reborn endpoints land.
+
+The project creation draft port found the same route-state issue in the
+top-level Projects `New project` action: the handler created a thread but
+navigated to `/chat` without the thread id in the URL. The browser now opens
+`/chat/{thread_id}` and preserves the seeded project-creation composer draft.
 
 The Responses API port confirmed a route-contract difference: Reborn's
 OpenAI-compatible Responses API accepts typed Responses input items and rejects

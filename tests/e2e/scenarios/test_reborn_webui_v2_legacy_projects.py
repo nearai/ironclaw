@@ -232,6 +232,30 @@ async def test_reborn_legacy_projects_search_no_match_can_be_cleared(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_project_creation_opens_seeded_chat_thread(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser)
+    try:
+        page = harness["page"]
+
+        await page.get_by_role("button", name="New project").click()
+        await page.wait_for_url("**/v2/chat/thread-project-scoped", timeout=10000)
+
+        composer = page.locator(SEL_V2["chat_composer"])
+        await expect(composer).to_be_visible(timeout=10000)
+        await expect(composer).to_have_value(
+            "Create a new project for me. I want to set up a project for: ",
+            timeout=5000,
+        )
+
+        assert len(harness["thread_create_requests"]) == 1
+        assert "project_id" not in harness["thread_create_requests"][0]
+        assert harness["thread_create_requests"][0]["client_action_id"]
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_project_workspace_starts_scoped_chat_thread(
     reborn_v2_server, reborn_v2_browser
 ):
