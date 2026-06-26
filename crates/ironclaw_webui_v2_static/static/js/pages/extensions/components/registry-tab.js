@@ -1,5 +1,9 @@
 import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
+import {
+  ChannelConnectActionSections,
+  connectActionsForPackage,
+} from "./channels-tab.js";
 import { ExtensionCard, RegistryCard } from "./extension-card.js";
 
 function packageId(item) {
@@ -16,6 +20,7 @@ export function RegistryTab({
   onActivate,
   onConfigure,
   onRemove,
+  connectableChannels,
   isBusy,
 }) {
   const t = useT();
@@ -85,16 +90,28 @@ export function RegistryTab({
                 </h3>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
                   ${installedEntries.map(
-                    (entry) => html`
-                      <${ExtensionCard}
-                        key=${entry.id}
-                        ext=${entry.extension || entry.entry}
-                        onActivate=${onActivate}
-                        onConfigure=${onConfigure}
-                        onRemove=${onRemove}
-                        isBusy=${isBusy}
-                      />
-                    `
+                    (entry) => {
+                      const ext = entry.extension || entry.entry;
+                      const connectActions = connectActionsForPackage(
+                        connectableChannels,
+                        ext
+                      );
+                      return html`
+                        <div key=${entry.id} className="flex flex-col gap-3">
+                          <${ExtensionCard}
+                            ext=${ext}
+                            onActivate=${onActivate}
+                            onConfigure=${onConfigure}
+                            onRemove=${onRemove}
+                            isBusy=${isBusy}
+                          />
+                          ${connectActions.length > 0 &&
+                          html`<${ChannelConnectActionSections}
+                            connectActions=${connectActions}
+                          />`}
+                        </div>
+                      `;
+                    }
                   )}
                   ${registryOnlyInstalledEntries.map(
                     (entry) => html`

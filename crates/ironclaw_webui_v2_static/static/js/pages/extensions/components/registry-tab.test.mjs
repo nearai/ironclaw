@@ -6,8 +6,16 @@ import vm from "node:vm";
 function registryTabSourceForTest() {
   const source = readFileSync(new URL("./registry-tab.js", import.meta.url), "utf8");
   const lines = [];
+  let skippingImport = false;
   for (const line of source.split("\n")) {
-    if (line.startsWith("import ")) continue;
+    if (!skippingImport && line.startsWith("import ")) {
+      skippingImport = !line.trimEnd().endsWith(";");
+      continue;
+    }
+    if (skippingImport) {
+      skippingImport = !line.trimEnd().endsWith(";");
+      continue;
+    }
     lines.push(line.replace(/^export function /, "function "));
   }
   return `${lines.join("\n")}\nglobalThis.__testExports = { RegistryTab };`;
@@ -15,10 +23,15 @@ function registryTabSourceForTest() {
 
 function renderRegistryTab(props, filter = "") {
   const context = {
+    ChannelConnectActionSections() {},
     ExtensionCard() {},
     RegistryCard() {},
     React: {
       useState: () => [filter, () => {}],
+    },
+    connectActionsForPackage: (connectableChannels, item) => {
+      const id = item?.package_ref?.id;
+      return (connectableChannels || []).filter((action) => action.channel === id);
     },
     globalThis: {},
     html(strings, ...values) {
@@ -104,12 +117,13 @@ test("RegistryTab renders only real installed extensions with management actions
     onActivate: () => {},
     onConfigure: () => {},
     onRemove: () => {},
+    connectableChannels: [],
     isBusy: false,
   });
 
   const extensionCards = collectComponentValues(rendered, ExtensionCard);
   assert.equal(extensionCards.length, 1);
-  assert.equal(extensionCards[0][2], installedExtension);
+  assert.equal(extensionCards[0][1], installedExtension);
 
   const registryCards = collectComponentValues(rendered, RegistryCard);
   assert.equal(registryCards.length, 2);
@@ -146,10 +160,50 @@ test("RegistryTab searches installed entries using registry metadata", () => {
       onActivate: () => {},
       onConfigure: () => {},
       onRemove: () => {},
+      connectableChannels: [],
       isBusy: false,
     },
     "calendar",
   );
 
   assert.equal(collectComponentValues(rendered, ExtensionCard).length, 1);
+});
+
+test("RegistryTab renders channel connect controls under installed channel cards", () => {
+  const telegramExtension = {
+    package_ref: { kind: "extension", id: "telegram" },
+    display_name: "Telegram",
+    kind: "channel",
+    active: true,
+  };
+  const connectAction = {
+    channel: "telegram",
+    strategy: "inbound_proof_code",
+    action: { title: "Telegram account connection" },
+  };
+  const { ChannelConnectActionSections, rendered } = renderRegistryTab({
+    catalogEntries: [
+      {
+        id: "telegram",
+        installed: true,
+        entry: {
+          package_ref: telegramExtension.package_ref,
+          display_name: "Telegram",
+          description: "Telegram channel",
+          kind: "channel",
+        },
+        extension: telegramExtension,
+      },
+    ],
+    connectableChannels: [connectAction],
+    onInstall: () => {},
+    onActivate: () => {},
+    onConfigure: () => {},
+    onRemove: () => {},
+    isBusy: false,
+  });
+
+  const connectSections = collectComponentValues(rendered, ChannelConnectActionSections);
+  assert.equal(connectSections.length, 1);
+  assert.deepEqual(connectSections[0][1], [connectAction]);
 });

@@ -93,6 +93,7 @@ export function ExtensionsPage() {
     />`,
     registry: html`<${RegistryTab}
       catalogEntries=${catalogEntries}
+      connectableChannels=${connectableChannels}
       onInstall=${install}
       onActivate=${activate}
       onConfigure=${handleConfigure}

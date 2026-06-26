@@ -12,6 +12,7 @@ use ironclaw_host_api::{
     RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, VirtualPath,
     sha256_digest_token,
 };
+use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
     LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleProductResponse,
@@ -558,6 +559,8 @@ impl RebornLocalExtensionManagementPort {
         }
 
         let visible_capability_ids = package_visible_capability_ids(&active_package);
+        let message =
+            activation_success_message(&package_ref, &active_package, &visible_capability_ids);
 
         let mut response = response_with_payload(
             Some(package_ref),
@@ -567,10 +570,7 @@ impl RebornLocalExtensionManagementPort {
                 visible_capability_ids,
             },
         );
-        response.message = Some(
-            "Extension activation succeeded and its tools are now available. No additional authorization or configuration is needed, including for write-capable tools, unless a later tool call reports auth_required. Do not ask the user for a token, OAuth, authorization, or configuration after activated=true."
-                .to_string(),
-        );
+        response.message = Some(message);
         Ok(response)
     }
 
@@ -1158,6 +1158,33 @@ fn package_visible_capability_ids(package: &ExtensionPackage) -> Vec<String> {
         .collect()
 }
 
+fn activation_success_message(
+    package_ref: &LifecyclePackageRef,
+    package: &ExtensionPackage,
+    visible_capability_ids: &[String],
+) -> String {
+    if package_declares_inbound_product_adapter(package) {
+        if package_ref.id.as_str() == "slack" {
+            return "Slack is installed as an inbound channel, but the user's Slack account still needs pairing. Tell the user to DM the Slack app; the bot will reply with a pairing code. The user should paste that code into the Slack account connection panel in WebChat, not into normal chat. After the connection panel succeeds, continue the user's original request. Do not claim Slack message-reading tools are available unless a separate Slack read capability is installed.".to_string();
+        }
+        return format!(
+            "{} is installed as an external channel, but the user's account still needs channel-specific connection or pairing. Tell the user to open the extension's app or bot, get the pairing code or connection challenge, and paste it into the WebChat connection panel rather than normal chat. After the connection panel succeeds, continue the user's original request. Do not claim the channel can receive or send messages for the user until pairing completes.",
+            package.manifest.name.as_str()
+        );
+    }
+    if visible_capability_ids.is_empty() {
+        return "Extension activation succeeded. No model-visible tools were published by this extension; follow any extension-specific setup or connection UI before claiming new capabilities are available.".to_string();
+    }
+    "Extension activation succeeded and its tools are now available. No additional authorization or configuration is needed, including for write-capable tools, unless a later tool call reports auth_required. Do not ask the user for a token, OAuth, authorization, or configuration after activated=true.".to_string()
+}
+
+fn package_declares_inbound_product_adapter(package: &ExtensionPackage) -> bool {
+    package.manifest.host_apis.iter().any(|host_api| {
+        host_api.id.as_str() == PRODUCT_ADAPTER_HOST_API_ID
+            && host_api.section.as_str() == "product_adapter.inbound"
+    })
+}
+
 fn extension_ids_from_package_ref(
     package_ref: &LifecyclePackageRef,
 ) -> Result<(ExtensionId, ExtensionInstallationId), ProductWorkflowError> {
@@ -1440,6 +1467,104 @@ mod tests {
             !storage_root
                 .join("system/extensions/fixture/wasm/fixture.wasm")
                 .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_activate_returns_slack_pairing_guidance_for_external_channel_package() {
+        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+            extension_lifecycle_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
+                    "slack", "Slack",
+                )]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("valid ref");
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install slack channel");
+
+        let activate = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionActivate {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("activate slack channel");
+
+        assert_eq!(activate.phase, LifecyclePhase::Active);
+        let message = activate.message.as_deref().expect("activation message");
+        assert!(
+            message.contains("DM the Slack app")
+                && message.contains("pairing code")
+                && message.contains("WebChat")
+                && message.contains("not into normal chat")
+                && message.contains("continue the user's original request")
+                && message.contains("Do not claim Slack message-reading tools"),
+            "Slack activation should guide the model into pairing UI, got: {message}"
+        );
+        let Some(LifecycleProductPayload::ExtensionActivate {
+            visible_capability_ids,
+            ..
+        }) = activate.payload.as_ref()
+        else {
+            panic!("expected extension activate payload");
+        };
+        assert!(
+            visible_capability_ids.is_empty(),
+            "Slack channel activation must not imply model-visible Slack read tools"
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_activate_returns_generic_pairing_guidance_for_external_channel_package() {
+        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+            extension_lifecycle_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
+                    "telegram", "Telegram",
+                )]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
+            .expect("valid ref");
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install external channel");
+
+        let activate = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionActivate { package_ref },
+            )
+            .await
+            .expect("activate external channel");
+
+        assert_eq!(activate.phase, LifecyclePhase::Active);
+        let message = activate.message.as_deref().expect("activation message");
+        assert!(
+            message.contains("Telegram is installed as an external channel")
+                && message.contains("app or bot")
+                && message.contains("pairing code")
+                && message.contains("WebChat connection panel")
+                && message.contains("rather than normal chat")
+                && message.contains("continue the user's original request")
+                && message.contains("until pairing completes"),
+            "external channel activation should guide the model into generic pairing UI, got: {message}"
         );
     }
 
@@ -4156,6 +4281,46 @@ mod tests {
         fixture_extension_package_from_manifest(&manifest)
     }
 
+    fn fixture_external_channel_package(id: &str, name: &str) -> AvailableExtensionPackage {
+        let manifest = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{id}"
+name = "{name}"
+version = "0.1.0"
+description = "{name} channel fixture"
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "{id}_host"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.inbound"
+
+[product_adapter.inbound]
+surface_kind = "external_channel"
+
+[product_adapter.inbound.auth]
+kind = "request_signature"
+header_name = "X-Channel-Signature"
+timestamp_header_name = "X-Channel-Timestamp"
+
+[product_adapter.inbound.capabilities]
+flags = ["inbound_messages"]
+
+[[product_adapter.inbound.required_credentials]]
+handle = "{id}_bot_token"
+
+[[product_adapter.inbound.egress]]
+host = "example.com"
+credential_handle = "{id}_bot_token"
+"#
+        );
+        fixture_extension_package_from_manifest_with_product_adapter_contracts(&manifest, id)
+    }
+
     fn fixture_extension_manifest() -> &'static str {
         r#"
 schema_version = "reborn.extension_manifest.v2"
@@ -4233,6 +4398,35 @@ output_schema_ref = "schemas/search.output.json"
             &HostPortCatalog::empty(),
         )
         .expect("fixture manifest");
+        fixture_extension_package_from_parsed_manifest(manifest_toml, root_id, manifest)
+    }
+
+    fn fixture_extension_package_from_manifest_with_product_adapter_contracts(
+        manifest_toml: &str,
+        root_id: &str,
+    ) -> AvailableExtensionPackage {
+        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+        contracts
+            .register(Arc::new(
+                ironclaw_product_adapter_registry::ProductAdapterHostApiContract::new()
+                    .expect("product adapter host API contract"),
+            ))
+            .expect("register product adapter host API contract");
+        let manifest = ExtensionManifest::parse_with_host_api_contracts(
+            manifest_toml,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+            &contracts,
+        )
+        .expect("fixture manifest");
+        fixture_extension_package_from_parsed_manifest(manifest_toml, root_id, manifest)
+    }
+
+    fn fixture_extension_package_from_parsed_manifest(
+        manifest_toml: &str,
+        root_id: &str,
+        manifest: ExtensionManifest,
+    ) -> AvailableExtensionPackage {
         let root =
             VirtualPath::new(format!("/system/extensions/{root_id}")).expect("extension root");
         let package = ExtensionPackage::from_manifest_toml(manifest, root, manifest_toml)

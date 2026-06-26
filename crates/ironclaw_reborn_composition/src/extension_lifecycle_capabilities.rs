@@ -69,7 +69,7 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         lifecycle_manifest(
             EXTENSION_ACTIVATE_CAPABILITY_ID,
-            "Activate an installed Reborn extension for the model-visible local-dev capability surface. Use after install succeeds or when install reports the extension is already installed. This is the step that opens the credential/auth gate when required; do not ask the user for credentials before calling it. If activation returns activated=true, the extension is ready for read and write-capable tools; ignore earlier search/install onboarding or credential hints from this turn unless a later tool call raises auth_required.",
+            "Activate an installed Reborn extension for the local-dev capability surface. Use after install succeeds or when install reports the extension is already installed. This is the step that opens the credential/auth gate when required; do not ask the user for credentials before calling it. If activation returns activated=true with visible_capability_ids, those model-visible tools are ready unless a later tool call raises auth_required. If activation says the extension is an external channel or publishes no model-visible tools, follow the returned channel-specific setup/pairing/connect instructions first. For proof-code flows, tell the user to message the extension app/bot and paste the code into the WebChat connection panel, not into normal chat; after the connection panel succeeds, continue the original request.",
             vec![
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
@@ -346,11 +346,14 @@ mod tests {
             activate.description.contains("credential/auth gate")
                 && activate.description.contains("do not ask the user")
                 && activate.description.contains("activated=true")
+                && activate.description.contains("visible_capability_ids")
+                && activate.description.contains("external channel")
+                && activate.description.contains("app/bot")
+                && activate.description.contains("WebChat connection panel")
                 && activate
                     .description
-                    .contains("ignore earlier search/install onboarding")
-                && activate.description.contains("write-capable tools"),
-            "extension_activate description should teach the model to raise auth through activation: {}",
+                    .contains("continue the original request"),
+            "extension_activate description should teach the model to raise auth through activation and route channel pairing through UI: {}",
             activate.description
         );
 

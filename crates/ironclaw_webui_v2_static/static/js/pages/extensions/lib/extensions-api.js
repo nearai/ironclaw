@@ -53,14 +53,21 @@ export function startExtensionOauth(packageRef, secret) {
     }
   );
 }
-export function fetchPairingRequests() {
-  return Promise.resolve({ requests: [] });
+export function fetchPairingRequests(channel) {
+  return apiFetch(`/api/pairing/${encodeURIComponent(channelName(channel))}`);
 }
-export function approvePairingCode() {
-  return Promise.resolve({
-    success: false,
-    message: "Pairing requires a v2 pairing endpoint.",
+export function approvePairingCode(channel, code) {
+  return apiFetch(`/api/pairing/${encodeURIComponent(channelName(channel))}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ code }),
   });
+}
+
+function channelName(channel) {
+  if (typeof channel !== "string" || !channel.trim()) {
+    throw new Error("Pairing channel is required");
+  }
+  return channel.trim();
 }
 
 function packageId(packageRef) {
