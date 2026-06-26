@@ -231,6 +231,37 @@ test("ChatInput blocks Enter send when only submit is disabled", async () => {
   assert.equal(sendCalls, 0);
 });
 
+test("ChatInput blocks Enter send from current DOM disabled state", async () => {
+  let sendCalls = 0;
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "draft while busy",
+    onSend: async () => {
+      sendCalls += 1;
+    },
+  });
+
+  const textarea = findNode(tree, (node) =>
+    node.strings.some((part) => part.includes("<textarea")),
+  );
+  const textareaProps = templateProps(textarea);
+  let prevented = false;
+  textareaProps.onKeyDown({
+    key: "Enter",
+    shiftKey: false,
+    currentTarget: { dataset: { sendDisabled: "true" } },
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+  await Promise.resolve();
+
+  assert.equal(prevented, true);
+  assert.equal(sendCalls, 0);
+});
+
 test("ChatInput preserves draft when caller refuses send", async () => {
   const setCalls = [];
   let sendCalls = 0;

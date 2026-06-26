@@ -205,7 +205,18 @@ export function ChatInput({
   const handleSend = React.useCallback(async () => {
     // The v2 send contract requires non-empty content, so attachments
     // ride along with text rather than sending on their own.
-    if (!text.trim() || sendBlockedRef.current) return;
+    const domSendDisabled =
+      textareaRef.current?.dataset?.sendDisabled === "true";
+    if (
+      !text.trim() ||
+      disabled ||
+      sendDisabled ||
+      isSending ||
+      domSendDisabled ||
+      sendBlockedRef.current
+    ) {
+      return;
+    }
     sendBlockedRef.current = true;
     setIsSending(true);
     try {
@@ -225,7 +236,16 @@ export function ChatInput({
       sendBlockedRef.current = disabled || sendDisabled;
       setIsSending(false);
     }
-  }, [text, attachments, onSend, draftKey, cancelPendingDraft, disabled, sendDisabled]);
+  }, [
+    text,
+    attachments,
+    disabled,
+    sendDisabled,
+    isSending,
+    onSend,
+    draftKey,
+    cancelPendingDraft,
+  ]);
 
   const handleChange = React.useCallback(
     (e) => {
@@ -255,6 +275,7 @@ export function ChatInput({
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         const domSendDisabled =
+          e.currentTarget?.dataset?.sendDisabled === "true" ||
           textareaRef.current?.dataset?.sendDisabled === "true";
         if (domSendDisabled || sendBlockedRef.current) return;
         handleSend();
