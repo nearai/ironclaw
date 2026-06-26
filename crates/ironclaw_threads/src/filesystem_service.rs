@@ -1116,8 +1116,13 @@ where
                     SessionThreadError,
                 > = match current {
                     Some(existing) => {
-                        // Thread already exists: scope-check and return it (no write).
-                        if existing.record.scope != scope {
+                        // Thread already exists: scope- and identity-check before
+                        // returning it (no write). Mirrors the guard in
+                        // `read_thread_versioned` which rejects both a scope
+                        // mismatch and a thread_id mismatch — defensive parity
+                        // even though the path already encodes thread_id.
+                        if existing.record.scope != scope || existing.record.thread_id != thread_id
+                        {
                             Err(SessionThreadError::ThreadScopeMismatch { thread_id })
                         } else {
                             // Unchanged snapshot → cas_update skips the write.

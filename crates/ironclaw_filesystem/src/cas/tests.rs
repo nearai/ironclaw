@@ -976,9 +976,13 @@ impl RootFilesystem for KindGatedByteOnlyBackend {
         &self,
         path: &VirtualPath,
         entry: Entry,
-        _cas: CasExpectation,
+        cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
         self.put_called.store(true, Ordering::SeqCst);
+        assert!(
+            matches!(cas, CasExpectation::Absent),
+            "first writes must use CasExpectation::Absent"
+        );
         if entry.kind.is_some() {
             // Record-shaped entries are rejected — mirrors `LocalFilesystem`'s
             // `if entry.kind.is_some() || !entry.indexed.is_empty()` guard.
