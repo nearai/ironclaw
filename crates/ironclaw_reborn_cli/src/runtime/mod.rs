@@ -991,8 +991,6 @@ fn reject_unsupported_runtime_sections(
     }
 }
 
-const MAX_WORKER_COUNT: usize = 32;
-
 /// Resolve a `[runner]` concurrency cap against the in-effect default.
 ///
 /// - `None` (field absent from the file) → keep `current_default` (the value
@@ -1017,7 +1015,12 @@ fn resolve_concurrency_cap(
 ///   semaphore is then sized to `tokio::sync::Semaphore::MAX_PERMITS`, so the
 ///   per-user / per-origin caps become the only concurrency bound (used to
 ///   stress-test backends with no global throttle).
-/// - `Some(n)` → bounded worker count, clamped to [`MAX_WORKER_COUNT`].
+/// - `Some(n)` → that worker count, verbatim. The operator's explicit override
+///   is trusted: a large value just sizes the scheduler semaphore counter (the
+///   permit count caps concurrency, runner tasks are still only spawned per
+///   claimed run), degrading smoothly toward the `0` = unlimited regime. No
+///   silent clamp — mirrors the per-user / per-origin caps in
+///   [`resolve_concurrency_cap`].
 fn resolve_worker_count(
     raw: Option<usize>,
     current_default: Option<std::num::NonZeroUsize>,
@@ -1025,18 +1028,9 @@ fn resolve_worker_count(
     match raw {
         None => current_default,
         Some(0) => None,
-        Some(n) => {
-            let clamped = n.min(MAX_WORKER_COUNT);
-            if clamped < n {
-                tracing::debug!(
-                    requested = n,
-                    clamped = MAX_WORKER_COUNT,
-                    "runner worker_count exceeds maximum; clamping (set 0 for unlimited)"
-                );
-            }
-            // clamped is in [1, MAX_WORKER_COUNT]: guaranteed non-zero.
-            std::num::NonZeroUsize::new(clamped)
-        }
+        // `n` is non-zero here (the `Some(0)` arm handled zero), so this never
+        // collapses to the unlimited sentinel.
+        Some(n) => std::num::NonZeroUsize::new(n),
     }
 }
 
@@ -1073,7 +1067,7 @@ fn runner_settings(
             settings.poll_interval = Duration::from_millis(ms);
         }
         // worker_count: absent → default; `0` → unlimited (None); positive →
-        // clamp at MAX_WORKER_COUNT.
+        // that count, verbatim.
         settings.worker_count = resolve_worker_count(runner.worker_count, settings.worker_count);
 
         // Each cap: absent in the file → keep the struct default already in
@@ -1133,10 +1127,9 @@ mod tests {
     #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
-        MAX_WORKER_COUNT, RuntimeInputCaller, RuntimeInputOptions,
-        apply_credential_refresh_override, block_on_cli, build_runtime_input,
-        build_runtime_input_with_options, no_assistant_text_message, protect_reborn_log_filter,
-        resolve_google_oauth_config, runner_settings,
+        RuntimeInputCaller, RuntimeInputOptions, apply_credential_refresh_override, block_on_cli,
+        build_runtime_input, build_runtime_input_with_options, no_assistant_text_message,
+        protect_reborn_log_filter, resolve_google_oauth_config, runner_settings,
     };
     // Only the `#[cfg(feature = "libsql")]` hosted-volume test consumes this.
     #[cfg(feature = "libsql")]
@@ -1217,16 +1210,14 @@ mod tests {
     }
 
     #[test]
-    fn runner_settings_clamps_worker_count_at_max() {
+    fn runner_settings_large_worker_count_passes_through_unclamped() {
+        // A deliberate operator override is trusted verbatim — no silent clamp.
+        // `0` remains the only "unlimited" sentinel.
         let _lock = lock_trigger_env();
         let _env = clear_runner_env();
-        let toml = format!("[runner]\nworker_count = {}\n", MAX_WORKER_COUNT + 10);
-        let cfg = parse_runner_section(&toml);
+        let cfg = parse_runner_section("[runner]\nworker_count = 512\n");
         let settings = runner_settings(Some(&cfg)).expect("should succeed");
-        assert_eq!(
-            settings.worker_count.map(|v| v.get()),
-            Some(MAX_WORKER_COUNT)
-        );
+        assert_eq!(settings.worker_count.map(|v| v.get()), Some(512));
     }
 
     #[test]
@@ -1298,18 +1289,12 @@ mod tests {
     }
 
     #[test]
-    fn runner_env_worker_count_clamps_at_max() {
+    fn runner_env_large_worker_count_passes_through_unclamped() {
         let _lock = lock_trigger_env();
         let _guards = clear_runner_env();
-        let _w = EnvGuard::set(
-            "IRONCLAW_REBORN_RUNNER_WORKER_COUNT",
-            &(MAX_WORKER_COUNT + 100).to_string(),
-        );
+        let _w = EnvGuard::set("IRONCLAW_REBORN_RUNNER_WORKER_COUNT", "512");
         let settings = runner_settings(None).expect("should succeed");
-        assert_eq!(
-            settings.worker_count.map(|v| v.get()),
-            Some(MAX_WORKER_COUNT)
-        );
+        assert_eq!(settings.worker_count.map(|v| v.get()), Some(512));
     }
 
     #[test]
