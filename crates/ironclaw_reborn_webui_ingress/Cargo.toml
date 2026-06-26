@@ -19,6 +19,13 @@ default = []
 # and the O(n) constant-time lookup would scale poorly under real
 # user load. Local dev and tests opt in by enabling this feature.
 dev-in-memory-session = []
+# Compile in `LocalUserDirectoryAuthenticator`, the bearer-token
+# authenticator backed by the durable REST-created user directory
+# (#5272). Forwards `capability-policy` to the composition crate so the
+# `LocalUserDirectoryStore` / `hash_user_token` surface it resolves
+# through is present. Off by default so a feature-off build is
+# byte-unchanged.
+capability-policy = ["ironclaw_reborn_composition/capability-policy"]
 
 [dependencies]
 async-trait = "0.1"

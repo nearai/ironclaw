@@ -27,6 +27,8 @@ use ironclaw_reborn_webui_ingress::{
     DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
     RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2,
 };
+#[cfg(feature = "capability-policy")]
+use ironclaw_reborn_webui_ingress::{LayeredWebuiAuthenticator, LocalUserDirectoryAuthenticator};
 use secrecy::SecretString;
 
 use crate::context::RebornCliContext;
@@ -135,10 +137,15 @@ impl ServeCommand {
         // value is consumed here.
         let token_byte_len = token_value.len();
         let session_signing_secret = SecretString::from(token_value.clone());
-        let env_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(EnvBearerAuthenticator::new(
-            SecretString::from(token_value),
-            user_id.clone(),
-        )?);
+        let operator_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(
+            EnvBearerAuthenticator::new(SecretString::from(token_value), user_id.clone())?,
+        );
+
+        // The WebUI authenticator is assembled AFTER the runtime is built
+        // (below): the local-dev multi-user authenticator (#5272) resolves
+        // REST-created users through a durable store that needs the built
+        // runtime's filesystem, so `operator_authenticator` is carried into the
+        // async block and layered there.
 
         // Resolve trusted host-installation default agent/project from
         // `[identity]`. The v2 facade builds `ThreadScope` from
@@ -381,6 +388,43 @@ impl ServeCommand {
             let runtime = build_reborn_runtime(runtime_input)
                 .await
                 .context("failed to assemble Reborn runtime for `serve`")?;
+
+            // Assemble the WebUI authenticator AFTER the runtime is built. The
+            // local-dev multi-user authenticator (#5272) resolves REST-created
+            // users through the durable `LocalUserDirectoryStore`, which is
+            // backed by the runtime's filesystem. When the capability-policy
+            // feature is compiled in, layer the directory authenticator *over*
+            // the operator credential so one process can be driven as several
+            // users; the operator env token is retained as the fallback (and
+            // bootstrap admin that mints the first REST user), keeping its SSO
+            // signing key, runtime-owner pin, and operator WebUI routes. Each
+            // per-turn caller is isolated by `resolve_for_turn`.
+            //
+            // The single store `Arc` is shared between the authenticator and
+            // the `/admin/users` mount (below), so admin writes are visible to
+            // token resolution.
+            #[cfg(feature = "capability-policy")]
+            let mut user_directory_store_for_mount: Option<
+                Arc<dyn ironclaw_reborn_composition::LocalUserDirectoryStore>,
+            > = None;
+            #[cfg(feature = "capability-policy")]
+            let env_authenticator: Arc<dyn WebuiAuthenticator> =
+                match ironclaw_reborn_composition::build_local_user_directory_store(&runtime) {
+                    Some(store) => {
+                        user_directory_store_for_mount = Some(Arc::clone(&store));
+                        Arc::new(LayeredWebuiAuthenticator::new(vec![
+                            Arc::new(LocalUserDirectoryAuthenticator::new(
+                                tenant_id.clone(),
+                                store,
+                            )),
+                            operator_authenticator,
+                        ]))
+                    }
+                    None => operator_authenticator,
+                };
+            #[cfg(not(feature = "capability-policy"))]
+            let env_authenticator: Arc<dyn WebuiAuthenticator> = operator_authenticator;
+
             #[cfg(feature = "slack-v2-host-beta")]
             let slack_mounts = if let Some(slack_config) = slack_host_beta_config {
                 match build_slack_host_beta_runtime_mounts(&runtime, slack_config)
@@ -475,10 +519,65 @@ impl ServeCommand {
                 &bundle.readiness,
             );
 
+            #[cfg(feature = "capability-policy")]
+            let capability_admin_tenant_id = tenant_id.clone();
+            #[cfg(feature = "capability-policy")]
+            let local_user_admin_tenant_id = tenant_id.clone();
+            #[cfg(feature = "capability-policy")]
+            let capability_user_policy_tenant_id = tenant_id.clone();
             let mut serve_config = WebuiServeConfig::new(tenant_id, authenticator, allowed_origins)
                 .with_default_agent_id(default_agent_id.clone());
             if let Some(project_id) = default_project_id.clone() {
                 serve_config = serve_config.with_default_project_id(project_id);
+            }
+            // Admin capability-availability write surface (#5268): tenant-shared
+            // extension install/uninstall/list, admin-gated, writing the same
+            // scoped-lifecycle store the #5267 resolver reads.
+            #[cfg(feature = "capability-policy")]
+            if let Some(mount) = ironclaw_reborn_composition::build_capability_admin_route_mount(
+                &runtime,
+                capability_admin_tenant_id,
+            ) {
+                serve_config = serve_config.with_protected_route_mount(mount);
+                eprintln!(
+                    "ironclaw-reborn: capability admin routes mounted \
+                     (PUT/DELETE/GET /api/webchat/v2/admin/extensions/...)"
+                );
+            }
+            // REST-created local user directory admin surface (#5272): admin-gated
+            // create/list/delete/set-role over the SAME durable store the
+            // `LocalUserDirectoryAuthenticator` resolves tokens through (the
+            // `Arc` is shared, so a minted token is immediately resolvable).
+            #[cfg(feature = "capability-policy")]
+            if let Some(store) = user_directory_store_for_mount {
+                let mount = ironclaw_reborn_composition::local_user_admin_route_mount(
+                    ironclaw_reborn_composition::LocalUserAdminRouteConfig::new(
+                        local_user_admin_tenant_id,
+                        store,
+                    ),
+                );
+                serve_config = serve_config.with_protected_route_mount(mount);
+                eprintln!(
+                    "ironclaw-reborn: local user admin routes mounted \
+                     (GET/POST/PUT/DELETE /api/webchat/v2/admin/users...)"
+                );
+            }
+            // Per-user capability policy admin surface (#5268): admin-gated
+            // PUT/DELETE/GET writing per-user CapabilityPolicyDelta rows into the
+            // SAME shared delta store the dispatch PolicyResolver reads, so a grant
+            // here is immediately visible to enforcement.
+            #[cfg(feature = "capability-policy")]
+            if let Some(mount) =
+                ironclaw_reborn_composition::build_capability_user_policy_route_mount(
+                    &runtime,
+                    capability_user_policy_tenant_id,
+                )
+            {
+                serve_config = serve_config.with_protected_route_mount(mount);
+                eprintln!(
+                    "ironclaw-reborn: per-user capability policy admin routes mounted \
+                     (PUT/DELETE/GET /api/webchat/v2/admin/users/{{user_id}}/capabilities...)"
+                );
             }
             #[cfg(feature = "openai-compat-beta")]
             {

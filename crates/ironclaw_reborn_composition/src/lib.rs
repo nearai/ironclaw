@@ -32,10 +32,14 @@ mod available_extensions;
 mod budget;
 mod budget_events;
 mod bundled_skills;
+#[cfg(all(feature = "capability-policy", feature = "webui-v2-beta"))]
+mod capability_admin_routes;
 #[cfg(feature = "capability-policy")]
 mod capability_policy_engine;
 #[cfg(feature = "capability-policy")]
 mod capability_surface_policy;
+#[cfg(all(feature = "capability-policy", feature = "webui-v2-beta"))]
+mod capability_user_policy_routes;
 mod communication_context;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod credential_refresh_worker;
@@ -68,6 +72,8 @@ mod local_dev_authorization;
 mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
+#[cfg(all(feature = "capability-policy", feature = "webui-v2-beta"))]
+mod local_user_directory;
 mod manual_token_flow;
 mod mcp;
 mod mcp_discovery;
@@ -180,6 +186,15 @@ pub use auth::{
 pub use automation::RebornAutomationProductFacade;
 pub use budget::build_default_budget_accountant;
 pub use budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
+#[cfg(all(feature = "capability-policy", feature = "webui-v2-beta"))]
+pub use capability_admin_routes::{
+    CapabilityAdminRouteConfig, build_capability_admin_route_mount, capability_admin_route_mount,
+};
+#[cfg(all(feature = "capability-policy", feature = "webui-v2-beta"))]
+pub use capability_user_policy_routes::{
+    CapabilityUserPolicyRouteConfig, build_capability_user_policy_route_mount,
+    capability_user_policy_route_mount,
+};
 pub use error::RebornBuildError;
 pub use extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
@@ -200,6 +215,10 @@ pub use hooks::{
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
+// Capability-policy vocabulary the CLI/host need to drive the per-user admin
+// REST surface (facade-narrow, per composition CLAUDE.md).
+#[cfg(all(feature = "capability-policy", feature = "webui-v2-beta"))]
+pub use ironclaw_capability_policy::{Availability, IdentityMode, PolicyScope};
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
@@ -228,6 +247,11 @@ pub use local_runtime_profile::{
     RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions,
     hosted_single_tenant_runtime_policy, local_dev_runtime_policy, local_dev_yolo_runtime_policy,
     local_runtime_build_input, local_runtime_build_input_with_options,
+};
+#[cfg(all(feature = "capability-policy", feature = "webui-v2-beta"))]
+pub use local_user_directory::{
+    LocalUserAdminRouteConfig, LocalUserDirectoryError, LocalUserDirectoryStore, LocalUserRecord,
+    build_local_user_directory_store, hash_user_token, local_user_admin_route_mount,
 };
 pub use nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,

@@ -17,6 +17,8 @@ v1 secrets / settings / DB.
 | `serve_webui_v2(opts)` | Bind a `TcpListener` + run `axum::serve` with graceful shutdown |
 | `RebornWebuiServeOptions` | Owner-supplied input (addr, router, shutdown receiver) |
 | `EnvBearerAuthenticator` | Single-token `WebuiAuthenticator` for the standalone CLI / local dev; accepted tokens map to operator WebUI capabilities |
+| `LocalUserDirectoryAuthenticator` (feature `capability-policy`) | `WebuiAuthenticator` that resolves a bearer token through the durable REST-created `LocalUserDirectoryStore` (#5272): hashes the candidate via `hash_user_token`, calls `resolve_token`, and maps the resolved `LocalUserRecord` to `(UserId, UserRole)`. Never grants operator WebUI config (`mounts_operator_webui_config_routes() == false`); a store read error is logged and the request fails closed. Layered *over* `EnvBearerAuthenticator` so the operator credential stays the bootstrap admin. |
+| `LayeredWebuiAuthenticator` | Tries several `WebuiAuthenticator`s in match-priority order, returning the first match; ORs `mounts_operator_webui_config_routes()` across layers |
 | `SessionStore` trait | Pluggable session storage; durable impl is host's; `InMemorySessionStore` for local dev / tests |
 | `SessionAuthenticator` | `WebuiAuthenticator` that resolves bearer tokens through a `SessionStore`; accepted tokens map to non-operator WebUI capabilities |
 | `OidcAuthenticator` | OIDC bearer-token verifier (JWKS + standard claims); accepted tokens map to non-operator WebUI capabilities |
