@@ -11,6 +11,7 @@ pub enum RebornCompositionProfile {
     LocalDev,
     LocalDevYolo,
     HostedSingleTenant,
+    HostedSingleTenantVolume,
     Production,
     MigrationDryRun,
 }
@@ -22,6 +23,7 @@ impl RebornCompositionProfile {
             Self::LocalDev => "local-dev",
             Self::LocalDevYolo => "local-dev-yolo",
             Self::HostedSingleTenant => "hosted-single-tenant",
+            Self::HostedSingleTenantVolume => "hosted-single-tenant-volume",
             Self::Production => "production",
             Self::MigrationDryRun => "migration-dry-run",
         }
@@ -35,9 +37,48 @@ impl RebornCompositionProfile {
         matches!(self, Self::Production | Self::MigrationDryRun)
     }
 
+    pub fn uses_local_runtime_substrate(self) -> bool {
+        matches!(
+            self,
+            Self::LocalDev
+                | Self::LocalDevYolo
+                | Self::HostedSingleTenant
+                | Self::HostedSingleTenantVolume
+        )
+    }
+
+    pub fn uses_local_dev_storage_input(self) -> bool {
+        matches!(
+            self,
+            Self::LocalDev | Self::LocalDevYolo | Self::HostedSingleTenantVolume
+        )
+    }
+
+    pub fn starts_live_runtime(self) -> bool {
+        matches!(
+            self,
+            Self::LocalDev
+                | Self::LocalDevYolo
+                | Self::HostedSingleTenant
+                | Self::HostedSingleTenantVolume
+                | Self::Production
+        )
+    }
+
+    pub fn uses_hosted_extension_installation_state(self) -> bool {
+        matches!(
+            self,
+            Self::HostedSingleTenant | Self::HostedSingleTenantVolume
+        )
+    }
+
     pub fn to_event_store_profile(self) -> ironclaw_reborn_event_store::RebornProfile {
         match self {
-            Self::Disabled | Self::LocalDev | Self::LocalDevYolo | Self::HostedSingleTenant => {
+            Self::Disabled
+            | Self::LocalDev
+            | Self::LocalDevYolo
+            | Self::HostedSingleTenant
+            | Self::HostedSingleTenantVolume => {
                 ironclaw_reborn_event_store::RebornProfile::LocalDev
             }
             Self::Production | Self::MigrationDryRun => {
@@ -57,6 +98,7 @@ impl FromStr for RebornCompositionProfile {
             "local-dev" => Ok(Self::LocalDev),
             "local-dev-yolo" => Ok(Self::LocalDevYolo),
             "hosted-single-tenant" => Ok(Self::HostedSingleTenant),
+            "hosted-single-tenant-volume" => Ok(Self::HostedSingleTenantVolume),
             "production" => Ok(Self::Production),
             "migration-dry-run" => Ok(Self::MigrationDryRun),
             _ => Err(RebornCompositionProfileParseError { value: normalized }),
