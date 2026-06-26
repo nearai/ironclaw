@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::LoopDiagnosticRef;
+use crate::{LoopDiagnosticRef, LoopGateRef};
 
 use super::host::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind, LoopModelPort,
@@ -127,6 +127,9 @@ pub struct LoopModelGatewayError {
     pub safe_summary: LoopSafeSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_ref: Option<LoopGateRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
@@ -139,6 +142,7 @@ impl LoopModelGatewayError {
             kind,
             safe_summary: LoopSafeSummary::new(safe_summary)?,
             reason_kind: None,
+            gate_ref: None,
             diagnostic_ref: None,
         })
     }
@@ -153,12 +157,18 @@ impl LoopModelGatewayError {
             kind: AgentLoopHostErrorKind::Unavailable,
             safe_summary: LoopSafeSummary::model_gateway_timed_out(),
             reason_kind: None,
+            gate_ref: None,
             diagnostic_ref: None,
         }
     }
 
     pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
         self.reason_kind = Some(reason_kind);
+        self
+    }
+
+    pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
+        self.gate_ref = Some(gate_ref);
         self
     }
 
@@ -171,6 +181,9 @@ impl LoopModelGatewayError {
         let mut error = AgentLoopHostError::new(self.kind, self.safe_summary.as_str().to_string());
         if let Some(reason_kind) = self.reason_kind {
             error = error.with_reason_kind(reason_kind);
+        }
+        if let Some(gate_ref) = self.gate_ref {
+            error = error.with_gate_ref(gate_ref);
         }
         if let Some(diagnostic_ref) = self.diagnostic_ref {
             error = error.with_diagnostic_ref(diagnostic_ref);

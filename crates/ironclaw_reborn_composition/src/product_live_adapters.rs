@@ -220,7 +220,7 @@ impl LoopCapabilityInputResolver for ProductLiveCapabilityIo {
         self.display_previews.record_input(
             &run_context.run_id.to_string(),
             &input_ref,
-            &tool_call.name,
+            tool_call.name.as_str(),
             &tool_call.arguments,
         );
         Ok(input_ref)
@@ -873,7 +873,7 @@ pub fn capability_allowlist(ids: impl IntoIterator<Item = CapabilityId>) -> Capa
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        AgentId, CapabilityDisplayOutputPreview, InvocationId, TenantId, ThreadId,
+        AgentId, CapabilityDisplayOutputPreview, InvocationId, ProviderToolName, TenantId, ThreadId,
     };
     use ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver;
     use ironclaw_turns::{
@@ -889,7 +889,7 @@ mod tests {
             provider_model_id: "model".to_string(),
             turn_id: Some("turn_1".to_string()),
             id: "call_1".to_string(),
-            name: "read_file".to_string(),
+            name: ProviderToolName::new("read_file").expect("provider tool name"),
             arguments: serde_json::json!({"path": "src/main.rs", "api_key": "sk-secret"}),
             response_reasoning: None,
             reasoning: None,
@@ -950,7 +950,7 @@ mod tests {
             provider_model_id: "model".to_string(),
             turn_id: Some("turn_1".to_string()),
             id: "call_1".to_string(),
-            name: "nearai__web_search".to_string(),
+            name: ProviderToolName::new("nearai__web_search").expect("provider tool name"),
             arguments: serde_json::json!({"query": "deploy status"}),
             response_reasoning: None,
             reasoning: None,

@@ -27,6 +27,7 @@ ironclaw_process_sandbox = { path = "../ironclaw_process_sandbox" }
 ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_extractors = { path = "../ironclaw_extractors" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }

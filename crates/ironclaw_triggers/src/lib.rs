@@ -1170,7 +1170,8 @@ pub use libsql::LibSqlTriggerRepository;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresTriggerRepository;
 pub use worker::{
-    TriggerActiveRunLookup, TriggerActiveRunState, TriggerActiveRunStateRequest,
+    NoopTriggerFireSettlementObserver, TriggerAcceptedFireSettlement, TriggerActiveRunLookup,
+    TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerFireSettlementObserver,
     TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerFireReport,
     TriggerPollerTickReport, TriggerPollerWorker, TriggerPollerWorkerConfig,
     TriggerPollerWorkerDeps, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,

@@ -14,7 +14,7 @@ mod tests {
     use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore};
     use ironclaw_host_api::{
         AgentId, CapabilityId, EffectKind, GrantConstraints, InvocationId, MountPermissions,
-        NetworkPolicy, Principal, ProjectId, TenantId, ThreadId, UserId,
+        NetworkPolicy, Principal, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
     };
     use ironclaw_host_runtime::{
         APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
@@ -188,16 +188,13 @@ mod tests {
         .expect("visible request")
     }
 
-    fn provider_tool_call_with_name(
-        name: impl Into<String>,
-        arguments: serde_json::Value,
-    ) -> ProviderToolCall {
+    fn provider_tool_call_with_name(name: &str, arguments: serde_json::Value) -> ProviderToolCall {
         ProviderToolCall {
             provider_id: "test-provider".to_string(),
             provider_model_id: "test-model".to_string(),
             turn_id: Some("provider-turn-1".to_string()),
             id: "call-1".to_string(),
-            name: name.into(),
+            name: ProviderToolName::new(name).expect("provider tool name"),
             arguments,
             response_reasoning: None,
             reasoning: None,
@@ -1229,6 +1226,9 @@ mod tests {
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
         let port = factory
             .create_capability_port(&run_context)
@@ -1398,6 +1398,9 @@ mod tests {
             ),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
 
         let tenant_id = TenantId::new("tenant-project-create").expect("tenant id");
@@ -1582,6 +1585,9 @@ mod tests {
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
 
         let owner_user_id = UserId::new("outbound-delivery-owner").expect("user id");
@@ -1616,13 +1622,19 @@ mod tests {
         let tool_definitions = port.tool_definitions().expect("tool definitions");
         let tool_definition_names = tool_definitions
             .iter()
-            .map(|definition| definition.name.clone())
+            .map(|definition| definition.name.as_str().to_string())
             .collect::<Vec<_>>();
-        assert!(tool_definition_names.contains(&"builtin__outbound_delivery_targets_list".into()));
-        assert!(tool_definition_names.contains(&"builtin__outbound_delivery_target_set".into()));
+        assert!(
+            tool_definition_names.contains(&"builtin__outbound_delivery_targets_list".to_string())
+        );
+        assert!(
+            tool_definition_names.contains(&"builtin__outbound_delivery_target_set".to_string())
+        );
         let list_tool = tool_definitions
             .iter()
-            .find(|definition| definition.name == "builtin__outbound_delivery_targets_list")
+            .find(|definition| {
+                definition.name.as_str() == "builtin__outbound_delivery_targets_list"
+            })
             .expect("list tool definition should exist");
         assert!(
             list_tool
@@ -1632,7 +1644,7 @@ mod tests {
         );
         let set_tool = tool_definitions
             .iter()
-            .find(|definition| definition.name == "builtin__outbound_delivery_target_set")
+            .find(|definition| definition.name.as_str() == "builtin__outbound_delivery_target_set")
             .expect("set tool definition should exist");
         assert!(
             set_tool
@@ -2127,6 +2139,9 @@ mod tests {
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
         let run_context = run_context("outbound-delivery-hidden")
             .await
@@ -2153,10 +2168,14 @@ mod tests {
             .tool_definitions()
             .expect("tool definitions")
             .into_iter()
-            .map(|definition| definition.name)
+            .map(|definition| definition.name.as_str().to_string())
             .collect::<Vec<_>>();
-        assert!(!tool_definition_names.contains(&"builtin__outbound_delivery_targets_list".into()));
-        assert!(!tool_definition_names.contains(&"builtin__outbound_delivery_target_set".into()));
+        assert!(
+            !tool_definition_names.contains(&"builtin__outbound_delivery_targets_list".to_string())
+        );
+        assert!(
+            !tool_definition_names.contains(&"builtin__outbound_delivery_target_set".to_string())
+        );
     }
 
     #[tokio::test]
@@ -2231,6 +2250,9 @@ mod tests {
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
         let run_context = run_context("host-mount-read").await;
         enable_global_auto_approve_for_run(
@@ -2473,6 +2495,9 @@ mod tests {
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
         let run_context = run_context("skill-install-write").await;
         enable_global_auto_approve_for_run(
@@ -2584,6 +2609,9 @@ mod tests {
             project_service: Arc::clone(&local_runtime.project_service),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: std::sync::Arc::new(
+                ironclaw_turns::InMemoryExternalToolCatalog::new(),
+            ),
         };
         let run_context = run_context("no-host-disclosure").await;
         enable_global_auto_approve_for_run(
@@ -2891,13 +2919,43 @@ mod tests {
         ))
         .await
         .expect("local-dev services build");
-        let run_context = run_context("extension-search-loop-port").await;
-        enable_global_auto_approve_for_run(
+        assert_extension_search_capability_port_reads_system_catalog(
             &services,
-            &run_context,
-            &UserId::new("local-dev-extension-search-user").expect("user id"),
+            "extension-search-loop-port",
+            "local-dev-extension-search-user",
         )
         .await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn hosted_single_tenant_volume_capability_port_extension_search_reads_system_catalog() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::build_reborn_services(
+            crate::hosted_single_tenant_volume_build_input(
+                "hosted-volume-extension-search-owner",
+                dir.path().join("hosted-volume"),
+            )
+            .expect("hosted volume input"),
+        )
+        .await
+        .expect("hosted volume services build");
+        assert_extension_search_capability_port_reads_system_catalog(
+            &services,
+            "hosted-volume-extension-search-loop-port",
+            "hosted-volume-extension-search-user",
+        )
+        .await;
+    }
+
+    async fn assert_extension_search_capability_port_reads_system_catalog(
+        services: &crate::RebornServices,
+        run_label: &str,
+        user_id: &str,
+    ) {
+        let run_context = run_context(run_label).await;
+        let user_id = UserId::new(user_id).expect("user id");
+        enable_global_auto_approve_for_run(services, &run_context, &user_id).await;
         let thread_scope = ThreadScope {
             tenant_id: run_context.scope.tenant_id.clone(),
             agent_id: run_context.scope.agent_id.clone().expect("agent id"),
@@ -2906,10 +2964,10 @@ mod tests {
             mission_id: None,
         };
         let wiring = capability_wiring(
-            &services,
+            services,
             Arc::new(InMemorySessionThreadService::default()),
             thread_scope,
-            UserId::new("local-dev-extension-search-user").expect("user id"),
+            user_id,
             Arc::new(
                 crate::local_dev_capability_policy::local_dev_capability_policy()
                     .expect("policy parses"),
@@ -2939,7 +2997,7 @@ mod tests {
         let candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(
                 provider_tool_call_with_name(
-                    tool_definition.name,
+                    tool_definition.name.as_str(),
                     serde_json::json!({"query": "gmail"}),
                 ),
             ))
@@ -3127,11 +3185,11 @@ mod tests {
             .into_iter()
             .find(|definition| definition.capability_id.as_str() == "gmail.list_messages")
             .expect("gmail.list_messages tool definition");
-        assert_eq!(tool_definition.name, "gmail__list_messages");
+        assert_eq!(tool_definition.name.as_str(), "gmail__list_messages");
 
         let candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(
-                provider_tool_call_with_name(tool_definition.name, serde_json::json!({})),
+                provider_tool_call_with_name(tool_definition.name.as_str(), serde_json::json!({})),
             ))
             .await
             .expect("gmail provider tool call stages");
