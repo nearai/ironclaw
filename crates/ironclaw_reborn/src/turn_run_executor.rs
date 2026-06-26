@@ -25,6 +25,13 @@ use crate::{
     turn_runner::{HostFactory, sanitized_driver_failure, sanitized_failure},
 };
 
+/// Upper bound on the best-effort after-turn memory recording that the scheduler
+/// worker awaits inline. A slow or hung memory provider must not occupy the
+/// worker (and delay unrelated runs) beyond this; on timeout the recording is
+/// skipped (the run is already `Completed`). Generous because a network-backed
+/// provider performs a thread-history read plus a write.
+const AFTER_TURN_MEMORY_RECORD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// A `TurnRunExecutorError` for the static category `"unknown_failure"`.
 ///
 /// Built once on first access via `OnceLock`. Used as a guaranteed-valid
@@ -295,7 +302,23 @@ impl RebornTurnRunExecutor {
                 if state.status == TurnStatus::Completed
                     && let Some(recorder) = self.after_turn_memory_recorder.as_ref()
                 {
-                    recorder.record_completed_run(&state).await;
+                    // Bound this best-effort post-terminal side effect so a slow or
+                    // hung memory provider can't occupy the scheduler worker and
+                    // delay unrelated runs.
+                    if tokio::time::timeout(
+                        AFTER_TURN_MEMORY_RECORD_TIMEOUT,
+                        recorder.record_completed_run(&state),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        // silent-ok: after-turn recording is best-effort post-completion;
+                        // a timeout must not fail or delay the already-completed run.
+                        debug!(
+                            run_id = ?run_id,
+                            "after-turn memory recording timed out; skipping (run already complete)"
+                        );
+                    }
                 }
                 Ok(())
             }

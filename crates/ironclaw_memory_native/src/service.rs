@@ -474,6 +474,12 @@ impl NativeMemoryService {
         }
         let (scope, context) = self.scoped_context(invocation)?;
         let resolved_path = resolve_target_path(target, None)?;
+        // Defense in depth: this bypass writes ONLY the reserved `threads/`
+        // namespace. Reject anything else so a future caller cannot smuggle an
+        // arbitrary path past the public `write` guard through this helper.
+        if !is_thread_scoped_path(&resolved_path) {
+            return Err(MemoryServiceError::operation());
+        }
         let path = document_path(&scope, &resolved_path)?;
         let options = write_options(None);
         self.backend

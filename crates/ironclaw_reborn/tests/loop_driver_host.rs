@@ -1679,7 +1679,6 @@ async fn turn_runner_worker_records_after_turn_memory_on_completed_run() {
         "turn runner should complete queued run for after-turn memory recording",
     )
     .await;
-    scheduler_handle.shutdown().await;
 
     // The recorder runs inside the worker's `apply_exit`, just after the run
     // flips to Completed. Poll the memory store (same scope the recorder writes
@@ -1724,6 +1723,11 @@ async fn turn_runner_worker_records_after_turn_memory_on_completed_run() {
         content.contains("model says hi"),
         "after-turn memory must record the assistant reply: {content:?}"
     );
+
+    // Shut down only AFTER the memory read/assertions: the recorder runs after the
+    // status flips to Completed, so tearing the worker down first could race the
+    // side effect this test asserts.
+    scheduler_handle.shutdown().await;
 }
 
 /// Caller-level coverage of the after-turn memory WIRING (testing.md "test

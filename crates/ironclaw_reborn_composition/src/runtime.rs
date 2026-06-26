@@ -3132,9 +3132,10 @@ pub async fn build_reborn_runtime(
         // After-turn memory recording (#3537 / mem0 `add`): the RAW document-store
         // provider — the SAME `memory_service_resolver` the memory tools and the
         // prompt-context lane use, NOT wrapped in `ProductionMemoryPromptContextService`.
-        // The executor records each Completed run's `[user, assistant]` exchange
-        // through `record_interaction`. `None` degrades to no after-turn recording,
-        // the same production-graph deferral as `memory_context_service` (issue #5013).
+        // The executor forwards each Completed run's full transcript to
+        // `record_interaction`, skipping only runs with no user/assistant content.
+        // `None` degrades to no after-turn recording, the same production-graph
+        // deferral as `memory_context_service` (issue #5013).
         after_turn_memory_writer: local_runtime.and_then(|local_runtime| {
             local_runtime
                 .memory_service_resolver

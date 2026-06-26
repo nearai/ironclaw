@@ -87,6 +87,8 @@ impl AfterTurnMemoryRecorder {
         {
             Ok(history) => history,
             Err(error) => {
+                // silent-ok: after-turn memory is post-terminal; a thread-history
+                // read failure must not reopen or fail the already-completed run.
                 debug!(error = %error, "after-turn memory: thread history read failed; skipping");
                 return;
             }
@@ -129,6 +131,8 @@ impl AfterTurnMemoryRecorder {
             .record_interaction(invocation, request)
             .await
         {
+            // silent-ok: after-turn memory writes are best-effort after completion;
+            // a provider failure must not fail an already-completed run.
             debug!(error = %error, "after-turn memory: record_interaction failed; run already complete");
         }
     }

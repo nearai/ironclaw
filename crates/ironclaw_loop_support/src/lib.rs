@@ -1977,12 +1977,13 @@ fn compaction_kind_for_message(kind: MessageKind) -> LoopContextCompactionKind {
 /// Messages arrive ordered ascending by sequence, so the last `User` message is
 /// the most recent.
 fn latest_user_message_text(messages: &[ContextMessage]) -> Option<String> {
-    messages
-        .iter()
-        .rev()
-        .find(|message| message.kind == MessageKind::User)
-        .map(|message| message.content.clone())
-        .filter(|content| !content.trim().is_empty())
+    // The latest NON-BLANK user message: skip blank trailing user rows and keep
+    // looking back, so a whitespace-only newest user turn doesn't drop memory for
+    // the run when an earlier user turn carries real content.
+    messages.iter().rev().find_map(|message| {
+        (message.kind == MessageKind::User && !message.content.trim().is_empty())
+            .then(|| message.content.clone())
+    })
 }
 
 fn message_ref_from_context(message: &ContextMessage) -> Option<LoopMessageRef> {
@@ -2178,6 +2179,62 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ctx_msg(sequence: u64, kind: MessageKind, content: &str) -> ContextMessage {
+        ContextMessage {
+            message_id: None,
+            summary_id: None,
+            sequence,
+            kind,
+            tool_result_provider_call: None,
+            content: content.to_string(),
+            image_attachments: Vec::new(),
+        }
+    }
+
+    /// CR review: `latest_user_message_text` returns the latest NON-BLANK user
+    /// message — a blank trailing user turn must not drop memory for the run when
+    /// an earlier user turn has content, and non-user rows are skipped.
+    #[test]
+    fn latest_user_message_text_uses_latest_non_blank_user_turn() {
+        // A blank newest user turn must fall back to the earlier non-blank one.
+        let blank_trailing = vec![
+            ctx_msg(1, MessageKind::User, "remember the launch is friday"),
+            ctx_msg(2, MessageKind::User, "   \n  "),
+        ];
+        assert_eq!(
+            latest_user_message_text(&blank_trailing).as_deref(),
+            Some("remember the launch is friday"),
+            "a blank trailing user turn must not drop the earlier non-blank one"
+        );
+
+        // All-blank user rows → None (nothing to query memory with).
+        let all_blank = vec![
+            ctx_msg(1, MessageKind::User, "   "),
+            ctx_msg(2, MessageKind::User, ""),
+        ];
+        assert_eq!(latest_user_message_text(&all_blank), None);
+
+        // The newest non-blank user turn wins over an older one.
+        let two_users = vec![
+            ctx_msg(1, MessageKind::User, "older"),
+            ctx_msg(2, MessageKind::User, "newest"),
+        ];
+        assert_eq!(
+            latest_user_message_text(&two_users).as_deref(),
+            Some("newest")
+        );
+
+        // A newer non-user row is skipped in favor of the latest user turn.
+        let user_then_assistant = vec![
+            ctx_msg(1, MessageKind::User, "the user turn"),
+            ctx_msg(2, MessageKind::Assistant, "model reply"),
+        ];
+        assert_eq!(
+            latest_user_message_text(&user_then_assistant).as_deref(),
+            Some("the user turn")
+        );
+    }
 
     #[test]
     fn personal_context_admitted_summary_empty_paths_uses_count_only() {
