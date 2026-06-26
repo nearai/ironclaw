@@ -42,6 +42,15 @@ concurrency:
   group: reborn-e2e-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+env:
+  # Transient crates.io fetch failures (e.g. "curl SSL_read: unexpected eof",
+  # registry HTTP/2 hiccups) have reddened the architecture leg on main. Disable
+  # HTTP/2 multiplexing, retry network ops aggressively, and use the git CLI for
+  # git deps so those retry too. Mirrors reborn-tests.yml.
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
 jobs:
   rust-reborn:
     name: Rust Reborn (${{ matrix.group }})

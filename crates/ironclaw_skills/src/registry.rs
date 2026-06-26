@@ -1138,6 +1138,10 @@ fn compute_hash_bytes(bytes: &[u8]) -> String {
     format!("sha256:{:x}", result)
 }
 
+// All call sites read file handles inside `#[cfg(unix)]` permission-check
+// paths, so the helper is genuinely unix-only; gate it to match and keep the
+// non-unix build free of a dead-code error under `-D warnings`.
+#[cfg(unix)]
 fn read_file_bytes_limited<R: io::Read>(
     reader: R,
     path: &str,
