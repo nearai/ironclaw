@@ -983,6 +983,20 @@ impl CapabilityStage {
                                 diagnostic_ref: None,
                             };
                         }
+                        CapabilityOutcome::Completed(result) => {
+                            clear_matching_pending_approval_resume(&mut state, &call);
+                            clear_matching_pending_auth_resume(&mut state, &call);
+                            clear_matching_pending_external_tool_resume(&mut state, &call);
+                            append_completed_capability_result(
+                                ctx.host,
+                                &mut state,
+                                &call,
+                                result,
+                                capability_batch,
+                            )
+                            .await?;
+                            return Ok(BatchStep::Continue(Box::new(state)));
+                        }
                         promoted => {
                             return Box::pin(self.handle_capability_outcome(
                                 ctx,

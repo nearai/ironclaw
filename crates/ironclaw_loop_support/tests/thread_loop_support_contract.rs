@@ -2989,12 +2989,15 @@ async fn model_port_merges_consecutive_text_user_messages_for_prompt() {
     .await
     .unwrap();
 
-    let calls = gateway.calls.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].messages.len(), 1);
-    assert_eq!(calls[0].messages[0].role, HostManagedModelMessageRole::User);
+    let messages = {
+        let calls = gateway.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        calls[0].messages.clone()
+    };
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].role, HostManagedModelMessageRole::User);
     assert_eq!(
-        calls[0].messages[0].content,
+        messages[0].content,
         "first follow-up\nsecond follow-up\nthird follow-up"
     );
 

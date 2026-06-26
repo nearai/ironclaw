@@ -1346,7 +1346,7 @@ mod tests {
         let thread_service = StubSessionThreadService;
 
         handoff
-            .submit_or_replay(&thread_service, &coordinator)
+            .submit_or_replay(&thread_service, &coordinator, None)
             .await
             .expect("submit_or_replay succeeds");
 
@@ -1610,7 +1610,7 @@ mod tests {
         let thread_service = StubSessionThreadService;
 
         handoff
-            .submit_or_replay(&thread_service, &coordinator)
+            .submit_or_replay(&thread_service, &coordinator, None)
             .await
             .expect("submit_or_replay succeeds");
 
