@@ -1,9 +1,12 @@
+#[cfg(feature = "libsql")]
+use ironclaw_reborn_composition::hosted_single_tenant_volume_build_input;
 use ironclaw_reborn_composition::{
     RebornBuildInput, RebornCompositionProfile, RebornFacadeReadiness,
     RebornLocalRuntimeProfileOptions, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
-    build_reborn_services, local_dev_yolo_runtime_policy, local_runtime_build_input_with_options,
+    build_reborn_services, hosted_single_tenant_volume_runtime_policy,
+    local_dev_yolo_runtime_policy, local_runtime_build_input_with_options,
 };
 
 use ironclaw_host_api::runtime_policy::{FilesystemBackendKind, RuntimeProfile, SecretMode};
@@ -49,6 +52,18 @@ fn profile_parse_accepts_kebab_and_snake_case() {
         RebornCompositionProfile::HostedSingleTenant
     );
     assert_eq!(
+        "hosted_single_tenant_volume"
+            .parse::<RebornCompositionProfile>()
+            .unwrap(),
+        RebornCompositionProfile::HostedSingleTenantVolume
+    );
+    assert_eq!(
+        "hosted-single-tenant-volume"
+            .parse::<RebornCompositionProfile>()
+            .unwrap(),
+        RebornCompositionProfile::HostedSingleTenantVolume
+    );
+    assert_eq!(
         "migration-dry-run"
             .parse::<RebornCompositionProfile>()
             .unwrap(),
@@ -62,8 +77,49 @@ fn full_graph_profiles_match_production_strictness() {
     assert!(!RebornCompositionProfile::LocalDev.requires_production_shape());
     assert!(!RebornCompositionProfile::LocalDevYolo.requires_production_shape());
     assert!(!RebornCompositionProfile::HostedSingleTenant.requires_production_shape());
+    assert!(!RebornCompositionProfile::HostedSingleTenantVolume.requires_production_shape());
     assert!(RebornCompositionProfile::Production.requires_production_shape());
     assert!(RebornCompositionProfile::MigrationDryRun.requires_production_shape());
+}
+
+#[test]
+fn profile_predicates_capture_hosted_volume_substrate_contract() {
+    assert!(!RebornCompositionProfile::Disabled.uses_local_runtime_substrate());
+    assert!(RebornCompositionProfile::LocalDev.uses_local_runtime_substrate());
+    assert!(RebornCompositionProfile::LocalDevYolo.uses_local_runtime_substrate());
+    assert!(RebornCompositionProfile::HostedSingleTenant.uses_local_runtime_substrate());
+    assert!(RebornCompositionProfile::HostedSingleTenantVolume.uses_local_runtime_substrate());
+    assert!(!RebornCompositionProfile::Production.uses_local_runtime_substrate());
+    assert!(!RebornCompositionProfile::MigrationDryRun.uses_local_runtime_substrate());
+
+    assert!(!RebornCompositionProfile::Disabled.uses_local_dev_storage_input());
+    assert!(RebornCompositionProfile::LocalDev.uses_local_dev_storage_input());
+    assert!(RebornCompositionProfile::LocalDevYolo.uses_local_dev_storage_input());
+    assert!(!RebornCompositionProfile::HostedSingleTenant.uses_local_dev_storage_input());
+    assert!(RebornCompositionProfile::HostedSingleTenantVolume.uses_local_dev_storage_input());
+    assert!(!RebornCompositionProfile::Production.uses_local_dev_storage_input());
+    assert!(!RebornCompositionProfile::MigrationDryRun.uses_local_dev_storage_input());
+
+    assert!(!RebornCompositionProfile::Disabled.uses_hosted_extension_installation_state());
+    assert!(!RebornCompositionProfile::LocalDev.uses_hosted_extension_installation_state());
+    assert!(!RebornCompositionProfile::LocalDevYolo.uses_hosted_extension_installation_state());
+    assert!(
+        RebornCompositionProfile::HostedSingleTenant.uses_hosted_extension_installation_state()
+    );
+    assert!(
+        RebornCompositionProfile::HostedSingleTenantVolume
+            .uses_hosted_extension_installation_state()
+    );
+    assert!(!RebornCompositionProfile::Production.uses_hosted_extension_installation_state());
+    assert!(!RebornCompositionProfile::MigrationDryRun.uses_hosted_extension_installation_state());
+
+    assert!(!RebornCompositionProfile::Disabled.starts_live_runtime());
+    assert!(RebornCompositionProfile::LocalDev.starts_live_runtime());
+    assert!(RebornCompositionProfile::LocalDevYolo.starts_live_runtime());
+    assert!(RebornCompositionProfile::HostedSingleTenant.starts_live_runtime());
+    assert!(RebornCompositionProfile::HostedSingleTenantVolume.starts_live_runtime());
+    assert!(RebornCompositionProfile::Production.starts_live_runtime());
+    assert!(!RebornCompositionProfile::MigrationDryRun.starts_live_runtime());
 }
 
 #[test]
@@ -89,6 +145,17 @@ fn local_dev_yolo_runtime_policy_requires_disclosure() {
             profile: RuntimeProfile::LocalYolo
         }
     );
+}
+
+#[test]
+fn hosted_single_tenant_volume_runtime_policy_is_processless_secure_default() {
+    let policy =
+        hosted_single_tenant_volume_runtime_policy().expect("hosted volume policy resolves");
+
+    assert_eq!(policy.process_backend.as_str(), "none");
+    assert_eq!(policy.filesystem_backend.as_str(), "scoped_virtual");
+    assert_eq!(policy.secret_mode.as_str(), "brokered_handles");
+    assert_eq!(policy.network_mode.as_str(), "brokered");
 }
 
 #[test]
@@ -314,6 +381,7 @@ fn production_blocker_rejects_non_production_shaped_profiles() {
         RebornCompositionProfile::LocalDev,
         RebornCompositionProfile::LocalDevYolo,
         RebornCompositionProfile::HostedSingleTenant,
+        RebornCompositionProfile::HostedSingleTenantVolume,
     ] {
         let diagnostic = RebornReadinessDiagnostic::production_blocker(
             profile,
@@ -349,6 +417,51 @@ fn dev_only_profiles_are_visible_non_production_in_readiness() {
         assert_eq!(diagnostic.status, RebornReadinessDiagnosticStatus::Blocking);
         assert!(diagnostic.blocks_production);
     }
+}
+
+#[test]
+fn hosted_single_tenant_volume_is_visible_as_preview_readiness() {
+    let diagnostic = RebornReadinessDiagnostic::hosted_single_tenant_volume();
+
+    assert_eq!(
+        diagnostic.profile,
+        RebornCompositionProfile::HostedSingleTenantVolume
+    );
+    assert_eq!(
+        diagnostic.component,
+        RebornReadinessDiagnosticComponent::CompositionProfile
+    );
+    assert_eq!(
+        diagnostic.reason,
+        RebornReadinessDiagnosticReason::HostedSingleTenantVolumePreview
+    );
+    assert_eq!(diagnostic.status, RebornReadinessDiagnosticStatus::Warning);
+    assert!(diagnostic.blocks_production);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn hosted_single_tenant_volume_factory_readiness_includes_preview_diagnostic() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = hosted_single_tenant_volume_build_input(
+        "readiness-contract-owner",
+        dir.path().to_path_buf(),
+    )
+    .unwrap();
+    let services = build_reborn_services(input).await.unwrap();
+
+    assert_eq!(
+        services.readiness.profile,
+        RebornCompositionProfile::HostedSingleTenantVolume
+    );
+    assert_eq!(
+        services.readiness.state,
+        RebornReadinessState::HostedSingleTenantVolumePreviewValidated
+    );
+    assert_eq!(
+        services.readiness.diagnostics,
+        vec![RebornReadinessDiagnostic::hosted_single_tenant_volume()]
+    );
 }
 
 #[tokio::test]
@@ -518,6 +631,7 @@ fn production_wiring_report_skipped_for_non_production_profiles() {
         RebornCompositionProfile::LocalDev,
         RebornCompositionProfile::LocalDevYolo,
         RebornCompositionProfile::HostedSingleTenant,
+        RebornCompositionProfile::HostedSingleTenantVolume,
     ] {
         assert!(
             RebornReadinessDiagnostic::from_production_wiring_report(profile, &report).is_empty()
