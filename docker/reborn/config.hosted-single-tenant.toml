@@ -20,14 +20,16 @@ backend = "postgres"
 url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
 # All Postgres-backed subsystems (turns, threads, messages, events, secrets)
-# share this single pool, and each filesystem op checks out a connection. A
+# share this single pool, and each filesystem op checks out a connection;
+# put_batch additionally holds a connection for the span of its BEGIN…COMMIT. A
 # size of 1-2 starves the heartbeat/webui under a single turn, so the runner
-# lease expires and the turn wedges. Size for runtime concurrency while staying
-# under the upstream pooler cap: the reference deployment fronts Postgres with
-# the Supabase Supavisor session pooler (default pool size ~15), so 10 leaves
-# headroom for migrations and any admin sessions. Override at runtime without a
-# redeploy via IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE (env wins over this file).
-pool_max_size = 10
+# lease expires and the turn wedges. 16 matches DEFAULT_POSTGRES_POOL_MAX_SIZE
+# for batch headroom. NOTE: the reference deployment fronts Postgres with the
+# Supabase Supavisor session pooler (default pool size ~15); confirm 16 stays
+# within the upstream pooler cap (and the server max_connections) before rollout,
+# and lower this value if the pooler ceiling is ~15. Override at runtime without
+# a redeploy via IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE (env wins over this file).
+pool_max_size = 16
 # Remote Postgres defaults to TLS. For trusted private-network deployments
 # where the provider cannot complete TLS, set both DATABASE_SSLMODE=disable
 # and IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT=true.

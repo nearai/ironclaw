@@ -1783,14 +1783,17 @@ mod postgres_tests {
 
     #[tokio::test]
     async fn postgres_put_batch_multi_all_or_nothing() {
-        // Postgres advertises TxnCapability::MultiKey, so the default
-        // put_batch impl drives a real multi-key transaction: a mix of
-        // Absent (insert) and Version (CAS update) legs all land together,
-        // and a single stale leg rolls the whole batch back.
+        // Postgres advertises TxnCapability::MultiKey + Capability::BatchPut, so
+        // put_batch is served by the trait default impl, which routes the whole
+        // batch through one `begin`/`StorageTxn` BEGIN…COMMIT over the common
+        // prefix: a mix of Absent (insert) and Version (CAS update) legs all land
+        // together over a real Postgres transaction, and a single stale leg rolls
+        // the whole batch back, leaving nothing written.
         let Some((fs, prefix)) = postgres_root().await else {
             return;
         };
         assert_eq!(fs.capabilities().txn(), TxnCapability::MultiKey);
+        assert!(fs.capabilities().has(Capability::BatchPut));
 
         // Pre-create two paths so we can exercise Version CAS legs.
         let c = vpath(&prefix, "C");
@@ -2486,5 +2489,17 @@ mod postgres_tests {
             return;
         };
         assert!(fs.capabilities().has(Capability::Events));
+    }
+
+    #[tokio::test]
+    async fn postgres_capabilities_advertise_batch_put() {
+        let Some((fs, _prefix)) = postgres_root().await else {
+            return;
+        };
+        // Postgres must advertise the BatchPut bit so atomic-batching callers
+        // can gate on it; put_batch is served atomically by the trait default
+        // over the MultiKey txn capability also advertised here.
+        assert!(fs.capabilities().has(Capability::BatchPut));
+        assert_eq!(fs.capabilities().txn(), TxnCapability::MultiKey);
     }
 }
