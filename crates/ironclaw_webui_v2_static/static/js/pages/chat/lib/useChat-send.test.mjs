@@ -2565,3 +2565,170 @@ test("useChat.resolveGate: approved also keeps isProcessing true", async () => {
   const lastIsProcessing = isProcessingUpdates[isProcessingUpdates.length - 1];
   assert.equal(lastIsProcessing.value, true);
 });
+
+// ---------------------------------------------------------------------------
+// Parallel-thread send admission (regression for #5256).
+//
+// The send gate must block ONLY a duplicate send into the thread that
+// already has a run in flight. A run on some *other* thread — most often the
+// one currently on screen — must never stop the user from starting a new
+// chat or addressing a different thread in parallel. #5256 keyed the gate on
+// `!targetThreadId` and on the *viewed* thread id, which silently dropped
+// ("doesn't accept from front end") any send while another thread was busy.
+//
+// These tests drive the real `send` caller and assert the functional
+// outcome — whether the request actually reaches `sendMessage`/`createThread`
+// — with no dependence on DOM, markup, or class names.
+// ---------------------------------------------------------------------------
+
+function createParallelSendContext({
+  threadId,
+  activeRun,
+  createdThreadId = "thread-created",
+  stateUpdates = [],
+} = {}) {
+  let sentBody = null;
+  let createThreadCalls = 0;
+  let currentMessages = [];
+  const seededByThread = new Map();
+  const initialByIndex = new Map();
+  if (activeRun !== undefined) {
+    // State slot order: cooldownUntil(0), now(1), activeRun(2),
+    // channelConnectAction(3), isProcessing(4), pendingGate(5),
+    // busyGateNotice(6), stateThreadId(7).
+    initialByIndex.set(2, activeRun);
+  }
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({ initialByIndex, setCalls: stateUpdates }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      createThreadCalls += 1;
+      return { thread: { thread_id: createdThreadId } };
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async (body) => {
+      sentBody = body;
+      return {
+        accepted_message_ref: "msg:parallel-1",
+        run_id: "run-parallel",
+        status: "queued",
+        thread_id: body.threadId,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: currentMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: (seedThreadId, updater) => {
+        const previous = seededByThread.get(seedThreadId) || [];
+        const next = typeof updater === "function" ? updater(previous) : updater;
+        seededByThread.set(seedThreadId, next);
+      },
+      setMessages: (updater) => {
+        currentMessages =
+          typeof updater === "function" ? updater(currentMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  return {
+    context,
+    sentBody: () => sentBody,
+    createThreadCalls: () => createThreadCalls,
+  };
+}
+
+test("useChat.send: starts a new chat while another thread's run is active", async () => {
+  // Landing screen (no open thread), but a run on `thread-busy` is still
+  // tracked in activeRun. Starting a brand-new chat must create the thread
+  // and send — the active run belongs to a different thread.
+  const { context, sentBody, createThreadCalls } = createParallelSendContext({
+    threadId: null,
+    activeRun: { runId: "run-busy", threadId: "thread-busy", status: "running" },
+    createdThreadId: "thread-new",
+  });
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(null);
+  const result = await chat.send("start a parallel conversation");
+
+  assert.equal(createThreadCalls(), 1, "a new thread must be created");
+  assert.ok(sentBody(), "the message must reach sendMessage, not be dropped");
+  assert.equal(sentBody().threadId, "thread-new");
+  assert.equal(sentBody().content, "start a parallel conversation");
+  assert.ok(result, "send must resolve with a response, not null");
+});
+
+test("useChat.send: addresses a second thread in parallel while viewing a running thread", async () => {
+  // Viewing thread-a (its run is active); send is explicitly addressed to a
+  // different thread-b. The active run on the viewed thread must not block
+  // delivery to thread-b.
+  const { context, sentBody } = createParallelSendContext({
+    threadId: "thread-a",
+    activeRun: { runId: "run-a", threadId: "thread-a", status: "running" },
+  });
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat("thread-a");
+  const result = await chat.send("message for the other thread", {
+    threadId: "thread-b",
+  });
+
+  assert.ok(sentBody(), "the parallel-thread message must reach sendMessage");
+  assert.equal(sentBody().threadId, "thread-b");
+  assert.ok(result, "send must resolve with a response, not null");
+});
+
+test("useChat.send: still blocks a duplicate send into the already-running thread", async () => {
+  // The one case the gate must keep blocking: a second send into the SAME
+  // thread that already has a run in flight.
+  const { context, sentBody, createThreadCalls } = createParallelSendContext({
+    threadId: "thread-a",
+    activeRun: { runId: "run-a", threadId: "thread-a", status: "running" },
+  });
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat("thread-a");
+  const result = await chat.send("duplicate into the busy thread", {
+    threadId: "thread-a",
+  });
+
+  assert.equal(result, null, "duplicate send into the busy thread is rejected");
+  assert.equal(sentBody(), null, "sendMessage must not be called for a busy thread");
+  assert.equal(createThreadCalls(), 0);
+});
