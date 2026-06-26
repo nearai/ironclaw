@@ -149,13 +149,14 @@ impl TriggerPollerWorker {
                             .to_string(),
                     });
                 }
-                self.deps.fire_settlement_observer.on_accepted_fire_settled(
-                    TriggerAcceptedFireSettlement {
+                self.deps
+                    .fire_settlement_observer
+                    .on_accepted_fire_settled(TriggerAcceptedFireSettlement {
                         fire: submitted_fire,
                         run_id,
                         turn_scope,
-                    },
-                );
+                    })
+                    .await;
                 Ok(TriggerPollerFireOutcome::Submitted { run_id })
             }
             Ok(TrustedTriggerFireSubmitOutcome::Replayed {

@@ -1,8 +1,10 @@
 use std::sync::Arc;
 #[cfg(feature = "slack-v2-host-beta")]
-use std::sync::OnceLock;
+use std::sync::Mutex;
 use std::time::Duration;
 
+#[cfg(feature = "slack-v2-host-beta")]
+use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_triggers::{
     ScheduleTriggerSourceProvider, TriggerActiveRunLookup, TriggerError, TriggerPollerWorker,
@@ -70,13 +72,11 @@ pub(crate) struct TriggerPollerCompositionDeps {
     pub(crate) materializer: Arc<dyn TriggerPromptMaterializer>,
     pub(crate) trusted_submitter: Arc<dyn TrustedTriggerFireSubmitter>,
     pub(crate) active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
-    /// Late-binding slot for the post-submit delivery hook. Filled by
-    /// `RebornRuntime::set_trigger_post_submit_hook` after the runtime is
-    /// built. The settlement observer checks `slot.get()` after each accepted
-    /// fire is durably settled, so the hook can be wired after
-    /// `spawn_trigger_poller` returns without restarting the poller.
+    /// Late-binding dispatcher for the post-submit delivery hook. It buffers
+    /// accepted-fire settlements during runtime startup until
+    /// `RebornRuntime::set_trigger_post_submit_hook` installs the real hook.
     #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) post_submit_hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
+    pub(crate) post_submit_hook_dispatch: Arc<PostSubmitHookDispatch>,
 }
 
 pub(crate) fn spawn_trigger_poller(
@@ -89,7 +89,7 @@ pub(crate) fn spawn_trigger_poller(
     settings.worker.validate()?;
     #[cfg(feature = "slack-v2-host-beta")]
     let fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver> =
-        Arc::new(PostSubmitHookObserver::new(deps.post_submit_hook_slot));
+        Arc::new(PostSubmitHookObserver::new(deps.post_submit_hook_dispatch));
     #[cfg(feature = "slack-v2-host-beta")]
     let trusted_submitter = deps.trusted_submitter;
     #[cfg(not(feature = "slack-v2-host-beta"))]
@@ -116,36 +116,106 @@ pub(crate) fn spawn_trigger_poller(
     Ok(Some(TriggerPollerRuntimeHandle { cancel, handle }))
 }
 
+/// Late-bound delivery dispatcher shared by the runtime and trigger poller.
+///
+/// Runtime construction starts the poller before Slack mounts are fully built.
+/// Accepted fires that settle in that startup window are buffered here and
+/// replayed once `set_trigger_post_submit_hook` installs the Slack hook.
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) struct PostSubmitHookDispatch {
+    state: Mutex<PostSubmitHookDispatchState>,
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+#[derive(Default)]
+struct PostSubmitHookDispatchState {
+    hook: Option<Arc<dyn PostSubmitDeliveryHook>>,
+    pending: Vec<TriggerAcceptedFireSettlement>,
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+impl PostSubmitHookDispatch {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: Mutex::new(PostSubmitHookDispatchState::default()),
+        }
+    }
+
+    pub(crate) fn install_hook(&self, hook: Arc<dyn PostSubmitDeliveryHook>) -> bool {
+        let pending = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.hook.is_some() {
+                return false;
+            }
+            state.hook = Some(Arc::clone(&hook));
+            std::mem::take(&mut state.pending)
+        };
+        for event in pending {
+            spawn_post_submit_delivery(Arc::clone(&hook), event);
+        }
+        true
+    }
+
+    pub(crate) fn is_hook_installed(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .hook
+            .is_some()
+    }
+
+    fn dispatch_or_buffer(&self, event: TriggerAcceptedFireSettlement) {
+        let hook = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match state.hook.as_ref() {
+                Some(hook) => Arc::clone(hook),
+                None => {
+                    state.pending.push(event);
+                    return;
+                }
+            }
+        };
+        spawn_post_submit_delivery(hook, event);
+    }
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+fn spawn_post_submit_delivery(
+    hook: Arc<dyn PostSubmitDeliveryHook>,
+    event: TriggerAcceptedFireSettlement,
+) {
+    tokio::spawn(async move {
+        hook.on_trigger_submitted(event.fire, event.run_id, event.turn_scope)
+            .await;
+    });
+}
+
 /// Bridges trigger-domain settlement notifications to the composition-owned
 /// Slack delivery hook. Delivery is detached from the poller tick only after the
 /// worker has persisted the accepted run/thread mapping.
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) struct PostSubmitHookObserver {
-    pub(crate) hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
+    pub(crate) dispatch: Arc<PostSubmitHookDispatch>,
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
 impl PostSubmitHookObserver {
-    fn new(hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>) -> Self {
-        Self { hook_slot }
+    fn new(dispatch: Arc<PostSubmitHookDispatch>) -> Self {
+        Self { dispatch }
     }
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
+#[async_trait]
 impl TriggerFireSettlementObserver for PostSubmitHookObserver {
-    fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement) {
-        let Some(hook) = self.hook_slot.get().cloned() else {
-            tracing::debug!(
-                target = "ironclaw::reborn::trigger_poller",
-                %event.run_id,
-                "triggered run settled but post-submit hook slot not yet set (startup window); delivery skipped for this fire"
-            );
-            return;
-        };
-        tokio::spawn(async move {
-            hook.on_trigger_submitted(event.fire, event.run_id, event.turn_scope)
-                .await;
-        });
+    async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement) {
+        self.dispatch.dispatch_or_buffer(event);
     }
 }
 
@@ -254,7 +324,7 @@ mod tests {
     #[cfg(feature = "slack-v2-host-beta")]
     mod post_submit_observer {
         use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::{Arc, Mutex, OnceLock};
+        use std::sync::{Arc, Mutex};
         use std::time::Duration;
 
         use async_trait::async_trait;
@@ -267,7 +337,7 @@ mod tests {
         use ironclaw_turns::{TurnRunId, TurnScope};
         use tokio::sync::Notify;
 
-        use super::super::PostSubmitHookObserver;
+        use super::super::{PostSubmitHookDispatch, PostSubmitHookObserver};
         use crate::slack_delivery::PostSubmitDeliveryHook;
 
         #[derive(Default)]
@@ -363,31 +433,46 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn empty_slot_settlement_succeeds_hook_does_not_fire() {
-            let hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>> =
-                Arc::new(OnceLock::new());
-            let observer = PostSubmitHookObserver::new(Arc::clone(&hook_slot));
+        async fn uninstalled_hook_buffers_until_hook_is_installed() {
+            let run_id = TurnRunId::new();
+            let dispatch = Arc::new(PostSubmitHookDispatch::new());
+            let observer = PostSubmitHookObserver::new(Arc::clone(&dispatch));
+            let recording = Arc::new(RecordingHook::default());
 
-            observer.on_accepted_fire_settled(settlement_event(TurnRunId::new()));
+            observer
+                .on_accepted_fire_settled(settlement_event(run_id))
+                .await;
 
             assert!(
-                hook_slot.get().is_none(),
-                "hook slot must remain empty when no hook was set"
+                tokio::time::timeout(Duration::from_millis(50), recording.wait_for_calls(1))
+                    .await
+                    .is_err(),
+                "settlement must be buffered while hook is not installed"
             );
+            assert!(
+                dispatch.install_hook(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>),
+                "first hook install must succeed"
+            );
+
+            let calls = tokio::time::timeout(Duration::from_secs(1), recording.wait_for_calls(1))
+                .await
+                .expect("buffered settlement should be delivered after hook install");
+            assert_eq!(calls[0].1, run_id);
         }
 
         #[tokio::test]
         async fn filled_slot_settlement_invokes_hook_with_run_id_and_scope() {
             let run_id = TurnRunId::new();
-            let hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>> =
-                Arc::new(OnceLock::new());
+            let dispatch = Arc::new(PostSubmitHookDispatch::new());
             let recording = Arc::new(RecordingHook::default());
-            hook_slot
-                .set(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
-                .unwrap_or_else(|_| panic!("slot set should succeed on first call"));
-            let observer = PostSubmitHookObserver::new(hook_slot);
+            assert!(
+                dispatch.install_hook(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
+            );
+            let observer = PostSubmitHookObserver::new(dispatch);
 
-            observer.on_accepted_fire_settled(settlement_event(run_id));
+            observer
+                .on_accepted_fire_settled(settlement_event(run_id))
+                .await;
 
             let calls = tokio::time::timeout(Duration::from_secs(1), recording.wait_for_calls(1))
                 .await
@@ -414,21 +499,20 @@ mod tests {
         #[tokio::test]
         async fn filled_slot_slow_hook_does_not_block_observer() {
             let run_id = TurnRunId::new();
-            let hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>> =
-                Arc::new(OnceLock::new());
+            let dispatch = Arc::new(PostSubmitHookDispatch::new());
             let entered = Arc::new(Notify::new());
             let release = Arc::new(Notify::new());
             let completed = Arc::new(AtomicBool::new(false));
-            hook_slot
-                .set(Arc::new(BlockingHook {
-                    entered: Arc::clone(&entered),
-                    release: Arc::clone(&release),
-                    completed: Arc::clone(&completed),
-                }) as Arc<dyn PostSubmitDeliveryHook>)
-                .unwrap_or_else(|_| panic!("slot set should succeed on first call"));
-            let observer = PostSubmitHookObserver::new(hook_slot);
+            assert!(dispatch.install_hook(Arc::new(BlockingHook {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                completed: Arc::clone(&completed),
+            }) as Arc<dyn PostSubmitDeliveryHook>));
+            let observer = PostSubmitHookObserver::new(dispatch);
 
-            observer.on_accepted_fire_settled(settlement_event(run_id));
+            observer
+                .on_accepted_fire_settled(settlement_event(run_id))
+                .await;
 
             tokio::time::timeout(Duration::from_secs(1), entered.notified())
                 .await

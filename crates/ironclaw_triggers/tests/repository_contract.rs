@@ -3618,6 +3618,133 @@ mod fire_claim_contract {
         .await;
     }
 
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_repository_mark_fire_accepted_settles_equivalent_active_fire_timestamp_text() {
+        let (_dir, db, repo) = build_libsql_repo_with_db().await;
+        let trigger_id = TriggerId::parse("01J00000000000000000000020").expect("ulid");
+        let tenant_id = tenant("tenant-libsql-accepted-text");
+        let fire_slot = ts(1_704_067_200);
+        let accepted_at = ts(1_704_067_205);
+        repo.upsert_trigger(sample_record(trigger_id, tenant_id.clone(), fire_slot))
+            .await
+            .expect("insert record");
+        assert!(matches!(
+            repo.claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("claim fire"),
+            ClaimDueFireOutcome::Claimed(_)
+        ));
+        rewrite_libsql_active_fire_slot_to_equivalent_text(&db, &tenant_id, trigger_id, fire_slot)
+            .await;
+
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f67").expect("valid run");
+        let thread_id =
+            ThreadId::new("01890f0f-ee01-7000-8000-000000000005").expect("valid thread id");
+        let accepted = repo
+            .mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                run_id,
+                thread_id: thread_id.clone(),
+                submitted_at: accepted_at,
+            })
+            .await
+            .expect("accept fire with equivalent active_fire_slot text")
+            .expect("accepted fire should settle");
+
+        assert_eq!(accepted.active_run_ref, Some(run_id));
+        let runs = repo
+            .list_trigger_run_history(tenant_id, trigger_id, 1)
+            .await
+            .expect("run history");
+        assert_eq!(runs[0].run_id, Some(run_id));
+        assert_eq!(runs[0].thread_id, Some(thread_id));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_repository_mark_fire_replayed_settles_equivalent_active_fire_timestamp_text() {
+        let (_dir, db, repo) = build_libsql_repo_with_db().await;
+        let trigger_id = TriggerId::parse("01J00000000000000000000021").expect("ulid");
+        let tenant_id = tenant("tenant-libsql-replayed-text");
+        let fire_slot = ts(1_704_067_200);
+        let replayed_at = ts(1_704_067_205);
+        repo.upsert_trigger(sample_record(trigger_id, tenant_id.clone(), fire_slot))
+            .await
+            .expect("insert record");
+        assert!(matches!(
+            repo.claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("claim fire"),
+            ClaimDueFireOutcome::Claimed(_)
+        ));
+        rewrite_libsql_active_fire_slot_to_equivalent_text(&db, &tenant_id, trigger_id, fire_slot)
+            .await;
+
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f68").expect("valid run");
+        let thread_id =
+            ThreadId::new("01890f0f-ee01-7000-8000-000000000006").expect("valid thread id");
+        let replayed = repo
+            .mark_fire_replayed(FireReplayedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                original_run_id: run_id,
+                thread_id: Some(thread_id.clone()),
+                replayed_at,
+            })
+            .await
+            .expect("replay fire with equivalent active_fire_slot text")
+            .expect("replayed fire should settle");
+
+        assert_eq!(replayed.active_run_ref, Some(run_id));
+        let runs = repo
+            .list_trigger_run_history(tenant_id, trigger_id, 1)
+            .await
+            .expect("run history");
+        assert_eq!(runs[0].run_id, Some(run_id));
+        assert_eq!(runs[0].thread_id, Some(thread_id));
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn rewrite_libsql_active_fire_slot_to_equivalent_text(
+        db: &libsql::Database,
+        tenant_id: &TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+    ) {
+        let equivalent_fire_slot_text = fire_slot.to_rfc3339_opts(SecondsFormat::Secs, false);
+        let canonical_fire_slot_text = fire_slot.to_rfc3339_opts(SecondsFormat::Nanos, true);
+        assert_ne!(
+            equivalent_fire_slot_text, canonical_fire_slot_text,
+            "test must rewrite to an equivalent but non-canonical timestamp string"
+        );
+        db.connect()
+            .expect("connect raw libsql")
+            .execute(
+                "UPDATE trigger_records SET active_fire_slot = ?1 WHERE tenant_id = ?2 AND trigger_id = ?3",
+                libsql::params![
+                    equivalent_fire_slot_text,
+                    tenant_id.as_str(),
+                    trigger_id.to_string()
+                ],
+            )
+            .await
+            .expect("rewrite active fire timestamp text");
+    }
+
     #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_repository_fire_claim_contract() {
@@ -3730,27 +3857,10 @@ mod fire_claim_contract {
             ClaimDueFireOutcome::Claimed(_)
         ));
 
-        let equivalent_fire_slot_text = fire_slot.to_rfc3339_opts(SecondsFormat::Secs, false);
-        let canonical_fire_slot_text = fire_slot.to_rfc3339_opts(SecondsFormat::Nanos, true);
-        assert_ne!(
-            equivalent_fire_slot_text, canonical_fire_slot_text,
-            "test must rewrite to an equivalent but non-canonical timestamp string"
-        );
-        pool.get()
-            .await
-            .expect("postgres connection")
-            .execute(
-                "UPDATE trigger_records
-                 SET active_fire_slot = $1
-                 WHERE tenant_id = $2 AND trigger_id = $3",
-                &[
-                    &equivalent_fire_slot_text,
-                    &tenant_id.as_str(),
-                    &trigger_id.to_string(),
-                ],
-            )
-            .await
-            .expect("rewrite active fire timestamp text");
+        rewrite_postgres_active_fire_slot_to_equivalent_text(
+            &pool, &tenant_id, trigger_id, fire_slot,
+        )
+        .await;
 
         let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f65").expect("valid run");
         let thread_id =
@@ -3776,6 +3886,95 @@ mod fire_claim_contract {
         assert_eq!(runs[0].run_id, Some(run_id));
         assert_eq!(runs[0].thread_id, Some(thread_id));
         clear_postgres_triggers(&pool).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_repository_mark_fire_replayed_settles_equivalent_active_fire_timestamp_text()
+    {
+        let Some((_container, pool)) = postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+
+        let trigger_id = TriggerId::parse("01J00000000000000000000019").expect("ulid");
+        let tenant_id = tenant("tenant-postgres-replayed-text");
+        let fire_slot = ts(1_704_067_200);
+        let replayed_at = ts(1_704_067_205);
+        repo.upsert_trigger(sample_record(trigger_id, tenant_id.clone(), fire_slot))
+            .await
+            .expect("insert record");
+        assert!(matches!(
+            repo.claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("claim fire"),
+            ClaimDueFireOutcome::Claimed(_)
+        ));
+        rewrite_postgres_active_fire_slot_to_equivalent_text(
+            &pool, &tenant_id, trigger_id, fire_slot,
+        )
+        .await;
+
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f66").expect("valid run");
+        let thread_id =
+            ThreadId::new("01890f0f-ee01-7000-8000-000000000004").expect("valid thread id");
+        let replayed = repo
+            .mark_fire_replayed(FireReplayedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                original_run_id: run_id,
+                thread_id: Some(thread_id.clone()),
+                replayed_at,
+            })
+            .await
+            .expect("replay fire with equivalent active_fire_slot text")
+            .expect("replayed fire should settle");
+
+        assert_eq!(replayed.active_run_ref, Some(run_id));
+        let runs = repo
+            .list_trigger_run_history(tenant_id, trigger_id, 1)
+            .await
+            .expect("run history");
+        assert_eq!(runs[0].run_id, Some(run_id));
+        assert_eq!(runs[0].thread_id, Some(thread_id));
+        clear_postgres_triggers(&pool).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    async fn rewrite_postgres_active_fire_slot_to_equivalent_text(
+        pool: &deadpool_postgres::Pool,
+        tenant_id: &TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+    ) {
+        let equivalent_fire_slot_text = fire_slot.to_rfc3339_opts(SecondsFormat::Secs, false);
+        let canonical_fire_slot_text = fire_slot.to_rfc3339_opts(SecondsFormat::Nanos, true);
+        assert_ne!(
+            equivalent_fire_slot_text, canonical_fire_slot_text,
+            "test must rewrite to an equivalent but non-canonical timestamp string"
+        );
+        pool.get()
+            .await
+            .expect("postgres connection")
+            .execute(
+                "UPDATE trigger_records
+                 SET active_fire_slot = $1
+                 WHERE tenant_id = $2 AND trigger_id = $3",
+                &[
+                    &equivalent_fire_slot_text,
+                    &tenant_id.as_str(),
+                    &trigger_id.to_string(),
+                ],
+            )
+            .await
+            .expect("rewrite active fire timestamp text");
     }
 
     #[cfg(feature = "postgres")]

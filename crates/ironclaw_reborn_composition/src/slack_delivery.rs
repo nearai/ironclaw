@@ -2978,8 +2978,6 @@ mod tests {
     // the plan explicitly forbids exposing `host_state_filesystem` from
     // `RebornRuntime` for that purpose.
 
-    use std::sync::OnceLock;
-
     use ironclaw_outbound::{
         CommunicationPreferenceRecord, DeliveryDefaultScope, InMemoryDeliveredGateRouteStore,
         InMemoryOutboundStateStore, InMemoryTriggeredRunDeliveryStore,
@@ -5852,65 +5850,6 @@ mod tests {
         assert!(
             body.contains(gate_ref_str),
             "approval prompt must reference the gate ref, body: {body}"
-        );
-    }
-
-    // --- OnceLock slot behaviour tests ----------------------------------------
-
-    #[tokio::test]
-    async fn post_submit_hook_slot_empty_hook_does_not_fire() {
-        // Verify the contract that `PostSubmitHookWrappedSubmitter` relies on:
-        // when the OnceLock slot is empty, reading it returns None and no hook fires.
-        let slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>> = Arc::new(OnceLock::new());
-
-        // Slot is empty — `get()` returns None, so no hook fires.
-        assert!(slot.get().is_none(), "empty slot must return None");
-
-        // When the slot IS occupied the hook IS reachable.
-        let fired = Arc::new(Mutex::new(false));
-        let fired_clone = Arc::clone(&fired);
-        struct FlagHook(Arc<Mutex<bool>>);
-        #[async_trait]
-        impl PostSubmitDeliveryHook for FlagHook {
-            async fn on_trigger_submitted(
-                &self,
-                _fire: TriggerFire,
-                _run_id: TurnRunId,
-                _scope: TurnScope,
-            ) {
-                *self.0.lock().expect("flag") = true;
-            }
-        }
-        slot.set(Arc::new(FlagHook(fired_clone)))
-            .unwrap_or_else(|_| panic!("first slot set should succeed"));
-        if let Some(hook) = slot.get() {
-            let fire = minimal_trigger_fire(None);
-            hook.on_trigger_submitted(fire, TurnRunId::new(), personal_turn_scope())
-                .await;
-        }
-        assert!(
-            *fired.lock().expect("flag"),
-            "hook must fire after slot is set"
-        );
-    }
-
-    #[test]
-    fn post_submit_hook_slot_second_set_is_noop() {
-        // OnceLock semantics: first set succeeds, second set returns the value.
-        // This is the contract behind `set_trigger_post_submit_hook` returning false
-        // on duplicate calls.
-        let slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>> = Arc::new(OnceLock::new());
-        let hook_a: Arc<dyn PostSubmitDeliveryHook> = Arc::new(NoopPostSubmitDeliveryHook);
-        let hook_b: Arc<dyn PostSubmitDeliveryHook> = Arc::new(NoopPostSubmitDeliveryHook);
-
-        assert!(slot.set(hook_a).is_ok(), "first set should succeed");
-        assert!(
-            slot.set(hook_b).is_err(),
-            "second set should fail (slot already occupied)"
-        );
-        assert!(
-            slot.get().is_some(),
-            "slot still occupied after duplicate set"
         );
     }
 

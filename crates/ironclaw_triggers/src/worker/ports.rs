@@ -107,15 +107,17 @@ pub struct TriggerAcceptedFireSettlement {
     pub turn_scope: TurnScope,
 }
 
+#[async_trait]
 pub trait TriggerFireSettlementObserver: Send + Sync {
-    fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement);
+    async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement);
 }
 
 #[derive(Debug, Default)]
 pub struct NoopTriggerFireSettlementObserver;
 
+#[async_trait]
 impl TriggerFireSettlementObserver for NoopTriggerFireSettlementObserver {
-    fn on_accepted_fire_settled(&self, _event: TriggerAcceptedFireSettlement) {}
+    async fn on_accepted_fire_settled(&self, _event: TriggerAcceptedFireSettlement) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -320,7 +320,14 @@ async fn tick_notifies_settlement_observer_after_accepted_fire_persists() {
     repo.upsert_trigger(record.clone()).await.expect("insert");
     let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5b").expect("run id");
     let turn_scope = test_turn_scope();
-    let observer = Arc::new(RecordingSettlementObserver::default());
+    let observer = Arc::new(RecordingSettlementObserver::with_visibility_assertion(
+        repo.clone(),
+        tenant_id.clone(),
+        trigger_id,
+        fire_slot,
+        run_id,
+        turn_scope.thread_id.clone(),
+    ));
     let worker = TriggerPollerWorker::new(
         TriggerPollerWorkerConfig::default(),
         TriggerPollerWorkerDeps {
@@ -346,19 +353,6 @@ async fn tick_notifies_settlement_observer_after_accepted_fire_persists() {
         report.results.last().map(|result| &result.outcome),
         Some(&TriggerPollerFireOutcome::Submitted { run_id })
     );
-    let persisted = repo
-        .get_trigger(tenant_id.clone(), trigger_id)
-        .await
-        .expect("load")
-        .expect("record present");
-    assert_eq!(persisted.active_run_ref, Some(run_id));
-    let history = repo
-        .list_trigger_run_history(tenant_id, trigger_id, 1)
-        .await
-        .expect("run history");
-    assert_eq!(history[0].run_id, Some(run_id));
-    assert_eq!(history[0].thread_id, Some(turn_scope.thread_id.clone()));
-
     let events = observer.events();
     assert_eq!(
         events.len(),
@@ -2850,16 +2844,71 @@ impl TrustedTriggerFireSubmitter for RecordingSubmitter {
 #[derive(Default)]
 struct RecordingSettlementObserver {
     events: Mutex<Vec<TriggerAcceptedFireSettlement>>,
+    visibility_assertion: Option<SettlementVisibilityAssertion>,
+}
+
+struct SettlementVisibilityAssertion {
+    repository: Arc<dyn TriggerRepository>,
+    tenant_id: TenantId,
+    trigger_id: TriggerId,
+    fire_slot: Timestamp,
+    run_id: TurnRunId,
+    thread_id: ThreadId,
 }
 
 impl RecordingSettlementObserver {
+    fn with_visibility_assertion(
+        repository: Arc<dyn TriggerRepository>,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        run_id: TurnRunId,
+        thread_id: ThreadId,
+    ) -> Self {
+        Self {
+            events: Mutex::new(Vec::new()),
+            visibility_assertion: Some(SettlementVisibilityAssertion {
+                repository,
+                tenant_id,
+                trigger_id,
+                fire_slot,
+                run_id,
+                thread_id,
+            }),
+        }
+    }
+
     fn events(&self) -> Vec<TriggerAcceptedFireSettlement> {
         self.events.lock().expect("events lock").clone()
     }
 }
 
+#[async_trait]
 impl TriggerFireSettlementObserver for RecordingSettlementObserver {
-    fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement) {
+    async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement) {
+        if let Some(assertion) = &self.visibility_assertion {
+            let persisted = assertion
+                .repository
+                .get_trigger(assertion.tenant_id.clone(), assertion.trigger_id)
+                .await
+                .expect("load trigger during settlement callback")
+                .expect("trigger must exist during settlement callback");
+            assert_eq!(persisted.active_fire_slot, Some(assertion.fire_slot));
+            assert_eq!(persisted.active_run_ref, Some(assertion.run_id));
+            let history = assertion
+                .repository
+                .list_trigger_run_history(assertion.tenant_id.clone(), assertion.trigger_id, 1)
+                .await
+                .expect("run history during settlement callback");
+            assert_eq!(
+                history.first().and_then(|run| run.run_id),
+                Some(assertion.run_id)
+            );
+            assert_eq!(
+                history.first().and_then(|run| run.thread_id.clone()),
+                Some(assertion.thread_id.clone())
+            );
+        }
         self.events.lock().expect("events lock").push(event);
     }
 }
