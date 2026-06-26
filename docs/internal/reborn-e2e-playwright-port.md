@@ -493,6 +493,40 @@ Behavior adjustment:
   regression intent: do not label an unauthenticated channel as already
   reconfigurable.
 
+### Step 14: Legacy Tool Permissions Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_tool_permissions.py`.
+
+Ported the caller-visible intent from legacy `test_tool_permissions.py` to
+Reborn's Tools settings surface:
+
+- `/v2/settings/tools` renders the global auto-approve control and tool rows;
+- changing a mutable tool permission through the Reborn `<select>` posts the
+  v2 `/api/webchat/v2/settings/tools/{capability_id}` request and survives a
+  browser reload;
+- selecting `Follow global` posts the v2 `default` state;
+- locked tools show the lock affordance and badge but no editable permission
+  select;
+- the global auto-approve switch posts to
+  `/api/webchat/v2/settings/tools`;
+- a real Reborn server API check reads the authoritative tool catalog, updates
+  a mutable tool to `disabled`, resets it to `default`, and verifies locked
+  tools reject writes when the catalog exposes one.
+
+Behavior adjustment:
+
+- Legacy v1 used per-row toggle buttons and `/api/settings/tools/*`. Reborn
+  uses one select per mutable tool, `Follow global` as the no-override state,
+  and the `/api/webchat/v2/settings/tools/*` endpoint family.
+
+Testability adjustment:
+
+- Reborn Tools rows now expose stable `data-testid="settings-tool-row"` and
+  `data-tool-name` attributes, and locked rows expose
+  `data-testid="settings-tool-lock"`. The labels and selects remain accessible
+  controls; the row hooks avoid brittle DOM ancestry assertions for locked
+  tool coverage.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -505,7 +539,7 @@ Not yet ported:
 - deeper tool approval scenarios that need real Reborn runtime/tool execution,
   persistence, or recovery beyond the browser approval-card contract;
 - remaining settings/extension lifecycle scenarios beyond Settings search,
-  Skills, channel label regressions, and the top-level extension
+  Skills, tool permissions, channel label regressions, and the top-level extension
   install/manage surface;
 - OAuth/product-auth flows;
 - Slack/Telegram/channel pairing scenarios;
@@ -557,6 +591,11 @@ the top-level Extensions surface. `setup_required` channels no longer get a
 secondary overflow `Setup` action when the primary `Configure` button already
 covers setup, and ready/authenticated channels no longer receive overlapping
 `Reconfigure` menu items.
+
+The tool-permission port did not require a behavior fix in the Reborn settings
+API: the v2 endpoint already persisted mutable tool overrides and rejected
+locked-tool writes. It did add stable row hooks to the Tools tab so locked-tool
+coverage can assert the real row without depending on incidental DOM ancestry.
 
 The same settings inspection confirmed an admin parity gap: Reborn Settings
 Users client methods still return TODO stub responses instead of calling real

@@ -6644,13 +6644,17 @@ ${_e}`;if(Ue.current.gateKey!==_&&(Ue.current={gateKey:_,credentialRef:null,inFl
     <//>
   `}function AM({tool:e,onPermissionChange:t,isSaved:a}){let n=C(),r=[{value:"default",label:n("tools.followDefault"),tone:"neutral"},{value:"always_allow",label:n("tools.alwaysAllow"),tone:"positive"},{value:"ask_each_time",label:n("tools.askEachTime"),tone:"warning"},{value:"disabled",label:n("tools.disabled"),tone:"danger"}],s={default:n("tools.sourceDefault"),global:n("tools.sourceGlobal"),override:n("tools.sourceOverride")},i=e.locked,o=r.find(m=>m.value===e.state)||r[1],l=e.effective_source||"default",c=l==="override"?e.state:"default",d=l==="default"&&e.state===e.default_state;return u`
     <div
+      data-testid="settings-tool-row"
+      data-tool-name=${e.name}
       className="flex items-center justify-between gap-4 border-t border-[var(--v2-panel-border)] py-3.5 first:border-0 first:pt-0"
     >
       <div className="flex min-w-0 items-center gap-3">
-        ${i&&u`<${D}
-          name="lock"
-          className="h-3.5 w-3.5 shrink-0 text-[var(--v2-text-faint)]"
-        />`}
+        ${i&&u`<span data-testid="settings-tool-lock" className="shrink-0">
+          <${D}
+            name="lock"
+            className="h-3.5 w-3.5 text-[var(--v2-text-faint)]"
+          />
+        </span>`}
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="truncate font-mono text-sm text-[var(--v2-text)]"
