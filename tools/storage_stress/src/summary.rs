@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +14,52 @@ pub(crate) struct LatencySummary {
     pub(crate) p95_us: u128,
     pub(crate) p99_us: u128,
     pub(crate) max_us: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct FailureCause {
+    pub(crate) bucket: String,
+    pub(crate) stage: String,
+    pub(crate) detail: String,
+}
+
+impl FailureCause {
+    pub(crate) fn new(
+        bucket: impl Into<String>,
+        stage: impl Into<String>,
+        detail: impl std::fmt::Display,
+    ) -> Self {
+        Self {
+            bucket: bucket.into(),
+            stage: stage.into(),
+            detail: sanitize_failure_detail(detail),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct FailureCauseSummary {
+    pub(crate) count: u64,
+    pub(crate) stages: BTreeMap<String, u64>,
+    pub(crate) sample_detail: String,
+}
+
+pub(crate) fn summarize_failure_causes(
+    samples: &[Sample],
+) -> BTreeMap<String, FailureCauseSummary> {
+    let mut causes = BTreeMap::new();
+    for failure in samples.iter().filter_map(|sample| sample.failure.as_ref()) {
+        let summary = causes
+            .entry(failure.bucket.clone())
+            .or_insert_with(|| FailureCauseSummary {
+                count: 0,
+                stages: BTreeMap::new(),
+                sample_detail: failure.detail.clone(),
+            });
+        summary.count += 1;
+        *summary.stages.entry(failure.stage.clone()).or_insert(0) += 1;
+    }
+    causes
 }
 
 pub(crate) fn summarize_user_turn_stages(
@@ -78,4 +124,15 @@ fn percentile(sorted: &[u128], percentile: usize) -> u128 {
     let last = sorted.len().saturating_sub(1);
     let index = (last * percentile).div_ceil(100);
     sorted[index.min(last)]
+}
+
+fn sanitize_failure_detail(detail: impl std::fmt::Display) -> String {
+    const MAX_DETAIL_CHARS: usize = 512;
+
+    let detail = detail.to_string().replace(['\n', '\r'], " ");
+    let mut truncated = detail.chars().take(MAX_DETAIL_CHARS).collect::<String>();
+    if detail.chars().count() > MAX_DETAIL_CHARS {
+        truncated.push_str("...");
+    }
+    truncated
 }

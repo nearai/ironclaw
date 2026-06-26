@@ -3,6 +3,8 @@ mod progress;
 mod redaction;
 mod summary;
 mod synthetic;
+#[cfg(test)]
+mod tests;
 mod user_turn;
 
 use std::{
@@ -22,7 +24,10 @@ use crate::{
     child_io::{join_child_stderr_reader, spawn_child_stderr_reader},
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
     redaction::{redact_libsql_path, redact_postgres_url},
-    summary::{LatencySummary, latency_summary, summarize_user_turn_stages},
+    summary::{
+        FailureCause, FailureCauseSummary, LatencySummary, latency_summary,
+        summarize_failure_causes, summarize_user_turn_stages,
+    },
     synthetic::SyntheticIds,
     user_turn::{
         UserTurnStageDurations, UserTurnStageLatencySummary, build_user_turn_workload,
@@ -95,6 +100,19 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 1)]
     pub(crate) progress_interval_seconds: u64,
 
+    /// Emit structured stderr spans for failed chat-turn operations.
+    #[arg(long, default_value_t = false)]
+    pub(crate) span_log_failures: bool,
+
+    /// Emit structured stderr spans for chat-turn operations at or above this latency.
+    /// Set to 0 to disable.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) slow_span_threshold_ms: u64,
+
+    /// Max structured spans to emit per process. Set to 0 for unlimited.
+    #[arg(long, default_value_t = 100)]
+    pub(crate) span_sample_limit: usize,
+
     #[arg(long, hide = true)]
     pub(crate) child_index: Option<usize>,
 }
@@ -146,6 +164,7 @@ struct BackendHandle {
 pub(crate) struct Sample {
     pub(crate) latency: Duration,
     pub(crate) error: Option<String>,
+    pub(crate) failure: Option<FailureCause>,
     pub(crate) stages: Option<UserTurnStageDurations>,
 }
 
@@ -170,6 +189,8 @@ struct RunSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     stage_latency: Option<UserTurnStageLatencySummary>,
     errors: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    failure_causes: BTreeMap<String, FailureCauseSummary>,
 }
 
 #[tokio::main]
@@ -309,12 +330,19 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.postgres_pool_size.to_string())
             .arg("--progress-interval-seconds")
             .arg(args.progress_interval_seconds.to_string())
+            .arg("--slow-span-threshold-ms")
+            .arg(args.slow_span_threshold_ms.to_string())
+            .arg("--span-sample-limit")
+            .arg(args.span_sample_limit.to_string())
             .arg("--run-id")
             .arg(run_id)
             .arg("--child-index")
             .arg(child_index.to_string())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if args.span_log_failures {
+            command.arg("--span-log-failures");
+        }
         if matches!(args.backend, Backend::Libsql) {
             command.arg("--libsql-path").arg(&libsql_path);
         }
@@ -597,9 +625,14 @@ fn run_one_operation(
         Scenario::ChatTurn => unreachable!("chat-turn uses the async user-turn workload"),
     };
     let latency = started.elapsed();
+    let failure = outcome
+        .err()
+        .map(|error| resource_failure(args.scenario, error));
+    let error = failure.as_ref().map(|cause| cause.bucket.clone());
     Sample {
         latency,
-        error: outcome.err().map(|error| classify_error(&error)),
+        error,
+        failure,
         stages: None,
     }
 }
@@ -647,6 +680,7 @@ fn summarize(
         latency: latency_summary(&latencies),
         stage_latency: summarize_user_turn_stages(&samples),
         errors,
+        failure_causes: summarize_failure_causes(&samples),
     }
 }
 
@@ -658,6 +692,23 @@ fn print_parent_summary(args: &Args, run_id: &str, summaries: &[RunSummary]) -> 
     for summary in summaries {
         for (error, count) in &summary.errors {
             *errors.entry(error.clone()).or_insert(0) += count;
+        }
+    }
+    let mut failure_causes = BTreeMap::new();
+    for summary in summaries {
+        for (bucket, cause) in &summary.failure_causes {
+            let aggregate =
+                failure_causes
+                    .entry(bucket.clone())
+                    .or_insert_with(|| FailureCauseSummary {
+                        count: 0,
+                        stages: BTreeMap::new(),
+                        sample_detail: cause.sample_detail.clone(),
+                    });
+            aggregate.count += cause.count;
+            for (stage, count) in &cause.stages {
+                *aggregate.stages.entry(stage.clone()).or_insert(0) += count;
+            }
         }
     }
     let max_duration_ms = summaries
@@ -700,6 +751,7 @@ fn print_parent_summary(args: &Args, run_id: &str, summaries: &[RunSummary]) -> 
         "worst_child_p99_us": p99_us,
         "worst_child_max_us": max_us,
         "errors": errors,
+        "failure_causes": failure_causes,
         "children": summaries,
     });
     let encoded = serde_json::to_string_pretty(&aggregate).map_err(display_err)?;
@@ -720,6 +772,22 @@ fn classify_error(error: &ResourceError) -> String {
         ResourceError::ReservationMismatch { .. } => "reservation_mismatch".to_string(),
         ResourceError::UnknownReservation { .. } => "unknown_reservation".to_string(),
         ResourceError::ReservationClosed { .. } => "reservation_closed".to_string(),
+    }
+}
+
+fn resource_failure(scenario: Scenario, error: ResourceError) -> FailureCause {
+    FailureCause::new(
+        classify_error(&error),
+        resource_failure_stage(scenario),
+        format!("{error:?}"),
+    )
+}
+
+fn resource_failure_stage(scenario: Scenario) -> &'static str {
+    match scenario {
+        Scenario::ReserveRelease => "reserve_release",
+        Scenario::ReserveReconcile => "reserve_reconcile",
+        Scenario::ChatTurn => "chat_turn",
     }
 }
 
@@ -913,87 +981,4 @@ fn optional_env_var(name: &str) -> Result<Option<String>, String> {
 
 fn display_err(error: impl std::fmt::Display) -> String {
     error.to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn redacts_postgres_uri_credentials_but_keeps_host() {
-        let redacted = redact_postgres_url("postgres://user:secret@localhost:5432/app");
-
-        assert_eq!(redacted, "postgres://<redacted>@localhost:5432/app");
-        assert!(!redacted.contains("secret"));
-    }
-
-    #[test]
-    fn redacts_postgresql_uri_password_query_parameter() {
-        let redacted =
-            redact_postgres_url("postgresql://localhost/app?sslmode=require&password=secret");
-
-        assert_eq!(
-            redacted,
-            "postgresql://localhost/app?sslmode=require&password=<redacted>"
-        );
-        assert!(!redacted.contains("secret"));
-    }
-
-    #[test]
-    fn redacts_key_value_postgres_password() {
-        let redacted =
-            redact_postgres_url("host=localhost user=postgres password=secret dbname=app");
-
-        assert_eq!(
-            redacted,
-            "host=localhost user=postgres password=<redacted> dbname=app"
-        );
-        assert!(!redacted.contains("secret"));
-    }
-
-    #[test]
-    fn redacts_libsql_absolute_path() {
-        let redacted = redact_libsql_path(Path::new("/tmp/ironclaw-storage-stress-secret.db"));
-
-        assert_eq!(redacted, "libsql://<redacted-local-path>");
-        assert!(!redacted.contains("/tmp"));
-    }
-
-    #[test]
-    fn synthetic_ids_are_generated_once_for_requested_cardinality() {
-        let args = test_args();
-        let ids = SyntheticIds::new(&args).expect("synthetic ids build");
-
-        assert_eq!(ids.tenant_count(), args.tenants);
-        assert_eq!(ids.user_count(), args.users);
-    }
-
-    #[test]
-    fn chat_turn_rejects_multi_process_runs() {
-        let mut args = test_args();
-        args.scenario = Scenario::ChatTurn;
-        args.processes = 2;
-
-        let error = validate_args(&args).expect_err("chat-turn is single-process only");
-
-        assert!(error.contains("--scenario chat-turn requires --processes 1"));
-    }
-
-    fn test_args() -> Args {
-        Args {
-            backend: Backend::Libsql,
-            processes: 1,
-            concurrency: 2,
-            operations: 3,
-            users: 4,
-            tenants: 2,
-            scenario: Scenario::ReserveRelease,
-            run_id: None,
-            libsql_path: None,
-            postgres_url: None,
-            postgres_pool_size: 4,
-            progress_interval_seconds: 0,
-            child_index: None,
-        }
-    }
 }

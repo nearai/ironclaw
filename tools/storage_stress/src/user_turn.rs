@@ -1,6 +1,9 @@
 use std::{
     future::Future,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -25,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Args, Backend, LatencySummary, Sample,
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
+    summary::FailureCause,
     synthetic::SyntheticIds,
 };
 
@@ -134,6 +138,7 @@ pub(crate) async fn run_user_turn_tasks(
 ) -> Result<Vec<Sample>, String> {
     let total_operations = args.concurrency.saturating_mul(args.operations);
     let progress = Arc::new(ProgressCounters::default());
+    let span_budget = Arc::new(AtomicUsize::new(span_sample_limit(args.span_sample_limit)));
     let progress_reporter = spawn_progress_reporter(
         crate::log_prefix(args),
         args.backend.as_str(),
@@ -148,6 +153,7 @@ pub(crate) async fn run_user_turn_tasks(
         let workload = Arc::clone(&workload);
         let identities = Arc::clone(&identities);
         let progress = Arc::clone(&progress);
+        let span_budget = Arc::clone(&span_budget);
         let args = args.clone();
         handles.push((
             worker_index,
@@ -155,7 +161,13 @@ pub(crate) async fn run_user_turn_tasks(
                 let mut samples = Vec::with_capacity(args.operations);
                 for operation_index in 0..args.operations {
                     let sample = workload
-                        .run_operation(&args, &identities, worker_index, operation_index)
+                        .run_operation(
+                            &args,
+                            &identities,
+                            worker_index,
+                            operation_index,
+                            &span_budget,
+                        )
                         .await;
                     progress.record(sample.error.is_some());
                     samples.push(sample);
@@ -213,18 +225,19 @@ impl UserTurnWorkload {
         identities: &SyntheticIds,
         worker_index: usize,
         operation_index: usize,
+        span_budget: &AtomicUsize,
     ) -> Sample {
         match self {
             #[cfg(feature = "libsql")]
             Self::Libsql(services) => {
                 services
-                    .run_operation(args, identities, worker_index, operation_index)
+                    .run_operation(args, identities, worker_index, operation_index, span_budget)
                     .await
             }
             #[cfg(feature = "postgres")]
             Self::Postgres(services) => {
                 services
-                    .run_operation(args, identities, worker_index, operation_index)
+                    .run_operation(args, identities, worker_index, operation_index, span_budget)
                     .await
             }
         }
@@ -241,15 +254,29 @@ where
         identities: &SyntheticIds,
         worker_index: usize,
         operation_index: usize,
+        span_budget: &AtomicUsize,
     ) -> Sample {
         let mut stages = UserTurnStageDurations::default();
         let started = Instant::now();
         let outcome = self
             .run_operation_inner(args, identities, worker_index, operation_index, &mut stages)
             .await;
+        let latency = started.elapsed();
+        let failure = outcome.err().map(|failure| failure.cause);
+        let error = failure.as_ref().map(|cause| cause.bucket.clone());
+        maybe_emit_operation_span(
+            args,
+            worker_index,
+            operation_index,
+            latency,
+            &stages,
+            failure.as_ref(),
+            span_budget,
+        );
         Sample {
-            latency: started.elapsed(),
-            error: outcome.err().map(|failure| failure.bucket),
+            latency,
+            error,
+            failure,
             stages: Some(stages),
         }
     }
@@ -264,7 +291,7 @@ where
     ) -> Result<(), OperationFailure> {
         let context = identities
             .user_turn_context(args, worker_index, operation_index)
-            .map_err(OperationFailure::invalid_request)?;
+            .map_err(|error| OperationFailure::invalid_request("build_context", error))?;
         let turn_store = self.turn_store_for_context(&context)?;
         let turn_coordinator = DefaultTurnCoordinator::new(Arc::clone(&turn_store));
         let operation_ref = operation_ref(args, worker_index, operation_index);
@@ -282,7 +309,7 @@ where
             }),
         )
         .await
-        .map_err(thread_failure)?;
+        .map_err(|error| thread_failure("ensure_thread", error))?;
 
         let accepted = time_stage(
             &mut stages.accept_inbound,
@@ -298,7 +325,7 @@ where
                 }),
         )
         .await
-        .map_err(thread_failure)?;
+        .map_err(|error| thread_failure("accept_inbound", error))?;
 
         let submit_result = time_stage(
             &mut stages.submit_turn,
@@ -306,14 +333,14 @@ where
                 scope: context.turn_scope.clone(),
                 actor: TurnActor::new(context.user_id.clone()),
                 accepted_message_ref: AcceptedMessageRef::new(accepted.message_id.to_string())
-                    .map_err(OperationFailure::invalid_request)?,
+                    .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
                 source_binding_ref: SourceBindingRef::new(source_binding)
-                    .map_err(OperationFailure::invalid_request)?,
+                    .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
                 reply_target_binding_ref: ReplyTargetBindingRef::new(reply_target)
-                    .map_err(OperationFailure::invalid_request)?,
+                    .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
                 requested_run_profile: None,
                 idempotency_key: IdempotencyKey::new(format!("storage-stress:{operation_ref}"))
-                    .map_err(OperationFailure::invalid_request)?,
+                    .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
                 received_at: Utc::now(),
                 requested_run_id: None,
                 parent_run_id: None,
@@ -336,10 +363,10 @@ where
                     ),
                 )
                 .await
-                .map_err(thread_failure)?;
-                return Err(turn_failure(error));
+                .map_err(|error| thread_failure("mark_rejected_busy", error))?;
+                return Err(turn_failure("submit_turn", error));
             }
-            Err(error) => return Err(turn_failure(error)),
+            Err(error) => return Err(turn_failure("submit_turn", error)),
         };
 
         let SubmitTurnResponse::Accepted {
@@ -357,7 +384,7 @@ where
             ),
         )
         .await
-        .map_err(thread_failure)?;
+        .map_err(|error| thread_failure("mark_submitted", error))?;
 
         let runner_id = TurnRunnerId::new();
         let lease_token = TurnLeaseToken::new();
@@ -370,9 +397,13 @@ where
             }),
         )
         .await
-        .map_err(turn_failure)?
+        .map_err(|error| turn_failure("claim_run", error))?
         .ok_or_else(|| {
-            OperationFailure::new("turn_claim_miss", "submitted run was not claimable")
+            OperationFailure::new(
+                "turn_claim_miss",
+                "claim_run",
+                "submitted run was not claimable",
+            )
         })?;
 
         let draft = time_stage(
@@ -386,7 +417,7 @@ where
                 }),
         )
         .await
-        .map_err(thread_failure)?;
+        .map_err(|error| thread_failure("append_assistant", error))?;
 
         time_stage(
             &mut stages.finalize_assistant,
@@ -398,7 +429,7 @@ where
             ),
         )
         .await
-        .map_err(thread_failure)?;
+        .map_err(|error| thread_failure("finalize_assistant", error))?;
 
         time_stage(
             &mut stages.complete_run,
@@ -409,7 +440,7 @@ where
             }),
         )
         .await
-        .map_err(turn_failure)?;
+        .map_err(|error| turn_failure("complete_run", error))?;
 
         time_stage(
             &mut stages.load_context,
@@ -421,7 +452,7 @@ where
                 }),
         )
         .await
-        .map_err(thread_failure)?;
+        .map_err(|error| thread_failure("load_context", error))?;
 
         Ok(())
     }
@@ -431,7 +462,7 @@ where
         context: &crate::synthetic::UserTurnContext,
     ) -> Result<Arc<FilesystemTurnStateStore<F>>, OperationFailure> {
         let view = user_turn_mount_view(&self.run_id, &context.turn_scope.to_resource_scope())
-            .map_err(OperationFailure::invalid_request)?;
+            .map_err(|error| OperationFailure::invalid_request("turn_store", error))?;
         let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
             Arc::clone(&self.root),
             view,
@@ -511,26 +542,122 @@ fn operation_ref(args: &Args, worker_index: usize, operation_index: usize) -> St
     )
 }
 
+fn maybe_emit_operation_span(
+    args: &Args,
+    worker_index: usize,
+    operation_index: usize,
+    latency: Duration,
+    stages: &UserTurnStageDurations,
+    failure: Option<&FailureCause>,
+    span_budget: &AtomicUsize,
+) {
+    let slow = args.slow_span_threshold_ms > 0
+        && latency >= Duration::from_millis(args.slow_span_threshold_ms);
+    let failed = failure.is_some();
+    if (!args.span_log_failures || !failed) && !slow {
+        return;
+    }
+    if !try_claim_span_budget(span_budget) {
+        return;
+    }
+
+    let span = serde_json::json!({
+        "backend": args.backend,
+        "scenario": args.scenario,
+        "run_id": args.run_id.as_deref().unwrap_or("unknown-run"),
+        "child_index": args.child_index.unwrap_or(0),
+        "worker_index": worker_index,
+        "operation_index": operation_index,
+        "operation_ref": operation_ref(args, worker_index, operation_index),
+        "latency_us": latency.as_micros(),
+        "failed": failed,
+        "failure": failure,
+        "stages_us": stage_latencies_us(stages),
+    });
+    match serde_json::to_string(&span) {
+        Ok(encoded) => eprintln!("{} span {encoded}", crate::log_prefix(args)),
+        Err(error) => eprintln!("{} failed to encode span: {error}", crate::log_prefix(args)),
+    }
+}
+
+fn stage_latencies_us(stages: &UserTurnStageDurations) -> serde_json::Value {
+    let mut output = serde_json::Map::new();
+    insert_stage_latency(&mut output, "ensure_thread", stages.ensure_thread);
+    insert_stage_latency(&mut output, "accept_inbound", stages.accept_inbound);
+    insert_stage_latency(&mut output, "submit_turn", stages.submit_turn);
+    insert_stage_latency(&mut output, "mark_submitted", stages.mark_submitted);
+    insert_stage_latency(&mut output, "mark_rejected_busy", stages.mark_rejected_busy);
+    insert_stage_latency(&mut output, "claim_run", stages.claim_run);
+    insert_stage_latency(&mut output, "append_assistant", stages.append_assistant);
+    insert_stage_latency(&mut output, "finalize_assistant", stages.finalize_assistant);
+    insert_stage_latency(&mut output, "complete_run", stages.complete_run);
+    insert_stage_latency(&mut output, "load_context", stages.load_context);
+    serde_json::Value::Object(output)
+}
+
+fn insert_stage_latency(
+    output: &mut serde_json::Map<String, serde_json::Value>,
+    name: &str,
+    duration: Option<Duration>,
+) {
+    if let Some(duration) = duration {
+        output.insert(name.to_string(), serde_json::json!(duration.as_micros()));
+    }
+}
+
+fn try_claim_span_budget(span_budget: &AtomicUsize) -> bool {
+    loop {
+        let remaining = span_budget.load(Ordering::Relaxed);
+        if remaining == 0 {
+            return false;
+        }
+        if span_budget
+            .compare_exchange_weak(
+                remaining,
+                remaining.saturating_sub(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            return true;
+        }
+    }
+}
+
+fn span_sample_limit(limit: usize) -> usize {
+    if limit == 0 { usize::MAX } else { limit }
+}
+
 #[derive(Debug)]
 struct OperationFailure {
-    bucket: String,
+    cause: FailureCause,
 }
 
 impl OperationFailure {
-    fn new(bucket: impl Into<String>, detail: impl std::fmt::Display) -> Self {
+    fn new(
+        bucket: impl Into<String>,
+        stage: impl Into<String>,
+        detail: impl std::fmt::Display,
+    ) -> Self {
         let bucket = bucket.into();
+        let stage = stage.into();
+        let cause = FailureCause::new(bucket, stage, detail);
         if std::env::var_os("IRONCLAW_STORAGE_STRESS_DEBUG_ERRORS").is_some() {
-            eprintln!("[storage-stress] operation error bucket={bucket}: {detail}");
+            eprintln!(
+                "[storage-stress] operation error bucket={} stage={}: {}",
+                cause.bucket, cause.stage, cause.detail
+            );
         }
-        Self { bucket }
+        Self { cause }
     }
 
-    fn invalid_request(detail: impl std::fmt::Display) -> Self {
-        Self::new("invalid_request", detail)
+    fn invalid_request(stage: impl Into<String>, detail: impl std::fmt::Display) -> Self {
+        Self::new("invalid_request", stage, detail)
     }
 }
 
-fn thread_failure(error: SessionThreadError) -> OperationFailure {
+fn thread_failure(stage: impl Into<String>, error: SessionThreadError) -> OperationFailure {
     let bucket = match &error {
         SessionThreadError::UnknownThread { .. } => "thread_unknown",
         SessionThreadError::UnknownMessage { .. } => "thread_message_unknown",
@@ -548,10 +675,10 @@ fn thread_failure(error: SessionThreadError) -> OperationFailure {
         }
         SessionThreadError::Backend(_) => "thread_backend",
     };
-    OperationFailure::new(bucket, error)
+    OperationFailure::new(bucket, stage, error)
 }
 
-fn turn_failure(error: TurnError) -> OperationFailure {
+fn turn_failure(stage: impl Into<String>, error: TurnError) -> OperationFailure {
     let bucket = match error.category() {
         TurnErrorCategory::ThreadBusy => "turn_thread_busy",
         TurnErrorCategory::AdmissionRejected => "turn_admission_rejected",
@@ -562,5 +689,5 @@ fn turn_failure(error: TurnError) -> OperationFailure {
         TurnErrorCategory::Conflict => "turn_conflict",
         TurnErrorCategory::CapacityExceeded => "turn_capacity_exceeded",
     };
-    OperationFailure::new(bucket, error)
+    OperationFailure::new(bucket, stage, error)
 }
