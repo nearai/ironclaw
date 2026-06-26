@@ -359,6 +359,98 @@ WEBUI_V2_COMPOSITION_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_DESCRIPTOR_POLICY_COMMAND = CommandSpec(
+    name="webui_v2_descriptor_policy_surface",
+    description=(
+        "Locked WebUI v2 descriptor policy surface, including LLM provider and "
+        "operator configuration route auth, body-limit, rate-limit, audit, and "
+        "effect-path contracts."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_descriptors_contract",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_OPERATOR_HANDLER_COMMAND = CommandSpec(
+    name="webui_v2_operator_handler_contracts",
+    description=(
+        "Focused WebUI v2 operator setup, config, diagnostics, status, logs, "
+        "service lifecycle, and capability-enforcement handler contracts."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_handlers_contract",
+        "operator_",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_OPERATOR_MOUNT_COMMAND = CommandSpec(
+    name="webui_v2_operator_mount_policy",
+    description=(
+        "Composition-level session capability and operator-only route mount "
+        "policy for WebUI v2 LLM/operator configuration APIs."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "--test",
+        "webui_v2_serve",
+        "operator",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_OPERATOR_LLM_CONFIG_COMMAND = CommandSpec(
+    name="webui_v2_operator_llm_config_persistence",
+    description=(
+        "Composed operator LLM-config smoke covering NEAR AI provider key "
+        "persistence, active provider selection, and read-back after re-save."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support,root-llm-provider",
+        "--test",
+        "webui_v2_e2e",
+        "operator_llm_config",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_LLM_PROVIDER_ROUTE_COMMAND = CommandSpec(
     name="webui_v2_llm_provider_routes",
     description=(
@@ -582,6 +674,33 @@ CASES: dict[str, CaseSpec] = {
             "Matches the QA matrix composition command for REBCLI-055-TC-09; "
             "this validates the Rust gateway composition layer rather than "
             "duplicating browser coverage from PR #5348."
+        ),
+    ),
+    "webui_v2_operator_config_api_regression": CaseSpec(
+        name="webui_v2_operator_config_api_regression",
+        feature="WebUI v2 LLM and operator configuration APIs",
+        category="Hermetic Operator Configuration API Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-048-TC-01",
+            "REBCLI-048-TC-02",
+            "REBCLI-048-TC-03",
+            "REBCLI-048-TC-04",
+            "REBCLI-048-TC-05",
+            "REBCLI-048-TC-06",
+        ],
+        commands=[
+            WEBUI_V2_DESCRIPTOR_POLICY_COMMAND,
+            WEBUI_V2_LLM_PROVIDER_ROUTE_COMMAND,
+            WEBUI_V2_OPERATOR_HANDLER_COMMAND,
+            WEBUI_V2_OPERATOR_MOUNT_COMMAND,
+            WEBUI_V2_OPERATOR_LLM_CONFIG_COMMAND,
+        ],
+        notes=(
+            "Covers non-browser WebUI v2 operator/LLM configuration rows: "
+            "descriptor policy, provider CRUD and active/test/model routes, "
+            "operator setup/config/diagnostics/status/logs/lifecycle handlers, "
+            "operator capability/mount gating, redacted secret/error handling, "
+            "and composed provider key persistence."
         ),
     ),
     "webui_v2_provider_login_api_regression": CaseSpec(
