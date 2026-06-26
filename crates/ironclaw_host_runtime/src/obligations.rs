@@ -1549,6 +1549,13 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
         }
 
         let mut dispatch = request.dispatch.clone();
+        // Turn any base64 document payload into extracted text before redaction
+        // and the output-size obligations run, so the model gets bounded text
+        // (leak-scanned, size-checked) and the large base64 never survives.
+        dispatch.output = crate::document_output::extract_documents_in_output(
+            dispatch.capability_id.as_str(),
+            dispatch.output,
+        );
         if request
             .obligations
             .iter()
@@ -2462,6 +2469,73 @@ mod tests {
 
         assert!(completed.display_preview.is_none());
         assert_eq!(completed.output["safe"], serde_json::json!("ok"));
+    }
+
+    #[tokio::test]
+    async fn complete_dispatch_extracts_base64_document_into_text() {
+        use base64::Engine as _;
+        use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceUsage, RuntimeKind};
+
+        // Drive the *caller* (`complete_dispatch`), not the helper: a dispatch
+        // result carrying `content_base64` + `mime_type` must come back with the
+        // extracted text in `content` and no base64 left for the model to see.
+        let services = BuiltinObligationServices::with_handoff_stores(
+            Arc::new(InMemoryAuditSink::new()),
+            Arc::new(NetworkObligationPolicyStore::new()),
+            Arc::new(InMemorySecretStore::new()),
+            Arc::new(RuntimeSecretInjectionStore::new()),
+            Arc::new(InMemoryResourceGovernor::new()),
+        );
+        let handler = services.obligation_handler();
+        let context = execution_context();
+        // The document-extraction transform is capability-gated, so this test
+        // must dispatch a capability that opts in (`google-drive.download_file`)
+        // — the shared `echo.say` helper id would pass through untouched.
+        let capability_id = CapabilityId::new("google-drive.download_file").unwrap();
+        let estimate = ResourceEstimate::default();
+        let obligations = vec![Obligation::RedactOutput];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"name,age\nAlice,30");
+        let dispatch = CapabilityDispatchResult {
+            capability_id: capability_id.clone(),
+            provider: context.extension_id.clone(),
+            runtime: RuntimeKind::Wasm,
+            output: serde_json::json!({
+                "file_id": "f1",
+                "name": "data.csv",
+                "mime_type": "text/csv",
+                "content_base64": encoded,
+            }),
+            display_preview: None,
+            usage: ResourceUsage::default(),
+            receipt: ResourceReceipt {
+                id: ResourceReservationId::new(),
+                scope: context.resource_scope.clone(),
+                status: ReservationStatus::Released,
+                estimate: ResourceEstimate::default(),
+                actual: None,
+            },
+        };
+
+        let completed = handler
+            .complete_dispatch(CapabilityObligationCompletionRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+                dispatch: &dispatch,
+            })
+            .await
+            .expect("base64 document dispatch completes");
+
+        assert_eq!(
+            completed.output["content"],
+            serde_json::json!("name,age\nAlice,30")
+        );
+        assert!(
+            completed.output.get("content_base64").is_none(),
+            "base64 must be stripped before the result reaches the model"
+        );
     }
 
     #[tokio::test]

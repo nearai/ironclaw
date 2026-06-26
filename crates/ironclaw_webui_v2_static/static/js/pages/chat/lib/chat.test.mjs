@@ -78,6 +78,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
       useCallback: (fn) => fn,
       useEffect: () => {},
       useMemo: (fn) => fn(),
+      useRef: (initial) => ({ current: initial }),
       useState: (initial) => [initial, () => {}],
     },
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention", RUNNING: "running" },
@@ -175,8 +176,8 @@ test("Chat leaves the composer editable while a run is processing", () => {
   assert.equal(props.sendDisabled, true);
 });
 
-test("Chat blocks sends while a run is processing", async () => {
-  let sendCount = 0;
+test("Chat refuses composer sends while a run is processing", async () => {
+  let sendCalls = 0;
   const { tree, components } = renderChat({
     hookState: {
       messages: [{ id: "message-1" }],
@@ -191,7 +192,7 @@ test("Chat blocks sends while a run is processing", async () => {
       recoveryNotice: null,
       activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
       send: async () => {
-        sendCount += 1;
+        sendCalls += 1;
         return {};
       },
       cancelRun: async () => {},
@@ -207,8 +208,10 @@ test("Chat blocks sends while a run is processing", async () => {
 
   const chatInput = findComponent(tree, components.ChatInput);
   const props = componentProps(chatInput, components.ChatInput);
-  assert.equal(await props.onSend("draft while running"), null);
-  assert.equal(sendCount, 0);
+  const response = await props.onSend("draft while busy");
+
+  assert.equal(response, null);
+  assert.equal(sendCalls, 0);
 });
 
 test("Chat cancel button ignores active runs from another thread", () => {

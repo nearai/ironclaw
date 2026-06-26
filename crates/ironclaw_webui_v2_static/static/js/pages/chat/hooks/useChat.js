@@ -189,7 +189,14 @@ export function useChat(threadId) {
     setMessages,
   } = useHistory(threadId, { getPendingMessages, setPendingMessages });
 
-  const [isProcessing, setIsProcessing] = React.useState(false);
+  const [isProcessing, setIsProcessingState] = React.useState(false);
+  const isProcessingRef = React.useRef(isProcessing);
+  const setIsProcessing = React.useCallback((next) => {
+    const value =
+      typeof next === "function" ? next(isProcessingRef.current) : next;
+    isProcessingRef.current = value;
+    setIsProcessingState(value);
+  }, []);
   const [pendingGate, setPendingGateState] = React.useState(null);
   const pendingGateRef = React.useRef(pendingGate);
   const [busyGateNotice, setBusyGateNotice] = React.useState(null);
@@ -209,6 +216,7 @@ export function useChat(threadId) {
     credentialRef: null,
     inFlight: false,
   });
+  const submitBusyRef = React.useRef(false);
 
   // Per-thread transient state must not leak across thread switches.
   // Without this reset, clicking "+ New" while the previous thread is
@@ -239,7 +247,7 @@ export function useChat(threadId) {
   // raw setActiveRunState rather than the activeRunRef-mutating wrapper.
   if (stateThreadId !== threadId) {
     setStateThreadId(threadId);
-    setIsProcessing(false);
+    setIsProcessingState(false);
     setPendingGateState(null);
     setBusyGateNotice(null);
     setActiveRunState(null);
@@ -253,6 +261,9 @@ export function useChat(threadId) {
   React.useEffect(() => {
     pendingGateRef.current = pendingGate;
   }, [pendingGate]);
+  React.useEffect(() => {
+    isProcessingRef.current = isProcessing;
+  }, [isProcessing]);
 
   React.useEffect(() => {
     const currentKey = busyNoticeKey(threadId, pendingGate);
@@ -350,6 +361,7 @@ export function useChat(threadId) {
     // user message from the server doesn't render alongside its
     // pre-submit optimistic twin.
     onRunSettled: (_runId, { success }) => {
+      submitBusyRef.current = false;
       if (success) setPendingMessages([]);
       loadHistory(undefined, {
         preserveClientOnly: true,
@@ -385,8 +397,21 @@ export function useChat(threadId) {
       const wireAttachments = stagedAttachments.map(toWireAttachment);
       const renderAttachments = stagedAttachments.map(toRenderAttachment);
 
-      if (pendingGate) {
+      if (pendingGate || pendingGateRef.current) {
         throw approvalGatePendingSendError();
+      }
+      const activeRunForSend = activeRunRef.current;
+      const activeRunBlocksSend =
+        activeRunForSend &&
+        (!targetThreadId ||
+          activeRunForSend.threadId === targetThreadId ||
+          activeRunForSend.threadId === threadId);
+      if (
+        submitBusyRef.current ||
+        isProcessingRef.current ||
+        activeRunBlocksSend
+      ) {
+        return null;
       }
 
       // Channel-connect slash commands ("/connect telegram") never carry
@@ -410,10 +435,6 @@ export function useChat(threadId) {
         if (!sendThreadId) {
           throw new Error("createThread returned no thread_id");
         }
-      }
-
-      if (pendingGateRef.current) {
-        throw approvalGatePendingSendError();
       }
 
       const pendingKey = sendThreadId;
@@ -447,6 +468,7 @@ export function useChat(threadId) {
         if (shouldRenderInCurrentThread) updater();
       };
 
+      submitBusyRef.current = true;
       updateCurrentThread((prev) => [...prev, pendingRenderMessage]);
       updateSeededTarget((prev) => [...prev, pendingRenderMessage]);
 
@@ -540,6 +562,9 @@ export function useChat(threadId) {
             }
           }
           updateCurrentRunState(() => setIsProcessing(false));
+          submitBusyRef.current = false;
+        } else if (!response?.run_id) {
+          submitBusyRef.current = false;
         }
         return response;
       } catch (err) {
@@ -560,6 +585,7 @@ export function useChat(threadId) {
         updateCurrentThread(markFailed);
         updateSeededTarget(markFailed);
         updateCurrentRunState(() => setIsProcessing(false));
+        submitBusyRef.current = false;
         throw err;
       } finally {
         // Drop the optimistic from the pending ref unconditionally:
@@ -573,7 +599,15 @@ export function useChat(threadId) {
         removePending(pendingMessagesRef.current, pendingKey, optimisticId);
       }
     },
-    [threadId, pendingGate, setMessages, seedThreadMessages],
+    [
+      threadId,
+      pendingGate,
+      setMessages,
+      seedThreadMessages,
+      setIsProcessing,
+      setPendingGate,
+      setActiveRun,
+    ],
   );
 
   // v2 resolveGate signature: `(resolution, { always?, credentialRef? })`.
@@ -708,6 +742,7 @@ export function useChat(threadId) {
       setPendingGate(null);
       setIsProcessing(false);
       setActiveRun(null);
+      submitBusyRef.current = false;
       await cancelRunRequest({ threadId, runId, reason });
     },
     [activeRun, threadId],

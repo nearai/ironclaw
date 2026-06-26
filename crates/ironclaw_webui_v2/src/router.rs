@@ -37,6 +37,7 @@ use crate::descriptors::{
     WEBUI_V2_PATTERN_RESUME_AUTOMATION, WEBUI_V2_PATTERN_SEARCH_SKILLS,
     WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
     WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED, WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE,
+    WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION, WEBUI_V2_PATTERN_SETTINGS_TOOLS,
     WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_SKILL_DETAIL,
     WEBUI_V2_PATTERN_START_CODEX_LOGIN, WEBUI_V2_PATTERN_START_NEARAI_LOGIN,
     WEBUI_V2_PATTERN_STAT_FS_PATH, WEBUI_V2_PATTERN_STAT_PROJECT_FILE,
@@ -267,6 +268,14 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(
             WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED,
             post(handlers::set_auto_activate_learned),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_TOOLS,
+            get(handlers::list_settings_tools).post(handlers::set_settings_tools_auto_approve),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION,
+            post(handlers::set_settings_tool_permission),
         )
         .route(
             WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,

@@ -91,6 +91,8 @@ export function Chat({
     : "";
   const composerSendDisabled =
     Boolean(pendingGate) || (isProcessing && !pendingGate) || cooldownSeconds > 0;
+  const composerSendBlockedRef = React.useRef(composerSendDisabled);
+  composerSendBlockedRef.current = composerSendDisabled;
   const composerStatusText =
     approvalSubmitWarning ||
     (cooldownSeconds > 0 ? `Retry in ${cooldownSeconds}s` : undefined);
@@ -118,7 +120,7 @@ export function Chat({
       if (pendingGate) {
         throw new Error(approvalSubmitWarning);
       }
-      if (composerSendDisabled) return null;
+      if (composerSendBlockedRef.current) return null;
       const response = await send(content, {
         images,
         attachments,
