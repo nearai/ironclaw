@@ -258,6 +258,14 @@ Behavior adjustment:
   regression focuses on the no-pending-gate contract that those words remain
   normal chat content.
 
+Issue fixed:
+
+- The first migrated keyword regression waited for assistant-message rendering
+  before sending the next keyword, but assistant rendering can win the race
+  against the composer send gate reopening. A full migrated-suite rerun exposed
+  this as a dropped third keyword. The test now waits on the composer
+  `data-send-disabled="false"` contract before each send.
+
 CI update:
 
 - `.github/workflows/reborn-e2e.yml` now includes the approval UI port in the
@@ -279,6 +287,8 @@ Ported the durable-history and reconnect intent from legacy
   `after_cursor`;
 - a visibility pause/resume does not refetch the timeline or re-render the
   message DOM when no terminal run event occurred.
+- an in-app sidebar switch from one thread to another opens the second thread's
+  SSE stream without carrying the first thread's `after_cursor`.
 
 Behavior adjustment:
 
@@ -287,6 +297,10 @@ Behavior adjustment:
   Reborn's equivalent behavior lives in the `useSSE` hook and v2 timeline API.
   The port asserts the caller-visible effect: fresh EventSource URLs include
   `after_cursor` after resume, and already-rendered history is not torn down.
+- Legacy stale-`Last-Event-ID` coverage was adapted to Reborn's route-scoped
+  `threadId` model. The Reborn port verifies that a prior thread cursor is
+  dropped on thread switch instead of replayed against a different
+  `/api/webchat/v2/threads/:id/events` stream.
 
 CI update:
 
@@ -822,14 +836,40 @@ CI update:
   so the feature-gated binary build in this scenario does not flake on slower
   runners.
 
+### Step 23: Legacy SSE Thread-Switch Cursor Port
+
+Extended `tests/e2e/scenarios/test_reborn_webui_v2_legacy_sse_history.py`.
+
+Ported the remaining stale-cursor intent from legacy `test_sse_reconnect.py`
+to Reborn's in-app thread switch path:
+
+- seeded two v2 threads through route-mocked `/api/webchat/v2/threads` and
+  timeline responses;
+- opened thread A, emitted a `keep_alive` frame with a cursor, then selected
+  thread B through the real sidebar button;
+- asserted the new thread B EventSource URL targets
+  `/api/webchat/v2/threads/thread-legacy-sse-b/events`;
+- asserted the thread B stream carries the bearer token but no inherited
+  `after_cursor`.
+
+Behavior adjustment:
+
+- Legacy browser tests also covered root-refresh fallback to server
+  `active_thread` and skipping read-only external-channel active threads. The
+  standalone Reborn v2 UI is URL/thread-list driven and does not expose those
+  legacy globals or read-only external active-thread semantics, so the
+  functional port protects the matching Reborn invariant: event cursors are
+  scoped to the active `threadId` route and reset when that route changes.
+
 ## Open Migration Buckets
 
 Not yet ported:
 
 - remaining legacy chat UI affordances that have Reborn equivalents;
-- remaining legacy SSE/history edge cases such as active-thread fallback and
-  read-only external-channel refresh behavior where Reborn has a matching
-  product concept;
+- remaining legacy SSE/history edge cases only where Reborn exposes a matching
+  product concept; active-thread fallback and read-only external-channel refresh
+  are legacy v1 routing semantics rather than current standalone Reborn v2 UI
+  behavior;
 - remaining DOM/resource-limit scenarios for Reborn-specific SSE reconnect
   timer cleanup and any future capped long-running activity stores;
 - deeper tool approval scenarios that need real Reborn runtime/tool execution,

@@ -17,6 +17,8 @@ from reborn_webui_harness import (
 
 
 THREAD_ID = "thread-legacy-sse-history"
+THREAD_A_ID = "thread-legacy-sse-a"
+THREAD_B_ID = "thread-legacy-sse-b"
 
 
 async def test_reborn_legacy_message_persists_across_page_reload(
@@ -208,5 +210,157 @@ async def test_reborn_legacy_sse_resume_reuses_last_cursor_without_history_reloa
         assert query.get("after_cursor") == ["cursor-42"]
         assert len(timeline_requests) == timeline_count_before_resume, timeline_requests
         await expect(page.locator('[data-e2e-preserved="yes"]')).to_have_count(1)
+    finally:
+        await context.close()
+
+
+async def test_reborn_legacy_sse_thread_switch_drops_prior_thread_cursor(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Switching threads must not replay one thread's SSE cursor on another."""
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    await page.add_init_script(
+        """
+        (() => {
+          const streams = [];
+          window.__v2SseUrls = [];
+          class FakeEventSource extends EventTarget {
+            constructor(url) {
+              super();
+              this.url = url;
+              this.readyState = 0;
+              streams.push(this);
+              window.__v2SseUrls.push(url);
+              setTimeout(() => {
+                this.readyState = 1;
+                if (typeof this.onopen === "function") this.onopen(new Event("open"));
+              }, 0);
+            }
+            close() {
+              this.readyState = 2;
+            }
+          }
+          window.EventSource = FakeEventSource;
+          window.__emitV2Sse = (type, frame, id = "cursor-1") => {
+            const stream = streams[streams.length - 1];
+            if (!stream) throw new Error("no EventSource stream is open");
+            const event = new MessageEvent(type, {
+              data: JSON.stringify({ type, ...frame }),
+              lastEventId: id,
+            });
+            stream.dispatchEvent(event);
+          };
+        })();
+        """
+    )
+
+    async def fulfill_json(route, body):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route):
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route):
+        await fulfill_json(
+            route,
+            {
+                "threads": [
+                    {
+                        "thread_id": THREAD_A_ID,
+                        "title": "Thread A",
+                        "created_at": "2026-06-25T00:00:00Z",
+                        "updated_at": "2026-06-25T00:00:00Z",
+                    },
+                    {
+                        "thread_id": THREAD_B_ID,
+                        "title": "Thread B",
+                        "created_at": "2026-06-25T00:01:00Z",
+                        "updated_at": "2026-06-25T00:01:00Z",
+                    },
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_timeline_a(route):
+        await fulfill_json(
+            route,
+            {
+                "messages": [
+                    {
+                        "message_id": "thread-a-user",
+                        "kind": "user",
+                        "content": "Message from thread A",
+                        "sequence": 1,
+                        "status": "accepted",
+                        "created_at": "2026-06-25T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_timeline_b(route):
+        await fulfill_json(
+            route,
+            {
+                "messages": [
+                    {
+                        "message_id": "thread-b-user",
+                        "kind": "user",
+                        "content": "Message from thread B",
+                        "sequence": 1,
+                        "status": "accepted",
+                        "created_at": "2026-06-25T00:01:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads", handle_threads)
+    await page.route("**/api/webchat/v2/threads?**", handle_threads)
+    await page.route(f"**/api/webchat/v2/threads/{THREAD_A_ID}/timeline**", handle_timeline_a)
+    await page.route(f"**/api/webchat/v2/threads/{THREAD_B_ID}/timeline**", handle_timeline_b)
+
+    try:
+        await page.goto(f"{reborn_v2_server}/v2/chat/{THREAD_A_ID}?token={REBORN_V2_AUTH_TOKEN}")
+        thread_a_message = page.locator(SEL_V2["msg_user"]).filter(has_text="Message from thread A")
+        await expect(thread_a_message).to_be_visible(timeout=15000)
+        await page.wait_for_function("() => window.__v2SseUrls.length === 1", timeout=5000)
+
+        await page.evaluate("() => window.__emitV2Sse('keep_alive', {}, 'cursor-thread-a')")
+        await page.locator("#gateway-sidebar button").filter(has_text="Thread B").first.click()
+        thread_b_message = page.locator(SEL_V2["msg_user"]).filter(has_text="Message from thread B")
+        await expect(thread_b_message).to_be_visible(timeout=15000)
+        await page.wait_for_function("() => window.__v2SseUrls.length === 2", timeout=5000)
+
+        switched_url = await page.evaluate("() => window.__v2SseUrls[1]")
+        parsed = urlparse(switched_url)
+        query = parse_qs(parsed.query)
+        assert parsed.path.endswith(f"/api/webchat/v2/threads/{THREAD_B_ID}/events")
+        assert query.get("token") == [REBORN_V2_AUTH_TOKEN]
+        assert "after_cursor" not in query
     finally:
         await context.close()

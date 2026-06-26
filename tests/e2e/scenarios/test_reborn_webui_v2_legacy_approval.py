@@ -264,6 +264,11 @@ async def test_reborn_legacy_bare_approval_keywords_send_as_chat_without_gate(
         user_count = await reborn_v2_page.locator(SEL_V2["msg_user"]).count()
         assistant_count = await reborn_v2_page.locator(SEL_V2["msg_assistant"]).count()
 
+        await expect(composer).to_have_attribute(
+            "data-send-disabled",
+            "false",
+            timeout=15000,
+        )
         await composer.fill(keyword)
         await composer.press("Enter")
 
