@@ -1,6 +1,7 @@
 """Legacy product-auth prompt coverage ported to Reborn WebUI v2."""
 
 import json
+import re
 
 from playwright.async_api import expect
 
@@ -14,6 +15,16 @@ from reborn_webui_harness import (
 
 THREAD_ID = "thread-legacy-auth-flows"
 RUN_ID = "run-legacy-auth-flows"
+FAKE_GITHUB_PAT = "ghp_fake4112PAT_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+GITHUB_PAT_RE = re.compile(
+    r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]+",
+    re.IGNORECASE,
+)
+
+
+def _assert_no_github_pat(text: str, *, context: str) -> None:
+    match = GITHUB_PAT_RE.search(text)
+    assert match is None, f"GitHub PAT leaked into {context}: {match.group()!r}"
 
 
 async def _open_stubbed_auth_thread(reborn_v2_server, reborn_v2_browser):
@@ -226,6 +237,46 @@ async def test_reborn_legacy_manual_token_auth_prompt_submits_and_resumes_gate(
         assert resolve_requests[0]["body"]["resolution"] == "credential_provided"
         assert resolve_requests[0]["body"]["credential_ref"] == "credential-ref-github"
         assert resolve_requests[0]["body"]["client_action_id"]
+    finally:
+        await context.close()
+
+
+async def test_reborn_legacy_manual_token_not_retained_in_browser(
+    reborn_v2_server, reborn_v2_browser
+):
+    context, page, manual_token_requests, _resolve_requests = await _open_stubbed_auth_thread(
+        reborn_v2_server, reborn_v2_browser
+    )
+    try:
+        await _emit_auth_prompt(
+            page,
+            challenge_kind="manual_token",
+            gate_ref="manual-token-no-leak-gate",
+        )
+
+        gate = page.locator(SEL_V2["auth_gate_for"].format(kind="manual_token")).first
+        await expect(gate).to_be_visible(timeout=5000)
+
+        await page.locator(SEL_V2["auth_token_input"]).fill(f" {FAKE_GITHUB_PAT} ")
+        await gate.get_by_role("button", name="Use token").click()
+        await expect(gate).to_be_hidden(timeout=5000)
+        await expect(page.locator(SEL_V2["auth_token_input"])).to_have_count(0)
+
+        assert manual_token_requests[-1]["token"] == FAKE_GITHUB_PAT
+        _assert_no_github_pat(await page.inner_text("body"), context="visible page text")
+        _assert_no_github_pat(
+            await page.evaluate("() => document.body.innerHTML"),
+            context="page HTML",
+        )
+        browser_storage = await page.evaluate(
+            """
+            () => JSON.stringify({
+              localStorage: Object.entries(window.localStorage),
+              sessionStorage: Object.entries(window.sessionStorage),
+            })
+            """
+        )
+        _assert_no_github_pat(browser_storage, context="browser storage")
     finally:
         await context.close()
 

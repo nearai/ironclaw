@@ -2072,6 +2072,30 @@ Behavior adjustment:
   operator control as `View full command` / `Show preview` on the structured
   approval-details section, so the assertion follows those accessible controls.
 
+### Step 64: Legacy GitHub PAT Browser Non-Retention Port
+
+Extended `test_reborn_webui_v2_legacy_auth_flows.py`.
+
+Ported the skipped browser assertion from `test_v2_github_pat_flow.py` that a
+submitted GitHub personal access token is not retained in the page after manual
+auth completes:
+
+- submitted a fake GitHub PAT through the Reborn manual-token auth gate;
+- asserted the product-auth submit boundary received the trimmed token;
+- asserted the auth gate and password input disappeared after run-gate
+  resolution;
+- asserted the token pattern was absent from visible page text, page HTML,
+  `localStorage`, and `sessionStorage`.
+
+Behavior adjustment:
+
+- The legacy skipped browser test drove the old `ENGINE_V2=true` gateway,
+  `/api/chat/*` routes, and provider fixture. Reborn's browser-equivalent
+  contract is the typed `auth_required` WebChat v2 gate plus
+  `/api/reborn/product-auth/manual-token/submit`; the port therefore protects
+  the no-retention browser boundary while leaving full provider execution to
+  lower-level Reborn/product-auth contracts.
+
 ## Open Migration Buckets
 
 Not yet ported:
