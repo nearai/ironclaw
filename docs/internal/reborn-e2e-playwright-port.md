@@ -3311,6 +3311,35 @@ Not yet ported:
   auth-flow suite, while runner/driver/provider integration should be covered
   through Reborn-native composition or product-auth contracts.
 
+## File-Level Audit Snapshot
+
+Audit command:
+
+- `for f in tests/e2e/scenarios/test_*.py; do ... rg "^(async def|def) test_|^    (async def|def) test_" "$f"; done | wc -l`
+  -> `503` legacy/general test functions remain outside the
+  `test_reborn_webui_v2_legacy_*.py` glob.
+
+That number is not the missing Reborn browser-test count. It includes legacy
+gateway endpoint suites, service fixtures, skipped placeholders, and
+ENGINE_V2-era `/api/chat/*` contracts that should not be mechanically copied
+into standalone Reborn WebUI v2. Current file-level disposition:
+
+| Legacy/general file set | Reborn disposition |
+| --- | --- |
+| `test_agent_loop_recovery.py`, `test_v2_engine_error_handling.py`, `test_v2_engine_tool_lifecycle.py` | Covered by Reborn tool-execution/error projection tests and low-iteration loop-boundary coverage. |
+| `test_auth_no_duplicate_response.py`, `test_v2_engine_auth_cancel.py`, `test_v2_engine_auth_flow.py`, `test_v2_engine_oauth_google.py`, `test_v2_github_pat_flow.py`, `test_v2_gsuite_oauth_flow.py`, `test_v2_kernel_auth_gateway_flow.py`, `test_v2_notion_mcp_oauth_flow.py` | Browser-visible auth, manual token, OAuth prompt, callback, replacement, and cross-thread isolation behavior is covered by `test_reborn_webui_v2_legacy_auth_flows.py` and extension OAuth-start tests. Old `/oauth/callback` and `/api/chat/gate/resolve` contracts remain non-portable. |
+| `test_chat.py`, `test_html_injection.py`, `test_pending_user_messages.py`, `test_message_persistence.py` | Covered across Reborn core, rendering, attachments, pending-message, and message-persistence suites. |
+| `test_connection.py`, `test_ownership_model.py`, `test_owner_scope.py`, `test_multi_tenant_greeting.py` | Reborn health/session/auth, browser login rejection, message round-trip, and authenticated-scope draft isolation are covered. Remaining old admin/user, greeting-row, routine, and HTTP-webhook assertions have no standalone Reborn endpoint equivalent yet. |
+| `test_csp.py`, `test_dom_resource_limits.py`, `test_sse_reconnect.py`, `test_v2_thread_visibility.py`, `test_v2_activity_shell.py` | Covered by Reborn CSP, DOM/timeline limit, SSE/history, sidebar/background-state, and hidden-routines/automations ports where a current product concept exists. |
+| `test_extensions.py`, `test_settings_extensions_labels.py`, `test_settings_search.py`, `test_skills.py`, `test_tool_permissions.py`, `test_tool_approval.py`, `test_tool_execution.py` | Covered by Reborn settings search, Skills, Extensions, tool-permission, approval, and tool-execution suites. |
+| `test_channel_pairing_flow.py`, `test_pairing.py`, `test_channel_approval_gates.py`, `test_slack_e2e.py`, `test_telegram_e2e.py`, `test_telegram_hot_activation.py`, `test_telegram_pairing_chat_claim.py`, `test_telegram_token_validation.py` | Browser connect-card, proof-code redemption, and approval-card behavior is covered. Full Slack/Telegram webhook/WASM-channel round trips need a standalone Reborn host-beta channel fixture and v2 channel binding endpoints. |
+| `test_extension_oauth.py`, `test_mcp_auth_flow.py`, `test_oauth_credential_fallback.py`, `test_oauth_refresh.py`, `test_oauth_url_parameters.py`, `test_skill_oauth_flow.py` | Reborn browser prompt/OAuth-start/callback UI contracts and Rust product-auth callback contracts are covered. Hosted refresh, credential fallback, old extension lifecycle callback, and provider-backed MCP execution remain service/composition follow-ups until matching Reborn fixtures exist. |
+| `test_admin_api.py`, `test_wasm_lifecycle.py`, `test_extension_uninstall_cleanup.py` | Non-portable as browser tests today: current Reborn Admin/Users clients are TODO stubs, and legacy `/api/extensions/*` response shapes plus secret-table side effects are old gateway contracts. |
+| `test_routine_event_batch.py`, `test_routine_full_job.py`, `test_routine_oauth_credential_injection.py`, `test_routines_tab_after_v2_upgrade.py`, `test_mission_gmail_3133.py` | Current Reborn equivalent is the `/v2/automations` run-history surface, which is covered. Legacy `/api/routines/*`, job, mission Gmail, and routine OAuth paths remain blocked by TODO routines-page/endpoints. |
+| `test_project_detail.py`, `test_portfolio.py`, `test_plan_mode.py`, `test_webhook.py`, `test_widget_customization.py` | Covered only where Reborn has a current surface: project list/workspace/thread creation is covered. Project child drill-ins, portfolio widgets/share, plan checklist UI, HTTP webhook ingress, and dynamic gateway widgets have no current WebUI v2 contract. |
+| `test_responses_api.py` | Covered by Reborn Responses API contract tests using current typed Responses input and Reborn approval context semantics. |
+| Reborn-native supplemental files: `test_reborn_gateway_smoke.py`, `test_reborn_v2_file_download.py`, `test_reborn_emulate_full_path.py`, `test_emulate_reborn_provider_contracts.py`, `test_reborn_webui_v2_smoke.py` | Kept as supplemental Reborn CI/service coverage rather than renamed into the legacy glob. They cover smoke startup, file download chips, and provider/Emulate full-path contracts. |
+
 ## Issues Found
 
 The first confirmed issues were test-harness coupling between Reborn scenario
