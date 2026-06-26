@@ -693,7 +693,13 @@ standalone Reborn's `/api/webchat/v2` surface:
 - a v2 message can dispatch the builtin time capability and persist a
   completed preview containing the time result;
 - a normal non-tool message still finalizes an assistant response and does not
-  create capability-preview records.
+  create capability-preview records;
+- a single Reborn turn can dispatch both builtin echo and builtin time calls,
+  persist completed previews for both capabilities, and finalize the
+  multi-tool summary response;
+- a sequential Reborn planned loop can run echo, observe the result, run time,
+  observe the result, and then finalize the mock's multi-step completion
+  response without looping.
 
 Behavior adjustment:
 
@@ -709,6 +715,11 @@ Harness adjustment:
   emits `builtin__time`, matching the provider-facing name for Reborn's
   `builtin.time` capability. The existing legacy `what time` trigger is
   unchanged for legacy gateway/v2-engine tests.
+- The mock LLM also has a Reborn-specific `reborn parallel echo and time`
+  trigger that emits `builtin__echo` plus `builtin__time`. The legacy
+  `parallel echo and time` trigger remains unchanged for the unqualified
+  gateway/v2-engine tool surface. The existing `multi step echo then time`
+  trigger already selects Reborn provider names from the advertised tool list.
 
 CI update:
 

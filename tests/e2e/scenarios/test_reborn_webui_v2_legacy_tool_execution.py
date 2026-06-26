@@ -351,6 +351,93 @@ async def test_reborn_legacy_non_tool_message_still_works(reborn_v2_yolo_server)
     ] == []
 
 
+async def test_reborn_legacy_parallel_tool_calls_complete(reborn_v2_yolo_server):
+    """Port legacy parallel echo+time dispatch to Reborn capability previews."""
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        thread_id = await create_thread(client, reborn_v2_yolo_server)
+        await send_message(
+            client,
+            reborn_v2_yolo_server,
+            thread_id,
+            "reborn parallel echo and time",
+        )
+
+        echo_preview = await _wait_for_capability_preview(
+            client,
+            reborn_v2_yolo_server,
+            thread_id,
+            "builtin.echo",
+            output_fragment="parallel-test",
+        )
+        time_preview = await _wait_for_capability_preview(
+            client,
+            reborn_v2_yolo_server,
+            thread_id,
+            "builtin.time",
+            output_fragment="utc_iso",
+        )
+        assistant = await wait_for_assistant_message(
+            client,
+            reborn_v2_yolo_server,
+            thread_id,
+            timeout=45,
+        )
+
+    content = assistant.get("content") or ""
+    assert echo_preview["status"] == "completed", echo_preview
+    assert time_preview["status"] == "completed", time_preview
+    assert "Dispatched 2 tools" in content, assistant
+    assert "parallel-test" in content, assistant
+
+
+async def test_reborn_legacy_multi_step_tool_chain_completes(reborn_v2_yolo_server):
+    """Port legacy echo-then-time chain to Reborn's planned loop path."""
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        thread_id = await create_thread(client, reborn_v2_yolo_server)
+        await send_message(
+            client,
+            reborn_v2_yolo_server,
+            thread_id,
+            "multi step echo then time",
+        )
+
+        echo_preview = await _wait_for_capability_preview(
+            client,
+            reborn_v2_yolo_server,
+            thread_id,
+            "builtin.echo",
+            output_fragment="step-one",
+        )
+        time_preview = await _wait_for_capability_preview(
+            client,
+            reborn_v2_yolo_server,
+            thread_id,
+            "builtin.time",
+            output_fragment="utc_iso",
+        )
+        assistant = await wait_for_assistant_message(
+            client,
+            reborn_v2_yolo_server,
+            thread_id,
+            timeout=60,
+        )
+        timeline = await fetch_timeline(client, reborn_v2_yolo_server, thread_id)
+
+    previews = [
+        preview
+        for message in timeline.get("messages", [])
+        if (preview := _preview_payload(message)) is not None
+        and preview.get("capability_id") in {"builtin.echo", "builtin.time"}
+    ]
+    assert echo_preview["status"] == "completed", echo_preview
+    assert time_preview["status"] == "completed", time_preview
+    assert [preview["capability_id"] for preview in previews] == [
+        "builtin.echo",
+        "builtin.time",
+    ], previews
+    assert "multi-step complete" in (assistant.get("content") or "").lower(), assistant
+
+
 async def test_reborn_legacy_tool_failure_recovers_with_final_response(
     reborn_v2_yolo_server,
 ):

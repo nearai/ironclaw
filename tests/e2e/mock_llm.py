@@ -135,6 +135,17 @@ NOTION_SEARCH_LIFECYCLE_TRIGGER = re.compile(
 )
 
 TOOL_CALL_PATTERNS = [
+    # Reborn parallel tool-call port: the Reborn provider-visible builtin tool
+    # names are namespaced/sanitized, while the legacy engine keeps using the
+    # unqualified trigger below.
+    (
+        re.compile(r"reborn parallel echo and time", re.IGNORECASE),
+        "builtin__echo",
+        lambda _: [
+            {"tool_name": "builtin__echo", "arguments": {"message": "parallel-test"}},
+            {"tool_name": "builtin__time", "arguments": {"operation": "now"}},
+        ],
+    ),
     # Parallel tool calls: return both echo and time in one response
     (
         re.compile(r"parallel echo and time", re.IGNORECASE),
