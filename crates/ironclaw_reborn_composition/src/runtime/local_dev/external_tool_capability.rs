@@ -132,17 +132,6 @@ fn external_tool_capability_id(tool_name: &str) -> Result<CapabilityId, AgentLoo
     })
 }
 
-fn provider_tool_name_for_external_tool(
-    tool_name: &str,
-) -> Result<ProviderToolName, AgentLoopHostError> {
-    ProviderToolName::new(tool_name).map_err(|_| {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            "external tool name cannot be represented as a provider tool name",
-        )
-    })
-}
-
 impl ExternalToolCapabilityPort {
     fn surface_version(&self) -> Result<CapabilitySurfaceVersion, AgentLoopHostError> {
         self.surface
@@ -363,7 +352,7 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
                     "external tool name shadows a host capability",
                 ));
             }
-            let tool_name = provider_tool_name_for_external_tool(spec.name())?;
+            let tool_name = spec.provider_tool_name().clone();
             let capability_id = external_tool_capability_id(spec.name())?;
             if surface
                 .descriptors
@@ -620,22 +609,6 @@ mod tests {
         assert_eq!(
             ids.provider_capability_id.as_str(),
             "external_tool.client_tool"
-        );
-    }
-
-    #[tokio::test]
-    async fn external_tool_surface_rejects_names_that_are_not_provider_safe() {
-        let (port, _run_context) =
-            wrapped_port_with_specs(vec![external_tool_spec("client.tool")]).await;
-
-        let error = port
-            .visible_capabilities(VisibleCapabilityRequest)
-            .await
-            .expect_err("invalid external tool name should fail closed");
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
-        assert_eq!(
-            error.safe_summary,
-            "external tool name cannot be represented as a provider tool name"
         );
     }
 }

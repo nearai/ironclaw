@@ -21,12 +21,13 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use ironclaw_host_api::ProviderToolName;
 use serde::{Deserialize, Serialize};
 
 use crate::TurnRunId;
 
 /// Maximum accepted external tool name length, in bytes.
-const MAX_EXTERNAL_TOOL_NAME_BYTES: usize = 128;
+const MAX_EXTERNAL_TOOL_NAME_BYTES: usize = ProviderToolName::MAX_BYTES;
 /// Maximum accepted external tool description length, in bytes.
 const MAX_EXTERNAL_TOOL_DESCRIPTION_BYTES: usize = 8 * 1024;
 /// Maximum accepted serialized parameters-schema length, in bytes.
@@ -52,40 +53,29 @@ impl std::error::Error for ExternalToolSpecError {}
 /// parks the run and returns control to the API client.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExternalToolSpec {
-    name: String,
+    name: ProviderToolName,
     description: String,
     parameters_schema: serde_json::Value,
 }
 
 impl ExternalToolSpec {
-    /// Validate and construct a spec. Rejects empty/oversized/control-character
-    /// names, oversized descriptions, and oversized parameter schemas.
+    /// Validate and construct a spec. Rejects names that cannot be safely
+    /// advertised to model providers, oversized descriptions, and oversized
+    /// parameter schemas.
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
         parameters_schema: serde_json::Value,
     ) -> Result<Self, ExternalToolSpecError> {
         let name = name.into();
-        if name.is_empty() {
-            return Err(ExternalToolSpecError {
-                reason: "external tool name must not be empty",
-            });
-        }
         if name.len() > MAX_EXTERNAL_TOOL_NAME_BYTES {
             return Err(ExternalToolSpecError {
                 reason: "external tool name is too long",
             });
         }
-        if name.trim() != name {
-            return Err(ExternalToolSpecError {
-                reason: "external tool name must not have surrounding whitespace",
-            });
-        }
-        if name.chars().any(char::is_control) {
-            return Err(ExternalToolSpecError {
-                reason: "external tool name must not contain control characters",
-            });
-        }
+        let name = ProviderToolName::new(name).map_err(|_| ExternalToolSpecError {
+            reason: "external tool name cannot be represented as a provider tool name",
+        })?;
         let description = description.into();
         if description.len() > MAX_EXTERNAL_TOOL_DESCRIPTION_BYTES {
             return Err(ExternalToolSpecError {
@@ -108,6 +98,10 @@ impl ExternalToolSpec {
     }
 
     pub fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    pub fn provider_tool_name(&self) -> &ProviderToolName {
         &self.name
     }
 
@@ -365,6 +359,7 @@ mod tests {
     fn spec_validation_rejects_bad_names_and_oversized_fields() {
         assert!(ExternalToolSpec::new("", "d", serde_json::json!({})).is_err());
         assert!(ExternalToolSpec::new(" x", "d", serde_json::json!({})).is_err());
+        assert!(ExternalToolSpec::new("client.tool", "d", serde_json::json!({})).is_err());
         assert!(ExternalToolSpec::new("x\u{0000}", "d", serde_json::json!({})).is_err());
         let long_name = "n".repeat(MAX_EXTERNAL_TOOL_NAME_BYTES + 1);
         assert!(ExternalToolSpec::new(long_name, "d", serde_json::json!({})).is_err());

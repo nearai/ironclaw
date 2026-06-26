@@ -3173,11 +3173,10 @@ pub async fn build_reborn_runtime(
                         local_runtime
                             .shared_extension_registry
                             .clone()
-                            .unwrap_or_else(|| {
-                                Arc::new(SharedExtensionRegistry::new(
-                                    local_runtime.extension_registry.as_ref().clone(),
-                                ))
-                            }),
+                            .ok_or_else(|| RebornRuntimeError::InvalidArgument {
+                                reason: "canonical shared extension registry is required"
+                                    .to_string(),
+                            })?,
                     )?,
                 ))
                 .with_tool_permission_override_store(
