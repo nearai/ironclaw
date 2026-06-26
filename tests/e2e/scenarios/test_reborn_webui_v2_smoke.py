@@ -290,39 +290,6 @@ async def _get_timeline(
     return response.json()
 
 
-async def _reset_mock_capability_policy_state(mock_llm_server: str) -> None:
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{mock_llm_server}/__mock/capability_policy/reset",
-            timeout=10,
-        )
-        response.raise_for_status()
-
-
-async def _wait_for_mock_capability_policy_guard(
-    mock_llm_server: str,
-    *,
-    timeout: float = 10.0,
-) -> dict:
-    last_state: dict = {}
-    async with httpx.AsyncClient() as client:
-        for _ in range(int(timeout * 2)):
-            response = await client.get(
-                f"{mock_llm_server}/__mock/capability_policy/state",
-                timeout=10,
-            )
-            response.raise_for_status()
-            last_state = response.json()
-            if last_state.get("unavailable_response_guard_matches", 0) > 0:
-                return last_state
-            await asyncio.sleep(0.5)
-
-    raise AssertionError(
-        "Timed out waiting for mock LLM unavailable-capability guard. "
-        f"Last state: {last_state}"
-    )
-
-
 async def _restore_disabled_tool_policy(client: httpx.AsyncClient, base_url: str) -> None:
     errors = []
     for capability_id in ("builtin.echo", "builtin.shell"):
@@ -444,10 +411,9 @@ async def test_reborn_v2_text_turn_persists(reborn_v2_server):
 
 
 async def test_reborn_v2_disabled_tool_does_not_route_through_shell(
-    reborn_v2_server, disabled_echo_shell_ask_policy, mock_llm_server
+    reborn_v2_server, disabled_echo_shell_ask_policy
 ):
     """A named unavailable tool request should not route through another tool."""
-    await _reset_mock_capability_policy_state(mock_llm_server)
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
     async with httpx.AsyncClient(headers=headers) as client:
         thread_id = await _create_thread(client, reborn_v2_server)
@@ -467,12 +433,6 @@ async def test_reborn_v2_disabled_tool_does_not_route_through_shell(
         assert "builtin_shell" not in timeline_text
         assert "builtin.shell" not in timeline_text
         assert "echo \\\"disabled-test\\\"" not in timeline_text
-
-        mock_state = await _wait_for_mock_capability_policy_guard(mock_llm_server)
-        last_request = mock_state["last_unavailable_response_request"]
-        assert last_request["content"] == prompt
-        assert last_request["has_tools"] is True
-        assert last_request["has_policy"] is True
 
 
 async def test_reborn_v2_ui_send_renders_reply(reborn_v2_page, reborn_v2_server):

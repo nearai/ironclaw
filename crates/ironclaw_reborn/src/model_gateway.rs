@@ -13,7 +13,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ProviderToolName, sha256_digest_token};
+use ironclaw_host_api::{CapabilityId, ProviderToolName, sha256_digest_token};
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
     LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
@@ -59,6 +59,7 @@ use crate::{
 const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of credits";
 const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
     "arguments omitted because they exceeded the host provider-tool limit";
+const UNAVAILABLE_CAPABILITY_REPLY: &str = "That capability is unavailable or disabled for this request, so I will not route it through another tool.";
 
 /// Fail-closed routing policy from resolved Reborn model profile ids to the
 /// host-selected provider/model envelope.
@@ -833,6 +834,8 @@ where
             );
         }
         if !tool_definitions.is_empty() {
+            let unavailable_capability_guard =
+                unavailable_requested_capability_guard(&completion.messages, &tool_definitions);
             let mut recovery_tool_names = Vec::with_capacity(tool_definitions.len());
             let llm_tool_definitions = tool_definitions
                 .into_iter()
@@ -857,6 +860,7 @@ where
                     .as_deref()
                     .unwrap_or("model_call=unknown"),
                 &replay_identity,
+                unavailable_capability_guard.as_ref(),
             )
             .await
             {
@@ -890,6 +894,7 @@ where
                             .as_deref()
                             .unwrap_or("model_call=unknown"),
                         &replay_identity,
+                        unavailable_capability_guard.as_ref(),
                     )
                     .await;
                 }
@@ -995,6 +1000,7 @@ async fn tool_response_to_host(
     capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     provider_turn_scope: &str,
     replay_identity: &ProviderReplayIdentity,
+    unavailable_capability_guard: Option<&UnavailableCapabilityGuard>,
 ) -> Result<HostManagedModelResponse, HostManagedModelError> {
     if tracing::enabled!(tracing::Level::DEBUG) {
         let tool_call_name_sample = response
@@ -1017,6 +1023,21 @@ async fn tool_response_to_host(
             FinishReason::ToolUse | FinishReason::Stop
         )
     {
+        if let Some(guard) = unavailable_capability_guard {
+            debug!(
+                requested_capability_id = %guard.capability_id,
+                tool_call_count = response.tool_calls.len(),
+                "reborn model gateway suppressed provider tool calls after unavailable named capability request"
+            );
+            return Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
+                UNAVAILABLE_CAPABILITY_REPLY,
+                response.reasoning,
+            )
+            .with_usage(LoopModelUsage {
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+            }));
+        }
         let advertised_tool_names = capabilities
             .tool_definitions()
             .map_err(map_capability_host_error)?
@@ -1111,6 +1132,76 @@ async fn tool_response_to_host(
             HostManagedModelErrorKind::Unavailable,
             "model response did not complete cleanly",
         )),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnavailableCapabilityGuard {
+    capability_id: CapabilityId,
+}
+
+fn unavailable_requested_capability_guard(
+    messages: &[ChatMessage],
+    tool_definitions: &[ProviderToolDefinition],
+) -> Option<UnavailableCapabilityGuard> {
+    let latest_user = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::User)?;
+    let visible_capability_ids = tool_definitions
+        .iter()
+        .map(|definition| definition.capability_id.as_str())
+        .collect::<HashSet<_>>();
+    let visible_namespaces = tool_definitions
+        .iter()
+        .filter_map(|definition| definition.capability_id.as_str().split('.').next())
+        .collect::<HashSet<_>>();
+
+    extract_explicit_capability_ids(&latest_user.content)
+        .into_iter()
+        .find(|capability_id| {
+            !visible_capability_ids.contains(capability_id.as_str())
+                && capability_id
+                    .as_str()
+                    .split('.')
+                    .next()
+                    .is_some_and(|namespace| visible_namespaces.contains(namespace))
+        })
+        .map(|capability_id| UnavailableCapabilityGuard { capability_id })
+}
+
+fn extract_explicit_capability_ids(content: &str) -> Vec<CapabilityId> {
+    let mut ids = Vec::new();
+    let mut token_start = None;
+    for (index, character) in content.char_indices() {
+        if is_capability_token_char(character) {
+            token_start.get_or_insert(index);
+            continue;
+        }
+        if let Some(start) = token_start.take() {
+            push_capability_token(&content[start..index], &mut ids);
+        }
+    }
+    if let Some(start) = token_start {
+        push_capability_token(&content[start..], &mut ids);
+    }
+    ids
+}
+
+fn is_capability_token_char(character: char) -> bool {
+    character.is_ascii_lowercase()
+        || character.is_ascii_digit()
+        || matches!(character, '_' | '-' | '.')
+}
+
+fn push_capability_token(token: &str, ids: &mut Vec<CapabilityId>) {
+    if !token.contains('.') {
+        return;
+    }
+    if let Ok(capability_id) = CapabilityId::new(token) {
+        if !ids.iter().any(|existing| existing == &capability_id) {
+            ids.push(capability_id);
+        }
     }
 }
 
