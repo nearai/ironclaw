@@ -527,6 +527,34 @@ Testability adjustment:
   controls; the row hooks avoid brittle DOM ancestry assertions for locked
   tool coverage.
 
+### Step 15: Legacy CSP Browser-Safety Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_csp.py`.
+
+Ported the security and browser-safety intent from legacy `test_csp.py` to the
+real Reborn WebUI v2 shell:
+
+- authenticated `/v2/` reloads do not emit CSP refusal or content-security
+  console errors;
+- the rendered DOM does not contain inline event handler attributes such as
+  `onclick`, `onchange`, or `onerror`;
+- a fresh authenticated page load does not raise browser `pageerror` events;
+- core Reborn shell controls remain wired through React handlers: sidebar
+  collapse/expand, Settings navigation, Settings search clear, and sidebar
+  New chat.
+
+Behavior adjustment:
+
+- The legacy button-wiring check referenced v1-only element IDs such as
+  `send-btn`, `restart-btn`, and `logs-clear-btn`. Reborn uses React routes and
+  accessible controls instead, so the port asserts visible user behavior rather
+  than legacy IDs.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the CSP/browser-safety port
+  in the Reborn WebUI v2 Playwright job.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -552,9 +580,8 @@ Not yet ported:
 
 ## Issues Found
 
-No Reborn product defects have been confirmed yet in this branch. The first
-confirmed issues were test-harness coupling between Reborn scenario files, an
-imported-fixture dependency gap, and a missing `local-dev-yolo`
+The first confirmed issues were test-harness coupling between Reborn scenario
+files, an imported-fixture dependency gap, and a missing `local-dev-yolo`
 `--confirm-host-access` acknowledgement in the extracted fixture. All are test
 harness issues fixed in this branch.
 
@@ -596,6 +623,10 @@ The tool-permission port did not require a behavior fix in the Reborn settings
 API: the v2 endpoint already persisted mutable tool overrides and rejected
 locked-tool writes. It did add stable row hooks to the Tools tab so locked-tool
 coverage can assert the real row without depending on incidental DOM ancestry.
+
+The CSP/browser-safety port did not require a Reborn product fix. Initial
+focused failures were selector mismatches in the port (`New` is a scoped
+sidebar button in Reborn, not a legacy `New thread` link).
 
 The same settings inspection confirmed an admin parity gap: Reborn Settings
 Users client methods still return TODO stub responses instead of calling real

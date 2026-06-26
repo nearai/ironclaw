@@ -163,6 +163,7 @@ jobs:
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_approval.py
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_attachments.py
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_rendering.py
+          tests/e2e/scenarios/test_reborn_webui_v2_legacy_csp.py
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_sse_history.py
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_skills.py
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_extensions.py
