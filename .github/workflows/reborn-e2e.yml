@@ -154,8 +154,12 @@ jobs:
           pip install -e .
           playwright install --with-deps chromium
 
-      - name: Run Reborn WebUI v2 smoke
-        run: pytest tests/e2e/scenarios/test_reborn_webui_v2_smoke.py -v --timeout=120
+      - name: Run Reborn WebUI v2 Playwright smoke
+        run: >
+          pytest
+          tests/e2e/scenarios/test_reborn_webui_v2_smoke.py
+          tests/e2e/scenarios/test_reborn_webui_v2_legacy_core.py
+          -v --timeout=120
 
       - name: Upload screenshots on failure
         if: failure()

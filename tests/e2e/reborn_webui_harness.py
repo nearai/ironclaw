@@ -1,0 +1,363 @@
+"""Shared Reborn WebUI v2 Playwright harness.
+
+The legacy Playwright suite has mature shared fixtures in ``conftest.py`` for
+the ``ironclaw`` gateway. Reborn WebUI v2 is a different product surface: it
+boots ``ironclaw-reborn serve``, serves the React SPA under ``/v2/``, and uses
+``/api/webchat/v2/*`` endpoints. Keep that setup here so migrated scenarios
+exercise the real Reborn binary without duplicating process plumbing.
+"""
+
+import asyncio
+import os
+import signal
+import socket
+import uuid
+from pathlib import Path
+
+import httpx
+import pytest
+from playwright.async_api import async_playwright
+
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, wait_for_ready
+
+USER_ID = "reborn-v2-e2e-user"
+DEFAULT_PROFILE = "local-dev"
+YOLO_PROFILE = "local-dev-yolo"
+
+
+def find_free_port() -> int:
+    """Ask the OS for an available loopback port as a startup hint."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def read_log(path: Path, limit: int = 8192) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")[-limit:]
+    except OSError:
+        return ""
+
+
+def forward_coverage_env(env: dict[str, str]) -> None:
+    for key, value in os.environ.items():
+        if key.startswith(("CARGO_LLVM_COV", "LLVM_")) or key in {
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO_INCREMENTAL",
+        }:
+            env[key] = value
+
+
+async def stop_process(proc, *, sig=signal.SIGINT, timeout: float = 10) -> None:
+    """Signal a subprocess and wait for exit without re-reading stdio pipes."""
+    if proc.returncode is not None:
+        return
+    try:
+        proc.send_signal(sig)
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await asyncio.wait_for(proc.wait(), timeout=5)
+
+
+def write_config_toml(
+    path: Path, mock_llm_server: str, profile: str = DEFAULT_PROFILE
+) -> None:
+    """Seed a sparse Reborn config that selects the mock OpenAI-compatible LLM."""
+    path.write_text(
+        f"""api_version = "ironclaw.runtime/v1"
+
+[boot]
+profile = "{profile}"
+
+[identity]
+default_owner = "{USER_ID}"
+tenant = "reborn-v2-e2e"
+default_agent = "reborn-v2-e2e-agent"
+
+[webui]
+env_token_var = "IRONCLAW_REBORN_WEBUI_TOKEN"
+env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
+
+[llm.default]
+provider_id = "openai"
+model = "mock-model"
+api_key_env = "MOCK_LLM_API_KEY"
+base_url = "{mock_llm_server}/v1"
+""",
+        encoding="utf-8",
+    )
+
+
+async def start_reborn_webui_v2_server(
+    *,
+    ironclaw_reborn_binary: str,
+    mock_llm_server: str,
+    home_dir: Path,
+    profile: str = DEFAULT_PROFILE,
+    log_prefix: str = "reborn-v2",
+) -> tuple[object, str]:
+    """Start ``ironclaw-reborn serve`` and return ``(process, base_url)``."""
+    reborn_home = home_dir / "reborn-home"
+    reborn_home.mkdir(parents=True, exist_ok=True)
+    write_config_toml(reborn_home / "config.toml", mock_llm_server, profile=profile)
+
+    proc = None
+    last_stderr = ""
+    last_port = None
+
+    for attempt in range(1, 4):
+        port = find_free_port()
+        last_port = port
+        stdout_path = home_dir / f"{log_prefix}-attempt-{attempt}.stdout.log"
+        stderr_path = home_dir / f"{log_prefix}-attempt-{attempt}.stderr.log"
+
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(home_dir),
+            "IRONCLAW_REBORN_HOME": str(reborn_home),
+            "IRONCLAW_REBORN_PROFILE": profile,
+            "IRONCLAW_REBORN_WEBUI_TOKEN": REBORN_V2_AUTH_TOKEN,
+            "IRONCLAW_REBORN_WEBUI_USER_ID": USER_ID,
+            "MOCK_LLM_API_KEY": "mock-api-key",
+            "NO_PROXY": "127.0.0.1,localhost,::1",
+            "no_proxy": "127.0.0.1,localhost,::1",
+            "RUST_LOG": "ironclaw=warn,ironclaw_reborn=warn",
+            "RUST_BACKTRACE": "1",
+        }
+        forward_coverage_env(env)
+
+        args = [
+            ironclaw_reborn_binary,
+            "serve",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+        ]
+        if profile == YOLO_PROFILE:
+            args.insert(2, "--confirm-host-access")
+
+        with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=out,
+                stderr=err,
+                env=env,
+            )
+        base_url = f"http://127.0.0.1:{port}"
+
+        try:
+            await wait_for_ready(f"{base_url}/api/health", timeout=60)
+            return proc, base_url
+        except TimeoutError:
+            if proc.returncode is None:
+                await stop_process(proc, timeout=2)
+            last_stderr = read_log(stderr_path)
+            proc = None
+
+    pytest.fail(
+        f"Reborn WebUI v2 server failed to start after 3 attempts.\n"
+        f"Last attempted port: {last_port}\n"
+        f"stderr:\n{last_stderr}"
+    )
+
+
+async def close_reborn_server(proc) -> None:
+    if proc is not None and proc.returncode is None:
+        await stop_process(proc, sig=signal.SIGINT, timeout=10)
+        if proc.returncode is None:
+            await stop_process(proc, sig=signal.SIGTERM, timeout=5)
+
+
+async def enable_reborn_global_auto_approve(base_url: str) -> None:
+    """Enable the Tools settings global auto-approve switch for this test user."""
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        response = await client.post(
+            f"{base_url}/api/webchat/v2/settings/tools",
+            json={"enabled": True},
+            timeout=15,
+        )
+        response.raise_for_status()
+
+
+@pytest.fixture(scope="module")
+async def reborn_v2_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_factory):
+    """Start ``ironclaw-reborn serve`` with the default local-dev profile."""
+    home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-home")
+    proc, base_url = await start_reborn_webui_v2_server(
+        ironclaw_reborn_binary=ironclaw_reborn_binary,
+        mock_llm_server=mock_llm_server,
+        home_dir=home_dir,
+        profile=DEFAULT_PROFILE,
+    )
+    try:
+        yield base_url
+    finally:
+        await close_reborn_server(proc)
+
+
+@pytest.fixture(scope="module")
+async def reborn_v2_yolo_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_factory):
+    """Start ``ironclaw-reborn serve`` with auto-approval local-dev-yolo profile."""
+    home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-yolo-home")
+    proc, base_url = await start_reborn_webui_v2_server(
+        ironclaw_reborn_binary=ironclaw_reborn_binary,
+        mock_llm_server=mock_llm_server,
+        home_dir=home_dir,
+        profile=YOLO_PROFILE,
+        log_prefix="reborn-v2-yolo",
+    )
+    await enable_reborn_global_auto_approve(base_url)
+    try:
+        yield base_url
+    finally:
+        await close_reborn_server(proc)
+
+
+@pytest.fixture(scope="module")
+async def reborn_v2_browser():
+    """Chromium instance for Reborn v2 tests, independent of the legacy gateway."""
+    from playwright.async_api import Error as PlaywrightError
+
+    headless = os.environ.get("HEADED", "").strip() not in ("1", "true")
+    async with async_playwright() as p:
+        browser = None
+        for attempt in range(3):
+            try:
+                browser = await p.chromium.launch(headless=headless, timeout=60000)
+                break
+            except PlaywrightError:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(1)
+        yield browser
+        await browser.close()
+
+
+@pytest.fixture
+async def reborn_v2_page(reborn_v2_server, reborn_v2_browser):
+    """Fresh authenticated page on the Reborn v2 SPA."""
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    await open_reborn_v2_page(page, reborn_v2_server)
+    yield page
+    await context.close()
+
+
+@pytest.fixture
+async def reborn_v2_yolo_page(reborn_v2_yolo_server, reborn_v2_browser):
+    """Fresh authenticated yolo-profile page with downloads enabled."""
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 720}, accept_downloads=True
+    )
+    page = await context.new_page()
+    await open_reborn_v2_page(page, reborn_v2_yolo_server)
+    yield page
+    await context.close()
+
+
+async def open_reborn_v2_page(page, base_url: str, path: str = "/v2/") -> None:
+    separator = "&" if "?" in path else "?"
+    await page.goto(f"{base_url}{path}{separator}token={REBORN_V2_AUTH_TOKEN}")
+    await page.wait_for_selector(SEL_V2["chat_composer"], timeout=15000)
+
+
+def reborn_bearer_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+
+
+def client_action_id() -> str:
+    """Idempotency key accepted by ``webui_inbound::parse_client_action_id``."""
+    return str(uuid.uuid4())
+
+
+async def create_thread(client: httpx.AsyncClient, base_url: str) -> str:
+    response = await client.post(
+        f"{base_url}/api/webchat/v2/threads",
+        json={"client_action_id": client_action_id()},
+        timeout=15,
+    )
+    response.raise_for_status()
+    return response.json()["thread"]["thread_id"]
+
+
+async def send_message(
+    client: httpx.AsyncClient, base_url: str, thread_id: str, content: str
+) -> None:
+    response = await client.post(
+        f"{base_url}/api/webchat/v2/threads/{thread_id}/messages",
+        json={"client_action_id": client_action_id(), "content": content},
+        timeout=30,
+    )
+    assert response.status_code in (200, 202), response.text
+
+
+async def fetch_timeline(client: httpx.AsyncClient, base_url: str, thread_id: str) -> dict:
+    response = await client.get(
+        f"{base_url}/api/webchat/v2/threads/{thread_id}/timeline",
+        timeout=15,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+async def wait_for_assistant_message(
+    client: httpx.AsyncClient,
+    base_url: str,
+    thread_id: str,
+    *,
+    timeout: float = 45.0,
+) -> dict:
+    """Poll the timeline until a finalized assistant message appears."""
+    last_timeline: dict = {}
+    for _ in range(int(timeout * 2)):
+        last_timeline = await fetch_timeline(client, base_url, thread_id)
+        finalized = [
+            message
+            for message in last_timeline.get("messages", [])
+            if message.get("kind") == "assistant"
+            and message.get("status") == "finalized"
+            and (message.get("content") or "").strip()
+        ]
+        if finalized:
+            return finalized[-1]
+        await asyncio.sleep(0.5)
+
+    raise AssertionError(
+        f"Timed out waiting for a finalized assistant message in thread {thread_id}. "
+        f"Last timeline: {last_timeline}"
+    )
+
+
+def finalized_assistant_count(timeline: dict) -> int:
+    return sum(
+        1
+        for message in timeline.get("messages", [])
+        if message.get("kind") == "assistant"
+        and message.get("status") == "finalized"
+        and (message.get("content") or "").strip()
+    )
+
+
+async def send_and_settle(
+    client: httpx.AsyncClient,
+    base_url: str,
+    thread_id: str,
+    content: str,
+    expected: int,
+) -> None:
+    """Send a text turn and wait until ``expected`` assistant replies finalize."""
+    await send_message(client, base_url, thread_id, content)
+    for _ in range(90):
+        timeline = await fetch_timeline(client, base_url, thread_id)
+        if finalized_assistant_count(timeline) >= expected:
+            return
+        await asyncio.sleep(0.5)
+    raise AssertionError(
+        f"Thread {thread_id} did not reach {expected} finalized assistant replies"
+    )
