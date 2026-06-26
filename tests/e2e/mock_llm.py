@@ -1326,6 +1326,21 @@ def _normalize_tool_calls(tool_name: str, value: object) -> list[dict]:
     return [{"tool_name": tool_name, "arguments": value}]
 
 
+def _advertised_tool_names(tools: object) -> set[str]:
+    names: set[str] = set()
+    if not isinstance(tools, list):
+        return names
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if isinstance(function, dict) and isinstance(function.get("name"), str):
+            names.add(function["name"])
+        elif isinstance(tool.get("name"), str):
+            names.add(tool["name"])
+    return names
+
+
 def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
     """Return the list of tool calls to emit for the latest user message.
 
@@ -1719,16 +1734,33 @@ async def _send_sse(resp: web.StreamResponse, data: dict):
     await resp.write(f"data: {json.dumps(data)}\n\n".encode())
 
 
-def match_special_response(messages: list[dict], has_tools: bool) -> dict | None:
+def _preferred_tool_name(available_tool_names: set[str], legacy: str) -> str:
+    reborn_name = {
+        "echo": "builtin__echo",
+        "time": "builtin__time",
+    }.get(legacy)
+    if reborn_name and reborn_name in available_tool_names:
+        return reborn_name
+    return legacy
+
+
+def match_special_response(
+    messages: list[dict],
+    has_tools: bool,
+    available_tool_names: set[str] | None = None,
+) -> dict | None:
     """Deterministic issue-specific responses for agent-loop recovery tests."""
     last_user = _last_user_content(messages)
+    available_tool_names = available_tool_names or set()
+    echo_tool = _preferred_tool_name(available_tool_names, "echo")
+    time_tool = _preferred_tool_name(available_tool_names, "time")
 
     if _conversation_has_user_trigger(messages, LOOP_FOREVER_TRIGGER):
         if has_tools:
             return {
                 "type": "tool_call",
                 "tool_call": {
-                    "tool_name": "echo",
+                    "tool_name": echo_tool,
                     "arguments": {"message": "loop-iteration"},
                 },
             }
@@ -1742,7 +1774,7 @@ def match_special_response(messages: list[dict], has_tools: bool) -> dict | None
             return {
                 "type": "truncated_tool_call",
                 "tool_call": {
-                    "tool_name": "time",
+                    "tool_name": time_tool,
                     "arguments": {},
                 },
                 "content": "Attempting a tool call but the response was truncated.",
@@ -1756,7 +1788,7 @@ def match_special_response(messages: list[dict], has_tools: bool) -> dict | None
         return {
             "type": "tool_call",
             "tool_call": {
-                "tool_name": "time",
+                "tool_name": time_tool,
                 "arguments": {"operation": "broken-operation"},
             },
         }
@@ -1773,12 +1805,18 @@ def match_special_response(messages: list[dict], has_tools: bool) -> dict | None
         if n == 0 and has_tools:
             return {
                 "type": "tool_call",
-                "tool_call": {"tool_name": "echo", "arguments": {"message": "step-one"}},
+                "tool_call": {
+                    "tool_name": echo_tool,
+                    "arguments": {"message": "step-one"},
+                },
             }
         if n == 1 and has_tools:
             return {
                 "type": "tool_call",
-                "tool_call": {"tool_name": "time", "arguments": {"operation": "now"}},
+                "tool_call": {
+                    "tool_name": time_tool,
+                    "arguments": {"operation": "now"},
+                },
             }
         return {
             "type": "text",
@@ -2044,7 +2082,9 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     _last_chat_request = body
     messages = body.get("messages", [])
     stream = body.get("stream", False)
-    has_tools = bool(body.get("tools"))
+    tools = body.get("tools")
+    has_tools = bool(tools)
+    available_tool_names = _advertised_tool_names(tools)
     cid = f"mock-{uuid.uuid4().hex[:8]}"
 
     slow_response_delay = _conversation_slow_response_delay(messages)
@@ -2066,7 +2106,7 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
 
     # Special chat-loop recovery cases that intentionally override the normal
     # tool-result summary path (for example, the looping case).
-    special = match_special_response(messages, has_tools)
+    special = match_special_response(messages, has_tools, available_tool_names)
     if special and _conversation_has_user_trigger(messages, LOOP_FOREVER_TRIGGER):
         return await _dispatch_special_response(request, cid, stream, special)
     # Multi-step chain: must bypass tool-result-summary to issue second tool call

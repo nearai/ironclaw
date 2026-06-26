@@ -1236,6 +1236,37 @@ Behavior adjustment:
   direct Playwright ports until Reborn intentionally exposes equivalent
   standalone v2 product surfaces.
 
+### Step 34: Legacy Agent-Loop Recovery Port
+
+Extended `test_reborn_webui_v2_legacy_tool_execution.py`.
+
+Ported issue-1780 recovery behavior that has a current Reborn WebUI v2
+equivalent:
+
+- a model-requested built-in time tool call with invalid arguments reaches a
+  finalized assistant summary instead of leaving the run hanging;
+- a streamed, length-truncated tool-call-shaped assistant response finalizes as
+  visible assistant text and does not create a capability activity card.
+
+Test harness issue fixed:
+
+- the mock LLM's issue-1780 recovery triggers emitted legacy tool names
+  (`time`, `echo`) even when standalone Reborn advertised provider-facing
+  names (`builtin__time`, `builtin__echo`). The mock now preserves legacy names
+  for legacy requests and selects the Reborn names only when the request
+  advertises them.
+
+Current blocker:
+
+- legacy `test_empty_reply_uses_chat_fallback` expects an empty model reply to
+  produce a visible assistant error. Reborn's `LlmProviderModelGateway` already
+  rejects empty tool-capable stop responses as `InvalidOutput`, and existing
+  Reborn driver tests intentionally assert that model failures skip transcript
+  writes. The current WebUI v2 timeline therefore exposes no finalized
+  assistant message for that case. Porting the legacy empty-reply UX requires a
+  product decision about how failed model calls should surface in WebChat v2
+  without leaking raw provider errors.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -1282,6 +1313,9 @@ Not yet ported:
 - legacy owner-scope, multi-tenant greeting, and engine-v2 visibility parity,
   because those tests target old gateway/admin/routine/engine endpoints rather
   than current standalone Reborn WebUI v2 product surfaces;
+- legacy empty-model-reply visible-error parity, because Reborn currently treats
+  model `InvalidOutput` as a failed run without writing an assistant transcript
+  row;
 - legacy Responses API context-injection parity for
   `x_context.notification_response`, because the Reborn OpenAI-compatible
   Responses DTO does not currently expose a matching context field;

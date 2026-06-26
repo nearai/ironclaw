@@ -124,3 +124,59 @@ async def test_reborn_legacy_non_tool_message_still_works(reborn_v2_yolo_server)
         for message in timeline.get("messages", [])
         if message.get("kind") == "capability_display_preview"
     ] == []
+
+
+async def test_reborn_legacy_tool_failure_recovers_with_final_response(
+    reborn_v2_yolo_server,
+):
+    """Port issue-1780 failed-tool recovery to Reborn's v2 turn path."""
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        thread_id = await create_thread(client, reborn_v2_yolo_server)
+        await send_message(
+            client,
+            reborn_v2_yolo_server,
+            thread_id,
+            "issue 1780 tool failure",
+        )
+
+        assistant = await wait_for_assistant_message(
+            client,
+            reborn_v2_yolo_server,
+            thread_id,
+            timeout=45,
+        )
+        content = (assistant.get("content") or "").lower()
+
+    assert "tool returned" in content, assistant
+    assert "broken-operation" in content or "error" in content, assistant
+
+
+async def test_reborn_legacy_truncated_tool_call_recovers_without_activity_card(
+    reborn_v2_yolo_server,
+):
+    """Port issue-1780 truncated tool-call recovery to Reborn's v2 turn path."""
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        thread_id = await create_thread(client, reborn_v2_yolo_server)
+        await send_message(
+            client,
+            reborn_v2_yolo_server,
+            thread_id,
+            "issue 1780 truncated tool call",
+        )
+
+        assistant = await wait_for_assistant_message(
+            client,
+            reborn_v2_yolo_server,
+            thread_id,
+            timeout=45,
+        )
+        timeline = await fetch_timeline(client, reborn_v2_yolo_server, thread_id)
+
+    assert (
+        "response was truncated" in (assistant.get("content") or "").lower()
+    ), assistant
+    assert [
+        message
+        for message in timeline.get("messages", [])
+        if message.get("kind") == "capability_display_preview"
+    ] == []
