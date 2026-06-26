@@ -140,7 +140,10 @@ async def _open_mocked_automations_page(
 ):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
-    current_automations = [deepcopy(item) for item in (automations or MOCK_AUTOMATIONS)]
+    current_automations = [
+        deepcopy(item)
+        for item in (MOCK_AUTOMATIONS if automations is None else automations)
+    ]
     list_requests: list[dict] = []
     pause_requests: list[str] = []
     resume_requests: list[str] = []
@@ -296,9 +299,9 @@ async def _open_mocked_automations_page(
     await page.route("**/api/webchat/v2/automations**", handle_automations)
     await page.route("**/api/webchat/v2/outbound/**", handle_outbound)
     await page.goto(f"{reborn_v2_server}/v2/automations?token={REBORN_V2_AUTH_TOKEN}")
-    await expect(page.get_by_role("heading", name="Automations")).to_be_visible(
-        timeout=15000
-    )
+    await expect(
+        page.get_by_role("heading", name="Automations", exact=True)
+    ).to_be_visible(timeout=15000)
 
     return {
         "context": context,
@@ -371,6 +374,54 @@ async def test_reborn_legacy_automations_render_scheduler_and_delivery_defaults(
         assert harness["preference_requests"] == [
             {"final_reply_target_id": SLACK_OPS_TARGET["target_id"]}
         ]
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_automations_empty_state_starts_in_chat_and_copies_prompt(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_automations_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        automations=[],
+    )
+    try:
+        page = harness["page"]
+        await page.evaluate(
+            """() => {
+              window.__copiedAutomationPrompts = [];
+              Object.defineProperty(navigator, "clipboard", {
+                configurable: true,
+                value: {
+                  writeText: (text) => {
+                    window.__copiedAutomationPrompts.push(text);
+                    return Promise.resolve();
+                  },
+                },
+              });
+            }"""
+        )
+
+        await expect(
+            page.get_by_role("heading", name="No automations yet")
+        ).to_be_visible()
+        await expect(page.get_by_text("Try asking your agent")).to_be_visible()
+
+        copy_prompt = page.get_by_role("button", name="Copy prompt").first
+        await copy_prompt.click()
+        await expect(page.get_by_role("button", name="Copied")).to_be_visible(
+            timeout=5000
+        )
+        copied = await page.evaluate("() => window.__copiedAutomationPrompts")
+        expected_prompt = (
+            "Check the nearai/ironclaw repo every 10 minutes and summarize "
+            "new issues, PRs, and commits."
+        )
+        assert copied == [expected_prompt]
+
+        await page.get_by_role("button", name="Start in chat").click()
+        await expect(page).to_have_url(re.compile(r".*/v2/chat.*"), timeout=10000)
     finally:
         await harness["context"].close()
 

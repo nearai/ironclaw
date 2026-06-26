@@ -2954,6 +2954,29 @@ Behavior adjustment:
   browser boundary. Host-side provider URL construction remains product-auth /
   extension-service contract coverage rather than a browser port.
 
+### Step 99: Legacy Routine Creation Entry-Point Port
+
+Extended `test_reborn_webui_v2_legacy_automations.py`.
+
+Ported the browser-visible entry-point behind legacy routine creation flows to
+Reborn's implemented Automations empty state:
+
+- opened `/v2/automations` with an empty v2 automation list;
+- asserted Reborn explains that automations are created by chatting with the
+  agent rather than through a legacy routine form;
+- copied one example automation prompt through the visible copy button and
+  asserted the raw prompt is written to the clipboard;
+- clicked `Start in chat` and asserted the SPA navigates to `/v2/chat`.
+
+Behavior adjustment:
+
+- Legacy routine creation tests used chat commands plus legacy `/api/routines`
+  records. Reborn's `/v2/routines` page is still a TODO-backed legacy stub, and
+  the supported scheduled-work surface is `/v2/automations`. The migrated test
+  protects the user-facing creation affordance that Reborn actually exposes
+  today: start from the Automations empty state, copy a ready prompt if useful,
+  then continue in chat.
+
 ## Open Migration Buckets
 
 Not yet ported:
