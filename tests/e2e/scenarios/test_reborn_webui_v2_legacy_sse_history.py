@@ -23,6 +23,7 @@ THREAD_ID = "thread-legacy-sse-history"
 THREAD_A_ID = "thread-legacy-sse-a"
 THREAD_B_ID = "thread-legacy-sse-b"
 STALE_REPLAY_THREAD_ID = "thread-legacy-sse-stale-replay"
+LATE_TEXT_PROJECTION_THREAD_ID = "thread-legacy-late-text-projection"
 
 
 async def test_reborn_legacy_message_persists_across_page_reload(
@@ -631,6 +632,155 @@ async def test_reborn_legacy_stale_replay_timeline_refresh_dedupes_messages(
         await expect(assistant_message).to_have_count(1, timeout=5000)
         await expect(user_message).to_have_count(1, timeout=5000)
         assert len(timeline_requests) > before_terminal_requests
+    finally:
+        await context.close()
+
+
+async def test_reborn_legacy_late_projection_text_dedupes_history_response(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Port legacy late response-event dedupe to Reborn projection text items."""
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    await page.add_init_script(
+        """
+        (() => {
+          const streams = [];
+          class FakeEventSource extends EventTarget {
+            constructor(url) {
+              super();
+              this.url = url;
+              this.readyState = 0;
+              streams.push(this);
+              queueMicrotask(() => {
+                this.readyState = 1;
+                if (typeof this.onopen === "function") this.onopen(new Event("open"));
+              });
+            }
+            close() {
+              this.readyState = 2;
+            }
+          }
+          window.EventSource = FakeEventSource;
+          window.__emitV2Sse = (type, frame, id = "cursor-late-text") => {
+            const stream = streams[streams.length - 1];
+            if (!stream) throw new Error("no EventSource stream is open");
+            const event = new MessageEvent(type, {
+              data: JSON.stringify({ type, ...frame }),
+              lastEventId: id,
+            });
+            stream.dispatchEvent(event);
+          };
+        })();
+        """
+    )
+
+    async def fulfill_json(route, body):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route):
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route):
+        await fulfill_json(
+            route,
+            {
+                "threads": [
+                    {
+                        "thread_id": LATE_TEXT_PROJECTION_THREAD_ID,
+                        "title": "Legacy late text projection port",
+                        "created_at": "2026-06-26T00:00:00Z",
+                        "updated_at": "2026-06-26T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_timeline(route):
+        await fulfill_json(
+            route,
+            {
+                "messages": [
+                    {
+                        "message_id": "late-projection-user",
+                        "kind": "user",
+                        "content": "What is 2+2?",
+                        "sequence": 1,
+                        "status": "accepted",
+                        "created_at": "2026-06-26T00:00:00Z",
+                        "turn_run_id": "run-late-projection",
+                    },
+                    {
+                        "message_id": "late-projection-assistant",
+                        "kind": "assistant",
+                        "content": "The answer is 4.",
+                        "sequence": 2,
+                        "status": "finalized",
+                        "created_at": "2026-06-26T00:00:01Z",
+                        "turn_run_id": "run-late-projection",
+                    },
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads", handle_threads)
+    await page.route("**/api/webchat/v2/threads?**", handle_threads)
+    await page.route(
+        f"**/api/webchat/v2/threads/{LATE_TEXT_PROJECTION_THREAD_ID}/timeline**",
+        handle_timeline,
+    )
+
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/v2/chat/{LATE_TEXT_PROJECTION_THREAD_ID}"
+            f"?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        answer = page.locator(SEL_V2["msg_assistant"]).filter(
+            has_text="The answer is 4."
+        )
+        await expect(answer).to_have_count(1, timeout=15000)
+
+        await page.evaluate(
+            """
+            () => window.__emitV2Sse("projection_update", {
+              state: {
+                items: [
+                  {
+                    text: {
+                      id: "late-projection-assistant",
+                      body: "The answer is 4."
+                    }
+                  }
+                ]
+              }
+            })
+            """
+        )
+
+        await expect(answer).to_have_count(1, timeout=5000)
+        await expect(page.locator(SEL_V2["msg_assistant"])).to_have_count(1)
     finally:
         await context.close()
 

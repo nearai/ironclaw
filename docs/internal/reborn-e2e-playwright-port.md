@@ -2888,6 +2888,29 @@ Behavior mapping:
   hidden from primary navigation and exposes Automations for the implemented
   browser workflow.
 
+### Step 97: Legacy Late Response Dedupe Port
+
+Extended `test_reborn_webui_v2_legacy_sse_history.py` and fixed Reborn WebUI v2
+projection-text dedupe.
+
+Ported the duplicate-protection intent from legacy
+`test_response_event_does_not_duplicate_history_rendered_response` to Reborn's
+timeline plus projection model:
+
+- seeded a Reborn thread with a finalized assistant message returned from
+  `/api/webchat/v2/threads/{thread_id}/timeline`;
+- emitted a late `projection_update` text item whose id matches the durable
+  assistant message id;
+- asserted the transcript still renders a single assistant bubble.
+
+Issue fixed:
+
+- Reborn projection text items deduped only against `text-{id}` client bubbles.
+  Timeline-rendered assistant rows use `msg-{message_id}`, so a late projection
+  carrying the same durable id could duplicate a reply already rendered from
+  history. The projection handler now also checks the matching `msg-{id}`
+  timeline id and updates that bubble in place.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -2900,8 +2923,8 @@ Not yet ported:
   are legacy v1 routing semantics rather than current standalone Reborn v2 UI
   behavior, while active-thread retention after summary refresh, route-scoped
   cursor reset, EventSource error reconnect, stale replay dedupe, multi-tab
-  fan-out, keepalive comments, connection limits, and reload persistence are
-  covered;
+  fan-out, keepalive comments, connection limits, late projected-text dedupe,
+  and reload persistence are covered;
 - remaining DOM/resource-limit scenarios for any future capped long-running
   activity stores beyond the current timeline paging, near-cap response
   projection, background-thread processing summary, and SSE reconnect-timeout
