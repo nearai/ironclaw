@@ -335,7 +335,7 @@ async fn http_error_kind_maps_all_reason_codes() {
         ),
         (
             RuntimeHttpEgressReasonCode::RequestDenied,
-            RuntimeDispatchErrorKind::InputEncode,
+            RuntimeDispatchErrorKind::PolicyDenied,
         ),
         (
             RuntimeHttpEgressReasonCode::PolicyDenied,
@@ -779,7 +779,7 @@ impl FirstPartyCapabilityHandler for HttpFirstPartyHandler {
 fn http_error_kind(reason: RuntimeHttpEgressReasonCode) -> RuntimeDispatchErrorKind {
     match reason {
         RuntimeHttpEgressReasonCode::CredentialUnavailable => RuntimeDispatchErrorKind::Client,
-        RuntimeHttpEgressReasonCode::RequestDenied => RuntimeDispatchErrorKind::InputEncode,
+        RuntimeHttpEgressReasonCode::RequestDenied => RuntimeDispatchErrorKind::PolicyDenied,
         RuntimeHttpEgressReasonCode::PolicyDenied => RuntimeDispatchErrorKind::PolicyDenied,
         RuntimeHttpEgressReasonCode::NetworkError => RuntimeDispatchErrorKind::NetworkDenied,
         RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OperationFailed,
