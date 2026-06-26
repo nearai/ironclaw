@@ -555,6 +555,41 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the CSP/browser-safety port
   in the Reborn WebUI v2 Playwright job.
 
+### Step 16: Legacy Tool Activity History Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_message_persistence.py`.
+
+Ported the tool-call history-card intent from legacy
+`test_message_persistence.py` to Reborn's timeline projection:
+
+- a real `ironclaw-reborn serve` browser turn dispatches the builtin echo
+  capability through the `local-dev-yolo` profile;
+- the assistant response and tool activity are visible before reload;
+- after a full page reload, the timeline rehydrates the assistant reply and
+  collapsed activity run from durable `capability_display_preview` records;
+- expanding the activity run reveals the persisted echo tool card;
+- expanding the tool card shows the persisted result preview.
+
+Testability adjustment:
+
+- Reborn activity runs now expose stable `data-testid` hooks for the run,
+  run toggle, run item list, tool card, tool-card toggle, and tool detail
+  panel. Tool cards also expose `data-tool-name` and `data-tool-status` so
+  tests can assert the persisted card without depending on styling classes.
+
+Harness adjustment:
+
+- The mock LLM now has a Reborn-specific `reborn builtin echo ...` trigger
+  that emits `builtin__echo`, matching the provider-facing name for
+  Reborn's `builtin.echo` capability. The existing legacy `echo ...` trigger
+  is unchanged for the legacy gateway/v2-engine tests that still use the
+  unqualified legacy tool name.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the message-persistence
+  activity-card port in the Reborn WebUI v2 Playwright job.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -565,7 +600,8 @@ Not yet ported:
   product concept;
 - DOM pruning/resource-limit scenarios;
 - deeper tool approval scenarios that need real Reborn runtime/tool execution,
-  persistence, or recovery beyond the browser approval-card contract;
+  persistence, or recovery beyond the browser approval-card and persisted
+  activity-card contracts;
 - remaining settings/extension lifecycle scenarios beyond Settings search,
   Skills, tool permissions, channel label regressions, and the top-level extension
   install/manage surface;
@@ -627,6 +663,12 @@ coverage can assert the real row without depending on incidental DOM ancestry.
 The CSP/browser-safety port did not require a Reborn product fix. Initial
 focused failures were selector mismatches in the port (`New` is a scoped
 sidebar button in Reborn, not a legacy `New thread` link).
+
+The tool-activity history port did not require a Reborn product behavior fix:
+durable `capability_display_preview` records already rehydrated the activity
+card after reload. It did add stable test hooks to the activity UI and a
+Reborn-specific mock trigger so the browser test dispatches `builtin__echo`
+instead of the legacy unqualified `echo` tool name.
 
 The same settings inspection confirmed an admin parity gap: Reborn Settings
 Users client methods still return TODO stub responses instead of calling real

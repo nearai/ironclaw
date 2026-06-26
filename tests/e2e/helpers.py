@@ -238,6 +238,13 @@ SEL_V2 = {
     "msg_system":     "[data-testid='msg-system']",     # system notice bubble
     "approval_card":  "[data-testid='approval-card']",  # approval gate card
     "busy_gate_notice": "[data-testid='busy-gate-notice']",  # gate busy notice
+    "activity_run":   "[data-testid='activity-run']",
+    "activity_run_toggle": "[data-testid='activity-run-toggle']",
+    "activity_run_items": "[data-testid='activity-run-items']",
+    "tool_activity_card": "[data-testid='tool-activity-card']",
+    "tool_activity_card_for": "[data-testid='tool-activity-card'][data-tool-name='{name}']",
+    "tool_activity_toggle": "[data-testid='tool-activity-toggle']",
+    "tool_activity_detail": "[data-testid='tool-activity-detail']",
     # Download chip for an agent-produced workspace file; `{path}` selects one.
     # Clicking a chip opens the shared attachment preview modal, whose footer
     # carries the Download action.

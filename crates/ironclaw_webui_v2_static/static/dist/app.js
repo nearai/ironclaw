@@ -1377,6 +1377,7 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
       onClick=${()=>d(y=>!y)}
       aria-expanded=${c?"true":"false"}
       aria-controls=${h}
+      data-testid="tool-activity-toggle"
       className="v2-button flex w-full items-center gap-2.5 border-0 border-b border-iron-700/40 bg-transparent px-1 py-2 text-left text-sm"
     >
       <span className=${["h-2 w-2 shrink-0 rounded-full",m].join(" ")} />
@@ -1398,7 +1399,12 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
       </span>
     </button>
   `;return u`
-    <div className=${t?"":"flex gap-3"}>
+    <div
+      className=${t?"":"flex gap-3"}
+      data-testid="tool-activity-card"
+      data-tool-name=${a||""}
+      data-tool-status=${n||""}
+    >
       ${!t&&u`
         <div
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/10 bg-iron-800 text-iron-100"
@@ -1429,6 +1435,7 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
     `:u`
     <div
       id=${e}
+      data-testid="tool-activity-detail"
       className="rounded-b-lg border-x border-b border-iron-700/40 bg-iron-950"
     >
       <div className="flex items-center gap-1 border-b border-iron-700/40 px-2 pt-1.5">
@@ -1485,11 +1492,12 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
     >${JSON.stringify(a,null,2)}</pre>`:u`<pre
     className="overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono text-[var(--v2-positive-text)]"
   >${e}</pre>`}function d4(e){return e&&typeof e=="object"&&!Array.isArray(e)&&Object.values(e).every(t=>t===null||typeof t!="object")}function m4(e){return e==null?"":String(e)}function B1({activity:e}){let t=P1(e),a=h4(e),[n,r]=p.default.useState(a);return p.default.useEffect(()=>{a&&r(!0)},[a]),u`
-    <div className="mr-auto flex w-full max-w-[85%] flex-col">
+    <div className="mr-auto flex w-full max-w-[85%] flex-col" data-testid="activity-run">
       <button
         type="button"
         onClick=${()=>r(s=>!s)}
         aria-expanded=${n?"true":"false"}
+        data-testid="activity-run-toggle"
         className=${["v2-button flex w-full items-center gap-2 border-0 bg-transparent px-1 py-1.5 text-left text-sm",t.hasError?"text-[var(--v2-danger-text)]":"text-iron-400 hover:text-iron-200"].join(" ")}
       >
         <${D} name="layers" className="h-4 w-4 shrink-0" />
@@ -1501,7 +1509,7 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
       </button>
 
       ${n&&u`
-        <div className="mt-2 flex flex-col gap-3">
+        <div className="mt-2 flex flex-col gap-3" data-testid="activity-run-items">
           ${e.map((s,i)=>u`
             <${f4}
               key=${s.id||`${s.role||"activity"}-${i}`}
