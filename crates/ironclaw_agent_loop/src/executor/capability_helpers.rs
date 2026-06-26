@@ -523,30 +523,34 @@ pub(super) async fn pending_external_tool_resume_candidate(
 ) -> Result<CapabilityCallCandidate, AgentLoopExecutorError> {
     if let Some(replay) = resume.provider_replay.as_ref() {
         let candidate = host
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
-                provider_id: replay.provider_id.clone(),
-                provider_model_id: replay.provider_model_id.clone(),
-                turn_id: Some(replay.provider_turn_id.clone()),
-                id: replay.provider_call_id.clone(),
-                name: replay.provider_tool_name.clone(),
-                arguments: replay.arguments.clone(),
-                response_reasoning: replay.response_reasoning.clone(),
-                reasoning: replay.reasoning.clone(),
-                signature: replay.signature.clone(),
-            }))
+            .register_provider_tool_call(RegisterProviderToolCallRequest::for_activity(
+                ProviderToolCall {
+                    provider_id: replay.provider_id.clone(),
+                    provider_model_id: replay.provider_model_id.clone(),
+                    turn_id: Some(replay.provider_turn_id.clone()),
+                    id: replay.provider_call_id.clone(),
+                    name: replay.provider_tool_name.clone(),
+                    arguments: replay.arguments.clone(),
+                    response_reasoning: replay.response_reasoning.clone(),
+                    reasoning: replay.reasoning.clone(),
+                    signature: replay.signature.clone(),
+                },
+                resume.activity_id_for_resume(),
+            ))
             .await
             .map_err(capability_host_error)?;
-        if candidate.capability_id != resume.capability_id
+        if candidate.activity_id != resume.activity_id_for_resume()
+            || candidate.capability_id != resume.capability_id
             || candidate.effective_capability_ids != resume.effective_capability_ids
         {
             return Err(AgentLoopExecutorError::PlannerContract {
-                detail: "external tool resume provider replay no longer matches blocked capability",
+                detail: "external tool resume provider replay no longer matches blocked capability activity",
             });
         }
         return Ok(candidate);
     }
     Ok(CapabilityCallCandidate {
-        activity_id: ironclaw_turns::CapabilityActivityId::new(),
+        activity_id: resume.activity_id_for_resume(),
         surface_version,
         capability_id: resume.capability_id.clone(),
         input_ref: resume.input_ref.clone(),
