@@ -308,6 +308,50 @@ async def test_reborn_legacy_oauth_prompt_opens_https_authorization_only(
         await context.close()
 
 
+async def test_reborn_legacy_oauth_callback_completion_clears_matching_gate(
+    reborn_v2_server, reborn_v2_browser
+):
+    context, page, _manual_token_requests, _resolve_requests = await _open_stubbed_auth_thread(
+        reborn_v2_server, reborn_v2_browser
+    )
+    try:
+        await _emit_auth_prompt(
+            page,
+            challenge_kind="oauth_url",
+            gate_ref="oauth-callback-gate",
+            authorization_url="https://accounts.example.test/oauth?state=callback-state",
+        )
+
+        gate = page.locator(SEL_V2["auth_gate_for"].format(kind="oauth_url")).first
+        await expect(gate).to_be_visible(timeout=5000)
+
+        await page.evaluate(
+            """
+            (payload) => {
+              const key = "ironclaw:product-auth:oauth-complete";
+              const value = JSON.stringify(payload);
+              window.localStorage.setItem(key, value);
+              window.dispatchEvent(new StorageEvent("storage", { key, newValue: value }));
+            }
+            """,
+            {
+                "type": "ironclaw:product-auth:oauth-complete",
+                "status": "completed",
+                "completedAt": 1924617600000,
+                "continuation": {
+                    "type": "turn_gate_resume",
+                    "turn_run_ref": RUN_ID,
+                    "gate_ref": "oauth-callback-gate",
+                },
+            },
+        )
+
+        await expect(gate).to_be_hidden(timeout=5000)
+        await expect(page.locator(SEL_V2["auth_gate"])).to_have_count(0)
+    finally:
+        await context.close()
+
+
 async def test_reborn_legacy_oauth_prompt_rejects_non_https_authorization_url(
     reborn_v2_server, reborn_v2_browser
 ):

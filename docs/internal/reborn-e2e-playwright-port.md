@@ -983,6 +983,28 @@ Behavior adjustment:
   v1 DOM/API behavior, not an additional Reborn port target unless product
   requirements change to reintroduce text approval aliases.
 
+### Step 26: Legacy OAuth Callback Completion Port
+
+Extended `tests/e2e/scenarios/test_reborn_webui_v2_legacy_auth_flows.py`.
+
+Ported the browser-visible callback-success portion of legacy
+`test_extension_oauth.py` to Reborn's product-auth prompt flow:
+
+- opened an OAuth auth gate from an `auth_required` SSE frame;
+- emitted the same-origin callback completion signal used by Reborn's
+  server-side product-auth callback page;
+- asserted the pending OAuth gate clears only when the completion payload
+  matches the active `turn_run_ref` and `gate_ref`.
+
+Behavior adjustment:
+
+- Legacy extension OAuth tests hit `/oauth/callback` directly, exchanged mock
+  provider tokens, checked replay rejection, and asserted extension/tool
+  authenticated state. Reborn's WebChat v2 browser owns only the prompt and
+  completion-signal behavior; provider token exchange and replay/removal
+  invalidation are host-runtime endpoint contracts and remain open until a
+  standalone Reborn product-auth endpoint fixture exists for those paths.
+
 ## Open Migration Buckets
 
 Not yet ported:
