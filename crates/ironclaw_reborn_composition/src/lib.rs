@@ -32,8 +32,6 @@ mod available_extensions;
 mod budget;
 mod budget_events;
 mod bundled_skills;
-#[cfg(all(feature = "capability-policy", feature = "webui-v2-beta"))]
-mod capability_admin_routes;
 #[cfg(feature = "capability-policy")]
 mod capability_policy_engine;
 #[cfg(feature = "capability-policy")]
@@ -182,10 +180,6 @@ pub use auth::{
 pub use automation::RebornAutomationProductFacade;
 pub use budget::build_default_budget_accountant;
 pub use budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
-#[cfg(all(feature = "capability-policy", feature = "webui-v2-beta"))]
-pub use capability_admin_routes::{
-    CapabilityAdminRouteConfig, build_capability_admin_route_mount, capability_admin_route_mount,
-};
 pub use error::RebornBuildError;
 pub use extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
