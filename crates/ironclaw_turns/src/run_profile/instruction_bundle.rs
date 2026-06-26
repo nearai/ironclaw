@@ -628,20 +628,21 @@ fn push_visible_surface(
     surface
         .descriptors
         .sort_by(|a, b| a.capability_id.cmp(&b.capability_id));
-    let capability_policy = CAPABILITY_SURFACE_USAGE_POLICY.trim();
+    let capability_policy = capability_surface_usage_policy()?;
     let mut summary = format!("surface {}", surface.version.as_str());
-    summary.push_str("\nPolicy: ");
+    summary.push_str("\nPolicy:\n");
     summary.push_str(capability_policy);
-    if !surface.descriptors.is_empty() {
-        summary.push_str("\nCapabilities:");
+    summary.push_str("\nCapabilities:");
+    if surface.descriptors.is_empty() {
+        summary.push_str("\n(none)");
     }
     for descriptor in &surface.descriptors {
         validate_surface_descriptor(descriptor)?;
-        summary.push('\n');
+        summary.push_str("\n- id: ");
         summary.push_str(descriptor.capability_id.as_str());
-        summary.push('|');
+        summary.push_str("\n  name: ");
         summary.push_str(&descriptor.safe_name);
-        summary.push('|');
+        summary.push_str("\n  description: ");
         summary.push_str(&descriptor.safe_description);
     }
     let content_ref = synthetic_message_ref(
@@ -682,6 +683,23 @@ fn push_visible_surface(
         content_ref,
     });
     Ok(())
+}
+
+fn capability_surface_usage_policy() -> Result<&'static str, AgentLoopHostError> {
+    normalized_capability_surface_usage_policy(CAPABILITY_SURFACE_USAGE_POLICY)
+}
+
+fn normalized_capability_surface_usage_policy(
+    raw_policy: &'static str,
+) -> Result<&'static str, AgentLoopHostError> {
+    let policy = raw_policy.trim();
+    if policy.is_empty() {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "capability surface usage policy is empty",
+        ));
+    }
+    Ok(policy)
 }
 
 fn validate_surface_descriptor(
@@ -929,5 +947,17 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+    }
+
+    #[test]
+    fn capability_surface_usage_policy_rejects_blank_text() {
+        let error = normalized_capability_surface_usage_policy(" \n\t ")
+            .expect_err("blank policy text should fail closed");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert_eq!(
+            error.safe_summary,
+            "capability surface usage policy is empty"
+        );
     }
 }

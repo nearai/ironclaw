@@ -2090,7 +2090,7 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
     assert!(
         surface_materialized
             .model_content
-            .contains("Policy: Use only visible capabilities."),
+            .contains("\nPolicy:\nUse only visible capabilities."),
         "surface prompt must render the capability policy separately: {:?}",
         surface_materialized.model_content
     );
@@ -2111,8 +2111,22 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
     assert!(
         surface_materialized
             .model_content
-            .contains("\nCapabilities:\ndemo.echo|Echo|Echo safe input"),
-        "surface prompt must preserve capability descriptor tuple alignment: {:?}",
+            .contains("\nCapabilities:\n- id: demo.echo"),
+        "surface prompt must render capability descriptors under a stable header: {:?}",
+        surface_materialized.model_content
+    );
+    assert!(
+        surface_materialized
+            .model_content
+            .contains("\n  name: Echo"),
+        "surface prompt must render capability names as labeled fields: {:?}",
+        surface_materialized.model_content
+    );
+    assert!(
+        surface_materialized
+            .model_content
+            .contains("\n  description: Echo safe input"),
+        "surface prompt must render capability descriptions as labeled fields: {:?}",
         surface_materialized.model_content
     );
     assert!(bundle.instruction_fingerprint.is_some());

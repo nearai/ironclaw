@@ -30,6 +30,7 @@ import os
 import signal
 import socket
 import uuid
+from enum import StrEnum
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -41,6 +42,12 @@ from playwright.async_api import async_playwright, expect
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, wait_for_ready
 
 USER_ID = "reborn-v2-e2e-user"
+
+
+class ToolPermissionState(StrEnum):
+    DEFAULT = "default"
+    DISABLED = "disabled"
+    ASK_EACH_TIME = "ask_each_time"
 
 
 def _find_free_port() -> int:
@@ -256,11 +263,14 @@ async def _send_message(
 
 
 async def _set_tool_permission(
-    client: httpx.AsyncClient, base_url: str, capability_id: str, state: str
+    client: httpx.AsyncClient,
+    base_url: str,
+    capability_id: str,
+    state: ToolPermissionState,
 ) -> None:
     response = await client.post(
         f"{base_url}/api/webchat/v2/settings/tools/{capability_id}",
-        json={"state": state},
+        json={"state": state.value},
         timeout=15,
     )
     assert response.status_code == 200, (
@@ -280,11 +290,49 @@ async def _get_timeline(
     return response.json()
 
 
+async def _reset_mock_capability_policy_state(mock_llm_server: str) -> None:
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{mock_llm_server}/__mock/capability_policy/reset",
+            timeout=10,
+        )
+        response.raise_for_status()
+
+
+async def _wait_for_mock_capability_policy_guard(
+    mock_llm_server: str,
+    *,
+    timeout: float = 10.0,
+) -> dict:
+    last_state: dict = {}
+    async with httpx.AsyncClient() as client:
+        for _ in range(int(timeout * 2)):
+            response = await client.get(
+                f"{mock_llm_server}/__mock/capability_policy/state",
+                timeout=10,
+            )
+            response.raise_for_status()
+            last_state = response.json()
+            if last_state.get("unavailable_response_guard_matches", 0) > 0:
+                return last_state
+            await asyncio.sleep(0.5)
+
+    raise AssertionError(
+        "Timed out waiting for mock LLM unavailable-capability guard. "
+        f"Last state: {last_state}"
+    )
+
+
 async def _restore_disabled_tool_policy(client: httpx.AsyncClient, base_url: str) -> None:
     errors = []
     for capability_id in ("builtin.echo", "builtin.shell"):
         try:
-            await _set_tool_permission(client, base_url, capability_id, "default")
+            await _set_tool_permission(
+                client,
+                base_url,
+                capability_id,
+                ToolPermissionState.DEFAULT,
+            )
         except Exception as error:
             errors.append(f"{capability_id}: {error}")
     assert not errors, "Failed to restore tool permission defaults: " + "; ".join(errors)
@@ -328,8 +376,18 @@ async def disabled_echo_shell_ask_policy(reborn_v2_server):
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
     async with httpx.AsyncClient(headers=headers) as client:
         try:
-            await _set_tool_permission(client, reborn_v2_server, "builtin.echo", "disabled")
-            await _set_tool_permission(client, reborn_v2_server, "builtin.shell", "ask_each_time")
+            await _set_tool_permission(
+                client,
+                reborn_v2_server,
+                "builtin.echo",
+                ToolPermissionState.DISABLED,
+            )
+            await _set_tool_permission(
+                client,
+                reborn_v2_server,
+                "builtin.shell",
+                ToolPermissionState.ASK_EACH_TIME,
+            )
             yield
         finally:
             await _restore_disabled_tool_policy(client, reborn_v2_server)
@@ -386,9 +444,10 @@ async def test_reborn_v2_text_turn_persists(reborn_v2_server):
 
 
 async def test_reborn_v2_disabled_tool_does_not_route_through_shell(
-    reborn_v2_server, disabled_echo_shell_ask_policy
+    reborn_v2_server, disabled_echo_shell_ask_policy, mock_llm_server
 ):
     """A named unavailable tool request should not route through another tool."""
+    await _reset_mock_capability_policy_state(mock_llm_server)
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
     async with httpx.AsyncClient(headers=headers) as client:
         thread_id = await _create_thread(client, reborn_v2_server)
@@ -408,6 +467,12 @@ async def test_reborn_v2_disabled_tool_does_not_route_through_shell(
         assert "builtin_shell" not in timeline_text
         assert "builtin.shell" not in timeline_text
         assert "echo \\\"disabled-test\\\"" not in timeline_text
+
+        mock_state = await _wait_for_mock_capability_policy_guard(mock_llm_server)
+        last_request = mock_state["last_unavailable_response_request"]
+        assert last_request["content"] == prompt
+        assert last_request["has_tools"] is True
+        assert last_request["has_policy"] is True
 
 
 async def test_reborn_v2_ui_send_renders_reply(reborn_v2_page, reborn_v2_server):

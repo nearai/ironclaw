@@ -12,6 +12,7 @@ import os
 import re
 import time
 import uuid
+from pathlib import Path
 from aiohttp import web
 
 DENIAL_PATTERN = re.compile(
@@ -19,7 +20,10 @@ DENIAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-UNAVAILABLE_CAPABILITY_POLICY_TEXT = "not listed under Capabilities"
+UNAVAILABLE_CAPABILITY_POLICY_TEXT = (
+    Path(__file__).parents[2]
+    / "crates/ironclaw_turns/prompts/capability_surface_usage_policy.md"
+).read_text(encoding="utf-8").strip()
 UNAVAILABLE_CAPABILITY_RESPONSE = (
     "That capability is unavailable or disabled for this request, so I "
     "will not route it through another tool."
@@ -859,6 +863,13 @@ def _new_mcp_state() -> dict:
     }
 
 
+def _new_capability_policy_state() -> dict:
+    return {
+        "unavailable_response_guard_matches": 0,
+        "last_unavailable_response_request": None,
+    }
+
+
 def _message_text(msg: dict) -> str:
     content = msg.get("content") or ""
     if isinstance(content, list):
@@ -1318,7 +1329,11 @@ def _normalize_tool_calls(tool_name: str, value: object) -> list[dict]:
     return [{"tool_name": tool_name, "arguments": value}]
 
 
-def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
+def match_tool_call(
+    messages: list[dict],
+    has_tools: bool,
+    capability_policy_state: dict | None = None,
+) -> list[dict] | None:
     """Return the list of tool calls to emit for the latest user message.
 
     Returns ``None`` when no pattern matches or when the request did not
@@ -1335,15 +1350,14 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
     lower = content.lower()
     recent_tool_results = _find_tool_results(messages)
     if _matches_unavailable_capability_response(content):
-        if _conversation_has_unavailable_capability_policy(messages):
-            return None
-        return [{
-            "tool_name": "builtin_shell",
-            "arguments": {
-                "command": "echo \"disabled-test\"",
-                "workdir": "/workspace",
-            },
-        }]
+        if capability_policy_state is not None:
+            capability_policy_state["unavailable_response_guard_matches"] += 1
+            capability_policy_state["last_unavailable_response_request"] = {
+                "content": content,
+                "has_tools": has_tools,
+                "has_policy": _conversation_has_unavailable_capability_policy(messages),
+            }
+        return None
     # #3533: gmail-install-then-retry sequence.
     #
     # Turn 1: user says "check gmail unread" → match_tool_call below dispatches
@@ -2092,7 +2106,11 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     # take precedence over the tool-result-summary fallback whenever it
     # has a follow-up call to emit.
     if tool_results:
-        followup = match_tool_call(messages, has_tools)
+        followup = match_tool_call(
+            messages,
+            has_tools,
+            request.app["capability_policy_state"],
+        )
         if followup:
             if not stream:
                 return _tool_call_response(cid, followup)
@@ -2202,7 +2220,7 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
         return await _dispatch_special_response(request, cid, stream, special)
 
     # Tool-call pattern match
-    tc = match_tool_call(messages, has_tools)
+    tc = match_tool_call(messages, has_tools, request.app["capability_policy_state"])
     if tc:
         if not stream:
             return _tool_call_response(cid, tc)
@@ -2540,6 +2558,15 @@ async def mcp_reset(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def capability_policy_state_handler(request: web.Request) -> web.Response:
+    return web.json_response(request.app["capability_policy_state"])
+
+
+async def capability_policy_reset(request: web.Request) -> web.Response:
+    request.app["capability_policy_state"] = _new_capability_policy_state()
+    return web.json_response({"ok": True})
+
+
 async def models(_request: web.Request) -> web.Response:
     return web.json_response({
         "object": "list",
@@ -2814,6 +2841,7 @@ def main():
     app = web.Application()
     app["oauth_state"] = _new_oauth_state()
     app["mcp_state"] = _new_mcp_state()
+    app["capability_policy_state"] = _new_capability_policy_state()
     app["gmail_state"] = _new_gmail_state()
     # Register both /v1/ and non-/v1/ paths (rig-core omits the /v1/ prefix)
     app.router.add_post("/v1/chat/completions", chat_completions)
@@ -2826,6 +2854,8 @@ def main():
     app.router.add_post("/__mock/oauth/reset", oauth_reset)
     app.router.add_get("/__mock/mcp/state", mcp_state_handler)
     app.router.add_post("/__mock/mcp/reset", mcp_reset)
+    app.router.add_get("/__mock/capability_policy/state", capability_policy_state_handler)
+    app.router.add_post("/__mock/capability_policy/reset", capability_policy_reset)
 
     async def set_github_api_url(request: web.Request) -> web.Response:
         global _github_api_url
