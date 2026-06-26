@@ -950,17 +950,18 @@ impl RootFilesystem for LibSqlRootFilesystem {
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
         let mut seqs: Vec<i64> = Vec::with_capacity(payloads.len());
-        for chunk in payloads.chunks(ROWS_PER_STATEMENT) {
+        let mut iter = payloads.into_iter().peekable();
+        while iter.peek().is_some() {
             let mut sql =
                 String::from("INSERT INTO root_filesystem_events (path, payload) VALUES ");
-            let mut params: Vec<libsql::Value> = Vec::with_capacity(chunk.len() * 2);
-            for (row_idx, payload) in chunk.iter().enumerate() {
+            let mut params: Vec<libsql::Value> = Vec::new();
+            for (row_idx, payload) in (&mut iter).take(ROWS_PER_STATEMENT).enumerate() {
                 if row_idx > 0 {
                     sql.push(',');
                 }
                 sql.push_str("(?, ?)");
                 params.push(libsql::Value::Text(path.as_str().to_string()));
-                params.push(libsql::Value::Blob(payload.clone()));
+                params.push(libsql::Value::Blob(payload));
             }
             sql.push_str(" RETURNING seq");
             let mut rows = tx.query(&sql, params).await.map_err(|error| {

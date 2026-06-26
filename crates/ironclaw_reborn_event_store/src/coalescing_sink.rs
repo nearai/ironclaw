@@ -72,7 +72,7 @@ enum DrainMessage {
     // Boxed: `RuntimeEvent` is much larger than the flush ack, so boxing keeps
     // the channel's per-message footprint small.
     Event(Box<RuntimeEvent>),
-    Flush(oneshot::Sender<()>),
+    Flush(oneshot::Sender<Result<(), EventError>>),
 }
 
 /// Write-behind [`EventSink`] that coalesces same-window runtime appends into
@@ -127,12 +127,19 @@ impl EventSink for CoalescingEventSink {
         match self.tx.try_send(DrainMessage::Event(Box::new(event))) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(
-                    target = "ironclaw::reborn::event_store::coalescing",
-                    dropped = self.dropped.load(Ordering::Relaxed),
-                    "event dropped: coalescing channel at capacity ({CHANNEL_CAPACITY}); drain may be stalled"
-                );
+                // Rate-limited: log on the first drop (0→1 transition) and
+                // every 1000th drop thereafter. The `dropped` counter is the
+                // real signal; logging every single drop would amplify a
+                // backend outage with unbounded I/O and corrupt the REPL/TUI
+                // (CLAUDE.md: background tasks must use `debug!`, not `warn!`).
+                let new_dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                if new_dropped == 1 || new_dropped.is_multiple_of(1000) {
+                    tracing::debug!(
+                        target = "ironclaw::reborn::event_store::coalescing",
+                        dropped = new_dropped,
+                        "event dropped: coalescing channel at capacity ({CHANNEL_CAPACITY}); drain may be stalled"
+                    );
+                }
                 Ok(())
             }
             Err(mpsc::error::TrySendError::Closed(_)) => Err(sink_closed()),
@@ -140,8 +147,10 @@ impl EventSink for CoalescingEventSink {
     }
 
     /// Flush every event queued before this call, awaiting durable write. Used
-    /// for graceful shutdown and deterministic tests. Returns an error only if
-    /// the drain task is no longer running.
+    /// for graceful shutdown and deterministic tests. Returns `Ok(())` only
+    /// when every queued event has been written durably. Returns `Err` if the
+    /// drain task is no longer running **or** if the durable append itself
+    /// failed — callers can rely on `Ok(())` as a true durability guarantee.
     ///
     /// Unlike [`EventSink::emit`], flush awaits channel capacity rather than
     /// dropping on full — it is on the slow/shutdown path and must not be lost.
@@ -151,7 +160,8 @@ impl EventSink for CoalescingEventSink {
             .send(DrainMessage::Flush(ack_tx))
             .await
             .map_err(|_| sink_closed())?;
-        ack_rx.await.map_err(|_| sink_closed())
+        // The ack now carries a Result; flatten Result<Result<…>, RecvError>.
+        ack_rx.await.map_err(|_| sink_closed())?
     }
 }
 
@@ -169,7 +179,7 @@ async fn drain_loop(
         };
 
         let mut batch: Vec<RuntimeEvent> = Vec::new();
-        let mut acks: Vec<oneshot::Sender<()>> = Vec::new();
+        let mut acks: Vec<oneshot::Sender<Result<(), EventError>>> = Vec::new();
         let mut closed = false;
 
         match first {
@@ -198,10 +208,20 @@ async fn drain_loop(
             }
         }
 
-        flush_batch(&log, std::mem::take(&mut batch)).await;
+        let flush_result = flush_batch(&log, std::mem::take(&mut batch)).await;
+        // EventError is not Clone, so capture the error message as a String and
+        // reconstruct one Err per ack. All acks for this window share the same
+        // outcome.
+        let flush_err_msg: Option<String> = flush_result.as_ref().err().map(|e| e.to_string());
         for ack in acks {
+            let payload = match &flush_err_msg {
+                None => Ok(()),
+                Some(reason) => Err(EventError::Sink {
+                    reason: reason.clone(),
+                }),
+            };
             // Receiver may have given up; ignore.
-            let _ = ack.send(());
+            let _ = ack.send(payload);
         }
 
         if closed {
@@ -210,9 +230,12 @@ async fn drain_loop(
     }
 }
 
-async fn flush_batch(log: &Arc<dyn DurableEventLog>, batch: Vec<RuntimeEvent>) {
+async fn flush_batch(
+    log: &Arc<dyn DurableEventLog>,
+    batch: Vec<RuntimeEvent>,
+) -> Result<(), EventError> {
     if batch.is_empty() {
-        return;
+        return Ok(());
     }
     // Isolate the flush in its own task so a panic inside a backend
     // `append_batch` (driver bug, serialization edge) cannot tear down the
@@ -223,14 +246,25 @@ async fn flush_batch(log: &Arc<dyn DurableEventLog>, batch: Vec<RuntimeEvent>) {
     let log = Arc::clone(log);
     match tokio::spawn(async move { log.append_batch(batch).await }).await {
         Ok(results) => {
+            // Collect the first error (if any) so callers can surface durable
+            // failures. All per-event errors are logged; the first is returned
+            // so `flush()` can fail loud on a stalled backend.
+            let mut first_err: Option<String> = None;
             for result in results {
                 if let Err(error) = result {
-                    tracing::warn!(
+                    tracing::debug!(
                         target = "ironclaw::reborn::event_store::coalescing",
                         %error,
                         "durable event append failed during coalescing flush"
                     );
+                    if first_err.is_none() {
+                        first_err = Some(error.to_string());
+                    }
                 }
+            }
+            match first_err {
+                Some(reason) => Err(EventError::Sink { reason }),
+                None => Ok(()),
             }
         }
         Err(join_error) => {
@@ -239,6 +273,9 @@ async fn flush_batch(log: &Arc<dyn DurableEventLog>, batch: Vec<RuntimeEvent>) {
                 %join_error,
                 "coalescing event flush panicked; dropping this batch and continuing"
             );
+            Err(EventError::Sink {
+                reason: join_error.to_string(),
+            })
         }
     }
 }

@@ -247,10 +247,16 @@ async fn coalescing_sink_flush_splits_burst_at_max_batch() {
     let scope = scope_for("alice", "project-a");
     let stream = EventStreamKey::from_scope(&scope);
 
-    for _ in 0..BURST {
+    // Give each event a distinct capability_id so that a batch-boundary
+    // permutation would produce wrong content, not just pass a monotonic-cursor
+    // check with identical records.
+    let emitted_ids: Vec<CapabilityId> = (0..BURST)
+        .map(|i| CapabilityId::new(format!("demo.event{i}")).expect("valid capability id"))
+        .collect();
+    for cap_id in &emitted_ids {
         sink.emit(RuntimeEvent::dispatch_requested(
             scope.clone(),
-            capability_id(),
+            cap_id.clone(),
         ))
         .await
         .expect("emit buffers without blocking");
@@ -285,13 +291,21 @@ async fn coalescing_sink_flush_splits_burst_at_max_batch() {
         "no single-row appends on the coalesced path"
     );
 
-    // Order preservation: all BURST events are durable and have monotonic
-    // cursors in emit order across all three flushes.
+    // Order + content preservation: each replayed event's capability_id must
+    // match the emitted order exactly. Monotonic cursor check alone would pass
+    // even if records were permuted within or across batch boundaries — checking
+    // content catches that class of bug.
     let replay = log
         .read_after_cursor(&stream, &ReadScope::default(), None, 100)
         .await
         .expect("replay after burst flush");
     assert_eq!(replay.entries.len(), BURST);
+    for (i, entry) in replay.entries.iter().enumerate() {
+        assert_eq!(
+            entry.record.capability_id, emitted_ids[i],
+            "event {i} must appear in emit order"
+        );
+    }
     for window in replay.entries.windows(2) {
         assert!(
             window[0].cursor.as_u64() < window[1].cursor.as_u64(),

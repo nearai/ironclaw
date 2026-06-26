@@ -1117,8 +1117,8 @@ async fn durable_event_log_append_batch_keeps_prefix_on_mid_batch_error() {
     );
 
     // Positions beyond K are also failures (mock returns Err for all n >= K).
-    for i in (K + 1)..N {
-        assert!(results[i].is_err(), "results[{i}] must be Err");
+    for (i, result) in results.iter().enumerate().skip(K + 1) {
+        assert!(result.is_err(), "results[{i}] must be Err");
     }
 }
 
