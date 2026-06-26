@@ -854,7 +854,7 @@ test("useChat.send: rejected busy attaches notice to a gate received while in fl
   );
   assert.equal(stateSlots.get(4).value, replacementGate);
   const busyNoticeUpdates = stateUpdates
-    .filter((call) => call.index === 5)
+    .filter((call) => call.index === 6)
     .map((call) => call.value);
   assert.equal(busyNoticeUpdates.length, 1);
   assert.equal(busyNoticeUpdates[0].content, "Thread is busy, please try again.");
@@ -1337,14 +1337,15 @@ test("useChat clears transient run and gate state during thread switch render", 
     Math,
     React: createReactStub({
       // useChat state call order: cooldownUntil, now, activeRun,
-      // isProcessing, pendingGate, busyGateNotice,
+      // isProcessing, pendingGate, pendingOnboarding, busyGateNotice,
       // stateThreadId.
       initialByIndex: new Map([
         [2, { runId: "run-old", threadId: "thread-old", status: "awaiting_gate" }],
         [3, true],
         [4, { runId: "run-old", gateRef: "gate-old" }],
-        [5, { gateKey: "thread-old\nrun-old\ngate-old", content: "busy" }],
-        [6, "thread-old"],
+        [5, { extensionName: "telegram", state: "pairing_required" }],
+        [6, { gateKey: "thread-old\nrun-old\ngate-old", content: "busy" }],
+        [7, "thread-old"],
       ]),
       setCalls: stateUpdates,
     }),
@@ -1388,10 +1389,11 @@ test("useChat clears transient run and gate state during thread switch render", 
   context.globalThis.__testExports.useChat("thread-new");
 
   assert.deepEqual(stateUpdates.slice(0, 6), [
-    { index: 6, value: "thread-new" },
+    { index: 7, value: "thread-new" },
     { index: 3, value: false },
     { index: 4, value: null },
     { index: 5, value: null },
+    { index: 6, value: null },
     { index: 2, value: null },
   ]);
 });

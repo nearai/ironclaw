@@ -14,6 +14,7 @@ import { ConnectionStatus } from "./components/connection-status.js";
 import { EmptyState } from "./components/empty-state.js";
 import { KeyboardShortcuts } from "./components/keyboard-shortcuts.js";
 import { MessageList } from "./components/message-list.js";
+import { OnboardingPairingCard } from "./components/onboarding-pairing-card.js";
 import { RecoveryNotice } from "./components/recovery-notice.js";
 import { SuggestionChips } from "./components/suggestion-chips.js";
 import { TypingIndicator } from "./components/typing-indicator.js";
@@ -34,6 +35,13 @@ import { buildRuntimeContext } from "./lib/runtime-context.js";
  * telemetry) if slow links make the re-flicker noticeable. */
 const THREAD_STATE_CLEAR_GRACE_MS = 1500;
 
+function pendingOnboardingLabel(onboarding) {
+  const raw = String(onboarding?.extensionName || "the extension").trim();
+  if (!raw) return "the extension";
+  if (raw.toLowerCase() === "slack") return "Slack";
+  return raw.replace(/[-_]+/g, " ");
+}
+
 export function Chat({
   threads,
   activeThreadId,
@@ -48,6 +56,7 @@ export function Chat({
     messages,
     isProcessing,
     pendingGate,
+    pendingOnboarding,
     busyGateNotice,
     suggestions,
     sseStatus,
@@ -65,6 +74,8 @@ export function Chat({
     loadMore,
     setSuggestions,
     submitAuthToken,
+    submitOnboardingPairing,
+    dismissOnboardingPairing,
   } = useChat(activeThreadId);
 
   const activeThread = React.useMemo(
@@ -76,21 +87,29 @@ export function Chat({
     [gatewayStatus, activeThread]
   );
   const activeThreadHasGate = Boolean(activeThreadId) && Boolean(pendingGate);
+  const activeThreadHasOnboarding =
+    Boolean(activeThreadId) && Boolean(pendingOnboarding);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
   const hasMessages =
     messages.length > 0 ||
     activeThreadIsProcessing ||
-    activeThreadHasGate;
+    activeThreadHasGate ||
+    activeThreadHasOnboarding;
   // Don't show the landing composer when history failed to load — show the
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
   const showLanding = !historyLoading && !hasMessages && !historyLoadError;
   const approvalSubmitWarning = activeThreadHasGate
     ? "Resolve the approval request before sending another message."
+    : activeThreadHasOnboarding
+      ? `Finish connecting ${pendingOnboardingLabel(pendingOnboarding)} before sending another message.`
     : "";
   const composerSendDisabled =
     activeThreadHasGate ||
-    (activeThreadIsProcessing && !activeThreadHasGate) ||
+    activeThreadHasOnboarding ||
+    (activeThreadIsProcessing &&
+      !activeThreadHasGate &&
+      !activeThreadHasOnboarding) ||
     cooldownSeconds > 0;
   const composerSendBlockedRef = React.useRef(composerSendDisabled);
   composerSendBlockedRef.current = composerSendDisabled;
@@ -105,7 +124,8 @@ export function Chat({
       activeRun?.runId &&
       activeRun.threadId === activeThreadId &&
       activeThreadIsProcessing &&
-      !activeThreadHasGate
+      !activeThreadHasGate &&
+      !activeThreadHasOnboarding
   );
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [] } = {}) => {
@@ -262,7 +282,18 @@ export function Chat({
                 onRecover=${recoverHistory}
               />
             `}
-            ${activeThreadIsProcessing && !activeThreadHasGate && html`<${TypingIndicator} />`}
+            ${activeThreadIsProcessing &&
+            !activeThreadHasGate &&
+            !activeThreadHasOnboarding &&
+            html`<${TypingIndicator} />`}
+            ${activeThreadHasOnboarding &&
+            html`
+              <${OnboardingPairingCard}
+                onboarding=${pendingOnboarding}
+                onSubmit=${submitOnboardingPairing}
+                onCancel=${dismissOnboardingPairing}
+              />
+            `}
             ${pendingGate &&
             (pendingGate.kind === "auth_required"
               ? (pendingGate.challengeKind === "oauth_url"

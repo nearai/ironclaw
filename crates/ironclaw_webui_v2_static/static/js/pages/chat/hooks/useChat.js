@@ -5,8 +5,10 @@ import {
   sendMessage,
   submitManualToken,
 } from "../../../lib/api.js";
+import { redeemSlackPairingCode } from "../../../lib/slack-pairing-api.js";
 import { queryClient } from "../../../lib/query-client.js";
 import { React } from "../../../lib/html.js";
+import { approvePairingCode } from "../../extensions/lib/extensions-api.js";
 import { useChatEvents } from "../lib/useChatEvents.js";
 import {
   addPending,
@@ -177,6 +179,8 @@ export function useChat(threadId) {
   }, []);
   const [pendingGate, setPendingGateState] = React.useState(null);
   const pendingGateRef = React.useRef(pendingGate);
+  const [pendingOnboarding, setPendingOnboardingState] = React.useState(null);
+  const pendingOnboardingRef = React.useRef(pendingOnboarding);
   const [busyGateNotice, setBusyGateNotice] = React.useState(null);
   const setPendingGate = React.useCallback((next) => {
     const current = pendingGateRef.current;
@@ -185,6 +189,14 @@ export function useChat(threadId) {
     if (Object.is(value, current)) return;
     pendingGateRef.current = value;
     setPendingGateState(value);
+  }, []);
+  const setPendingOnboarding = React.useCallback((next) => {
+    const current = pendingOnboardingRef.current;
+    const value =
+      typeof next === "function" ? next(current) : next;
+    if (Object.is(value, current)) return;
+    pendingOnboardingRef.current = value;
+    setPendingOnboardingState(value);
   }, []);
   const [stateThreadId, setStateThreadId] = React.useState(threadId);
   const toolActivityStateRef = React.useRef(createToolActivityState());
@@ -228,6 +240,7 @@ export function useChat(threadId) {
     setStateThreadId(threadId);
     setIsProcessingState(false);
     setPendingGateState(null);
+    setPendingOnboardingState(null);
     setBusyGateNotice(null);
     setActiveRunState(null);
   }
@@ -247,6 +260,9 @@ export function useChat(threadId) {
   React.useEffect(() => {
     pendingGateRef.current = pendingGate;
   }, [pendingGate]);
+  React.useEffect(() => {
+    pendingOnboardingRef.current = pendingOnboarding;
+  }, [pendingOnboarding]);
   React.useEffect(() => {
     isProcessingRef.current = isProcessing;
   }, [isProcessing]);
@@ -331,6 +347,7 @@ export function useChat(threadId) {
     setMessages,
     setIsProcessing,
     setPendingGate,
+    setPendingOnboarding,
     setActiveRun,
     activeRunRef,
     locallyResolvedGatesRef,
@@ -396,7 +413,12 @@ export function useChat(threadId) {
       const wireAttachments = stagedAttachments.map(toWireAttachment);
       const renderAttachments = stagedAttachments.map(toRenderAttachment);
 
-      if (pendingGate || pendingGateRef.current) {
+      if (
+        pendingGate ||
+        pendingGateRef.current ||
+        pendingOnboarding ||
+        pendingOnboardingRef.current
+      ) {
         throw approvalGatePendingSendError();
       }
       // Admission: block a send only when the *destination* thread is the one
@@ -660,6 +682,7 @@ export function useChat(threadId) {
     [
       threadId,
       pendingGate,
+      pendingOnboarding,
       setMessages,
       seedThreadMessages,
       setIsProcessing,
@@ -793,11 +816,47 @@ export function useChat(threadId) {
     [pendingGate, threadId],
   );
 
+  const submitOnboardingPairing = React.useCallback(
+    async (code) => {
+      const onboarding = pendingOnboardingRef.current;
+      if (!onboarding) {
+        throw new Error("pairing is no longer pending");
+      }
+      const trimmed = String(code || "").trim();
+      if (!trimmed) {
+        throw new Error("pairing code is required");
+      }
+      const threadForResume = onboarding.threadId || threadId || null;
+      const options = {
+        threadId: threadForResume,
+        requestId: onboarding.requestId || null,
+      };
+      const response = isSlackPersonalPairing(onboarding.extensionName)
+        ? await redeemSlackPairingCode(trimmed, options)
+        : await approvePairingCode(onboarding.extensionName, trimmed, options);
+      if (response?.success === false) {
+        throw new Error(response.message || "Pairing failed");
+      }
+      setPendingOnboarding(null);
+      if (onboarding.requestId) {
+        setIsProcessing(true);
+      }
+      return response;
+    },
+    [threadId, setPendingOnboarding, setIsProcessing],
+  );
+
+  const dismissOnboardingPairing = React.useCallback(
+    () => setPendingOnboarding(null),
+    [setPendingOnboarding],
+  );
+
   const cancelRun = React.useCallback(
     async (reason) => {
       const runId = activeRun?.runId;
       if (!runId || !threadId) return;
       setPendingGate(null);
+      setPendingOnboarding(null);
       setIsProcessing(false);
       setActiveRun(null);
       submitBusyRef.current = false;
@@ -848,6 +907,7 @@ export function useChat(threadId) {
     messages,
     isProcessing,
     pendingGate,
+    pendingOnboarding,
     busyGateNotice,
     activeRun,
     sseStatus,
@@ -858,6 +918,8 @@ export function useChat(threadId) {
     send,
     resolveGate,
     submitAuthToken,
+    submitOnboardingPairing,
+    dismissOnboardingPairing,
     cancelRun,
     loadMore,
     // fork-shape compatibility — see comments above
@@ -868,6 +930,10 @@ export function useChat(threadId) {
     recoverHistory: noop,
     recoveryNotice: null,
   };
+}
+
+function isSlackPersonalPairing(extensionName) {
+  return String(extensionName || "").trim().toLowerCase() === "slack";
 }
 
 function isDeclinedGateResolution(resolution) {

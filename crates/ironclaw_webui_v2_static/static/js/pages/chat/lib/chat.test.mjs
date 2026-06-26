@@ -68,6 +68,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     KeyboardShortcuts() {},
     Link() {},
     MessageList() {},
+    OnboardingPairingCard() {},
     RecoveryNotice() {},
     SuggestionChips() {},
     TypingIndicator() {},
@@ -288,7 +289,6 @@ test("Chat keeps the new-conversation composer sendable while a prior run is set
       messages: [],
       isProcessing: true,
       pendingGate: null,
-      channelConnectAction: null,
       suggestions: [],
       sseStatus: "open",
       historyLoading: false,
@@ -307,7 +307,6 @@ test("Chat keeps the new-conversation composer sendable while a prior run is set
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      dismissChannelConnectAction: () => {},
     },
   });
 
@@ -322,6 +321,62 @@ test("Chat keeps the new-conversation composer sendable while a prior run is set
   assert.equal(sentBody.options.threadId, null);
   assert.equal(sentBody.options.images.length, 0);
   assert.equal(sentBody.options.attachments.length, 0);
+});
+
+test("Chat renders generic onboarding pairing and blocks composer sends", async () => {
+  const pendingOnboarding = {
+    extensionName: "telegram",
+    state: "pairing_required",
+    instructions: "Message the Telegram bot and paste the code here.",
+  };
+  const submissions = [];
+  let sendCount = 0;
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: false,
+      pendingGate: null,
+      pendingOnboarding,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "blocked" },
+      send: async () => {
+        sendCount += 1;
+        return {};
+      },
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+      submitOnboardingPairing: async (code) => submissions.push(code),
+      dismissOnboardingPairing: () => {},
+    },
+  });
+
+  const pairingCard = findComponent(tree, components.OnboardingPairingCard);
+  assert.ok(pairingCard, "pairing card should render");
+  const pairingProps = componentProps(pairingCard, components.OnboardingPairingCard);
+  assert.equal(pairingProps.onboarding, pendingOnboarding);
+  await pairingProps.onSubmit("A1B2C3");
+  assert.deepEqual(submissions, ["A1B2C3"]);
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const inputProps = componentProps(chatInput, components.ChatInput);
+  assert.equal(inputProps.sendDisabled, true);
+  assert.equal(
+    inputProps.statusText,
+    "Finish connecting telegram before sending another message.",
+  );
+  const response = await inputProps.onSend("do not send while pairing");
+  assert.equal(response, null);
+  assert.equal(sendCount, 0);
 });
 
 test("Chat renders a timeline load failure as an alert instead of the empty landing", () => {

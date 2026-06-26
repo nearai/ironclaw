@@ -40,3 +40,34 @@ test("redeemSlackPairingCode posts Slack codes to the Reborn pairing endpoint", 
     code: "A1B2C3",
   });
 });
+
+test("redeemSlackPairingCode includes chat continuation identifiers when supplied", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "token-1",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(
+      JSON.stringify({ provider: "slack", provider_user_id: "install-alpha:U123" }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }
+    );
+  };
+
+  await redeemSlackPairingCode("A1B2C3", {
+    threadId: "thread-1",
+    requestId: "pairing-gate-1",
+  });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    channel: "slack",
+    code: "A1B2C3",
+    thread_id: "thread-1",
+    request_id: "pairing-gate-1",
+  });
+});

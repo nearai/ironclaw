@@ -61,6 +61,28 @@ test("approvePairingCode submits a pairing code for the authenticated user", asy
   assert.deepEqual(JSON.parse(calls[0].options.body), { code: "A1B2C3" });
 });
 
+test("approvePairingCode includes chat continuation identifiers when supplied", async (t) => {
+  const calls = [];
+  installFetch(t, async (path, options) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  });
+
+  await approvePairingCode("telegram", "A1B2C3", {
+    threadId: "thread-1",
+    requestId: "pairing-gate-1",
+  });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    code: "A1B2C3",
+    thread_id: "thread-1",
+    request_id: "pairing-gate-1",
+  });
+});
+
 test("pairing API helpers require a channel", () => {
   assert.throws(() => fetchPairingRequests(""), /Pairing channel is required/);
   assert.throws(() => approvePairingCode("", "A1B2C3"), /Pairing channel is required/);

@@ -3,10 +3,13 @@ import { apiFetch } from "./api.js";
 export const SLACK_PAIRING_REDEEM_PATH =
   "/api/webchat/v2/extensions/pairing/redeem";
 
-export function redeemSlackPairingCode(code) {
+export function redeemSlackPairingCode(code, options = {}) {
+  const body = { channel: "slack", code };
+  if (options.threadId) body.thread_id = options.threadId;
+  if (options.requestId) body.request_id = options.requestId;
   return apiFetch(SLACK_PAIRING_REDEEM_PATH, {
     method: "POST",
-    body: JSON.stringify({ channel: "slack", code }),
+    body: JSON.stringify(body),
   }).then((response) => ({
     success: true,
     provider: response.provider,

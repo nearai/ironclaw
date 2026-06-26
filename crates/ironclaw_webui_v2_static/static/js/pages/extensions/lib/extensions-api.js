@@ -56,10 +56,13 @@ export function startExtensionOauth(packageRef, secret) {
 export function fetchPairingRequests(channel) {
   return apiFetch(`/api/pairing/${encodeURIComponent(channelName(channel))}`);
 }
-export function approvePairingCode(channel, code) {
+export function approvePairingCode(channel, code, options = {}) {
+  const body = { code };
+  if (options.threadId) body.thread_id = options.threadId;
+  if (options.requestId) body.request_id = options.requestId;
   return apiFetch(`/api/pairing/${encodeURIComponent(channelName(channel))}/approve`, {
     method: "POST",
-    body: JSON.stringify({ code }),
+    body: JSON.stringify(body),
   });
 }
 

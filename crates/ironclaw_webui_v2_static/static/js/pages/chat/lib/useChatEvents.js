@@ -10,6 +10,8 @@ import {
   upsertToolActivityMessage,
 } from "./tool-activity-state.js";
 
+const EXTENSION_ACTIVATE_CAPABILITY_ID = "builtin.extension_activate";
+
 // Handler factory for v2 `WebChatV2EventFrame` events.
 //
 // The current local-dev runtime primarily emits `projection_snapshot` and
@@ -36,6 +38,7 @@ export function useChatEvents({
   setMessages,
   setIsProcessing,
   setPendingGate,
+  setPendingOnboarding,
   setActiveRun,
   activeRunRef,
   locallyResolvedGatesRef,
@@ -118,6 +121,11 @@ export function useChatEvents({
           if (!preview || !preview.invocation_id) return;
           const card = toolCardFromPreview(preview);
           upsertToolActivityMessage(setMessages, card, toolActivityStateRef);
+          const onboarding = onboardingFromExtensionActivatePreview(preview, threadId);
+          if (onboarding) {
+            setPendingOnboarding?.(onboarding);
+            setIsProcessing(false);
+          }
           return;
         }
 
@@ -134,6 +142,22 @@ export function useChatEvents({
             });
           }
           setIsProcessing(false);
+          return;
+        }
+
+        case "onboarding_state": {
+          const onboarding = onboardingFromEvent(frame, threadId);
+          if (!onboarding) return;
+          if (onboarding.state === "pairing_required" || onboarding.state === "pairing") {
+            setPendingOnboarding?.(onboarding);
+            setIsProcessing(false);
+            return;
+          }
+          if (onboarding.state === "ready" || onboarding.state === "failed") {
+            setPendingOnboarding?.((current) =>
+              onboardingMatchesCurrent(current, onboarding) ? null : current,
+            );
+          }
           return;
         }
 
@@ -212,6 +236,7 @@ export function useChatEvents({
       setMessages,
       setIsProcessing,
       setPendingGate,
+      setPendingOnboarding,
       setActiveRun,
       activeRunRef,
       locallyResolvedGatesRef,
@@ -219,6 +244,119 @@ export function useChatEvents({
       onRunSettled,
     ],
   );
+}
+
+function onboardingFromEvent(frame, currentThreadId) {
+  if (!frame || typeof frame !== "object") return null;
+  const frameThreadId = frame.thread_id || frame.threadId || null;
+  if (frameThreadId && currentThreadId && frameThreadId !== currentThreadId) {
+    return null;
+  }
+  const extensionName =
+    frame.extension_name ||
+    frame.extensionName ||
+    frame.channel ||
+    frame.package_ref?.id ||
+    frame.packageRef?.id ||
+    null;
+  if (!extensionName) return null;
+  const onboarding = frame.onboarding || {};
+  return {
+    state: String(frame.state || "").toLowerCase(),
+    extensionName,
+    requestId: frame.request_id || frame.requestId || null,
+    threadId: frameThreadId || currentThreadId || null,
+    message: frame.message || null,
+    instructions:
+      frame.instructions ||
+      onboarding.pairing_instructions ||
+      onboarding.credential_instructions ||
+      onboarding.credential_next_step ||
+      null,
+    setupUrl: frame.setup_url || frame.setupUrl || onboarding.setup_url || null,
+    inputPlaceholder:
+      onboarding.input_placeholder ||
+      onboarding.code_placeholder ||
+      onboarding.pairing_code_placeholder ||
+      null,
+    submitLabel: onboarding.submit_label || null,
+  };
+}
+
+function onboardingFromExtensionActivatePreview(preview, currentThreadId) {
+  if (!preview || preview.capability_id !== EXTENSION_ACTIVATE_CAPABILITY_ID) {
+    return null;
+  }
+  const previewThreadId = preview.thread_id || null;
+  if (previewThreadId && currentThreadId && previewThreadId !== currentThreadId) {
+    return null;
+  }
+  const output = parseJsonObject(preview.output_preview);
+  const payload = output?.payload;
+  if (payload?.kind !== "extension_activate" || payload.activated !== true) {
+    return null;
+  }
+  const message = typeof output.message === "string" ? output.message : "";
+  if (!activationMessageRequiresPairing(message)) {
+    return null;
+  }
+  const extensionName = output.package_ref?.id || output.packageRef?.id || null;
+  if (!extensionName) return null;
+  return {
+    state: "pairing_required",
+    extensionName,
+    requestId: null,
+    threadId: previewThreadId || currentThreadId || null,
+    message,
+    instructions: activationPairingInstructions(extensionName),
+    setupUrl: null,
+    inputPlaceholder: extensionName.toLowerCase() === "slack"
+      ? "Enter Slack pairing code"
+      : "Enter pairing code",
+    submitLabel: "Connect",
+  };
+}
+
+function parseJsonObject(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function activationMessageRequiresPairing(message) {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("pairing") &&
+    (normalized.includes("external channel") ||
+      normalized.includes("inbound channel") ||
+      normalized.includes("connection panel"))
+  );
+}
+
+function activationPairingInstructions(extensionName) {
+  if (extensionName.toLowerCase() === "slack") {
+    return "Go to Slack and DM the IronClaw Reborn app to get a pairing code. Paste the code here; it will not be sent to the model.";
+  }
+  const displayName = extensionName
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+  return `Open ${displayName}'s app or bot, get the pairing code or connection challenge, and paste it here.`;
+}
+
+function onboardingMatchesCurrent(current, incoming) {
+  if (!current || !incoming) return false;
+  if (current.extensionName !== incoming.extensionName) return false;
+  if (current.threadId && incoming.threadId && current.threadId !== incoming.threadId) {
+    return false;
+  }
+  if (current.requestId && incoming.requestId && current.requestId !== incoming.requestId) {
+    return false;
+  }
+  return true;
 }
 
 // Fire the settle callback exactly once per runId. A run settles on any

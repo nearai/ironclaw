@@ -45,6 +45,7 @@ function createUseChatEventsHarness({
 } = {}) {
   let messages = [];
   let pendingGate = null;
+  let pendingOnboarding = null;
   let isProcessing = false;
   let activeRun = null;
   const activeRunRef = { current: null };
@@ -84,6 +85,10 @@ function createUseChatEventsHarness({
       pendingGate =
         typeof updater === "function" ? updater(pendingGate) : updater;
     },
+    setPendingOnboarding: (updater) => {
+      pendingOnboarding =
+        typeof updater === "function" ? updater(pendingOnboarding) : updater;
+    },
     setActiveRun: (updater) => {
       activeRun = typeof updater === "function" ? updater(activeRun) : updater;
       activeRunRef.current = activeRun;
@@ -101,6 +106,9 @@ function createUseChatEventsHarness({
     },
     get pendingGate() {
       return pendingGate;
+    },
+    get pendingOnboarding() {
+      return pendingOnboarding;
     },
     get isProcessing() {
       return isProcessing;
@@ -205,6 +213,94 @@ test("useChatEvents: auth gate stays visible through progress events", () => {
   });
 
   assert.deepEqual(harness.pendingGate, authGate);
+});
+
+test("useChatEvents: onboarding pairing event opens a generic pairing panel", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "accepted",
+    frame: {
+      ack: {
+        run_id: "run-1",
+        thread_id: "thread-1",
+        status: "running",
+      },
+    },
+  });
+  assert.equal(harness.isProcessing, true);
+
+  harness.handleEvent({
+    type: "onboarding_state",
+    frame: {
+      type: "onboarding_state",
+      extension_name: "telegram",
+      state: "pairing_required",
+      request_id: "pairing-request-1",
+      thread_id: "thread-1",
+      instructions: "Message the Telegram bot and paste the code here.",
+      message: "Pairing required.",
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.deepEqual(plain(harness.pendingOnboarding), {
+    state: "pairing_required",
+    extensionName: "telegram",
+    requestId: "pairing-request-1",
+    threadId: "thread-1",
+    message: "Pairing required.",
+    instructions: "Message the Telegram bot and paste the code here.",
+    setupUrl: null,
+    inputPlaceholder: null,
+    submitLabel: null,
+  });
+});
+
+test("useChatEvents: onboarding ready clears the matching pairing panel", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "onboarding_state",
+    frame: {
+      type: "onboarding_state",
+      extension_name: "telegram",
+      state: "pairing_required",
+      request_id: "pairing-request-1",
+      thread_id: "thread-1",
+    },
+  });
+  assert.equal(harness.pendingOnboarding?.extensionName, "telegram");
+
+  harness.handleEvent({
+    type: "onboarding_state",
+    frame: {
+      type: "onboarding_state",
+      extension_name: "telegram",
+      state: "ready",
+      request_id: "pairing-request-1",
+      thread_id: "thread-1",
+    },
+  });
+
+  assert.equal(harness.pendingOnboarding, null);
+});
+
+test("useChatEvents: onboarding events from another thread are ignored", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "onboarding_state",
+    frame: {
+      type: "onboarding_state",
+      extension_name: "telegram",
+      state: "pairing_required",
+      request_id: "pairing-request-1",
+      thread_id: "thread-2",
+    },
+  });
+
+  assert.equal(harness.pendingOnboarding, null);
 });
 
 test("useChatEvents: progress clears non-auth gates for the resumed run", () => {
@@ -334,6 +430,43 @@ test("useChatEvents: approval gate creates activity from stable invocation id be
   assert.equal(harness.messages[0].toolStatus, "running");
   assert.equal(harness.messages[0].gateRef, gateRef);
   assert.equal(harness.messages[0].gateActivity, false);
+});
+
+test("useChatEvents: extension activation preview opens pairing panel for external channels", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "capability_display_preview",
+    frame: {
+      preview: {
+        invocation_id: "invocation-extension-activate",
+        turn_run_id: "run-1",
+        thread_id: "thread-1",
+        capability_id: "builtin.extension_activate",
+        status: "completed",
+        title: "extension_activate",
+        output_preview: JSON.stringify({
+          package_ref: { kind: "extension", id: "telegram" },
+          phase: "active",
+          message:
+            "Telegram is installed as an external channel, but the user's account still needs channel-specific connection or pairing. Tell the user to open the extension's app or bot, get the pairing code or connection challenge, and paste it into the WebChat connection panel rather than normal chat.",
+          payload: {
+            kind: "extension_activate",
+            activated: true,
+            visible_capability_ids: [],
+          },
+        }),
+      },
+    },
+  });
+
+  assert.equal(harness.pendingOnboarding?.extensionName, "telegram");
+  assert.equal(harness.pendingOnboarding?.state, "pairing_required");
+  assert.match(
+    harness.pendingOnboarding?.instructions,
+    /Open Telegram's app or bot/,
+  );
+  assert.equal(harness.isProcessing, false);
 });
 
 test("useChatEvents: cleared non-auth gates are not restored by later projections", () => {

@@ -17,6 +17,7 @@ const V2_EVENT_NAMES = [
   "capability_display_preview",
   "gate",
   "auth_required",
+  "onboarding_state",
   "final_reply",
   "cancelled",
   "failed",
