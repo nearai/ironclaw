@@ -1874,6 +1874,30 @@ Behavior adjustment:
   WebChat v2 boundary: the user sees a non-error waiting state and the blocked
   input does not become a failed chat message.
 
+### Step 56: Legacy Near-Cap Response Projection Port
+
+Extended `test_reborn_webui_v2_legacy_dom_resource_limits.py`.
+
+Ported the response-integrity intent behind legacy DOM-cap scenarios including
+`test_response_intact_near_dom_cap`, `test_real_user_message_prunes_before_response`,
+and streaming-preservation coverage:
+
+- a Reborn timeline page can start at the current 50-message browser boundary;
+- a `projection_update` text item appends a visible assistant response beyond
+  that initial page;
+- a later projection for the same text id updates that assistant bubble in place
+  instead of duplicating it;
+- older unloaded history remains unloaded until the user explicitly loads older
+  messages.
+
+Behavior adjustment:
+
+- Legacy v1 enforced a fixed large DOM cap and pruned older nodes while keeping
+  in-flight responses intact. Reborn WebUI v2 keeps long history bounded through
+  timeline paging, while projection text items are deduped by projection id, so
+  the port asserts the equivalent response-integrity behavior at the current SSE
+  projection boundary.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -1886,8 +1910,8 @@ Not yet ported:
   are legacy v1 routing semantics rather than current standalone Reborn v2 UI
   behavior;
 - remaining DOM/resource-limit scenarios for any future capped long-running
-  activity stores beyond the current timeline paging and SSE reconnect-timeout
-  cleanup coverage;
+  activity stores beyond the current timeline paging, near-cap response
+  projection, and SSE reconnect-timeout cleanup coverage;
 - deeper tool approval scenarios that need real Reborn runtime/tool execution,
   persistence, or recovery beyond the browser approval-card, local send-blocking,
   and persisted activity-card contracts; legacy text-alias interception is v1

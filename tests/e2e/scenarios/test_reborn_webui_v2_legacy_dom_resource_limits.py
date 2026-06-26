@@ -14,6 +14,7 @@ from reborn_webui_harness import (
 
 
 THREAD_ID = "thread-legacy-dom-resource-limits"
+FULL_PAGE_THREAD_ID = "thread-legacy-dom-full-page-response"
 RECONNECT_THREAD_ID = "thread-legacy-dom-reconnect"
 
 
@@ -142,6 +143,164 @@ async def test_reborn_chat_history_dom_stays_page_bounded_until_user_loads_more(
         await expect(page.get_by_text("DOM page message 151")).to_be_visible()
         await expect(page.get_by_text("DOM page message 250")).to_be_visible()
         await expect(page.get_by_text("DOM page message 101")).to_have_count(0)
+    finally:
+        await context.close()
+
+
+async def test_reborn_response_projection_survives_full_history_page(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Port legacy near-DOM-cap response integrity to Reborn projection updates."""
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    timeline_queries: list[dict[str, list[str]]] = []
+
+    await page.add_init_script(
+        """
+        (() => {
+          const streams = [];
+          class FakeEventSource extends EventTarget {
+            constructor(url) {
+              super();
+              this.url = url;
+              this.readyState = 0;
+              streams.push(this);
+              setTimeout(() => {
+                this.readyState = 1;
+                if (typeof this.onopen === "function") this.onopen(new Event("open"));
+              }, 0);
+            }
+            close() {
+              this.readyState = 2;
+            }
+          }
+          window.EventSource = FakeEventSource;
+          window.__emitV2Sse = (type, frame, id = "cursor-near-cap") => {
+            const stream = streams[streams.length - 1];
+            if (!stream) throw new Error("no EventSource stream is open");
+            const event = new MessageEvent(type, {
+              data: JSON.stringify({ type, ...frame }),
+              lastEventId: id,
+            });
+            stream.dispatchEvent(event);
+          };
+        })();
+        """
+    )
+
+    async def fulfill_json(route, body):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route):
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route):
+        await fulfill_json(
+            route,
+            {
+                "threads": [
+                    {
+                        "thread_id": FULL_PAGE_THREAD_ID,
+                        "title": "Legacy near-cap response port",
+                        "created_at": "2026-06-26T00:00:00Z",
+                        "updated_at": "2026-06-26T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_timeline(route):
+        query = parse_qs(urlparse(route.request.url).query)
+        timeline_queries.append(query)
+        await fulfill_json(
+            route,
+            {
+                "messages": [_timeline_message(i) for i in range(201, 251)],
+                "next_cursor": "older-200",
+            },
+        )
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads", handle_threads)
+    await page.route("**/api/webchat/v2/threads?**", handle_threads)
+    await page.route(
+        f"**/api/webchat/v2/threads/{FULL_PAGE_THREAD_ID}/timeline**",
+        handle_timeline,
+    )
+
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/v2/chat/{FULL_PAGE_THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}"
+        )
+
+        bubbles = page.locator(f"{SEL_V2['msg_user']}, {SEL_V2['msg_assistant']}")
+        await expect(bubbles).to_have_count(50, timeout=15000)
+        assert timeline_queries == [{"limit": ["50"]}]
+        await expect(page.get_by_text("DOM page message 250")).to_be_visible()
+        await expect(page.get_by_text("DOM page message 150")).to_have_count(0)
+
+        await page.evaluate(
+            """
+            () => window.__emitV2Sse("projection_update", {
+              state: {
+                items: [
+                  {
+                    text: {
+                      id: "near-cap-final",
+                      body: "Final response near DOM page cap"
+                    }
+                  }
+                ]
+              }
+            })
+            """
+        )
+
+        await expect(bubbles).to_have_count(51, timeout=5000)
+        await expect(page.get_by_text("Final response near DOM page cap")).to_be_visible()
+        await expect(page.get_by_text("DOM page message 150")).to_have_count(0)
+
+        await page.evaluate(
+            """
+            () => window.__emitV2Sse("projection_update", {
+              state: {
+                items: [
+                  {
+                    text: {
+                      id: "near-cap-final",
+                      body: "Final response near DOM page cap with the final sentence intact."
+                    }
+                  }
+                ]
+              }
+            }, "cursor-near-cap-2")
+            """
+        )
+
+        await expect(bubbles).to_have_count(51, timeout=5000)
+        await expect(
+            page.get_by_text("Final response near DOM page cap with the final sentence intact.")
+        ).to_be_visible()
+        await expect(page.get_by_text("Final response near DOM page cap")).to_have_count(1)
     finally:
         await context.close()
 
