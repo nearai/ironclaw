@@ -924,6 +924,75 @@ async def test_reborn_legacy_configure_modal_saves_manual_secret_and_fields(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_configure_modal_blank_existing_secret_is_not_submitted(
+    reborn_v2_server, reborn_v2_browser
+):
+    configured_tool = {
+        **CONFIG_TOOL,
+        "active": True,
+        "authenticated": True,
+        "needs_setup": False,
+        "activation_status": "active",
+        "onboarding_state": "ready",
+    }
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[configured_tool],
+        setup_payloads={
+            "config-tool": {
+                "name": "config-tool",
+                "kind": "wasm_tool",
+                "secrets": [
+                    {
+                        "name": "API_TOKEN",
+                        "prompt": "API token",
+                        "provided": True,
+                        "optional": False,
+                        "auto_generate": False,
+                    }
+                ],
+                "fields": [],
+                "onboarding": None,
+            }
+        },
+        tab="installed",
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, "Config Tool")
+        await expect(card).to_be_visible(timeout=5000)
+        await _open_card_menu(card)
+        await page.get_by_role("menuitem", name="Reconfigure", exact=True).click()
+
+        await expect(
+            page.get_by_role("heading", name="Configure Config Tool")
+        ).to_be_visible(timeout=5000)
+        await expect(page.get_by_text("configured")).to_be_visible()
+        await expect(page.locator('input[type="password"]').first).to_have_attribute(
+            "placeholder", "••••••• (leave blank to keep)"
+        )
+
+        await page.get_by_role("button", name="Save").click()
+        await expect(
+            page.get_by_role("heading", name="Configure Config Tool")
+        ).to_have_count(0)
+        assert harness["setup_submit_requests"] == [
+            {
+                "package_id": "config-tool",
+                "body": {
+                    "action": "submit",
+                    "payload": {
+                        "secrets": {},
+                        "fields": {},
+                    },
+                },
+            }
+        ]
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_configure_modal_save_failure_stays_open(
     reborn_v2_server, reborn_v2_browser
 ):

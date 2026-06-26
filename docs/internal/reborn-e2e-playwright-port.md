@@ -1475,6 +1475,26 @@ Behavior adjustment:
   `onboarding_state`) instead of the legacy `/api/extensions/*` response field
   names and secret-table assertions.
 
+### Step 39: Legacy Blank Existing Secret Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the caller-visible invariant from legacy
+`test_configure_empty_secret_skipped`:
+
+- a configured extension's setup modal marks an existing manual secret as
+  configured;
+- the password input stays blank with a "leave blank to keep" placeholder;
+- saving without entering a replacement token submits an empty `secrets` object
+  through the Reborn v2 setup endpoint instead of sending an empty string that
+  could clear the stored secret.
+
+Behavior adjustment:
+
+- Reborn does not expose the legacy secret table through the browser test, so
+  the port asserts the boundary payload emitted by the modal. The lower-level
+  service remains responsible for preserving omitted secrets.
+
 ## Open Migration Buckets
 
 Not yet ported:
