@@ -1186,7 +1186,8 @@ Already-covered functional Reborn behavior:
   with `noopener,noreferrer`, reject non-HTTPS values, and clear only matching
   OAuth callback completion events;
 - extension activate/setup browser flows reject non-HTTPS `auth_url` and
-  `authorization_url` values and accept uppercase HTTPS URLs;
+  `authorization_url` values, accept uppercase HTTPS URLs, and preserve the
+  full provider query string handed to the browser;
 - Reborn v2 extension setup endpoints expose Google OAuth requirements through
   `/api/webchat/v2/extensions/{package_id}/setup`;
 - Reborn product-auth callback behavior, including one-shot claim semantics,
@@ -2926,6 +2927,32 @@ Issue fixed:
   carrying the same durable id could duplicate a reply already rendered from
   history. The projection handler now also checks the matching `msg-{id}`
   timeline id and updates that bubble in place.
+
+### Step 98: Legacy OAuth URL Query Preservation Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py`.
+
+Ported the browser-observable portion of legacy
+`test_oauth_url_parameters.py` to Reborn's Extensions configure OAuth flow:
+
+- mocked the Reborn setup OAuth-start response with a full Google-style
+  authorization URL;
+- asserted the browser-opened URL keeps `client_id` rather than `clientid`;
+- asserted required OAuth parameters (`response_type`, `redirect_uri`, `scope`,
+  `state`) remain present and correctly decoded by the browser;
+- asserted Google-style extra params (`access_type=offline`,
+  `prompt=consent`) are preserved;
+- kept the existing uppercase-HTTPS acceptance assertion on the same path.
+
+Behavior adjustment:
+
+- Legacy generated the provider URL through `/api/extensions/gmail/setup` and
+  validated host-side Gmail URL construction. Reborn's browser receives an
+  already-generated `authorization_url` from
+  `/api/webchat/v2/extensions/{package_id}/setup/oauth/start`, so the migrated
+  Playwright coverage protects URL preservation and HTTPS acceptance at the
+  browser boundary. Host-side provider URL construction remains product-auth /
+  extension-service contract coverage rather than a browser port.
 
 ## Open Migration Buckets
 

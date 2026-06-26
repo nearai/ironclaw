@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from playwright.async_api import expect
 
@@ -2265,6 +2265,16 @@ async def test_reborn_legacy_configure_oauth_start_failure_stays_visible(
 async def test_reborn_legacy_configure_oauth_accepts_uppercase_https_url(
     reborn_v2_server, reborn_v2_browser
 ):
+    authorization_url = (
+        "HTTPS://accounts.google.com/o/oauth2/v2/auth?"
+        "client_id=client-123.apps.googleusercontent.com"
+        "&response_type=code"
+        "&redirect_uri=https%3A%2F%2Freborn.example.test%2Foauth%2Fcallback"
+        "&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.readonly+email"
+        "&state=state-abc-123"
+        "&access_type=offline"
+        "&prompt=consent"
+    )
     harness = await _open_mocked_extensions_page(
         reborn_v2_server,
         reborn_v2_browser,
@@ -2291,7 +2301,7 @@ async def test_reborn_legacy_configure_oauth_accepts_uppercase_https_url(
         oauth_start_responses={
             "oauth-tool": {
                 "success": True,
-                "authorization_url": "HTTPS://example.com/oauth?state=abc",
+                "authorization_url": authorization_url,
             }
         },
         tab="installed",
@@ -2332,7 +2342,25 @@ async def test_reborn_legacy_configure_oauth_accepts_uppercase_https_url(
             timeout=5000,
         )
         opened = await page.evaluate("() => window.__openedUrls")
-        assert opened[-1].lower().startswith("https://example.com/oauth"), opened
+        opened_url = opened[-1]
+        parsed = urlparse(opened_url)
+        params = parse_qs(parsed.query)
+        assert parsed.scheme.lower() == "https", opened
+        assert parsed.netloc == "accounts.google.com", opened
+        assert parsed.path == "/o/oauth2/v2/auth", opened
+        assert "client_id" in params, opened
+        assert "clientid" not in params, opened
+        assert params["client_id"] == ["client-123.apps.googleusercontent.com"]
+        assert params["response_type"] == ["code"]
+        assert params["redirect_uri"] == [
+            "https://reborn.example.test/oauth/callback"
+        ]
+        assert params["scope"] == [
+            "https://www.googleapis.com/auth/gmail.readonly email"
+        ]
+        assert params["state"] == ["state-abc-123"]
+        assert params["access_type"] == ["offline"]
+        assert params["prompt"] == ["consent"]
     finally:
         await harness["context"].close()
 
