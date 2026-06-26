@@ -256,12 +256,44 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the approval UI port in the
   Reborn WebUI v2 Playwright job.
 
+### Step 7: Legacy SSE and History Persistence Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_sse_history.py`.
+
+Ported the durable-history and reconnect intent from legacy
+`test_message_persistence.py` and `test_sse_reconnect.py`:
+
+- a completed Reborn v2 text turn is reloaded from `/api/webchat/v2` timeline
+  after a full browser page reload;
+- user and assistant bubbles remain visible after reload;
+- a hidden-tab SSE pause closes the active stream and a visible-tab resume
+  opens a fresh v2 EventSource;
+- the resumed EventSource carries the last observed event cursor via
+  `after_cursor`;
+- a visibility pause/resume does not refetch the timeline or re-render the
+  message DOM when no terminal run event occurred.
+
+Behavior adjustment:
+
+- Legacy v1 relied on in-page globals such as `eventSource`,
+  `sseHasConnectedBefore`, `currentThreadId`, and `/api/chat/history`.
+  Reborn's equivalent behavior lives in the `useSSE` hook and v2 timeline API.
+  The port asserts the caller-visible effect: fresh EventSource URLs include
+  `after_cursor` after resume, and already-rendered history is not torn down.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the SSE/history port in the
+  Reborn WebUI v2 Playwright job.
+
 ## Open Migration Buckets
 
 Not yet ported:
 
 - remaining legacy chat UI affordances that have Reborn equivalents;
-- legacy SSE reconnect/history-reload edge cases;
+- remaining legacy SSE/history edge cases such as active-thread fallback and
+  read-only external-channel refresh behavior where Reborn has a matching
+  product concept;
 - DOM pruning/resource-limit scenarios;
 - deeper tool approval scenarios that need real Reborn runtime/tool execution,
   persistence, or recovery beyond the browser approval-card contract;
