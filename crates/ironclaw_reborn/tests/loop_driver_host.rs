@@ -1,6 +1,9 @@
 use std::{
-    collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex},
+    collections::{BTreeMap, HashMap, VecDeque},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -50,8 +53,9 @@ use ironclaw_loop_support::{
     identity_message_ref, loop_driver_execution_extension_id,
 };
 use ironclaw_processes::ProcessServices;
+use ironclaw_reborn::app_loop_family::build_loop_family_registry;
 use ironclaw_reborn::driver_registry::{
-    DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey,
+    DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey, RequirementLevel,
 };
 use ironclaw_reborn::loop_driver_host::{
     RebornLoopDriverHost, RebornLoopDriverHostFactory, RebornLoopDriverHostRequest,
@@ -66,6 +70,7 @@ use ironclaw_reborn::model_routes::{
     ModelRoute, ModelRoutePolicy, ModelRouteResolver, ModelSelectionMode, ModelSlot,
     StaticModelRouteResolver,
 };
+use ironclaw_reborn::planned_driver::PlannedDriver;
 use ironclaw_reborn::planned_driver_factory::{
     SUBAGENT_PLANNED_PROFILE_ID, default_planned_run_profile_resolver,
 };
@@ -129,9 +134,15 @@ use ironclaw_turns::{
         StageCheckpointPayloadRequest, SystemInferenceTaskId, UserProfileContext,
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
-    runner::{ClaimRunRequest, ClaimedTurnRun, TurnRunTransitionPort},
+    runner::{
+        ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
+        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
+        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
+        RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+    },
 };
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 
 fn driver_requirements_for(
     descriptor: &AgentLoopDriverDescriptor,
@@ -2058,6 +2069,344 @@ async fn turn_runner_worker_drives_full_text_only_model_transcript_completion_af
             "assistant_reply_finalized",
         ]
     );
+}
+
+#[tokio::test]
+async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full() {
+    let fixture =
+        HostFixture::new_unsubmitted("thread-full-reborn-disk-full", "hello disk full").await;
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let resolver = default_planned_run_profile_resolver().expect("planned profile resolver");
+    let run_id = queue_fixture_turn(
+        &fixture,
+        turn_store.as_ref(),
+        &resolver,
+        "idem-full-reborn-disk-full",
+    )
+    .await;
+    let driver = planned_driver_for_full_reborn_test();
+    let descriptor = driver.descriptor();
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            driver,
+            planned_requirements_without_capabilities(),
+            DriverKind::Reference,
+        )
+        .unwrap();
+    let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
+    let factory = RebornLoopDriverHostFactory::new(
+        fixture.thread_service.clone(),
+        fixture.thread_scope.clone(),
+        fixture.gateway.clone(),
+        Arc::new(DiskFullCheckpointStateStore),
+        turn_store.clone(),
+        loop_checkpoint_store,
+        fixture.milestone_sink.clone(),
+        TextOnlyLoopHostConfig {
+            max_messages: 8,
+            require_model_route_snapshot: false,
+        },
+        InstructionSafetyContext::local_development_noop(),
+    )
+    .with_driver_requirements(driver_requirements_for(
+        &descriptor,
+        planned_requirements_without_capabilities(),
+    ));
+    let executor = Arc::new(RebornTurnRunExecutor::new(
+        loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
+        Arc::new(registry),
+        Arc::new(factory) as Arc<dyn HostFactory>,
+    ));
+    let scheduler_handle = TurnRunScheduler::new(
+        turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        full_reborn_chaos_scheduler_config(),
+    )
+    .start();
+
+    let failed = wait_for_run_status(
+        turn_store.as_ref(),
+        &fixture.context.scope,
+        run_id,
+        TurnStatus::Failed,
+        "full reborn run should fail cleanly when checkpoint-state disk is full",
+    )
+    .await;
+    scheduler_handle.shutdown().await;
+
+    assert_eq!(
+        failed.failure.expect("failure").category(),
+        "driver_unavailable"
+    );
+    assert!(
+        fixture.gateway.requests().is_empty(),
+        "checkpoint persistence failed before the model provider should be called"
+    );
+    assert_no_assistant_message(&fixture).await;
+}
+
+#[tokio::test]
+async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_offline() {
+    let fixture =
+        HostFixture::new_unsubmitted("thread-full-reborn-model-offline", "hello model outage")
+            .await;
+    fixture.gateway.fail_with_model_error(
+        HostManagedModelErrorKind::Unavailable,
+        "connection refused at https://api.example.test with sk-provider-secret /host/path",
+    );
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let resolver = default_planned_run_profile_resolver().expect("planned profile resolver");
+    let run_id = queue_fixture_turn(
+        &fixture,
+        turn_store.as_ref(),
+        &resolver,
+        "idem-full-reborn-model-offline",
+    )
+    .await;
+    let driver = planned_driver_for_full_reborn_test();
+    let descriptor = driver.descriptor();
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            driver,
+            planned_requirements_without_capabilities(),
+            DriverKind::Reference,
+        )
+        .unwrap();
+    let factory = fixture
+        .factory_with_loop_checkpoint_store(turn_store.clone())
+        .with_driver_requirements(driver_requirements_for(
+            &descriptor,
+            planned_requirements_without_capabilities(),
+        ));
+    let executor = Arc::new(RebornTurnRunExecutor::new(
+        loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
+        Arc::new(registry),
+        Arc::new(factory) as Arc<dyn HostFactory>,
+    ));
+    let scheduler_handle = TurnRunScheduler::new(
+        turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        full_reborn_chaos_scheduler_config(),
+    )
+    .start();
+
+    let failed = wait_for_run_status(
+        turn_store.as_ref(),
+        &fixture.context.scope,
+        run_id,
+        TurnStatus::Failed,
+        "full reborn run should fail cleanly when the model provider is offline",
+    )
+    .await;
+    scheduler_handle.shutdown().await;
+
+    assert_eq!(
+        failed.failure.as_ref().expect("failure").category(),
+        "model_error"
+    );
+    assert_driver_public_outputs_hide_raw_payloads(&failed);
+    let model_requests = fixture.gateway.requests();
+    assert!(
+        model_requests.len() >= 2,
+        "planned recovery should retry transient model unavailability before failing"
+    );
+    assert_serialized_value_omits(
+        "model-offline gateway requests",
+        &model_requests,
+        &[
+            "connection refused",
+            "sk-provider-secret",
+            "/host/path",
+            "https://api.example.test",
+        ],
+    );
+    assert_no_assistant_message(&fixture).await;
+    assert_public_milestones_hide_raw_payloads(&fixture.milestones());
+}
+
+#[tokio::test]
+async fn turn_runner_worker_full_reborn_completes_while_postgres_heartbeats_are_slow() {
+    let fixture =
+        HostFixture::new_unsubmitted("thread-full-reborn-slow-postgres", "hello slow postgres")
+            .await;
+    fixture
+        .gateway
+        .set_response_delay(std::time::Duration::from_millis(150));
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let transitions = Arc::new(
+        SlowHeartbeatTransitionPort::new(turn_store.clone())
+            .with_heartbeat_delay(std::time::Duration::from_millis(50)),
+    );
+    let resolver = default_planned_run_profile_resolver().expect("planned profile resolver");
+    let run_id = queue_fixture_turn(
+        &fixture,
+        turn_store.as_ref(),
+        &resolver,
+        "idem-full-reborn-slow-postgres",
+    )
+    .await;
+    let driver = planned_driver_for_full_reborn_test();
+    let descriptor = driver.descriptor();
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            driver,
+            planned_requirements_without_capabilities(),
+            DriverKind::Reference,
+        )
+        .unwrap();
+    let factory = fixture
+        .factory_with_loop_checkpoint_store(turn_store.clone())
+        .with_driver_requirements(driver_requirements_for(
+            &descriptor,
+            planned_requirements_without_capabilities(),
+        ));
+    let executor = Arc::new(RebornTurnRunExecutor::new(
+        loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
+        Arc::new(registry),
+        Arc::new(factory) as Arc<dyn HostFactory>,
+    ));
+    let scheduler_handle = TurnRunScheduler::new(
+        transitions.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        full_reborn_chaos_scheduler_config()
+            .with_runner_heartbeat_interval(std::time::Duration::from_millis(5))
+            .with_max_consecutive_heartbeat_failures(2),
+    )
+    .start();
+
+    transitions.wait_for_heartbeat_attempts(3).await;
+    let completed = wait_for_run_status(
+        turn_store.as_ref(),
+        &fixture.context.scope,
+        run_id,
+        TurnStatus::Completed,
+        "full reborn run should not be killed while postgres heartbeats are slow",
+    )
+    .await;
+    scheduler_handle.shutdown().await;
+
+    assert!(completed.failure.is_none());
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(history.messages.iter().any(|message| {
+        message.kind == MessageKind::Assistant
+            && message.status == MessageStatus::Finalized
+            && message.content.as_deref() == Some("model says hi")
+    }));
+}
+
+#[tokio::test]
+async fn turn_runner_worker_full_reborn_continues_after_tool_network_outage() {
+    let fixture =
+        HostFixture::new_unsubmitted("thread-full-reborn-tool-network", "hello tool network").await;
+    fixture
+        .gateway
+        .respond_with_capability_calls_then_reply("model recovered after tool outage");
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let resolver = default_planned_run_profile_resolver().expect("planned profile resolver");
+    let run_id = queue_fixture_turn(
+        &fixture,
+        turn_store.as_ref(),
+        &resolver,
+        "idem-full-reborn-tool-network",
+    )
+    .await;
+    let capability_id = CapabilityId::new("demo.echo").unwrap();
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor(capability_id.as_str()),
+    ])));
+    runtime.push_outcome(RuntimeCapabilityOutcome::Failed(
+        RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            RuntimeFailureKind::Network,
+            Some("offline transport sk-secret /host/path".to_string()),
+        ),
+    ));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    io.put_input(
+        CapabilityInputRef::new("input:opaque-tool-call").unwrap(),
+        json!({"message": "call offline http tool"}),
+    );
+    let host_factory = CapabilityHostFactory {
+        thread_service: fixture.thread_service.clone(),
+        thread_scope: fixture.thread_scope.clone(),
+        model_gateway: fixture.gateway.clone(),
+        checkpoint_state_store: fixture.checkpoint_state_store.clone(),
+        loop_checkpoint_store: turn_store.clone(),
+        milestone_sink: fixture.milestone_sink.clone(),
+        runtime: runtime.clone(),
+        visible_request: host_runtime_visible_request(&fixture, ["demo"]),
+        io: io.clone(),
+    };
+    let driver = planned_driver_for_full_reborn_test();
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            driver,
+            planned_requirements_without_capabilities(),
+            DriverKind::Reference,
+        )
+        .unwrap();
+    let executor = Arc::new(RebornTurnRunExecutor::new(
+        loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
+        Arc::new(registry),
+        Arc::new(host_factory) as Arc<dyn HostFactory>,
+    ));
+    let scheduler_handle = TurnRunScheduler::new(
+        turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        full_reborn_chaos_scheduler_config(),
+    )
+    .start();
+
+    let completed = wait_for_run_status(
+        turn_store.as_ref(),
+        &fixture.context.scope,
+        run_id,
+        TurnStatus::Completed,
+        "full reborn run should continue after a transient tool network outage",
+    )
+    .await;
+    scheduler_handle.shutdown().await;
+
+    assert!(completed.failure.is_none());
+    assert_eq!(
+        runtime.invocations().len(),
+        1,
+        "the offline tool call should be surfaced to the model without killing the turn"
+    );
+    assert_serialized_value_omits(
+        "tool-outage gateway requests",
+        &fixture.gateway.requests(),
+        &["offline transport", "sk-secret", "/host/path"],
+    );
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_string_omits(
+        "tool-outage public history",
+        &format!("{history:?}"),
+        &["offline transport", "sk-secret", "/host/path"],
+    );
+    assert!(history.messages.iter().any(|message| {
+        message.kind == MessageKind::Assistant
+            && message.status == MessageStatus::Finalized
+            && message.content.as_deref() == Some("model recovered after tool outage")
+    }));
 }
 
 #[tokio::test]
@@ -7299,11 +7648,11 @@ impl HostRuntime for RecordingHostRuntime {
 fn host_runtime_surface(
     descriptors: impl IntoIterator<Item = CapabilityDescriptor>,
 ) -> ironclaw_host_runtime::VisibleCapabilitySurface {
-    host_runtime_surface_with_version(
-        "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-        descriptors,
-    )
+    host_runtime_surface_with_version(TEST_HOST_RUNTIME_SURFACE_VERSION, descriptors)
 }
+
+const TEST_HOST_RUNTIME_SURFACE_VERSION: &str =
+    "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
 
 fn host_runtime_surface_with_version(
     version: &str,
@@ -7896,12 +8245,32 @@ fn loop_exit_applier_for_fixture(
     turn_store: Arc<InMemoryTurnStateStore>,
 ) -> Arc<LoopExitApplier> {
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
-    let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
-        Arc::clone(&fixture.thread_service),
-        turn_store.clone(),
-        loop_checkpoint_store,
-    ));
+    let evidence = Arc::new(
+        ThreadCheckpointLoopExitEvidencePort::new(
+            Arc::clone(&fixture.thread_service),
+            turn_store.clone(),
+            loop_checkpoint_store,
+        )
+        .with_checkpoint_state_store(fixture.checkpoint_state_store.clone()),
+    );
     Arc::new(LoopExitApplier::new(turn_store, evidence))
+}
+
+fn planned_driver_for_full_reborn_test() -> Arc<PlannedDriver> {
+    let registry = build_loop_family_registry().expect("loop family registry should build");
+    Arc::new(PlannedDriver::default_from_registry(&registry).expect("planned driver should build"))
+}
+
+fn planned_requirements_without_capabilities() -> DriverRequirements {
+    let mut requirements = DriverRequirements::all_required();
+    requirements.capabilities = RequirementLevel::Optional;
+    requirements
+}
+
+fn full_reborn_chaos_scheduler_config() -> TurnRunSchedulerConfig {
+    TurnRunSchedulerConfig::default()
+        .with_runner_heartbeat_interval(std::time::Duration::from_millis(20))
+        .with_poll_interval(std::time::Duration::from_millis(10))
 }
 
 struct StaticTurnStateStore {
@@ -8277,6 +8646,20 @@ fn assert_driver_public_outputs_hide_raw_payloads<T: serde::Serialize>(value: &T
     assert_serialized_or_debug_hides_raw_payloads(&wire);
 }
 
+fn assert_serialized_value_omits<T: serde::Serialize>(label: &str, value: &T, forbidden: &[&str]) {
+    let wire = serde_json::to_string(value).unwrap();
+    assert_string_omits(label, &wire, forbidden);
+}
+
+fn assert_string_omits(label: &str, wire: &str, forbidden: &[&str]) {
+    for (index, raw) in forbidden.iter().enumerate() {
+        assert!(
+            !wire.contains(raw),
+            "{label} leaked forbidden raw payload marker at index {index}"
+        );
+    }
+}
+
 fn assert_serialized_or_debug_hides_raw_payloads(wire: &str) {
     for forbidden in [
         "RAW_CHECKPOINT_PAYLOAD",
@@ -8329,9 +8712,135 @@ impl LoopCheckpointStore for FailingLoopCheckpointStore {
     }
 }
 
+struct DiskFullCheckpointStateStore;
+
+#[async_trait]
+impl CheckpointStateStore for DiskFullCheckpointStateStore {
+    async fn put_checkpoint_state(
+        &self,
+        _request: PutCheckpointStateRequest,
+    ) -> Result<ironclaw_turns::CheckpointStateRecord, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "checkpoint state disk full".to_string(),
+        })
+    }
+
+    async fn get_checkpoint_state(
+        &self,
+        _request: GetCheckpointStateRequest,
+    ) -> Result<Option<ironclaw_turns::CheckpointStateRecord>, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "checkpoint state disk full".to_string(),
+        })
+    }
+}
+
+struct SlowHeartbeatTransitionPort {
+    store: Arc<InMemoryTurnStateStore>,
+    heartbeat_delay: std::time::Duration,
+    heartbeat_attempts: AtomicUsize,
+    notify_heartbeat_attempt: Notify,
+}
+
+impl SlowHeartbeatTransitionPort {
+    fn new(store: Arc<InMemoryTurnStateStore>) -> Self {
+        Self {
+            store,
+            heartbeat_delay: std::time::Duration::ZERO,
+            heartbeat_attempts: AtomicUsize::new(0),
+            notify_heartbeat_attempt: Notify::new(),
+        }
+    }
+
+    fn with_heartbeat_delay(mut self, delay: std::time::Duration) -> Self {
+        self.heartbeat_delay = delay;
+        self
+    }
+
+    async fn wait_for_heartbeat_attempts(&self, expected: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let notified = self.notify_heartbeat_attempt.notified();
+                if self.heartbeat_attempts.load(Ordering::SeqCst) >= expected {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("scheduler did not attempt expected slow heartbeats");
+    }
+}
+
+#[async_trait]
+impl TurnRunTransitionPort for SlowHeartbeatTransitionPort {
+    async fn claim_next_run(
+        &self,
+        request: ClaimRunRequest,
+    ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+        self.store.claim_next_run(request).await
+    }
+
+    async fn heartbeat(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
+        self.heartbeat_attempts.fetch_add(1, Ordering::SeqCst);
+        self.notify_heartbeat_attempt.notify_waiters();
+        tokio::time::sleep(self.heartbeat_delay).await;
+        self.store.heartbeat(request).await
+    }
+
+    async fn recover_expired_leases(
+        &self,
+        request: RecoverExpiredLeasesRequest,
+    ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
+        self.store.recover_expired_leases(request).await
+    }
+
+    async fn record_model_route_snapshot(
+        &self,
+        request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.store.record_model_route_snapshot(request).await
+    }
+
+    async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
+        self.store.block_run(request).await
+    }
+
+    async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
+        self.store.complete_run(request).await
+    }
+
+    async fn cancel_run(
+        &self,
+        request: CancelRunCompletionRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.store.cancel_run(request).await
+    }
+
+    async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
+        self.store.fail_run(request).await
+    }
+
+    async fn record_runner_failure(
+        &self,
+        request: RecordRunnerFailureRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.store.record_runner_failure(request).await
+    }
+
+    async fn apply_validated_loop_exit(
+        &self,
+        request: ApplyValidatedLoopExitRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.store.apply_validated_loop_exit(request).await
+    }
+}
+
 struct RecordingGateway {
     requests: Mutex<Vec<HostManagedModelRequest>>,
     response: Mutex<Result<HostManagedModelResponse, HostManagedModelError>>,
+    queued_responses: Mutex<VecDeque<Result<HostManagedModelResponse, HostManagedModelError>>>,
+    response_delay: Mutex<Option<std::time::Duration>>,
 }
 
 impl RecordingGateway {
@@ -8339,6 +8848,8 @@ impl RecordingGateway {
         Self {
             requests: Mutex::new(Vec::new()),
             response: Mutex::new(Ok(HostManagedModelResponse::assistant_reply(content))),
+            queued_responses: Mutex::new(VecDeque::new()),
+            response_delay: Mutex::new(None),
         }
     }
 
@@ -8352,6 +8863,10 @@ impl RecordingGateway {
         raw_detail: impl Into<String>,
     ) {
         *self.response.lock().unwrap() = Err(HostManagedModelError::new(kind, raw_detail));
+    }
+
+    fn set_response_delay(&self, delay: std::time::Duration) {
+        *self.response_delay.lock().unwrap() = Some(delay);
     }
 
     fn respond_with_capability_calls(&self) {
@@ -8372,8 +8887,33 @@ impl RecordingGateway {
         });
     }
 
+    fn respond_with_capability_calls_then_reply(&self, reply: impl Into<String>) {
+        let mut responses = self.queued_responses.lock().unwrap();
+        responses.push_back(Ok(capability_call_response()));
+        responses.push_back(Ok(HostManagedModelResponse::assistant_reply(reply)));
+    }
+
     fn requests(&self) -> Vec<HostManagedModelRequest> {
         self.requests.lock().unwrap().clone()
+    }
+}
+
+fn capability_call_response() -> HostManagedModelResponse {
+    HostManagedModelResponse {
+        safe_text_deltas: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
+        usage: None,
+        output: ParentLoopOutput::CapabilityCalls(vec![
+            ironclaw_turns::run_profile::CapabilityCallCandidate {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                surface_version: CapabilitySurfaceVersion::new(TEST_HOST_RUNTIME_SURFACE_VERSION)
+                    .unwrap(),
+                capability_id: CapabilityId::new("demo.echo").unwrap(),
+                input_ref: CapabilityInputRef::new("input:opaque-tool-call").unwrap(),
+                effective_capability_ids: vec![CapabilityId::new("demo.echo").unwrap()],
+                provider_replay: None,
+            },
+        ]),
     }
 }
 
@@ -8384,6 +8924,13 @@ impl HostManagedModelGateway for RecordingGateway {
         request: HostManagedModelRequest,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         self.requests.lock().unwrap().push(request);
+        let delay = *self.response_delay.lock().unwrap();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        if let Some(response) = self.queued_responses.lock().unwrap().pop_front() {
+            return response;
+        }
         self.response.lock().unwrap().clone()
     }
 }

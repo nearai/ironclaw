@@ -1,7 +1,5 @@
 import { React, html } from "../../lib/html.js";
-import { Link } from "react-router";
 import { useT } from "../../lib/i18n.js";
-import { Icon } from "../../design-system/icons.js";
 import {
   THREAD_STATE,
   clearThreadState,
@@ -23,7 +21,6 @@ import { TypingIndicator } from "./components/typing-indicator.js";
 import { useChat } from "./hooks/useChat.js";
 import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
-import { buildScopedLogsPath } from "../logs/lib/logs-data.js";
 
 /* Grace window before an active thread's sidebar state is cleared to idle.
  * Long enough for SSE to rehydrate a gate/run after a thread switch (so a
@@ -107,15 +104,6 @@ export function Chat({
       isProcessing &&
       !pendingGate
   );
-  const activeRunLogsPath =
-    activeThreadId &&
-    activeRun?.runId &&
-    activeRun.threadId === activeThreadId
-      ? buildScopedLogsPath(
-          { threadId: activeThreadId, runId: activeRun.runId },
-          { absolute: true },
-        )
-      : null;
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [] } = {}) => {
       if (pendingGate) {
@@ -226,19 +214,6 @@ export function Chat({
     <div className="flex h-full min-h-0 overflow-hidden">
       <div className="flex min-w-0 flex-1 flex-col">
         <${ConnectionStatus} status=${sseStatus} />
-
-        ${isProcessing && !pendingGate && activeRunLogsPath && html`
-          <div className="flex justify-end border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)] px-4 py-1.5">
-            <${Link}
-              to=${activeRunLogsPath}
-              className="inline-flex h-8 items-center gap-1.5 rounded-[8px] px-2.5 text-xs font-semibold text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
-              title=${t("nav.logs")}
-            >
-              <${Icon} name="list" className="h-3.5 w-3.5" />
-              ${t("nav.logs")}
-            <//>
-          </div>
-        `}
 
         ${historyLoadError &&
         html`

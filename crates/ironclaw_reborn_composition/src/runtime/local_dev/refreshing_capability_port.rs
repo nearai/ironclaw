@@ -8,6 +8,7 @@ use ironclaw_loop_support::{
 };
 use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
 use ironclaw_run_state::ApprovalRequestStore;
+use ironclaw_turns::ExternalToolCatalog;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
     CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
@@ -21,6 +22,7 @@ use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::LocalDevSelectableSkillContextSource;
 use crate::runtime::local_dev::extension_surface::LocalDevExtensionSurfaceSource;
+use crate::runtime::local_dev::external_tool_capability::wrap_local_dev_external_tools;
 use crate::runtime::local_dev::outbound_delivery::outbound_delivery_capabilities;
 use crate::runtime::local_dev::project_create::project_create_capability;
 use crate::runtime::local_dev::skill_activation::skill_activation_capability;
@@ -53,6 +55,7 @@ pub(super) struct RefreshingLocalDevCapabilityPortConfig {
     pub(super) approval_settings: Arc<dyn ApprovalSettingsProvider>,
     pub(super) approval_requests: Arc<dyn ApprovalRequestStore>,
     pub(super) capability_leases: Arc<dyn CapabilityLeaseStore>,
+    pub(super) external_tool_catalog: Arc<dyn ExternalToolCatalog>,
 }
 
 pub(super) async fn create_refreshing_local_dev_capability_port(
@@ -80,6 +83,7 @@ pub(super) async fn create_refreshing_local_dev_capability_port(
         approval_settings: config.approval_settings,
         approval_requests: config.approval_requests,
         capability_leases: config.capability_leases,
+        external_tool_catalog: config.external_tool_catalog,
         current: StdMutex::new(None),
         refresh_lock: AsyncMutex::new(()),
     });
@@ -111,6 +115,7 @@ struct RefreshingLocalDevCapabilityPort {
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
+    external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     current: StdMutex<Option<Arc<dyn LoopCapabilityPort>>>,
     refresh_lock: AsyncMutex<()>,
 }
@@ -197,9 +202,15 @@ impl RefreshingLocalDevCapabilityPort {
             // wrapper needs the observer to emit `on_capability_input` itself.
             self.trajectory_observer.clone(),
         )?;
-        Ok(wrap_local_dev_surface_disclosure(
+        let port = wrap_local_dev_surface_disclosure(port, &self.workspace_mounts);
+        // Outermost: external (client-supplied) tools see the full resolved
+        // surface (for shadow-rejection) and park instead of executing.
+        Ok(wrap_local_dev_external_tools(
             port,
-            &self.workspace_mounts,
+            self.run_context.clone(),
+            Arc::clone(&self.input_resolver),
+            Arc::clone(&self.result_writer),
+            Arc::clone(&self.external_tool_catalog),
         ))
     }
 

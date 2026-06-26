@@ -791,6 +791,55 @@ async fn responses_rejects_empty_input_items_and_malformed_json_before_side_effe
 }
 
 #[tokio::test]
+async fn responses_rejects_invalid_model_before_product_workflow() {
+    // Same `model` bounds as Chat Completions: byte cap, control characters,
+    // and surrounding whitespace all reject with a sanitized 400 naming the
+    // `model` param before any product-workflow side effect.
+    let oversized_model = "m".repeat(257);
+    let cases = [
+        oversized_model.as_str(),
+        "gpt\u{0000}4",
+        " gpt-reborn",
+        "gpt-reborn ",
+    ];
+    for model in cases {
+        for path in ["/api/v1/responses", "/v1/responses"] {
+            let workflow = Arc::new(FakeProductWorkflow::new());
+            let router = test_router(
+                workflow.clone(),
+                Arc::new(StaticResponsesReader::completed("unused")),
+            );
+
+            let response = router
+                .oneshot(response_create_request(
+                    path,
+                    json!({"model": model, "input": "hello"}),
+                    None,
+                ))
+                .await
+                .expect("response");
+
+            assert_eq!(
+                response.status(),
+                http::StatusCode::BAD_REQUEST,
+                "model {model:?} on {path} must reject"
+            );
+            let body = json_body(response).await;
+            assert_eq!(body["error"]["param"], "model", "model {model:?} on {path}");
+            assert_eq!(
+                body["error"]["code"], "invalid_request",
+                "model {model:?} on {path}"
+            );
+            assert_eq!(
+                workflow.accepted_count(),
+                0,
+                "invalid model {model:?} on {path} must not reach the product workflow"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn responses_rejects_oversized_body_before_product_workflow() {
     let workflow = Arc::new(FakeProductWorkflow::new());
     let router = test_router(

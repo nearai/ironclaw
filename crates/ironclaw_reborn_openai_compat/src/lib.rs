@@ -23,6 +23,11 @@ mod handlers;
 #[cfg(feature = "openai-compat-beta")]
 mod identity;
 #[cfg(feature = "openai-compat-beta")]
+mod model_validation;
+mod models;
+#[cfg(feature = "openai-compat-beta")]
+mod models_catalog;
+#[cfg(feature = "openai-compat-beta")]
 mod projection_helpers;
 mod refs;
 mod responses;
@@ -48,10 +53,12 @@ pub use chat_workflow::{
     OpenAiCompatInboundAttachmentSubmit,
 };
 pub use descriptors::{
-    OPENAI_COMPAT_PATTERN_CHAT_COMPLETIONS, OPENAI_COMPAT_PATTERN_RESPONSES_API_CREATE,
+    OPENAI_COMPAT_PATTERN_CHAT_COMPLETIONS, OPENAI_COMPAT_PATTERN_MODELS_API_LIST,
+    OPENAI_COMPAT_PATTERN_MODELS_LIST, OPENAI_COMPAT_PATTERN_RESPONSES_API_CREATE,
     OPENAI_COMPAT_PATTERN_RESPONSES_API_ITEM, OPENAI_COMPAT_PATTERN_RESPONSES_API_ITEM_CANCEL,
     OPENAI_COMPAT_PATTERN_RESPONSES_V1_CREATE, OPENAI_COMPAT_PATTERN_RESPONSES_V1_ITEM,
     OPENAI_COMPAT_PATTERN_RESPONSES_V1_ITEM_CANCEL, OPENAI_COMPAT_ROUTE_CHAT_COMPLETIONS,
+    OPENAI_COMPAT_ROUTE_MODELS_API_LIST, OPENAI_COMPAT_ROUTE_MODELS_LIST,
     OPENAI_COMPAT_ROUTE_RESPONSES_API_CANCEL, OPENAI_COMPAT_ROUTE_RESPONSES_API_CREATE,
     OPENAI_COMPAT_ROUTE_RESPONSES_API_RETRIEVE, OPENAI_COMPAT_ROUTE_RESPONSES_V1_CANCEL,
     OPENAI_COMPAT_ROUTE_RESPONSES_V1_CREATE, OPENAI_COMPAT_ROUTE_RESPONSES_V1_RETRIEVE,
@@ -63,13 +70,16 @@ pub use error::{
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use handlers::{
-    chat_completions, responses_api_cancel, responses_api_create, responses_api_retrieve,
-    responses_v1_cancel, responses_v1_create, responses_v1_retrieve,
+    chat_completions, models_list, responses_api_cancel, responses_api_create,
+    responses_api_retrieve, responses_v1_cancel, responses_v1_create, responses_v1_retrieve,
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use identity::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
 };
+pub use models::{OpenAiModelListResponse, OpenAiModelObject};
+#[cfg(feature = "openai-compat-beta")]
+pub use models_catalog::{OpenAiCompatModelCatalog, OpenAiCompatModelEntry};
 pub use refs::{
     InMemoryOpenAiCompatRefStore, OpenAiChatCompletionId, OpenAiCompatActorScope,
     OpenAiCompatBindInternalRefs, OpenAiCompatIdempotencyConflict, OpenAiCompatIdempotencyKey,

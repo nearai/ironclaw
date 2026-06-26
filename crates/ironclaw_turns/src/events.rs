@@ -40,6 +40,7 @@ pub enum TurnBlockedGateKind {
     Auth,
     Resource,
     AwaitDependentRun,
+    ExternalTool,
 }
 
 impl TurnBlockedGateKind {
@@ -49,6 +50,7 @@ impl TurnBlockedGateKind {
             TurnStatus::BlockedAuth => Some(Self::Auth),
             TurnStatus::BlockedResource => Some(Self::Resource),
             TurnStatus::BlockedDependentRun => Some(Self::AwaitDependentRun),
+            TurnStatus::BlockedExternalTool => Some(Self::ExternalTool),
             _ => None,
         }
     }
@@ -620,6 +622,19 @@ mod tests {
         ] {
             assert_eq!(TurnBlockedGateKind::from_status(status), None);
         }
+    }
+
+    #[test]
+    fn external_tool_gate_kind_maps_from_status_and_round_trips() {
+        assert_eq!(
+            TurnBlockedGateKind::from_status(TurnStatus::BlockedExternalTool),
+            Some(TurnBlockedGateKind::ExternalTool)
+        );
+        // Wire-stable snake_case contract for the new gate kind.
+        let wire = serde_json::to_string(&TurnBlockedGateKind::ExternalTool).expect("serialize");
+        assert_eq!(wire, "\"external_tool\"");
+        let parsed: TurnBlockedGateKind = serde_json::from_str(&wire).expect("deserialize");
+        assert_eq!(parsed, TurnBlockedGateKind::ExternalTool);
     }
 
     #[test]
