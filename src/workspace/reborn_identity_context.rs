@@ -127,29 +127,39 @@ impl HostIdentityContextSource for WorkspaceIdentityContextSource {
         run_context: &LoopRunContext,
         _mode: PromptMode,
     ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
-        let mut candidates = Vec::new();
-        for path in Self::stable_identity_paths() {
-            if let Some(candidate) = self
-                .candidate_for_path(path, applicability_for_path(path))
-                .await?
-            {
-                candidates.push(candidate);
-            }
-        }
+        // Each identity file is an independent single-document read with no
+        // shared transaction, so they MUST load concurrently — never in a
+        // serial cross-region loop. Every `candidate_for_path` is exactly one
+        // SQL round-trip (hits and misses alike); serializing the 5-7 reads
+        // against a hosted/cross-region database added seconds of cold-turn
+        // latency before the provider call (no `IdentityCandidateCache` hit on
+        // iteration 0). `try_join_all` overlaps the reads so the whole set
+        // costs ~1 round-trip while preserving the deterministic candidate
+        // order of `loads`. See `.claude/rules/database.md`
+        // ("Independent per-record reads must be concurrent, never a serial loop").
+        let mut loads: Vec<(&'static str, IdentityApplicability)> = Self::stable_identity_paths()
+            .into_iter()
+            .map(|path| (path, applicability_for_path(path)))
+            .collect();
 
         if run_context.resolved_run_profile.personal_context_policy
             == PersonalContextPolicy::Allowed
         {
-            for path in Self::personal_identity_paths() {
-                if let Some(candidate) = self
-                    .candidate_for_path(path, IdentityApplicability::OnPersonalContextAllowed)
-                    .await?
-                {
-                    candidates.push(candidate);
-                }
-            }
+            loads.extend(
+                Self::personal_identity_paths()
+                    .into_iter()
+                    .map(|path| (path, IdentityApplicability::OnPersonalContextAllowed)),
+            );
         }
-        Ok(candidates)
+
+        let candidates = futures::future::try_join_all(
+            loads
+                .into_iter()
+                .map(|(path, applicability)| self.candidate_for_path(path, applicability)),
+        )
+        .await?;
+
+        Ok(candidates.into_iter().flatten().collect())
     }
 
     async fn resolve_identity_message_content(

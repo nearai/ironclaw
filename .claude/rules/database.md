@@ -54,6 +54,31 @@ See `src/db/CLAUDE.md` for full schema, dialect differences, and libSQL limitati
    cargo check --all-features                           # both
    ```
 
+## Independent per-record reads must be concurrent, never a serial loop
+
+When a caller fetches N *independent* records by key (no shared transaction,
+no read-after-write ordering between them) — e.g. loading a fixed set of
+identity/config files, or hydrating several entities by id — issue the reads
+CONCURRENTLY (`futures::future::try_join_all` / `join_all`), never in a serial
+`for path in … { store.get(path).await? }` loop.
+
+Each `get_document_by_path`-style call is one self-contained query on its own
+pooled connection (postgres: `self.conn().await?` per call; libsql:
+`self.connect().await?` per call) and returns `DocumentNotFound` on a miss —
+so a serial loop pays one full round-trip *per record, including misses*.
+Against the hosted cross-region Postgres backend (~100-200 ms/RTT) that turned
+5-7 cold identity reads into multiple seconds of pre-provider latency on every
+cold turn; concurrent dispatch collapses them to ~1 RTT. The pattern is
+backend-agnostic and safe on all three backends (postgres pool=30 ≫ N, libsql
+per-call connection, in-memory trivially independent — in-memory just saves
+~0 wall-clock).
+
+Preserve deterministic output order (`try_join_all` keeps input order). Guard
+the invariant with a `ConcurrencyProbeDb`-style test that instruments the
+`Database` boundary and asserts max-in-flight ≥ 2 — see
+`tests/reborn_identity_parallel_read.rs` and
+`src/workspace/reborn_identity_context.rs::load_identity_candidates`.
+
 ## SQL Dialect Translation Checklist
 
 When writing SQL for both backends, translate these types:
