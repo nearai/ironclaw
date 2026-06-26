@@ -1586,6 +1586,40 @@ async fn libsql_put_batch_empty_rejected() {
 }
 
 #[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_get_batch_returns_results_in_input_order_with_none() {
+    // Native chunked `WHERE path IN (?,…)` path: seed a and c, skip b, and read
+    // [a,b,c] in one pass. The result is reassembled into one slot per input
+    // path in input order (`None` = absent).
+    let filesystem = libsql_root().await;
+    let a = VirtualPath::new("/secrets/leases/getbatch/a").unwrap();
+    let b = VirtualPath::new("/secrets/leases/getbatch/b").unwrap();
+    let c = VirtualPath::new("/secrets/leases/getbatch/c").unwrap();
+    filesystem
+        .put(&a, Entry::bytes(vec![0xA]), CasExpectation::Absent)
+        .await
+        .unwrap();
+    filesystem
+        .put(&c, Entry::bytes(vec![0xC]), CasExpectation::Absent)
+        .await
+        .unwrap();
+
+    let out = filesystem
+        .get_batch(vec![a.clone(), b.clone(), c.clone()])
+        .await
+        .unwrap();
+    assert_eq!(out.len(), 3);
+    assert_eq!(out[0].as_ref().unwrap().path, a);
+    assert_eq!(out[0].as_ref().unwrap().entry.body, vec![0xA]);
+    assert!(out[1].is_none());
+    assert_eq!(out[2].as_ref().unwrap().path, c);
+    assert_eq!(out[2].as_ref().unwrap().entry.body, vec![0xC]);
+
+    // Empty read batch is a valid no-op (unlike empty put_batch).
+    assert!(filesystem.get_batch(Vec::new()).await.unwrap().is_empty());
+}
+
+#[cfg(feature = "libsql")]
 async fn libsql_root() -> TestLibSqlRootFilesystem {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("root-filesystem.db");
@@ -2081,6 +2115,39 @@ mod postgres_tests {
         };
         let path = vpath(&prefix, "missing");
         assert!(fs.get(&path).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn postgres_get_batch_returns_results_in_input_order_with_none() {
+        // Native `WHERE path = ANY($1)` path: seed a and c, skip b, and read
+        // [a,b,c] in one query. The result is reassembled into one slot per
+        // input path in input order (`None` = absent).
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let a = vpath(&prefix, "a");
+        let b = vpath(&prefix, "b");
+        let c = vpath(&prefix, "c");
+        fs.put(&a, Entry::bytes(vec![0xA]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        fs.put(&c, Entry::bytes(vec![0xC]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        let out = fs
+            .get_batch(vec![a.clone(), b.clone(), c.clone()])
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].as_ref().unwrap().path, a);
+        assert_eq!(out[0].as_ref().unwrap().entry.body, vec![0xA]);
+        assert!(out[1].is_none());
+        assert_eq!(out[2].as_ref().unwrap().path, c);
+        assert_eq!(out[2].as_ref().unwrap().entry.body, vec![0xC]);
+
+        // Empty read batch is a valid no-op (unlike empty put_batch).
+        assert!(fs.get_batch(Vec::new()).await.unwrap().is_empty());
     }
 
     #[tokio::test]

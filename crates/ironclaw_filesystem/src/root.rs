@@ -22,6 +22,14 @@ pub struct BatchPut {
 /// `put_batch` overrides reuse this same cap rather than defining their own.
 pub const MAX_BATCH_PUTS: usize = 64;
 
+/// Universal upper bound on the number of paths in a single
+/// [`get_batch`](RootFilesystem::get_batch). Deliberately **not**
+/// [`MAX_BATCH_PUTS`]: a read batch has no transaction legs to bound, so the
+/// motivation is different — SQL `IN`-clause / `= ANY` payload size and the
+/// per-statement bound-parameter ceiling, not multi-key txn cost. A read batch
+/// is therefore allowed to be considerably larger than a write batch.
+pub const MAX_BATCH_GETS: usize = 256;
+
 /// Unified filesystem interface over canonical virtual paths.
 ///
 /// Both individual storage backends (local files, Postgres, libSQL, HSM,
@@ -249,6 +257,46 @@ pub trait RootFilesystem: Send + Sync {
                 Ok(versions)
             }
         }
+    }
+
+    /// Read several entries in one call.
+    ///
+    /// Returns one [`Option<VersionedEntry>`] per input path, **in input
+    /// order** (`None` = the path holds no entry). This is the read analogue
+    /// of [`put_batch`](Self::put_batch): a pure-latency collapse of N serial
+    /// [`get`](Self::get) round-trips into one. There is **no** atomicity and
+    /// **no** CAS — a read batch observes whatever each path holds when the
+    /// backend reads it; it carries no all-or-nothing promise.
+    ///
+    /// Availability contract:
+    /// - `paths.len() == 0` is a valid no-op and returns `Ok(vec![])` — unlike
+    ///   the empty `put_batch`, an empty read has nothing to fail on.
+    /// - `paths.len() > MAX_BATCH_GETS` returns
+    ///   [`FilesystemError::BackendInfrastructure`].
+    ///
+    /// The default impl reads sequentially through [`get`](Self::get), so
+    /// `get_batch` is **always available** on every backend. Native backends
+    /// override it with a single `WHERE path IN (…)` / `= ANY` query for the
+    /// latency win — they are merely faster, never required — so this primitive
+    /// intentionally needs no [`Capability`](crate::Capability) bit.
+    async fn get_batch(
+        &self,
+        paths: Vec<VirtualPath>,
+    ) -> Result<Vec<Option<VersionedEntry>>, FilesystemError> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        if paths.len() > MAX_BATCH_GETS {
+            return Err(FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::ReadFile,
+                reason: "batch exceeds MAX_BATCH_GETS".to_string(),
+            });
+        }
+        let mut out = Vec::with_capacity(paths.len());
+        for path in &paths {
+            out.push(self.get(path).await?);
+        }
+        Ok(out)
     }
 
     // ─── Event plane (append/tail) ────────────────────────────────────────

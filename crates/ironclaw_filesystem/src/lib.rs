@@ -46,7 +46,7 @@ pub use postgres::PostgresRootFilesystem;
 pub use record::{
     CasExpectation, ContentType, Entry, RecordKind, RecordVersion, SeqNo, VersionedEntry,
 };
-pub use root::{BatchPut, MAX_BATCH_PUTS, RootFilesystem};
+pub use root::{BatchPut, MAX_BATCH_GETS, MAX_BATCH_PUTS, RootFilesystem};
 pub use scoped::{MountViewResolver, ScopedBatchPut, ScopedFilesystem};
 pub use types::{
     BackendCapabilities, BackendId, BackendKind, Capability, ContentKind, DirEntry, FileStat,

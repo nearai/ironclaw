@@ -503,6 +503,60 @@ async fn read_requires_read_permission_through_scoped_api() {
 }
 
 #[tokio::test]
+async fn get_batch_requires_read_permission_and_returns_in_order_with_none() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    std::fs::write(storage.path().join("project1/a.txt"), b"AA").unwrap();
+    std::fs::write(storage.path().join("project1/c.txt"), b"CC").unwrap();
+
+    // Denied: every leg is permission-checked as a read before any backend
+    // dispatch, so a write-only grant fails closed with PermissionDenied{ReadFile}.
+    let write_only = scoped_project_fs(
+        storage.path(),
+        MountPermissions {
+            read: false,
+            write: true,
+            delete: false,
+            list: true,
+            execute: false,
+        },
+    );
+    let err = write_only
+        .get_batch(
+            &ResourceScope::system(),
+            vec![ScopedPath::new("/workspace/a.txt").unwrap()],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::PermissionDenied {
+            operation: FilesystemOperation::ReadFile,
+            ..
+        }
+    ));
+
+    // Granted: read permission yields one slot per input path, in input order,
+    // None for the absent middle path.
+    let readable = scoped_project_fs(storage.path(), MountPermissions::read_only());
+    let out = readable
+        .get_batch(
+            &ResourceScope::system(),
+            vec![
+                ScopedPath::new("/workspace/a.txt").unwrap(),
+                ScopedPath::new("/workspace/missing.txt").unwrap(),
+                ScopedPath::new("/workspace/c.txt").unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.len(), 3);
+    assert_eq!(out[0].as_ref().unwrap().entry.body, b"AA".to_vec());
+    assert!(out[1].is_none());
+    assert_eq!(out[2].as_ref().unwrap().entry.body, b"CC".to_vec());
+}
+
+#[tokio::test]
 async fn stat_is_allowed_by_read_or_list_and_denied_without_both() {
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join("project1")).unwrap();
