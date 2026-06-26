@@ -27,6 +27,10 @@ use ironclaw_product_workflow::{
     ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
     StaticProductInstallationResolver,
 };
+#[cfg(feature = "root-llm-provider")]
+use ironclaw_product_workflow::{
+    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, WebUiAuthenticatedCaller,
+};
 use ironclaw_product_workflow_storage::RebornFilesystemIdempotencyLedger;
 use ironclaw_reborn_openai_compat::{
     OPENAI_COMPAT_ACTOR_KIND, OPENAI_COMPAT_ADAPTER_ID, OPENAI_COMPAT_INSTALLATION_ID,
@@ -41,6 +45,8 @@ use ironclaw_reborn_openai_compat::{
     OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
     OpenAiResponsesWorkflow, openai_compat_router_with_state, openai_compat_routes,
 };
+#[cfg(feature = "root-llm-provider")]
+use ironclaw_reborn_openai_compat::{OpenAiCompatModelCatalog, OpenAiCompatModelEntry};
 use ironclaw_reborn_openai_compat_storage::FilesystemOpenAiCompatRefStore;
 use ironclaw_threads::{
     FinalizedAssistantMessageByRunRequest, LoadContextMessagesRequest, MessageKind, MessageStatus,
@@ -179,13 +185,107 @@ pub async fn build_openai_compat_route_mount(
         OpenAiResponsesWorkflow::new(product_workflow, ref_store, responses_projection_reader)
             .with_projection_streamer(projection_streamer),
     );
+    let router_state = OpenAiCompatRouterState::with_chat_completions(chat_workflow)
+        .with_responses_workflow(responses_workflow);
+    // `GET /v1/models` lists the deployment's configured models from the same
+    // LLM-config source the operator WebUI uses. Wired only when the root LLM
+    // provider is compiled in; otherwise the route stays fail-closed (501).
+    #[cfg(feature = "root-llm-provider")]
+    let router_state = match crate::webui::build_llm_config_service(runtime) {
+        Some(llm_config) => {
+            let catalog: Arc<dyn OpenAiCompatModelCatalog> =
+                Arc::new(LlmConfigModelCatalog::new(llm_config));
+            router_state.with_models_catalog(catalog)
+        }
+        None => router_state,
+    };
     Ok(ProtectedRouteMount::new(
-        openai_compat_router_with_state(
-            OpenAiCompatRouterState::with_chat_completions(chat_workflow)
-                .with_responses_workflow(responses_workflow),
-        ),
+        openai_compat_router_with_state(router_state),
         openai_compat_routes(),
     ))
+}
+
+/// Maps an [`LlmConfigSnapshot`] to the OpenAI-compatible `/v1/models` listing.
+///
+/// The active selection (if any) is listed first, then every configured
+/// provider's active or default model, de-duplicated by model id while
+/// preserving order. Each entry's `owned_by` is the provider id.
+#[cfg(feature = "root-llm-provider")]
+fn model_entries_from_snapshot(snapshot: &LlmConfigSnapshot) -> Vec<OpenAiCompatModelEntry> {
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    if let Some(active) = &snapshot.active
+        && let Some(model) = &active.model
+    {
+        candidates.push((model.clone(), active.provider_id.clone()));
+    }
+    for provider in &snapshot.providers {
+        let model = provider
+            .active_model
+            .clone()
+            .unwrap_or_else(|| provider.default_model.clone());
+        candidates.push((model, provider.id.clone()));
+    }
+    let mut seen = std::collections::HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|(id, _)| !id.is_empty() && seen.insert(id.clone()))
+        .map(|(id, owner)| OpenAiCompatModelEntry::new(id).with_owner(owner))
+        .collect()
+}
+
+/// [`OpenAiCompatModelCatalog`] backed by the runtime's operator LLM-config
+/// service. Lists the deployment's configured models for `GET /v1/models`.
+#[cfg(feature = "root-llm-provider")]
+struct LlmConfigModelCatalog {
+    llm_config: Arc<dyn LlmConfigService>,
+}
+
+#[cfg(feature = "root-llm-provider")]
+impl LlmConfigModelCatalog {
+    fn new(llm_config: Arc<dyn LlmConfigService>) -> Self {
+        Self { llm_config }
+    }
+}
+
+#[cfg(feature = "root-llm-provider")]
+#[async_trait]
+impl OpenAiCompatModelCatalog for LlmConfigModelCatalog {
+    async fn list_models(
+        &self,
+        caller: &ironclaw_reborn_openai_compat::OpenAiCompatAuthenticatedCaller,
+    ) -> Result<Vec<OpenAiCompatModelEntry>, OpenAiCompatHttpError> {
+        // The route authenticated the caller; carry its tenant/user scope into
+        // the LLM-config read so the snapshot is scoped to the same identity.
+        let webui_caller = WebUiAuthenticatedCaller::new(
+            caller.scope().tenant_id().clone(),
+            caller.scope().user_id().clone(),
+            caller.scope().agent_id().cloned(),
+            caller.scope().project_id().cloned(),
+        );
+        let snapshot = self
+            .llm_config
+            .snapshot(webui_caller)
+            .await
+            .map_err(map_llm_config_error_to_openai)?;
+        Ok(model_entries_from_snapshot(&snapshot))
+    }
+}
+
+#[cfg(feature = "root-llm-provider")]
+fn map_llm_config_error_to_openai(error: LlmConfigServiceError) -> OpenAiCompatHttpError {
+    match error {
+        LlmConfigServiceError::InvalidRequest { .. } => {
+            OpenAiCompatHttpError::invalid_request(None)
+        }
+        LlmConfigServiceError::NotFound => OpenAiCompatHttpError::not_found(None),
+        LlmConfigServiceError::Unavailable => OpenAiCompatHttpError::from_kind(
+            503,
+            true,
+            OpenAiCompatErrorKind::ServiceUnavailable,
+            None,
+        ),
+        LlmConfigServiceError::Internal => OpenAiCompatHttpError::internal(),
+    }
 }
 
 /// Bridges the route crate's [`OpenAiCompatInboundAttachmentSubmit`] door to the
@@ -548,7 +648,7 @@ fn push_tool_output_items(
                 id: format!("fc_{call_id}"),
                 status: Some(OpenAiResponseOutputItemStatus::Completed),
                 call_id: call_id.clone(),
-                name: provider_call.provider_tool_name.clone(),
+                name: provider_call.provider_tool_name.as_str().to_string(),
                 arguments,
             });
             items.push(OpenAiResponseOutputItem::FunctionCallOutput {

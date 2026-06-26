@@ -37,6 +37,7 @@ use std::{collections::BTreeMap, env, fmt};
 use thiserror::Error;
 
 mod capability_catalog;
+mod document_output;
 mod egress;
 mod extension_contracts;
 mod first_party;

@@ -488,6 +488,111 @@ async fn first_party_adapter_releases_reservation_when_reconcile_fails_after_suc
     );
 }
 
+/// Handler that records it was entered, then blocks forever. Lets a test drive
+/// the adapter to the `catch_unwind().await` suspend point (the reservation is
+/// already taken) and then cancel the future to exercise the cancellation path.
+struct BlockingFirstPartyHandler {
+    entered: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl crate::FirstPartyCapabilityHandler for BlockingFirstPartyHandler {
+    async fn dispatch(
+        &self,
+        _request: crate::FirstPartyCapabilityRequest,
+    ) -> Result<crate::FirstPartyCapabilityResult, crate::FirstPartyCapabilityError> {
+        self.entered
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Block forever; the test cancels the dispatch future via timeout.
+        std::future::pending::<()>().await;
+        unreachable!("pending future never resolves")
+    }
+}
+
+/// Regression test for the permanent resource-reservation leak.
+///
+/// The adapter reserves *before* awaiting `handler.dispatch().catch_unwind()`.
+/// Before the `ReservationGuard` fix, cancelling the dispatch future mid-await
+/// (the turn scheduler does this on user cancel / lease expiry / heartbeat-store
+/// timeout) left the reservation in `reserved_by_account` forever — the governor
+/// has no TTL/sweep, so the per-scope budget leaked permanently. With the guard,
+/// dropping the future runs `Drop`, releasing the reservation.
+///
+/// We force the cancellation deterministically: the handler signals it was
+/// entered (proving the reservation was taken) and then blocks forever; the
+/// dispatch future is wrapped in a short `tokio::time::timeout`, whose elapse
+/// drops the future at the suspended await.
+#[tokio::test]
+async fn first_party_adapter_releases_reservation_when_dispatch_future_is_cancelled() {
+    let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let descriptor = test_descriptor(RuntimeKind::FirstParty, Vec::new());
+    let registry = Arc::new(FirstPartyCapabilityRegistry::new().with_handler(
+        descriptor.id.clone(),
+        Arc::new(BlockingFirstPartyHandler {
+            entered: Arc::clone(&entered),
+        }),
+    ));
+    let adapter = FirstPartyRuntimeAdapter::from_registry(
+        registry,
+        Arc::new(LocalInvocationServicesResolver::new(
+            Arc::new(LocalFilesystem::new()),
+            None,
+            Arc::new(LocalHostProcessPort::new()),
+            None,
+        )),
+    );
+    let filesystem = LocalFilesystem::new();
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let package = test_package(WASM_MANIFEST, "test-wasm");
+    let policy = policy_with(
+        FilesystemBackendKind::HostWorkspace,
+        ProcessBackendKind::LocalHost,
+        NetworkMode::DirectLogged,
+        SecretMode::ScrubbedEnv,
+    );
+    // Non-zero estimate so the held reservation is observable in the tally.
+    let estimate = ResourceEstimate {
+        output_bytes: Some(128),
+        ..ResourceEstimate::default()
+    };
+
+    let dispatch = adapter.dispatch_json(RuntimeAdapterRequest {
+        package: &package,
+        descriptor: &descriptor,
+        filesystem: &filesystem,
+        governor: &governor,
+        runtime_policy: &policy,
+        capability_id: &descriptor.id,
+        scope,
+        estimate,
+        mounts: None,
+        resource_reservation: None,
+        input: json!({}),
+    });
+
+    // The handler blocks forever, so the timeout elapses and drops the dispatch
+    // future at the await — the cancellation the turn scheduler performs.
+    let outcome = tokio::time::timeout(Duration::from_millis(100), dispatch).await;
+    assert!(
+        outcome.is_err(),
+        "the blocking handler must not complete; the timeout must cancel the dispatch future"
+    );
+    assert!(
+        entered.load(std::sync::atomic::Ordering::SeqCst),
+        "the handler must have been entered, proving the reservation was taken before the await"
+    );
+
+    // The dropped future's `ReservationGuard::drop` must have released the
+    // reservation; the per-scope reserved tally returns to baseline.
+    assert_eq!(
+        governor.reserved_for(&tenant_account),
+        ResourceTally::default(),
+        "cancelling the dispatch future mid-await must release the reservation, not leak it"
+    );
+}
+
 struct SucceedingFirstPartyHandler;
 
 #[async_trait]
@@ -502,4 +607,104 @@ impl crate::FirstPartyCapabilityHandler for SucceedingFirstPartyHandler {
             usage: ironclaw_host_api::ResourceUsage::default(),
         })
     }
+}
+
+/// Handler that returns `Err(FirstPartyCapabilityError::Dispatch)` with
+/// accountable usage, simulating a handler that consumed some resources
+/// before failing. Used to exercise the `account_failed` path when the
+/// handler error carries usage that `has_accountable_effects` considers
+/// accountable (non-zero `output_bytes`).
+struct DispatchFailingWithUsageHandler;
+
+#[async_trait]
+impl crate::FirstPartyCapabilityHandler for DispatchFailingWithUsageHandler {
+    async fn dispatch(
+        &self,
+        _request: crate::FirstPartyCapabilityRequest,
+    ) -> Result<crate::FirstPartyCapabilityResult, crate::FirstPartyCapabilityError> {
+        let usage = ironclaw_host_api::ResourceUsage {
+            output_bytes: 64,
+            ..ironclaw_host_api::ResourceUsage::default()
+        };
+        Err(
+            crate::FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+                .with_usage(usage),
+        )
+    }
+}
+
+/// Regression test for the `account_failed` reconcile-failure branch when the
+/// handler returns `Err` WITH accountable usage.
+///
+/// When `governor.reconcile` fails (simulated by `ReconcileFailingGovernor`):
+///   (a) The adapter must return the **original** handler error
+///       (`DispatchError::FirstParty { OperationFailed }`) — NOT the
+///       `Resource` accounting error that `first_party_resource_error` produces.
+///   (b) The reservation must be released (reserved tally returns to baseline),
+///       because `account_failed` calls `governor.release` after a reconcile
+///       failure.
+#[tokio::test]
+async fn first_party_adapter_preserves_handler_error_when_account_failed_reconcile_fails() {
+    let descriptor = test_descriptor(RuntimeKind::FirstParty, Vec::new());
+    let registry = Arc::new(FirstPartyCapabilityRegistry::new().with_handler(
+        descriptor.id.clone(),
+        Arc::new(DispatchFailingWithUsageHandler),
+    ));
+    let adapter = FirstPartyRuntimeAdapter::from_registry(
+        registry,
+        Arc::new(LocalInvocationServicesResolver::new(
+            Arc::new(LocalFilesystem::new()),
+            None,
+            Arc::new(LocalHostProcessPort::new()),
+            None,
+        )),
+    );
+    let filesystem = LocalFilesystem::new();
+    let governor = ReconcileFailingGovernor::new();
+    let scope = sample_scope();
+    let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let package = test_package(WASM_MANIFEST, "test-wasm");
+    let policy = policy_with(
+        FilesystemBackendKind::HostWorkspace,
+        ProcessBackendKind::LocalHost,
+        NetworkMode::DirectLogged,
+        SecretMode::ScrubbedEnv,
+    );
+
+    let result = adapter
+        .dispatch_json(RuntimeAdapterRequest {
+            package: &package,
+            descriptor: &descriptor,
+            filesystem: &filesystem,
+            governor: &governor,
+            runtime_policy: &policy,
+            capability_id: &descriptor.id,
+            scope,
+            estimate: ResourceEstimate::default(),
+            mounts: None,
+            resource_reservation: None,
+            input: json!({}),
+        })
+        .await;
+
+    // (a) Must return the original handler error — NOT DispatchError::FirstParty{Resource}.
+    assert!(
+        matches!(
+            result,
+            Err(DispatchError::FirstParty {
+                kind: RuntimeDispatchErrorKind::OperationFailed,
+                ..
+            })
+        ),
+        "adapter must preserve the original handler DispatchError kind when account_failed \
+         reconcile fails; got {result:?}"
+    );
+
+    // (b) The reservation must not leak: release() is called by account_failed
+    // after a reconcile failure, so the reserved tally returns to baseline.
+    assert_eq!(
+        governor.inner.reserved_for(&tenant_account),
+        ResourceTally::default(),
+        "reservation must be released when account_failed reconcile fails"
+    );
 }
