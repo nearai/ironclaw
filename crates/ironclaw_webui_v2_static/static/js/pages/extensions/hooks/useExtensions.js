@@ -348,6 +348,9 @@ export function useOauthSetup(packageRef) {
   return useMutation({
     mutationFn: ({ secret, popup }) =>
       startExtensionOauth(packageRef, secret).then((res) => {
+        if (res.success === false) {
+          throw new Error(res.message || "OAuth setup failed");
+        }
         if (res.authorization_url && !isHttpsAuthUrl(res.authorization_url)) {
           throw new Error("Authorization URL must use HTTPS.");
         }

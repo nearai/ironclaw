@@ -1630,6 +1630,85 @@ async def test_reborn_legacy_configure_oauth_requires_https_authorization_url(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_configure_oauth_start_failure_stays_visible(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[OAUTH_TOOL],
+        setup_payloads={
+            "oauth-tool": {
+                "name": "oauth-tool",
+                "kind": "wasm_tool",
+                "secrets": [
+                    {
+                        "name": "GOOGLE_AUTH",
+                        "prompt": "Google account",
+                        "provider": "google",
+                        "provided": False,
+                        "optional": False,
+                        "auto_generate": False,
+                        "setup": {
+                            "kind": "oauth",
+                            "account_label": "QA account",
+                            "scopes": ["email"],
+                            "invocation_id": "inv-1",
+                        },
+                    }
+                ],
+                "fields": [],
+                "onboarding": None,
+            }
+        },
+        oauth_start_responses={
+            "oauth-tool": {
+                "success": False,
+                "message": "Google OAuth is unavailable for this workspace.",
+            }
+        },
+        tab="installed",
+    )
+    try:
+        page = harness["page"]
+        await page.evaluate(
+            """
+            () => {
+              window.__openedPopups = [];
+              window.open = (url) => {
+                const popup = {
+                  closed: false,
+                  close() { this.closed = true; },
+                  location: {
+                    _href: url,
+                    get href() { return this._href; },
+                    set href(value) { this._href = value; },
+                  },
+                };
+                window.__openedPopups.push(popup);
+                return popup;
+              };
+            }
+            """
+        )
+
+        card = _card_by_title(page, "OAuth Tool")
+        await expect(card).to_be_visible(timeout=5000)
+        await card.get_by_role("button", name="Configure").click()
+        await page.get_by_role("button", name="Authorize").click()
+
+        await expect(
+            page.get_by_text("Google OAuth is unavailable for this workspace.")
+        ).to_be_visible(timeout=5000)
+        await expect(
+            page.get_by_role("heading", name="Configure OAuth Tool")
+        ).to_be_visible()
+        assert harness["oauth_start_requests"][0]["body"]["provider"] == "google"
+        assert await page.evaluate("() => window.__openedPopups[0].closed") is True
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_configure_oauth_accepts_uppercase_https_url(
     reborn_v2_server, reborn_v2_browser
 ):

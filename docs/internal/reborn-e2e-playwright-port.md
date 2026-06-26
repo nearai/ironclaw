@@ -1732,6 +1732,36 @@ Behavior adjustment:
   asserts the unified v2 Registry projection, which is what operators see after
   the extensions and registry queries are invalidated.
 
+### Step 51: Legacy Extension OAuth Start Failure Port
+
+Extended `test_reborn_webui_v2_legacy_extensions.py` and fixed the Reborn
+extension OAuth setup hook.
+
+Ported the failure invariant behind legacy `test_oauth_configure_returns_auth_url`
+and `test_oauth_activate_returns_auth_url`:
+
+- clicking `Authorize` submits the v2 OAuth-start request with provider, scopes,
+  account label, and invocation id;
+- if OAuth start returns `success: false`, the configure modal keeps the error
+  visible instead of treating the response as a successful no-op;
+- the placeholder popup opened for browser-popup compatibility is closed on the
+  failure path;
+- the configure modal remains open so the operator can retry or cancel.
+
+Real issue fixed:
+
+- `useOauthSetup` only rejected invalid authorization URLs. A server response
+  such as `{success:false, message:"..."}` without an `authorization_url` flowed
+  through the success handler, closed the placeholder popup, refreshed state,
+  and showed no error. The hook now matches manual setup submission by throwing
+  on explicit `success:false`.
+
+Behavior adjustment:
+
+- Legacy asserted the old `/api/extensions/{name}/setup` response body directly.
+  Reborn's port exercises the v2 Configure modal and OAuth-start endpoint
+  projection because that is the current operator-visible setup flow.
+
 ## Open Migration Buckets
 
 Not yet ported:
