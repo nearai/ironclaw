@@ -42,7 +42,7 @@ Keep the event log **durable** (it is the read-model substrate: projections fold
 
 New `CoalescingEventSink` (`coalescing_sink.rs`) implementing `EventSink`, wrapping `Arc<dyn DurableEventLog>`:
 
-- `emit(event)`: push onto an `mpsc::UnboundedSender` and return `Ok(())` immediately (best-effort sink contract — a closed receiver logs, never short-circuits the caller).
+- `emit(event)`: `try_send` onto a bounded `mpsc::Sender` (capacity 8192) and return `Ok(())` immediately (best-effort sink contract — never blocks or short-circuits the caller). On a full channel (drain stalled) the event is dropped and a `dropped_count` counter is incremented (rate-limited `debug!`, not per-event `warn!`); a closed receiver returns the sink-closed diagnostic.
 - A single long-lived drain task: on first event, start a `flush_interval` deadline; accumulate via `timeout_at(deadline, rx.recv())` until the deadline elapses **or** `max_batch` is reached, then `log.append_batch(batch)` (one INSERT per stream). Flushes are awaited sequentially in the single task → **global order preserved**. On all-senders-dropped, drain remaining and exit (deterministic shutdown).
 - `flush()` control message (oneshot ack) for deterministic test/shutdown flushing.
 - `EventBatchConfig { max_batch, flush_interval }` with conservative defaults (`max_batch: 256`, `flush_interval: 50ms`).
