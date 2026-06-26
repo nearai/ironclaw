@@ -33,9 +33,10 @@ use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AssistantReplyInput, AssistantReplyStage, BatchStep,
     BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityInput,
     CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
-    HostStage, InputStage, InputStep, PendingInputAck, PromptInput, PromptStage, PromptStep,
-    StageContext, StopInput, StopStage, StopStep, TurnCompletedStep, UserFacingInputDrainMode,
-    consume_drainable_inputs, sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
+    HostStage, InputStage, InputStep, MAX_CAPABILITY_RETRIES, PendingInputAck, PromptInput,
+    PromptStage, PromptStep, StageContext, StopInput, StopStage, StopStep, TurnCompletedStep,
+    UserFacingInputDrainMode, consume_drainable_inputs, sanitize_result_ref_suffix,
+    synthetic_provider_error_result_ref,
 };
 
 #[allow(dead_code)]
@@ -2648,6 +2649,52 @@ async fn policy_denied_capability_error_honors_retry_recovery() {
     assert!(matches!(exit, LoopExit::Completed(_))); // safety: test-only assertion
     assert_eq!(host.single_invocations().len(), 1); // safety: test-only assertion
     assert_eq!(final_staged_state(&host).recovery_state, Default::default()); // safety: test-only assertion
+}
+
+#[tokio::test]
+async fn retry_exhaustion_reports_latest_retry_failure_kind() {
+    let host = MockHost::new(vec![calls_response()])
+        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Failed(
+                ironclaw_turns::run_profile::CapabilityFailure {
+                    error_kind: CapabilityFailureKind::Transient,
+                    safe_summary: "temporary capability outage".to_string(),
+                    detail: None,
+                },
+            )],
+            stopped_on_suspension: false,
+        }])
+        .with_single_outcomes(
+            (0..MAX_CAPABILITY_RETRIES)
+                .map(|_| {
+                    CapabilityOutcome::Failed(ironclaw_turns::run_profile::CapabilityFailure {
+                        error_kind: CapabilityFailureKind::InvalidInput,
+                        safe_summary: "invalid input".to_string(),
+                        detail: None,
+                    })
+                })
+                .collect(),
+        );
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(
+            &family_with_always_retry_capability_recovery(),
+            &host,
+            state,
+        )
+        .await
+        .expect("execute");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::ModelError);
+            assert!(failed.checkpoint_id.is_some());
+        }
+        other => panic!("expected failed exit, got {other:?}"),
+    }
+    assert_eq!(host.single_invocations().len(), MAX_CAPABILITY_RETRIES);
 }
 
 #[tokio::test]

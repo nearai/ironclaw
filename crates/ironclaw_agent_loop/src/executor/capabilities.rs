@@ -972,6 +972,9 @@ impl CapabilityStage {
                             if failure.error_kind == CapabilityFailureKind::Cancelled {
                                 return self.cancelled_after_checkpoint(ctx, state).await;
                             }
+                            state
+                                .recent_failure_kinds
+                                .push(capability_failure_kind(&failure.error_kind));
                             model_observation =
                                 Some(model_visible_capability_failure_observation(&failure));
                             summary = CapabilityErrorSummary {
