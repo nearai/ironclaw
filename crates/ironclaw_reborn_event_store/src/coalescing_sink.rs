@@ -35,7 +35,8 @@
 //! This sink is **lossy under stress on purpose**. It carries best-effort
 //! observability events whose returned cursor is discarded at the sink, so
 //! none of these losses can alter a runtime/control-plane outcome. There are
-//! exactly three loss modes, all bounded and observable:
+//! three stress-path drop modes (beyond the crash-tail loss noted under
+//! Ordering & durability above), all bounded and observable:
 //!
 //! 1. **Overload drop** — sustained back-pressure fills the bounded channel;
 //!    `emit` drops (it must never block the caller per the [`EventSink`]
@@ -70,8 +71,8 @@ use tokio::time::{Instant, timeout_at};
 ///
 /// Bounds memory consumption when the durable backend stalls (DB outage,
 /// slow INSERT, etc.). ~8 k events is a generous burst headroom for normal
-/// traffic; events emitted past this limit are dropped with a `warn!` and
-/// counted by [`CoalescingEventSink::dropped_count`].
+/// traffic; events emitted past this limit are dropped with a rate-limited
+/// `debug!` and counted by [`CoalescingEventSink::dropped_count`].
 const CHANNEL_CAPACITY: usize = 8192;
 
 /// Tuning for the write-behind coalescing event sink.

@@ -38,6 +38,11 @@ fn scope_for(user: &str, project: &str) -> ResourceScope {
 /// Wraps an inner [`DurableEventLog`], counting how many times each entry
 /// point is invoked so a test can prove the sink coalesces single `emit`s into
 /// one `append_batch` call rather than N `append`s.
+///
+/// When `inject_partial_failure` is set to `true`, `append_batch` returns a
+/// partial-failure result vector: the first event succeeds (committed to the
+/// inner log) and the remaining events fail with an injected error. This lets
+/// tests verify that `flush()` propagates a per-event rejection as `Err`.
 struct CountingEventLog {
     inner: InMemoryDurableEventLog,
     append_calls: AtomicUsize,
@@ -45,6 +50,9 @@ struct CountingEventLog {
     batched_events: AtomicUsize,
     /// Size of each individual `append_batch` call, in call order.
     batch_sizes: std::sync::Mutex<Vec<usize>>,
+    /// When `true`, `append_batch` injects an error on every event after the
+    /// first, simulating a partial backend rejection.
+    inject_partial_failure: std::sync::atomic::AtomicBool,
 }
 
 impl CountingEventLog {
@@ -55,6 +63,7 @@ impl CountingEventLog {
             append_batch_calls: AtomicUsize::new(0),
             batched_events: AtomicUsize::new(0),
             batch_sizes: std::sync::Mutex::new(Vec::new()),
+            inject_partial_failure: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -77,7 +86,27 @@ impl DurableEventLog for CountingEventLog {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(events.len());
-        self.inner.append_batch(events).await
+        if self
+            .inject_partial_failure
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            // Partial rejection: commit only the first event to the inner log;
+            // return an injected error for every subsequent event.
+            let mut results: Vec<Result<EventLogEntry<RuntimeEvent>, EventError>> =
+                Vec::with_capacity(events.len());
+            let mut iter = events.into_iter();
+            if let Some(first) = iter.next() {
+                results.push(self.inner.append(first).await);
+            }
+            for _ in iter {
+                results.push(Err(EventError::Sink {
+                    reason: "injected test failure".to_string(),
+                }));
+            }
+            results
+        } else {
+            self.inner.append_batch(events).await
+        }
     }
 
     async fn read_after_cursor(
@@ -312,4 +341,40 @@ async fn coalescing_sink_flush_splits_burst_at_max_batch() {
             "cursors must be monotonic in emit order across batch boundaries"
         );
     }
+}
+
+#[tokio::test]
+async fn flush_propagates_partial_append_batch_failure() {
+    // Verify that a per-event rejection inside `append_batch` propagates all
+    // the way through `flush()` as an `Err`. The sink's `flush()` contract
+    // guarantees `Ok(())` only when every queued event landed durably; callers
+    // rely on that guarantee for graceful-shutdown sequencing.
+    let log = Arc::new(CountingEventLog::new());
+    log.inject_partial_failure
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let sink = CoalescingEventSink::new(
+        Arc::clone(&log) as Arc<dyn DurableEventLog>,
+        EventBatchConfig {
+            max_batch: 256,
+            flush_interval: Duration::from_millis(50),
+        },
+    );
+
+    let scope = scope_for("alice", "project-a");
+    // Emit 3 events so `append_batch` has at least 2 items — the mock commits
+    // the first and rejects the rest, making this a partial failure.
+    for _ in 0..3 {
+        sink.emit(RuntimeEvent::dispatch_requested(
+            scope.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("emit must buffer without blocking");
+    }
+
+    let result = sink.flush().await;
+    assert!(
+        result.is_err(),
+        "flush must return Err when append_batch reports a per-event rejection"
+    );
 }

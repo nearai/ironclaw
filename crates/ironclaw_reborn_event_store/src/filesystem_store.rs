@@ -107,9 +107,10 @@ where
     ) -> Vec<Result<EventLogEntry<RuntimeEvent>, EventError>> {
         // Group events by stream path (one path per `(tenant, user, agent)`),
         // preserving input order within each group, then issue one multi-row
-        // INSERT per path via the filesystem `append_batch` primitive. A
-        // per-turn burst shares one stream, so it collapses to a single
-        // round-trip. Results are stitched back into input order.
+        // INSERT per path via the filesystem `append_batch` primitive — one
+        // round-trip per distinct stream path. A per-turn burst commonly shares
+        // a single stream and so collapses to one round-trip. Results are
+        // stitched back into input order.
         let mut index_by_path: HashMap<ScopedPath, usize> = HashMap::new();
         let mut groups: Vec<(ScopedPath, Vec<usize>, Vec<RuntimeEvent>)> = Vec::new();
         let mut results: Vec<Option<Result<EventLogEntry<RuntimeEvent>, EventError>>> =

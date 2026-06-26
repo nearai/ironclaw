@@ -300,6 +300,42 @@ async fn composite_routes_append_batch_to_matching_backend() {
     );
 }
 
+#[tokio::test]
+async fn composite_append_batch_returns_mount_not_found() {
+    // A composite with one mount at /events.  An append_batch to /logs/…
+    // (outside all mounts) must return MountNotFound and leave the /events
+    // backend completely empty — no side effects.
+    let backend = Arc::new(InMemoryBackend::new());
+
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(
+        event_log_descriptor("/events", "events-backend"),
+        Arc::clone(&backend),
+    )
+    .unwrap();
+
+    // Path under a valid virtual root (/memory) that has no matching mount.
+    let unmapped = VirtualPath::new("/memory/system.jsonl").unwrap();
+    let payloads: Vec<Vec<u8>> = vec![b"payload".to_vec()];
+
+    let err = root.append_batch(&unmapped, payloads).await.unwrap_err();
+
+    assert!(
+        matches!(err, FilesystemError::MountNotFound { .. }),
+        "expected MountNotFound, got {err:?}"
+    );
+
+    // The mounted /events backend must not have received any write.
+    let records = backend
+        .tail(&VirtualPath::new("/events/log.jsonl").unwrap(), SeqNo::ZERO)
+        .await
+        .unwrap();
+    assert!(
+        records.is_empty(),
+        "/events backend must not receive writes for an unmapped path"
+    );
+}
+
 fn empty_local_backend(virtual_root: &str) -> (LocalFilesystem, tempfile::TempDir) {
     let dir = tempdir().unwrap();
     let mut backend = LocalFilesystem::new();
