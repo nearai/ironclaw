@@ -343,6 +343,24 @@ def _label_channel(**overrides):
     return {**LABEL_CHANNEL_BASE, **overrides}
 
 
+def _manual_config_setup_payload() -> dict:
+    return {
+        "name": "config-tool",
+        "kind": "wasm_tool",
+        "secrets": [
+            {
+                "name": "API_TOKEN",
+                "prompt": "API token",
+                "provided": False,
+                "optional": False,
+                "auto_generate": False,
+            }
+        ],
+        "fields": [],
+        "onboarding": None,
+    }
+
+
 async def _open_card_menu(card):
     await card.get_by_label("More actions").click()
     return card.get_by_role("menu")
@@ -755,6 +773,91 @@ async def test_reborn_legacy_configure_modal_save_failure_stays_open(
         assert harness["setup_submit_requests"][0]["body"]["payload"]["secrets"] == {
             "API_TOKEN": "bad-token"
         }
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_configure_modal_dismisses_without_saving(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[CONFIG_TOOL],
+        setup_payloads={"config-tool": _manual_config_setup_payload()},
+        tab="installed",
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, "Config Tool")
+        await expect(card).to_be_visible(timeout=5000)
+
+        async def open_modal():
+            await card.get_by_role("button", name="Configure").click()
+            await expect(
+                page.get_by_role("heading", name="Configure Config Tool")
+            ).to_be_visible(timeout=5000)
+
+        await open_modal()
+        await page.get_by_role("button", name="Cancel").click()
+        await expect(
+            page.get_by_role("heading", name="Configure Config Tool")
+        ).to_have_count(0)
+
+        await open_modal()
+        await page.mouse.click(5, 5)
+        await expect(
+            page.get_by_role("heading", name="Configure Config Tool")
+        ).to_have_count(0)
+
+        await open_modal()
+        await page.keyboard.press("Escape")
+        await expect(
+            page.get_by_role("heading", name="Configure Config Tool")
+        ).to_have_count(0)
+
+        assert harness["setup_submit_requests"] == []
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_configure_modal_enter_key_submits(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        installed=[CONFIG_TOOL],
+        setup_payloads={"config-tool": _manual_config_setup_payload()},
+        tab="installed",
+    )
+    try:
+        page = harness["page"]
+        card = _card_by_title(page, "Config Tool")
+        await expect(card).to_be_visible(timeout=5000)
+        await card.get_by_role("button", name="Configure").click()
+
+        await expect(
+            page.get_by_role("heading", name="Configure Config Tool")
+        ).to_be_visible(timeout=5000)
+        await page.locator('input[type="password"]').first.fill("enter-token")
+        await page.locator('input[type="password"]').first.press("Enter")
+
+        await expect(
+            page.get_by_role("heading", name="Configure Config Tool")
+        ).to_have_count(0)
+        assert harness["setup_submit_requests"] == [
+            {
+                "package_id": "config-tool",
+                "body": {
+                    "action": "submit",
+                    "payload": {
+                        "secrets": {"API_TOKEN": "enter-token"},
+                        "fields": {},
+                    },
+                },
+            }
+        ]
     finally:
         await harness["context"].close()
 

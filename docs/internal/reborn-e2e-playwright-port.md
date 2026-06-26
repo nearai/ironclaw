@@ -378,6 +378,10 @@ standalone Reborn WebUI v2 Extensions surface:
 - setup-required extensions open the Reborn configure modal, fetch setup
   metadata, submit manual secrets and fields to the v2 setup endpoint, and close
   on success;
+- configure modal Cancel, backdrop click, and Escape dismissal close the modal
+  without submitting setup;
+- pressing Enter in a manual configuration input submits the same v2 setup
+  payload as the Save button;
 - failed setup responses keep the configure modal open and show the server
   message so the user can correct the credential;
 - activation responses that include legacy-style `auth_url` values reject
