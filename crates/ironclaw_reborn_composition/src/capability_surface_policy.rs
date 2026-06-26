@@ -111,6 +111,71 @@ pub(crate) fn build_capability_policy_resolver(
     Arc::new(StoreBackedPolicyResolver::new(defaults, delta_store))
 }
 
+/// Adapts the shared [`PolicyResolver`] into the loop's host-owned
+/// [`LoopCapabilityConfigSource`] (#5261 configuration dimension). Supplies the
+/// admin policy config (`EffectivePolicy.config`) to deep-merge into a
+/// capability's resolved input before dispatch.
+///
+/// Holds the SAME resolver `Arc` the availability seam reads, so config and
+/// availability stay consistent for a turn.
+#[cfg(feature = "capability-policy")]
+pub(crate) struct PolicyResolverConfigSource {
+    policy: Arc<dyn PolicyResolver>,
+}
+
+#[cfg(feature = "capability-policy")]
+impl PolicyResolverConfigSource {
+    pub(crate) fn new(policy: Arc<dyn PolicyResolver>) -> Self {
+        Self { policy }
+    }
+}
+
+#[cfg(feature = "capability-policy")]
+#[async_trait]
+impl ironclaw_loop_support::LoopCapabilityConfigSource for PolicyResolverConfigSource {
+    async fn config_for(
+        &self,
+        run_context: &LoopRunContext,
+        capability_id: &CapabilityId,
+    ) -> Result<Option<serde_json::Value>, ironclaw_turns::run_profile::AgentLoopHostError> {
+        // Use the SAME acting-principal derivation the availability seam uses.
+        let Some(user_id) = principal_user_id(&run_context.scope, run_context.actor.as_ref())
+        else {
+            // Ownerless / actor-fallback turn: no subject, so no admin config to
+            // overlay. Fail-OPEN — the model input dispatches un-merged.
+            return Ok(None);
+        };
+        let subject = PolicySubject {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            user_id: user_id.clone(),
+        };
+        match self.policy.resolve(&subject, capability_id).await {
+            Ok(effective) => {
+                // `available_default()` config is `Null`; a delta with no
+                // `config_patch` leaves it `Null`. Treat `Null` as "no admin
+                // opinion" so the merge is skipped entirely.
+                if effective.config.is_null() {
+                    Ok(None)
+                } else {
+                    Ok(Some(effective.config))
+                }
+            }
+            Err(error) => {
+                // Fail-OPEN (#5261 D5 configuration): a resolver fault or an
+                // unavailable backend must NOT end the turn. Drop the admin
+                // config and dispatch the un-merged model input. Logged at debug
+                // so it never corrupts the REPL/TUI surface (see CLAUDE.md).
+                tracing::debug!(
+                    %error,
+                    capability = %capability_id.as_str(),
+                    "capability policy config resolution failed; dispatching un-merged input"
+                );
+                Ok(None)
+            }
+        }
+    }
+}
+
 /// Whether the per-`(tenant, user)` capability policy resolver (#5267 / #5261)
 /// is active for this runtime. Compiled in by the `capability-policy` feature,
 /// but OFF unless `IRONCLAW_REBORN_CAPABILITY_POLICY` is set truthy

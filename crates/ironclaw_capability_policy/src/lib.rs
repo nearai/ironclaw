@@ -188,6 +188,19 @@ pub fn resolve_effective_policy(
     }
 }
 
+/// Deep-merge `patch` into `base` with the SAME semantics the policy fold uses
+/// ([`resolve_effective_policy`]): objects merge key-by-key (recursively); any
+/// non-object value (including arrays and `null`) in `patch` replaces the
+/// corresponding slot in `base`, so `patch` keys win on conflict.
+///
+/// Exposed so the capability-invocation seam (#5261 configuration dimension) can
+/// overlay an admin `EffectivePolicy.config` onto the model-supplied input with
+/// admin keys winning, matching this crate's fold byte-for-byte rather than
+/// re-implementing the merge. Delegates to the private [`deep_merge`].
+pub fn deep_merge_into(base: &mut Value, patch: &Value) {
+    deep_merge(base, patch);
+}
+
 /// Deep-merge `patch` into `base`: objects merge key-by-key (recursively); any
 /// non-object value (including arrays and `null`) replaces. Mirrors the
 /// "admin owns the keys, lower scopes tweak" semantics (architecture doc §6).

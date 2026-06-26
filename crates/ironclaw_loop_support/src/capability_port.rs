@@ -88,6 +88,30 @@ pub trait CapabilityTrajectoryObserver: std::fmt::Debug + Send + Sync {
     );
 }
 
+/// Supplies the admin-policy configuration to deep-merge into a capability's
+/// resolved input before it is dispatched (#5261 configuration dimension).
+///
+/// Host-owned input to [`HostRuntimeLoopCapabilityPort`]: the composition layer
+/// implements this over the shared `PolicyResolver`, keyed by the turn's
+/// `(tenant, user)` and the capability id. The merge happens on the **first**
+/// (non-replay) dispatch only; the approval / auth resume path replays the
+/// already-merged leased payload and must not re-merge.
+///
+/// **Fail-OPEN.** Per the #5261 configuration decision (D5), a resolver fault,
+/// an unavailable backend, or an ownerless turn must yield `Ok(None)` so the
+/// run continues with the un-merged model input — never an `Err` that would end
+/// the turn (see `.claude/rules/agent-loop-capabilities.md`).
+#[async_trait]
+pub trait LoopCapabilityConfigSource: Send + Sync {
+    /// The admin-policy config patch for this capability and turn, or `None`
+    /// when there is no admin opinion (and on any recoverable failure).
+    async fn config_for(
+        &self,
+        run_context: &LoopRunContext,
+        capability_id: &CapabilityId,
+    ) -> Result<Option<serde_json::Value>, AgentLoopHostError>;
+}
+
 #[async_trait]
 pub trait LoopCapabilityInputResolver: Send + Sync {
     async fn resolve_capability_input(
@@ -372,6 +396,7 @@ pub struct HostRuntimeLoopCapabilityPortFactory {
     execution_mounts: MountView,
     capability_execution_mounts: HashMap<CapabilityId, MountView>,
     trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
+    policy_config_source: Option<Arc<dyn LoopCapabilityConfigSource>>,
 }
 
 impl HostRuntimeLoopCapabilityPortFactory {
@@ -391,6 +416,7 @@ impl HostRuntimeLoopCapabilityPortFactory {
             execution_mounts: MountView::default(),
             capability_execution_mounts: HashMap::new(),
             trajectory_observer: None,
+            policy_config_source: None,
         }
     }
 
@@ -401,6 +427,18 @@ impl HostRuntimeLoopCapabilityPortFactory {
         observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
     ) -> Self {
         self.trajectory_observer = observer;
+        self
+    }
+
+    /// Attach a [`LoopCapabilityConfigSource`] that every port built by this
+    /// factory consults to deep-merge admin policy config into a capability's
+    /// resolved input before dispatch (#5261). No-op when unset — the model
+    /// input is dispatched verbatim, preserving current behaviour.
+    pub fn with_policy_config_source(
+        mut self,
+        config_source: Option<Arc<dyn LoopCapabilityConfigSource>>,
+    ) -> Self {
+        self.policy_config_source = config_source;
         self
     }
 
@@ -435,6 +473,7 @@ impl HostRuntimeLoopCapabilityPortFactory {
         .with_execution_mounts(self.execution_mounts.clone())
         .with_capability_execution_mounts(self.capability_execution_mounts.clone())
         .with_trajectory_observer(self.trajectory_observer.clone())
+        .with_policy_config_source(self.policy_config_source.clone())
     }
 }
 
@@ -794,6 +833,7 @@ pub struct HostRuntimeLoopCapabilityPort {
     dispatch_records: Mutex<DispatchRecordStore>,
     provider_tool_call_registrations: Mutex<ProviderToolCallRegistrationStore>,
     trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
+    policy_config_source: Option<Arc<dyn LoopCapabilityConfigSource>>,
 }
 
 /// Lock a poisoned-aware `Mutex` and wrap a poison error as the canonical
@@ -839,6 +879,7 @@ impl HostRuntimeLoopCapabilityPort {
                 ProviderToolCallRegistrationStore::default(),
             ),
             trajectory_observer: None,
+            policy_config_source: None,
         }
     }
 
@@ -849,6 +890,17 @@ impl HostRuntimeLoopCapabilityPort {
         observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
     ) -> Self {
         self.trajectory_observer = observer;
+        self
+    }
+
+    /// Attach a [`LoopCapabilityConfigSource`] consulted to deep-merge admin
+    /// policy config into a capability's resolved input before dispatch (#5261).
+    /// No-op when unset.
+    pub fn with_policy_config_source(
+        mut self,
+        config_source: Option<Arc<dyn LoopCapabilityConfigSource>>,
+    ) -> Self {
+        self.policy_config_source = config_source;
         self
     }
 
@@ -1668,10 +1720,23 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 }
                 Err(error) => return Err(error.error),
             };
-            (
-                host_runtime_input_for_capability(&request.capability_id, input)?,
-                capability.estimate.clone(),
-            )
+            let mut input = host_runtime_input_for_capability(&request.capability_id, input)?;
+            // Configuration dimension (#5261): deep-merge the admin policy
+            // config into the model-supplied input on the FIRST (non-replay)
+            // dispatch only, with admin keys winning (model input is the base,
+            // the policy config overlays). The replay branch above reuses the
+            // already-merged leased payload, so it must NOT re-merge — re-merging
+            // would diverge from the approval-leased fingerprint. Fail-OPEN: the
+            // config source returns `Ok(None)` on any recoverable failure (D5),
+            // so the run continues with un-merged input rather than ending.
+            if let Some(config_source) = &self.policy_config_source
+                && let Some(config) = config_source
+                    .config_for(&self.run_context, &request.capability_id)
+                    .await?
+            {
+                ironclaw_capability_policy::deep_merge_into(&mut input, &config);
+            }
+            (input, capability.estimate.clone())
         };
         let mut invocation_context =
             invocation_context_from_visible(VisibleInvocationContextRequest {
@@ -4245,6 +4310,173 @@ mod tests {
             arguments,
             &serde_json::json!({"message": "hello"}),
             "observer should receive the resolved tool-call arguments"
+        );
+    }
+
+    /// Fake [`LoopCapabilityConfigSource`] that returns a fixed config patch and
+    /// records every `config_for` invocation, so a port-level test can assert
+    /// (a) the patch is deep-merged into the dispatched input on a fresh
+    /// dispatch, and (b) the approval/auth-resume replay branch never consults
+    /// it (it must not re-merge the already-leased payload).
+    #[derive(Default)]
+    struct RecordingConfigSource {
+        patch: Option<serde_json::Value>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl RecordingConfigSource {
+        fn with_patch(patch: serde_json::Value) -> Self {
+            Self {
+                patch: Some(patch),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.lock().expect("config source calls lock").len()
+        }
+    }
+
+    #[async_trait]
+    impl LoopCapabilityConfigSource for RecordingConfigSource {
+        async fn config_for(
+            &self,
+            _run_context: &LoopRunContext,
+            capability_id: &CapabilityId,
+        ) -> Result<Option<serde_json::Value>, AgentLoopHostError> {
+            self.calls
+                .lock()
+                .expect("config source calls lock")
+                .push(capability_id.as_str().to_string());
+            Ok(self.patch.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_capability_deep_merges_policy_config_into_dispatched_input() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        // Admin patch: adds a key AND overrides the model-supplied `message`.
+        // Admin keys win (model input is the base, the patch overlays).
+        let config_source = Arc::new(RecordingConfigSource::with_patch(serde_json::json!({
+            "message": "from-admin",
+            "injected": {"by": "policy"}
+        })));
+
+        let mut context = execution_context("thread-policy-config-merge");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id.clone(),
+                dispatch_trust_decision(),
+            )])),
+            dummy_input_resolver(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+        )
+        .with_policy_config_source(Some(
+            config_source.clone() as Arc<dyn LoopCapabilityConfigSource>
+        ))
+        .port_for_run_context(run_context);
+
+        let outcome = invoke_visible_runtime_capability(&port)
+            .await
+            .expect("capability invocation succeeds");
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+
+        assert_eq!(
+            config_source.call_count(),
+            1,
+            "config source consulted once on a fresh (non-replay) dispatch"
+        );
+        let requests = runtime.take_requests();
+        assert_eq!(requests.len(), 1, "exactly one capability dispatched");
+        assert_eq!(
+            requests[0].input,
+            serde_json::json!({"message": "from-admin", "injected": {"by": "policy"}}),
+            "dispatched input is the deep-merged result with admin keys winning"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_resume_replay_does_not_remerge_policy_config() {
+        use ironclaw_host_api::ApprovalRequestId;
+        use ironclaw_turns::run_profile::CapabilityApprovalResume;
+
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let runtime = Arc::new(RecordingResumeHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let config_source = Arc::new(RecordingConfigSource::with_patch(serde_json::json!({
+            "injected": "must-not-be-applied-on-replay"
+        })));
+
+        let mut context = execution_context("thread-policy-config-replay");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id.clone(),
+                dispatch_trust_decision(),
+            )])),
+            dummy_input_resolver(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+        )
+        .with_policy_config_source(Some(
+            config_source.clone() as Arc<dyn LoopCapabilityConfigSource>
+        ))
+        .port_for_run_context(run_context);
+
+        let invocation = visible_runtime_invocation(&port).await;
+        // The leased replay payload already carries the merged config from the
+        // first dispatch; the resume branch must replay it verbatim, never
+        // re-running the config source (which would diverge from the lease).
+        let resume = CapabilityApprovalResume {
+            approval_request_id: ApprovalRequestId::new(),
+            resume_token: CapabilityResumeToken::new(invocation.activity_id.to_string())
+                .expect("valid resume token"),
+            correlation_id: CorrelationId::new(),
+            input_ref: invocation.input_ref.clone(),
+            input: serde_json::json!({"message": "leased"}),
+            estimate: ResourceEstimate::default(),
+        };
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: invocation.activity_id,
+                surface_version: invocation.surface_version,
+                capability_id: invocation.capability_id,
+                input_ref: invocation.input_ref,
+                approval_resume: Some(resume),
+                auth_resume: None,
+            })
+            .await
+            .expect("matching approval resume succeeds");
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        assert_eq!(runtime.resume_request_count(), 1, "resume dispatched once");
+        assert_eq!(
+            config_source.call_count(),
+            0,
+            "replay branch must NOT consult the config source (no re-merge)"
         );
     }
 
