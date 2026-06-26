@@ -2509,6 +2509,28 @@ Issue found and fixed:
   click and Enter submission so Slack proof-code redemption matches the legacy
   normalization contract.
 
+### Step 83: Legacy Slack Pairing Failure Retry Port
+
+Extended `test_reborn_webui_v2_legacy_channel_connect.py`.
+
+Ported the failed-pairing retry behavior from legacy
+`test_pairing_card_submit_error` to Reborn's Slack connect command card:
+
+- opened a Slack `inbound_proof_code` connect card from the chat composer;
+- submitted a bad proof code through the Slack pairing section;
+- mocked `/api/webchat/v2/extensions/pairing/redeem` returning a failed
+  response;
+- asserted the inline error is visible and the connect card remains open;
+- asserted the proof-code input retains the user's code for retry;
+- asserted the redeem request still sends the normalized uppercase code.
+
+Issue found and fixed:
+
+- `SlackPairingSection` cleared the proof-code input immediately after sending
+  the redeem request. A failed request therefore forced users to retype the
+  code. The component now clears the input only on successful redemption,
+  matching the generic Reborn pairing section and the legacy retry behavior.
+
 ## Open Migration Buckets
 
 Not yet ported:

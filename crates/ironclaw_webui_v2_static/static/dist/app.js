@@ -1034,7 +1034,7 @@ Please change the parent <Route path="${v}"> to <Route path="${v==="/"?"*":`${v}
         </div>
       </form>
     <//>
-  `}var t4="/api/webchat/v2/extensions/pairing/redeem";function A1(e){return Q(t4,{method:"POST",body:JSON.stringify({channel:"slack",code:e})}).then(t=>({success:!0,provider:t.provider,provider_user_id:t.provider_user_id,message:"Slack account connected."}))}function Pc({action:e}){let t=R(),a=X(),n=G({mutationFn:({code:l})=>A1(l),onSuccess:()=>{a.invalidateQueries({queryKey:["extensions"]}),a.invalidateQueries({queryKey:["connectable-channels"]}),a.invalidateQueries({queryKey:["pairing","slack"]})}}),[r,s]=p.default.useState(""),i=a4(e,t),o=()=>{let l=r.trim().toUpperCase();l&&(n.mutate({code:l}),s(""))};return u`
+  `}var t4="/api/webchat/v2/extensions/pairing/redeem";function A1(e){return Q(t4,{method:"POST",body:JSON.stringify({channel:"slack",code:e})}).then(t=>({success:!0,provider:t.provider,provider_user_id:t.provider_user_id,message:"Slack account connected."}))}function Pc({action:e}){let t=R(),a=X(),n=G({mutationFn:({code:l})=>A1(l),onSuccess:()=>{s(""),a.invalidateQueries({queryKey:["extensions"]}),a.invalidateQueries({queryKey:["connectable-channels"]}),a.invalidateQueries({queryKey:["pairing","slack"]})}}),[r,s]=p.default.useState(""),i=a4(e,t),o=()=>{let l=r.trim().toUpperCase();l&&n.mutate({code:l})};return u`
     <div
       data-testid="slack-pairing-section"
       className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4"

@@ -10,6 +10,7 @@ export function SlackPairingSection({ action }) {
   const redeemMutation = useMutation({
     mutationFn: ({ code }) => redeemSlackPairingCode(code),
     onSuccess: () => {
+      setManualCode("");
       queryClient.invalidateQueries({ queryKey: ["extensions"] });
       queryClient.invalidateQueries({ queryKey: ["connectable-channels"] });
       queryClient.invalidateQueries({ queryKey: ["pairing", "slack"] });
@@ -22,7 +23,6 @@ export function SlackPairingSection({ action }) {
     const code = manualCode.trim().toUpperCase();
     if (!code) return;
     redeemMutation.mutate({ code });
-    setManualCode("");
   };
 
   return html`
