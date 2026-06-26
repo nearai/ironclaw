@@ -158,6 +158,7 @@ jobs:
         run: >
           pytest
           tests/e2e/scenarios/test_reborn_webui_v2_smoke.py
+          tests/e2e/scenarios/test_reborn_v2_file_download.py
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_core.py
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_chat_actions.py
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_approval.py

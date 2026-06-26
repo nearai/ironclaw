@@ -2143,6 +2143,28 @@ Behavior adjustment:
   adapter-level Reborn follow-ups until standalone WebChat v2 exposes that
   provider harness directly.
 
+### Step 67: Reborn Agent File Download CI Inclusion
+
+Updated `.github/workflows/reborn-e2e.yml`.
+
+Moved the existing `test_reborn_v2_file_download.py` browser scenario into the
+Reborn WebUI v2 CI test list:
+
+- keeps the shared Reborn WebUI v2 smoke job exercising the agent-produced
+  `/workspace` file path flow;
+- covers browser rendering of assistant-referenced project-file chips;
+- covers both direct chip-download and preview-modal download paths for
+  agent-written CSV/PDF artifacts;
+- ensures the `local-dev-yolo` Reborn harness, mock LLM `builtin.write_file`
+  mapping, and authenticated blob-download path stay in the PR gate rather than
+  remaining supplemental local coverage.
+
+Behavior adjustment:
+
+- This scenario is Reborn-native rather than a direct legacy gateway endpoint
+  port, but it protects the functional browser/download outcome expected from
+  legacy file/artifact workflows on the current WebUI v2 surface.
+
 ## Open Migration Buckets
 
 Not yet ported:
