@@ -7,8 +7,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountAlias,
-    MountGrant, MountPermissions, MountView, PermissionMode, ResourceEstimate, ResourceUsage,
-    RuntimeKind, ThreadId, TrustClass, UserId, VirtualPath,
+    MountGrant, MountPermissions, MountView, PermissionMode, ProviderToolName, ResourceEstimate,
+    ResourceUsage, RuntimeKind, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
@@ -184,7 +184,7 @@ async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_ove
             provider_model_id: "model".to_string(),
             turn_id: Some("turn_1".to_string()),
             id: "call_1".to_string(),
-            name: "demo__echo".to_string(),
+            name: ProviderToolName::new("demo__echo").expect("provider tool name"),
             arguments: arguments.clone(),
             response_reasoning: None,
             reasoning: None,

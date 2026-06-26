@@ -4,7 +4,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
+};
 use ironclaw_llm::{
     CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
@@ -44,6 +46,10 @@ use rust_decimal::Decimal;
 use tokio::sync::Barrier;
 
 const STATIC_PROVIDER_ID: &str = "static-test-provider";
+
+fn provider_name(value: &str) -> ProviderToolName {
+    ProviderToolName::new(value).expect("provider tool name")
+}
 
 fn local_development_safety_context() -> InstructionSafetyContext {
     InstructionSafetyContext::local_development_noop()
@@ -336,7 +342,7 @@ async fn gateway_with_tool_surface_calls_complete_with_tools_and_returns_capabil
     assert_eq!(provider_replay.provider_id, STATIC_PROVIDER_ID);
     assert_eq!(provider_replay.provider_model_id, "host-selected-model");
     assert_eq!(provider_replay.provider_call_id, "call_1");
-    assert_eq!(provider_replay.provider_tool_name, "demo__echo");
+    assert_eq!(provider_replay.provider_tool_name.as_str(), "demo__echo");
     assert_eq!(
         provider_replay.arguments,
         serde_json::json!({"message":"hello"})
@@ -417,7 +423,7 @@ async fn gateway_recovers_capability_calls_from_textual_tool_syntax() {
 
     let registered = capabilities.registered.lock().unwrap();
     assert_eq!(registered.len(), 1);
-    assert_eq!(registered[0].name, "demo__echo");
+    assert_eq!(registered[0].name.as_str(), "demo__echo");
     assert_eq!(
         registered[0].arguments,
         serde_json::json!({"message":"hello"})
@@ -712,7 +718,7 @@ async fn gateway_reconstructs_provider_tool_roundtrip_from_tool_result_reference
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"hello"}),
         response_reasoning: Some("provider reasoning".to_string()),
@@ -789,7 +795,7 @@ async fn gateway_replays_model_observation_from_tool_result_reference_before_saf
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"hello"}),
         response_reasoning: Some("provider reasoning".to_string()),
@@ -843,7 +849,7 @@ async fn gateway_falls_back_to_safe_summary_for_invalid_model_observation() {
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"hello"}),
         response_reasoning: None,
@@ -884,7 +890,7 @@ async fn gateway_replays_resolved_tool_result_content_instead_of_summary() {
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"hello"}),
         response_reasoning: None,
@@ -1050,7 +1056,7 @@ async fn gateway_reconstructs_multi_tool_provider_turn_from_grouped_result_refer
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"first"}),
         response_reasoning: Some("provider reasoning".to_string()),
@@ -1062,7 +1068,7 @@ async fn gateway_reconstructs_multi_tool_provider_turn_from_grouped_result_refer
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_2".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"second"}),
         response_reasoning: Some("provider reasoning".to_string()),
@@ -1143,7 +1149,7 @@ async fn gateway_splits_adjacent_provider_tool_results_from_different_turns() {
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"first"}),
         response_reasoning: Some("first provider reasoning".to_string()),
@@ -1155,7 +1161,7 @@ async fn gateway_splits_adjacent_provider_tool_results_from_different_turns() {
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_2".to_string(),
         provider_call_id: "call_2".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"second"}),
         response_reasoning: Some("second provider reasoning".to_string()),
@@ -1260,7 +1266,7 @@ async fn gateway_keeps_same_turn_provider_roundtrip_when_plain_tool_result_is_in
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"first"}),
         response_reasoning: Some("provider reasoning".to_string()),
@@ -1272,7 +1278,7 @@ async fn gateway_keeps_same_turn_provider_roundtrip_when_plain_tool_result_is_in
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_2".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"second"}),
         response_reasoning: Some("provider reasoning".to_string()),
@@ -1354,7 +1360,7 @@ async fn gateway_degrades_provider_tool_replay_from_different_provider_route_to_
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"hello"}),
         response_reasoning: None,
@@ -1402,7 +1408,7 @@ async fn gateway_degrades_resolved_provider_mismatch_to_safe_summary() {
         provider_model_id: "host-selected-model".to_string(),
         provider_turn_id: "turn_1".to_string(),
         provider_call_id: "call_1".to_string(),
-        provider_tool_name: "demo__echo".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
         capability_id: CapabilityId::new("demo.echo").unwrap(),
         arguments: serde_json::json!({"message":"hello"}),
         response_reasoning: None,
@@ -2959,7 +2965,7 @@ impl GatewayCapabilityPort {
         Self {
             definitions: vec![ProviderToolDefinition {
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
-                name: "demo__echo".to_string(),
+                name: provider_name("demo__echo"),
                 description: "Echo input".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",

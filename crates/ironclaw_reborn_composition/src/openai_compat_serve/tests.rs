@@ -3,7 +3,7 @@ use super::*;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use ironclaw_host_api::{CapabilityId, ThreadId};
+use ironclaw_host_api::{CapabilityId, ProviderToolName, ThreadId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
     ProductOutboundTarget, ProjectionCursor,
@@ -447,7 +447,7 @@ fn run_output_provider_call() -> ProviderToolCallReferenceEnvelope {
         provider_model_id: "gpt-test".to_string(),
         provider_turn_id: "turn-1".to_string(),
         provider_call_id: "call_abc".to_string(),
-        provider_tool_name: "web_search".to_string(),
+        provider_tool_name: ProviderToolName::new("web_search").expect("provider tool name"),
         capability_id: CapabilityId::new("web.search").expect("capability id"),
         arguments: serde_json::json!({ "query": "rust" }),
         response_reasoning: None,
