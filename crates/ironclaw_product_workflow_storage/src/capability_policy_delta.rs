@@ -276,13 +276,14 @@ fn index_key(value: &'static str) -> Result<IndexKey, PolicyError> {
     IndexKey::new(value).map_err(|error| internal(error.to_string()))
 }
 
-/// Map a [`FilesystemError`] to a sanitized [`PolicyError`], logging the typed
+/// Map a [`FilesystemError`] to a sanitized [`PolicyError`], logging the real
 /// cause first (per `.claude/rules/error-handling.md` — never drop the cause).
+/// [`FilesystemError`]'s `Display` is host-path-safe (it carries virtual/scoped
+/// paths, never raw host paths), so it is safe to log in full.
 fn filesystem_error(operation: &'static str, error: FilesystemError) -> PolicyError {
-    let error_type = std::any::type_name_of_val(&error);
     tracing::error!(
         operation,
-        error_type,
+        error = %error,
         "capability policy delta store filesystem operation failed"
     );
     PolicyError::Unavailable {

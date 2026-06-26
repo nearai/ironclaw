@@ -1726,15 +1726,64 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             // dispatch only, with admin keys winning (model input is the base,
             // the policy config overlays). The replay branch above reuses the
             // already-merged leased payload, so it must NOT re-merge — re-merging
-            // would diverge from the approval-leased fingerprint. Fail-OPEN: the
-            // config source returns `Ok(None)` on any recoverable failure (D5),
-            // so the run continues with un-merged input rather than ending.
-            if let Some(config_source) = &self.policy_config_source
-                && let Some(config) = config_source
+            // would diverge from the approval-leased fingerprint.
+            //
+            // Fail-OPEN is structural here: a `config_for` fault must NOT end the
+            // turn (an `Err` maps to a terminal `HostUnavailable`, see
+            // `.claude/rules/agent-loop-capabilities.md`). We match the result
+            // explicitly — `Ok(Some)` merges, `Ok(None)` skips, and `Err` is
+            // logged at `debug!` (dispatch path: never `info!`/`warn!`) before
+            // continuing with the un-merged model input.
+            if let Some(config_source) = &self.policy_config_source {
+                match config_source
                     .config_for(&self.run_context, &request.capability_id)
-                    .await?
-            {
-                ironclaw_capability_policy::deep_merge_into(&mut input, &config);
+                    .await
+                {
+                    Ok(Some(config)) => {
+                        ironclaw_capability_policy::deep_merge_into(&mut input, &config);
+                        // The admin patch is overlaid AFTER the input was
+                        // validated/normalized against the capability schema, so
+                        // re-validate the merged payload exactly like the original
+                        // input. A validation failure is model-visible and
+                        // recoverable (the model can adjust its request), so route
+                        // it to `Failed { InvalidInput }` — never an `Err` that
+                        // would end the turn.
+                        input = match prepare_provider_arguments_with_detail(
+                            &input,
+                            &capability.parameters_schema,
+                            "capability input",
+                        ) {
+                            Ok(input) => input,
+                            Err(error) => {
+                                let result = Ok(CapabilityOutcome::Failed(CapabilityFailure {
+                                    error_kind: CapabilityFailureKind::InvalidInput,
+                                    safe_summary: error.error.safe_summary,
+                                    detail: error.detail,
+                                }));
+                                guard.commit();
+                                self.record_loop_completed(
+                                    &idempotency_key,
+                                    requested_invocation_id,
+                                    result.clone(),
+                                )?;
+                                return result;
+                            }
+                        };
+                        // Re-apply the sandbox-plan wrapping so the merged payload
+                        // is normalized like the original (process-sandbox plans
+                        // round-trip through `SandboxProcessPlan` validation).
+                        input = host_runtime_input_for_capability(&request.capability_id, input)?;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::debug!(
+                            capability_id = request.capability_id.as_str(),
+                            error = %error,
+                            "policy config source faulted; continuing with un-merged \
+                             input (fail-open, #5261 D5)"
+                        );
+                    }
+                }
             }
             (input, capability.estimate.clone())
         };
@@ -4477,6 +4526,80 @@ mod tests {
             config_source.call_count(),
             0,
             "replay branch must NOT consult the config source (no re-merge)"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_resume_replay_does_not_remerge_policy_config() {
+        use ironclaw_turns::run_profile::{CapabilityAuthResume, CapabilityAuthResumeReplay};
+
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let runtime = Arc::new(RecordingResumeHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let config_source = Arc::new(RecordingConfigSource::with_patch(serde_json::json!({
+            "injected": "must-not-be-applied-on-replay"
+        })));
+
+        let mut context = execution_context("thread-policy-config-auth-replay");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id.clone(),
+                dispatch_trust_decision(),
+            )])),
+            dummy_input_resolver(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+        )
+        .with_policy_config_source(Some(
+            config_source.clone() as Arc<dyn LoopCapabilityConfigSource>
+        ))
+        .port_for_run_context(run_context);
+
+        let invocation = visible_runtime_invocation(&port).await;
+        // The auth-resume replay payload already carries the merged config from
+        // the first dispatch; the resume branch must replay it verbatim, never
+        // re-running the config source (which would diverge from the lease).
+        let auth_resume = CapabilityAuthResume {
+            resume_token: CapabilityResumeToken::new(invocation.activity_id.to_string())
+                .expect("valid resume token"),
+            prior_approval: None,
+            replay: Some(CapabilityAuthResumeReplay {
+                input: serde_json::json!({"message": "leased"}),
+                estimate: ResourceEstimate::default(),
+            }),
+        };
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: invocation.activity_id,
+                surface_version: invocation.surface_version,
+                capability_id: invocation.capability_id,
+                input_ref: invocation.input_ref,
+                approval_resume: None,
+                auth_resume: Some(auth_resume),
+            })
+            .await
+            .expect("matching auth resume succeeds");
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        assert_eq!(
+            runtime.auth_resume_request_count(),
+            1,
+            "auth resume dispatched once"
+        );
+        assert_eq!(
+            config_source.call_count(),
+            0,
+            "auth-resume replay branch must NOT consult the config source (no re-merge)"
         );
     }
 
@@ -7972,6 +8095,7 @@ mod tests {
     struct RecordingResumeHostRuntime {
         capabilities: Vec<VisibleCapability>,
         resume_requests: Mutex<Vec<RuntimeCapabilityResumeRequest>>,
+        auth_resume_requests: Mutex<Vec<RuntimeCapabilityAuthResumeRequest>>,
     }
 
     impl RecordingResumeHostRuntime {
@@ -7979,6 +8103,7 @@ mod tests {
             Self {
                 capabilities,
                 resume_requests: Mutex::new(Vec::new()),
+                auth_resume_requests: Mutex::new(Vec::new()),
             }
         }
 
@@ -7986,6 +8111,13 @@ mod tests {
             self.resume_requests
                 .lock()
                 .expect("resume requests lock")
+                .len()
+        }
+
+        fn auth_resume_request_count(&self) -> usize {
+            self.auth_resume_requests
+                .lock()
+                .expect("auth resume requests lock")
                 .len()
         }
     }
@@ -8011,6 +8143,27 @@ mod tests {
                 RuntimeCapabilityCompleted {
                     capability_id: request.capability_id,
                     output: serde_json::json!({"resumed": true}),
+                    display_preview: None,
+                    usage: ResourceUsage {
+                        output_bytes: RECORDING_OUTPUT_BYTES,
+                        ..ResourceUsage::default()
+                    },
+                },
+            )))
+        }
+
+        async fn auth_resume_capability(
+            &self,
+            request: RuntimeCapabilityAuthResumeRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            self.auth_resume_requests
+                .lock()
+                .expect("auth resume requests lock")
+                .push(request.clone());
+            Ok(RuntimeCapabilityOutcome::Completed(Box::new(
+                RuntimeCapabilityCompleted {
+                    capability_id: request.capability_id,
+                    output: serde_json::json!({"auth_resumed": true}),
                     display_preview: None,
                     usage: ResourceUsage {
                         output_bytes: RECORDING_OUTPUT_BYTES,
