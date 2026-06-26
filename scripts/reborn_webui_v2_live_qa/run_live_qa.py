@@ -2600,8 +2600,126 @@ def _assert_openai_error(
         "invalid_request_error",
         "authentication_error",
         "not_found_error",
+        "conflict_error",
     }:
         raise AssertionError(f"unexpected error.type={error.get('type')!r}")
+
+
+def _response_output_text(payload: dict[str, object]) -> str:
+    parts: list[str] = []
+
+    def collect(value: object) -> None:
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                collect(item)
+
+    collect(payload.get("output"))
+    return "\n".join(parts)
+
+
+def _assert_response_completed(
+    payload: dict[str, object],
+    *,
+    marker: str,
+    expected_id: str | None = None,
+) -> str:
+    response_id = payload.get("id")
+    if not isinstance(response_id, str) or not response_id.startswith("resp_"):
+        raise AssertionError(f"response id is not a resp_* string: {response_id!r}")
+    if expected_id is not None and response_id != expected_id:
+        raise AssertionError(f"response id {response_id!r} did not match {expected_id!r}")
+    if payload.get("object") != "response":
+        raise AssertionError(f"response object={payload.get('object')!r}, expected 'response'")
+    if payload.get("status") != "completed":
+        raise AssertionError(f"response status={payload.get('status')!r}, expected completed")
+    text = _response_output_text(payload)
+    if marker not in text:
+        raise AssertionError(f"response output did not contain marker {marker!r}: {text[:500]!r}")
+    return response_id
+
+
+async def case_responses_create_retrieve_live_llm_contract(ctx: LiveQaContext) -> ProbeResult:
+    import httpx
+
+    started = time.monotonic()
+    case_name = "responses_create_retrieve_live_llm_contract"
+    marker = f"RESPONSES_LIVE_QA_OK_{uuid.uuid4().hex[:8].upper()}"
+    request_body = {
+        "model": "gpt-reborn",
+        "input": (
+            "Live Responses API QA verification. Reply with exactly this token "
+            f"and no extra words: {marker}"
+        ),
+    }
+    idempotency_key = f"responses-live-qa-{uuid.uuid4().hex}"
+    observed: dict[str, object] = {
+        "marker": marker,
+        "create_path": "/v1/responses",
+        "retrieve_path": "/api/v1/responses/{response_id}",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=180.0, follow_redirects=False) as client:
+            created = await client.post(
+                f"{ctx.base_url}/v1/responses",
+                json=request_body,
+                headers={**_auth_json_headers(), "idempotency-key": idempotency_key},
+            )
+            _assert_status(created, 200, "live POST /v1/responses")
+            created_body = await _response_json(created)
+            response_id = _assert_response_completed(created_body, marker=marker)
+            observed["response_id"] = response_id
+            observed["create_status"] = created.status_code
+
+            retrieved = await client.get(
+                f"{ctx.base_url}/api/v1/responses/{response_id}",
+                headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
+            )
+            _assert_status(
+                retrieved,
+                200,
+                "live GET /api/v1/responses/{response_id}",
+            )
+            retrieved_body = await _response_json(retrieved)
+            _assert_response_completed(
+                retrieved_body,
+                marker=marker,
+                expected_id=response_id,
+            )
+            observed["retrieve_status"] = retrieved.status_code
+
+            replayed = await client.post(
+                f"{ctx.base_url}/api/v1/responses",
+                json=request_body,
+                headers={**_auth_json_headers(), "idempotency-key": idempotency_key},
+            )
+            _assert_status(replayed, 200, "idempotent replay POST /api/v1/responses")
+            replayed_body = await _response_json(replayed)
+            _assert_response_completed(
+                replayed_body,
+                marker=marker,
+                expected_id=response_id,
+            )
+            observed["replay_status"] = replayed.status_code
+
+            conflict = await client.post(
+                f"{ctx.base_url}/v1/responses",
+                json={**request_body, "input": f"different input for {marker}"},
+                headers={**_auth_json_headers(), "idempotency-key": idempotency_key},
+            )
+            _assert_status(conflict, 409, "idempotency conflict POST /v1/responses")
+            conflict_body = await _response_json(conflict)
+            _assert_openai_error(conflict_body, code="conflict")
+            observed["conflict_status"] = conflict.status_code
+
+        return _result(case_name, True, started, observed)
+    except Exception as exc:
+        return _result(case_name, False, started, {"error": str(exc), **observed})
 
 
 async def case_responses_create_live_http_contract(ctx: LiveQaContext) -> ProbeResult:
@@ -5243,6 +5361,14 @@ CASES: dict[str, CaseSpec] = {
     "webui_static_shell_csp_nonce": CaseSpec(
         case_webui_static_shell_csp_nonce,
         qa_matrix_test_ids=["REBCLI-063-TC-01"],
+    ),
+    "responses_create_retrieve_live_llm_contract": CaseSpec(
+        case_responses_create_retrieve_live_llm_contract,
+        qa_matrix_test_ids=[
+            "REBCLI-057-TC-01",
+            "REBCLI-057-TC-03",
+            "REBCLI-058-TC-01",
+        ],
     ),
     "responses_create_live_http_contract": CaseSpec(
         case_responses_create_live_http_contract,
