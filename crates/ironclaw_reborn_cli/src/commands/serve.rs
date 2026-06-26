@@ -499,10 +499,26 @@ impl ServeCommand {
                 &bundle.readiness,
             );
 
+            #[cfg(feature = "capability-policy")]
+            let capability_admin_tenant_id = tenant_id.clone();
             let mut serve_config = WebuiServeConfig::new(tenant_id, authenticator, allowed_origins)
                 .with_default_agent_id(default_agent_id.clone());
             if let Some(project_id) = default_project_id.clone() {
                 serve_config = serve_config.with_default_project_id(project_id);
+            }
+            // Admin capability-availability write surface (#5268): tenant-shared
+            // extension install/uninstall/list, admin-gated, writing the same
+            // scoped-lifecycle store the #5267 resolver reads.
+            #[cfg(feature = "capability-policy")]
+            if let Some(mount) = ironclaw_reborn_composition::build_capability_admin_route_mount(
+                &runtime,
+                capability_admin_tenant_id,
+            ) {
+                serve_config = serve_config.with_protected_route_mount(mount);
+                eprintln!(
+                    "ironclaw-reborn: capability admin routes mounted \
+                     (PUT/DELETE/GET /api/webchat/v2/admin/extensions/...)"
+                );
             }
             #[cfg(feature = "openai-compat-beta")]
             {
