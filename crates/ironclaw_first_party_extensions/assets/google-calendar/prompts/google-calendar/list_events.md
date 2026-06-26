@@ -1,5 +1,7 @@
 Use `google-calendar.list_events` for read-only retrieval of events on a Google Calendar.
 
-Pass `calendar_id` when the user names a specific calendar; omit it to use the primary calendar. Use `time_min`, `time_max`, `page_token`, and `max_results` only when narrowing a date range or paginating results.
+By default it returns upcoming expanded events on the primary calendar, ordered by start time, with `time_min` filled as the current UTC time and `max_results` defaulting to 25. Pass an explicit earlier `time_min` only when the user asks for past or historical events. Pass both `time_min` and `time_max` for bounded windows that start after now, such as tomorrow, next week, or after 5pm; `time_max` alone means from now until that bound. When paginating a single calendar with `page_token`, repeat the same calendar and original filters from the first request (`time_min`, `time_max`, `max_results`, and `query`). When paginating merged multi-calendar results, keep those same original filters and pass `page_tokens` using the per-calendar tokens returned in `nextPageTokens`; do not use single `page_token` with `calendar_ids` or `include_all_calendars`.
+
+Pass `calendar_id` when the user names a specific calendar. For all meetings across calendars, either pass `include_all_calendars: true` or call `list_calendars` first and pass the relevant `calendar_ids`. Use `query` for Google Calendar text search when the user names a meeting, attendee, location, or keyword.
 
 This capability reads from the Google Calendar API through host HTTP egress. It requires a configured Google credential account with Calendar read scope.
