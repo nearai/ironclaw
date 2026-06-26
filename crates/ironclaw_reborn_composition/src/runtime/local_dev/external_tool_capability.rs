@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, InvocationId, RuntimeKind};
+use ironclaw_host_api::{CapabilityId, InvocationId, ProviderToolName, RuntimeKind};
 use ironclaw_loop_support::{
     CapabilityResultWrite, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
@@ -64,11 +64,11 @@ pub(super) fn wrap_local_dev_external_tools(
 struct ResolvedSurface {
     version: CapabilitySurfaceVersion,
     specs_by_capability_id: HashMap<CapabilityId, ToolSpec>,
-    capability_ids_by_tool_name: HashMap<String, CapabilityId>,
+    capability_ids_by_tool_name: HashMap<ProviderToolName, CapabilityId>,
 }
 
 struct ToolSpec {
-    tool_name: String,
+    tool_name: ProviderToolName,
     description: String,
     parameters_schema: serde_json::Value,
 }
@@ -82,7 +82,7 @@ impl ToolSpec {
             capability_id: capability_id.clone(),
             provider: None,
             runtime: RuntimeKind::System,
-            safe_name: self.tool_name.clone(),
+            safe_name: self.tool_name.as_str().to_string(),
             safe_description: self.description.clone(),
             // External tools are client-side; the host never runs them in
             // parallel, and they always park, so mark them exclusive.
@@ -95,12 +95,12 @@ impl ToolSpec {
         &self,
         capability_id: &CapabilityId,
     ) -> Result<ProviderToolDefinition, AgentLoopHostError> {
-        ProviderToolDefinition::from_parts(
+        Ok(ProviderToolDefinition::from_typed_parts(
             capability_id.clone(),
             self.tool_name.clone(),
             self.description.clone(),
             self.parameters_schema.clone(),
-        )
+        ))
     }
 }
 
@@ -135,7 +135,9 @@ fn external_tool_capability_id(tool_name: &str) -> Result<CapabilityId, AgentLoo
     })
 }
 
-fn validate_external_tool_name_for_provider(tool_name: &str) -> Result<(), AgentLoopHostError> {
+fn validate_external_tool_name_for_provider(
+    tool_name: &str,
+) -> Result<ProviderToolName, AgentLoopHostError> {
     ProviderToolDefinition::validate_name(tool_name).map_err(|error| {
         AgentLoopHostError::new(
             error.kind,
@@ -176,7 +178,7 @@ impl ExternalToolCapabilityPort {
             .unwrap_or(false)
     }
 
-    fn capability_id_for_tool_name(&self, tool_name: &str) -> Option<CapabilityId> {
+    fn capability_id_for_tool_name(&self, tool_name: &ProviderToolName) -> Option<CapabilityId> {
         self.surface.lock().ok().and_then(|surface| {
             surface
                 .as_ref()
@@ -260,7 +262,7 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
-        if let Some(capability_id) = self.capability_id_for_tool_name(tool_call.name.as_str()) {
+        if let Some(capability_id) = self.capability_id_for_tool_name(&tool_call.name) {
             return Ok(ProviderToolCallCapabilityIds::single(capability_id));
         }
         self.inner.provider_tool_call_capability_ids(tool_call)
@@ -270,10 +272,7 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<(), AgentLoopHostError> {
-        if self
-            .capability_id_for_tool_name(tool_call.name.as_str())
-            .is_some()
-        {
+        if self.capability_id_for_tool_name(&tool_call.name).is_some() {
             if tool_call.turn_id.is_none() {
                 return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::InvalidInvocation,
@@ -293,7 +292,7 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
             tool_call,
             activity_id,
         } = request;
-        let Some(capability_id) = self.capability_id_for_tool_name(tool_call.name.as_str()) else {
+        let Some(capability_id) = self.capability_id_for_tool_name(&tool_call.name) else {
             return self
                 .inner
                 .register_provider_tool_call(RegisterProviderToolCallRequest {
@@ -363,7 +362,7 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
                     "external tool name shadows a host capability",
                 ));
             }
-            validate_external_tool_name_for_provider(spec.name())?;
+            let tool_name = validate_external_tool_name_for_provider(spec.name())?;
             let capability_id = external_tool_capability_id(spec.name())?;
             if surface
                 .descriptors
@@ -376,9 +375,9 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
                     "external tool conflicts with another capability id",
                 ));
             }
-            capability_ids_by_tool_name.insert(spec.name().to_string(), capability_id.clone());
+            capability_ids_by_tool_name.insert(tool_name.clone(), capability_id.clone());
             let tool_spec = ToolSpec {
-                tool_name: spec.name().to_string(),
+                tool_name,
                 description: spec.description().to_string(),
                 parameters_schema: spec.parameters_schema().clone(),
             };

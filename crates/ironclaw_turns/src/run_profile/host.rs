@@ -1364,17 +1364,31 @@ impl ProviderToolDefinition {
         description: impl Into<String>,
         parameters: serde_json::Value,
     ) -> Result<Self, AgentLoopHostError> {
-        Ok(Self {
+        let name = ProviderToolName::new(name.into()).map_err(provider_tool_name_error)?;
+        Ok(Self::from_typed_parts(
             capability_id,
-            name: ProviderToolName::new(name.into()).map_err(provider_tool_name_error)?,
-            description: description.into(),
+            name,
+            description,
             parameters,
-        })
+        ))
     }
 
-    pub fn validate_name(name: &str) -> Result<(), AgentLoopHostError> {
-        ProviderToolName::new(name).map_err(provider_tool_name_error)?;
-        Ok(())
+    pub fn from_typed_parts(
+        capability_id: CapabilityId,
+        name: ProviderToolName,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
+        Self {
+            capability_id,
+            name,
+            description: description.into(),
+            parameters,
+        }
+    }
+
+    pub fn validate_name(name: &str) -> Result<ProviderToolName, AgentLoopHostError> {
+        ProviderToolName::new(name).map_err(provider_tool_name_error)
     }
 }
 
