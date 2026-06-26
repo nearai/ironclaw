@@ -3111,13 +3111,43 @@ Validation:
 - `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_*.py -q`
   -> `155 passed`
 
+### Step 103: Command Palette Affordance Port
+
+Extended `tests/e2e/scenarios/test_reborn_webui_v2_legacy_chat_actions.py`.
+
+Ported the Reborn-equivalent command discovery/navigation affordance behind
+legacy chat slash-autocomplete coverage:
+
+- opened the global Reborn command palette with `Ctrl+K`;
+- asserted the browser-visible command list contains chat/navigation actions;
+- filtered the palette to the Settings command; and
+- submitted the active command with Enter and asserted the app navigates to
+  `/v2/settings`.
+
+Behavior mapping:
+
+- Legacy v1 rendered an inline chat-owned `#slash-autocomplete` menu that mixed
+  built-in slash commands and installed skills. Reborn still does not expose
+  that inline slash menu, but it does expose a global command palette for
+  command discovery and navigation plus separate chat-owned channel-connect
+  command handling. This step protects the command-palette half of that
+  browser affordance; inline skill insertion remains non-portable unless the
+  Reborn product intentionally adds that surface.
+
+Validation:
+
+- `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_chat_actions.py -q`
+  -> `3 passed`
+- `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_*.py -q`
+  -> `156 passed`
+
 ## Open Migration Buckets
 
 Not yet ported:
 
-- remaining legacy chat UI affordances that have Reborn equivalents; the legacy
-  inline slash autocomplete menu has no current Reborn v2 surface and is
-  documented above;
+- legacy inline slash autocomplete skill insertion, because Reborn WebChat v2
+  currently has no inline `#slash-autocomplete` menu; the Reborn command
+  palette and channel-connect command paths are covered;
 - remaining legacy SSE/history edge cases only where Reborn exposes a matching
   product concept; active-thread fallback and read-only external-channel refresh
   are legacy v1 routing semantics rather than current standalone Reborn v2 UI

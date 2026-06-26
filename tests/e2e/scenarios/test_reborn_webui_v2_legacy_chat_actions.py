@@ -1,5 +1,7 @@
 """Reborn WebChat v2 ports of legacy chat action coverage."""
 
+import re
+
 from playwright.async_api import expect
 
 from helpers import SEL_V2
@@ -101,3 +103,23 @@ async def test_reborn_legacy_selection_copy_forces_plain_text(reborn_v2_page):
     assert copied["defaultPrevented"] is True
     assert "the pull request" in copied["text"]
     assert copied["html"] == ""
+
+
+async def test_reborn_legacy_command_palette_filters_and_navigates(reborn_v2_page):
+    """Port the command-discovery affordance to Reborn's command palette."""
+    page = reborn_v2_page
+
+    await page.keyboard.press("Control+K")
+    palette = page.get_by_role("dialog", name="Command palette")
+    await expect(palette).to_be_visible(timeout=5000)
+    await expect(palette.get_by_role("button", name="New chat")).to_be_visible()
+    await expect(palette.get_by_role("button", name="Go to Extensions")).to_be_visible()
+    await expect(palette.get_by_role("button", name="Go to Settings")).to_be_visible()
+
+    search = palette.get_by_placeholder("Type a command or search")
+    await search.fill("settings")
+    await expect(palette.get_by_role("button", name="Go to Settings")).to_be_visible()
+    await expect(palette.get_by_role("button", name="Go to Extensions")).to_have_count(0)
+
+    await search.press("Enter")
+    await expect(page).to_have_url(re.compile(r".*/v2/settings.*"), timeout=10000)
