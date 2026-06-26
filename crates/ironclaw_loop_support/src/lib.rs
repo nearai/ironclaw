@@ -2071,6 +2071,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn model_gateway_error_sanitizes_raw_detail_without_losing_budget_gate() {
+        let gate_ref = LoopGateRef::new("gate:budget-static-check").expect("gate ref");
+        let raw_detail = format!(
+            "provider 500: {} tool temporarily unavailable; api_key=secret; /private/path",
+            "System"
+        );
+
+        let error = HostManagedModelError::new(
+            HostManagedModelErrorKind::BudgetApprovalRequired,
+            raw_detail.as_str(),
+        )
+        .with_gate_ref(gate_ref.clone());
+
+        assert_eq!(error.safe_summary, "model request needs budget approval");
+        assert!(!error.safe_summary.contains("System tool"));
+        assert!(!error.safe_summary.contains("secret"));
+        assert!(!error.safe_summary.contains("/private/path"));
+
+        let host_error = model_gateway_error(error);
+
+        assert_eq!(
+            host_error.kind,
+            AgentLoopHostErrorKind::BudgetApprovalRequired
+        );
+        assert_eq!(host_error.gate_ref, Some(gate_ref));
+        assert_eq!(
+            host_error.safe_summary,
+            "model request needs budget approval"
+        );
+        assert!(!host_error.safe_summary.contains("System tool"));
+        assert!(!host_error.safe_summary.contains("secret"));
+        assert!(!host_error.safe_summary.contains("/private/path"));
+    }
+
+    #[test]
     fn personal_context_admitted_summary_empty_paths_uses_count_only() {
         let summary = personal_context_admitted_summary(&[]).unwrap();
 
