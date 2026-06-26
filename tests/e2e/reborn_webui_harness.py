@@ -23,6 +23,8 @@ from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, wait_for_ready
 USER_ID = "reborn-v2-e2e-user"
 DEFAULT_PROFILE = "local-dev"
 YOLO_PROFILE = "local-dev-yolo"
+DEFAULT_MODEL = "mock-model"
+VISION_MODEL = "gpt-4o"
 
 
 def find_free_port() -> int:
@@ -64,7 +66,10 @@ async def stop_process(proc, *, sig=signal.SIGINT, timeout: float = 10) -> None:
 
 
 def write_config_toml(
-    path: Path, mock_llm_server: str, profile: str = DEFAULT_PROFILE
+    path: Path,
+    mock_llm_server: str,
+    profile: str = DEFAULT_PROFILE,
+    model: str = DEFAULT_MODEL,
 ) -> None:
     """Seed a sparse Reborn config that selects the mock OpenAI-compatible LLM."""
     path.write_text(
@@ -84,7 +89,7 @@ env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
 
 [llm.default]
 provider_id = "openai"
-model = "mock-model"
+model = "{model}"
 api_key_env = "MOCK_LLM_API_KEY"
 base_url = "{mock_llm_server}/v1"
 """,
@@ -98,12 +103,18 @@ async def start_reborn_webui_v2_server(
     mock_llm_server: str,
     home_dir: Path,
     profile: str = DEFAULT_PROFILE,
+    model: str = DEFAULT_MODEL,
     log_prefix: str = "reborn-v2",
 ) -> tuple[object, str]:
     """Start ``ironclaw-reborn serve`` and return ``(process, base_url)``."""
     reborn_home = home_dir / "reborn-home"
     reborn_home.mkdir(parents=True, exist_ok=True)
-    write_config_toml(reborn_home / "config.toml", mock_llm_server, profile=profile)
+    write_config_toml(
+        reborn_home / "config.toml",
+        mock_llm_server,
+        profile=profile,
+        model=model,
+    )
 
     proc = None
     last_stderr = ""
@@ -220,6 +231,24 @@ async def reborn_v2_yolo_server(ironclaw_reborn_binary, mock_llm_server, tmp_pat
 
 
 @pytest.fixture(scope="module")
+async def reborn_v2_vision_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_factory):
+    """Start Reborn with a vision-classified model id backed by the mock LLM."""
+    home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-vision-home")
+    proc, base_url = await start_reborn_webui_v2_server(
+        ironclaw_reborn_binary=ironclaw_reborn_binary,
+        mock_llm_server=mock_llm_server,
+        home_dir=home_dir,
+        profile=DEFAULT_PROFILE,
+        model=VISION_MODEL,
+        log_prefix="reborn-v2-vision",
+    )
+    try:
+        yield base_url
+    finally:
+        await close_reborn_server(proc)
+
+
+@pytest.fixture(scope="module")
 async def reborn_v2_browser():
     """Chromium instance for Reborn v2 tests, independent of the legacy gateway."""
     from playwright.async_api import Error as PlaywrightError
@@ -257,6 +286,16 @@ async def reborn_v2_yolo_page(reborn_v2_yolo_server, reborn_v2_browser):
     )
     page = await context.new_page()
     await open_reborn_v2_page(page, reborn_v2_yolo_server)
+    yield page
+    await context.close()
+
+
+@pytest.fixture
+async def reborn_v2_vision_page(reborn_v2_vision_server, reborn_v2_browser):
+    """Fresh authenticated page backed by a vision-classified mock model."""
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    await open_reborn_v2_page(page, reborn_v2_vision_server)
     yield page
     await context.close()
 

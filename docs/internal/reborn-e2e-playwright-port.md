@@ -169,6 +169,32 @@ Legacy-only / non-1:1 case:
   storage/model projection remains covered at lower contract layers and the
   Reborn browser port verifies text-plus-attachment send/reload.
 
+### Step 4c: Legacy Attachment Extraction Port
+
+Extended `test_reborn_webui_v2_legacy_attachments.py`.
+
+Ported the model-payload assertions from legacy attachment tests to Reborn's
+native attachment projection:
+
+- PDF, text, and PPTX extracted text reach the mock LLM request;
+- image attachments are sent through the multimodal data URL path when the
+  selected model is vision-classified;
+- corrupt PDF attachments still reach the model with Reborn's
+  `text extraction unavailable` fallback marker.
+
+Behavior adjustment:
+
+- The legacy v1 gateway persisted an explicit `[Failed to extract ...]`
+  placeholder. Reborn stores `extracted_text = None` on extraction failure and
+  renders `[Document attached - text extraction unavailable]` in the
+  model-visible attachment block. The Reborn port asserts that fallback instead
+  of the legacy string.
+- The shared Reborn harness now has a dedicated vision-model fixture selecting
+  `gpt-4o` while still routing to the deterministic mock LLM. The default
+  `mock-model` remains intentionally text-only, matching Reborn's production
+  vision gate that drops image parts for non-vision models while preserving the
+  stored attachment pointer.
+
 ### Step 5: Legacy Chat Action Port
 
 Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_chat_actions.py`.
@@ -201,8 +227,6 @@ CI update:
 
 Not yet ported:
 
-- deeper legacy attachment variants: PDF/PPTX extraction and unextractable
-  placeholder assertions;
 - remaining legacy chat UI affordances that have Reborn equivalents;
 - legacy SSE reconnect/history-reload edge cases;
 - DOM pruning/resource-limit scenarios;
