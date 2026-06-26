@@ -187,6 +187,27 @@ impl RootFilesystem for PostgresRootFilesystem {
         postgres_get_with_client(&client, path).await
     }
 
+    async fn get_batch(
+        &self,
+        paths: Vec<VirtualPath>,
+    ) -> Result<Vec<Option<VersionedEntry>>, FilesystemError> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        if paths.len() > crate::MAX_BATCH_GETS {
+            return Err(FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::ReadFile,
+                reason: format!(
+                    "get_batch has {} paths, exceeding MAX_BATCH_GETS ({})",
+                    paths.len(),
+                    crate::MAX_BATCH_GETS
+                ),
+            });
+        }
+        let client = self.client().await?;
+        postgres_get_batch_with_client(&client, paths).await
+    }
+
     async fn ensure_index(
         &self,
         path: &VirtualPath,
@@ -1385,6 +1406,66 @@ async fn postgres_get_with_client(
         entry,
         version: record_version_from_i64(path, version_raw)?,
     }))
+}
+
+/// Read every requested path in one `WHERE path = ANY($1)` query and
+/// reassemble the rows into one slot per input path, **in input order**
+/// (`None` = absent or a directory row). Reuses the same row→[`VersionedEntry`]
+/// decoding the single-path [`postgres_get_with_client`] uses. Indexing by path
+/// string and cloning out of the map (rather than draining) keeps the result
+/// correct even when the input contains duplicate paths.
+#[cfg(feature = "postgres")]
+async fn postgres_get_batch_with_client(
+    client: &deadpool_postgres::Object,
+    paths: Vec<VirtualPath>,
+) -> Result<Vec<Option<VersionedEntry>>, FilesystemError> {
+    // Probe path for any infrastructure error: the batch query has no single
+    // path in scope, so attribute it to the first requested path. `paths` is
+    // guaranteed non-empty by the caller's guard.
+    let probe = paths[0].clone();
+    let path_strs: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
+    let rows = cached_query(
+        client,
+        r#"
+            SELECT path, contents, is_dir, content_type, kind, indexed, version
+            FROM root_filesystem_entries
+            WHERE path = ANY($1)
+            "#,
+        &[&path_strs],
+    )
+    .await
+    .map_err(|error| db_error(probe, FilesystemOperation::ReadFile, error))?;
+
+    let mut by_path: std::collections::HashMap<String, VersionedEntry> =
+        std::collections::HashMap::with_capacity(rows.len());
+    for row in &rows {
+        // A directory row is `None` to readers, mirroring `get`.
+        let is_dir: bool = row.get("is_dir");
+        if is_dir {
+            continue;
+        }
+        let row_path_str: String = row.get("path");
+        let row_path = VirtualPath::new(row_path_str.clone())?;
+        let body: Vec<u8> = row.get("contents");
+        let content_type_raw: String = row.get("content_type");
+        let kind_raw: Option<String> = row.get("kind");
+        let indexed_value: serde_json::Value = row.get("indexed");
+        let version_raw: i64 = row.get("version");
+        let entry = build_entry(&row_path, body, content_type_raw, kind_raw, indexed_value)?;
+        let version = record_version_from_i64(&row_path, version_raw)?;
+        by_path.insert(
+            row_path_str,
+            VersionedEntry {
+                path: row_path,
+                entry,
+                version,
+            },
+        );
+    }
+    Ok(paths
+        .into_iter()
+        .map(|path| by_path.get(path.as_str()).cloned())
+        .collect())
 }
 
 #[cfg(feature = "postgres")]

@@ -161,6 +161,34 @@ where
         self.root.get(&virtual_path).await
     }
 
+    /// Read several entries in one call.
+    ///
+    /// Each [`ScopedPath`] is resolved and permission-checked (as a read)
+    /// against this scope's [`MountView`] before any backend dispatch; the
+    /// resolved [`VirtualPath`]s are then handed to
+    /// [`RootFilesystem::get_batch`], which returns one
+    /// [`Option<VersionedEntry>`] per path in input order (`None` = absent).
+    /// Pure latency: no atomicity, no CAS. The mount view is resolved once for
+    /// the whole batch; per-path authorization mirrors the per-leg loop in
+    /// [`put_batch`](Self::put_batch). See [`RootFilesystem::get_batch`] for the
+    /// always-available / empty-is-`Ok(vec![])` contract.
+    pub async fn get_batch(
+        &self,
+        scope: &ResourceScope,
+        paths: Vec<ScopedPath>,
+    ) -> Result<Vec<Option<VersionedEntry>>, FilesystemError> {
+        let view = self.mount_view(scope)?;
+        let mut resolved = Vec::with_capacity(paths.len());
+        for path in &paths {
+            resolved.push(resolve_with_permission_view(
+                &view,
+                path,
+                FilesystemOperation::ReadFile,
+            )?);
+        }
+        self.root.get_batch(resolved).await
+    }
+
     /// Filtered query over `prefix`.
     pub async fn query(
         &self,

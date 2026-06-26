@@ -126,6 +126,43 @@ impl CompositeRootFilesystem {
             .max_by_key(|mount| mount.descriptor.virtual_root.as_str().len())
             .ok_or_else(|| FilesystemError::MountNotFound { path: path.clone() })
     }
+
+    /// Resolve a multi-path batch to the single [`CompositeMount`] that owns
+    /// every path, or fail closed.
+    ///
+    /// A batch may not straddle mounts: every path must resolve to the same
+    /// mount as the first item, else the whole call fails `PathOutsideMount`.
+    /// Mount identity is compared by pointer on the resolved `CompositeMount`,
+    /// so one `matching_mount` resolve per path settles routing. Shared by
+    /// [`put_batch`](RootFilesystem::put_batch) and
+    /// [`get_batch`](RootFilesystem::get_batch) composite dispatch.
+    ///
+    /// An empty `items` slice returns [`FilesystemError::BackendInfrastructure`]
+    /// (`op`) — no path is in scope to resolve. Callers whose empty case is a
+    /// valid no-op (e.g. `get_batch`) must short-circuit *before* calling this.
+    fn resolve_single_mount_batch<'a, T>(
+        &'a self,
+        items: &[T],
+        path_of: impl Fn(&T) -> &VirtualPath,
+        op: FilesystemOperation,
+    ) -> Result<&'a CompositeMount, FilesystemError> {
+        let Some(first) = items.first() else {
+            return Err(FilesystemError::BackendInfrastructure {
+                operation: op,
+                reason: "empty batch".to_string(),
+            });
+        };
+        let first_mount = self.matching_mount(path_of(first))?;
+        for item in &items[1..] {
+            let mount = self.matching_mount(path_of(item))?;
+            if !std::ptr::eq(mount, first_mount) {
+                return Err(FilesystemError::PathOutsideMount {
+                    path: path_of(item).clone(),
+                });
+            }
+        }
+        Ok(first_mount)
+    }
 }
 
 impl Default for CompositeRootFilesystem {
@@ -267,27 +304,28 @@ impl RootFilesystem for CompositeRootFilesystem {
         self.matching_mount(path)?.backend.begin(path).await
     }
 
-    // A batch may not straddle mounts: every path must resolve to the same
-    // mount as the first leg, else the whole call fails `PathOutsideMount` and
-    // nothing is written. Identity is compared by pointer on the resolved
-    // `CompositeMount`, so a single resolve per path settles routing.
+    // A write batch may not straddle mounts (see `resolve_single_mount_batch`):
+    // every path must resolve to the same mount as the first leg, else the whole
+    // call fails `PathOutsideMount` and nothing is written.
     async fn put_batch(&self, puts: Vec<BatchPut>) -> Result<Vec<RecordVersion>, FilesystemError> {
-        if puts.is_empty() {
-            return Err(FilesystemError::BackendInfrastructure {
-                operation: FilesystemOperation::PutBatch,
-                reason: "empty put_batch".to_string(),
-            });
+        let mount =
+            self.resolve_single_mount_batch(&puts, |p| &p.path, FilesystemOperation::PutBatch)?;
+        mount.backend.put_batch(puts).await
+    }
+
+    // Read analogue of `put_batch`. Empty is a valid no-op (`Ok(vec![])`), so we
+    // short-circuit before resolving a mount; otherwise the same single-mount
+    // dispatcher routes every path to one backend `get_batch`.
+    async fn get_batch(
+        &self,
+        paths: Vec<VirtualPath>,
+    ) -> Result<Vec<Option<VersionedEntry>>, FilesystemError> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
         }
-        let first_mount = self.matching_mount(&puts[0].path)?;
-        for put in &puts[1..] {
-            let mount = self.matching_mount(&put.path)?;
-            if !std::ptr::eq(mount, first_mount) {
-                return Err(FilesystemError::PathOutsideMount {
-                    path: put.path.clone(),
-                });
-            }
-        }
-        first_mount.backend.put_batch(puts).await
+        let mount =
+            self.resolve_single_mount_batch(&paths, |p| p, FilesystemOperation::ReadFile)?;
+        mount.backend.get_batch(paths).await
     }
 
     // ── Event plane ──
@@ -491,5 +529,80 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn get_batch_routes_to_owning_mount_in_order_with_none() {
+        // Through the composite dispatcher: seed a and c on the /secrets mount,
+        // skip b, and read [a,b,c] in one call. The shared single-mount
+        // dispatcher routes all three to the one backend, which returns
+        // [Some(a), None, Some(c)] in input order.
+        let mut composite = CompositeRootFilesystem::new();
+        let secrets = Arc::new(InMemoryBackend::new());
+        composite
+            .mount(descriptor("/secrets"), secrets.clone())
+            .unwrap();
+        secrets
+            .put(
+                &vp("/secrets/leases/a"),
+                Entry::bytes(vec![0xA]),
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+        secrets
+            .put(
+                &vp("/secrets/leases/c"),
+                Entry::bytes(vec![0xC]),
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+
+        let out = composite
+            .get_batch(vec![
+                vp("/secrets/leases/a"),
+                vp("/secrets/leases/b"),
+                vp("/secrets/leases/c"),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].as_ref().unwrap().entry.body, vec![0xA]);
+        assert!(out[1].is_none());
+        assert_eq!(out[2].as_ref().unwrap().entry.body, vec![0xC]);
+    }
+
+    #[tokio::test]
+    async fn get_batch_empty_is_ok_noop() {
+        // The composite short-circuits an empty read batch to Ok(vec![]) before
+        // resolving any mount — unlike the empty put_batch, which is an error.
+        let composite = CompositeRootFilesystem::new();
+        let out = composite.get_batch(Vec::new()).await.unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_batch_cross_mount_rejected() {
+        // A read batch may not straddle mounts: same single-mount dispatcher as
+        // put_batch, so a path on a second mount fails PathOutsideMount.
+        let mut composite = CompositeRootFilesystem::new();
+        let secrets = Arc::new(InMemoryBackend::new());
+        let memory = Arc::new(InMemoryBackend::new());
+        composite
+            .mount(descriptor("/secrets"), secrets.clone())
+            .unwrap();
+        composite
+            .mount(descriptor("/memory"), memory.clone())
+            .unwrap();
+
+        let err = composite
+            .get_batch(vec![vp("/secrets/leases/a"), vp("/memory/docs/b")])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, FilesystemError::PathOutsideMount { .. }),
+            "cross-mount get_batch must be rejected, got {err:?}"
+        );
     }
 }

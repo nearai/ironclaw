@@ -161,6 +161,39 @@ impl RootFilesystem for InMemoryBackend {
         }))
     }
 
+    async fn get_batch(
+        &self,
+        paths: Vec<VirtualPath>,
+    ) -> Result<Vec<Option<VersionedEntry>>, FilesystemError> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        if paths.len() > crate::MAX_BATCH_GETS {
+            return Err(FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::ReadFile,
+                reason: format!(
+                    "get_batch has {} paths, exceeding MAX_BATCH_GETS ({})",
+                    paths.len(),
+                    crate::MAX_BATCH_GETS
+                ),
+            });
+        }
+        // Native fast path: acquire the single `Mutex<State>` once and look up
+        // every path under it, returning one slot per input path in input order
+        // (`None` = absent). No `.await` while the lock is held.
+        let state = self.state.lock().await;
+        Ok(paths
+            .into_iter()
+            .map(|path| {
+                state.entries.get(&path).map(|stored| VersionedEntry {
+                    path,
+                    entry: stored.entry.clone(),
+                    version: stored.version,
+                })
+            })
+            .collect())
+    }
+
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let mut state = self.state.lock().await;
         // PR #3659 reviewer fix: delete now matches the SQL backends'
@@ -1538,5 +1571,61 @@ mod tests {
         );
         assert!(fs.get(&vpath("/memory/a")).await.unwrap().is_none());
         assert!(fs.get(&vpath("/turns/b")).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn get_batch_returns_results_in_input_order_with_none_for_absent() {
+        // Seed a and c, skip b. get_batch([a,b,c]) must yield
+        // [Some(a), None, Some(c)] — one slot per input path, in input order.
+        let fs = InMemoryBackend::new();
+        let a = vpath("/secrets/leases/a");
+        let b = vpath("/secrets/leases/b");
+        let c = vpath("/secrets/leases/c");
+        fs.put(&a, Entry::bytes(vec![0xA]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        fs.put(&c, Entry::bytes(vec![0xC]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        let out = fs
+            .get_batch(vec![a.clone(), b.clone(), c.clone()])
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].as_ref().unwrap().path, a);
+        assert_eq!(out[0].as_ref().unwrap().entry.body, vec![0xA]);
+        assert!(out[1].is_none());
+        assert_eq!(out[2].as_ref().unwrap().path, c);
+        assert_eq!(out[2].as_ref().unwrap().entry.body, vec![0xC]);
+    }
+
+    #[tokio::test]
+    async fn get_batch_empty_is_ok_noop() {
+        // Unlike put_batch, an empty read batch is a valid no-op (not an error).
+        let fs = InMemoryBackend::new();
+        let out = fs.get_batch(Vec::new()).await.unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_batch_exceeding_cap_rejected() {
+        // A read batch larger than MAX_BATCH_GETS surfaces a typed
+        // BackendInfrastructure error rather than running a giant query.
+        let fs = InMemoryBackend::new();
+        let paths: Vec<VirtualPath> = (0..=crate::MAX_BATCH_GETS)
+            .map(|i| vpath(&format!("/secrets/leases/cap/L{i}")))
+            .collect();
+        assert!(paths.len() > crate::MAX_BATCH_GETS);
+        match fs.get_batch(paths).await.unwrap_err() {
+            FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::ReadFile,
+                reason,
+            } => assert!(
+                reason.contains("MAX_BATCH_GETS"),
+                "expected cap reason, got {reason}"
+            ),
+            other => panic!("expected BackendInfrastructure cap error, got {other:?}"),
+        }
     }
 }

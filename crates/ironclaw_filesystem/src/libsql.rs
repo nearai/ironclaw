@@ -328,6 +328,27 @@ impl RootFilesystem for LibSqlRootFilesystem {
         libsql_get_on_conn(&conn, path).await
     }
 
+    async fn get_batch(
+        &self,
+        paths: Vec<VirtualPath>,
+    ) -> Result<Vec<Option<VersionedEntry>>, FilesystemError> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        if paths.len() > crate::MAX_BATCH_GETS {
+            return Err(FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::ReadFile,
+                reason: format!(
+                    "get_batch has {} paths, exceeding MAX_BATCH_GETS ({})",
+                    paths.len(),
+                    crate::MAX_BATCH_GETS
+                ),
+            });
+        }
+        let conn = self.connect().await?;
+        libsql_get_batch_on_conn(&conn, paths).await
+    }
+
     async fn ensure_index(
         &self,
         path: &VirtualPath,
@@ -1498,6 +1519,87 @@ async fn libsql_get_on_conn(
         entry,
         version: record_version_from_i64(path, version_raw)?,
     }))
+}
+
+/// Read every requested path via chunked `WHERE path IN (?,…)` queries and
+/// reassemble into one slot per input path, **in input order** (`None` =
+/// absent or a directory row). Reuses the same row→[`VersionedEntry`] decoding
+/// as [`libsql_get_on_conn`].
+#[cfg(feature = "libsql")]
+async fn libsql_get_batch_on_conn(
+    conn: &libsql::Connection,
+    paths: Vec<VirtualPath>,
+) -> Result<Vec<Option<VersionedEntry>>, FilesystemError> {
+    // SQLite caps bound parameters per statement (~999). Each path is one `IN`
+    // placeholder, so chunk well under that ceiling — mirrors the chunking in
+    // `append_batch`. Index decoded rows by path string and clone out of the
+    // map so the result is one slot per input path in input order, correct even
+    // when the input contains duplicate paths.
+    const PATHS_PER_STATEMENT: usize = 512;
+    // The batch query has no single path in scope; attribute any infrastructure
+    // error to the first requested path. `paths` is non-empty (caller's guard).
+    let probe = paths[0].clone();
+    let mut by_path: std::collections::HashMap<String, VersionedEntry> =
+        std::collections::HashMap::with_capacity(paths.len());
+    for chunk in paths.chunks(PATHS_PER_STATEMENT) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT path, contents, is_dir, content_type, kind, indexed, version \
+             FROM root_filesystem_entries WHERE path IN ({placeholders})"
+        );
+        let params: Vec<libsql::Value> = chunk
+            .iter()
+            .map(|p| libsql::Value::Text(p.as_str().to_string()))
+            .collect();
+        let mut rows = conn.query(&sql, params).await.map_err(|error| {
+            libsql_db_error(probe.clone(), FilesystemOperation::ReadFile, error)
+        })?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(probe.clone(), FilesystemOperation::ReadFile, error))?
+        {
+            let is_dir: i64 = row.get(2).map_err(|error| {
+                libsql_db_error(probe.clone(), FilesystemOperation::ReadFile, error)
+            })?;
+            if is_dir != 0 {
+                continue;
+            }
+            let row_path_str: String = row.get(0).map_err(|error| {
+                libsql_db_error(probe.clone(), FilesystemOperation::ReadFile, error)
+            })?;
+            let row_path = VirtualPath::new(row_path_str.clone())?;
+            let body: Vec<u8> = row.get(1).map_err(|error| {
+                libsql_db_error(row_path.clone(), FilesystemOperation::ReadFile, error)
+            })?;
+            let content_type_raw: String = row.get(3).map_err(|error| {
+                libsql_db_error(row_path.clone(), FilesystemOperation::ReadFile, error)
+            })?;
+            let kind_raw: Option<String> = row.get(4).ok();
+            let indexed_raw: String = row.get(5).map_err(|error| {
+                libsql_db_error(row_path.clone(), FilesystemOperation::ReadFile, error)
+            })?;
+            let version_raw: i64 = row.get(6).map_err(|error| {
+                libsql_db_error(row_path.clone(), FilesystemOperation::ReadFile, error)
+            })?;
+            let entry = build_entry(&row_path, body, content_type_raw, kind_raw, indexed_raw)?;
+            let version = record_version_from_i64(&row_path, version_raw)?;
+            by_path.insert(
+                row_path_str,
+                VersionedEntry {
+                    path: row_path,
+                    entry,
+                    version,
+                },
+            );
+        }
+    }
+    Ok(paths
+        .into_iter()
+        .map(|path| by_path.get(path.as_str()).cloned())
+        .collect())
 }
 
 /// Delete the row (and any descendants) at `path` on the supplied (possibly
