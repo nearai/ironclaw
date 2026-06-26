@@ -2686,4 +2686,98 @@ mod tests {
     // correctness is now verified by the first per-tenant decrypt op rather
     // than a process-wide startup sentinel; see the comment in the impl
     // block above.
+
+    /// Regression for the `already_marked` branch inside `consume`.
+    ///
+    /// When the stored lease status is already `Expired` (not merely
+    /// effectively-expired due to an elapsed TTL), `consume` must return
+    /// `LeaseExpired` without issuing a write — the CAS closure returns `Err`
+    /// so `cas_update` skips the write entirely.
+    ///
+    /// How we force `stored.status == Expired`:
+    ///   1. Create a store with a negative lease TTL so every freshly issued
+    ///      lease has `lease_expires_at` in the past.
+    ///   2. First `consume`: `effective_status` sees `Active` + elapsed TTL
+    ///      → returns `Expired`; `already_marked = (Active == Expired)` = false
+    ///      → the promotion branch writes `status = Expired` and surfaces
+    ///      `LeaseExpired`.
+    ///   3. Second `consume`: reads the now-stored `Expired` status.
+    ///      `already_marked = (Expired == Expired)` = true → no write,
+    ///      returns `LeaseExpired` via the apply-error path.
+    ///
+    /// The no-write assertion is the load-bearing check: the backend
+    /// `RecordVersion` must not advance after the second consume.
+    #[tokio::test]
+    async fn consume_already_expired_lease_returns_expired_without_rewrite() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = default_scoped_fs(Arc::clone(&backend));
+        // Negative TTL: every issued lease is born past its expiry.
+        let store = FilesystemSecretStore::with_lease_ttl(
+            Arc::clone(&scoped),
+            test_crypto(),
+            chrono::Duration::seconds(-1),
+        );
+        let scope = sample_scope("tenant-a", "user-a");
+        let handle = SecretHandle::new("api_key").unwrap();
+
+        store
+            .put(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("already-expired-secret"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // lease_expires_at = Utc::now() + (-1s) → already in the past.
+        let lease = store.lease_once(&scope, &handle).await.unwrap();
+
+        // First consume: effective_status(Active, now) sees elapsed TTL →
+        // Expired. already_marked = (Active == Expired) = false → promotion
+        // branch writes status=Expired and surfaces LeaseExpired.
+        let first_err = store.consume(&scope, lease.id).await.unwrap_err();
+        assert!(
+            first_err.is_expired(),
+            "first consume must return LeaseExpired (promotion path); got {first_err:?}"
+        );
+
+        // Capture the backend version after the promotion write. The promotion
+        // branch issued exactly one CAS write, so the version advanced from the
+        // initial write_lease value to this snapshot.
+        let scoped_lease_path = lease_path(&scope, lease.id).unwrap();
+        let virtual_path = scoped.resolve(&scope, &scoped_lease_path).unwrap();
+        let version_after_promotion = backend
+            .get(&virtual_path)
+            .await
+            .unwrap()
+            .expect("lease record must exist after promotion write")
+            .version;
+
+        // Second consume: reads stored status=Expired. effective_status passes
+        // Expired through. already_marked = (Expired == Expired) = true →
+        // closure returns Err immediately; cas_update skips the write.
+        let second_err = store.consume(&scope, lease.id).await.unwrap_err();
+        assert!(
+            second_err.is_expired(),
+            "second consume must return LeaseExpired (already_marked path); got {second_err:?}"
+        );
+
+        // Load-bearing assertion: no write was issued on the already_marked
+        // path. The backend version must NOT advance.
+        let version_after_second = backend
+            .get(&virtual_path)
+            .await
+            .unwrap()
+            .expect("lease record must still exist after second consume")
+            .version;
+        assert_eq!(
+            version_after_promotion.get(),
+            version_after_second.get(),
+            "already_marked path must issue no write — backend version must not advance \
+             (after promotion: v{}, after second consume: v{})",
+            version_after_promotion.get(),
+            version_after_second.get(),
+        );
+    }
 }

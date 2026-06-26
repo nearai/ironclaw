@@ -5,9 +5,11 @@
 //! and [`FilesystemBudgetGateStore`](crate::FilesystemBudgetGateStore)
 //! share the same shape: a single JSON snapshot per scope, read-modify-
 //! write through `ScopedFilesystem` with a `CasExpectation::Version`
-//! precondition, an in-process per-path async lock that serializes
-//! same-process writers, and a dedicated current-thread tokio runtime
-//! that bridges the sync trait surface to the async filesystem API.
+//! precondition, lock-free optimistic concurrency via the shared
+//! `cas_update` helper (versioned compare-and-swap, retrying on
+//! `VersionMismatch` with bounded jittered backoff), and a dedicated
+//! current-thread tokio runtime that bridges the sync trait surface
+//! to the async filesystem API.
 //!
 //! Before this module existed, each store carried ~350 lines of its
 //! own copy of this infrastructure. The two were drifting (different
