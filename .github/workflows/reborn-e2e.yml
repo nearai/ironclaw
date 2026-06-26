@@ -159,6 +159,7 @@ jobs:
           pytest
           tests/e2e/scenarios/test_reborn_webui_v2_smoke.py
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_core.py
+          tests/e2e/scenarios/test_reborn_webui_v2_legacy_attachments.py
           tests/e2e/scenarios/test_reborn_webui_v2_legacy_rendering.py
           -v --timeout=120
 

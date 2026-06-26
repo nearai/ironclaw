@@ -120,11 +120,40 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the rendering-safety port in
   the Reborn WebUI v2 Playwright job.
 
+### Step 4: Legacy Attachment Browser Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_attachments.py`.
+
+Ported the first attachment behavior from legacy `test_chat.py` through the
+real Reborn WebUI v2 browser path:
+
+- staged multiple files in the composer;
+- rendered attachment chips before send;
+- rendered user-message attachment cards after send;
+- proved text extracted from a browser-uploaded document reaches the mock LLM;
+- verified attachment cards survive a full page reload from the v2 timeline.
+
+Issue fixed:
+
+- The mock LLM's missing-slash-skill heuristic inspected the fully
+  model-visible user message. Reborn correctly appends generated
+  `<attachments>` context containing `/workspace/...` storage paths, and the
+  mock mistook those paths for user-typed slash skills before the canned
+  attachment response could match. The heuristic now strips generated
+  attachment context only for slash-skill detection; the canned-response matcher
+  still sees extracted attachment text.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the attachment browser port
+  in the Reborn WebUI v2 Playwright job.
+
 ## Open Migration Buckets
 
 Not yet ported:
 
-- legacy attachment upload/PDF/PPTX extraction assertions;
+- deeper legacy attachment variants: PDF/PPTX extraction, files-only reload,
+  unextractable placeholders, and budget/limit browser assertions;
 - legacy SSE reconnect/history-reload edge cases;
 - DOM pruning/resource-limit scenarios;
 - tool approval scenarios;
@@ -142,3 +171,9 @@ confirmed issues were test-harness coupling between Reborn scenario files, an
 imported-fixture dependency gap, and a missing `local-dev-yolo`
 `--confirm-host-access` acknowledgement in the extracted fixture. All are test
 harness issues fixed in this branch.
+
+The attachment browser port initially failed with the mock response
+`Skill '/workspace' is not installed or was not found.` That was traced to the
+test mock's slash-skill detector treating generated attachment storage paths as
+explicit slash skills. Reborn's attachment projection was behaving as intended;
+the mock heuristic was fixed.

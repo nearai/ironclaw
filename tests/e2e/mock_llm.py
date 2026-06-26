@@ -955,11 +955,28 @@ def _active_skill_names(messages: list[dict]) -> set[str]:
     return names
 
 
+def _typed_user_content_for_skill_detection(messages: list[dict]) -> str:
+    """Return user-authored text without generated attachment context.
+
+    Reborn appends a model-visible ``<attachments>`` block to user messages so
+    tools can reason about uploaded files and their /workspace storage paths.
+    Those paths are not user-typed slash skills, so the mock's missing-skill
+    heuristic must ignore that generated block.
+    """
+    return re.sub(
+        r"\n+<attachments>.*?</attachments>\s*$",
+        "",
+        _last_user_content(messages),
+        flags=re.DOTALL,
+    )
+
+
 def _missing_explicit_skills(messages: list[dict]) -> list[str]:
     active = _active_skill_names(messages)
     missing = []
     seen = set()
-    for match in re.finditer(r'(^|[\s"\(])/(?P<name>[A-Za-z0-9._-]+)', _last_user_content(messages)):
+    content = _typed_user_content_for_skill_detection(messages)
+    for match in re.finditer(r'(^|[\s"\(])/(?P<name>[A-Za-z0-9._-]+)', content):
         name = match.group("name").lower()
         if name in active or name in seen:
             continue
