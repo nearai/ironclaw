@@ -121,9 +121,10 @@ pub struct MemorySection {
     pub admin_overrides: Vec<MemoryAdminOverride>,
     /// Connection base URL for a third-party memory provider that needs one,
     /// used only when a binding selects that provider (issue #5264). For mem0 this
-    /// is the self-hosted mem0 OSS server (defaults to `http://localhost:8888`
-    /// when unset — never the hosted cloud). The `MEMORY_MEM0_BASE_URL` env var
-    /// overrides this. An API key is OPTIONAL (a self-hosted server with
+    /// is the self-hosted mem0 OSS server URL (never the hosted cloud). There is
+    /// no default: mem0 stays off unless explicitly bound AND given a base URL
+    /// here or via the `MEMORY_MEM0_BASE_URL` env override; a bound-but-unset mem0
+    /// fails closed. An API key is OPTIONAL (a self-hosted server with
     /// `AUTH_DISABLED=true` needs none); when required it is supplied via
     /// `MEMORY_MEM0_API_KEY` (a secret — never the config file). Inert when no
     /// third-party binding needs it.
