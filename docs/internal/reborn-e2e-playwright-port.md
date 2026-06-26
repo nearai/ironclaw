@@ -148,12 +148,41 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the attachment browser port
   in the Reborn WebUI v2 Playwright job.
 
+### Step 5: Legacy Chat Action Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_chat_actions.py`.
+
+Ported the per-message copy behavior from legacy `test_chat.py` to Reborn's
+message action buttons:
+
+- user-message copy writes the user-authored raw text;
+- assistant-message copy writes the raw markdown content, not rendered link
+  text;
+- the copy action flips to the copied state and then returns to the normal
+  action label.
+
+Legacy-only / non-1:1 cases in the same area:
+
+- v1 slash autocomplete was tied to the legacy gateway chat input and
+  `#slash-autocomplete` DOM. Reborn does not currently expose that widget; its
+  slash command handling is routed through the Reborn send path and targeted
+  auth/product tests.
+- v1 turn-cost events no longer append legacy message badges in Reborn's
+  message renderer; cost is surfaced in Reborn's activity/admin/project
+  surfaces instead of the old `turn_cost` DOM event path.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the chat-action port in the
+  Reborn WebUI v2 Playwright job.
+
 ## Open Migration Buckets
 
 Not yet ported:
 
 - deeper legacy attachment variants: PDF/PPTX extraction, files-only reload,
   unextractable placeholders, and budget/limit browser assertions;
+- remaining legacy chat UI affordances that have Reborn equivalents;
 - legacy SSE reconnect/history-reload edge cases;
 - DOM pruning/resource-limit scenarios;
 - tool approval scenarios;
