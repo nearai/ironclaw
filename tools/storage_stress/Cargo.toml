@@ -18,9 +18,9 @@ postgres = ["dep:deadpool-postgres", "dep:tokio-postgres", "ironclaw_filesystem/
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 deadpool-postgres = { version = "0.14", optional = true }
-ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
-ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
-ironclaw_resources = { path = "../ironclaw_resources", version = "0.1.0" }
+ironclaw_filesystem = { path = "../../crates/ironclaw_filesystem", version = "0.1.0" }
+ironclaw_host_api = { path = "../../crates/ironclaw_host_api", version = "0.1.0" }
+ironclaw_resources = { path = "../../crates/ironclaw_resources", version = "0.1.0" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 rust_decimal_macros = "1"
