@@ -361,7 +361,9 @@ export function useChat(threadId) {
     // user message from the server doesn't render alongside its
     // pre-submit optimistic twin.
     onRunSettled: (_runId, { success }) => {
-      submitBusyRef.current = false;
+      // submitBusyRef is released by send()'s `finally` when the POST settles —
+      // it is NOT this callback's to clear. Releasing the POST re-entrancy guard
+      // on run settlement is the wrong layer (and was the deadlock #5256 fixed).
       if (success) setPendingMessages([]);
       loadHistory(undefined, {
         preserveClientOnly: true,
