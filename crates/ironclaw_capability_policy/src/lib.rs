@@ -43,6 +43,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+mod store;
+pub use store::{
+    CapabilityPolicyDeltaStore, InMemoryCapabilityPolicyDeltaStore, StoreBackedPolicyResolver,
+};
+
 /// Availability dimension: can a principal see and invoke a capability?
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
