@@ -2132,6 +2132,38 @@ async fn gateway_sanitizes_provider_errors() {
 }
 
 #[tokio::test]
+async fn gateway_maps_offline_provider_to_unavailable_without_leaking_details() {
+    let provider = Arc::new(RecordingLlmProvider::fail(LlmError::RequestFailed {
+        provider: "offline-provider".to_string(),
+        reason: "connection refused at https://api.example.test with sk-provider-secret"
+            .to_string(),
+    }));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    let error = gateway
+        .stream_model(model_request(interactive_model()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::Unavailable);
+    assert_eq!(error.safe_summary, "model service is unavailable");
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    let debug = format!("{error:?}");
+    for sentinel in [
+        "connection refused",
+        "https://api.example.test",
+        "sk-provider-secret",
+    ] {
+        assert!(!debug.contains(sentinel));
+    }
+}
+
+#[tokio::test]
 async fn gateway_maps_nearai_credit_exhaustion_to_safe_summary() {
     let provider = Arc::new(RecordingLlmProvider::fail(LlmError::RequestFailed {
         provider: "nearai_chat".to_string(),
