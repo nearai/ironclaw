@@ -111,7 +111,7 @@ EMPTY_REPLY_TRIGGER = re.compile(r"issue 1780 empty reply", re.IGNORECASE)
 LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
 MULTI_STEP_TRIGGER = re.compile(r"multi step echo then time", re.IGNORECASE)
 REQUESTED_UNAVAILABLE_TOOL_TRIGGER = re.compile(
-    r"issue 5197 disabled echo workaround|use\s+[a-z0-9_-]+\.[a-z0-9_.-]+\s+to\b",
+    r"issue 5197 disabled echo workaround|\buse\s+builtin\.echo\s+to\s+print\b",
     re.IGNORECASE,
 )
 UNAVAILABLE_CAPABILITY_POLICY_TEXT = "not listed under Capabilities"
