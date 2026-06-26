@@ -3894,6 +3894,119 @@ async def case_webui_projects_browser(ctx: LiveQaContext) -> ProbeResult:
         return _result(case_name, False, started, {"error": str(exc), **observed})
 
 
+async def case_webui_workspace_browser(ctx: LiveQaContext) -> ProbeResult:
+    from playwright.async_api import expect
+
+    started = time.monotonic()
+    case_name = "webui_workspace_browser"
+    file_name = f"live-qa-notes-{uuid.uuid4().hex[:8]}.txt"
+    marker = f"workspace live qa marker {uuid.uuid4().hex}"
+    workspace_dir = ctx.output_dir / "workspace"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    (workspace_dir / file_name).write_text(
+        f"# Live QA notes\n\n{marker}\n",
+        encoding="utf-8",
+    )
+    legacy_requests: list[str] = []
+    fs_requests: list[dict[str, object]] = []
+    observed: dict[str, object] = {}
+
+    async def action(page: object) -> None:
+        def record_request(request: object) -> None:
+            url = getattr(request, "url", "")
+            parsed = urllib.parse.urlparse(url)
+            path = parsed.path
+            if path.startswith(("/api/chat", "/api/engine", "/api/profile", "/api/v1")):
+                legacy_requests.append(path)
+            if path.startswith("/api/webchat/v2/fs"):
+                method = getattr(request, "method", "")
+                headers = getattr(request, "headers", {}) or {}
+                fs_requests.append(
+                    {
+                        "method": method,
+                        "path": path,
+                        "query": parsed.query,
+                        "authorized": str(headers.get("authorization", "")).startswith("Bearer "),
+                    }
+                )
+
+        page.on("request", record_request)  # type: ignore[attr-defined]
+
+        await page.goto(  # type: ignore[attr-defined]
+            f"{ctx.base_url}/v2/workspace/workspace/{urllib.parse.quote(file_name)}?token={AUTH_TOKEN}",
+            wait_until="domcontentloaded",
+        )
+        await expect(page.locator("body")).to_contain_text("Workspace", timeout=15000)  # type: ignore[attr-defined]
+        await expect(page.locator("body")).to_contain_text("Read-only", timeout=15000)  # type: ignore[attr-defined]
+        await expect(page.locator("body")).to_contain_text(file_name, timeout=15000)  # type: ignore[attr-defined]
+        await expect(page.locator("body")).to_contain_text(marker, timeout=15000)  # type: ignore[attr-defined]
+        await expect(page.locator("body")).to_contain_text("Download", timeout=15000)  # type: ignore[attr-defined]
+
+        href_after_auth = await page.evaluate("() => window.location.href")  # type: ignore[attr-defined]
+        if "token=" in href_after_auth:
+            raise AssertionError(f"workspace URL token was not scrubbed: {href_after_auth}")
+
+        invalid_stat = await page.evaluate(  # type: ignore[attr-defined]
+            """async ({ token }) => {
+                const response = await fetch(
+                    "/api/webchat/v2/fs/stat?mount=workspace&path=../secret.txt",
+                    { headers: { Accept: "application/json", Authorization: `Bearer ${token}` } },
+                );
+                return { status: response.status };
+            }""",
+            {"token": AUTH_TOKEN},
+        )
+        if invalid_stat.get("status") not in (400, 403, 404):
+            raise AssertionError(f"invalid workspace path did not fail closed: {invalid_stat!r}")
+
+        await page.goto(f"{ctx.base_url}/v2/workspace", wait_until="domcontentloaded")  # type: ignore[attr-defined]
+        await expect(page.locator("body")).to_contain_text("Workspace", timeout=15000)  # type: ignore[attr-defined]
+        home_button = page.get_by_role("button", name=re.compile(r"\bhome\b", re.I)).first  # type: ignore[attr-defined]
+        await expect(home_button).to_be_visible(timeout=15000)
+        filter_input = page.get_by_placeholder(re.compile("filter", re.I))  # type: ignore[attr-defined]
+        await filter_input.fill(file_name[:12])
+        await home_button.click()
+        filtered_file = page.get_by_role(  # type: ignore[attr-defined]
+            "button",
+            name=re.compile(re.escape(file_name)),
+        ).first
+        await expect(filtered_file).to_be_visible(timeout=15000)
+
+        if legacy_requests:
+            raise AssertionError(f"workspace route called legacy APIs: {legacy_requests}")
+        if not fs_requests:
+            raise AssertionError("workspace route made no fs API requests")
+        non_get = [request for request in fs_requests if request.get("method") != "GET"]
+        if non_get:
+            raise AssertionError(f"workspace route used non-GET fs requests: {non_get!r}")
+        unauthorized = [request for request in fs_requests if not request.get("authorized")]
+        if unauthorized:
+            raise AssertionError(f"workspace fs requests lacked bearer auth: {unauthorized!r}")
+        request_queries = [str(request.get("query", "")) for request in fs_requests]
+        if not any("mount=workspace" in query and f"path={urllib.parse.quote(file_name)}" in query for query in request_queries):
+            raise AssertionError(f"workspace file stat/content was not requested: {fs_requests!r}")
+        if not any(request.get("path") == "/api/webchat/v2/fs/mounts" for request in fs_requests):
+            raise AssertionError(f"workspace mounts were not requested: {fs_requests!r}")
+
+        observed.update(
+            {
+                "file_name": file_name,
+                "marker": marker,
+                "direct_text_preview_checked": True,
+                "invalid_path_status": invalid_stat.get("status"),
+                "filter_checked": True,
+                "legacy_api_requests": legacy_requests,
+                "fs_request_count": len(fs_requests),
+            }
+        )
+
+    try:
+        await _with_page(ctx.output_dir, case_name, action)
+        return _result(case_name, True, started, observed)
+    except Exception as exc:
+        return _result(case_name, False, started, {"error": str(exc), **observed})
+
+
 async def _live_chat_case(
     ctx: LiveQaContext,
     *,
@@ -6351,6 +6464,18 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-066-TC-03",
             "REBCLI-066-TC-05",
             "REBCLI-066-TC-20",
+        ],
+    ),
+    "webui_workspace_browser": CaseSpec(
+        case_webui_workspace_browser,
+        qa_matrix_test_ids=[
+            "REBCLI-066-TC-04",
+            "REBCLI-066-TC-06",
+            "REBCLI-084-TC-01",
+            "REBCLI-084-TC-04",
+            "REBCLI-084-TC-05",
+            "REBCLI-084-TC-06",
+            "REBCLI-084-TC-07",
         ],
     ),
     "qa_3b_endpoint_status_live_chat": CaseSpec(case_qa_3b_endpoint_status_live_chat),

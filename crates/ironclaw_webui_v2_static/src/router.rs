@@ -27,6 +27,23 @@ const NONCE_PLACEHOLDER: &str = "__IRONCLAW_CSP_NONCE__";
 /// characters, well above the CSP-3 recommendation of 128 bits.
 const NONCE_BYTES: usize = 16;
 
+const CLIENT_ROUTE_PREFIXES: &[&str] = &[
+    "admin",
+    "automations",
+    "chat",
+    "extensions",
+    "jobs",
+    "login",
+    "logs",
+    "missions",
+    "overview",
+    "projects",
+    "routines",
+    "settings",
+    "welcome",
+    "workspace",
+];
+
 /// Build the SPA static-asset router with no path prefix.
 ///
 /// Standalone consumers (the crate's own tests) mount this at `/`.
@@ -164,6 +181,10 @@ fn serve_for_path(path: &str) -> Response {
         return asset_response(asset.bytes, asset.content_type);
     }
 
+    if is_known_client_route(path) {
+        return render_index_with_nonce();
+    }
+
     // Unknown path that does not look like a real asset request
     // (last segment has no file extension, so probably a client-side
     // route like `chat/abc` or `chat/user.123`) → serve the SPA shell
@@ -177,6 +198,13 @@ fn serve_for_path(path: &str) -> Response {
     }
 
     StatusCode::NOT_FOUND.into_response()
+}
+
+fn is_known_client_route(path: &str) -> bool {
+    let Some(first_segment) = path.split('/').next() else {
+        return false;
+    };
+    CLIENT_ROUTE_PREFIXES.contains(&first_segment)
 }
 
 fn render_index_with_nonce() -> Response {
@@ -647,6 +675,51 @@ mod tests {
             let body = body_string(response).await;
             assert!(body.contains("v2-root"), "`{path}` did not render shell");
         }
+    }
+
+    #[tokio::test]
+    async fn standalone_known_client_routes_accept_dot_in_terminal_segment() {
+        let app = static_router();
+        for path in [
+            "/workspace/workspace/notes.txt",
+            "/chat/thread.with.dots",
+            "/projects/project.with.dots",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("oneshot");
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "known client-side route `{path}` should fall back to the SPA shell",
+            );
+            let body = body_string(response).await;
+            assert!(body.contains("v2-root"), "`{path}` did not render shell");
+        }
+    }
+
+    #[tokio::test]
+    async fn standalone_unknown_asset_like_path_still_404s() {
+        let app = static_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/missing-asset.bin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]
