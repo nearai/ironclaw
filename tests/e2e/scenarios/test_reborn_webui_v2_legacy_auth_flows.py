@@ -230,6 +230,44 @@ async def test_reborn_legacy_manual_token_auth_prompt_submits_and_resumes_gate(
         await context.close()
 
 
+async def test_reborn_legacy_auth_prompt_does_not_duplicate_as_assistant_text(
+    reborn_v2_server, reborn_v2_browser
+):
+    context, page, _manual_token_requests, _resolve_requests = await _open_stubbed_auth_thread(
+        reborn_v2_server, reborn_v2_browser
+    )
+    try:
+        auth_body = (
+            "Paste your GitHub personal access token below. "
+            "Authentication required before the protected integration can continue."
+        )
+        await page.evaluate(
+            """
+            (prompt) => window.__emitV2Sse("auth_required", { prompt })
+            """,
+            {
+                "turn_run_id": RUN_ID,
+                "auth_request_ref": "duplicate-response-auth-gate",
+                "invocation_id": "invoke-duplicate-response-auth-gate",
+                "challenge_kind": "manual_token",
+                "provider": "github",
+                "account_label": "GitHub PAT",
+                "headline": "Connect GitHub",
+                "body": auth_body,
+            },
+        )
+
+        gate = page.locator(SEL_V2["auth_gate_for"].format(kind="manual_token")).first
+        await expect(gate).to_be_visible(timeout=5000)
+        await expect(gate).to_contain_text(auth_body)
+        await expect(
+            page.locator(SEL_V2["msg_assistant"]).filter(has_text="Paste your GitHub")
+        ).to_have_count(0)
+        await expect(page.locator(SEL_V2["auth_gate"])).to_have_count(1)
+    finally:
+        await context.close()
+
+
 async def test_reborn_legacy_oauth_prompt_opens_https_authorization_only(
     reborn_v2_server, reborn_v2_browser
 ):

@@ -933,6 +933,28 @@ Behavior adjustment:
   functional port protects the matching Reborn invariant: event cursors are
   scoped to the active `threadId` route and reset when that route changes.
 
+### Step 24: Legacy Auth Duplicate Response Port
+
+Extended `tests/e2e/scenarios/test_reborn_webui_v2_legacy_auth_flows.py`.
+
+Ported the browser-visible intent from legacy
+`test_auth_no_duplicate_response.py` to Reborn's WebChat v2 auth-gate path:
+
+- emitted an `auth_required` SSE frame carrying the same auth-instruction text
+  that legacy previously duplicated as a `response` event;
+- asserted the instructions render inside the manual-token auth gate;
+- asserted no assistant message bubble contains the auth instructions;
+- asserted exactly one auth gate is present for the prompt.
+
+Behavior adjustment:
+
+- The legacy regression test observed the old gateway's raw `/api/chat/*` SSE
+  events and specifically forbade a duplicate `response` event. Reborn WebChat
+  v2 consumes typed thread events and renders auth prompts through gate state,
+  so the migrated coverage protects the equivalent user-facing contract:
+  authentication instructions appear as a gate only, not as duplicate assistant
+  transcript text.
+
 ## Open Migration Buckets
 
 Not yet ported:
