@@ -271,6 +271,31 @@ WEBUI_V2_RUST_STATIC_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_COMPOSITION_COMMAND = CommandSpec(
+    name="webui_v2_composition_regression",
+    description=(
+        "Composed Reborn WebUI v2 gateway regression covering serve, runtime e2e, "
+        "product-auth, middleware, static assets, SSE, and WebSocket policy."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "--test",
+        "webui_v2_serve",
+        "--test",
+        "webui_v2_e2e",
+        "--test",
+        "webui_v2_product_auth",
+        "--test",
+        "webui_v2_product_auth_4201",
+    ],
+)
+
 CASES: dict[str, CaseSpec] = {
     "openai_compat_owner_crate_regression": CaseSpec(
         name="openai_compat_owner_crate_regression",
@@ -349,6 +374,18 @@ CASES: dict[str, CaseSpec] = {
         notes=(
             "Matches the QA matrix Rust/static command for REBCLI-055-TC-13; "
             "browser/static Node coverage remains separate."
+        ),
+    ),
+    "webui_v2_composition_regression": CaseSpec(
+        name="webui_v2_composition_regression",
+        feature="CLI-served WebUI v2 gateway composition",
+        category="WebUI Composition Regression",
+        qa_matrix_test_ids=["REBCLI-055-TC-09"],
+        commands=[WEBUI_V2_COMPOSITION_COMMAND],
+        notes=(
+            "Matches the QA matrix composition command for REBCLI-055-TC-09; "
+            "this validates the Rust gateway composition layer rather than "
+            "duplicating browser coverage from PR #5348."
         ),
     ),
 }
