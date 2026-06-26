@@ -8,6 +8,7 @@ import { LanguageTab } from "./components/language-tab.js";
 import { NetworkingTab } from "./components/networking-tab.js";
 import { RestartBanner } from "./components/restart-banner.js";
 import { SkillsTab } from "./components/skills-tab.js";
+import { SettingsToolbar } from "./components/settings-toolbar.js";
 import { ToolsTab } from "./components/tools-tab.js";
 import { TraceCommonsTab } from "./components/trace-commons-tab.js";
 import { UsersTab } from "./components/users-tab.js";
@@ -19,7 +20,16 @@ export function SettingsPage() {
   const { gatewayStatus, gatewayStatusQuery, isAdmin = false } = useOutletContext();
   const defaultTab = isAdmin ? "inference" : "language";
   const tab = requestedTab || defaultTab;
-  const { settings, query, save, savedKeys, needsRestart, saveError } = useSettings();
+  const {
+    settings,
+    query,
+    save,
+    savedKeys,
+    needsRestart,
+    importSettings,
+    isImporting,
+    saveError,
+  } = useSettings();
   const [searchQuery, setSearchQuery] = React.useState("");
 
   React.useEffect(() => {
@@ -97,6 +107,16 @@ export function SettingsPage() {
                 ${t("error.saveFailed", { message: saveError.message })}
               </div>
             `}
+
+            <${SettingsToolbar}
+              settingsExport=${query.data || null}
+              onImport=${importSettings}
+              isImporting=${isImporting}
+              searchQuery=${searchQuery}
+              onSearchChange=${setSearchQuery}
+              onSearchClear=${() => setSearchQuery("")}
+              canGoBack=${false}
+            />
 
             ${tabContent[tab]}
           </div>

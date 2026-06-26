@@ -417,6 +417,50 @@ CI update:
 - `.github/workflows/reborn-e2e.yml` now includes the pending-message port in
   the Reborn WebUI v2 Playwright job.
 
+### Step 12: Legacy Settings Search Port
+
+Added `tests/e2e/scenarios/test_reborn_webui_v2_legacy_settings_search.py`.
+
+Ported the caller-visible settings search intent from legacy
+`test_settings_search.py` to Reborn's Settings surface:
+
+- tools search filters the v2 tool-permission rows and updates the visible
+  result count;
+- clearing search restores the full tool list;
+- tools no-match state renders the Reborn empty-filter copy;
+- skills search filters installed/workspace skill cards through the mounted
+  Settings toolbar;
+- channels search filters the v2 extension-backed messaging and MCP groups;
+- empty Skills/Channels searches render the shared Reborn settings empty state.
+
+Issue fixed:
+
+- Reborn Settings tabs already accepted `searchQuery`, and the
+  `SettingsToolbar` component already implemented the search input, but
+  `SettingsPage` did not render that toolbar. The search state therefore could
+  never change from the browser. `SettingsPage` now mounts `SettingsToolbar`
+  and wires it to the existing import/export/search state.
+- The WebUI v2 asset build script watched only the top-level `static/`
+  directory. Editing `static/js/**` did not reliably trigger a Cargo rebuild of
+  embedded assets, so local E2E runs could keep serving stale `dist/app.js`.
+  The build script now emits `rerun-if-changed` for every served static file.
+- Settings Channels ignored `channel.display_name` for installed channel
+  extensions and fell back to internal package names. The card presenter now
+  prefers the installed channel display name, matching the top-level extension
+  surface and the registry fallback behavior.
+
+Behavior adjustment:
+
+- Legacy Users search covered the old admin users table. Reborn's
+  `fetchUsers`, `createUser`, and `updateUser` settings client methods are
+  currently TODO stubs, so Users search remains an operator/admin parity gap
+  rather than a meaningful browser port in this step.
+
+CI update:
+
+- `.github/workflows/reborn-e2e.yml` now includes the settings-search port in
+  the Reborn WebUI v2 Playwright job.
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -428,11 +472,12 @@ Not yet ported:
 - DOM pruning/resource-limit scenarios;
 - deeper tool approval scenarios that need real Reborn runtime/tool execution,
   persistence, or recovery beyond the browser approval-card contract;
-- remaining settings/extension lifecycle scenarios beyond Skills and the
-  top-level extension install/manage surface;
+- remaining settings/extension lifecycle scenarios beyond Settings search,
+  Skills, and the top-level extension install/manage surface;
 - OAuth/product-auth flows;
 - Slack/Telegram/channel pairing scenarios;
-- admin/operator flows;
+- admin/operator flows, including Reborn Settings Users search once the v2
+  users endpoints replace the current TODO client stubs;
 - legacy `/v2/routines` parity, because the current Reborn routines page still
   uses TODO client stubs instead of real v2 endpoints;
 - Emulate provider full-path scenarios against standalone Reborn where the
@@ -457,3 +502,24 @@ The routine/automation inspection found a product parity gap: the Reborn
 stub responses and reference legacy v1 routine endpoints. The migrated tests
 therefore target Reborn's real `/v2/automations` surface for scheduled-work
 management, while leaving dedicated routines-page parity as open work.
+
+The settings-search inspection found a product defect: Reborn Settings search
+logic existed inside the tabs and toolbar component, but the toolbar was not
+mounted by `SettingsPage`, so no browser-visible control could update
+`searchQuery`. This branch mounts the toolbar and covers tools, skills, and
+channels search through the real `/v2/settings/*` routes.
+
+The same step found a frontend build-system defect: `cargo build` embedded the
+committed WebUI v2 bundle, and the static crate's build script did not track
+individual asset-file mtimes. Source edits under `static/js/**` could therefore
+be invisible to a local rebuild until `static/dist/app.js` was regenerated and
+embedded. The build script now tracks served asset files explicitly.
+
+The settings Channels card also displayed installed channel package names
+instead of `display_name` when no registry entry was present. That is fixed in
+the Settings Channels presenter.
+
+The same settings inspection confirmed an admin parity gap: Reborn Settings
+Users client methods still return TODO stub responses instead of calling real
+v2 users endpoints. Legacy Users search is left open until those endpoints are
+implemented.

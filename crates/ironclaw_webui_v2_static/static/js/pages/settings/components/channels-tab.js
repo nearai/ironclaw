@@ -35,6 +35,7 @@ function ExtensionChannelCard({ channel, registryEntry }) {
   const t = useT();
   const name =
     registryEntry?.display_name ||
+    channel?.display_name ||
     channel?.name ||
     registryEntry?.name ||
     t("common.unknown");

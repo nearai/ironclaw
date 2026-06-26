@@ -81,6 +81,7 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
             {
                 continue;
             }
+            println!("cargo:rerun-if-changed={}", path.display());
             let rel = path.strip_prefix(root).expect("strip prefix"); // safety: build script — strip_prefix only fails on a logic bug
             // Force forward slashes in the URL key even on Windows hosts.
             let url = rel
