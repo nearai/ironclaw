@@ -17,14 +17,14 @@ hex = "0.4.3"
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
 ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
-jsonwebtoken = "9"
-rand = "0.8"
+jsonwebtoken = "10"
+rand = "0.10"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

@@ -16,9 +16,9 @@ publish = false
 dist = false
 
 [dependencies]
-fs4 = "0.6"
+fs4 = "1.1"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 thiserror = "2"
-toml = "0.8"
-toml_edit = "0.22"
+toml = "1.1"
+toml_edit = "0.25"
