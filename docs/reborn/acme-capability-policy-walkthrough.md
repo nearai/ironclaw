@@ -170,6 +170,22 @@ admin-keyed half demonstrates the "unavailable when unprovisioned" behaviour but
 not the "works once the shared key exists" behaviour. The other three dimensions
 are end-to-end.
 
+## Scope notes (verified by review)
+
+- **Profiles.** Enforcement is wired on the **local-runtime path** — the
+  LocalDev-shaped profiles the `serve` subcommand boots. The production-graph
+  profiles (`build_backend_production`, `local_runtime: None`) take the empty
+  surface resolver and carry no policy resolver, so they do **not** enforce
+  capability policy yet; wiring the shared handles into the production store
+  graph is a deferred follow-on. This walkthrough runs on `serve`, which is the
+  intended target.
+- **One subject per turn.** All four dimensions resolve the same acting user for
+  a turn (availability/config via the turn actor → explicit owner; approval/
+  identity via the dispatch resource scope). These agree on every path here — you
+  drive as each user directly, including the shared `engineering@` account. A
+  future *delegated* turn (actor ≠ scope owner) is the only case that could
+  diverge; aligning that is a deferred follow-up, not exercised by this test.
+
 ## What is NOT in this milestone (per epic #5261)
 
 Configuration-as-Code / declarative policy (#3036, #4120), live propagation to

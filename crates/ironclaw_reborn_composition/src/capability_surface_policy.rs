@@ -433,6 +433,18 @@ impl ScopedLifecyclePolicyCapabilitySurfaceResolver {
 /// account resolves to its own `UserId` here when a turn is driven as it.
 /// Returns `None` for an ownerless / actor-fallback turn → the resolver fails
 /// closed to an empty allow-set.
+///
+/// SUBJECT INVARIANT (epic #5261): all four policy dimensions must resolve the
+/// same `PolicySubject` for a given turn or an admin grant applies
+/// inconsistently. Availability and configuration key off this helper
+/// (actor-first, then explicit owner); approval (`PolicyResolverAdminApprovalSource`)
+/// and identity (`resolve_identity_mandate`) key off the dispatch
+/// `ResourceScope.user_id`. Those agree whenever the actor IS the acting user —
+/// which is every path the hand-driven Acme walkthrough exercises (you drive as
+/// each user directly, including the shared `engineering@` account). They could
+/// diverge only on a future delegated turn where `actor != resource_scope owner`;
+/// aligning the dispatch `ResourceScope` with this helper for that case is a
+/// deferred follow-up (not exercised by the milestone).
 fn principal_user_id<'a>(scope: &'a TurnScope, actor: Option<&'a TurnActor>) -> Option<&'a UserId> {
     actor
         .map(|actor| &actor.user_id)

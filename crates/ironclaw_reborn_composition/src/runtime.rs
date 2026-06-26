@@ -2825,6 +2825,16 @@ pub async fn build_reborn_runtime(
         // `HooksActivationConfig` master-flag-default-off pattern. When the
         // feature is absent or the flag is off, local-dev keeps the historical
         // `AllowAll` surface so existing flows are unchanged.
+        //
+        // SCOPE (epic #5261): this — and the other three dimensions sourced from
+        // the shared `capability_policy_{resolver,delta_store}` handles — wire only
+        // on the local-runtime path (`Some(local_runtime)`). The production-graph
+        // profiles (`build_backend_production`, `local_runtime: None`) take the
+        // `EmptyCapabilitySurfaceResolver` branch below and carry no policy
+        // resolver, so they do NOT enforce capability policy yet. The milestone
+        // targets the LocalDev-shaped `serve` profiles; production enforcement is a
+        // deferred follow-on (wire the same shared handles into the production store
+        // graph).
         #[cfg(feature = "capability-policy")]
         let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
             if crate::capability_surface_policy::capability_policy_activated() {
