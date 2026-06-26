@@ -42,6 +42,10 @@ CANNED_RESPONSES = [
         "Done — I saved /workspace/report.csv and /workspace/report.pdf. "
         "Both are ready to download.",
     ),
+    (
+        re.compile(r"reborn write approval file (?P<label>[a-z0-9_-]+)", re.IGNORECASE),
+        "Done - saved the approval test file.",
+    ),
     (re.compile(r"\bhello\b|\bhi\b|\bhey\b", re.IGNORECASE), "Hello! How can I help you today?"),
     (re.compile(r"2\s*\+\s*2|two plus two", re.IGNORECASE), "The answer is 4."),
     (
@@ -194,6 +198,14 @@ TOOL_CALL_PATTERNS = [
                 },
             },
         ],
+    ),
+    (
+        re.compile(r"reborn write approval file (?P<label>[a-z0-9_-]+)", re.IGNORECASE),
+        "builtin__write_file",
+        lambda m: {
+            "path": f"/workspace/reborn-approval-{m.group('label')}.txt",
+            "content": f"approved {m.group('label')}\n",
+        },
     ),
     (
         re.compile(

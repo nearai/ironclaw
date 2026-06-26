@@ -1,7 +1,9 @@
 """Legacy tool-permission coverage ported to Reborn WebChat v2."""
 
+import asyncio
 import json
-from urllib.parse import unquote, urlparse
+from pathlib import Path
+from urllib.parse import quote, unquote, urlparse
 
 import httpx
 import pytest
@@ -9,8 +11,14 @@ from playwright.async_api import expect
 
 from helpers import REBORN_V2_AUTH_TOKEN
 from reborn_webui_harness import (
+    client_action_id,
+    create_thread,
     reborn_v2_browser,  # noqa: F401 - imported fixture
+    reborn_v2_restartable_server,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
+    reborn_bearer_headers,
+    send_message,
+    wait_for_assistant_message,
 )
 
 
@@ -173,6 +181,13 @@ def _tool_row(page, name: str):
     return page.locator(f'[data-testid="settings-tool-row"][data-tool-name="{name}"]')
 
 
+@pytest.fixture
+def reborn_approval_artifact_cleanup():
+    yield
+    for label in ("first", "second"):
+        Path(f"reborn-approval-{label}.txt").unlink(missing_ok=True)
+
+
 async def _set_real_auto_approve(reborn_v2_server: str, enabled: bool):
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
     async with httpx.AsyncClient(headers=headers) as client:
@@ -183,6 +198,55 @@ async def _set_real_auto_approve(reborn_v2_server: str, enabled: bool):
         )
         response.raise_for_status()
         return response.json()
+
+
+async def _get_real_tool_state(
+    client: httpx.AsyncClient, base_url: str, capability_id: str
+) -> dict:
+    response = await client.get(
+        f"{base_url}/api/webchat/v2/settings/tools",
+        timeout=15,
+    )
+    response.raise_for_status()
+    for entry in response.json().get("entries", []):
+        if entry.get("key") == f"tool.{capability_id}":
+            return entry
+    raise AssertionError(f"{capability_id} missing from Tools settings")
+
+
+async def _wait_for_gate_prompt_after_send(
+    base_url: str, thread_id: str, content: str
+) -> dict:
+    url = (
+        f"{base_url}/api/webchat/v2/threads/{thread_id}/events"
+        f"?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    timeout = httpx.Timeout(60.0, read=60.0)
+    async with httpx.AsyncClient(timeout=timeout) as stream_client:
+        async with stream_client.stream("GET", url) as response:
+            response.raise_for_status()
+            async with httpx.AsyncClient(headers=reborn_bearer_headers()) as action_client:
+                await send_message(action_client, base_url, thread_id, content)
+
+            event_name = None
+            data_lines: list[str] = []
+            async with asyncio.timeout(45):
+                async for line in response.aiter_lines():
+                    if line.startswith(":"):
+                        continue
+                    if line.startswith("event:"):
+                        event_name = line.removeprefix("event:").strip()
+                        continue
+                    if line.startswith("data:"):
+                        data_lines.append(line.removeprefix("data:").lstrip())
+                        continue
+                    if line == "":
+                        if event_name == "gate" and data_lines:
+                            frame = json.loads("\n".join(data_lines))
+                            return frame["prompt"]
+                        event_name = None
+                        data_lines = []
+    raise AssertionError("SSE stream closed before a gate prompt arrived")
 
 
 async def test_reborn_legacy_tool_permissions_tab_visible(
@@ -329,3 +393,65 @@ async def test_reborn_legacy_tool_permission_real_api_persists_and_rejects_locke
                 timeout=15,
             )
             assert rejected.status_code >= 400
+
+
+async def test_reborn_legacy_always_approve_survives_reborn_restart(
+    reborn_v2_restartable_server,
+    reborn_approval_artifact_cleanup,
+):
+    state, start_server, stop_server = reborn_v2_restartable_server
+    capability_id = "builtin.write_file"
+
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        base_url = state["base_url"]
+        reset = await client.post(
+            f"{base_url}/api/webchat/v2/settings/tools/{capability_id}",
+            json={"state": "default"},
+            timeout=15,
+        )
+        reset.raise_for_status()
+        thread_id = await create_thread(client, base_url)
+
+    first_prompt = await _wait_for_gate_prompt_after_send(
+        state["base_url"],
+        thread_id,
+        "reborn write approval file first",
+    )
+    assert first_prompt["allow_always"] is True
+    assert first_prompt["approval_context"]["tool_name"] == capability_id
+
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        gate_ref = quote(first_prompt["gate_ref"], safe="")
+        resolve = await client.post(
+            (
+                f"{state['base_url']}/api/webchat/v2/threads/{thread_id}/runs/"
+                f"{first_prompt['turn_run_id']}/gates/{gate_ref}/resolve"
+            ),
+            json={
+                "client_action_id": client_action_id(),
+                "resolution": "approved",
+                "always": True,
+            },
+            timeout=15,
+        )
+        resolve.raise_for_status()
+        await wait_for_assistant_message(client, state["base_url"], thread_id)
+
+        persisted = await _get_real_tool_state(client, state["base_url"], capability_id)
+        assert persisted["value"]["state"] == "always_allow"
+
+    await stop_server()
+    restarted_url = await start_server()
+
+    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+        restarted = await _get_real_tool_state(client, restarted_url, capability_id)
+        assert restarted["value"]["state"] == "always_allow"
+
+        second_thread_id = await create_thread(client, restarted_url)
+        await send_message(
+            client,
+            restarted_url,
+            second_thread_id,
+            "reborn write approval file second",
+        )
+        await wait_for_assistant_message(client, restarted_url, second_thread_id)

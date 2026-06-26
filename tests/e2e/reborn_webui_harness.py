@@ -233,6 +233,37 @@ async def reborn_v2_yolo_server(ironclaw_reborn_binary, mock_llm_server, tmp_pat
         await close_reborn_server(proc)
 
 
+@pytest.fixture
+async def reborn_v2_restartable_server(
+    ironclaw_reborn_binary, mock_llm_server, tmp_path_factory
+):
+    """Start/stop Reborn against one persistent home directory."""
+    home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-restartable-home")
+    state = {"proc": None, "base_url": None}
+
+    async def start() -> str:
+        proc, base_url = await start_reborn_webui_v2_server(
+            ironclaw_reborn_binary=ironclaw_reborn_binary,
+            mock_llm_server=mock_llm_server,
+            home_dir=home_dir,
+            profile=DEFAULT_PROFILE,
+            log_prefix="reborn-v2-restartable",
+        )
+        state["proc"] = proc
+        state["base_url"] = base_url
+        return base_url
+
+    async def stop() -> None:
+        await close_reborn_server(state["proc"])
+        state["proc"] = None
+
+    await start()
+    try:
+        yield state, start, stop
+    finally:
+        await stop()
+
+
 @pytest.fixture(scope="module")
 async def reborn_v2_loop_limited_yolo_server(
     ironclaw_reborn_binary, mock_llm_server, tmp_path_factory

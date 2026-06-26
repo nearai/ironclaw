@@ -3141,6 +3141,46 @@ Validation:
 - `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_*.py -q`
   -> `156 passed`
 
+### Step 104: Always-Approve Restart Persistence Port
+
+Extended `tests/e2e/scenarios/test_reborn_webui_v2_legacy_tool_permissions.py`,
+`tests/e2e/reborn_webui_harness.py`, and `tests/e2e/mock_llm.py`.
+
+Ported the Reborn-equivalent behavior from legacy
+`test_always_approve_survives_restart`:
+
+- added a restartable Reborn WebUI v2 fixture that stops and starts
+  `ironclaw-reborn serve` against the same `IRONCLAW_REBORN_HOME`;
+- added a deterministic mock LLM trigger for one `builtin.write_file`
+  capability call;
+- opened a real v2 SSE stream, sent the trigger through
+  `/api/webchat/v2/threads/{thread_id}/messages`, and captured the real gate
+  prompt with `turn_run_id`, `gate_ref`, `allow_always`, and approval context;
+- resolved the real gate through
+  `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve`
+  with `{"resolution": "approved", "always": true}`;
+- asserted Tools settings show `tool.builtin.write_file` as
+  `always_allow`;
+- restarted Reborn; and
+- asserted the setting still reads `always_allow` and a second write-file run
+  finalizes without another approval gate.
+
+Behavior mapping:
+
+- Legacy v2 used the old gateway `/api/chat/*` and restartable v2 fixture. The
+  Reborn port uses only current WebChat v2 ingress, real SSE, the real
+  typed-approval resolver, and the Reborn persistent approval policy store.
+  This proved the behavior already works; no product fix was required.
+
+Validation:
+
+- `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_tool_permissions.py::test_reborn_legacy_always_approve_survives_reborn_restart -q`
+  -> `1 passed`
+- `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_tool_permissions.py -q`
+  -> `7 passed`
+- `tests/e2e/.venv/bin/pytest tests/e2e/scenarios/test_reborn_webui_v2_legacy_*.py -q`
+  -> `157 passed`
+
 ## Open Migration Buckets
 
 Not yet ported:
@@ -3159,11 +3199,11 @@ Not yet ported:
   activity stores beyond the current timeline paging, near-cap response
   projection, background-thread processing summary, and SSE reconnect-timeout
   cleanup coverage;
-- deeper tool approval scenarios that need real Reborn runtime/tool execution,
-  persistence, or recovery beyond the browser approval-card, denied activity,
-  local send-blocking, cross-thread isolation, and persisted activity-card
-  contracts; legacy text-alias interception is v1 behavior superseded by
-  Reborn's disabled-composer gate flow;
+- deeper tool approval scenarios that need Reborn recovery paths beyond the
+  browser approval-card, denied activity, local send-blocking, cross-thread
+  isolation, persisted activity-card contracts, real settings persistence, and
+  always-approve restart persistence; legacy text-alias interception is v1
+  behavior superseded by Reborn's disabled-composer gate flow;
 - remaining settings/extension lifecycle scenarios beyond Settings search,
   Skills, tool permissions, channel label regressions, extension revisit
   refetch, and the top-level extension install/manage/configure surface,
