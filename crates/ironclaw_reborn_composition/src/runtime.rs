@@ -2837,7 +2837,7 @@ pub async fn build_reborn_runtime(
         // graph).
         #[cfg(feature = "capability-policy")]
         let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
-            if crate::capability_surface_policy::capability_policy_activated() {
+            if crate::capability_policy_engine::capability_policy_activated() {
                 use crate::available_extensions::AvailableExtensionCatalog;
                 use crate::capability_surface_policy::{
                     ScopedLifecyclePolicyCapabilitySurfaceResolver, StaticPackageCapabilitySource,
@@ -3696,7 +3696,7 @@ fn validate_runtime_identity(
 }
 
 // The activation gate `capability_policy_activated()` now lives (shared
-// `pub(crate)`) in `capability_surface_policy.rs` so both this module
+// `pub(crate)`) in `capability_policy_engine.rs` so both this module
 // (availability seam) and `factory.rs` (shared delta-store / resolver handle
 // construction) gate on the same switch — see #5261 D3 / D5.
 

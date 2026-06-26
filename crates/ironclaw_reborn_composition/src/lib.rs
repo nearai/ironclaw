@@ -35,6 +35,8 @@ mod bundled_skills;
 #[cfg(all(feature = "capability-policy", feature = "webui-v2-beta"))]
 mod capability_admin_routes;
 #[cfg(feature = "capability-policy")]
+mod capability_policy_engine;
+#[cfg(feature = "capability-policy")]
 mod capability_surface_policy;
 #[cfg(all(feature = "capability-policy", feature = "webui-v2-beta"))]
 mod capability_user_policy_routes;

@@ -530,15 +530,14 @@ type CapabilityPolicyHandles = (
 fn build_capability_policy_handles(
     filesystem: &Arc<LocalDevRootFilesystem>,
 ) -> CapabilityPolicyHandles {
-    if !crate::capability_surface_policy::capability_policy_activated() {
+    if !crate::capability_policy_engine::capability_policy_activated() {
         return (None, None);
     }
-    let delta_store = crate::capability_surface_policy::local_dev_capability_policy_delta_store(
+    let delta_store = crate::capability_policy_engine::local_dev_capability_policy_delta_store(
         Arc::clone(filesystem) as Arc<dyn ironclaw_filesystem::RootFilesystem>,
     );
-    let resolver = crate::capability_surface_policy::build_capability_policy_resolver(Arc::clone(
-        &delta_store,
-    ));
+    let resolver =
+        crate::capability_policy_engine::build_capability_policy_resolver(Arc::clone(&delta_store));
     (Some(delta_store), Some(resolver))
 }
 
@@ -1150,7 +1149,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         .as_ref()
         .map(|policy| {
             Arc::new(
-                crate::capability_surface_policy::PolicyResolverAdminApprovalSource::new(
+                crate::capability_policy_engine::PolicyResolverAdminApprovalSource::new(
                     Arc::clone(policy),
                 ),
             ) as Arc<dyn crate::profile_approval_authorization::AdminApprovalSource>

@@ -16,7 +16,7 @@ use ironclaw_trust::TrustDecision;
 /// Deliberately local so this dep-light module never imports
 /// `ironclaw_capability_policy`: the seam is a trait, and composition supplies
 /// the concrete adapter over the shared `PolicyResolver` (see
-/// `crate::capability_surface_policy::PolicyResolverAdminApprovalSource`). A
+/// `crate::capability_policy_engine::PolicyResolverAdminApprovalSource`). A
 /// `None` return (no admin row, `Ask`, or a resolver fault) means "no admin
 /// opinion" and the dispatch falls through to the existing user/profile chain
 /// (fail-SAFE, #5261 D5 approval — never auto-approve on error).

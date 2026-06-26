@@ -33,12 +33,7 @@ use ironclaw_turns::run_profile::LoopRunContext;
 use ironclaw_turns::scope::{TurnActor, TurnScope};
 
 #[cfg(feature = "capability-policy")]
-use ironclaw_capability_policy::{
-    CapabilityPolicyDeltaStore, PolicyResolver, PolicySubject, StaticCapabilityDefaultPolicySource,
-    StoreBackedPolicyResolver,
-};
-#[cfg(feature = "capability-policy")]
-use ironclaw_product_workflow_storage::FilesystemCapabilityPolicyDeltaStore;
+use ironclaw_capability_policy::{PolicyResolver, PolicySubject};
 
 use crate::available_extensions::{AvailableExtensionCatalog, visible_capability_ids};
 
@@ -67,193 +62,6 @@ pub(crate) fn local_dev_scoped_lifecycle_store(
     Arc::new(FilesystemScopedLifecycleInstallationStore::with_root(
         filesystem, root,
     ))
-}
-
-/// Durable virtual root for the local-dev capability-policy **delta** store
-/// (#5273). Sits under the SAME mounted prefix as the installation store
-/// (`/tenants/capability_policy`, the durable libSQL mount) but in a sibling
-/// subtree (`/policy_deltas`) so delta leaves never collide with the lifecycle
-/// store's `/installations` / `/installation_ids` leaves.
-#[cfg(feature = "capability-policy")]
-pub(crate) const LOCAL_DEV_CAPABILITY_POLICY_DELTA_ROOT: &str =
-    "/tenants/capability_policy/policy_deltas";
-
-/// Construct the local-dev capability-policy delta store over the durable
-/// `/tenants` mount. This is the SINGLE delta-store the runtime builds — the
-/// dispatch `PolicyResolver` reads it and the admin REST write surface (#5268 /
-/// #5273) writes it. Both share this backing so writes are visible to reads.
-#[cfg(feature = "capability-policy")]
-pub(crate) fn local_dev_capability_policy_delta_store(
-    filesystem: Arc<dyn ironclaw_filesystem::RootFilesystem>,
-) -> Arc<dyn CapabilityPolicyDeltaStore> {
-    let root = VirtualPath::new(LOCAL_DEV_CAPABILITY_POLICY_DELTA_ROOT)
-        .expect("LOCAL_DEV_CAPABILITY_POLICY_DELTA_ROOT is a valid virtual path");
-    Arc::new(FilesystemCapabilityPolicyDeltaStore::with_root(
-        filesystem, root,
-    ))
-}
-
-/// Build the milestone `PolicyResolver` over the shared delta store (#5261 D3).
-///
-/// The default source uses the milestone default
-/// ([`CapabilityDefaultPolicy::available_default`](ironclaw_capability_policy::CapabilityDefaultPolicy::available_default)):
-/// installed == available unless an admin delta hides it, with no admin opinion
-/// on identity/approval/config. The resolver is the read path for every
-/// dimension; it shares the SAME delta-store `Arc` the admin write surface
-/// holds — never construct a second.
-#[cfg(feature = "capability-policy")]
-pub(crate) fn build_capability_policy_resolver(
-    delta_store: Arc<dyn CapabilityPolicyDeltaStore>,
-) -> Arc<dyn PolicyResolver> {
-    let defaults = StaticCapabilityDefaultPolicySource::new(
-        ironclaw_capability_policy::CapabilityDefaultPolicy::available_default(),
-    );
-    Arc::new(StoreBackedPolicyResolver::new(defaults, delta_store))
-}
-
-/// Adapts the shared [`PolicyResolver`] into the loop's host-owned
-/// [`LoopCapabilityConfigSource`] (#5261 configuration dimension). Supplies the
-/// admin policy config (`EffectivePolicy.config`) to deep-merge into a
-/// capability's resolved input before dispatch.
-///
-/// Holds the SAME resolver `Arc` the availability seam reads, so config and
-/// availability stay consistent for a turn.
-#[cfg(feature = "capability-policy")]
-pub(crate) struct PolicyResolverConfigSource {
-    policy: Arc<dyn PolicyResolver>,
-}
-
-#[cfg(feature = "capability-policy")]
-impl PolicyResolverConfigSource {
-    pub(crate) fn new(policy: Arc<dyn PolicyResolver>) -> Self {
-        Self { policy }
-    }
-}
-
-#[cfg(feature = "capability-policy")]
-#[async_trait]
-impl ironclaw_loop_support::LoopCapabilityConfigSource for PolicyResolverConfigSource {
-    async fn config_for(
-        &self,
-        run_context: &LoopRunContext,
-        capability_id: &CapabilityId,
-    ) -> Result<Option<serde_json::Value>, ironclaw_turns::run_profile::AgentLoopHostError> {
-        // Use the SAME acting-principal derivation the availability seam uses.
-        let Some(user_id) = principal_user_id(&run_context.scope, run_context.actor.as_ref())
-        else {
-            // Ownerless / actor-fallback turn: no subject, so no admin config to
-            // overlay. Fail-OPEN — the model input dispatches un-merged.
-            return Ok(None);
-        };
-        let subject = PolicySubject {
-            tenant_id: run_context.scope.tenant_id.clone(),
-            user_id: user_id.clone(),
-        };
-        match self.policy.resolve(&subject, capability_id).await {
-            Ok(effective) => {
-                // `available_default()` config is `Null`; a delta with no
-                // `config_patch` leaves it `Null`. Treat `Null` as "no admin
-                // opinion" so the merge is skipped entirely.
-                if effective.config.is_null() {
-                    Ok(None)
-                } else {
-                    Ok(Some(effective.config))
-                }
-            }
-            Err(error) => {
-                // Fail-OPEN (#5261 D5 configuration): a resolver fault or an
-                // unavailable backend must NOT end the turn. Drop the admin
-                // config and dispatch the un-merged model input. Logged at debug
-                // so it never corrupts the REPL/TUI surface (see CLAUDE.md).
-                tracing::debug!(
-                    %error,
-                    capability = %capability_id.as_str(),
-                    "capability policy config resolution failed; dispatching un-merged input"
-                );
-                Ok(None)
-            }
-        }
-    }
-}
-
-/// Adapts the shared [`PolicyResolver`] into the dep-light approval module's
-/// host-owned [`AdminApprovalSource`] (#5261 D6 approval dimension). Supplies
-/// the admin (org-wide) approval opinion (`EffectivePolicy.approval`) so the
-/// dispatch approval chain can apply admin Deny/Allow precedence.
-///
-/// Holds the SAME resolver `Arc` the availability and config seams read, so all
-/// three dimensions stay consistent for a turn.
-#[cfg(feature = "capability-policy")]
-pub(crate) struct PolicyResolverAdminApprovalSource {
-    policy: Arc<dyn PolicyResolver>,
-}
-
-#[cfg(feature = "capability-policy")]
-impl PolicyResolverAdminApprovalSource {
-    pub(crate) fn new(policy: Arc<dyn PolicyResolver>) -> Self {
-        Self { policy }
-    }
-}
-
-#[cfg(feature = "capability-policy")]
-#[async_trait]
-impl crate::profile_approval_authorization::AdminApprovalSource
-    for PolicyResolverAdminApprovalSource
-{
-    async fn admin_approval(
-        &self,
-        scope: &ironclaw_host_api::ResourceScope,
-        capability_id: &CapabilityId,
-    ) -> Option<ironclaw_host_api::PermissionMode> {
-        let subject = PolicySubject {
-            tenant_id: scope.tenant_id.clone(),
-            user_id: scope.user_id.clone(),
-        };
-        match self.policy.resolve(&subject, capability_id).await {
-            // Only a definite admin opinion (Allow/Deny) is surfaced; `Ask`
-            // carries no org-wide decision, so it maps to `None` ("no admin
-            // opinion") exactly like a missing row or a fault. This makes the
-            // trait doc literally true and lets the dispatch chain fall through
-            // to the existing user/profile steps (require_approval_for_profile_policy
-            // matches only `Some(Allow)` / `Some(Deny)`, so `None` for `Ask`
-            // preserves the fall-through).
-            Ok(effective) => match effective.approval {
-                ironclaw_host_api::PermissionMode::Allow
-                | ironclaw_host_api::PermissionMode::Deny => Some(effective.approval),
-                ironclaw_host_api::PermissionMode::Ask => None,
-            },
-            Err(error) => {
-                // Fail-SAFE (#5261 D5 approval): a resolver fault must NOT
-                // auto-approve (privilege escalation). Returning `None` makes
-                // the dispatch chain treat this as "no admin opinion" and fall
-                // through to the existing user/profile steps. Logged at debug so
-                // it never corrupts the REPL/TUI surface (see CLAUDE.md).
-                tracing::debug!(
-                    %error,
-                    capability = %capability_id.as_str(),
-                    "capability policy approval resolution failed; deferring to user/profile chain"
-                );
-                None
-            }
-        }
-    }
-}
-
-/// Whether the per-`(tenant, user)` capability policy resolver (#5267 / #5261)
-/// is active for this runtime. Compiled in by the `capability-policy` feature,
-/// but OFF unless `IRONCLAW_REBORN_CAPABILITY_POLICY` is set truthy
-/// (`1` / `true` / `yes` / `on`). Enabling the feature alone therefore never
-/// changes local-dev behaviour — the operator opts in. Mirrors the
-/// `HooksActivationConfig` master-flag-default-off shape with an env toggle.
-///
-/// Lives here (shared `pub(crate)`) so both `runtime.rs` (availability seam
-/// construction) and `factory.rs` (shared delta-store / resolver handle
-/// construction) gate on the same switch.
-#[cfg(feature = "capability-policy")]
-pub(crate) fn capability_policy_activated() -> bool {
-    std::env::var("IRONCLAW_REBORN_CAPABILITY_POLICY")
-        .map(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
 }
 
 /// Maps an installed package to the capability ids it makes visible to the
@@ -445,7 +253,10 @@ impl ScopedLifecyclePolicyCapabilitySurfaceResolver {
 /// diverge only on a future delegated turn where `actor != resource_scope owner`;
 /// aligning the dispatch `ResourceScope` with this helper for that case is a
 /// deferred follow-up (not exercised by the milestone).
-fn principal_user_id<'a>(scope: &'a TurnScope, actor: Option<&'a TurnActor>) -> Option<&'a UserId> {
+pub(crate) fn principal_user_id<'a>(
+    scope: &'a TurnScope,
+    actor: Option<&'a TurnActor>,
+) -> Option<&'a UserId> {
     actor
         .map(|actor| &actor.user_id)
         .or_else(|| scope.explicit_owner_user_id())
@@ -625,6 +436,7 @@ mod tests {
     fn policy_with_deltas(
         deltas: Vec<ironclaw_capability_policy::CapabilityPolicyDelta>,
     ) -> Arc<dyn PolicyResolver> {
+        use ironclaw_capability_policy::CapabilityPolicyDeltaStore;
         let store = ironclaw_capability_policy::InMemoryCapabilityPolicyDeltaStore::new();
         for delta in deltas {
             // The InMemory store's upsert is synchronous enough to drive on a
@@ -632,7 +444,7 @@ mod tests {
             futures::executor::block_on(store.upsert_delta(&tenant(), delta))
                 .expect("seed policy delta");
         }
-        build_capability_policy_resolver(Arc::new(store))
+        crate::capability_policy_engine::build_capability_policy_resolver(Arc::new(store))
     }
 
     #[cfg(feature = "capability-policy")]

@@ -148,7 +148,7 @@ pub(super) fn capability_wiring(
         .as_ref()
         .map(|resolver| {
             Arc::new(
-                crate::capability_surface_policy::PolicyResolverConfigSource::new(Arc::clone(
+                crate::capability_policy_engine::PolicyResolverConfigSource::new(Arc::clone(
                     resolver,
                 )),
             ) as Arc<dyn ironclaw_loop_support::LoopCapabilityConfigSource>
