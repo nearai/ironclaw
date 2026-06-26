@@ -210,6 +210,9 @@ async def test_reborn_legacy_approval_card_renders_details_and_expands_payload(
         await card.get_by_role("button", name="View full command").click()
         await expect(card.get_by_role("button", name="Show preview")).to_be_visible()
         await expect(card).to_contain_text(long_command[-40:])
+        await card.get_by_role("button", name="Show preview").click()
+        await expect(card.get_by_role("button", name="View full command")).to_be_visible()
+        await expect(card).not_to_contain_text(long_command[-40:])
     finally:
         await context.close()
 

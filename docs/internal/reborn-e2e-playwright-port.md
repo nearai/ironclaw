@@ -2054,6 +2054,24 @@ Behavior adjustment:
   the decision, so the port protects duplicate-submit prevention rather than
   copying the legacy resolved-label DOM.
 
+### Step 63: Legacy Approval Payload Collapse Port
+
+Extended `test_reborn_webui_v2_legacy_approval.py`.
+
+Completed the remaining toggle behavior from legacy `test_approval_params_toggle`
+for Reborn's long approval payload preview:
+
+- asserted a long command starts truncated;
+- expanded it with `View full command`;
+- collapsed it again with `Show preview`;
+- asserted the long tail is hidden again after collapse.
+
+Behavior adjustment:
+
+- Legacy v1 toggled a raw `.approval-params` block. Reborn exposes the same
+  operator control as `View full command` / `Show preview` on the structured
+  approval-details section, so the assertion follows those accessible controls.
+
 ## Open Migration Buckets
 
 Not yet ported:
