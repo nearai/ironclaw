@@ -23,7 +23,7 @@ pub(super) fn validate_provider_tool_call(
     })?;
     validate_provider_token(turn_id, "provider turn id", 512).map_err(invalid_invocation)?;
     validate_provider_token(&tool_call.id, "provider call id", 512).map_err(invalid_invocation)?;
-    validate_provider_tool_name(&tool_call.name)?;
+    validate_provider_tool_name(tool_call.name.as_str())?;
     validate_provider_arguments(&tool_call.arguments)?;
     validate_optional_provider_metadata_text(
         tool_call.response_reasoning.as_deref(),
@@ -70,13 +70,15 @@ fn invalid_invocation(error: ProviderValidationError) -> AgentLoopHostError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::ProviderToolName;
+
+    fn provider_name(value: &str) -> ProviderToolName {
+        ProviderToolName::new(value).expect("provider tool name")
+    }
 
     #[test]
     fn provider_tool_call_validation_rejects_provider_unsafe_tool_name() {
-        let mut call = provider_tool_call();
-        call.name = "demo.echo".to_string();
-
-        let error = validate_provider_tool_call(&call).expect_err("unsafe name rejected");
+        let error = validate_provider_tool_name("demo.echo").expect_err("unsafe name rejected");
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
     }
 
@@ -155,7 +157,7 @@ mod tests {
             provider_model_id: "model".to_string(),
             turn_id: Some("turn_1".to_string()),
             id: "call_1".to_string(),
-            name: "demo__echo".to_string(),
+            name: provider_name("demo__echo"),
             arguments: serde_json::json!({"message":"hello"}),
             response_reasoning: None,
             reasoning: None,

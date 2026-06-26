@@ -27,7 +27,12 @@ pub enum WasmError {
 }
 
 impl WasmError {
-    pub(crate) fn execution_failed(message: String) -> Self {
+    /// Construct an [`WasmError::ExecutionFailed`] with default usage/logs.
+    ///
+    /// Used by the runtime itself and by any blocking-offload wrapper (execution
+    /// or preparation) that needs to map a semaphore acquire failure, a task
+    /// join error, or a blocking-task panic into a structured error.
+    pub fn execution_failed(message: String) -> Self {
         Self::ExecutionFailed {
             message,
             usage: ResourceUsage::default(),

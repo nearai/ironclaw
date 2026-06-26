@@ -254,6 +254,88 @@ async fn missing_composite_mount_fails_without_backend_side_effects() {
     assert!(matches!(err, FilesystemError::MountNotFound { .. }));
 }
 
+#[tokio::test]
+async fn composite_routes_append_batch_to_matching_backend() {
+    // Two InMemoryBackend mounts: broad at /events, more-specific at /events/engine.
+    // append_batch to /events/engine/... must route to the /events/engine backend
+    // (longest prefix), return N monotonic SeqNos for N payloads, and leave the
+    // /events backend empty.
+    let broad = Arc::new(InMemoryBackend::new());
+    let specific = Arc::new(InMemoryBackend::new());
+
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(
+        event_log_descriptor("/events", "broad-events"),
+        Arc::clone(&broad),
+    )
+    .unwrap();
+    root.mount(
+        event_log_descriptor("/events/engine", "specific-events"),
+        Arc::clone(&specific),
+    )
+    .unwrap();
+
+    let log = VirtualPath::new("/events/engine/log.jsonl").unwrap();
+    let payloads: Vec<Vec<u8>> = vec![b"first".to_vec(), b"second".to_vec(), b"third".to_vec()];
+
+    // 1. Longest-prefix routing: append_batch dispatches to the /events/engine mount.
+    let seqs = root.append_batch(&log, payloads.clone()).await.unwrap();
+    assert_eq!(seqs.len(), 3);
+
+    // 2. Ordered seqs: returned SeqNos are strictly monotonic in payload order.
+    assert!(seqs[0] < seqs[1] && seqs[1] < seqs[2]);
+
+    // The /events/engine backend holds all three records in payload order.
+    let records = specific.tail(&log, SeqNo::ZERO).await.unwrap();
+    assert_eq!(records.len(), 3);
+    for (i, payload) in payloads.iter().enumerate() {
+        assert_eq!(records[i].payload, *payload);
+        assert_eq!(records[i].seq, seqs[i]);
+    }
+
+    // The broad /events backend received nothing.
+    assert!(
+        broad.tail(&log, SeqNo::ZERO).await.unwrap().is_empty(),
+        "broad /events mount must not receive /events/engine appends"
+    );
+}
+
+#[tokio::test]
+async fn composite_append_batch_returns_mount_not_found() {
+    // A composite with one mount at /events.  An append_batch to /logs/…
+    // (outside all mounts) must return MountNotFound and leave the /events
+    // backend completely empty — no side effects.
+    let backend = Arc::new(InMemoryBackend::new());
+
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(
+        event_log_descriptor("/events", "events-backend"),
+        Arc::clone(&backend),
+    )
+    .unwrap();
+
+    // Path under a valid virtual root (/memory) that has no matching mount.
+    let unmapped = VirtualPath::new("/memory/system.jsonl").unwrap();
+    let payloads: Vec<Vec<u8>> = vec![b"payload".to_vec()];
+
+    let err = root.append_batch(&unmapped, payloads).await.unwrap_err();
+
+    assert!(
+        matches!(err, FilesystemError::MountNotFound { .. }),
+        "expected MountNotFound, got {err:?}"
+    );
+
+    // The mounted /events backend must not have received any write.
+    let records = backend
+        .tail(&VirtualPath::new("/events/log.jsonl").unwrap(), SeqNo::ZERO)
+        .await
+        .unwrap();
+    assert!(
+        records.is_empty(),
+        "/events backend must not receive writes for an unmapped path"
+    );
+}
+
 fn empty_local_backend(virtual_root: &str) -> (LocalFilesystem, tempfile::TempDir) {
     let dir = tempdir().unwrap();
     let mut backend = LocalFilesystem::new();
@@ -264,6 +346,18 @@ fn empty_local_backend(virtual_root: &str) -> (LocalFilesystem, tempfile::TempDi
         )
         .unwrap();
     (backend, dir)
+}
+
+fn event_log_descriptor(virtual_root: &str, backend_id: &str) -> MountDescriptor {
+    MountDescriptor {
+        virtual_root: VirtualPath::new(virtual_root).unwrap(),
+        backend_id: BackendId::new(backend_id).unwrap(),
+        backend_kind: BackendKind::MemoryDocuments,
+        storage_class: StorageClass::StructuredRecords,
+        content_kind: ContentKind::SystemState,
+        index_policy: IndexPolicy::NotIndexed,
+        capabilities: BackendCapabilities::in_memory_full(),
+    }
 }
 
 fn descriptor(

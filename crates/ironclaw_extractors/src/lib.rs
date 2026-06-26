@@ -97,6 +97,37 @@ pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<S
     }
 }
 
+/// Outcome of running the type-aware extractor over a document's bytes.
+/// Centralizes the extract+trim+empty classification so the consumers
+/// (chat attachments, agent file reads, capability download output) cannot
+/// drift as extractor behavior changes. Callers render their own model-facing
+/// text/markers and apply their own truncation from this outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocumentExtraction {
+    /// Non-empty extracted text, trimmed. NOT truncated — callers apply their own cap.
+    Text(String),
+    /// The extractor succeeded but produced no usable text.
+    Empty,
+    /// The extractor failed (unsupported/corrupt). Carries the error reason for
+    /// logging only; callers render a model-safe marker, never this string.
+    Failed(String),
+}
+
+/// Run the type-aware extractor and classify the outcome. See [`extract_text`].
+pub fn extract_document(data: &[u8], mime: &str, filename: Option<&str>) -> DocumentExtraction {
+    match extract_text(data, mime, filename) {
+        Ok(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                DocumentExtraction::Empty
+            } else {
+                DocumentExtraction::Text(trimmed.to_string())
+            }
+        }
+        Err(error) => DocumentExtraction::Failed(error),
+    }
+}
+
 /// Extract text from non-plain-text document formats inferred from a filename.
 ///
 /// This deliberately excludes UTF-8 passthrough formats such as `.txt`, `.json`,
@@ -683,6 +714,39 @@ mod tests {
             canonical
         );
         assert_eq!(extract_text(data, "TEXT/PLAIN", None).unwrap(), canonical);
+    }
+
+    #[test]
+    fn extract_document_classifies_text() {
+        // A supported text format with content yields Text(trimmed).
+        let outcome = extract_document(b"  name,age\nAlice,30  ", "text/csv", Some("data.csv"));
+        assert_eq!(
+            outcome,
+            DocumentExtraction::Text("name,age\nAlice,30".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_document_classifies_empty() {
+        // The extractor succeeds (UTF-8 passthrough) but the text is all
+        // whitespace, so after trimming there is nothing usable.
+        let outcome = extract_document(b"   \n\t  ", "text/plain", None);
+        assert_eq!(outcome, DocumentExtraction::Empty);
+    }
+
+    #[test]
+    fn extract_document_classifies_failed() {
+        // An unsupported/opaque binary (PNG header bytes under image/png) is not
+        // a document type the extractor handles, so it fails.
+        let outcome = extract_document(
+            &[0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02],
+            "image/png",
+            Some("image.png"),
+        );
+        assert!(
+            matches!(outcome, DocumentExtraction::Failed(reason) if !reason.is_empty()),
+            "unsupported binary must classify as Failed with a reason"
+        );
     }
 
     #[test]

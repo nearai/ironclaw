@@ -1163,6 +1163,76 @@ async fn libsql_append_and_tail_assigns_monotonic_seqno() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_append_batch_is_one_statement_with_contiguous_ordered_seqs() {
+    let filesystem = libsql_root().await;
+    let log = VirtualPath::new("/events/engine").unwrap();
+
+    // Seed a single append so the batch must continue the sequence.
+    let s0 = filesystem.append(&log, b"seed".to_vec()).await.unwrap();
+
+    let payloads: Vec<Vec<u8>> = (0..21u8).map(|n| vec![n]).collect();
+    let seqs = filesystem
+        .append_batch(&log, payloads.clone())
+        .await
+        .unwrap();
+    assert_eq!(seqs.len(), 21);
+    assert!(seqs[0] > s0, "batch seqs continue past the seeded append");
+    // Contiguous + monotonic in payload order.
+    for window in seqs.windows(2) {
+        assert!(window[0] < window[1]);
+    }
+
+    // Order + content preserved through the single multi-row INSERT.
+    let all = filesystem.tail(&log, SeqNo::ZERO).await.unwrap();
+    assert_eq!(all.len(), 22);
+    assert_eq!(all[0].payload, b"seed".to_vec());
+    for (offset, payload) in payloads.iter().enumerate() {
+        assert_eq!(&all[offset + 1].payload, payload);
+        assert_eq!(all[offset + 1].seq, seqs[offset]);
+    }
+
+    // Empty batch is a no-op.
+    assert!(
+        filesystem
+            .append_batch(&log, Vec::new())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_append_batch_spanning_multiple_statements_commits_atomically_in_order() {
+    // 600 > the 256-row chunk size, so this exercises the multi-statement
+    // transactional path: every chunk must commit and the seqs stay contiguous
+    // and ordered across chunk boundaries.
+    let filesystem = libsql_root().await;
+    let log = VirtualPath::new("/events/multichunk").unwrap();
+
+    let payloads: Vec<Vec<u8>> = (0..600u32).map(|n| n.to_le_bytes().to_vec()).collect();
+    let seqs = filesystem
+        .append_batch(&log, payloads.clone())
+        .await
+        .unwrap();
+    assert_eq!(seqs.len(), 600);
+    for window in seqs.windows(2) {
+        assert!(window[0] < window[1], "seqs are ordered across chunks");
+    }
+
+    let all = filesystem.tail(&log, SeqNo::ZERO).await.unwrap();
+    assert_eq!(all.len(), 600);
+    for (offset, payload) in payloads.iter().enumerate() {
+        assert_eq!(
+            &all[offset].payload, payload,
+            "order preserved across chunks"
+        );
+        assert_eq!(all[offset].seq, seqs[offset]);
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_tail_bounded_limits_records_before_materialization() {
     let filesystem = libsql_root().await;
     let log = VirtualPath::new("/events/bounded").unwrap();
@@ -1289,9 +1359,9 @@ async fn libsql_root() -> TestLibSqlRootFilesystem {
 mod postgres_tests {
     use super::*;
     use ironclaw_filesystem::{
-        Capability, CasExpectation, Entry, FilesystemError, FilesystemOperation, Filter, IndexKey,
-        IndexKind, IndexName, IndexSpec, IndexValue, Page, PostgresRootFilesystem, RecordKind,
-        SeqNo, TxnCapability,
+        Capability, CasExpectation, Entry, FileType, FilesystemError, FilesystemOperation, Filter,
+        IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, PostgresRootFilesystem,
+        RecordKind, SeqNo, TxnCapability,
     };
     use ironclaw_host_api::VirtualPath;
 
@@ -1330,6 +1400,36 @@ mod postgres_tests {
 
     fn vpath(prefix: &str, leaf: &str) -> VirtualPath {
         VirtualPath::new(format!("{prefix}/{leaf}")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn postgres_append_batch_is_one_statement_with_contiguous_ordered_seqs() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        // Event-plane writes go under a per-test prefix; the events table keys
+        // on the full path, so isolation holds against a shared DB.
+        let log = VirtualPath::new(format!("{prefix}/events")).unwrap();
+
+        let s0 = fs.append(&log, b"seed".to_vec()).await.unwrap();
+
+        let payloads: Vec<Vec<u8>> = (0..21u8).map(|n| vec![n]).collect();
+        let seqs = fs.append_batch(&log, payloads.clone()).await.unwrap();
+        assert_eq!(seqs.len(), 21);
+        assert!(seqs[0] > s0);
+        for window in seqs.windows(2) {
+            assert!(window[0] < window[1]);
+        }
+
+        let all = fs.tail(&log, SeqNo::ZERO).await.unwrap();
+        assert_eq!(all.len(), 22);
+        assert_eq!(all[0].payload, b"seed".to_vec());
+        for (offset, payload) in payloads.iter().enumerate() {
+            assert_eq!(&all[offset + 1].payload, payload);
+            assert_eq!(all[offset + 1].seq, seqs[offset]);
+        }
+
+        assert!(fs.append_batch(&log, Vec::new()).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1400,6 +1500,31 @@ mod postgres_tests {
     }
 
     #[tokio::test]
+    async fn postgres_put_cas_version_on_missing_path_reports_no_found_version() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let missing = vpath(&prefix, "cas_version_missing");
+        let err = fs
+            .put(
+                &missing,
+                Entry::bytes(vec![1]),
+                CasExpectation::Version(ironclaw_filesystem::RecordVersion::from_backend(1)),
+            )
+            .await
+            .expect_err("version CAS on a missing path must fail");
+        match err {
+            FilesystemError::VersionMismatch { found, .. } => {
+                assert!(
+                    found.is_none(),
+                    "missing path should report no found version, got: {found:?}"
+                );
+            }
+            other => panic!("expected VersionMismatch, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn postgres_native_put_cas_any_increments_existing_version() {
         let Some((fs, prefix)) = postgres_root().await else {
             return;
@@ -1417,6 +1542,99 @@ mod postgres_tests {
         let got = fs.get(&path).await.unwrap().unwrap();
         assert_eq!(got.version, v2);
         assert_eq!(got.entry.body, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn postgres_put_cas_any_inserts_missing_path_and_returns_version() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let missing = vpath(&prefix, "cas_any_insert_missing");
+        let v1 = fs
+            .put(&missing, Entry::bytes(vec![7]), CasExpectation::Any)
+            .await
+            .expect("Any insert on a missing path must succeed");
+        assert_eq!(v1, ironclaw_filesystem::RecordVersion::from_backend(1));
+        let got = fs.get(&missing).await.unwrap().unwrap();
+        assert_eq!(got.entry.body, vec![7]);
+    }
+
+    // CAS-put directory invariant (folded into the single write statement by
+    // the round-trip fix). Mirrors the libsql `write_file` rejection tests but
+    // drives `put` directly, which is the primitive the SQL fold changed.
+
+    #[tokio::test]
+    async fn postgres_put_rejects_implicit_directory() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        // Writing a child first makes `dir` an implicit directory.
+        let dir = vpath(&prefix, "implicit");
+        let child = vpath(&prefix, "implicit/leaf");
+        fs.put(&child, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        // Every CAS arm must refuse to overwrite the implicit directory.
+        for cas in [
+            CasExpectation::Absent,
+            CasExpectation::Any,
+            CasExpectation::Version(ironclaw_filesystem::RecordVersion::from_backend(1)),
+        ] {
+            let err = fs
+                .put(&dir, Entry::bytes(vec![2]), cas)
+                .await
+                .expect_err("put over an implicit directory must fail");
+            assert!(
+                matches!(
+                    err,
+                    FilesystemError::Backend {
+                        operation: FilesystemOperation::WriteFile,
+                        ..
+                    }
+                ),
+                "expected directory-write Backend error, got: {err:?}"
+            );
+        }
+        // The child is untouched.
+        assert_eq!(fs.get(&child).await.unwrap().unwrap().entry.body, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn postgres_put_rejects_existing_directory() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let dir = VirtualPath::new(format!("{prefix}/explicit")).unwrap();
+        // create_dir_all materializes explicit directory rows (is_dir = TRUE).
+        // Keep `dir` childless so the exact-path explicit-directory guard
+        // (ON CONFLICT / is_dir = FALSE) is what rejects the put, not the
+        // descendant scan (covered by postgres_put_rejects_implicit_directory).
+        fs.create_dir_all(&dir).await.unwrap();
+
+        // Every CAS arm (distinct SQL: PUT_ABSENT_SQL / PUT_VERSION_SQL /
+        // PUT_ANY_SQL) must refuse to overwrite the explicit directory.
+        for cas in [
+            CasExpectation::Absent,
+            CasExpectation::Any,
+            CasExpectation::Version(ironclaw_filesystem::RecordVersion::from_backend(1)),
+        ] {
+            let err = fs
+                .put(&dir, Entry::bytes(vec![2]), cas)
+                .await
+                .expect_err("put over an explicit directory must fail");
+            assert!(
+                matches!(
+                    err,
+                    FilesystemError::Backend {
+                        operation: FilesystemOperation::WriteFile,
+                        ..
+                    }
+                ),
+                "expected directory-write Backend error, got: {err:?}"
+            );
+        }
+        assert_eq!(fs.stat(&dir).await.unwrap().file_type, FileType::Directory);
     }
 
     #[tokio::test]
