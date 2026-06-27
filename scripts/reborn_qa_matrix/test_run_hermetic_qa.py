@@ -551,6 +551,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 {case["case"] for case in manifest["cases"]},
             )
             self.assertIn(
+                "slack_host_beta_serve_mount_regression",
+                {case["case"] for case in manifest["cases"]},
+            )
+            self.assertIn(
                 "slack_outbound_delivery_rendering_regression",
                 {case["case"] for case in manifest["cases"]},
             )
@@ -1470,6 +1474,58 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn("slack_personal_binding::tests", commands[1]["command"])
             self.assertIn("--features slack-v2-host-beta", commands[0]["command"])
             self.assertIn("--features slack-v2-host-beta", commands[1]["command"])
+
+    def test_slack_host_beta_serve_mount_case_dry_run_maps_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "slack_host_beta_serve_mount_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-038-TC-01",
+                    "REBCLI-038-TC-02",
+                    "REBCLI-038-TC-03",
+                    "REBCLI-038-TC-04",
+                    "REBCLI-038-TC-05",
+                    "REBCLI-038-TC-06",
+                    "REBCLI-038-TC-07",
+                    "REBCLI-038-TC-08",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                [command["name"] for command in commands],
+                [
+                    "slack_host_beta_webui_only_cli_contracts",
+                    "slack_host_beta_cli_serve_mount_smoke",
+                    "slack_host_beta_composition_contracts",
+                ],
+            )
+            self.assertIn("--features webui-v2-beta", commands[0]["command"])
+            self.assertIn("serve_slack", commands[0]["command"])
+            self.assertIn(
+                "--features webui-v2-beta,slack-v2-host-beta",
+                commands[1]["command"],
+            )
+            self.assertIn(
+                "serve_env_slack_enabled_mounts_slack_events_route",
+                commands[1]["command"],
+            )
+            self.assertIn("--features slack-v2-host-beta", commands[2]["command"])
+            self.assertIn("slack_host_beta", commands[2]["command"])
 
     def test_slack_outbound_delivery_rendering_case_dry_run_maps_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1201,6 +1201,77 @@ SLACK_PERSONAL_BINDING_SERVICE_COMMAND = CommandSpec(
     ],
 )
 
+SLACK_HOST_BETA_WEBUI_ONLY_CLI_COMMAND = CommandSpec(
+    name="slack_host_beta_webui_only_cli_contracts",
+    description=(
+        "Focused CLI contracts proving Slack host-beta enablement fails closed "
+        "when the binary is built with WebUI v2 but without the Slack host-beta "
+        "feature."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_cli",
+        "--features",
+        "webui-v2-beta",
+        "serve_slack",
+        "--bin",
+        "ironclaw-reborn",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+SLACK_HOST_BETA_CLI_SERVE_COMMAND = CommandSpec(
+    name="slack_host_beta_cli_serve_mount_smoke",
+    description=(
+        "Caller-level ironclaw-reborn serve smoke proving env-enabled Slack "
+        "mounts the Slack Events API route instead of returning 404."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_cli",
+        "--features",
+        "webui-v2-beta,slack-v2-host-beta",
+        "--test",
+        "smoke",
+        "serve_env_slack_enabled_mounts_slack_events_route",
+        "--",
+        "--exact",
+        "--format",
+        "terse",
+    ],
+)
+
+SLACK_HOST_BETA_COMPOSITION_COMMAND = CommandSpec(
+    name="slack_host_beta_composition_contracts",
+    description=(
+        "Focused composition contracts for building signed Slack Events API "
+        "mounts, pairing redeem routes, channel routing, dispatch, and "
+        "fail-closed runtime dependencies without live Slack traffic."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "slack-v2-host-beta",
+        "slack_host_beta",
+        "--lib",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 SLACK_DELIVERY_COMMAND = CommandSpec(
     name="slack_delivery_contracts",
     description=(
@@ -2959,6 +3030,34 @@ CASES: dict[str, CaseSpec] = {
             "tenant/app/team/installation validation, tenant-app-scope "
             "enforcement, invalid Slack id rejection, and binding-store error "
             "propagation."
+        ),
+    ),
+    "slack_host_beta_serve_mount_regression": CaseSpec(
+        name="slack_host_beta_serve_mount_regression",
+        feature="Slack host-beta serve mount",
+        category="Hermetic Slack Host-Beta Serve Mount Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-038-TC-01",
+            "REBCLI-038-TC-02",
+            "REBCLI-038-TC-03",
+            "REBCLI-038-TC-04",
+            "REBCLI-038-TC-05",
+            "REBCLI-038-TC-06",
+            "REBCLI-038-TC-07",
+            "REBCLI-038-TC-08",
+        ],
+        commands=[
+            SLACK_HOST_BETA_WEBUI_ONLY_CLI_COMMAND,
+            SLACK_HOST_BETA_CLI_SERVE_COMMAND,
+            SLACK_HOST_BETA_COMPOSITION_COMMAND,
+        ],
+        notes=(
+            "Covers Slack host-beta serve mount rows without live Slack "
+            "network calls or PR #5348 browser duplication: WebUI-only "
+            "feature-disabled fail-closed behavior, env-enabled serve route "
+            "mounting, Slack Events API descriptor/handler behavior, signed "
+            "URL verification/event dispatch, pairing redeem exposure, channel "
+            "routing, and runtime dependency failures."
         ),
     ),
     "slack_outbound_delivery_rendering_regression": CaseSpec(
