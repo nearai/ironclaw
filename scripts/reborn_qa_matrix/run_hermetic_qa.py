@@ -242,6 +242,43 @@ WEBUI_V2_STATIC_ROUTER_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_STATIC_AUTH_JS_COMMAND = CommandSpec(
+    name="webui_v2_static_auth_js_contract",
+    description=(
+        "Embedded auth.js contract for login-ticket consumption, URL "
+        "credential stripping, stored-token non-overwrite, logout revoke "
+        "request dispatch, and OAuth login_error handling."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2_static",
+        "--all-features",
+        "auth_js_carries_login_ticket_contract",
+        "--",
+        "--exact",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_STATIC_API_AUTH_COMMAND = CommandSpec(
+    name="webui_v2_static_api_auth_client_contracts",
+    description=(
+        "Static JS API-client contracts for reading bearer tokens from "
+        "sessionStorage, attaching Authorization on same-origin requests, "
+        "failing fast on missing ids, and rejecting off-origin attachment URLs "
+        "before a bearer can be sent."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/lib/api.test.mjs",
+    ],
+)
+
 WEBUI_V2_SEND_MULTILINE_COMMAND = CommandSpec(
     name="webui_v2_send_multiline_contract",
     description="Focused send-message route contract for preserving multiline content.",
@@ -457,6 +494,28 @@ WEBUI_V2_SESSION_ROUND_TRIP_COMMAND = CommandSpec(
         "--all-features",
         "--test",
         "session_round_trip",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_INGRESS_SESSION_AUTH_COMMAND = CommandSpec(
+    name="webui_v2_ingress_session_auth_contracts",
+    description=(
+        "Focused ingress auth/session contracts for exact env bearer matching, "
+        "empty or wrong token rejection, session creation/lookup/expiry, "
+        "single-use tickets, revoked-session denial, tenant isolation, signed "
+        "session round-trips, and protected-route authentication."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_webui_ingress",
+        "--all-features",
+        "session",
         "--",
         "--format",
         "terse",
@@ -1342,6 +1401,34 @@ CASES: dict[str, CaseSpec] = {
             "CSP nonces, no-store shell responses, locked document CSP "
             "allowlists, wallet-connect CSP isolation, static security "
             "headers, and mount prefix validation."
+        ),
+    ),
+    "webui_v2_login_session_state_regression": CaseSpec(
+        name="webui_v2_login_session_state_regression",
+        feature="WebUI v2 login and client session state",
+        category="Hermetic Login/Session State Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-064-TC-01",
+            "REBCLI-064-TC-02",
+            "REBCLI-064-TC-03",
+            "REBCLI-064-TC-04",
+            "REBCLI-064-TC-05",
+            "REBCLI-064-TC-06",
+        ],
+        commands=[
+            WEBUI_V2_STATIC_AUTH_JS_COMMAND,
+            WEBUI_V2_STATIC_API_AUTH_COMMAND,
+            WEBUI_V2_INGRESS_SESSION_AUTH_COMMAND,
+        ],
+        notes=(
+            "Covers WebUI v2 login/client-session rows without duplicating PR "
+            "#5348 browser auth-flow coverage: login-ticket consumption, URL "
+            "credential stripping, stored-token non-overwrite, logout revoke "
+            "dispatch, login_error handling, sessionStorage bearer use on "
+            "same-origin API calls, off-origin bearer-send prevention, env "
+            "bearer matching, session creation/lookup/expiry, one-time "
+            "tickets, revoked-session denial, tenant isolation, signed "
+            "session round-trips, and protected-route authentication."
         ),
     ),
     "webui_v2_product_auth_oauth_regression": CaseSpec(
