@@ -355,6 +355,139 @@ WEBUI_V2_MEMBER_HANDLER_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SSO_AUTH_ROUTE_COMMAND = CommandSpec(
+    name="webui_v2_sso_auth_route_contracts",
+    description=(
+        "WebUI v2 auth route contracts for bearer/session/OIDC acceptance, "
+        "rejection, route mounting, and generic unauthorized responses."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_webui_ingress",
+        "--all-features",
+        "--test",
+        "auth_route_contract",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_GOOGLE_OAUTH_ROUTE_COMMAND = CommandSpec(
+    name="webui_v2_google_oauth_routes",
+    description=(
+        "Google SSO public route contracts for provider discovery, login "
+        "redirect, callback success/failure, state replay, ticket exchange, "
+        "logout, open-redirect defense, and hosted-domain denial."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_webui_ingress",
+        "--all-features",
+        "--test",
+        "google_oauth_routes",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_GITHUB_OAUTH_ROUTE_COMMAND = CommandSpec(
+    name="webui_v2_github_oauth_routes",
+    description=(
+        "GitHub SSO public route contracts for provider discovery, login "
+        "redirect, callback success/failure, state replay, verified-email "
+        "selection, ticket exchange, and logout."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_webui_ingress",
+        "--all-features",
+        "--test",
+        "github_oauth_routes",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_SESSION_ROUND_TRIP_COMMAND = CommandSpec(
+    name="webui_v2_sso_session_round_trip",
+    description=(
+        "End-to-end WebUI v2 SSO callback, one-time ticket exchange, "
+        "protected route bearer use, logout, and revoked-session rejection."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_webui_ingress",
+        "--all-features",
+        "--test",
+        "session_round_trip",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_SSO_NETWORK_LIMITS_COMMAND = CommandSpec(
+    name="webui_v2_sso_network_limits",
+    description=(
+        "SSO public route rate-limit, body-limit, and CORS fail-closed "
+        "contracts for login, session exchange, and logout."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_webui_ingress",
+        "--all-features",
+        "--test",
+        "network_limits_contract",
+        "sso_",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_SSO_PUBLIC_MOUNT_COMMAND = CommandSpec(
+    name="webui_v2_sso_public_mount_policy",
+    description=(
+        "Composition-level public route mount contract proving /auth/providers "
+        "is reachable without bearer auth while protected WebUI v2 routes "
+        "remain bearer-protected."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "--test",
+        "webui_v2_serve",
+        "public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_policy",
+        "--",
+        "--exact",
+        "--format",
+        "terse",
+    ],
+)
+
 COMPOSITION_PROJECT_FS_COMMAND = CommandSpec(
     name="composition_project_filesystem_reader",
     description=(
@@ -794,6 +927,35 @@ CASES: dict[str, CaseSpec] = {
             "ID precedence, member add/update/remove routing, unwired service "
             "fail-closed behavior, no-content delete responses, and "
             "reborn-projects session feature projection."
+        ),
+    ),
+    "webui_v2_public_sso_session_regression": CaseSpec(
+        name="webui_v2_public_sso_session_regression",
+        feature="WebUI v2 public SSO session routes",
+        category="Hermetic Public SSO Session Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-051-TC-01",
+            "REBCLI-051-TC-02",
+            "REBCLI-051-TC-03",
+            "REBCLI-051-TC-04",
+            "REBCLI-051-TC-05",
+            "REBCLI-051-TC-06",
+        ],
+        commands=[
+            WEBUI_V2_SSO_AUTH_ROUTE_COMMAND,
+            WEBUI_V2_GOOGLE_OAUTH_ROUTE_COMMAND,
+            WEBUI_V2_GITHUB_OAUTH_ROUTE_COMMAND,
+            WEBUI_V2_SESSION_ROUND_TRIP_COMMAND,
+            WEBUI_V2_SSO_NETWORK_LIMITS_COMMAND,
+            WEBUI_V2_SSO_PUBLIC_MOUNT_COMMAND,
+        ],
+        notes=(
+            "Covers WebUI v2 public SSO session rows without live provider "
+            "calls: provider discovery, Google/GitHub login redirect and "
+            "callback success/failure, one-time state/ticket replay guards, "
+            "session bearer use on protected WebUI v2 routes, logout "
+            "revocation, public route mount policy, open-redirect defense, "
+            "body/rate limits, CORS fail-closed behavior, and sanitized errors."
         ),
     ),
     "webui_v2_rust_static_regression": CaseSpec(

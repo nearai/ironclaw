@@ -79,6 +79,14 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-051-TC-01",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "REBCLI-051-TC-06",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-055-TC-12",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -124,6 +132,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             )
             self.assertIn(
                 "webui_v2_project_membership_api_regression",
+                {case["case"] for case in manifest["cases"]},
+            )
+            self.assertIn(
+                "webui_v2_public_sso_session_regression",
                 {case["case"] for case in manifest["cases"]},
             )
             self.assertIn(
@@ -530,6 +542,56 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn("project_", commands[1]["command"])
             self.assertIn("projects", commands[2]["command"])
             self.assertIn("member", commands[3]["command"])
+
+    def test_public_sso_session_case_dry_run_maps_api_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "webui_v2_public_sso_session_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-051-TC-01",
+                    "REBCLI-051-TC-02",
+                    "REBCLI-051-TC-03",
+                    "REBCLI-051-TC-04",
+                    "REBCLI-051-TC-05",
+                    "REBCLI-051-TC-06",
+                ],
+            )
+            self.assertEqual(
+                [
+                    command["name"]
+                    for command in results["results"][0]["details"]["commands"]
+                ],
+                [
+                    "webui_v2_sso_auth_route_contracts",
+                    "webui_v2_google_oauth_routes",
+                    "webui_v2_github_oauth_routes",
+                    "webui_v2_sso_session_round_trip",
+                    "webui_v2_sso_network_limits",
+                    "webui_v2_sso_public_mount_policy",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertIn("--test auth_route_contract", commands[0]["command"])
+            self.assertIn("--test google_oauth_routes", commands[1]["command"])
+            self.assertIn("--test github_oauth_routes", commands[2]["command"])
+            self.assertIn("--test session_round_trip", commands[3]["command"])
+            self.assertIn("--test network_limits_contract", commands[4]["command"])
+            self.assertIn("public_route_mount_is_merged", commands[5]["command"])
 
     def test_failed_command_stops_later_commands_in_case(self):
         case = run_hermetic_qa.CaseSpec(
