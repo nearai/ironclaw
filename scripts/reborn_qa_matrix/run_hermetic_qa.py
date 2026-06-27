@@ -33,6 +33,7 @@ class CommandSpec:
     name: str
     argv: list[str]
     env: dict[str, str] = field(default_factory=dict)
+    unset_env: list[str] = field(default_factory=list)
     description: str = ""
 
 
@@ -384,6 +385,31 @@ OPENAI_COMPAT_ALL_FEATURE_COMPOSITION_COMMAND = CommandSpec(
     ],
 )
 
+REBORN_COMPOSITION_ALL_FEATURE_COMMAND = CommandSpec(
+    name="reborn_composition_all_feature_contracts",
+    description=(
+        "Full unfiltered ironclaw_reborn_composition regression under the "
+        "combined WebUI v2, OpenAI-compatible, Slack host-beta, and "
+        "test-support feature set."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    unset_env=["NEARAI_API_KEY", "NEARAI_BASE_URL"],
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,openai-compat-beta,slack-v2-host-beta,test-support",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+        "--test-threads=1",
+    ],
+)
+
 PRODUCT_WORKFLOW_LEDGER_COMMAND = CommandSpec(
     name="product_workflow_storage_durable_ledger",
     description=(
@@ -399,6 +425,35 @@ PRODUCT_WORKFLOW_LEDGER_COMMAND = CommandSpec(
         "--test",
         "durable_ledger_contract",
         "--all-features",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+REBORN_EVENT_STORE_FOUNDATION_COMMAND = CommandSpec(
+    name="reborn_event_store_foundation_contracts",
+    description=(
+        "Default-feature Reborn foundation crates for config, identity, "
+        "event-store, and the runtime facade that back CLI/WebUI audit and "
+        "replay behavior without optional live Postgres legs."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_common",
+        "-p",
+        "ironclaw_reborn_config",
+        "-p",
+        "ironclaw_reborn_identity",
+        "-p",
+        "ironclaw_reborn_event_store",
+        "-p",
+        "ironclaw_reborn",
         "--jobs",
         "2",
         "--",
@@ -441,6 +496,128 @@ SUPPORT_SUBSTRATE_COMMAND = CommandSpec(
         "-p",
         "ironclaw_safety",
         "--all-features",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+REBORN_RUNTIME_TOOL_SUBSTRATE_COMMAND = CommandSpec(
+    name="reborn_runtime_tool_substrate_contracts",
+    description=(
+        "Lower runtime/tool crates composed by Reborn WebUI v2 and the "
+        "runtime for authorization, policy, network, processes, script/WASM "
+        "lanes, extension assets, product context, registry, and loop support."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_authorization",
+        "-p",
+        "ironclaw_runtime_policy",
+        "-p",
+        "ironclaw_network",
+        "-p",
+        "ironclaw_dispatcher",
+        "-p",
+        "ironclaw_processes",
+        "-p",
+        "ironclaw_process_sandbox",
+        "-p",
+        "ironclaw_scripts",
+        "-p",
+        "ironclaw_wasm",
+        "-p",
+        "ironclaw_wasm_sandbox_core",
+        "-p",
+        "ironclaw_wasm_limiter",
+        "-p",
+        "ironclaw_first_party_extensions",
+        "-p",
+        "ironclaw_first_party_extension_ports",
+        "-p",
+        "ironclaw_product_context",
+        "-p",
+        "ironclaw_product_adapter_registry",
+        "-p",
+        "ironclaw_loop_support",
+        "--all-features",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+REBORN_HOOK_BACKEND_ARCHITECTURE_COMMAND = CommandSpec(
+    name="reborn_hook_backend_architecture_contracts",
+    description=(
+        "libSQL hook backend contracts, hook backend parity matrix, and "
+        "Reborn architecture boundary checks for route ownership and "
+        "durable predicate state behavior."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_hooks_libsql",
+        "-p",
+        "ironclaw_hooks_parity",
+        "-p",
+        "ironclaw_architecture",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+REBORN_HOOK_POSTGRES_FEATURE_COMMAND = CommandSpec(
+    name="reborn_hook_postgres_feature_contracts",
+    description=(
+        "Postgres-gated hook backend compile/contract/adversarial coverage; "
+        "Postgres test bodies guard-skip without a configured database URL."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_hooks_postgres",
+        "-p",
+        "ironclaw_hooks_parity",
+        "--features",
+        "postgres",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+REBORN_HOOK_POSTGRES_PARITY_INTEGRATION_COMMAND = CommandSpec(
+    name="reborn_hook_postgres_parity_integration_contracts",
+    description=(
+        "Postgres-feature plus integration-gated hook parity coverage; "
+        "libSQL multi-host integration remains hermetic and Postgres legs "
+        "guard-skip without a configured database URL."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_hooks_parity",
+        "--features",
+        "postgres,integration",
         "--jobs",
         "2",
         "--",
@@ -3376,6 +3553,49 @@ CASES: dict[str, CaseSpec] = {
             "matrix, then the full native ironclaw_webui_v2 package check."
         ),
     ),
+    "webui_v2_gateway_middleware_serve_foundation_regression": CaseSpec(
+        name="webui_v2_gateway_middleware_serve_foundation_regression",
+        feature="WebUI v2 gateway middleware and serve contract",
+        category="Hermetic Gateway Middleware/Serve Foundation Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-055-TC-01",
+            "REBCLI-055-TC-02",
+            "REBCLI-055-TC-03",
+            "REBCLI-055-TC-04",
+            "REBCLI-055-TC-05",
+            "REBCLI-055-TC-06",
+            "REBCLI-055-TC-10",
+            "REBCLI-055-TC-11",
+            "REBCLI-055-TC-14",
+            "REBCLI-055-TC-15",
+            "REBCLI-055-TC-16",
+            "REBCLI-055-TC-17",
+        ],
+        commands=[
+            WEBUI_V2_SERVE_LISTENER_CLI_COMMAND,
+            WEBUI_V2_SERVE_SECURITY_CLI_COMMAND,
+            WEBUI_V2_SERVE_CORS_COMMAND,
+            WEBUI_V2_SERVE_BODY_LIMIT_COMMAND,
+            WEBUI_V2_SERVE_WS_ORIGIN_COMMAND,
+            WEBUI_V2_DESCRIPTOR_POLICY_COMMAND,
+            WEBUI_V2_COMPOSITION_STATIC_COMMAND,
+            WEBUI_V2_COMPOSITION_COMMAND,
+            REBORN_COMPOSITION_ALL_FEATURE_COMMAND,
+            REBORN_EVENT_STORE_FOUNDATION_COMMAND,
+            WEBUI_V2_SESSION_EXECUTION_SUBSTRATE_COMMAND,
+            REBORN_RUNTIME_TOOL_SUBSTRATE_COMMAND,
+            REBORN_HOOK_BACKEND_ARCHITECTURE_COMMAND,
+            REBORN_HOOK_POSTGRES_FEATURE_COMMAND,
+            REBORN_HOOK_POSTGRES_PARITY_INTEGRATION_COMMAND,
+        ],
+        notes=(
+            "Maps the remaining hermetic REBCLI-055 foundation rows into the "
+            "canonical runner without duplicating PR #5348 browser/live "
+            "coverage. TC-18/TC-19 remain live side-effect canaries in the "
+            "separate live QA lane because they require external Google "
+            "credentials."
+        ),
+    ),
     "webui_v2_static_js_regression": CaseSpec(
         name="webui_v2_static_js_regression",
         feature="WebUI v2 static browser-facing SPA modules",
@@ -4748,10 +4968,12 @@ def parse_duration_seconds(raw: str | None) -> int:
 
 
 def render_command(command: CommandSpec) -> str:
-    prefix = " ".join(
+    unset_prefix = " ".join(f"unset {shlex.quote(name)};" for name in command.unset_env)
+    env_prefix = " ".join(
         f"{name}={shlex.quote(value)}" for name, value in sorted(command.env.items())
     )
     rendered = " ".join(shlex.quote(part) for part in command.argv)
+    prefix = " ".join(part for part in [unset_prefix, env_prefix] if part)
     if prefix:
         return f"{prefix} {rendered}"
     return rendered
@@ -4852,6 +5074,8 @@ def run_command(
         return details
 
     env = os.environ.copy()
+    for name in command.unset_env:
+        env.pop(name, None)
     env.update(command.env)
     started = time.monotonic()
     with stdout_log.open("w", encoding="utf-8") as stdout, stderr_log.open(

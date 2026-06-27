@@ -912,6 +912,78 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 commands[0]["command"],
             )
 
+    def test_webui_gateway_middleware_foundation_case_dry_run_maps_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "webui_v2_gateway_middleware_serve_foundation_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-055-TC-01",
+                    "REBCLI-055-TC-02",
+                    "REBCLI-055-TC-03",
+                    "REBCLI-055-TC-04",
+                    "REBCLI-055-TC-05",
+                    "REBCLI-055-TC-06",
+                    "REBCLI-055-TC-10",
+                    "REBCLI-055-TC-11",
+                    "REBCLI-055-TC-14",
+                    "REBCLI-055-TC-15",
+                    "REBCLI-055-TC-16",
+                    "REBCLI-055-TC-17",
+                ],
+            )
+            self.assertNotIn(
+                "REBCLI-055-TC-18", results["summary"]["qa_matrix_test_ids"]
+            )
+            self.assertNotIn(
+                "REBCLI-055-TC-19", results["summary"]["qa_matrix_test_ids"]
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                [command["name"] for command in commands],
+                [
+                    "webui_v2_serve_listener_cli_smoke",
+                    "webui_v2_serve_security_cli_smoke",
+                    "webui_v2_serve_cors_contracts",
+                    "webui_v2_serve_body_limit_contracts",
+                    "webui_v2_serve_ws_origin_contracts",
+                    "webui_v2_descriptor_policy_surface",
+                    "webui_v2_composition_static_route_contracts",
+                    "webui_v2_composition_regression",
+                    "reborn_composition_all_feature_contracts",
+                    "reborn_event_store_foundation_contracts",
+                    "webui_v2_session_execution_substrate_contracts",
+                    "reborn_runtime_tool_substrate_contracts",
+                    "reborn_hook_backend_architecture_contracts",
+                    "reborn_hook_postgres_feature_contracts",
+                    "reborn_hook_postgres_parity_integration_contracts",
+                ],
+            )
+            self.assertIn("ironclaw_reborn_composition", commands[8]["command"])
+            self.assertIn("unset NEARAI_API_KEY;", commands[8]["command"])
+            self.assertIn("unset NEARAI_BASE_URL;", commands[8]["command"])
+            self.assertIn("--test-threads=1", commands[8]["command"])
+            self.assertIn("ironclaw_reborn_event_store", commands[9]["command"])
+            self.assertIn("ironclaw_host_runtime", commands[10]["command"])
+            self.assertIn("ironclaw_wasm", commands[11]["command"])
+            self.assertIn("ironclaw_architecture", commands[12]["command"])
+            self.assertIn("--features postgres", commands[13]["command"])
+            self.assertIn("--features postgres,integration", commands[14]["command"])
+
     def test_webui_serve_listener_case_dry_run_maps_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
