@@ -463,6 +463,123 @@ WEBUI_V2_EXTENSIONS_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_EXTENSION_LIFECYCLE_HANDLER_COMMAND = CommandSpec(
+    name="webui_v2_extension_lifecycle_handler_contracts",
+    description=(
+        "Focused WebUI v2 extension lifecycle route contracts for list, "
+        "registry, install, activate, remove, setup GET/POST, malformed "
+        "package ids, caller scope, and facade dispatch."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_handlers_contract",
+        "extension_",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_EXTENSION_DESCRIPTOR_COMMAND = CommandSpec(
+    name="webui_v2_extension_lifecycle_descriptor_contracts",
+    description=(
+        "WebUI v2 descriptor contract for extension lifecycle route ids, "
+        "methods, patterns, body limits, rate limits, auth policies, audit "
+        "classes, and ProductWorkflow effect-path classification."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_descriptors_contract",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+COMPOSITION_EXTENSION_SETUP_ROUTE_COMMAND = CommandSpec(
+    name="composition_webui_v2_extension_setup_route_contract",
+    description=(
+        "Composition-mounted WebUI v2 extension setup route contract proving "
+        "the hosted router returns lifecycle setup projections through the "
+        "facade without legacy status aliases."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "--test",
+        "webui_v2_serve",
+        "setup_extension_returns_lifecycle_projection_via_facade",
+        "--",
+        "--exact",
+        "--format",
+        "terse",
+    ],
+)
+
+COMPOSITION_EXTENSION_LIFECYCLE_COMMAND = CommandSpec(
+    name="composition_extension_lifecycle_service_contracts",
+    description=(
+        "Composition extension lifecycle service contracts for catalog "
+        "install, activation, removal, setup projection, restoration, "
+        "credentialed activation, store failures, and lifecycle events."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "extension_lifecycle",
+        "--lib",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WASM_PRODUCT_ADAPTER_RUNTIME_COMMAND = CommandSpec(
+    name="wasm_product_adapter_runtime_contracts",
+    description=(
+        "WASM ProductAdapter runtime contracts used by extension/product "
+        "adapter lifecycle paths for component-model adapter loading, host "
+        "calls, auth evidence handling, egress restrictions, and component "
+        "error mapping."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_wasm_product_adapters",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_SLACK_PAIRING_UI_COMMAND = CommandSpec(
     name="webui_v2_slack_pairing_ui_contracts",
     description=(
@@ -2056,6 +2173,37 @@ CASES: dict[str, CaseSpec] = {
             "channel helpers, proof-code pairing redemption, and user-safe "
             "pairing error mapping. Browser-smoke TC-16 stays guarded by "
             "PR #5348/live coverage."
+        ),
+    ),
+    "webui_v2_extension_lifecycle_api_regression": CaseSpec(
+        name="webui_v2_extension_lifecycle_api_regression",
+        feature="WebUI v2 extension lifecycle APIs",
+        category="Hermetic Extension Lifecycle API Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-046-TC-01",
+            "REBCLI-046-TC-02",
+            "REBCLI-046-TC-03",
+            "REBCLI-046-TC-04",
+            "REBCLI-046-TC-05",
+            "REBCLI-046-TC-06",
+            "REBCLI-046-TC-08",
+        ],
+        commands=[
+            WEBUI_V2_EXTENSION_LIFECYCLE_HANDLER_COMMAND,
+            WEBUI_V2_EXTENSION_DESCRIPTOR_COMMAND,
+            COMPOSITION_EXTENSION_SETUP_ROUTE_COMMAND,
+            COMPOSITION_EXTENSION_LIFECYCLE_COMMAND,
+            WASM_PRODUCT_ADAPTER_RUNTIME_COMMAND,
+        ],
+        notes=(
+            "Covers the generated WebUI v2 extension lifecycle API rows "
+            "without duplicating PR #5348 browser legacy scenarios: list/"
+            "registry reads, install/activate/remove mutations, setup GET and "
+            "POST, malformed package-id rejection, caller-scoped facade "
+            "dispatch, descriptor route policy/body-limit/effect-path "
+            "lockstep, composition-mounted setup projection behavior, "
+            "lifecycle service install/activation/removal/restoration "
+            "contracts, and WASM ProductAdapter runtime dependency contracts."
         ),
     ),
     "webui_v2_slack_pairing_ui_regression": CaseSpec(

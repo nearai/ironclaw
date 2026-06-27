@@ -59,6 +59,14 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-046-TC-01",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "REBCLI-046-TC-08",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-048-TC-06",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -423,6 +431,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 {case["case"] for case in manifest["cases"]},
             )
             self.assertIn(
+                "webui_v2_extension_lifecycle_api_regression",
+                {case["case"] for case in manifest["cases"]},
+            )
+            self.assertIn(
                 "webui_v2_slack_pairing_ui_regression",
                 {case["case"] for case in manifest["cases"]},
             )
@@ -775,6 +787,55 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             )
             self.assertIn("slack-pairing-api.test.mjs", commands[0]["command"])
             self.assertIn("static/js/pages/extensions", commands[0]["command"])
+
+    def test_webui_extension_lifecycle_api_case_dry_run_maps_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "webui_v2_extension_lifecycle_api_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-046-TC-01",
+                    "REBCLI-046-TC-02",
+                    "REBCLI-046-TC-03",
+                    "REBCLI-046-TC-04",
+                    "REBCLI-046-TC-05",
+                    "REBCLI-046-TC-06",
+                    "REBCLI-046-TC-08",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                [command["name"] for command in commands],
+                [
+                    "webui_v2_extension_lifecycle_handler_contracts",
+                    "webui_v2_extension_lifecycle_descriptor_contracts",
+                    "composition_webui_v2_extension_setup_route_contract",
+                    "composition_extension_lifecycle_service_contracts",
+                    "wasm_product_adapter_runtime_contracts",
+                ],
+            )
+            self.assertIn("webui_v2_handlers_contract extension_", commands[0]["command"])
+            self.assertIn("webui_v2_descriptors_contract", commands[1]["command"])
+            self.assertIn(
+                "setup_extension_returns_lifecycle_projection_via_facade",
+                commands[2]["command"],
+            )
+            self.assertIn("extension_lifecycle --lib", commands[3]["command"])
+            self.assertIn("ironclaw_wasm_product_adapters", commands[4]["command"])
 
     def test_webui_slack_pairing_ui_case_dry_run_maps_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
