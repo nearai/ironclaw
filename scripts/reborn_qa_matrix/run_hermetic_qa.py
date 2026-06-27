@@ -1639,6 +1639,39 @@ WEBUI_V2_SETTINGS_TOOLBAR_SEARCH_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SETTINGS_TOOLBAR_BROWSER_COMMAND = CommandSpec(
+    name="webui_v2_settings_toolbar_browser_smoke",
+    description=(
+        "Focused WebUI v2 Settings toolbar browser smoke for rendered search "
+        "filtering, JSON export download, and JSON import through the v2 "
+        "settings tools API."
+    ),
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_settings_toolbar_browser.py",
+        "-q",
+    ],
+)
+
 WEBUI_V2_SETTINGS_DIRECT_TABS_COMMAND = CommandSpec(
     name="webui_v2_settings_direct_tabs_contracts",
     description=(
@@ -4878,14 +4911,17 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-090-TC-05",
             "REBCLI-090-TC-06",
         ],
-        commands=[WEBUI_V2_SETTINGS_TOOLBAR_SEARCH_COMMAND],
+        commands=[
+            WEBUI_V2_SETTINGS_TOOLBAR_SEARCH_COMMAND,
+            WEBUI_V2_SETTINGS_TOOLBAR_BROWSER_COMMAND,
+        ],
         notes=(
-            "Covers WebUI v2 Settings toolbar/search rows without duplicating "
-            "PR #5348 browser settings coverage: toolbar reachability from "
-            "SettingsPage, search change/clear wiring, JSON export payload "
-            "shape, valid import dispatch, invalid import rejection, empty "
-            "file handling, settings search matching, and v2 settings API "
-            "route selection."
+            "Covers WebUI v2 Settings toolbar/search rows through static "
+            "contracts and the served browser page: toolbar reachability from "
+            "SettingsPage, rendered search filtering and clear behavior, JSON "
+            "export download payload shape, valid import dispatch through the "
+            "v2 settings API, invalid import rejection, empty file handling, "
+            "settings search matching, and v2 settings API route selection."
         ),
     ),
     "webui_v2_settings_direct_tabs_regression": CaseSpec(

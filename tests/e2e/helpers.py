@@ -347,6 +347,12 @@ SEL_V2 = {
     "settings_restart_banner": "[data-testid='settings-restart-banner']",
     "settings_restart_unavailable": "[data-testid='settings-restart-unavailable']",
     "settings_restart_action": "[data-testid='settings-restart-action']",
+    "settings_toolbar_search": "[data-testid='settings-toolbar-search']",
+    "settings_toolbar_clear_search": "[data-testid='settings-toolbar-clear-search']",
+    "settings_toolbar_export": "[data-testid='settings-toolbar-export']",
+    "settings_toolbar_import": "[data-testid='settings-toolbar-import']",
+    "settings_toolbar_import_input": "[data-testid='settings-toolbar-import-input']",
+    "settings_toolbar_status": "[data-testid='settings-toolbar-status']",
 }
 
 

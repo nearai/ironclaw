@@ -6382,6 +6382,7 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
             />
             <input
               type="search"
+              data-testid="settings-toolbar-search"
               value=${n}
               onChange=${$=>r($.target.value)}
               placeholder=${l("settings.searchPlaceholder")}
@@ -6390,6 +6391,7 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
             ${n&&u`
               <button
                 type="button"
+                data-testid="settings-toolbar-clear-search"
                 onClick=${s}
                 aria-label=${l("settings.clearSearch")}
                 className="absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-[var(--v2-text-faint)] hover:bg-white/[0.07] hover:text-[var(--v2-text-strong)]"
@@ -6407,6 +6409,7 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
             size="sm"
             onClick=${x}
             disabled=${!e||a}
+            data-testid="settings-toolbar-export"
             className="gap-2"
           >
             <${M} name="download" className="h-3.5 w-3.5" />
@@ -6418,6 +6421,7 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
             size="sm"
             onClick=${()=>c.current?.click()}
             disabled=${a}
+            data-testid="settings-toolbar-import"
             className="gap-2"
           >
             <${M} name="upload" className="h-3.5 w-3.5" />
@@ -6426,6 +6430,7 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
           <input
             ref=${c}
             type="file"
+            data-testid="settings-toolbar-import-input"
             accept=".json,application/json"
             className="hidden"
             onChange=${y}
@@ -6438,6 +6443,7 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
         ${m&&u`
           <div
             role="status"
+            data-testid="settings-toolbar-status"
             className=${["mt-1 text-xs",m.tone==="error"?"text-red-200":"text-mint"].join(" ")}
           >
             ${m.text}
