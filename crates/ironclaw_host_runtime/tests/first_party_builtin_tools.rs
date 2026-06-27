@@ -5699,23 +5699,24 @@ async fn builtin_http_runtime_policy_denial_stops_before_egress() {
 }
 
 #[tokio::test]
-async fn builtin_http_rejects_hosted_allowlist_plan_before_egress() {
+async fn builtin_http_uses_hosted_allowlist_plan_through_configured_egress() {
     let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
         br#"{"ok":true}"#.to_vec(),
     ));
     let runtime = runtime_with_http_egress_and_policy(Arc::clone(&egress), hosted_dev_policy());
 
-    let error = invoke_with_context(
+    let output = invoke_with_context(
         &runtime,
         HTTP_CAPABILITY_ID,
         json!({"url": "https://api.example.test/v1/items"}),
         execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(error, RuntimeFailureKind::Network);
-    assert!(egress.requests().is_empty());
+    assert_eq!(output["status"], json!(200));
+    assert_eq!(output["body_text"], json!(r#"{"ok":true}"#));
+    assert_eq!(egress.requests().len(), 1);
 }
 
 #[tokio::test]
@@ -6202,22 +6203,24 @@ async fn builtin_http_awaits_async_egress_without_blocking_tokio_worker() {
 }
 
 #[tokio::test]
-async fn builtin_read_file_rejects_scoped_virtual_filesystem_plan_before_handler_access() {
+async fn builtin_read_file_reads_scoped_virtual_filesystem_through_mount_services() {
     let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("README.md"), "must not be read\n").unwrap();
+    std::fs::write(temp.path().join("README.md"), "scoped read\n").unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
     let runtime = runtime_with_filesystem_and_policy(filesystem, network_denied_policy());
 
-    let error = invoke_with_context(
+    let output = invoke_with_context(
         &runtime,
         READ_FILE_CAPABILITY_ID,
         json!({"path": "/workspace/README.md"}),
         execution_context_with_mounts([READ_FILE_CAPABILITY_ID], mounts),
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(error, RuntimeFailureKind::Authorization);
+    assert_eq!(output["content"], json!("     1│ scoped read"));
+    assert_eq!(output["path"], json!("/workspace/README.md"));
+    assert_eq!(output["total_lines"], json!(1));
 }
 
 #[tokio::test]

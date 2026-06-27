@@ -1359,6 +1359,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_dev_external_tools_are_advertised_as_provider_tool_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-external-tool-owner",
+            storage_root,
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let runtime = services.host_runtime.clone().expect("host runtime");
+        let run_context = run_context("external-tool-provider-name").await;
+        let catalog = Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new());
+        catalog
+            .register(
+                run_context.run_id,
+                vec![
+                    ironclaw_turns::ExternalToolSpec::new(
+                        "client_lookup",
+                        "Look up client-side data",
+                        serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "query": { "type": "string" }
+                            }
+                        }),
+                    )
+                    .expect("external tool spec"),
+                ],
+            )
+            .await
+            .expect("external tool catalog registers");
+        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+        let policy = Arc::new(
+            crate::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses"),
+        );
+        let factory = LocalDevLoopCapabilityPortFactory {
+            runtime,
+            fallback_user_id: UserId::new("external-tool-provider-name-user").expect("user id"),
+            policy,
+            workspace_mounts: local_runtime.workspace_mounts.clone(),
+            memory_mounts: local_runtime.memory_mounts.clone(),
+            system_extensions_lifecycle_mounts: local_runtime
+                .system_extensions_lifecycle_mounts
+                .clone(),
+            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            input_resolver,
+            result_writer,
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            skill_activation_source: None,
+            trajectory_observer: None,
+            outbound_preferences_facade: None,
+            outbound_delivery_target_set_requires_approval: false,
+            approval_settings: Arc::new(
+                crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
+            ),
+            project_service: Arc::clone(&local_runtime.project_service),
+            approval_requests: local_runtime.approval_requests.clone(),
+            capability_leases: local_runtime.capability_leases.clone(),
+            external_tool_catalog: catalog,
+        };
+        let port = factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+        let tool_definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.name.as_str() == "client_lookup")
+            .expect("external tool definition");
+
+        assert_eq!(
+            tool_definition.capability_id.as_str(),
+            "external_tool.client_lookup"
+        );
+
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    tool_definition.name.as_str(),
+                    serde_json::json!({"query": "status"}),
+                ),
+            ))
+            .await
+            .expect("external provider tool call stages");
+
+        assert_eq!(
+            candidate.capability_id.as_str(),
+            "external_tool.client_lookup"
+        );
+    }
+
+    #[tokio::test]
     async fn local_dev_project_create_tool_persists_project_visible_to_owner() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
@@ -1720,6 +1823,24 @@ mod tests {
             run_context.scope.tenant_id.clone(),
             actor_user_id.clone(),
         );
+        // Global auto-approve now defaults ON, so disable it for the owner scope
+        // (the scope the set dispatch authorizes against) to exercise the
+        // gate -> approve -> resume path this test verifies.
+        {
+            let mut disable_scope = run_context.scope.to_resource_scope();
+            disable_scope.user_id = owner_user_id.clone();
+            ironclaw_approvals::AutoApproveSettingStore::set(
+                local_runtime.auto_approve_settings.as_ref(),
+                ironclaw_approvals::AutoApproveSettingInput {
+                    updated_by: ironclaw_host_api::Principal::User(owner_user_id.clone()),
+                    scope: disable_scope,
+                    enabled: false,
+                },
+            )
+            .await
+            .expect("disable global auto-approve"); // safety: test-only gating precondition
+        }
+
         let set_candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(
                 provider_tool_call_with_name(
