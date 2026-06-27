@@ -64,7 +64,6 @@ use ironclaw_product_workflow::{
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
     WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -256,6 +255,13 @@ struct StubServices {
     list_outbound_delivery_targets_calls: Mutex<usize>,
     list_connectable_channels_calls: Mutex<usize>,
     next_list_connectable_channels_error: Mutex<Option<RebornServicesError>>,
+    list_skills_calls: Mutex<usize>,
+    search_skills_calls: Mutex<Vec<String>>,
+    install_skill_calls: Mutex<Vec<(String, Option<String>)>>,
+    read_skill_content_calls: Mutex<Vec<String>>,
+    update_skill_calls: Mutex<Vec<(String, String)>>,
+    remove_skill_calls: Mutex<Vec<String>>,
+    set_skill_auto_activate_calls: Mutex<Vec<(String, bool)>>,
     get_operator_setup_calls: Mutex<usize>,
     run_operator_setup_calls: Mutex<Vec<OperatorSetupCall>>,
     list_operator_config_calls: Mutex<usize>,
@@ -812,49 +818,107 @@ impl RebornServicesApi for StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornSkillListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+        *self.list_skills_calls.lock().expect("lock") += 1;
+        Ok(RebornSkillListResponse {
+            count: 0,
+            skills: Vec::new(),
+            auto_activate_learned: true,
+        })
     }
 
     async fn search_skills(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _query: String,
+        query: String,
     ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+        self.search_skills_calls.lock().expect("lock").push(query);
+        Ok(RebornSkillSearchResponse {
+            catalog: Vec::new(),
+            installed: Vec::new(),
+            registry_url: String::new(),
+            catalog_error: None,
+        })
     }
 
     async fn install_skill(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: Option<String>,
+        name: String,
+        content: Option<String>,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+        self.install_skill_calls
+            .lock()
+            .expect("lock")
+            .push((name.clone(), content));
+        Ok(RebornSkillActionResponse {
+            success: true,
+            message: format!("Skill '{name}' installed"),
+        })
     }
 
     async fn read_skill_content(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _name: String,
+        name: String,
     ) -> Result<RebornSkillContentResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+        self.read_skill_content_calls
+            .lock()
+            .expect("lock")
+            .push(name.clone());
+        Ok(RebornSkillContentResponse {
+            name,
+            content: "# Skill\n".to_string(),
+        })
     }
 
     async fn update_skill(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: String,
+        name: String,
+        content: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+        self.update_skill_calls
+            .lock()
+            .expect("lock")
+            .push((name.clone(), content));
+        Ok(RebornSkillActionResponse {
+            success: true,
+            message: format!("Skill '{name}' updated"),
+        })
     }
 
     async fn remove_skill(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _name: String,
+        name: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+        self.remove_skill_calls
+            .lock()
+            .expect("lock")
+            .push(name.clone());
+        Ok(RebornSkillActionResponse {
+            success: true,
+            message: format!("Skill '{name}' removed"),
+        })
+    }
+
+    async fn set_skill_auto_activate(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        name: String,
+        enabled: bool,
+    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.set_skill_auto_activate_calls
+            .lock()
+            .expect("lock")
+            .push((name.clone(), enabled));
+        Ok(RebornSkillActionResponse {
+            success: true,
+            message: format!(
+                "Skill '{name}' auto-activation {}",
+                if enabled { "enabled" } else { "disabled" }
+            ),
+        })
     }
 
     async fn set_auto_activate_learned(
@@ -1593,6 +1657,153 @@ async fn set_auto_activate_learned_forwards_enabled_flag_to_facade() {
             .expect("lock"),
         vec![false],
         "handler must forward body.enabled=false to the facade verbatim"
+    );
+}
+
+// Test-through-the-caller: the skills screen depends on this route family
+// preserving method/path/body semantics across six different facade calls.
+// A helper-only or facade-only test would miss router drift, missing JSON
+// extraction, and path-param loss.
+#[tokio::test]
+async fn skill_routes_dispatch_to_facade_methods() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let list_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/skills")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(list_response.status(), StatusCode::OK);
+    assert_eq!(
+        read_json(list_response).await["auto_activate_learned"],
+        true,
+        "list response must expose learned-skill auto-activation state"
+    );
+
+    let search_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":"docs"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(search_response.status(), StatusCode::OK);
+
+    let install_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r##"{"name":"qa-skill","content":"# QA\n\nUse this skill."}"##,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(install_response.status(), StatusCode::OK);
+
+    let get_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/skills/qa-skill")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(get_response.status(), StatusCode::OK);
+    assert_eq!(read_json(get_response).await["name"], "qa-skill");
+
+    let update_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/skills/qa-skill")
+                .header("content-type", "application/json")
+                .body(Body::from(r##"{"content":"# QA\n\nUpdated."}"##))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(update_response.status(), StatusCode::OK);
+
+    let auto_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/qa-skill/auto-activate")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":false}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(auto_response.status(), StatusCode::OK);
+
+    let delete_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/skills/qa-skill")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(delete_response.status(), StatusCode::OK);
+
+    assert_eq!(*services.list_skills_calls.lock().expect("lock"), 1);
+    assert_eq!(
+        *services.search_skills_calls.lock().expect("lock"),
+        vec!["docs".to_string()],
+        "search body query must reach the facade"
+    );
+    assert_eq!(
+        *services.install_skill_calls.lock().expect("lock"),
+        vec![(
+            "qa-skill".to_string(),
+            Some("# QA\n\nUse this skill.".to_string())
+        )],
+        "install must forward name and optional content from the JSON body"
+    );
+    assert_eq!(
+        *services.read_skill_content_calls.lock().expect("lock"),
+        vec!["qa-skill".to_string()],
+        "GET /skills/{{name}} must forward the path skill name"
+    );
+    assert_eq!(
+        *services.update_skill_calls.lock().expect("lock"),
+        vec![("qa-skill".to_string(), "# QA\n\nUpdated.".to_string())],
+        "PUT /skills/{{name}} must forward path name and body content"
+    );
+    assert_eq!(
+        *services.set_skill_auto_activate_calls.lock().expect("lock"),
+        vec![("qa-skill".to_string(), false)],
+        "per-skill auto-activate must forward path name and enabled flag"
+    );
+    assert_eq!(
+        *services.remove_skill_calls.lock().expect("lock"),
+        vec!["qa-skill".to_string()],
+        "DELETE /skills/{{name}} must forward the path skill name"
     );
 }
 

@@ -580,6 +580,83 @@ WASM_PRODUCT_ADAPTER_RUNTIME_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SKILL_MANAGEMENT_HANDLER_COMMAND = CommandSpec(
+    name="webui_v2_skill_management_handler_contract",
+    description=(
+        "Focused WebUI v2 skill-management handler contract for list, "
+        "search, install, read, update, remove, and per-skill "
+        "auto-activation route dispatch through the actual axum router."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_handlers_contract",
+        "skill_routes_dispatch_to_facade_methods",
+        "--",
+        "--exact",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_SKILL_MANAGEMENT_DESCRIPTOR_COMMAND = CommandSpec(
+    name="webui_v2_skill_management_descriptor_contract",
+    description=(
+        "WebUI v2 descriptor lock that includes the skill-management route "
+        "methods, path patterns, auth policy, body limits, rate limits, "
+        "audit classes, and allowed effect paths."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_descriptors_contract",
+        "every_descriptor_matches_the_locked_policy_surface",
+        "--",
+        "--exact",
+        "--format",
+        "terse",
+    ],
+)
+
+COMPOSITION_SKILL_MANAGEMENT_COMMAND = CommandSpec(
+    name="composition_skill_management_contracts",
+    description=(
+        "Composition skill-management contracts for local skill listing, "
+        "bundled Reborn skill installation, skill lifecycle facade behavior, "
+        "unsafe-content rejection, owner scoping, and local-dev capability "
+        "writes to the user skill root."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "bash",
+        "-lc",
+        (
+            "cargo test -p ironclaw_reborn_composition --features webui-v2-beta,test-support "
+            "local_skill_list --lib -- --format terse "
+            "&& cargo test -p ironclaw_reborn_composition --features webui-v2-beta,test-support "
+            "bundled_reborn_skills --lib -- --format terse "
+            "&& cargo test -p ironclaw_reborn_composition --features webui-v2-beta,test-support "
+            "skill_lifecycle --lib -- --format terse "
+            "&& cargo test -p ironclaw_reborn_composition --features webui-v2-beta,test-support "
+            "skills_product_facade --lib -- --format terse "
+            "&& cargo test -p ironclaw_reborn_composition --features webui-v2-beta,test-support "
+            "local_dev_capability_port_skill_install_writes_user_skill_root --lib -- --format terse"
+        ),
+    ],
+)
+
 WEBUI_V2_SLACK_PAIRING_UI_COMMAND = CommandSpec(
     name="webui_v2_slack_pairing_ui_contracts",
     description=(
@@ -2204,6 +2281,34 @@ CASES: dict[str, CaseSpec] = {
             "lockstep, composition-mounted setup projection behavior, "
             "lifecycle service install/activation/removal/restoration "
             "contracts, and WASM ProductAdapter runtime dependency contracts."
+        ),
+    ),
+    "webui_v2_skill_management_api_regression": CaseSpec(
+        name="webui_v2_skill_management_api_regression",
+        feature="WebUI v2 skill management APIs",
+        category="Hermetic Skill Management API Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-047-TC-01",
+            "REBCLI-047-TC-02",
+            "REBCLI-047-TC-03",
+            "REBCLI-047-TC-04",
+            "REBCLI-047-TC-05",
+            "REBCLI-047-TC-06",
+        ],
+        commands=[
+            WEBUI_V2_SKILL_MANAGEMENT_HANDLER_COMMAND,
+            WEBUI_V2_SKILL_MANAGEMENT_DESCRIPTOR_COMMAND,
+            COMPOSITION_SKILL_MANAGEMENT_COMMAND,
+        ],
+        notes=(
+            "Covers the generated WebUI v2 skill-management API rows without "
+            "duplicating PR #5348 browser legacy scenarios: actual axum "
+            "handler dispatch for list/search/install/read/update/remove and "
+            "per-skill auto-activation; descriptor method/path/auth/body/"
+            "rate/effect-path policy lockstep; and composition skill listing, "
+            "bundled skill installation, lifecycle facade, scoped owner "
+            "visibility, unsafe-content rejection, and local-dev capability "
+            "skill-root write contracts."
         ),
     ),
     "webui_v2_slack_pairing_ui_regression": CaseSpec(
