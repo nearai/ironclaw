@@ -183,6 +183,14 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-069-TC-01",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "REBCLI-069-TC-06",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-097-TC-01",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -220,6 +228,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             )
             self.assertIn(
                 "webui_v2_extensions_client_regression",
+                {case["case"] for case in manifest["cases"]},
+            )
+            self.assertIn(
+                "webui_v2_settings_onboarding_client_regression",
                 {case["case"] for case in manifest["cases"]},
             )
             self.assertIn(
@@ -521,6 +533,45 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             )
             self.assertIn("slack-pairing-api.test.mjs", commands[0]["command"])
             self.assertIn("static/js/pages/extensions", commands[0]["command"])
+
+    def test_webui_settings_onboarding_case_dry_run_maps_client_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "webui_v2_settings_onboarding_client_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-069-TC-01",
+                    "REBCLI-069-TC-02",
+                    "REBCLI-069-TC-03",
+                    "REBCLI-069-TC-04",
+                    "REBCLI-069-TC-05",
+                    "REBCLI-069-TC-06",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                [command["name"] for command in commands],
+                ["webui_v2_settings_onboarding_client_contracts"],
+            )
+            self.assertIn("static/js/lib/onboarding-gate.test.js", commands[0]["command"])
+            self.assertIn(
+                "find crates/ironclaw_webui_v2_static/static/js/pages/settings",
+                commands[0]["command"],
+            )
 
     def test_responses_api_case_dry_run_maps_create_retrieve_cancel_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:

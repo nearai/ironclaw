@@ -359,6 +359,26 @@ WEBUI_V2_EXTENSIONS_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SETTINGS_ONBOARDING_CLIENT_COMMAND = CommandSpec(
+    name="webui_v2_settings_onboarding_client_contracts",
+    description=(
+        "Focused WebUI v2 settings/onboarding client contracts for provider "
+        "classification and management, onboarding-gate routing, NEAR AI and "
+        "Codex login helper safety, settings v2 API route selection, skills, "
+        "traces, tools, and explicit users-tab stubs."
+    ),
+    argv=[
+        "bash",
+        "-lc",
+        (
+            "node --test "
+            "crates/ironclaw_webui_v2_static/static/js/lib/onboarding-gate.test.js "
+            "$(find crates/ironclaw_webui_v2_static/static/js/pages/settings "
+            "-type f -name '*test.mjs' | sort)"
+        ),
+    ],
+)
+
 WEBUI_V2_SEND_MULTILINE_COMMAND = CommandSpec(
     name="webui_v2_send_multiline_contract",
     description="Focused send-message route contract for preserving multiline content.",
@@ -1431,6 +1451,31 @@ CASES: dict[str, CaseSpec] = {
             "channel helpers, proof-code pairing redemption, and user-safe "
             "pairing error mapping. Browser-smoke TC-16 stays guarded by "
             "PR #5348/live coverage."
+        ),
+    ),
+    "webui_v2_settings_onboarding_client_regression": CaseSpec(
+        name="webui_v2_settings_onboarding_client_regression",
+        feature="WebUI v2 provider settings and onboarding screens",
+        category="Hermetic Settings/Onboarding Client Contract Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-069-TC-01",
+            "REBCLI-069-TC-02",
+            "REBCLI-069-TC-03",
+            "REBCLI-069-TC-04",
+            "REBCLI-069-TC-05",
+            "REBCLI-069-TC-06",
+        ],
+        commands=[WEBUI_V2_SETTINGS_ONBOARDING_CLIENT_COMMAND],
+        notes=(
+            "Covers the generated WebUI v2 provider settings/onboarding rows "
+            "at the static client contract layer without duplicating PR #5348 "
+            "browser settings-search/provider-management scenarios: provider "
+            "classification and grouping, setup/dropdown actions, NEAR AI "
+            "hosted-SSO localhost guard, wallet and Codex login recovery, "
+            "settings v2 LLM/skills/traces/tools API routes, bearer "
+            "propagation, users-tab stubs, and onboarding-gate redirect "
+            "policy. Browser rows TC-07/08/09 stay guarded by #5348/live "
+            "coverage."
         ),
     ),
     "webui_v2_filesystem_api_regression": CaseSpec(
