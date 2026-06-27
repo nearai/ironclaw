@@ -21,8 +21,8 @@ use std::time::Duration;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_llm::{LlmProvider, SessionConfig, apply_decorator_chain, create_session_manager};
 use ironclaw_loop_support::{
-    CapabilityAllowSet, EmptyUserProfileSource, HostManagedModelGateway,
-    JsonSpawnSubagentInputCodec, SubagentSpawnLimits,
+    EmptyUserProfileSource, HostManagedModelGateway, JsonSpawnSubagentInputCodec,
+    SubagentSpawnLimits,
 };
 use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
 use ironclaw_product_workflow::{
@@ -42,7 +42,6 @@ use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
-use ironclaw_reborn_composition::ProductLiveCapabilityIo;
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::run_profile::{InMemoryLoopHostMilestoneSink, ModelProfileId};
 use ironclaw_turns::{
@@ -52,9 +51,9 @@ use ironclaw_turns::{
 
 use super::filesystem::BlockingTurnStatePutFilesystem;
 use super::harness::{
-    EmptyIdentityContextSource, HarnessCapabilityPortFactory, HarnessTurnBackend,
-    HarnessTurnStorageBackend, RecordingTestCapabilityPort, StaticCapabilitySurfaceProfileResolver,
-    scoped_turns_fs, test_product_scope,
+    EmptyIdentityContextSource, HarnessCapabilityMode, HarnessCapabilityRecorder,
+    HarnessTurnBackend, HarnessTurnStorageBackend, HostRuntimeCapabilityHarness,
+    RecordingTestCapabilityPort, scoped_turns_fs, test_product_scope,
 };
 use super::reply::RebornScriptedReply;
 use super::scripted_provider::{SCRIPTED_MODEL_NAME, scripted_trace_llm};
@@ -69,18 +68,37 @@ const HARNESS_ACTOR_ID: &str = "host-user";
 /// Model profile the planned runtime requests; the gateway policy permits it.
 const INTERACTIVE_MODEL_PROFILE: &str = "interactive_model";
 
+/// Selects the capability backend the integration harness wires.
+enum RebornCapabilityBackend {
+    /// Echo recorder: records capability invocations, executes nothing. Default —
+    /// a text-only turn invokes no tool.
+    Echo,
+    /// Real first-party tool runtime (`builtin.http` + friends) with the recording
+    /// `RuntimeHttpEgress` (scripted body, no network) — the §3.7 Tier-2 capture.
+    BuiltinHttpTools,
+}
+
 /// Builder for [`RebornIntegrationHarness`]. The script is fixed at build time
 /// (no post-build mutation), matching the existing harness's construction-time
 /// queue.
 pub struct RebornIntegrationHarnessBuilder {
     conversation_id: String,
     replies: Vec<RebornScriptedReply>,
+    capability: RebornCapabilityBackend,
 }
 
 impl RebornIntegrationHarnessBuilder {
     /// Set the scripted model replies (consumed in order at the raw-provider seam).
     pub fn script(mut self, replies: impl IntoIterator<Item = RebornScriptedReply>) -> Self {
         self.replies = replies.into_iter().collect();
+        self
+    }
+
+    /// Use the real first-party tool runtime so scripted tool calls execute through
+    /// `RuntimeHttpEgress`, captured at the recording egress (no network). Required
+    /// for tool-calling tests; a text-only turn needs only the default echo backend.
+    pub fn with_builtin_http_tools(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpTools;
         self
     }
 
@@ -144,13 +162,29 @@ impl RebornIntegrationHarnessBuilder {
         let model_gateway: Arc<dyn HostManagedModelGateway> =
             Arc::new(LlmProviderModelGateway::new(provider, policy));
 
-        // --- capability surface (echo; no tool is invoked by a text reply) --
-        let port = Arc::new(RecordingTestCapabilityPort::echo());
-        let capability_io = Arc::new(ProductLiveCapabilityIo::default());
-        let capability_factory = Arc::new(HarnessCapabilityPortFactory { port });
-        let capability_surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver {
-            allow_set: CapabilityAllowSet::All,
-        });
+        // --- capability surface ---------------------------------------------
+        // Echo by default (records, executes nothing — a text reply invokes no
+        // tool). `with_builtin_http_tools` swaps in the real first-party tool
+        // runtime so tool calls execute through `RuntimeHttpEgress`, captured at
+        // the recording egress (§3.6/§3.7). Both backends flow through the shared
+        // `HarnessCapabilityMode::into_parts` wiring (single mechanism). The echo
+        // arm surfaces the port's own allowlist (not `CapabilityAllowSet::All`);
+        // benign because a text-only turn invokes no tool.
+        let capability_mode = match self.capability {
+            RebornCapabilityBackend::Echo => {
+                HarnessCapabilityMode::Recording(RecordingTestCapabilityPort::echo())
+            }
+            RebornCapabilityBackend::BuiltinHttpTools => HarnessCapabilityMode::HostRuntime(
+                Arc::new(HostRuntimeCapabilityHarness::core_builtin_tools().await?),
+            ),
+        };
+        let (
+            capability_factory,
+            capability_surface_resolver,
+            capability_input_resolver,
+            capability_result_writer,
+            capability_recorder,
+        ) = capability_mode.into_parts(milestone_sink.clone())?;
 
         // --- loop-exit evidence (plain; no gates/blocks in slice 1) ---------
         let turn_state_for_evidence: Arc<dyn TurnStateStore> = turn_store.clone();
@@ -174,11 +208,13 @@ impl RebornIntegrationHarnessBuilder {
             milestone_sink,
             capability_factory,
             capability_surface_resolver,
-            capability_result_writer: capability_io.clone(),
+            capability_result_writer,
             subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
             subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
             subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
-            subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(capability_io)),
+            subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
+                capability_input_resolver,
+            )),
             subagent_spawn_limits: SubagentSpawnLimits::default(),
             loop_exit_evidence,
             config: DefaultPlannedRuntimeConfig {
@@ -223,6 +259,7 @@ impl RebornIntegrationHarnessBuilder {
             thread_harness,
             scheduler_handle: Some(composition.scheduler_handle),
             event_seq: AtomicU64::new(1),
+            capability_recorder,
             _product_harness: product_harness,
             _turn_root: turn_root,
         })
@@ -241,6 +278,7 @@ pub struct RebornIntegrationHarness {
     thread_harness: RebornThreadHarness,
     scheduler_handle: Option<ironclaw_host_runtime::TurnRunSchedulerHandle>,
     event_seq: AtomicU64,
+    capability_recorder: HarnessCapabilityRecorder,
     _product_harness: super::product_workflow::RebornProductWorkflowHarness,
     _turn_root: Arc<tempfile::TempDir>,
 }
@@ -256,6 +294,7 @@ impl RebornIntegrationHarness {
         RebornIntegrationHarnessBuilder {
             conversation_id: conversation_id.into(),
             replies: Vec::new(),
+            capability: RebornCapabilityBackend::Echo,
         }
     }
 
@@ -290,6 +329,43 @@ impl RebornIntegrationHarness {
             .assert_final_reply(self.binding.thread_id.clone(), text)
             .await
             .map_err(Into::into)
+    }
+
+    /// Assert the named capability was invoked through the real capability path
+    /// (proves the scripted tool call actually ran the tool).
+    pub async fn assert_tool_invoked(&self, capability_id: &str) -> HarnessResult<()> {
+        let invocations = self.capability_recorder.invocations();
+        if invocations
+            .iter()
+            .any(|invocation| invocation.capability_id.as_str() == capability_id)
+        {
+            return Ok(());
+        }
+        let seen: Vec<&str> = invocations
+            .iter()
+            .map(|invocation| invocation.capability_id.as_str())
+            .collect();
+        Err(format!("capability {capability_id:?} was not invoked; saw {seen:?}").into())
+    }
+
+    /// Assert a tool HTTP egress request was captured (Tier-2) whose URL contains
+    /// `url_substr` — the proof that the tool crossed `RuntimeHttpEgress`.
+    pub async fn assert_egress_request_matching(&self, url_substr: &str) -> HarnessResult<()> {
+        let requests = self.capability_recorder.runtime_http_requests();
+        if requests
+            .iter()
+            .any(|request| request.url.contains(url_substr))
+        {
+            return Ok(());
+        }
+        let seen: Vec<&str> = requests
+            .iter()
+            .map(|request| request.url.as_str())
+            .collect();
+        Err(format!(
+            "no captured runtime HTTP egress request matching {url_substr:?}; saw {seen:?}"
+        )
+        .into())
     }
 
     async fn wait_for_completion(&self, run_id: TurnRunId) -> HarnessResult<()> {
