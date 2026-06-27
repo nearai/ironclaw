@@ -3058,6 +3058,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-061-TC-04",
                     "REBCLI-061-TC-05",
                     "REBCLI-061-TC-06",
+                    "REBCLI-061-TC-08",
                 ],
             )
             self.assertEqual(
@@ -3069,6 +3070,9 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "webui_v2_manual_token_legacy_submit_routes",
                     "webui_v2_manual_token_split_routes",
                     "webui_v2_manual_token_facade_contracts",
+                    "webui_v2_manual_token_postgres_migration_facade_contract",
+                    "webui_v2_manual_token_postgres_facade_contracts",
+                    "webui_v2_manual_token_libsql_facade_contracts",
                 ],
             )
             commands = results["results"][0]["details"]["commands"]
@@ -3076,6 +3080,9 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn("webui_v2_product_auth_4201", commands[1]["command"])
             self.assertIn("manual_tokens", commands[2]["command"])
             self.assertIn("manual_token_facade", commands[2]["command"])
+            self.assertIn("migration_dry_run_validates_postgres_planned_turn_profile", commands[3]["command"])
+            self.assertIn("--features postgres", commands[4]["command"])
+            self.assertIn("--features libsql", commands[5]["command"])
 
     def test_product_auth_account_lifecycle_case_dry_run_maps_api_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -2548,6 +2548,81 @@ WEBUI_V2_MANUAL_TOKEN_FACADE_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_MANUAL_TOKEN_POSTGRES_MIGRATION_FACADE_COMMAND = CommandSpec(
+    name="webui_v2_manual_token_postgres_migration_facade_contract",
+    description=(
+        "Postgres-feature facade_factory contract proving migration-dry-run "
+        "validates the planned-turn process-port profile as a normal, "
+        "non-ignored test."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "postgres",
+        "--test",
+        "facade_factory",
+        "migration_dry_run_validates_postgres_planned_turn_profile",
+        "--",
+        "--exact",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_MANUAL_TOKEN_POSTGRES_FACADE_COMMAND = CommandSpec(
+    name="webui_v2_manual_token_postgres_facade_contracts",
+    description=(
+        "Postgres-feature facade_factory contracts proving Postgres-only "
+        "local-dev product-auth manual-token setup stays usable and does not "
+        "advertise an unavailable durable backend."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "postgres",
+        "--test",
+        "facade_factory",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_MANUAL_TOKEN_LIBSQL_FACADE_COMMAND = CommandSpec(
+    name="webui_v2_manual_token_libsql_facade_contracts",
+    description=(
+        "libSQL-feature facade_factory contracts proving durable local-dev "
+        "product-auth manual-token setup, persistence, and recovery remain "
+        "usable through the WebUI-facing facade."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "libsql",
+        "--test",
+        "facade_factory",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_ACCOUNT_ROUTE_COMMAND = CommandSpec(
     name="webui_v2_product_auth_account_routes",
     description=(
@@ -4214,11 +4289,15 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-061-TC-04",
             "REBCLI-061-TC-05",
             "REBCLI-061-TC-06",
+            "REBCLI-061-TC-08",
         ],
         commands=[
             WEBUI_V2_MANUAL_TOKEN_LEGACY_COMMAND,
             WEBUI_V2_MANUAL_TOKEN_SPLIT_COMMAND,
             WEBUI_V2_MANUAL_TOKEN_FACADE_COMMAND,
+            WEBUI_V2_MANUAL_TOKEN_POSTGRES_MIGRATION_FACADE_COMMAND,
+            WEBUI_V2_MANUAL_TOKEN_POSTGRES_FACADE_COMMAND,
+            WEBUI_V2_MANUAL_TOKEN_LIBSQL_FACADE_COMMAND,
         ],
         notes=(
             "Covers WebUI v2 manual-token API/runtime rows without "
@@ -4228,7 +4307,9 @@ CASES: dict[str, CaseSpec] = {
             "on submit failure, partial continuation rejection, missing "
             "invocation enforcement, bearer/body/rate-limit enforcement, "
             "facade retry/cross-scope/fail-closed behavior, and sanitized "
-            "backend failures."
+            "backend failures. Also runs feature-gated facade_factory "
+            "Postgres/libSQL contracts for migration-dry-run process-port "
+            "coverage and durable local-dev manual-token setup parity."
         ),
     ),
     "webui_v2_product_auth_account_lifecycle_regression": CaseSpec(
