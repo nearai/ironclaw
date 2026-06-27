@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
+    "test": "find ../static/js -type f \\( -name '*test.js' -o -name '*test.mjs' \\) -print0 | xargs -0 node --test",
     "vendor": "bash vendor.sh",
     "all": "bash build.sh"
   },

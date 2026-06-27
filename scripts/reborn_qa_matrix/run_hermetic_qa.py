@@ -220,6 +220,21 @@ WEBUI_V2_STATIC_JS_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_CLIENT_PERSISTENCE_DISCOVERY_COMMAND = CommandSpec(
+    name="webui_v2_client_persistence_static_discovery",
+    description=(
+        "Canonical frontend npm test discovery for WebUI v2 client "
+        "persistence/helper contracts, including both .test.js and .test.mjs "
+        "static suites."
+    ),
+    argv=[
+        "npm",
+        "test",
+        "--prefix",
+        "crates/ironclaw_webui_v2_static/frontend",
+    ],
+)
+
 WEBUI_V2_FRONTEND_BUILD_COMMAND = CommandSpec(
     name="webui_v2_frontend_supply_chain_build",
     description=(
@@ -1895,6 +1910,29 @@ CASES: dict[str, CaseSpec] = {
             "committed WebUI v2 SPA modules. This complements Rust route and "
             "composition checks without duplicating PR #5348's legacy "
             "Playwright browser port."
+        ),
+    ),
+    "webui_v2_client_persistence_static_discovery_regression": CaseSpec(
+        name="webui_v2_client_persistence_static_discovery_regression",
+        feature="WebUI v2 client persistence and static JS test discovery",
+        category="Hermetic Client Persistence/Static Discovery Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-092-TC-01",
+            "REBCLI-092-TC-02",
+            "REBCLI-092-TC-03",
+            "REBCLI-092-TC-04",
+            "REBCLI-092-TC-05",
+            "REBCLI-092-TC-06",
+        ],
+        commands=[WEBUI_V2_CLIENT_PERSISTENCE_DISCOVERY_COMMAND],
+        notes=(
+            "Covers WebUI v2 client persistence/static-discovery rows "
+            "without duplicating PR #5348 browser legacy coverage: frontend "
+            "npm test discovers both .test.js and .test.mjs static suites, "
+            "including API error helpers, onboarding-gate decisions, "
+            "pin-store and draft-store auth scoping/fallbacks, project-file "
+            "path extraction/formatting, message grouping, and tool activity "
+            "state."
         ),
     ),
     "webui_v2_chat_client_regression": CaseSpec(
