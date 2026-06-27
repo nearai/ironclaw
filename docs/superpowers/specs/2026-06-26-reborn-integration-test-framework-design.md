@@ -136,6 +136,22 @@ Injection seam: `RebornBuildInput` → `build_local_runtime` does not expose a p
 
 **P1 ergonomics (not blockers):** a URL-keyed scripting layer over `RecordingRuntimeHttpEgress` for multi-step tool-HTTP flows, and a `.with_mock_mcp(...)` constructor wiring the existing `MockMcpServer` into the Reborn `ExtensionRegistry`. Both are additive; the default capture matrix above is the required floor.
 
+### 3.7 Interception model & extending the framework
+
+There is **no single outbound chokepoint** — production has four distinct seam families, so the harness uses a **two-tier** interception model (matching the industry split: trait-level fakes for orchestration logic, request-matcher mocks for HTTP adapters):
+
+- **Tier 1 — trait-level fakes** (for logic that runs *above* the call): `LlmProvider` (scripted `TraceLlm`, §3.1), `EmbeddingProvider` (fake), `RuntimeProcessPort` (inert `RecordingProcessPort`), and **channel delivery** (`OutboundDeliverySink` — captured by `RecordingOutboundDeliverySink` at its own trait boundary, *not* through `RuntimeHttpEgress`; see §3.6). LLM/embeddings hold their own `reqwest` clients and are deliberately **not** mocked at HTTP — mocking at the provider trait runs the real chain/loop (the "FakeChatModel" lesson: HTTP-level mocks silently pass when the SDK/loop layer above them changes).
+- **Tier 2 — recording interceptor over the HTTP-egress family**: MCP, OAuth, OAuth-refresh, first-party HTTP tools (and Trace Commons) route through the single `RuntimeHttpEgress::execute(RuntimeHttpEgressRequest{ runtime, capability_id, url, method, … })` trait; WASM/network-policy tool calls go through the sibling `NetworkHttpEgress`. The harness wires both recorders (`RecordingRuntimeHttpEgress` + `RecordingNetworkHttpEgress`) — see §3.6 for the authoritative per-boundary list. Today they record a scripted FIFO body; the P1 ergonomics extension (§3.6) is a URL/`capability_id`-keyed matcher over the same recorders.
+
+**Rejected: a single HTTP interceptor for *everything*.** Routing LLM/embeddings/process through one HTTP layer would rip provider auth/retry/circuit out of `ironclaw_llm`, force non-HTTP boundaries (process, future CLI) into an HTTP shape, lose type safety (match on serialized bodies), and reintroduce the per-provider HTTP fixtures §3.1 rejects. It contradicts the locked SDK-seam requirement.
+
+**Extending — adding a new egress point (the key extensibility property):**
+
+1. **New egress behind an *existing* trait** — a new tool, OAuth provider, MCP server, or future CLI-over-HTTP — is a new `RuntimeKind`/`capability_id` value flowing through `RuntimeHttpEgress`, which the one interceptor **already** records and can match. **Framework change: none.** This is the common case and the design's main payoff: production already funnels the HTTP family through one trait, and the harness rides it.
+2. **A genuinely new *kind* of I/O (a new port trait)** — write a concrete recording struct for that trait, mirroring the existing `Recording*` types (`RecordingRuntimeHttpEgress`, `RecordingNetworkHttpEgress`, `RecordingOutboundDeliverySink`): a small struct holding scripted responses + a captured-calls `Vec`, implementing the production trait. These single-method request→response ports are ~25–35 lines each and need no new framework support.
+
+**No shared generic is built now.** The existing `Recording*` structs are deliberately concrete. *If* a future port produces a third near-identical recorder, extract a shared generic (`Recording<P>` with `type Req`/`type Resp` + a `respond(&req)` match-and-record core) from the concrete code that then exists — a genuine rule-of-three lift from real duplication, not a speculative type written ahead of need. Write each new recorder in that extractable shape (scripted-responses + captured-calls, no bespoke control flow) so the eventual lift is mechanical. No derive/attribute macro unless the port count grows far enough to justify a proc-macro crate.
+
 ---
 
 ## 4. Test-Authoring Ergonomics (the anti-verbosity contract)
