@@ -876,6 +876,26 @@ REBORN_CLI_TRIGGER_POLLER_SETTINGS_COMMAND = CommandSpec(
     ],
 )
 
+REBORN_CLI_CREDENTIAL_REFRESH_SETTINGS_COMMAND = CommandSpec(
+    name="reborn_cli_credential_refresh_settings_contracts",
+    description=(
+        "Focused Reborn CLI credential-refresh runtime settings contracts "
+        "for run/serve defaults, operator force-on and kill-switch env "
+        "overrides, invalid env rejection, and RuntimeInput propagation."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_cli",
+        "credential_refresh",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 REBORN_CLI_WEBUI_V2_BINARY_COMMAND = CommandSpec(
     name="reborn_cli_webui_v2_binary",
     description=(
@@ -2777,6 +2797,28 @@ CASES: dict[str, CaseSpec] = {
             "overrides propagate into RuntimeInput, invalid env values fail "
             "closed, and min/max poll intervals are validated before runtime "
             "startup."
+        ),
+    ),
+    "reborn_cli_credential_refresh_settings_regression": CaseSpec(
+        name="reborn_cli_credential_refresh_settings_regression",
+        feature="Credential refresh worker settings",
+        category="Hermetic Reborn CLI Runtime Settings Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-041-TC-01",
+            "REBCLI-041-TC-02",
+            "REBCLI-041-TC-03",
+            "REBCLI-041-TC-04",
+            "REBCLI-041-TC-05",
+            "REBCLI-041-TC-06",
+        ],
+        commands=[REBORN_CLI_CREDENTIAL_REFRESH_SETTINGS_COMMAND],
+        notes=(
+            "Covers the non-duplicate Reborn CLI runtime settings row for "
+            "the proactive Google OAuth credential refresh worker: run "
+            "callers stay disabled by default, serve callers enable refresh "
+            "by default, env force-on and kill-switch values propagate into "
+            "RuntimeInput, blank env preserves the caller default, and "
+            "invalid/non-UTF-8 env values fail closed before runtime startup."
         ),
     ),
     "webui_v2_hidden_workflow_direct_routes_browser_smoke": CaseSpec(
