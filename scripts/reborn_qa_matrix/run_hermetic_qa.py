@@ -657,6 +657,96 @@ WEBUI_V2_PRODUCT_AUTH_CALLBACK_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_EXTENSION_OAUTH_ROUTE_COMMAND = CommandSpec(
+    name="webui_v2_extension_oauth_route_contract",
+    description=(
+        "WebUI v2 extension OAuth setup route contract for package-scoped "
+        "update binding on the browser-facing setup endpoint."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "--test",
+        "webui_v2_product_auth",
+        "extension_oauth",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_EXTENSION_OAUTH_START_COMMAND = CommandSpec(
+    name="webui_v2_extension_oauth_start_contracts",
+    description=(
+        "Extension OAuth start service contracts for DCR setup, reconnect "
+        "binding to an existing owner account, cross-owner rejection, and "
+        "missing DCR registry fail-closed behavior."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "extension_oauth_start",
+        "--lib",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_EXTENSION_GOOGLE_OAUTH_COMMAND = CommandSpec(
+    name="webui_v2_extension_google_oauth_start_contracts",
+    description=(
+        "Google extension OAuth start service contracts for existing-account "
+        "binding, cross-thread rebind, and unavailable binding lookup fallback."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "extension_google_oauth_start",
+        "--lib",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_DCR_OAUTH_CALLBACK_COMMAND = CommandSpec(
+    name="webui_v2_dcr_oauth_callback_contracts",
+    description=(
+        "DCR OAuth callback contracts for callback state decoding, PKCE "
+        "registry fallback, and blocked-turn gate resume."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "dcr_oauth_callback",
+        "--lib",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_DESCRIPTOR_POLICY_COMMAND = CommandSpec(
     name="webui_v2_descriptor_policy_surface",
     description=(
@@ -1080,6 +1170,34 @@ CASES: dict[str, CaseSpec] = {
             "unknown callback state, invalid scope/expiry rejection, "
             "cross-scope rejection, bearer/no-body enforcement, and "
             "per-caller/per-IP rate limits."
+        ),
+    ),
+    "webui_v2_extension_oauth_setup_regression": CaseSpec(
+        name="webui_v2_extension_oauth_setup_regression",
+        feature="WebUI v2 extension OAuth setup routes",
+        category="Hermetic Extension OAuth Setup Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-060-TC-01",
+            "REBCLI-060-TC-02",
+            "REBCLI-060-TC-03",
+            "REBCLI-060-TC-04",
+            "REBCLI-060-TC-05",
+            "REBCLI-060-TC-06",
+        ],
+        commands=[
+            WEBUI_V2_EXTENSION_OAUTH_ROUTE_COMMAND,
+            WEBUI_V2_EXTENSION_OAUTH_START_COMMAND,
+            WEBUI_V2_EXTENSION_GOOGLE_OAUTH_COMMAND,
+            WEBUI_V2_DCR_OAUTH_CALLBACK_COMMAND,
+        ],
+        notes=(
+            "Covers WebUI v2 extension OAuth setup API/runtime rows without "
+            "duplicating PR #5348 browser extension/auth-flow coverage: "
+            "package-scoped setup route binding, Google extension OAuth start, "
+            "DCR extension OAuth start, existing-owner reconnect binding, "
+            "cross-owner binding rejection, missing DCR registry fail-closed "
+            "behavior, binding lookup fallback, DCR callback state/PKCE "
+            "fallback, and blocked-turn gate resume."
         ),
     ),
     "webui_v2_operator_config_api_regression": CaseSpec(
