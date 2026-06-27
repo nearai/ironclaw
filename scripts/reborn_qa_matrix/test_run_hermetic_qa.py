@@ -403,6 +403,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-074-TC-07",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-075-TC-01",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -2214,21 +2218,30 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-074-TC-04",
                     "REBCLI-074-TC-05",
                     "REBCLI-074-TC-06",
+                    "REBCLI-074-TC-07",
                 ],
             )
             commands = results["results"][0]["details"]["commands"]
             self.assertEqual(
                 [command["name"] for command in commands],
-                ["webui_v2_shell_client_contracts"],
+                [
+                    "reborn_cli_webui_v2_binary",
+                    "webui_v2_shell_client_contracts",
+                    "webui_v2_shell_browser_smoke",
+                ],
             )
-            self.assertIn("shell-static-contracts.test.mjs", commands[0]["command"])
-            self.assertIn("useSidebar.test.mjs", commands[0]["command"])
-            self.assertIn("onboarding-gate.test.js", commands[0]["command"])
-            self.assertIn("pin-store.test.js", commands[0]["command"])
-            self.assertIn("thread-errors.test.mjs", commands[0]["command"])
-            self.assertIn("useThreads.test.mjs", commands[0]["command"])
-            self.assertIn("routes.test.mjs", commands[0]["command"])
-            self.assertNotIn("REBCLI-074-TC-07", results["summary"]["qa_matrix_test_ids"])
+            self.assertIn("cargo build -p ironclaw_reborn_cli", commands[0]["command"])
+            self.assertIn("shell-static-contracts.test.mjs", commands[1]["command"])
+            self.assertIn("useSidebar.test.mjs", commands[1]["command"])
+            self.assertIn("onboarding-gate.test.js", commands[1]["command"])
+            self.assertIn("pin-store.test.js", commands[1]["command"])
+            self.assertIn("thread-errors.test.mjs", commands[1]["command"])
+            self.assertIn("useThreads.test.mjs", commands[1]["command"])
+            self.assertIn("routes.test.mjs", commands[1]["command"])
+            self.assertIn(
+                "test_reborn_v2_shell_palette_and_sidebar_navigation",
+                commands[2]["command"],
+            )
 
     def test_webui_v2_frontend_bundle_case_dry_run_maps_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:

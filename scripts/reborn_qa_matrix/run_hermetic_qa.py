@@ -1676,6 +1676,39 @@ WEBUI_V2_SHELL_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SHELL_BROWSER_COMMAND = CommandSpec(
+    name="webui_v2_shell_browser_smoke",
+    description=(
+        "Playwright smoke for WebUI v2 shell navigation through the real "
+        "ironclaw-reborn serve binary: command palette route jump, sidebar "
+        "workspace navigation, and sidebar collapse/restore."
+    ),
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py::test_reborn_v2_shell_palette_and_sidebar_navigation",
+        "-q",
+    ],
+)
+
 WEBUI_V2_TEE_CLIENT_COMMAND = CommandSpec(
     name="webui_v2_tee_attestation_client_contracts",
     description=(
@@ -4298,17 +4331,21 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-074-TC-04",
             "REBCLI-074-TC-05",
             "REBCLI-074-TC-06",
+            "REBCLI-074-TC-07",
         ],
-        commands=[WEBUI_V2_SHELL_CLIENT_COMMAND],
+        commands=[
+            REBORN_CLI_WEBUI_V2_BINARY_COMMAND,
+            WEBUI_V2_SHELL_CLIENT_COMMAND,
+            WEBUI_V2_SHELL_BROWSER_COMMAND,
+        ],
         notes=(
-            "Covers the non-browser-smoke WebUI v2 shell/navigation rows "
-            "without duplicating PR #5348 browser shell coverage: first-run "
-            "onboarding redirects, responsive sidebar state, command palette "
-            "actions and thread jumps, admin/settings route filtering, "
-            "explicit thread pin/search/delete handling, account popover, "
-            "theme/sign-out controls, header logs/docs/TEE affordances, "
-            "toasts, and thread-delete error messaging. Browser-smoke TC-07 "
-            "stays guarded by PR #5348/live coverage."
+            "Covers the WebUI v2 shell/navigation rows: first-run onboarding "
+            "redirects, responsive sidebar state, command palette actions and "
+            "thread jumps, admin/settings route filtering, explicit thread "
+            "pin/search/delete handling, account popover, theme/sign-out "
+            "controls, header logs/docs/TEE affordances, toasts, "
+            "thread-delete error messaging, and a Chromium smoke for command "
+            "palette route jumps plus sidebar navigation/collapse."
         ),
     ),
     "webui_v2_frontend_bundle_supply_chain_regression": CaseSpec(

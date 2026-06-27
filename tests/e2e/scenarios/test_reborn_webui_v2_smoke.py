@@ -523,6 +523,32 @@ async def test_reborn_v2_new_chat_sends_while_a_run_is_active(reborn_v2_page):
     )
 
 
+async def test_reborn_v2_shell_palette_and_sidebar_navigation(reborn_v2_page):
+    """The global shell supports keyboard palette navigation and sidebar routing."""
+    sidebar = reborn_v2_page.locator(SEL_V2["sidebar"])
+    toggle = reborn_v2_page.locator(SEL_V2["sidebar_toggle"])
+
+    await expect(sidebar).to_be_visible(timeout=15000)
+    await expect(toggle).to_be_visible(timeout=15000)
+
+    await reborn_v2_page.keyboard.press("Control+K")
+    palette = reborn_v2_page.get_by_role("dialog", name="Command palette")
+    await expect(palette).to_be_visible(timeout=5000)
+    await palette.get_by_role("button", name="Go to Extensions").click()
+    await expect(reborn_v2_page).to_have_url(re.compile(r"/v2/extensions/?$"), timeout=5000)
+
+    await sidebar.get_by_role("link", name="Workspace").click()
+    await expect(reborn_v2_page).to_have_url(re.compile(r"/v2/workspace/?$"), timeout=5000)
+    await expect(reborn_v2_page.get_by_role("heading", name="Workspace")).to_be_visible(
+        timeout=15000
+    )
+
+    await toggle.click()
+    await expect(sidebar).to_be_hidden(timeout=5000)
+    await toggle.click()
+    await expect(sidebar).to_be_visible(timeout=5000)
+
+
 async def test_reborn_v2_approval_gate_blocks_composer_send(
     reborn_v2_server, reborn_v2_browser
 ):
