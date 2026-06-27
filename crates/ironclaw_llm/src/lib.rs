@@ -989,17 +989,18 @@ pub(crate) async fn build_provider_chain_components(
     build_provider_chain_components_with_options(config, session, true).await
 }
 
-async fn build_provider_chain_components_with_options(
+/// Apply the LLM decorator chain over a raw provider: Retry → SmartRouting →
+/// Failover → CircuitBreaker → ResponseCache. Each decorator is configured from
+/// `config`; when its config field is disabled/zero it is a passthrough that
+/// returns its inner provider unchanged. This is the single source of truth for
+/// decorator-chain assembly — assemble the chain only through this function, not
+/// inline or at a higher seam.
+pub async fn apply_decorator_chain(
+    raw: Arc<dyn LlmProvider>,
     config: &LlmConfig,
     session: Arc<SessionManager>,
-    include_standalone_cheap: bool,
-) -> Result<ProviderChainComponents, LlmError> {
-    let llm: Arc<dyn LlmProvider> = if config.backend == "openai_codex" {
-        create_openai_codex_provider(config).await?
-    } else {
-        create_llm_provider(config, session.clone()).await?
-    };
-    tracing::debug!("LLM provider initialized: {}", llm.model_name());
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let llm = raw;
 
     // 1. Retry — uses top-level LlmConfig fields (resolved from LLM_* env vars
     // with fallback to NEARAI_* for backward compatibility).
@@ -1116,6 +1117,23 @@ async fn build_provider_chain_components_with_options(
     } else {
         llm
     };
+
+    Ok(llm)
+}
+
+async fn build_provider_chain_components_with_options(
+    config: &LlmConfig,
+    session: Arc<SessionManager>,
+    include_standalone_cheap: bool,
+) -> Result<ProviderChainComponents, LlmError> {
+    let llm: Arc<dyn LlmProvider> = if config.backend == "openai_codex" {
+        create_openai_codex_provider(config).await?
+    } else {
+        create_llm_provider(config, session.clone()).await?
+    };
+    tracing::debug!("LLM provider initialized: {}", llm.model_name());
+
+    let llm = apply_decorator_chain(llm, config, session.clone()).await?;
 
     // Standalone cheap LLM for heartbeat/evaluation (not part of the chain)
     let cheap_llm = if include_standalone_cheap {

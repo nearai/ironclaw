@@ -165,8 +165,8 @@ type HarnessCapabilityParts = (
     Arc<dyn LoopCapabilityResultWriter>,
     HarnessCapabilityRecorder,
 );
-type HarnessTurnStorageBackend = BlockingTurnStatePutFilesystem<InMemoryBackend>;
-type HarnessTurnBackend = CompositeRootFilesystem;
+pub(crate) type HarnessTurnStorageBackend = BlockingTurnStatePutFilesystem<InMemoryBackend>;
+pub(crate) type HarnessTurnBackend = CompositeRootFilesystem;
 
 pub struct RebornBinaryE2EHarness {
     ingress: RebornTestIngress,
@@ -3537,8 +3537,8 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
     }
 }
 
-struct HarnessCapabilityPortFactory {
-    port: Arc<RecordingTestCapabilityPort>,
+pub(crate) struct HarnessCapabilityPortFactory {
+    pub(crate) port: Arc<RecordingTestCapabilityPort>,
 }
 
 #[async_trait]
@@ -3551,8 +3551,8 @@ impl LoopCapabilityPortFactory for HarnessCapabilityPortFactory {
     }
 }
 
-struct StaticCapabilitySurfaceProfileResolver {
-    allow_set: CapabilityAllowSet,
+pub(crate) struct StaticCapabilitySurfaceProfileResolver {
+    pub(crate) allow_set: CapabilityAllowSet,
 }
 
 #[async_trait]
@@ -3565,7 +3565,7 @@ impl CapabilitySurfaceProfileResolver for StaticCapabilitySurfaceProfileResolver
     }
 }
 
-struct EmptyIdentityContextSource;
+pub(crate) struct EmptyIdentityContextSource;
 
 #[async_trait]
 impl HostIdentityContextSource for EmptyIdentityContextSource {
@@ -3677,7 +3677,7 @@ fn route_kind_for_trigger(trigger: ProductTriggerReason) -> ProductConversationR
     }
 }
 
-fn scoped_turns_fs(
+pub(crate) fn scoped_turns_fs(
     backend: Arc<HarnessTurnStorageBackend>,
     binding: &ResolvedBinding,
 ) -> HarnessResult<Arc<ScopedFilesystem<HarnessTurnBackend>>> {

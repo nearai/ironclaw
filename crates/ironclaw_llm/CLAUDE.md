@@ -230,7 +230,7 @@ Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT
 
 ## Provider Chain Construction
 
-`build_provider_chain()` in `mod.rs` is the single source of truth for assembling decorators. It creates the base provider (dispatching to `create_openai_codex_provider()` for codex, `create_llm_provider()` for everything else), then applies all decorators inline:
+`build_provider_chain()` in `mod.rs` is the entry point for chain construction: it creates the base provider (dispatching to `create_openai_codex_provider()` for codex, `create_llm_provider()` for everything else), then delegates the decorator stack to `pub async fn apply_decorator_chain(raw, config, session)` — the single source of truth for decorator assembly. Assemble the chain only through `apply_decorator_chain` (the integration-test harness calls it directly to wrap a scripted raw provider); never apply these decorators inline or at a higher seam. The decorators, in order:
 
 ```
 Raw provider
