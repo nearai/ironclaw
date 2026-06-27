@@ -500,6 +500,20 @@ WEBUI_V2_SETTINGS_SHELL_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SETTINGS_RESTART_COMMAND = CommandSpec(
+    name="webui_v2_settings_restart_banner_contracts",
+    description=(
+        "Focused WebUI v2 Settings restart banner contracts for needsRestart "
+        "visibility, disabled v2 restart affordance, unavailable copy, local "
+        "confirmation callbacks, and no legacy restart side effects."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/pages/settings/settings-restart.test.mjs",
+    ],
+)
+
 WEBUI_V2_HIDDEN_STUBBED_ROUTE_COMMAND = CommandSpec(
     name="webui_v2_hidden_stubbed_route_contracts",
     description=(
@@ -2167,6 +2181,27 @@ CASES: dict[str, CaseSpec] = {
             "default tabs, unknown-tab redirects, non-admin operator-tab "
             "redirects, desktop role filtering, admin tab exposure, mobile "
             "hidden-active fallback, and tab-click callbacks."
+        ),
+    ),
+    "webui_v2_settings_restart_banner_regression": CaseSpec(
+        name="webui_v2_settings_restart_banner_regression",
+        feature="WebUI v2 settings restart availability banner",
+        category="Hermetic Settings Restart Banner Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-089-TC-01",
+            "REBCLI-089-TC-02",
+            "REBCLI-089-TC-03",
+            "REBCLI-089-TC-04",
+            "REBCLI-089-TC-05",
+            "REBCLI-089-TC-06",
+        ],
+        commands=[WEBUI_V2_SETTINGS_RESTART_COMMAND],
+        notes=(
+            "Covers WebUI v2 Settings restart banner rows without adding a "
+            "legacy restart implementation: no banner when needsRestart is "
+            "false, banner rendering when needsRestart is true, disabled "
+            "restart interface, unavailable reason, local confirmation "
+            "callbacks, and no v1 restart side effects."
         ),
     ),
     "webui_v2_tee_attestation_regression": CaseSpec(
