@@ -337,6 +337,35 @@ OPENAI_CHAT_WORKFLOW_COMMAND = CommandSpec(
     ],
 )
 
+OPENAI_MODELS_LIST_COMMAND = CommandSpec(
+    name="openai_models_list_api_contracts",
+    description=(
+        "Focused OpenAI-compatible Models API contracts for /v1/models and "
+        "/api/v1/models route descriptors, auth-before-catalog behavior, "
+        "fail-closed unwired catalog handling, and OpenAI model-list projection."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_openai_compat",
+        "--features",
+        "openai-compat-beta",
+        "--test",
+        "models_handlers_contract",
+        "--test",
+        "descriptors_contract",
+        "--test",
+        "stub_handlers_contract",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 OPENAI_COMPAT_ROUTE_MOUNT_COMMAND = CommandSpec(
     name="openai_compat_beta_route_mount_contracts",
     description=(
@@ -3973,6 +4002,26 @@ CASES: dict[str, CaseSpec] = {
             "malformed JSON, model/idempotency validation, streaming "
             "guardrails, projection metadata, and sanitized ProductWorkflow "
             "errors."
+        ),
+    ),
+    "openai_models_list_api_regression": CaseSpec(
+        name="openai_models_list_api_regression",
+        feature="OpenAI-compatible Models API",
+        category="Hermetic Models API Handler Contract",
+        qa_matrix_test_ids=[
+            "REBCLI-099-TC-01",
+            "REBCLI-099-TC-02",
+            "REBCLI-099-TC-03",
+            "REBCLI-099-TC-04",
+            "REBCLI-099-TC-05",
+            "REBCLI-099-TC-06",
+        ],
+        commands=[OPENAI_MODELS_LIST_COMMAND],
+        notes=(
+            "Focused Models API contract coverage for the discovered /v1/models "
+            "and /api/v1/models OpenAI-compatible feature: descriptor metadata, "
+            "authenticated model-list projection, auth-before-catalog rejection, "
+            "and fail-closed 501 behavior when the host does not wire a catalog."
         ),
     ),
     "support_substrate_product_workflow_regression": CaseSpec(

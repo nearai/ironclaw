@@ -3134,6 +3134,41 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 commands[0]["command"],
             )
 
+    def test_models_list_api_case_dry_run_maps_handler_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "openai_models_list_api_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-099-TC-01",
+                    "REBCLI-099-TC-02",
+                    "REBCLI-099-TC-03",
+                    "REBCLI-099-TC-04",
+                    "REBCLI-099-TC-05",
+                    "REBCLI-099-TC-06",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(commands[0]["name"], "openai_models_list_api_contracts")
+            self.assertIn("--features openai-compat-beta", commands[0]["command"])
+            self.assertIn("--test models_handlers_contract", commands[0]["command"])
+            self.assertIn("--test descriptors_contract", commands[0]["command"])
+            self.assertIn("--test stub_handlers_contract", commands[0]["command"])
+
     def test_provider_login_case_dry_run_maps_api_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
