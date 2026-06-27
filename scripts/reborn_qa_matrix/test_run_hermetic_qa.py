@@ -1343,6 +1343,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-066-TC-04",
                     "REBCLI-066-TC-05",
                     "REBCLI-066-TC-06",
+                    "REBCLI-066-TC-20",
                     "REBCLI-084-TC-01",
                     "REBCLI-084-TC-02",
                     "REBCLI-084-TC-03",
@@ -1358,6 +1359,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 [
                     "reborn_cli_webui_v2_binary",
                     "webui_v2_workspace_project_client_contracts",
+                    "webui_v2_projects_browser_smoke",
                     "webui_v2_workspace_browser_smoke",
                 ],
             )
@@ -1365,8 +1367,12 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn("workspace-api.test.mjs", commands[1]["command"])
             self.assertIn("projects-api.test.mjs", commands[1]["command"])
             self.assertIn(
-                "test_reborn_v2_workspace_text_file_preview_uses_v2_fs_api",
+                "test_reborn_v2_projects_overview_filter_and_detail_browser_smoke",
                 commands[2]["command"],
+            )
+            self.assertIn(
+                "test_reborn_v2_workspace_text_file_preview_uses_v2_fs_api",
+                commands[3]["command"],
             )
 
     def test_webui_automations_case_dry_run_maps_client_matrix_ids(self):

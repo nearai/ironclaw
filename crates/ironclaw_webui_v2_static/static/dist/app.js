@@ -2593,6 +2593,8 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
     <//>
   `:null}function PD({project:e,onOpen:t,t:a}){return u`
     <article
+      data-testid="project-card"
+      data-project-id=${e.id}
       onClick=${()=>t(e.id)}
       role="button"
       tabIndex=${0}
@@ -2641,6 +2643,7 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
           <div className="mt-1 text-xs uppercase tracking-[0.16em] text-iron-500">${nd(e.last_activity)}</div>
         </div>
         <${A}
+          data-testid="project-open-workspace"
           variant="secondary"
           onClick=${n=>{n.stopPropagation(),t(e.id)}}
         >${a("projects.openWorkspace")}<//>
@@ -2679,7 +2682,7 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
         description=${o("projects.empty.noMatchDesc")}
       />
     `:e.length?u`
-    <div className="space-y-5">
+    <div data-testid="projects-grid" className="space-y-5">
       ${l&&u`<${jD} project=${l} onOpen=${r} t=${o} />`}
 
       <${q} className="p-4 sm:p-5">
@@ -2693,6 +2696,7 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
           </div>
           <div className="flex gap-2">
             <input
+              data-testid="projects-search-input"
               value=${a}
               onInput=${d=>n(d.target.value)}
               placeholder=${o("projects.searchPlaceholder")}
@@ -2846,10 +2850,19 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
         </div>
       <//>
     `}function zD(e){return[...e||[]].sort((a,n)=>new Date(n.updated_at||n.created_at)-new Date(a.updated_at||a.created_at))[0]?.id||null}function GS({project:e,threads:t,selectedThreadId:a,onSelectThread:n,onNewConversation:r,isStartingConversation:s}){let i=zD(t);return u`
-    <div className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)]">
+    <div
+      data-testid="project-workspace"
+      data-project-id=${e.id}
+      className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)]"
+    >
       <div className="space-y-5">
         <div className="min-w-0">
-          <h2 className="text-2xl font-semibold tracking-tight text-white">${e.name}</h2>
+          <h2
+            data-testid="project-workspace-title"
+            className="text-2xl font-semibold tracking-tight text-white"
+          >
+            ${e.name}
+          </h2>
           ${e.description?u`<p className="mt-1 text-sm leading-6 text-iron-300">${e.description}</p>`:null}
         </div>
 

@@ -1033,6 +1033,129 @@ async def test_reborn_v2_workspace_text_file_preview_uses_v2_fs_api(
         await context.close()
 
 
+async def test_reborn_v2_projects_overview_filter_and_detail_browser_smoke(
+    reborn_v2_server, reborn_v2_browser
+):
+    """The Projects route filters overview cards and opens a project detail via v2 APIs."""
+    requests: list[tuple[str, str]] = []
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    def project_payload(project_id: str, name: str, description: str, goals: list[str]):
+        return {
+            "project_id": project_id,
+            "name": name,
+            "description": description,
+            "state": "active",
+            "role": "owner",
+            "metadata": {"goals": goals},
+            "created_at": "2026-06-01T00:00:00Z",
+            "updated_at": "2026-06-27T00:00:00Z",
+        }
+
+    alpha_project = project_payload(
+        "project-alpha",
+        "Alpha Launch",
+        "Launch readiness workspace",
+        ["ship alpha"],
+    )
+    beta_project = project_payload(
+        "project-beta",
+        "Beta Research",
+        "Research workspace",
+        ["study beta"],
+    )
+
+    async def fulfill_json(route, body, status=200):
+        await route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route):
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": True},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route):
+        await fulfill_json(route, {"threads": [], "next_cursor": None})
+
+    async def handle_projects(route):
+        parsed = urlparse(route.request.url)
+        requests.append((route.request.url, route.request.headers.get("authorization", "")))
+        if parsed.path == "/api/webchat/v2/projects":
+            assert parse_qs(parsed.query) == {"limit": ["200"]}
+            await fulfill_json(route, {"projects": [alpha_project, beta_project]})
+            return
+        if parsed.path == "/api/webchat/v2/projects/project-alpha":
+            await fulfill_json(route, {"project": alpha_project})
+            return
+        await fulfill_json(route, {"error": "unexpected project route"}, status=404)
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads**", handle_threads)
+    await page.route("**/api/webchat/v2/projects**", handle_projects)
+
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/v2/projects?token={REBORN_V2_AUTH_TOKEN}",
+            wait_until="domcontentloaded",
+        )
+        await expect(page).to_have_url(re.compile(r"/v2/projects/?$"), timeout=15000)
+        await expect(page.locator(SEL_V2["projects_grid"])).to_be_visible(timeout=15000)
+        await expect(
+            page.locator(SEL_V2["project_card_for"].format(id="project-alpha"))
+        ).to_contain_text("Alpha Launch")
+        await expect(
+            page.locator(SEL_V2["project_card_for"].format(id="project-beta"))
+        ).to_contain_text("Beta Research")
+
+        search = page.locator(SEL_V2["projects_search_input"])
+        await search.fill("Beta")
+        await expect(
+            page.locator(SEL_V2["project_card_for"].format(id="project-beta"))
+        ).to_be_visible(timeout=5000)
+        await expect(
+            page.locator(SEL_V2["project_card_for"].format(id="project-alpha"))
+        ).to_have_count(0, timeout=5000)
+
+        await search.fill("")
+        alpha_card = page.locator(SEL_V2["project_card_for"].format(id="project-alpha"))
+        await expect(alpha_card).to_be_visible(timeout=5000)
+        await alpha_card.locator(SEL_V2["project_open_workspace"]).click()
+
+        await expect(page).to_have_url(
+            re.compile(r"/v2/projects/project-alpha/?$"), timeout=15000
+        )
+        await expect(
+            page.locator(SEL_V2["project_workspace_for"].format(id="project-alpha"))
+        ).to_be_visible(timeout=15000)
+        await expect(
+            page.locator(SEL_V2["project_workspace_title"])
+        ).to_contain_text("Alpha Launch")
+
+        assert any("/api/webchat/v2/projects?limit=200" in url for url, _ in requests), requests
+        assert any(
+            "/api/webchat/v2/projects/project-alpha" in url for url, _ in requests
+        ), requests
+        assert all(auth == f"Bearer {REBORN_V2_AUTH_TOKEN}" for _, auth in requests), requests
+    finally:
+        await context.close()
+
+
 async def test_reborn_v2_slack_pairing_browser_success_error_and_keyboard_submit(
     reborn_v2_server, reborn_v2_browser
 ):

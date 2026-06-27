@@ -1041,6 +1041,41 @@ WEBUI_V2_WORKSPACE_BROWSER_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_PROJECTS_BROWSER_COMMAND = CommandSpec(
+    name="webui_v2_projects_browser_smoke",
+    description=(
+        "Playwright smoke for the WebUI v2 projects route through the real "
+        "ironclaw-reborn serve binary: token stripping, authorized project "
+        "overview fetch, search filtering, project-detail navigation, and "
+        "authorized detail fetch."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py::test_reborn_v2_projects_overview_filter_and_detail_browser_smoke",
+        "-q",
+    ],
+)
+
 WEBUI_V2_AUTOMATIONS_RUNTIME_TOOL_SUBSTRATE_COMMAND = CommandSpec(
     name="webui_v2_automations_runtime_tool_substrate_contracts",
     description=(
@@ -3852,6 +3887,7 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-066-TC-04",
             "REBCLI-066-TC-05",
             "REBCLI-066-TC-06",
+            "REBCLI-066-TC-20",
             "REBCLI-084-TC-01",
             "REBCLI-084-TC-02",
             "REBCLI-084-TC-03",
@@ -3863,18 +3899,22 @@ CASES: dict[str, CaseSpec] = {
         commands=[
             REBORN_CLI_WEBUI_V2_BINARY_COMMAND,
             WEBUI_V2_WORKSPACE_PROJECT_CLIENT_COMMAND,
+            WEBUI_V2_PROJECTS_BROWSER_COMMAND,
             WEBUI_V2_WORKSPACE_BROWSER_COMMAND,
         ],
         notes=(
             "Covers the generated WebUI v2 workspace/project rows at the "
             "static client contract layer plus a Reborn WebUI v2 browser "
-            "workspace preview smoke: root mount browsing, mount-qualified "
+            "projects overview/detail smoke and workspace preview smoke: "
+            "root mount browsing, mount-qualified "
             "directory entries, mount-root directory handling, bounded text "
             "and image preview via authed bytes, oversized text/image "
             "download-only behavior, unknown MIME UTF-8 versus binary "
             "sniffing, known-binary download-only behavior, Chromium text-file "
-            "preview rendering through v2 fs mount/stat/content calls, project "
-            "overview/detail mapping, project create/update payloads, "
+            "preview rendering through v2 fs mount/stat/content calls, "
+            "browser project overview filtering/detail navigation through "
+            "authorized v2 project calls, project overview/detail mapping, "
+            "project create/update payloads, "
             "membership route encoding, and TODO subresource stubs that must "
             "not call unsupported v1 APIs."
         ),
