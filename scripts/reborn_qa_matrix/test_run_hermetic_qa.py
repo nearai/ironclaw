@@ -1447,19 +1447,28 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-068-TC-04",
                     "REBCLI-068-TC-05",
                     "REBCLI-068-TC-06",
+                    "REBCLI-068-TC-16",
                 ],
             )
             commands = results["results"][0]["details"]["commands"]
             self.assertEqual(
                 [command["name"] for command in commands],
-                ["webui_v2_extensions_client_contracts"],
+                [
+                    "reborn_cli_webui_v2_binary",
+                    "webui_v2_extensions_client_contracts",
+                    "webui_v2_extensions_browser_smoke",
+                ],
             )
             self.assertIn(
                 "find crates/ironclaw_webui_v2_static/static/js/pages/extensions",
-                commands[0]["command"],
+                commands[1]["command"],
             )
-            self.assertIn("slack-pairing-api.test.mjs", commands[0]["command"])
-            self.assertIn("static/js/pages/extensions", commands[0]["command"])
+            self.assertIn("slack-pairing-api.test.mjs", commands[1]["command"])
+            self.assertIn("static/js/pages/extensions", commands[1]["command"])
+            self.assertIn(
+                "test_reborn_v2_extensions_lifecycle_browser_smoke",
+                commands[2]["command"],
+            )
 
     def test_webui_extension_lifecycle_api_case_dry_run_maps_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:

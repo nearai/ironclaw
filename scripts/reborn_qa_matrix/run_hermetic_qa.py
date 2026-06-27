@@ -1204,6 +1204,41 @@ WEBUI_V2_EXTENSIONS_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_EXTENSIONS_BROWSER_COMMAND = CommandSpec(
+    name="webui_v2_extensions_browser_smoke",
+    description=(
+        "Playwright smoke for the WebUI v2 extensions registry route through "
+        "the real ironclaw-reborn serve binary: token stripping, registry "
+        "card rendering, install payload, activate/remove empty bodies, "
+        "bearer propagation, toast feedback, and lifecycle UI state."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py::test_reborn_v2_extensions_lifecycle_browser_smoke",
+        "-q",
+    ],
+)
+
 WEBUI_V2_EXTENSION_LIFECYCLE_HANDLER_COMMAND = CommandSpec(
     name="webui_v2_extension_lifecycle_handler_contracts",
     description=(
@@ -3995,18 +4030,24 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-068-TC-04",
             "REBCLI-068-TC-05",
             "REBCLI-068-TC-06",
+            "REBCLI-068-TC-16",
         ],
-        commands=[WEBUI_V2_EXTENSIONS_CLIENT_COMMAND],
+        commands=[
+            REBORN_CLI_WEBUI_V2_BINARY_COMMAND,
+            WEBUI_V2_EXTENSIONS_CLIENT_COMMAND,
+            WEBUI_V2_EXTENSIONS_BROWSER_COMMAND,
+        ],
         notes=(
             "Covers the generated WebUI v2 extensions/channel-pairing rows "
-            "at the static client contract layer without duplicating PR #5348 "
-            "browser legacy Playwright scenarios: extension registry/list/"
+            "at the static client and browser layers without duplicating PR "
+            "#5348 browser legacy Playwright scenarios: extension registry/list/"
             "install/activate/remove/setup/OAuth API routes, registry and card "
             "presentation, lifecycle action selection/toasts, configure modal "
             "behavior, channel and MCP tab wiring, Slack setup and allowed "
             "channel helpers, proof-code pairing redemption, and user-safe "
-            "pairing error mapping. Browser-smoke TC-16 stays guarded by "
-            "PR #5348/live coverage."
+            "pairing error mapping, plus browser lifecycle install, activate, "
+            "remove, token stripping, bearer propagation, and mutation payload "
+            "checks."
         ),
     ),
     "webui_v2_extension_lifecycle_api_regression": CaseSpec(

@@ -255,6 +255,22 @@ SEL_V2 = {
     "slack_pairing_submit": "[data-testid='slack-pairing-submit']",
     "slack_pairing_success": "[data-testid='slack-pairing-success']",
     "slack_pairing_error": "[data-testid='slack-pairing-error']",
+    "extension_card_for": "[data-testid='extension-card'][data-extension-id='{id}']",
+    "extension_registry_card_for": (
+        "[data-testid='extension-registry-card'][data-extension-id='{id}']"
+    ),
+    "extension_install_for": (
+        "[data-testid='extension-action-install'][data-extension-id='{id}']"
+    ),
+    "extension_activate_for": (
+        "[data-testid='extension-action-activate'][data-extension-id='{id}']"
+    ),
+    "extension_actions_for": (
+        "[data-testid='extension-card-actions'][data-extension-id='{id}']"
+    ),
+    "extension_remove_for": (
+        "[data-testid='extension-menu-remove'][data-extension-id='{id}']"
+    ),
     "approval_card":  "[data-testid='approval-card']",  # approval gate card
     "busy_gate_notice": "[data-testid='busy-gate-notice']",  # gate busy notice
     "activity_run":   "[data-testid='activity-run']",

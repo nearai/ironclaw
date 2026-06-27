@@ -1464,6 +1464,201 @@ async def test_reborn_v2_slack_pairing_browser_success_error_and_keyboard_submit
     assert legacy_requests == []
 
 
+async def test_reborn_v2_extensions_lifecycle_browser_smoke(
+    reborn_v2_server, reborn_v2_browser
+):
+    """The Extensions registry drives install, activate, and remove over v2 APIs."""
+    calendar_installed = False
+    calendar_active = False
+    mutation_requests: list[dict] = []
+
+    def registry_entry():
+        return {
+            "kind": "first_party",
+            "package_ref": {"kind": "extension", "id": "calendar"},
+            "display_name": "Calendar",
+            "description": "Create and update calendar events.",
+            "keywords": ["calendar", "events"],
+            "version": "1.0.0",
+        }
+
+    def installed_extension():
+        return {
+            **registry_entry(),
+            "active": calendar_active,
+            "activation_status": "active" if calendar_active else "installed",
+            "tools": ["create_event"],
+        }
+
+    async def fulfill_json(route, body, status=200):
+        await route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route):
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route):
+        await fulfill_json(route, {"threads": []})
+
+    async def handle_extensions(route):
+        await fulfill_json(
+            route,
+            {"extensions": [installed_extension()] if calendar_installed else []},
+        )
+
+    async def handle_registry(route):
+        await fulfill_json(route, {"entries": [registry_entry()]})
+
+    async def handle_connectable_channels(route):
+        await fulfill_json(route, {"channels": []})
+
+    async def handle_install(route):
+        nonlocal calendar_installed, calendar_active
+        calendar_installed = True
+        calendar_active = False
+        mutation_requests.append(
+            {
+                "path": urlparse(route.request.url).path,
+                "authorization": route.request.headers.get("authorization", ""),
+                "body": json.loads(route.request.post_data or "{}"),
+            }
+        )
+        await fulfill_json(route, {"success": True, "message": "Calendar installed"})
+
+    async def handle_activate(route):
+        nonlocal calendar_active
+        calendar_active = True
+        mutation_requests.append(
+            {
+                "path": urlparse(route.request.url).path,
+                "authorization": route.request.headers.get("authorization", ""),
+                "body": route.request.post_data or "",
+            }
+        )
+        await fulfill_json(route, {"success": True, "message": "Calendar activated"})
+
+    async def handle_remove(route):
+        nonlocal calendar_installed, calendar_active
+        calendar_installed = False
+        calendar_active = False
+        mutation_requests.append(
+            {
+                "path": urlparse(route.request.url).path,
+                "authorization": route.request.headers.get("authorization", ""),
+                "body": route.request.post_data or "",
+            }
+        )
+        await fulfill_json(route, {"success": True, "message": "Calendar removed"})
+
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 720}
+    )
+    page = await context.new_page()
+    try:
+        await page.route(re.compile(r".*/api/webchat/v2/session$"), handle_session)
+        await page.route(re.compile(r".*/api/webchat/v2/threads.*"), handle_threads)
+        await page.route(
+            re.compile(r".*/api/webchat/v2/extensions/registry$"),
+            handle_registry,
+        )
+        await page.route(
+            re.compile(r".*/api/webchat/v2/channels/connectable$"),
+            handle_connectable_channels,
+        )
+        await page.route(
+            re.compile(r".*/api/webchat/v2/extensions/install$"),
+            handle_install,
+        )
+        await page.route(
+            re.compile(r".*/api/webchat/v2/extensions/calendar/activate$"),
+            handle_activate,
+        )
+        await page.route(
+            re.compile(r".*/api/webchat/v2/extensions/calendar/remove$"),
+            handle_remove,
+        )
+        await page.route(re.compile(r".*/api/webchat/v2/extensions$"), handle_extensions)
+
+        await page.goto(
+            f"{reborn_v2_server}/v2/extensions/registry?token={REBORN_V2_AUTH_TOKEN}",
+            wait_until="domcontentloaded",
+        )
+        await expect(page).to_have_url(
+            re.compile(r"/v2/extensions/registry/?$"),
+            timeout=15000,
+        )
+
+        calendar_id = "calendar"
+        await expect(
+            page.locator(SEL_V2["extension_registry_card_for"].format(id=calendar_id))
+        ).to_be_visible(timeout=15000)
+        await page.locator(SEL_V2["extension_install_for"].format(id=calendar_id)).click()
+
+        await expect(page.locator("body")).to_contain_text(
+            "Calendar installed",
+            timeout=10000,
+        )
+        await expect(
+            page.locator(SEL_V2["extension_card_for"].format(id=calendar_id))
+        ).to_be_visible(timeout=10000)
+
+        await page.locator(SEL_V2["extension_activate_for"].format(id=calendar_id)).click()
+        await expect(page.locator("body")).to_contain_text(
+            "Calendar activated",
+            timeout=10000,
+        )
+        await expect(
+            page.locator(SEL_V2["extension_card_for"].format(id=calendar_id))
+        ).to_have_attribute("data-extension-state", "active", timeout=10000)
+
+        await page.locator(SEL_V2["extension_actions_for"].format(id=calendar_id)).click()
+        await page.locator(SEL_V2["extension_remove_for"].format(id=calendar_id)).click()
+        await expect(page.locator("body")).to_contain_text(
+            "Calendar removed",
+            timeout=10000,
+        )
+        await expect(
+            page.locator(SEL_V2["extension_registry_card_for"].format(id=calendar_id))
+        ).to_be_visible(timeout=10000)
+    finally:
+        await context.close()
+
+    assert mutation_requests == [
+        {
+            "path": "/api/webchat/v2/extensions/install",
+            "authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}",
+            "body": {"package_ref": {"kind": "extension", "id": "calendar"}},
+        },
+        {
+            "path": "/api/webchat/v2/extensions/calendar/activate",
+            "authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}",
+            "body": "",
+        },
+        {
+            "path": "/api/webchat/v2/extensions/calendar/remove",
+            "authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}",
+            "body": "",
+        },
+    ]
+
+
 async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
     """Threads are listed for the caller and deletion removes the thread and transcript."""
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
