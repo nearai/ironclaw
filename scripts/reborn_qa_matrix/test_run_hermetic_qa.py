@@ -511,6 +511,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 {case["case"] for case in manifest["cases"]},
             )
             self.assertIn(
+                "webui_v2_sso_login_startup_regression",
+                {case["case"] for case in manifest["cases"]},
+            )
+            self.assertIn(
                 "webui_v2_workspace_project_client_regression",
                 {case["case"] for case in manifest["cases"]},
             )
@@ -947,6 +951,50 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn("body", commands[2]["command"])
             self.assertIn("ws_upgrade_", commands[3]["command"])
             self.assertIn("webui_v2_descriptors_contract", commands[4]["command"])
+
+    def test_webui_sso_login_startup_case_dry_run_maps_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "webui_v2_sso_login_startup_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-035-TC-01",
+                    "REBCLI-035-TC-02",
+                    "REBCLI-035-TC-03",
+                    "REBCLI-035-TC-04",
+                    "REBCLI-035-TC-05",
+                    "REBCLI-035-TC-06",
+                    "REBCLI-035-TC-07",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                [command["name"] for command in commands],
+                [
+                    "webui_v2_sso_startup_cli_smoke",
+                    "webui_v2_sso_startup_helper_contracts",
+                ],
+            )
+            self.assertIn(
+                "serve_fails_closed_when_sso_provider_has_no_allowed_domain_allowlist",
+                commands[0]["command"],
+            )
+            self.assertIn("--bin ironclaw-reborn", commands[1]["command"])
+            self.assertIn("serve_sso", commands[1]["command"])
 
     def test_webui_chat_client_case_dry_run_maps_chat_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:

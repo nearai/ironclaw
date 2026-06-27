@@ -166,6 +166,55 @@ WEBUI_V2_SERVE_WS_ORIGIN_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SSO_STARTUP_SMOKE_COMMAND = CommandSpec(
+    name="webui_v2_sso_startup_cli_smoke",
+    description=(
+        "Caller-level ironclaw-reborn serve smoke proving an SSO provider "
+        "configured without IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS "
+        "fails closed before listener binding."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_cli",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "smoke",
+        "serve_fails_closed_when_sso_provider_has_no_allowed_domain_allowlist",
+        "--",
+        "--exact",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_SSO_STARTUP_HELPER_COMMAND = CommandSpec(
+    name="webui_v2_sso_startup_helper_contracts",
+    description=(
+        "serve_sso helper contracts for no-provider behavior, missing "
+        "provider secrets, admission allowlist normalization, base URL "
+        "precedence, loopback fallback, and public cleartext rejection."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_cli",
+        "--features",
+        "webui-v2-beta",
+        "--bin",
+        "ironclaw-reborn",
+        "serve_sso",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 
 OPENAI_OWNER_CRATE_COMMAND = CommandSpec(
     name="openai_compat_owner_crates",
@@ -2576,6 +2625,32 @@ CASES: dict[str, CaseSpec] = {
             "allowed origin, zero body fallback, CORS allow/deny behavior, "
             "descriptor body caps, WebSocket same-origin policy, and "
             "canonical-host override behavior."
+        ),
+    ),
+    "webui_v2_sso_login_startup_regression": CaseSpec(
+        name="webui_v2_sso_login_startup_regression",
+        feature="WebUI v2 SSO login startup",
+        category="Hermetic WebUI v2 SSO Startup Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-035-TC-01",
+            "REBCLI-035-TC-02",
+            "REBCLI-035-TC-03",
+            "REBCLI-035-TC-04",
+            "REBCLI-035-TC-05",
+            "REBCLI-035-TC-06",
+            "REBCLI-035-TC-07",
+        ],
+        commands=[
+            WEBUI_V2_SSO_STARTUP_SMOKE_COMMAND,
+            WEBUI_V2_SSO_STARTUP_HELPER_COMMAND,
+        ],
+        notes=(
+            "Covers the CLI-owned WebUI SSO startup rows without live OAuth "
+            "provider calls: no-provider None behavior, provider without "
+            "admission allowlist fail-closed before binding, missing "
+            "provider secret failures, allowed-domain normalization, explicit "
+            "base URL precedence, listener fallback URL, loopback cleartext "
+            "allowance, and public cleartext rejection."
         ),
     ),
     "openai_compat_beta_routes_regression": CaseSpec(
