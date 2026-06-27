@@ -1,4 +1,3 @@
-use ironclaw_reborn_composition::hosted_single_tenant_volume_build_input;
 // Only the `#[cfg(not(feature = "libsql"))]` no-libsql regression test below
 // consumes this error type; `webui-v2-beta` (hence CI) pulls in `libsql`.
 #[cfg(not(feature = "libsql"))]
@@ -446,9 +445,11 @@ fn hosted_single_tenant_volume_is_visible_as_preview_readiness() {
 #[tokio::test]
 async fn hosted_single_tenant_volume_factory_readiness_includes_preview_diagnostic() {
     let dir = tempfile::tempdir().unwrap();
-    let input = hosted_single_tenant_volume_build_input(
+    let input = local_runtime_build_input_with_options(
+        RebornCompositionProfile::HostedSingleTenantVolume,
         "readiness-contract-owner",
         dir.path().to_path_buf(),
+        Default::default(),
     )
     .unwrap();
     let services = build_reborn_services(input).await.unwrap();
@@ -469,13 +470,15 @@ async fn hosted_single_tenant_volume_factory_readiness_includes_preview_diagnost
 
 #[cfg(not(feature = "libsql"))]
 #[test]
-fn hosted_single_tenant_volume_build_input_errors_without_libsql_feature() {
+fn hosted_single_tenant_volume_input_errors_without_libsql_feature() {
     let dir = tempfile::tempdir().unwrap();
     // `RebornBuildInput` (the Ok type) is not `Debug`, so `unwrap_err()` won't
     // compile; match on the `Result` directly instead.
-    let result = hosted_single_tenant_volume_build_input(
+    let result = local_runtime_build_input_with_options(
+        RebornCompositionProfile::HostedSingleTenantVolume,
         "readiness-contract-owner",
         dir.path().to_path_buf(),
+        Default::default(),
     );
 
     assert!(matches!(

@@ -975,6 +975,7 @@ fn recover_textual_tool_calls_from_tool_response(
         cache_read_input_tokens: response.cache_read_input_tokens,
         cache_creation_input_tokens: response.cache_creation_input_tokens,
         reasoning: response.reasoning,
+        reasoning_details: response.reasoning_details,
     })
 }
 
@@ -1207,7 +1208,8 @@ fn is_likely_capability_reference(token: &str) -> bool {
 }
 
 fn is_explicit_capability_request_token(content: &str, start: usize, end: usize) -> bool {
-    let previous_word = content[..start]
+    let previous_content = &content[..start]; // safety: start is produced by char_indices or content.len().
+    let previous_word = previous_content
         .trim_end()
         .rsplit(|character: char| !is_capability_request_word_char(character))
         .find(|word| !word.is_empty());
@@ -1387,6 +1389,7 @@ fn provider_tool_repair_messages(
             .map(provider_tool_call_for_repair)
             .collect(),
     )
+    .with_reasoning_details(response.reasoning_details.clone())
     .with_reasoning(response.reasoning.clone());
     std::iter::once(assistant)
         .chain(response.tool_calls.iter().map(|tool_call| {
@@ -1919,6 +1922,93 @@ mod tests {
         assert!(
             converted[0].content_parts.is_empty(),
             "a non-vision model must not receive image parts"
+        );
+    }
+
+    #[test]
+    fn gateway_recovers_capability_calls_from_textual_tool_syntax_preserves_reasoning_details() {
+        use ironclaw_llm::{ReasoningDetail, ReasoningDetails};
+
+        let expected_reasoning = ReasoningDetails {
+            id: Some("thinking_123".to_string()),
+            content: vec![ReasoningDetail::Text {
+                text: "Let me call the echo tool.".to_string(),
+                signature: Some("sig_abc".to_string()),
+            }],
+        };
+
+        let response = ToolCompletionResponse {
+            content: Some(
+                "Searching now.\nto=demo__echo weirdjson\n{\"message\":\"hello\"}".to_string(),
+            ),
+            tool_calls: Vec::new(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: Some("text reasoning".to_string()),
+            reasoning_details: Some(expected_reasoning.clone()),
+        };
+
+        let recovered =
+            recover_textual_tool_calls_from_tool_response(response, &["demo__echo".to_string()])
+                .expect("textual tool call recovery succeeded");
+
+        assert_eq!(
+            recovered.tool_calls.len(),
+            1,
+            "recovery must extract the textual tool call"
+        );
+        assert_eq!(recovered.tool_calls[0].name, "demo__echo");
+        assert_eq!(
+            recovered.reasoning_details,
+            Some(expected_reasoning),
+            "recovery must preserve typed reasoning_details onto the recovered response"
+        );
+    }
+
+    #[test]
+    fn provider_tool_repair_messages_preserves_reasoning_details_on_assistant_message() {
+        use ironclaw_llm::{ReasoningDetail, ReasoningDetails};
+
+        let expected_reasoning = ReasoningDetails {
+            id: Some("thinking_456".to_string()),
+            content: vec![ReasoningDetail::Encrypted(
+                "encrypted_thinking_data".to_string(),
+            )],
+        };
+
+        let response = ToolCompletionResponse {
+            content: Some("Calling tool.".to_string()),
+            tool_calls: vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "demo__echo".to_string(),
+                arguments: serde_json::json!({"message": "hello"}),
+                reasoning: None,
+                signature: None,
+                arguments_parse_error: None,
+            }],
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::ToolUse,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: Some("text reasoning".to_string()),
+            reasoning_details: Some(expected_reasoning.clone()),
+        };
+
+        let messages = provider_tool_repair_messages(&response, "tool arguments exceeded limit");
+
+        let repair_assistant = messages
+            .iter()
+            .find(|m| m.role == Role::Assistant && m.tool_calls.is_some())
+            .expect("repair messages must include an assistant tool call replay");
+
+        assert_eq!(
+            repair_assistant.reasoning_details,
+            Some(expected_reasoning),
+            "repaired assistant message must preserve typed reasoning_details"
         );
     }
 }

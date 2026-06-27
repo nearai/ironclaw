@@ -4847,6 +4847,53 @@ async fn external_tool_gate_block_stores_pending_external_tool_resume() {
 }
 
 #[tokio::test]
+async fn parallel_batch_records_completed_results_before_external_tool_block() {
+    let completed_ref = LoopResultRef::new("result:parallel-external-completed").expect("valid");
+    let external_gate_ref = LoopGateRef::new("gate:external-tool-parallel").expect("valid");
+    let host = MockHost::new(vec![two_calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![
+                CapabilityOutcome::Completed(CapabilityResultMessage {
+                    result_ref: completed_ref.clone(),
+                    safe_summary: "parallel call completed".to_string(),
+                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    terminate_hint: false,
+                    byte_len: 0,
+                    output_digest: None,
+                }),
+                CapabilityOutcome::ExternalToolPending {
+                    gate_ref: external_gate_ref.clone(),
+                    safe_summary: "awaiting client tool output".to_string(),
+                },
+            ],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let initial_state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, initial_state)
+        .await
+        .expect("execute blocks on external tool gate");
+
+    assert!(
+        matches!(exit, LoopExit::Blocked(_)),
+        "expected Blocked exit for external tool gate, got {exit:?}"
+    );
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1);
+    assert_eq!(appended[0].result_ref, completed_ref);
+    let before_block_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    assert_eq!(before_block_state.result_refs, vec![completed_ref]);
+    let pending = before_block_state
+        .pending_external_tool_resume
+        .as_ref()
+        .expect("BeforeBlock checkpoint must carry pending_external_tool_resume");
+    assert_eq!(pending.gate_ref, external_gate_ref);
+}
+
+#[tokio::test]
 async fn resume_after_external_tool_gate_redispatches_without_model_turn() {
     // Phase 1: the client tool call parks (ExternalToolPending). Phase 2: resume
     // re-dispatches the parked call WITHOUT a model turn, restaging the provider

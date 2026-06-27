@@ -912,6 +912,38 @@ async fn applier_rejects_agentless_transcript_evidence_before_transition() {
 }
 
 #[tokio::test]
+async fn external_tool_blocked_exit_with_durable_checkpoint_maps_to_blocked_external_tool() {
+    let claimed = claimed_run();
+    let checkpoint_id = TurnCheckpointId::new();
+    let state_ref =
+        ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:external-tool-blocked-state")
+            .expect("valid state ref");
+    let gate_ref = LoopGateRef::new("gate:test").expect("valid gate ref");
+    let checkpoint = loop_checkpoint_record_with_gate(
+        &claimed,
+        checkpoint_id,
+        state_ref.clone(),
+        LoopCheckpointKind::BeforeBlock,
+        Some(gate_ref),
+    );
+    let transition = Arc::new(RecordingTransitionPort::new());
+    let evidence = Arc::new(text_checkpoint_evidence(Arc::new(
+        StaticLoopCheckpointStore::new(checkpoint),
+    )));
+    let applier = Arc::new(LoopExitApplier::new(transition.clone(), evidence));
+    let exit =
+        blocked_exit_with_checkpoint(LoopBlockedKind::ExternalTool, checkpoint_id, state_ref);
+
+    let state = applier.apply(&claimed, exit).await.expect("applied");
+
+    assert_eq!(state.status, TurnStatus::BlockedExternalTool);
+    assert_eq!(
+        state.gate_ref.as_ref().map(|gate_ref| gate_ref.as_str()),
+        Some("gate:test")
+    );
+}
+
+#[tokio::test]
 async fn thread_checkpoint_evidence_rejects_stored_thread_scope_mismatch() {
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     let requested_scope = TurnScope::new(

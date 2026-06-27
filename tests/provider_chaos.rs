@@ -121,6 +121,7 @@ impl LlmProvider for FlakeyProvider {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: None,
+            reasoning_details: None,
         })
     }
 }
@@ -218,6 +219,7 @@ impl LlmProvider for GarbageProvider {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: None,
+            reasoning_details: None,
         })
     }
 }
@@ -280,6 +282,7 @@ impl LlmProvider for ReliableProvider {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: None,
+            reasoning_details: None,
         })
     }
 }

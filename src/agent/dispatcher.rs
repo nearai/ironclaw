@@ -23,7 +23,7 @@ use crate::agent::agentic_loop::{
 use crate::generated_images::GeneratedImageSentinel;
 use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::redact_params;
-use ironclaw_llm::{ChatMessage, Reasoning, ReasoningContext, TokenUsage};
+use ironclaw_llm::{ChatMessage, Reasoning, ReasoningContext, ReasoningDetails, TokenUsage};
 
 fn selected_model_override(value: &serde_json::Value) -> Option<String> {
     ironclaw_llm::normalized_model_override(value.as_str()).map(str::to_string)
@@ -842,6 +842,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
         reasoning: Option<String>,
+        reasoning_details: Option<ReasoningDetails>,
     ) -> Result<Option<LoopOutcome>, Error> {
         // Extract and sanitize the narrative before consuming `content`.
         let narrative = content
@@ -862,6 +863,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         // DeepSeek thinking-mode and Gemini 2.5+ to validate the chain (#3201, #3225).
         reason_ctx.messages.push(
             ChatMessage::assistant_with_tool_calls(content, tool_calls.clone())
+                .with_reasoning_details(reasoning_details)
                 .with_reasoning(reasoning),
         );
 
@@ -1955,6 +1957,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }
@@ -1999,6 +2002,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }
@@ -2044,6 +2048,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     reasoning: None,
+                    reasoning_details: None,
                 });
             }
 
@@ -2073,6 +2078,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }
@@ -3189,6 +3195,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     reasoning: None,
+                    reasoning_details: None,
                 });
             }
             // Tools available: always call one.
@@ -3208,6 +3215,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }
@@ -3510,6 +3518,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     reasoning: None,
+                    reasoning_details: None,
                 });
             }
             // Always call a tool that does not exist in the registry.
@@ -3529,6 +3538,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }
@@ -3581,6 +3591,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }

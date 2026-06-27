@@ -16,7 +16,7 @@ chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 futures = "0.3"
 hex = "0.4.3"
-jsonschema = { version = "0.45", default-features = false }
+jsonschema = { version = "0.46", default-features = false }
 parking_lot = "0.12"
 tracing = "0.1"
 tokio = { version = "1", features = ["rt", "sync", "time"] }

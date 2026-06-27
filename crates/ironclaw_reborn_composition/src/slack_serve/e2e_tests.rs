@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
 use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
@@ -111,7 +111,7 @@ fn slack_signature(timestamp: u64, body: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(SECRET.as_bytes()).expect("HMAC accepts any key size"); // safety: HMAC-SHA256 accepts arbitrary key lengths.
     mac.update(format!("v0:{timestamp}:").as_bytes());
     mac.update(body.as_bytes());
-    format!("v0={:x}", mac.finalize().into_bytes())
+    format!("v0={}", hex::encode(mac.finalize().into_bytes()))
 }
 
 impl Harness {

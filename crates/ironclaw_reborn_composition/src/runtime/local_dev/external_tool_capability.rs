@@ -27,7 +27,6 @@ use ironclaw_host_api::{CapabilityId, InvocationId, ProviderToolName, RuntimeKin
 use ironclaw_loop_support::{
     CapabilityResultWrite, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
-use ironclaw_turns::ExternalToolCatalog;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
     CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome, CapabilityProgress,
@@ -36,6 +35,7 @@ use ironclaw_turns::run_profile::{
     ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     VisibleCapabilitySurface,
 };
+use ironclaw_turns::{ExternalToolCatalog, PendingExternalCall};
 use ironclaw_turns::{LoopGateRef, TurnRunId};
 
 /// Wrap `inner` so the per-run external tools in `catalog` are offered to the
@@ -203,7 +203,7 @@ impl ExternalToolCapabilityPort {
         // writing the output as the capability result (no host-side execution).
         if let Some(output) = self
             .catalog
-            .take_output_for_input_ref(self.run_id, &input_ref)
+            .output_for_input_ref(self.run_id, &input_ref)
             .await
             .map_err(catalog_error)?
         {
@@ -218,6 +218,12 @@ impl ExternalToolCapabilityPort {
                     display_preview: None,
                 })
                 .await?;
+            // The parked call is resolved: drop its pending-call record so a run
+            // that parks again on a later call does not re-surface this one.
+            self.catalog
+                .complete_call_for_input_ref(self.run_id, &input_ref)
+                .await
+                .map_err(catalog_error)?;
             return Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref: write.result_ref,
                 safe_summary: "external tool output".to_string(),
@@ -319,6 +325,22 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
             )
             .await
             .map_err(catalog_error)?;
+        // Record the call (name/arguments/call_id) so a parked
+        // `BlockedExternalTool` run can render it as a `function_call` output
+        // item — the loop checkpoint that also holds this data has no external
+        // read path. Cleared in `complete_or_park` once the client output is
+        // consumed on resume.
+        self.catalog
+            .record_pending_call(
+                self.run_id,
+                PendingExternalCall::new(
+                    tool_call.id.clone(),
+                    tool_call.name.as_str().to_string(),
+                    tool_call.arguments.clone(),
+                ),
+            )
+            .await
+            .map_err(catalog_error)?;
         Ok(CapabilityCallCandidate {
             activity_id: activity_id.unwrap_or_default(),
             surface_version: self.surface_version()?,
@@ -417,8 +439,10 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
         for invocation in request.invocations {
             let outcome = self.invoke_capability(invocation).await?;
             let is_suspension = outcome.is_suspension();
+            let is_external_tool_pending =
+                matches!(&outcome, CapabilityOutcome::ExternalToolPending { .. });
             outcomes.push(outcome);
-            if request.stop_on_first_suspension && is_suspension {
+            if is_suspension && (request.stop_on_first_suspension || is_external_tool_pending) {
                 stopped_on_suspension = true;
                 break;
             }
@@ -462,6 +486,16 @@ fn catalog_error(error: ironclaw_turns::ExternalToolCatalogError) -> AgentLoopHo
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 format!("external tool registration is invalid: {reason}"),
+            )
+        }
+        ironclaw_turns::ExternalToolCatalogError::CallNotPending => AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "external tool call is not pending",
+        ),
+        ironclaw_turns::ExternalToolCatalogError::OutputAlreadySubmitted => {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "external tool output was already submitted",
             )
         }
     }
@@ -532,9 +566,14 @@ mod tests {
         async fn register_provider_tool_call_input(
             &self,
             _run_context: &LoopRunContext,
-            _tool_call: &ProviderToolCall,
+            tool_call: &ProviderToolCall,
         ) -> Result<CapabilityInputRef, AgentLoopHostError> {
-            Ok(CapabilityInputRef::new("input:external-tool-bind").expect("test input ref"))
+            CapabilityInputRef::new(format!("input:{}", tool_call.id)).map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "test provider tool-call input ref is invalid",
+                )
+            })
         }
     }
 
@@ -600,11 +639,59 @@ mod tests {
             Err(self.error.clone())
         }
 
+        async fn submit_output_for_pending_call(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: String,
+            _output: serde_json::Value,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn output(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: &str,
+        ) -> Result<Option<serde_json::Value>, ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
         async fn take_output(
             &self,
             _run_id: TurnRunId,
             _call_id: &str,
         ) -> Result<Option<serde_json::Value>, ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn complete_call_for_input_ref(
+            &self,
+            _run_id: TurnRunId,
+            _input_ref: &str,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn record_pending_call(
+            &self,
+            _run_id: TurnRunId,
+            _call: PendingExternalCall,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn pending_calls(
+            &self,
+            _run_id: TurnRunId,
+        ) -> Result<Vec<PendingExternalCall>, ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn clear_pending_call(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: &str,
+        ) -> Result<(), ExternalToolCatalogError> {
             Err(self.error.clone())
         }
 
@@ -660,12 +747,60 @@ mod tests {
             Ok(())
         }
 
+        async fn submit_output_for_pending_call(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: String,
+            _output: serde_json::Value,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Ok(())
+        }
+
+        async fn output(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: &str,
+        ) -> Result<Option<serde_json::Value>, ExternalToolCatalogError> {
+            Ok(None)
+        }
+
         async fn take_output(
             &self,
             _run_id: TurnRunId,
             _call_id: &str,
         ) -> Result<Option<serde_json::Value>, ExternalToolCatalogError> {
             Ok(None)
+        }
+
+        async fn complete_call_for_input_ref(
+            &self,
+            _run_id: TurnRunId,
+            _input_ref: &str,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Ok(())
+        }
+
+        async fn record_pending_call(
+            &self,
+            _run_id: TurnRunId,
+            _call: PendingExternalCall,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Ok(())
+        }
+
+        async fn pending_calls(
+            &self,
+            _run_id: TurnRunId,
+        ) -> Result<Vec<PendingExternalCall>, ExternalToolCatalogError> {
+            Ok(Vec::new())
+        }
+
+        async fn clear_pending_call(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: &str,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Ok(())
         }
 
         async fn clear(&self, _run_id: TurnRunId) -> Result<(), ExternalToolCatalogError> {
@@ -848,5 +983,75 @@ mod tests {
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
         assert_eq!(error.safe_summary, "external tool catalog is unavailable");
+    }
+
+    #[tokio::test]
+    async fn external_tool_output_survives_result_write_failure() {
+        let run_context = run_context().await;
+        let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+        catalog
+            .register(run_context.run_id, vec![external_tool_spec("get_weather")])
+            .await
+            .expect("register external tool");
+        let port = wrap_local_dev_external_tools(
+            Arc::new(EmptyInnerPort),
+            run_context.clone(),
+            Arc::new(TestInputResolver),
+            Arc::new(TestResultWriter),
+            catalog.clone(),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible capabilities");
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                id: "call-1".to_string(),
+                name: ProviderToolName::new("get_weather").expect("provider tool name"),
+                arguments: serde_json::json!({"city": "Boston"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .expect("register provider tool call");
+        catalog
+            .submit_output_for_pending_call(
+                run_context.run_id,
+                "call-1".to_string(),
+                serde_json::json!("72F"),
+            )
+            .await
+            .expect("submit output");
+
+        let error = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: candidate.activity_id,
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect_err("writer failure should propagate");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert_eq!(
+            catalog
+                .output(run_context.run_id, "call-1")
+                .await
+                .expect("output"),
+            Some(serde_json::json!("72F"))
+        );
+        assert_eq!(
+            catalog
+                .pending_calls(run_context.run_id)
+                .await
+                .expect("pending")
+                .len(),
+            1
+        );
     }
 }

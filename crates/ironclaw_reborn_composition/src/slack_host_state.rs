@@ -22,7 +22,7 @@ use ironclaw_host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, ScopedPath, TenantId, UserId,
 };
 use ironclaw_product_adapters::AdapterInstallationId;
-use rand::{RngCore, rngs::OsRng};
+use rand::RngExt as _;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::slack_actor_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
@@ -1640,7 +1640,7 @@ fn active_pairing_challenge(
 fn random_pairing_code() -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let mut bytes = [0_u8; PAIRING_CODE_LEN];
-    OsRng.fill_bytes(&mut bytes);
+    rand::rng().fill(&mut bytes);
     bytes
         .iter()
         .map(|byte| ALPHABET[usize::from(*byte) % ALPHABET.len()] as char)
@@ -1649,7 +1649,7 @@ fn random_pairing_code() -> String {
 
 fn random_lock_nonce() -> String {
     let mut bytes = [0_u8; 16];
-    OsRng.fill_bytes(&mut bytes);
+    rand::rng().fill(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
