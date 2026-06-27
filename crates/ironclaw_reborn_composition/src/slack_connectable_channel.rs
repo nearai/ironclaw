@@ -167,7 +167,7 @@ fn slack_inbound_proof_code_connectable_channel() -> RebornConnectableChannelInf
         action: RebornChannelConnectAction {
             title: "Slack account connection".to_string(),
             instructions:
-                "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes."
+                "Message the IronClaw Reborn app in Slack to get a pairing code, then paste it here. Codes expire in 10 minutes. If a code is invalid or expired, run /pair in Slack for a fresh one."
                     .to_string(),
             input_placeholder: "Enter Slack pairing code...".to_string(),
             submit_label: "Connect".to_string(),
@@ -251,7 +251,7 @@ mod tests {
         );
         assert_eq!(
             channel.action.instructions,
-            "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes."
+            "Message the IronClaw Reborn app in Slack to get a pairing code, then paste it here. Codes expire in 10 minutes. If a code is invalid or expired, run /pair in Slack for a fresh one."
         );
         assert_eq!(
             channel.action.error_message,

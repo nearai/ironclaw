@@ -50,7 +50,9 @@ test("onboardingFromToolMessages: opens panel from reloaded timeline tool card",
 
   assert.equal(onboarding?.state, "pairing_required");
   assert.equal(onboarding?.extensionName, "slack");
-  assert.match(onboarding?.instructions, /Paste the code here/);
+  assert.match(onboarding?.instructions, /paste it here/);
+  assert.match(onboarding?.instructions, /Message the IronClaw Reborn app in Slack/);
+  assert.match(onboarding?.instructions, /never sent to the model/);
 });
 
 test("onboardingFromToolMessages: suppresses stale Slack panel after continuation", () => {

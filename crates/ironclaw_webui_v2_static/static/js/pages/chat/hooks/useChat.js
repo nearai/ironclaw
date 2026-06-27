@@ -6,9 +6,13 @@ import {
   submitManualToken,
 } from "../../../lib/api.js";
 import { redeemSlackPairingCode } from "../../../lib/slack-pairing-api.js";
+import { listConnectableChannels } from "../../../lib/channel-connect.js";
 import { queryClient } from "../../../lib/query-client.js";
 import { React } from "../../../lib/html.js";
-import { approvePairingCode } from "../../extensions/lib/extensions-api.js";
+import {
+  approvePairingCode,
+  fetchExtensions,
+} from "../../extensions/lib/extensions-api.js";
 import { onboardingFromToolMessages } from "../lib/extension-onboarding.js";
 import { useChatEvents } from "../lib/useChatEvents.js";
 import {
@@ -33,6 +37,10 @@ const APPROVAL_GATE_PENDING_SEND_ERROR = "approval_gate_pending_send_blocked";
 const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
 const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
 const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
+const DISMISSED_ONBOARDING_STORAGE_PREFIX =
+  "ironclaw.chat.dismissedOnboarding.v1:";
+const DISMISSED_ONBOARDING_STORAGE_LIMIT = 100;
+const SLACK_STARTUP_ONBOARDING_SOURCE_ID = "connectable-channel:slack";
 
 async function withAuthTokenTimeout(task) {
   const controller = new AbortController();
@@ -70,6 +78,114 @@ function threadNeedsSidebarRefresh(threadId) {
 function busyNoticeKey(threadId, gate) {
   if (!threadId || !gate?.runId || !gate?.gateRef) return null;
   return `${threadId}\n${gate.runId}\n${gate.gateRef}`;
+}
+
+function dismissedOnboardingStorageKey(threadId) {
+  const normalized = String(threadId || "").trim();
+  return normalized ? `${DISMISSED_ONBOARDING_STORAGE_PREFIX}${normalized}` : null;
+}
+
+function onboardingStorage() {
+  try {
+    return globalThis?.localStorage || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function loadDismissedOnboardingIds(threadId) {
+  const key = dismissedOnboardingStorageKey(threadId);
+  const storage = key ? onboardingStorage() : null;
+  if (!storage) return new Set();
+  try {
+    const parsed = JSON.parse(storage.getItem(key) || "[]");
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((value) => typeof value === "string"));
+  } catch (_) {
+    return new Set();
+  }
+}
+
+function persistDismissedOnboardingId(threadId, sourceMessageId) {
+  const key = dismissedOnboardingStorageKey(threadId);
+  const storage = key ? onboardingStorage() : null;
+  if (!storage || !sourceMessageId) return;
+  const dismissed = loadDismissedOnboardingIds(threadId);
+  dismissed.add(sourceMessageId);
+  const values = Array.from(dismissed).slice(-DISMISSED_ONBOARDING_STORAGE_LIMIT);
+  try {
+    storage.setItem(key, JSON.stringify(values));
+  } catch (_) {
+    // Best-effort UX preference; storage failures should not block chat.
+  }
+}
+
+function packageRefId(item) {
+  return item?.package_ref?.id || item?.packageRef?.id || item?.id || "";
+}
+
+function extensionLifecycleState(item) {
+  return (
+    item?.onboarding_state ||
+    item?.onboardingState ||
+    item?.activation_status ||
+    item?.activationStatus ||
+    (item?.active ? "active" : "installed")
+  );
+}
+
+function slackStartupPairingOnboarding({
+  extensions,
+  connectableChannels,
+  threadId,
+  dismissedIds,
+}) {
+  if (!threadId || dismissedIds?.has(SLACK_STARTUP_ONBOARDING_SOURCE_ID)) {
+    return null;
+  }
+  const slack = (extensions || []).find((item) => packageRefId(item) === "slack");
+  if (!slack || slack.kind !== "channel") return null;
+  const state = extensionLifecycleState(slack);
+  if (!["setup_required", "pairing_required", "pairing"].includes(state)) {
+    return null;
+  }
+  const connectAction = (connectableChannels || []).find(
+    (channel) =>
+      channel?.channel === "slack" && channel?.strategy === "inbound_proof_code",
+  );
+  if (!connectAction) return null;
+  const action = connectAction.action || {};
+  return {
+    extensionName: "slack",
+    state: "pairing_required",
+    threadId,
+    sourceMessageId: SLACK_STARTUP_ONBOARDING_SOURCE_ID,
+    instructions:
+      action.instructions ||
+      "Message the IronClaw Reborn app in Slack to get a pairing code, then paste it here. If a code is invalid or expired, run /pair in Slack for a fresh one.",
+    inputPlaceholder:
+      action.input_placeholder ||
+      action.code_placeholder ||
+      "Enter Slack pairing code",
+    submitLabel: action.submit_label || "Connect",
+    errorMessage:
+      action.error_message ||
+      "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.",
+  };
+}
+
+function slackExtensionRequiresPairing(extensions) {
+  const slack = (extensions || []).find((item) => packageRefId(item) === "slack");
+  if (!slack || slack.kind !== "channel") return true;
+  const state = extensionLifecycleState(slack);
+  return ["setup_required", "pairing_required", "pairing"].includes(state);
+}
+
+function fetchWithQueryCache(queryKey, queryFn) {
+  if (typeof queryClient.fetchQuery === "function") {
+    return queryClient.fetchQuery({ queryKey, queryFn });
+  }
+  return queryFn();
 }
 
 function submitResponseResumedTurnGate(response) {
@@ -283,7 +399,7 @@ export function useChat(threadId) {
   React.useEffect(() => {
     resetToolActivityState(toolActivityStateRef);
     locallyResolvedGatesRef.current.clear();
-    dismissedOnboardingIdsRef.current.clear();
+    dismissedOnboardingIdsRef.current = loadDismissedOnboardingIds(threadId);
   }, [threadId]);
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
@@ -325,7 +441,64 @@ export function useChat(threadId) {
       return onboarding;
     });
     setIsProcessing(false);
+    if (
+      isSlackPersonalPairing(onboarding.extensionName) &&
+      typeof fetchExtensions === "function"
+    ) {
+      let cancelled = false;
+      fetchWithQueryCache(["extensions"], fetchExtensions)
+        .then((extensionData) => {
+          if (cancelled || slackExtensionRequiresPairing(extensionData?.extensions)) {
+            return;
+          }
+          setPendingOnboarding((current) => {
+            if (
+              current?.extensionName === onboarding.extensionName &&
+              current?.threadId === onboarding.threadId &&
+              current?.sourceMessageId === onboarding.sourceMessageId
+            ) {
+              return null;
+            }
+            return current;
+          });
+        })
+        .catch(() => {
+          // Historical activation cards are still useful fallback evidence when
+          // extension-state refresh fails; keep the panel instead of hiding it.
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
   }, [messages, threadId, setPendingOnboarding, setIsProcessing]);
+
+  React.useEffect(() => {
+    if (!threadId || pendingOnboarding || pendingGate) return;
+    if (Array.isArray(messages) && messages.length > 0) return;
+    let cancelled = false;
+    Promise.all([
+      fetchWithQueryCache(["extensions"], fetchExtensions),
+      fetchWithQueryCache(["connectable-channels"], listConnectableChannels),
+    ])
+      .then(([extensionData, connectableData]) => {
+        if (cancelled || pendingOnboardingRef.current) return;
+        const onboarding = slackStartupPairingOnboarding({
+          extensions: extensionData?.extensions || [],
+          connectableChannels: connectableData?.channels || [],
+          threadId,
+          dismissedIds: dismissedOnboardingIdsRef.current,
+        });
+        if (!onboarding) return;
+        setPendingOnboarding(onboarding);
+        setIsProcessing(false);
+      })
+      .catch(() => {
+        // Best-effort startup affordance; normal chat remains usable.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [messages, pendingGate, pendingOnboarding, threadId, setPendingOnboarding, setIsProcessing]);
 
   React.useEffect(() => {
     if (!isPendingOAuthGate(pendingGate)) return;
@@ -870,6 +1043,7 @@ export function useChat(threadId) {
       }
       if (onboarding.sourceMessageId) {
         dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
+        persistDismissedOnboardingId(threadForResume, onboarding.sourceMessageId);
       }
       setPendingOnboarding(null);
       if (isSlackPairing && threadForResume && !onboarding.requestId) {
@@ -891,9 +1065,13 @@ export function useChat(threadId) {
     const onboarding = pendingOnboardingRef.current;
     if (onboarding?.sourceMessageId) {
       dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
+      persistDismissedOnboardingId(
+        onboarding.threadId || threadId,
+        onboarding.sourceMessageId,
+      );
     }
     setPendingOnboarding(null);
-  }, [setPendingOnboarding]);
+  }, [threadId, setPendingOnboarding]);
 
   const cancelRun = React.useCallback(
     async (reason) => {

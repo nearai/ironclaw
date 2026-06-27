@@ -848,7 +848,7 @@ registerPack("ar", {
   "pairing.error": "فشل الاقتران.",
   "pairing.none": "لا توجد طلبات اقتران معلّقة.",
   "pairing.slackTitle": "اتصال حساب Slack",
-  "pairing.slackInstructions": "شغّل /pair في Slack للحصول على رمز، ثم الصقه هنا. تنتهي صلاحية الرموز خلال 10 دقائق.",
+  "pairing.slackInstructions": "أرسل رسالة إلى تطبيق IronClaw Reborn في Slack للحصول على رمز ربط، ثم الصقه هنا. تنتهي صلاحية الرموز خلال 10 دقائق. إذا كان الرمز غير صالح أو منتهي الصلاحية، فشغّل /pair في Slack للحصول على رمز جديد.",
   "pairing.slackPlaceholder": "أدخل رمز الاقتران Slack...",
   "pairing.connect": "اتصال",
   "pairing.slackSuccess": "حساب Slack متصل.",

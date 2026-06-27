@@ -18,8 +18,33 @@ function slackPairingSectionSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackPairingSection };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackPairingSection, slackPairingCopy };`;
 }
+
+test("SlackPairingSection fallback copy tells users to DM the Slack app first", () => {
+  const context = {
+    globalThis: {},
+    html: () => ({}),
+  };
+
+  vm.runInNewContext(slackPairingSectionSourceForTest(), context);
+  const copy = context.globalThis.__testExports.slackPairingCopy(
+    {},
+    (key) => ({
+      "pairing.slackTitle": "Slack account connection",
+      "pairing.slackInstructions":
+        "Message the IronClaw Reborn app in Slack to get a pairing code, then paste it here. Codes expire in 10 minutes. If a code is invalid or expired, run /pair in Slack for a fresh one.",
+      "pairing.slackPlaceholder": "Enter Slack pairing code...",
+      "pairing.connect": "Connect",
+      "pairing.slackSuccess": "Slack account connected.",
+      "pairing.slackError":
+        "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.",
+    })[key],
+  );
+
+  assert.match(copy.instructions, /Message the IronClaw Reborn app/);
+  assert.match(copy.instructions, /run \/pair in Slack/);
+});
 
 test("SlackPairingSection activates Slack after redeeming a pairing code", async () => {
   const calls = [];

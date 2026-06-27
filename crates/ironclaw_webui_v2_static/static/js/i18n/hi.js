@@ -848,7 +848,7 @@ registerPack("hi", {
   "pairing.error": "पेयरिंग विफल.",
   "pairing.none": "कोई लंबित युग्मन अनुरोध नहीं।",
   "pairing.slackTitle": "Slack खाता कनेक्शन",
-  "pairing.slackInstructions": "कोड पाने के लिए Slack में /pair चलाएं, फिर उसे यहां पेस्ट करें। कोड 10 मिनट में समाप्त हो जाते हैं।",
+  "pairing.slackInstructions": "पेयरिंग कोड पाने के लिए Slack में IronClaw Reborn ऐप को संदेश भेजें, फिर उसे यहां पेस्ट करें। कोड 10 मिनट में समाप्त हो जाते हैं। अगर कोड अमान्य या समाप्त हो गया है, तो नया कोड पाने के लिए Slack में /pair चलाएं।",
   "pairing.slackPlaceholder": "Slack पेयरिंग कोड दर्ज करें…",
   "pairing.connect": "कनेक्ट",
   "pairing.slackSuccess": "Slack खाता कनेक्ट किया गया।",

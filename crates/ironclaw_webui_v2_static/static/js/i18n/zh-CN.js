@@ -848,7 +848,7 @@ registerPack("zh-CN", {
   "pairing.error": "所尝试运行的上述匹配过程遭意外遇到并遇到发生了不可知失败原因。麻烦可稍后检查或者再从头重做配对要求步骤和密码输入信息。",
   "pairing.none": "没有待处理的配对请求。",
   "pairing.slackTitle": "当前正建立关于 Slack 组织帐户联通方式并提供设定配置关联。",
-  "pairing.slackInstructions": "在 Slack 中运行 /pair 获取代码，然后粘贴到此处。代码将在 10 分钟后过期。",
+  "pairing.slackInstructions": "在 Slack 中向 IronClaw Reborn 应用发送消息以获取配对代码，然后粘贴到这里。代码将在 10 分钟后过期。如果代码无效或已过期，请在 Slack 中运行 /pair 获取新代码。",
   "pairing.slackPlaceholder": "此处开始录入填入所需来自上述的 Slack 配对确认有效验证代码密码输入情况：",
   "pairing.connect": "点击通过去连接验证并校验这种配对工作",
   "pairing.slackSuccess": "针对所提供需要的 Slack 系统帐户，应用已被设置关联成功地进行接入且链接上系统上了！",

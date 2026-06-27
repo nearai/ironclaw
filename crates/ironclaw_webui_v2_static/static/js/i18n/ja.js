@@ -848,7 +848,7 @@ registerPack("ja", {
   "pairing.error": "ペアリングに失敗しました。",
   "pairing.none": "保留中のペアリング要求はありません。",
   "pairing.slackTitle": "Slack アカウント接続",
-  "pairing.slackInstructions": "Slack で /pair を実行してコードを取得し、ここに貼り付けます。コードは 10 分で期限切れになります。",
+  "pairing.slackInstructions": "Slack で IronClaw Reborn アプリにメッセージを送り、ペアリングコードを取得してここに貼り付けます。コードは 10 分で期限切れになります。コードが無効または期限切れの場合は、Slack で /pair を実行して新しいコードを取得してください。",
   "pairing.slackPlaceholder": "Slack ペアリング コードを入力してください…",
   "pairing.connect": "接続",
   "pairing.slackSuccess": "Slack アカウントが接続されました。",

@@ -118,7 +118,7 @@ function activationMessageRequiresPairing(message) {
 
 function activationPairingInstructions(extensionName) {
   if (extensionName.toLowerCase() === "slack") {
-    return "Go to Slack and DM the IronClaw Reborn app to get a pairing code. Paste the code here; it will not be sent to the model.";
+    return "Message the IronClaw Reborn app in Slack to get a pairing code, then paste it here. The code is redeemed directly and is never sent to the model.";
   }
   const displayName = extensionName
     .replace(/[-_]+/g, " ")

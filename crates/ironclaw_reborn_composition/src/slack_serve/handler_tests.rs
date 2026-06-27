@@ -409,6 +409,14 @@ impl RebornUserIdentityLookup for FakeIdentityLookup {
     ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
         Ok(self.bindings.get(provider_user_id).cloned())
     }
+
+    async fn user_has_provider_binding(
+        &self,
+        _provider: &str,
+        user_id: &UserId,
+    ) -> Result<bool, RebornUserIdentityLookupError> {
+        Ok(self.bindings.values().any(|bound| bound == user_id))
+    }
 }
 
 fn single_team_resolver() -> (
@@ -584,10 +592,7 @@ async fn slack_pair_already_linked_returns_connected_message() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let text = ephemeral_text(response).await;
-    assert!(
-        text.to_lowercase().contains("already"),
-        "already-linked reply should say so: {text}"
-    );
+    assert_eq!(text, "You're already connected.");
     // An already-linked user is never minted a code.
     assert!(!text.contains("PAIRCODE"));
     assert!(!store.is_live("PAIRCODE0001"));

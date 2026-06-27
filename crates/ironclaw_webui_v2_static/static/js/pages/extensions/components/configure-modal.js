@@ -55,6 +55,10 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       ? extension.packageRef
       : extension?.packageRef?.id || "";
   const isChannel = isChannelExtensionKind(extension?.kind);
+  const channelPairingInstructions =
+    channelId.toLowerCase() === "slack"
+      ? "Open Slack and message the IronClaw Reborn app to get a pairing code, then paste it below. The code is redeemed directly and is never sent to the model."
+      : `Message ${extensionName} to get a pairing code, then paste it below. The code is redeemed directly and is never sent to the model.`;
   const [pairingCode, setPairingCode] = React.useState("");
   const pairingMutation = useMutation({
     mutationFn: async (code) => {
@@ -98,8 +102,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
         title=${t("extensions.configureName").replace("{name}", extensionName)}
       >
         <p className="mb-4 text-sm leading-6 text-iron-300">
-          Message ${extensionName} to get a pairing code, then paste it below.
-          The code is redeemed directly and is never sent to the model.
+          ${channelPairingInstructions}
         </p>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           <input

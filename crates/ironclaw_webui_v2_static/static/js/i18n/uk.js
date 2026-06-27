@@ -848,7 +848,7 @@ registerPack("uk", {
   "pairing.error": "Помилка створення пари.",
   "pairing.none": "Немає запитів на парування в очікуванні.",
   "pairing.slackTitle": "Підключення до облікового запису Slack",
-  "pairing.slackInstructions": "Виконайте /pair у Slack, щоб отримати код, потім вставте його тут. Термін дії кодів спливає через 10 хвилин.",
+  "pairing.slackInstructions": "Напишіть застосунку IronClaw Reborn у Slack, щоб отримати код сполучення, а потім вставте його тут. Термін дії кодів спливає через 10 хвилин. Якщо код недійсний або прострочений, виконайте /pair у Slack, щоб отримати новий.",
   "pairing.slackPlaceholder": "Введіть код сполучення Slack…",
   "pairing.connect": "Підключитися",
   "pairing.slackSuccess": "Обліковий запис Slack підключено.",

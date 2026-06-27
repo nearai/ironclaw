@@ -2118,6 +2118,44 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn filesystem_slack_host_state_deletes_libsql_pairing_code_record_after_consumption() {
+        let (state, _dir) = libsql_state().await;
+        let issued = state
+            .issue_challenge(challenge())
+            .await
+            .expect("issue succeeds");
+        let path =
+            FilesystemSlackHostState::<ironclaw_filesystem::LibSqlRootFilesystem>::pairing_code_path(
+                &issued.code,
+            )
+            .expect("pairing code path");
+        assert!(
+            state
+                .read_record::<StoredSlackPairingChallenge>(&path)
+                .await
+                .expect("read issued code")
+                .is_some(),
+            "issued pairing code record should exist before consumption"
+        );
+
+        let consumed = state
+            .consume_challenge(&issued.code)
+            .await
+            .expect("consume succeeds");
+
+        assert_eq!(consumed, challenge());
+        assert!(
+            state
+                .read_record::<StoredSlackPairingChallenge>(&path)
+                .await
+                .expect("read consumed code")
+                .is_none(),
+            "consumed pairing code records must be physically removed"
+        );
+    }
+
     #[tokio::test]
     async fn filesystem_slack_host_state_previews_pairing_code_without_consuming_it() {
         let state = state();
@@ -2927,6 +2965,24 @@ mod tests {
 
     fn state_with_root(root: Arc<InMemoryBackend>) -> FilesystemSlackHostState<InMemoryBackend> {
         state_with_backend(root)
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn libsql_state() -> (
+        FilesystemSlackHostState<ironclaw_filesystem::LibSqlRootFilesystem>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("slack-host-state.db");
+        let db = Arc::new(
+            libsql::Builder::new_local(db_path)
+                .build()
+                .await
+                .expect("build libsql database"),
+        );
+        let root = Arc::new(ironclaw_filesystem::LibSqlRootFilesystem::new(db));
+        root.run_migrations().await.expect("run libsql migrations");
+        (state_with_backend(root), dir)
     }
 
     fn state_with_backend<F>(root: Arc<F>) -> FilesystemSlackHostState<F>

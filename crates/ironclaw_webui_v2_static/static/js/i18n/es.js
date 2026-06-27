@@ -848,7 +848,7 @@ registerPack("es", {
   "pairing.error": "El emparejamiento falló.",
   "pairing.none": "No hay solicitudes de emparejamiento pendientes.",
   "pairing.slackTitle": "Conexión de cuenta Slack",
-  "pairing.slackInstructions": "Ejecute /pair en Slack para obtener un código y péguelo aquí. Los códigos caducan en 10 minutos.",
+  "pairing.slackInstructions": "Envía un mensaje a la app IronClaw Reborn en Slack para obtener un código de vinculación y pégalo aquí. Los códigos caducan en 10 minutos. Si un código no es válido o caducó, ejecuta /pair en Slack para obtener uno nuevo.",
   "pairing.slackPlaceholder": "Ingrese el código de emparejamiento Slack…",
   "pairing.connect": "Conectar",
   "pairing.slackSuccess": "Cuenta Slack conectada.",

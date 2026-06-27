@@ -848,7 +848,7 @@ registerPack("ko", {
   "pairing.error": "페어링에 실패했습니다.",
   "pairing.none": "대기 중인 페어링 요청이 없습니다.",
   "pairing.slackTitle": "Slack 계정 연��",
-  "pairing.slackInstructions": "Slack에서 /pair를 실행하여 코드를 받은 후 여기에 붙여넣으세요. 코드는 10분 후에 만료됩니다.",
+  "pairing.slackInstructions": "Slack에서 IronClaw Reborn 앱에 메시지를 보내 페어링 코드를 받은 후 여기에 붙여넣으세요. 코드는 10분 후에 만료됩니다. 코드가 유효하지 않거나 만료되면 Slack에서 /pair를 실행해 새 코드를 받으세요.",
   "pairing.slackPlaceholder": "Slack 페어링 코드를 입력하세요…",
   "pairing.connect": "연결",
   "pairing.slackSuccess": "Slack 계정이 연결되었습니다.",

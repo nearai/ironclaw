@@ -410,7 +410,7 @@ fn error_response(status: StatusCode, category: SlackWebhookErrorCategory) -> Re
 
 /// Ephemeral copy shown when the Slack user is already linked to Ironclaw.
 /// Carries no code — an already-paired user has nothing to redeem.
-const SLACK_PAIR_ALREADY_LINKED_MESSAGE: &str = "You're already connected to Ironclaw.";
+const SLACK_PAIR_ALREADY_LINKED_MESSAGE: &str = "You're already connected.";
 
 /// Ephemeral fallback when pairing cannot be completed right now. Carries no
 /// code and no internal detail; the cause is logged at `debug` only.
