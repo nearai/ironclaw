@@ -249,6 +249,8 @@ impl OpenAiResponsesWorkflow {
                             &accepted_ack,
                         )
                         .await?;
+                    self.register_external_tools(&mapping, &external_tool_specs)
+                        .await?;
                     let projection_read = self
                         .response_projection_read_request(
                             &caller,
@@ -375,7 +377,7 @@ impl OpenAiResponsesWorkflow {
             .projection_streamer
             .clone()
             .ok_or_else(OpenAiCompatHttpError::not_wired)?;
-        validate_responses_stream_request(&request)?;
+        self.validate_responses_stream_request(&request)?;
 
         let previous_mapping = if let Some(previous_response_id) = &request.previous_response_id {
             Some(
@@ -390,6 +392,7 @@ impl OpenAiResponsesWorkflow {
             None
         };
 
+        let external_tool_specs = self.parse_request_external_tools(&request)?;
         let user_message_payload = responses_user_message_payload(&request)?;
         let request_fingerprint = OpenAiCompatRequestFingerprint::from_body_bytes(raw_body);
         let reservation = self
@@ -461,6 +464,8 @@ impl OpenAiResponsesWorkflow {
             }
         };
         let public_id = response_public_id(&mapping)?;
+        self.register_external_tools(&mapping, &external_tool_specs)
+            .await?;
         let projection_subscription = self
             .response_projection_subscription_request(&caller, &mapping, previous_mapping.as_ref())
             .await?;
@@ -848,6 +853,26 @@ impl OpenAiResponsesWorkflow {
         validate_responses_supported_fields(request)
     }
 
+    fn validate_responses_stream_request(
+        &self,
+        request: &OpenAiResponsesCreateRequest,
+    ) -> Result<(), OpenAiCompatHttpError> {
+        if !request.stream.unwrap_or(false) {
+            return Err(OpenAiCompatHttpError::invalid_request(Some(
+                "stream".to_string(),
+            )));
+        }
+        if self.external_tools_enabled() {
+            if request_has_function_call_output(request) {
+                return Err(OpenAiCompatHttpError::invalid_request(Some(
+                    "input".to_string(),
+                )));
+            }
+            return validate_responses_supported_fields_with_external_tools(request);
+        }
+        validate_responses_supported_fields(request)
+    }
+
     fn parse_request_external_tools(
         &self,
         request: &OpenAiResponsesCreateRequest,
@@ -1142,17 +1167,6 @@ fn projection_thread_id(
     ThreadId::new(thread_id)
         .map(Some)
         .map_err(|_| OpenAiCompatHttpError::internal())
-}
-
-fn validate_responses_stream_request(
-    request: &OpenAiResponsesCreateRequest,
-) -> Result<(), OpenAiCompatHttpError> {
-    if !request.stream.unwrap_or(false) {
-        return Err(OpenAiCompatHttpError::invalid_request(Some(
-            "stream".to_string(),
-        )));
-    }
-    validate_responses_supported_fields(request)
 }
 
 fn validate_responses_supported_fields(

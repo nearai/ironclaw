@@ -12,24 +12,24 @@ use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
     AuthRequirement, FakeProductWorkflow, ProductAdapterError, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput, ProductRejection,
-    ProductRejectionKind, ProductWorkflow, ProjectionReadRequest, ProtocolAuthEvidence,
-    RedactedString,
+    ProductInboundEnvelope, ProductInboundPayload, ProductOutboundEnvelope,
+    ProductProjectionReadInput, ProductRejection, ProductRejectionKind, ProductWorkflow,
+    ProjectionReadRequest, ProjectionSubscriptionRequest, ProtocolAuthEvidence, RedactedString,
 };
 use ironclaw_reborn_openai_compat::{
-    InMemoryOpenAiCompatRefStore, OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller,
-    OpenAiCompatBindInternalRefs, OpenAiCompatExternalToolResume,
+    InMemoryOpenAiCompatRefStore, OpenAiChatProjectionStreamRequest, OpenAiCompatActorScope,
+    OpenAiCompatAuthenticatedCaller, OpenAiCompatBindInternalRefs, OpenAiCompatExternalToolResume,
     OpenAiCompatExternalToolResumeRequest, OpenAiCompatExternalToolSpec,
     OpenAiCompatExternalToolStore, OpenAiCompatHttpError, OpenAiCompatInternalRefs,
     OpenAiCompatMarkExternalToolResumeCompleted, OpenAiCompatProductActionRef,
-    OpenAiCompatProjectionRef, OpenAiCompatRecordAcceptedAck, OpenAiCompatRefError,
-    OpenAiCompatRefLookup, OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome,
-    OpenAiCompatRefStore, OpenAiCompatResourceMapping, OpenAiCompatRouterState,
-    OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject, OpenAiResponseOutputItem,
-    OpenAiResponseOutputItemStatus, OpenAiResponseProjection, OpenAiResponseReadRequest,
-    OpenAiResponseStatus, OpenAiResponseUsage, OpenAiResponseWaitRequest,
-    OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow,
-    openai_compat_router_with_state,
+    OpenAiCompatProjectionRef, OpenAiCompatProjectionStreamer, OpenAiCompatRecordAcceptedAck,
+    OpenAiCompatRefError, OpenAiCompatRefLookup, OpenAiCompatRefReservation,
+    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatResourceMapping,
+    OpenAiCompatRouterState, OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
+    OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
+    OpenAiResponseProjectionStreamRequest, OpenAiResponseReadRequest, OpenAiResponseStatus,
+    OpenAiResponseUsage, OpenAiResponseWaitRequest, OpenAiResponsesMessageRole,
+    OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow, openai_compat_router_with_state,
 };
 use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnRunId, TurnScope};
 use serde_json::{Value, json};
@@ -1278,6 +1278,20 @@ fn sample_projection_read_request() -> ProjectionReadRequest {
     }
 }
 
+fn sample_projection_subscription_request() -> ProjectionSubscriptionRequest {
+    ProjectionSubscriptionRequest {
+        actor: TurnActor::new(UserId::new("user-a").expect("user")),
+        scope: TurnScope::new_with_owner(
+            TenantId::new("tenant-a").expect("tenant"),
+            Some(AgentId::new("agent-a").expect("agent")),
+            Some(ProjectId::new("project-a").expect("project")),
+            ThreadId::new("thread-openai-response").expect("thread"),
+            Some(UserId::new("user-a").expect("user")),
+        ),
+        after_cursor: None,
+    }
+}
+
 fn completed_response(id: OpenAiResponseId, text: &str) -> OpenAiResponseObject {
     OpenAiResponseObject {
         id,
@@ -1593,6 +1607,26 @@ impl OpenAiResponsesProjectionReader for CompletedNoRebindReader {
 }
 
 #[derive(Default)]
+struct EmptyProjectionStreamer;
+
+#[async_trait]
+impl OpenAiCompatProjectionStreamer for EmptyProjectionStreamer {
+    async fn drain_chat(
+        &self,
+        _request: OpenAiChatProjectionStreamRequest,
+    ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
+        Ok(Vec::new())
+    }
+
+    async fn drain_response(
+        &self,
+        _request: OpenAiResponseProjectionStreamRequest,
+    ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Default)]
 struct RecordingExternalToolStore {
     registered: Mutex<Vec<(String, Vec<OpenAiCompatExternalToolSpec>)>>,
     outputs: Mutex<Vec<(String, String, Value)>>,
@@ -1630,6 +1664,59 @@ impl OpenAiCompatExternalToolStore for RecordingExternalToolStore {
         }
         outputs.push((run_ref, call_id, output));
         Ok(())
+    }
+}
+
+struct FailsFirstRegisterExternalToolStore {
+    inner: RecordingExternalToolStore,
+    fail_next_register: Mutex<bool>,
+}
+
+impl FailsFirstRegisterExternalToolStore {
+    fn new() -> Self {
+        Self {
+            inner: RecordingExternalToolStore::default(),
+            fail_next_register: Mutex::new(true),
+        }
+    }
+
+    fn registered_len(&self) -> usize {
+        self.inner.registered.lock().expect("registered lock").len()
+    }
+}
+
+#[async_trait]
+impl OpenAiCompatExternalToolStore for FailsFirstRegisterExternalToolStore {
+    async fn register_tools(
+        &self,
+        run_ref: OpenAiCompatTurnRunRef,
+        specs: Vec<OpenAiCompatExternalToolSpec>,
+    ) -> Result<(), OpenAiCompatHttpError> {
+        let should_fail = {
+            let mut fail_next_register =
+                self.fail_next_register.lock().expect("register fail lock");
+            if *fail_next_register {
+                *fail_next_register = false;
+                true
+            } else {
+                false
+            }
+        };
+        if should_fail {
+            return Err(OpenAiCompatHttpError::internal());
+        }
+        self.inner.register_tools(run_ref, specs).await
+    }
+
+    async fn submit_tool_output(
+        &self,
+        run_ref: OpenAiCompatTurnRunRef,
+        call_id: String,
+        output: Value,
+    ) -> Result<(), OpenAiCompatHttpError> {
+        self.inner
+            .submit_tool_output(run_ref, call_id, output)
+            .await
     }
 }
 
@@ -1766,6 +1853,23 @@ fn router_with_external_tools(
         .layer(axum::Extension(caller()))
 }
 
+fn router_with_external_tools_and_streamer(
+    workflow: Arc<FakeProductWorkflow>,
+    ref_store: Arc<dyn OpenAiCompatRefStore>,
+    reader: Arc<dyn OpenAiResponsesProjectionReader>,
+    streamer: Arc<dyn OpenAiCompatProjectionStreamer>,
+    store: Arc<dyn OpenAiCompatExternalToolStore>,
+    resume: Arc<dyn OpenAiCompatExternalToolResume>,
+) -> axum::Router {
+    workflow.program_projection_read_resolution(sample_projection_read_request());
+    workflow.program_projection_resolution(sample_projection_subscription_request());
+    let service = OpenAiResponsesWorkflow::new(workflow, ref_store, reader)
+        .with_projection_streamer(streamer)
+        .with_external_tools(store, resume);
+    openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(Arc::new(service)))
+        .layer(axum::Extension(caller()))
+}
+
 #[tokio::test]
 async fn responses_with_external_tools_registers_specs_after_submit() {
     let workflow = Arc::new(FakeProductWorkflow::new());
@@ -1808,6 +1912,99 @@ async fn responses_with_external_tools_registers_specs_after_submit() {
     assert_eq!(registered[0].1.len(), 1);
     assert_eq!(registered[0].1[0].name, "get_weather");
     // No resume on a fresh create.
+    assert!(resume.resumed.lock().expect("resumed lock").is_empty());
+}
+
+#[tokio::test]
+async fn responses_idempotency_replay_retries_tool_registration_after_partial_create_failure() {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
+    let store = Arc::new(FailsFirstRegisterExternalToolStore::new());
+    let resume = Arc::new(RecordingExternalToolResume::default());
+    let reader = Arc::new(RecordingResponsesReader::new(completed_response(
+        OpenAiResponseId::new("resp_placeholder").expect("id"),
+        "ok",
+    )));
+    let router = router_with_external_tools(
+        workflow.clone(),
+        ref_store,
+        reader.clone(),
+        store.clone(),
+        resume,
+    );
+    let request = json!({
+        "model": "gpt-reborn",
+        "input": "what's the weather?",
+        "tools": [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}]
+    });
+
+    let first = router
+        .clone()
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            request.clone(),
+            Some("create-key"),
+        ))
+        .await
+        .expect("first create");
+    assert_eq!(first.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(workflow.accepted_count(), 1);
+    assert_eq!(store.registered_len(), 0);
+
+    let second = router
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            request,
+            Some("create-key"),
+        ))
+        .await
+        .expect("replay create");
+
+    assert_eq!(second.status(), http::StatusCode::OK);
+    assert_eq!(workflow.accepted_count(), 1);
+    assert_eq!(store.registered_len(), 1);
+    assert_eq!(reader.read_count(), 1);
+}
+
+#[tokio::test]
+async fn streamed_responses_with_external_tools_registers_specs_after_submit() {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let store = Arc::new(RecordingExternalToolStore::default());
+    let resume = Arc::new(RecordingExternalToolResume::default());
+    let router = router_with_external_tools_and_streamer(
+        workflow.clone(),
+        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        Arc::new(StaticResponsesReader::completed("unused")),
+        Arc::new(EmptyProjectionStreamer),
+        store.clone(),
+        resume.clone(),
+    );
+
+    let response = router
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            json!({
+                "model": "gpt-reborn",
+                "input": "what's the weather?",
+                "stream": true,
+                "tools": [{
+                    "type": "function",
+                    "name": "get_weather",
+                    "parameters": {"type": "object"}
+                }]
+            }),
+            None,
+        ))
+        .await
+        .expect("stream response");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(workflow.accepted_count(), 1);
+    let registered = store.registered.lock().expect("registered lock");
+    assert_eq!(registered.len(), 1);
+    assert!(!registered[0].0.is_empty(), "run ref must be bound");
+    assert_eq!(registered[0].1.len(), 1);
+    assert_eq!(registered[0].1[0].name, "get_weather");
     assert!(resume.resumed.lock().expect("resumed lock").is_empty());
 }
 
