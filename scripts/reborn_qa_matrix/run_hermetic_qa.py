@@ -758,6 +758,39 @@ WEBUI_V2_WORKSPACE_PROJECT_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_AUTOMATIONS_RUNTIME_TOOL_SUBSTRATE_COMMAND = CommandSpec(
+    name="webui_v2_automations_runtime_tool_substrate_contracts",
+    description=(
+        "Runtime/tool substrate contracts below WebUI v2 automation and "
+        "outbound workflows: authorization boundaries, runtime policy "
+        "reductions, network egress policy, process lifecycle, sandbox "
+        "guards, and loop-support event/checkpoint contracts."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_authorization",
+        "-p",
+        "ironclaw_runtime_policy",
+        "-p",
+        "ironclaw_network",
+        "-p",
+        "ironclaw_processes",
+        "-p",
+        "ironclaw_process_sandbox",
+        "-p",
+        "ironclaw_loop_support",
+        "--all-features",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_PROJECTS_CLIENT_API_COMMAND = CommandSpec(
     name="webui_v2_projects_client_api_contracts",
     description=(
@@ -3001,15 +3034,27 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-045-TC-04",
             "REBCLI-045-TC-05",
             "REBCLI-045-TC-06",
+            "REBCLI-045-TC-07",
+            "REBCLI-045-TC-08",
+            "REBCLI-045-TC-09",
         ],
-        commands=[WEBUI_V2_AUTOMATIONS_TRACE_OUTBOUND_CHANNEL_HANDLER_COMMAND],
+        commands=[
+            WEBUI_V2_AUTOMATIONS_TRACE_OUTBOUND_CHANNEL_HANDLER_COMMAND,
+            WEBUI_V2_SESSION_SERVICE_SUBSTRATE_COMMAND,
+            WEBUI_V2_SESSION_EXECUTION_SUBSTRATE_COMMAND,
+            WEBUI_V2_AUTOMATIONS_RUNTIME_TOOL_SUBSTRATE_COMMAND,
+        ],
         notes=(
             "Runs a focused caller-level WebUI v2 router contract for "
             "automations, Trace Commons credit/hold authorization, outbound "
             "preferences and targets, connectable channels, and malformed "
-            "automation query rejection. Static automations screen coverage "
-            "remains mapped separately to REBCLI-067, and PR #5348 browser "
-            "duplicates stay referenced instead of reimplemented here."
+            "automation query rejection, then service, execution, and "
+            "runtime/tool substrate sweeps for outbound delivery, trigger "
+            "execution, run notification state, capability gates, network "
+            "egress, process lifecycle, sandboxing, and loop-support "
+            "contracts. Static automations screen coverage remains mapped "
+            "separately to REBCLI-067, and PR #5348 browser duplicates stay "
+            "referenced instead of reimplemented here."
         ),
     ),
     "webui_v2_route_contract_regression": CaseSpec(
