@@ -239,6 +239,30 @@ WEBUI_V2_SSO_USER_ADMISSION_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_AUTH_SURFACE_COMMAND = CommandSpec(
+    name="webui_v2_auth_surface_contracts",
+    description=(
+        "CLI-owned WebUI auth-surface assembly contracts for env-bearer-only "
+        "serve, SSO fail-closed resolver requirements, public login-route "
+        "mounting, and local trigger-access bootstrap wiring."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_cli",
+        "--features",
+        "webui-v2-beta",
+        "--bin",
+        "ironclaw-reborn",
+        "webui_auth",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 
 OPENAI_OWNER_CRATE_COMMAND = CommandSpec(
     name="openai_compat_owner_crates",
@@ -2697,6 +2721,28 @@ CASES: dict[str, CaseSpec] = {
             "off-list rejection, unverified and missing-email rejection, "
             "case-insensitive domains, allowlisted verified secondary email, "
             "tenant separation, and local trigger-access seed/no-seed behavior."
+        ),
+    ),
+    "webui_v2_auth_surface_composition_regression": CaseSpec(
+        name="webui_v2_auth_surface_composition_regression",
+        feature="WebUI v2 auth surface composition",
+        category="Hermetic WebUI v2 Auth Surface Composition Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-037-TC-01",
+            "REBCLI-037-TC-02",
+            "REBCLI-037-TC-03",
+            "REBCLI-037-TC-04",
+            "REBCLI-037-TC-05",
+            "REBCLI-037-TC-06",
+            "REBCLI-037-TC-07",
+        ],
+        commands=[WEBUI_V2_AUTH_SURFACE_COMMAND],
+        notes=(
+            "Covers the CLI-owned WebUI auth-surface composition rows without "
+            "live OAuth provider calls: env-bearer-only serve mounts no public "
+            "login routes, configured SSO fails closed without an identity "
+            "resolver, and configured SSO builds the signed-session/public "
+            "login surface with local trigger-access bootstrap wiring."
         ),
     ),
     "openai_compat_beta_routes_regression": CaseSpec(

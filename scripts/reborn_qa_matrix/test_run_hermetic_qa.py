@@ -87,6 +87,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-037-TC-07",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-056-TC-01",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -520,6 +524,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             )
             self.assertIn(
                 "webui_v2_sso_user_admission_regression",
+                {case["case"] for case in manifest["cases"]},
+            )
+            self.assertIn(
+                "webui_v2_auth_surface_composition_regression",
                 {case["case"] for case in manifest["cases"]},
             )
             self.assertIn(
@@ -1042,6 +1050,45 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn("--features webui-v2-beta", commands[0]["command"])
             self.assertIn("--bin ironclaw-reborn", commands[0]["command"])
             self.assertIn("user_directory", commands[0]["command"])
+
+    def test_webui_auth_surface_composition_case_dry_run_maps_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "webui_v2_auth_surface_composition_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-037-TC-01",
+                    "REBCLI-037-TC-02",
+                    "REBCLI-037-TC-03",
+                    "REBCLI-037-TC-04",
+                    "REBCLI-037-TC-05",
+                    "REBCLI-037-TC-06",
+                    "REBCLI-037-TC-07",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                [command["name"] for command in commands],
+                ["webui_v2_auth_surface_contracts"],
+            )
+            self.assertIn("ironclaw_reborn_cli", commands[0]["command"])
+            self.assertIn("--features webui-v2-beta", commands[0]["command"])
+            self.assertIn("--bin ironclaw-reborn", commands[0]["command"])
+            self.assertIn("webui_auth", commands[0]["command"])
 
     def test_webui_chat_client_case_dry_run_maps_chat_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
