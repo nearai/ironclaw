@@ -1227,6 +1227,32 @@ WEBUI_V2_STREAMING_RUN_CONTROL_HANDLER_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_AUTOMATIONS_TRACE_OUTBOUND_CHANNEL_HANDLER_COMMAND = CommandSpec(
+    name="webui_v2_automations_trace_outbound_channel_handler_contract",
+    description=(
+        "Focused WebUI v2 automations/trace/outbound/channel route-family "
+        "contract for automation list and mutations, trace credit and hold "
+        "authorization routes, outbound preferences/targets, connectable "
+        "channels, and malformed automation query rejection."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_handlers_contract",
+        "automations_trace_outbound_channel_routes_dispatch_to_facade_methods",
+        "--",
+        "--exact",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_FS_HANDLER_COMMAND = CommandSpec(
     name="webui_v2_filesystem_handler_slice",
     description="Focused WebUI v2 filesystem handler negative-path contract slice.",
@@ -2178,6 +2204,28 @@ CASES: dict[str, CaseSpec] = {
             "event subscriptions, cursor handling, cancel, and gate "
             "resolution. Browser approval UX overlap remains referenced to "
             "PR #5348 instead of duplicated in this matrix branch."
+        ),
+    ),
+    "webui_v2_automations_trace_outbound_channel_api_regression": CaseSpec(
+        name="webui_v2_automations_trace_outbound_channel_api_regression",
+        feature="WebUI v2 automations, trace, outbound, and channel APIs",
+        category="Hermetic WebUI v2 API Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-045-TC-01",
+            "REBCLI-045-TC-02",
+            "REBCLI-045-TC-03",
+            "REBCLI-045-TC-04",
+            "REBCLI-045-TC-05",
+            "REBCLI-045-TC-06",
+        ],
+        commands=[WEBUI_V2_AUTOMATIONS_TRACE_OUTBOUND_CHANNEL_HANDLER_COMMAND],
+        notes=(
+            "Runs a focused caller-level WebUI v2 router contract for "
+            "automations, Trace Commons credit/hold authorization, outbound "
+            "preferences and targets, connectable channels, and malformed "
+            "automation query rejection. Static automations screen coverage "
+            "remains mapped separately to REBCLI-067, and PR #5348 browser "
+            "duplicates stay referenced instead of reimplemented here."
         ),
     ),
     "webui_v2_route_contract_regression": CaseSpec(

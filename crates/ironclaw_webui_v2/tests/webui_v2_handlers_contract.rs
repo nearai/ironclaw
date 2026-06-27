@@ -3140,6 +3140,279 @@ async fn list_connectable_channels_dispatches_through_facade() {
 }
 
 #[tokio::test]
+async fn automations_trace_outbound_channel_routes_dispatch_to_facade_methods() {
+    let unique_caller = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new(
+            format!(
+                "webui-v2-automation-outbound-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_nanos()
+            )
+            .as_str(),
+        )
+        .expect("user"),
+        Some(AgentId::new("agent-alpha").expect("agent")),
+        Some(ProjectId::new("project-alpha").expect("project")),
+    );
+    let services = Arc::new(StubServices::default());
+    let router = router_with_caller(
+        services.clone(),
+        WebUiV2Capabilities::default(),
+        unique_caller,
+    );
+
+    let automations_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations?limit=5&run_limit=7&include_completed=true")
+                .body(Body::empty())
+                .expect("automations request"),
+        )
+        .await
+        .expect("automations oneshot");
+    assert_eq!(automations_response.status(), StatusCode::OK);
+    let automations_body = read_json(automations_response).await;
+    assert_eq!(
+        automations_body["automations"][0]["automation_id"],
+        "automation-listed"
+    );
+    assert_eq!(automations_body["scheduler_enabled"], true);
+
+    let malformed_automations_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations?include_completed=notabool")
+                .body(Body::empty())
+                .expect("malformed automations request"),
+        )
+        .await
+        .expect("malformed automations oneshot");
+    assert_eq!(
+        malformed_automations_response.status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    let pause_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha/pause")
+                .body(Body::empty())
+                .expect("pause request"),
+        )
+        .await
+        .expect("pause oneshot");
+    assert_eq!(pause_response.status(), StatusCode::OK);
+
+    let resume_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations/automation-alpha/resume")
+                .body(Body::empty())
+                .expect("resume request"),
+        )
+        .await
+        .expect("resume oneshot");
+    assert_eq!(resume_response.status(), StatusCode::OK);
+
+    let delete_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/automations/automation-alpha")
+                .body(Body::empty())
+                .expect("delete request"),
+        )
+        .await
+        .expect("delete oneshot");
+    assert_eq!(delete_response.status(), StatusCode::OK);
+
+    let trace_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/traces/credit")
+                .body(Body::empty())
+                .expect("trace request"),
+        )
+        .await
+        .expect("trace oneshot");
+    assert_eq!(trace_response.status(), StatusCode::OK);
+    let trace_body = read_json(trace_response).await;
+    assert_eq!(trace_body["enrolled"], false);
+    assert_eq!(trace_body["submissions_total"], 0);
+    assert_eq!(trace_body["manual_review_hold_count"], 0);
+
+    let authorize_trace_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/traces/holds/11111111-1111-1111-1111-111111111111/authorize")
+                .body(Body::empty())
+                .expect("authorize trace request"),
+        )
+        .await
+        .expect("authorize trace oneshot");
+    assert_eq!(authorize_trace_response.status(), StatusCode::OK);
+    let authorize_trace_body = read_json(authorize_trace_response).await;
+    assert_eq!(authorize_trace_body["authorized"], false);
+
+    let outbound_preferences_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/outbound/preferences")
+                .body(Body::empty())
+                .expect("outbound preferences request"),
+        )
+        .await
+        .expect("outbound preferences oneshot");
+    assert_eq!(outbound_preferences_response.status(), StatusCode::OK);
+    let outbound_preferences_body = read_json(outbound_preferences_response).await;
+    assert_eq!(
+        outbound_preferences_body["final_reply_target"]["target_id"],
+        "slack-dm-alpha"
+    );
+
+    let set_outbound_preferences_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/outbound/preferences")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"final_reply_target_id":"slack-dm-beta"}"#))
+                .expect("set outbound preferences request"),
+        )
+        .await
+        .expect("set outbound preferences oneshot");
+    assert_eq!(set_outbound_preferences_response.status(), StatusCode::OK);
+
+    let outbound_targets_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/outbound/targets")
+                .body(Body::empty())
+                .expect("outbound targets request"),
+        )
+        .await
+        .expect("outbound targets oneshot");
+    assert_eq!(outbound_targets_response.status(), StatusCode::OK);
+    let outbound_targets_body = read_json(outbound_targets_response).await;
+    assert_eq!(
+        outbound_targets_body["targets"][0]["target"]["target_id"],
+        "slack-dm-alpha"
+    );
+
+    let channels_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/channels/connectable")
+                .body(Body::empty())
+                .expect("channels request"),
+        )
+        .await
+        .expect("channels oneshot");
+    assert_eq!(channels_response.status(), StatusCode::OK);
+    let channels_body = read_json(channels_response).await;
+    assert_eq!(channels_body["channels"][0]["channel"], "slack");
+    assert_eq!(
+        channels_body["channels"][0]["strategy"],
+        "inbound_proof_code"
+    );
+
+    let automation_calls = services
+        .list_automations_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(
+        automation_calls.len(),
+        1,
+        "malformed automation query must not reach the facade"
+    );
+    assert_eq!(automation_calls[0].limit, Some(5));
+    assert_eq!(automation_calls[0].run_limit, Some(7));
+    assert!(automation_calls[0].include_completed);
+    assert_eq!(
+        services
+            .pause_automation_calls
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["automation-alpha".to_string()]
+    );
+    assert_eq!(
+        services
+            .resume_automation_calls
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["automation-alpha".to_string()]
+    );
+    assert_eq!(
+        services
+            .delete_automation_calls
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec!["automation-alpha".to_string()]
+    );
+    assert_eq!(
+        *services
+            .get_outbound_preferences_calls
+            .lock()
+            .expect("lock"),
+        1
+    );
+    let set_outbound_calls = services
+        .set_outbound_preferences_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(set_outbound_calls.len(), 1);
+    assert_eq!(
+        set_outbound_calls[0]
+            .final_reply_target_id
+            .as_ref()
+            .map(|target_id| target_id.as_str()),
+        Some("slack-dm-beta")
+    );
+    assert_eq!(
+        *services
+            .list_outbound_delivery_targets_calls
+            .lock()
+            .expect("lock"),
+        1
+    );
+    assert_eq!(
+        *services
+            .list_connectable_channels_calls
+            .lock()
+            .expect("lock"),
+        1
+    );
+}
+
+#[tokio::test]
 async fn get_session_returns_caller_identity_and_capabilities() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(
