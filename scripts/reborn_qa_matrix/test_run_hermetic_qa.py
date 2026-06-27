@@ -2721,17 +2721,24 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertEqual(
                 [command["name"] for command in commands],
                 [
+                    "reborn_cli_webui_v2_binary",
                     "webui_v2_wallet_connect_client_contracts",
                     "webui_v2_wallet_connect_static_route",
                     "webui_v2_llm_provider_routes",
+                    "webui_v2_wallet_connect_browser_smoke",
                 ],
             )
-            self.assertIn("wallet-connect-core.test.mjs", commands[0]["command"])
+            self.assertIn("ironclaw-reborn", commands[0]["command"])
+            self.assertIn("wallet-connect-core.test.mjs", commands[1]["command"])
             self.assertIn(
                 "wallet_connect_popup_gets_relaxed_csp_and_spa_shell_stays_strict",
-                commands[1]["command"],
+                commands[2]["command"],
             )
-            self.assertIn("llm_provider_routes", commands[2]["command"])
+            self.assertIn("llm_provider_routes", commands[3]["command"])
+            self.assertIn(
+                "test_reborn_webui_v2_wallet_connect_browser.py",
+                commands[4]["command"],
+            )
             self.assertNotIn("REBCLI-078-TC-07", results["summary"]["qa_matrix_test_ids"])
 
     def test_reborn_operator_logs_service_case_dry_run_maps_matrix_ids(self):

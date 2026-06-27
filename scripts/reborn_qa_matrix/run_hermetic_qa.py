@@ -2841,6 +2841,42 @@ WEBUI_V2_HANDLER_CONTRACT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_WALLET_CONNECT_BROWSER_COMMAND = CommandSpec(
+    name="webui_v2_wallet_connect_browser_smoke",
+    description=(
+        "Playwright smoke for the served WebUI v2 NEAR wallet connect popup: "
+        "intercepts the remote wallet connector module with a deterministic "
+        "browser stub, verifies the fixed NEAR AI sign-message request, and "
+        "observes the BroadcastChannel success payload without live wallet "
+        "traffic."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_wallet_connect_browser.py",
+        "-q",
+    ],
+)
+
 WEBUI_V2_RUST_STATIC_COMMAND = CommandSpec(
     name="webui_v2_rust_static_regression",
     description=(
@@ -4874,9 +4910,11 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-078-TC-06",
         ],
         commands=[
+            REBORN_CLI_WEBUI_V2_BINARY_COMMAND,
             WEBUI_V2_WALLET_CONNECT_CLIENT_COMMAND,
             WEBUI_V2_WALLET_CONNECT_ROUTER_COMMAND,
             WEBUI_V2_LLM_PROVIDER_ROUTE_COMMAND,
+            WEBUI_V2_WALLET_CONNECT_BROWSER_COMMAND,
         ],
         notes=(
             "Covers the WebUI v2 NEAR wallet connect popup without live wallet "
@@ -4884,8 +4922,10 @@ CASES: dict[str, CaseSpec] = {
             "fail-closed source path, epoch-millis plus random nonce layout, "
             "fixed NEAR AI message/recipient, BroadcastChannel success/failure "
             "payloads, no-store and wallet-scoped relaxed CSP, strict SPA CSP "
-            "isolation, and protected backend wallet completion route gating. "
-            "Live wallet-provider behavior remains external/canary scope."
+            "isolation, protected backend wallet completion route gating, and "
+            "a real-browser served-popup smoke that stubs the remote connector "
+            "module and observes the signed success payload. Live "
+            "wallet-provider behavior remains external/canary scope."
         ),
     ),
     "reborn_operator_logs_service_regression": CaseSpec(
