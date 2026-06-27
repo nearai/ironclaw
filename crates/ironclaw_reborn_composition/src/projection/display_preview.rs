@@ -214,8 +214,15 @@ impl CapabilityDisplayPreviewStore {
         result: CapabilityDisplayPreviewResult<'_>,
         display_preview: Option<&CapabilityDisplayOutputPreview>,
     ) {
+        // Hold the pending AND completed locks for the whole operation so the
+        // remove-from-pending + insert-into-completed pair is atomic with
+        // respect to `prune_run` (which acquires the same two locks in the same
+        // order, pending before completed, and never holds both at once). This
+        // prevents a concurrent prune from interleaving and leaking a completed
+        // record that is never pruned. Matches `record_failure_preview`.
+        let mut pending = self.lock_pending_inputs();
+        let mut completed = self.lock_completed_previews();
         let input = {
-            let mut pending = self.lock_pending_inputs();
             // The result has landed: drop the running-input link so the
             // activity frame stops surfacing it as in-flight.
             pending
@@ -244,7 +251,6 @@ impl CapabilityDisplayPreviewStore {
             result_ref: Some(result.result_ref.to_string()),
             truncated: input.as_ref().is_some_and(|input| input.truncated) || output.truncated,
         };
-        let mut completed = self.lock_completed_previews();
         let invocation_id = result.invocation_id.to_string();
         completed
             .by_invocation
