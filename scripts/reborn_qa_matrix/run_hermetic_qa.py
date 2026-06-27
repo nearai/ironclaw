@@ -279,6 +279,25 @@ WEBUI_V2_STATIC_API_AUTH_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_CHAT_CLIENT_COMMAND = CommandSpec(
+    name="webui_v2_chat_client_contracts",
+    description=(
+        "Focused WebUI v2 chat client node:test suite for send/retry state, "
+        "pending-message reconciliation, approvals, auth gates, SSE timeline "
+        "projection, history merge, markdown/readability, attachment staging, "
+        "message grouping, cancellation, and thread-isolation contracts."
+    ),
+    argv=[
+        "bash",
+        "-lc",
+        (
+            "find crates/ironclaw_webui_v2_static/static/js/pages/chat "
+            "-type f \\( -name '*test.mjs' -o -name '*test.js' \\) "
+            "-print0 | xargs -0 node --test"
+        ),
+    ],
+)
+
 WEBUI_V2_SEND_MULTILINE_COMMAND = CommandSpec(
     name="webui_v2_send_multiline_contract",
     description="Focused send-message route contract for preserving multiline content.",
@@ -1256,6 +1275,28 @@ CASES: dict[str, CaseSpec] = {
             "committed WebUI v2 SPA modules. This complements Rust route and "
             "composition checks without duplicating PR #5348's legacy "
             "Playwright browser port."
+        ),
+    ),
+    "webui_v2_chat_client_regression": CaseSpec(
+        name="webui_v2_chat_client_regression",
+        feature="WebUI v2 chat screen and gate UX",
+        category="Hermetic Chat Client Contract Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-065-TC-01",
+            "REBCLI-065-TC-02",
+            "REBCLI-065-TC-03",
+            "REBCLI-065-TC-04",
+            "REBCLI-065-TC-05",
+            "REBCLI-065-TC-06",
+        ],
+        commands=[WEBUI_V2_CHAT_CLIENT_COMMAND],
+        notes=(
+            "Covers the six generated WebUI v2 chat/gate UX rows at the "
+            "static client contract layer without re-porting PR #5348 browser "
+            "legacy Playwright scenarios: send/retry state, pending-message "
+            "reconciliation, approvals, auth gates, SSE timeline projection, "
+            "history merge, markdown/readability, attachment staging, message "
+            "grouping, cancellation, and thread isolation."
         ),
     ),
     "webui_v2_filesystem_api_regression": CaseSpec(
