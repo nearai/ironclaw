@@ -1513,6 +1513,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn active_model_visible_capabilities_source_declared_network_targets_for_credential_free_hosted_mcp()
+     {
+        // Activate a real credential-free hosted-HTTP MCP package and read its
+        // model-visible capability back through `active_model_visible_capabilities`.
+        // The capability's `declared_network_targets` must be sourced from the
+        // manifest endpoint by the production `descriptor.runtime == Mcp` branch
+        // (the package carries no `runtime_credentials`), proving the mapping
+        // happens through the real call path rather than a hand-built capability.
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(
+                    vec![credential_free_hosted_mcp_package()],
+                ),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "example-mcp")
+            .expect("valid ref");
+        port.install(package_ref.clone())
+            .await
+            .expect("install credential-free hosted MCP");
+        port.activate_with_prechecked_credentials_for_test(
+            package_ref,
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate credential-free hosted MCP");
+
+        let capabilities = port
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities");
+        let ping = capabilities
+            .iter()
+            .find(|capability| capability.id == CapabilityId::new("example-mcp.ping").unwrap())
+            .expect("credential-free hosted MCP capability is model-visible");
+
+        // Credential-free provider: the egress allow-list cannot come from a
+        // credential audience, only from the manifest endpoint.
+        assert!(ping.runtime_credentials.is_empty());
+        assert_eq!(
+            ping.declared_network_targets,
+            vec![ironclaw_host_api::NetworkTargetPattern {
+                scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+                host_pattern: "mcp.example.com".to_string(),
+                port: None,
+            }]
+        );
+    }
+
     #[test]
     fn activation_credential_requirements_coalesce_google_oauth_scope_sets() {
         let catalog =
@@ -4250,6 +4300,55 @@ visibility = "model"
 input_schema_ref = "schemas/search.input.json"
 output_schema_ref = "schemas/search.output.json"
 "#
+    }
+
+    /// A credential-free hosted-HTTP MCP package: `HostBundled` source,
+    /// `ExtensionRuntime::Mcp` http url, and no `runtime_credentials`. Mirrors
+    /// the bug scenario where the egress allow-list must come from the manifest
+    /// endpoint rather than a credential audience.
+    fn credential_free_hosted_mcp_package() -> AvailableExtensionPackage {
+        let manifest_toml = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "example-mcp"
+name = "Example MCP"
+version = "0.1.0"
+description = "Credential-free hosted MCP fixture"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://mcp.example.com/mcp"
+
+[[capabilities]]
+id = "example-mcp.ping"
+description = "Ping the example MCP server"
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/example-mcp/ping.input.v1.json"
+output_schema_ref = "schemas/example-mcp/ping.output.v1.json"
+"#;
+        let manifest = ExtensionManifest::parse(
+            manifest_toml,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+        )
+        .expect("hosted MCP manifest");
+        let root = VirtualPath::new("/system/extensions/example-mcp").expect("extension root");
+        let package = ExtensionPackage::from_manifest_toml(manifest, root, manifest_toml)
+            .expect("hosted MCP package");
+        AvailableExtensionPackage {
+            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "example-mcp")
+                .expect("hosted MCP package ref"),
+            manifest_toml: manifest_toml.to_string(),
+            package,
+            surface_kinds: Vec::new(),
+            assets: vec![AvailableExtensionAsset {
+                path: "manifest.toml".to_string(),
+                content: AvailableExtensionAssetContent::Bytes(manifest_toml.as_bytes().to_vec()),
+            }],
+        }
     }
 
     fn fixture_extension_package_from_manifest(manifest_toml: &str) -> AvailableExtensionPackage {

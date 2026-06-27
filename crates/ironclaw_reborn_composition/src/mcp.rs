@@ -321,6 +321,47 @@ mod tests {
     }
 
     #[test]
+    fn hosted_mcp_endpoint_target_rejects_non_hosted_mcp_packages() {
+        // 1. Manifest is not host-bundled. A hosted MCP endpoint is only
+        //    honored for `ManifestSource::HostBundled`, so an installed-local
+        //    manifest with an otherwise-valid hosted MCP runtime yields no
+        //    target.
+        let non_host_bundled = package_with_runtime(
+            ManifestSource::InstalledLocal,
+            ExtensionRuntime::Mcp {
+                transport: "http".to_string(),
+                command: None,
+                args: Vec::new(),
+                url: Some("https://mcp.example.com/mcp".to_string()),
+            },
+        );
+        assert!(hosted_mcp_endpoint_target(&non_host_bundled).is_none());
+
+        // 2. Runtime is not a hosted-HTTP MCP server (here a WASM runtime), so
+        //    `hosted_http_mcp_endpoint` returns `None` regardless of source.
+        let non_mcp_runtime = package_with_runtime(
+            ManifestSource::HostBundled,
+            ExtensionRuntime::Wasm {
+                module: ironclaw_extensions::ExtensionAssetPath::new("wasm/example.wasm").unwrap(),
+            },
+        );
+        assert!(hosted_mcp_endpoint_target(&non_mcp_runtime).is_none());
+
+        // 3. MCP runtime whose URL is not HTTPS. `HostedMcpEndpoint::parse`
+        //    rejects non-https schemes, so the endpoint target is `None`.
+        let non_https_url = package_with_runtime(
+            ManifestSource::HostBundled,
+            ExtensionRuntime::Mcp {
+                transport: "http".to_string(),
+                command: None,
+                args: Vec::new(),
+                url: Some("http://mcp.example.com/mcp".to_string()),
+            },
+        );
+        assert!(hosted_mcp_endpoint_target(&non_https_url).is_none());
+    }
+
+    #[test]
     fn planner_denies_wrong_host_for_notion_provider() {
         let registry = Arc::new(SharedExtensionRegistry::new(registry_with_notion()));
         let planner = RegistryMcpEgressPlanner::new(registry);
@@ -499,6 +540,30 @@ mod tests {
             headers: &[],
             body: &[],
         }
+    }
+
+    /// Build a minimal package with the given manifest source and runtime. Only
+    /// `manifest.source` and `manifest.runtime` matter to
+    /// `hosted_mcp_endpoint_target`, so capabilities are left empty.
+    fn package_with_runtime(source: ManifestSource, runtime: ExtensionRuntime) -> ExtensionPackage {
+        ExtensionPackage::from_manifest(
+            ExtensionManifest {
+                schema_version: ironclaw_extensions::MANIFEST_SCHEMA_VERSION.to_string(),
+                id: ExtensionId::new("example-mcp").unwrap(),
+                name: "example-mcp".to_string(),
+                version: "0.1.0".to_string(),
+                description: "Hosted MCP".to_string(),
+                source,
+                requested_trust: ironclaw_host_api::RequestedTrustClass::ThirdParty,
+                descriptor_trust_default: TrustClass::Sandbox,
+                runtime,
+                host_apis: Vec::new(),
+                hooks: Vec::new(),
+                capabilities: Vec::new(),
+            },
+            VirtualPath::new("/system/extensions/example-mcp").unwrap(),
+        )
+        .unwrap()
     }
 
     fn registry_with_notion() -> ironclaw_extensions::ExtensionRegistry {
