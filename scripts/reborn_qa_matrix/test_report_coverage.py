@@ -31,7 +31,9 @@ def _sheet_xml(rows: list[list[str]]) -> str:
     )
 
 
-def _write_workbook(path: Path, *, feature_rows: list[list[str]], test_rows: list[list[str]]) -> None:
+def _write_workbook(
+    path: Path, *, feature_rows: list[list[str]], test_rows: list[list[str]]
+) -> None:
     workbook_xml = (
         '<?xml version="1.0" encoding="utf-8"?>'
         '<x:workbook xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
@@ -80,12 +82,16 @@ class ReportCoverageTests(unittest.TestCase):
             self.assertEqual(feature_ids, {"REBCLI-055", "REBCLI-099"})
             self.assertEqual(test_ids, {"REBCLI-055-TC-01", "REBCLI-099-TC-01"})
 
-    def test_build_report_prunes_external_and_existing_workbook_rows_from_actionable_gaps(self):
+    def test_build_report_scopes_to_webui_and_prunes_existing_rows_from_gaps(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = Path(tmpdir) / "matrix.xlsx"
             _write_workbook(
                 workbook_path,
-                feature_rows=[["Feature ID"], ["REBCLI-777"]],
+                feature_rows=[
+                    ["Feature ID", "Feature Name"],
+                    ["REBCLI-777", "WebUI v2 Settings"],
+                    ["REBCLI-778", "Root CLI Command Surface"],
+                ],
                 test_rows=[
                     ["Test ID", "Feature ID", "Status", "Notes"],
                     [
@@ -106,11 +112,21 @@ class ReportCoverageTests(unittest.TestCase):
                         "Partial",
                         "Needs implementation",
                     ],
+                    [
+                        "REBCLI-778-TC-01",
+                        "REBCLI-778",
+                        "Partial",
+                        "Out-of-scope CLI gap",
+                    ],
                 ],
             )
 
             report = report_coverage.build_report(workbook_path, Path(tmpdir))
 
+            self.assertEqual(report["all_feature_count"], 2)
+            self.assertEqual(report["all_matrix_test_count"], 4)
+            self.assertEqual(report["feature_count"], 1)
+            self.assertEqual(report["matrix_test_count"], 3)
             self.assertEqual(report["workbook_external_existing_test_count"], 1)
             self.assertIn("REBCLI-777-TC-01", report["workbook_external_existing_ids"])
             self.assertIn(
@@ -120,12 +136,25 @@ class ReportCoverageTests(unittest.TestCase):
             self.assertEqual(report["actionable_gap_ids"], ["REBCLI-777-TC-03"])
             self.assertEqual(report["actionable_gap_test_count"], 1)
 
+            all_report = report_coverage.build_report(
+                workbook_path,
+                Path(tmpdir),
+                scope_tokens=None,
+            )
+
+            self.assertEqual(all_report["feature_count"], 2)
+            self.assertEqual(all_report["matrix_test_count"], 4)
+            self.assertEqual(
+                all_report["actionable_gap_ids"],
+                ["REBCLI-777-TC-03", "REBCLI-778-TC-01"],
+            )
+
     def test_build_report_tracks_runner_ids_missing_from_workbook(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = Path(tmpdir) / "matrix.xlsx"
             _write_workbook(
                 workbook_path,
-                feature_rows=[["Feature ID"], ["REBCLI-099"]],
+                feature_rows=[["Feature ID", "Feature Name"], ["REBCLI-099", "Models API"]],
                 test_rows=[
                     ["Test ID", "Feature ID"],
                     ["REBCLI-099-TC-01", "REBCLI-099"],

@@ -42,7 +42,9 @@ REQUIRED_TEST_CATEGORIES = (
 DEFAULT_SCOPE_TOKENS = (
     "webui v2",
     "openai-compatible",
-    "responses",
+    "responsesapi",
+    "responses api",
+    "/responses",
     "chat completions",
     "models api",
 )

@@ -19,6 +19,15 @@ REL_NS = {"r": "http://schemas.openxmlformats.org/package/2006/relationships"}
 OFFICE_REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
 TEST_ID_RE = re.compile(r"REBCLI-\d{3}-TC-\d{2}")
 FEATURE_ID_RE = re.compile(r"REBCLI-\d{3}")
+DEFAULT_SCOPE_TOKENS = (
+    "webui v2",
+    "openai-compatible",
+    "responsesapi",
+    "responses api",
+    "/responses",
+    "chat completions",
+    "models api",
+)
 
 
 def _column_index(cell_ref: str) -> int:
@@ -131,6 +140,29 @@ def workbook_test_records(workbook_path: Path) -> dict[str, dict[str, str]]:
     return records
 
 
+def workbook_feature_records(workbook_path: Path) -> dict[str, dict[str, str]]:
+    with ZipFile(workbook_path) as xlsx:
+        feature_rows = _sheet_rows(xlsx, "Feature Inventory")
+    if not feature_rows:
+        return {}
+    headers = feature_rows[0]
+    records: dict[str, dict[str, str]] = {}
+    for row in feature_rows[1:]:
+        if not row or not FEATURE_ID_RE.fullmatch(row[0] or ""):
+            continue
+        records[row[0]] = _row_record(headers, row)
+    return records
+
+
+def _feature_in_scope(
+    feature: dict[str, str], scope_tokens: tuple[str, ...] | None
+) -> bool:
+    if scope_tokens is None:
+        return True
+    haystack = " ".join(str(value or "") for value in feature.values()).lower()
+    return any(token.lower() in haystack for token in scope_tokens)
+
+
 def _external_existing_ids(records: dict[str, dict[str, str]]) -> set[str]:
     return {
         test_id
@@ -187,9 +219,25 @@ def _pct(numerator: int, denominator: int) -> float:
     return round((numerator / denominator * 100.0), 1) if denominator else 0.0
 
 
-def build_report(workbook_path: Path, repo_root: Path = ROOT) -> dict[str, object]:
-    feature_ids, matrix_ids = workbook_ids(workbook_path)
+def build_report(
+    workbook_path: Path,
+    repo_root: Path = ROOT,
+    *,
+    scope_tokens: tuple[str, ...] | None = DEFAULT_SCOPE_TOKENS,
+) -> dict[str, object]:
+    all_feature_ids, all_matrix_ids = workbook_ids(workbook_path)
+    feature_records = workbook_feature_records(workbook_path)
+    feature_ids = {
+        feature_id
+        for feature_id, feature in feature_records.items()
+        if _feature_in_scope(feature, scope_tokens)
+    }
     workbook_records = workbook_test_records(workbook_path)
+    matrix_ids = {
+        test_id
+        for test_id, record in workbook_records.items()
+        if record.get("Feature ID", "") in feature_ids
+    }
     workbook_external_existing_ids = _external_existing_ids(workbook_records) & matrix_ids
     workbook_existing_evidence_ids = _workbook_existing_evidence_ids(workbook_records) & matrix_ids
     hermetic_ids = hermetic_runner_ids()
@@ -207,6 +255,9 @@ def build_report(workbook_path: Path, repo_root: Path = ROOT) -> dict[str, objec
     actionable_gap_ids = raw_missing_ids - workbook_external_existing_ids - workbook_existing_evidence_ids
     return {
         "workbook": str(workbook_path),
+        "scope_tokens": list(scope_tokens) if scope_tokens is not None else [],
+        "all_feature_count": len(all_feature_ids),
+        "all_matrix_test_count": len(all_matrix_ids),
         "feature_count": len(feature_ids),
         "matrix_test_count": len(matrix_ids),
         "hermetic_runner_test_count": len(matrix_ids & hermetic_ids),
@@ -236,7 +287,7 @@ def build_report(workbook_path: Path, repo_root: Path = ROOT) -> dict[str, objec
         "matrix_only_or_new_feature_pct": _pct(
             len(matrix_only_covered_features), len(feature_ids)
         ),
-        "runner_ids_not_in_workbook": sorted(combined_ids - matrix_ids),
+        "runner_ids_not_in_workbook": sorted(combined_ids - all_matrix_ids),
         "workbook_ids_not_in_hermetic_runner": sorted(matrix_ids - hermetic_ids),
         "workbook_ids_not_in_combined_runner": sorted(raw_missing_ids),
         "workbook_external_existing_ids": sorted(workbook_external_existing_ids),
@@ -249,8 +300,19 @@ def build_report(workbook_path: Path, repo_root: Path = ROOT) -> dict[str, objec
 
 def _print_text(report: dict[str, object], include_missing: bool) -> None:
     print(f"Workbook: {report['workbook']}")
-    print(f"Features: {report['feature_count']}")
-    print(f"Matrix test cases: {report['matrix_test_count']}")
+    if report["scope_tokens"]:
+        print(f"Scope tokens: {', '.join(report['scope_tokens'])}")
+        print(
+            "Scoped features: "
+            f"{report['feature_count']} / {report['all_feature_count']}"
+        )
+        print(
+            "Scoped matrix test cases: "
+            f"{report['matrix_test_count']} / {report['all_matrix_test_count']}"
+        )
+    else:
+        print(f"Features: {report['feature_count']}")
+        print(f"Matrix test cases: {report['matrix_test_count']}")
     print(
         "Hermetic runner coverage: "
         f"{report['hermetic_runner_test_count']} / {report['matrix_test_count']} "
@@ -318,6 +380,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workbook", type=Path, required=True)
     parser.add_argument("--repo-root", type=Path, default=ROOT)
+    parser.add_argument(
+        "--scope-token",
+        action="append",
+        dest="scope_tokens",
+        help=(
+            "case-insensitive feature row token; may be repeated. Defaults to "
+            "WebUIv2/OpenAI-compatible scope."
+        ),
+    )
+    parser.add_argument(
+        "--all-workbook",
+        action="store_true",
+        help="report coverage against every workbook row, including out-of-scope CLI rows",
+    )
     parser.add_argument("--json", action="store_true", help="emit JSON")
     parser.add_argument(
         "--include-missing",
@@ -329,7 +405,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    report = build_report(args.workbook, args.repo_root)
+    if args.all_workbook:
+        scope_tokens = None
+    elif args.scope_tokens:
+        scope_tokens = tuple(args.scope_tokens)
+    else:
+        scope_tokens = DEFAULT_SCOPE_TOKENS
+    report = build_report(args.workbook, args.repo_root, scope_tokens=scope_tokens)
     if args.json:
         json.dump(report, sys.stdout, indent=2)
         print()
