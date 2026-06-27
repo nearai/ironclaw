@@ -220,6 +220,28 @@ WEBUI_V2_STATIC_JS_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_STATIC_ROUTER_COMMAND = CommandSpec(
+    name="webui_v2_static_router_contracts",
+    description=(
+        "Focused static-router contracts for SPA shell fallback, known asset "
+        "serving, path traversal rejection, asset-like 404s, fresh matching "
+        "CSP nonces, locked document CSP allowlists, wallet-connect CSP "
+        "isolation, and prefix validation."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2_static",
+        "--all-features",
+        "router",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_SEND_MULTILINE_COMMAND = CommandSpec(
     name="webui_v2_send_multiline_contract",
     description="Focused send-message route contract for preserving multiline content.",
@@ -580,6 +602,31 @@ WEBUI_V2_COMPOSITION_COMMAND = CommandSpec(
         "webui_v2_product_auth",
         "--test",
         "webui_v2_product_auth_4201",
+    ],
+)
+
+WEBUI_V2_COMPOSITION_STATIC_COMMAND = CommandSpec(
+    name="webui_v2_composition_static_route_contracts",
+    description=(
+        "Composition-level static route contracts for /v2 root no-bearer "
+        "access, direct client route fallback, JS/CSS content types, fresh "
+        "CSP nonce substitution, static security headers, and unknown "
+        "extension asset 404s."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "--test",
+        "webui_v2_serve",
+        "static",
+        "--",
+        "--format",
+        "terse",
     ],
 )
 
@@ -1269,6 +1316,32 @@ CASES: dict[str, CaseSpec] = {
             "Matches the QA matrix composition command for REBCLI-055-TC-09; "
             "this validates the Rust gateway composition layer rather than "
             "duplicating browser coverage from PR #5348."
+        ),
+    ),
+    "webui_v2_spa_static_serving_regression": CaseSpec(
+        name="webui_v2_spa_static_serving_regression",
+        feature="WebUI v2 SPA shell and static asset serving",
+        category="Hermetic WebUI v2 Static Serving Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-063-TC-01",
+            "REBCLI-063-TC-02",
+            "REBCLI-063-TC-03",
+            "REBCLI-063-TC-04",
+            "REBCLI-063-TC-05",
+            "REBCLI-063-TC-06",
+        ],
+        commands=[
+            WEBUI_V2_STATIC_ROUTER_COMMAND,
+            WEBUI_V2_COMPOSITION_STATIC_COMMAND,
+        ],
+        notes=(
+            "Covers WebUI v2 SPA/static route rows without duplicating PR "
+            "#5348 browser shell coverage: /v2 root and direct client-route "
+            "fallbacks, JS/CSS asset content types, unknown asset 404s, path "
+            "traversal rejection, no-bearer static root access, fresh matching "
+            "CSP nonces, no-store shell responses, locked document CSP "
+            "allowlists, wallet-connect CSP isolation, static security "
+            "headers, and mount prefix validation."
         ),
     ),
     "webui_v2_product_auth_oauth_regression": CaseSpec(
