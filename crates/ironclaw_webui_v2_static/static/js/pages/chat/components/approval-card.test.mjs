@@ -36,6 +36,7 @@ function renderApprovalCard({ expandedPayload = false, gate = defaultApprovalGat
         effects.push({ fn, deps });
       },
       useMemo: (fn) => fn(),
+      useRef: (initial) => ({ current: initial }),
       useState: (initial) => {
         stateCalls += 1;
         if (stateCalls === 2) {
