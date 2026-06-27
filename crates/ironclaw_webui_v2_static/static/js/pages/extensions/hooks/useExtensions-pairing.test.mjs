@@ -78,6 +78,51 @@ test("usePairing can disable the legacy pairing request query for custom redeeme
   assert.equal(queryCalls[0].enabled, false);
 });
 
+test("useExtensions shows setup-panel copy after channel install succeeds", () => {
+  const mutationConfigs = [];
+  const actionResults = [];
+  const context = {
+    ...contextFor(
+      { mutate: () => {}, isPending: false, isSuccess: false, isError: false },
+      []
+    ),
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: () => ({ current: null }),
+      useState: (initial) => [initial, (value) => actionResults.push(value)],
+    },
+    useMutation: (config) => {
+      mutationConfigs.push(config);
+      return { mutate: () => {}, isPending: false, isSuccess: false, isError: false };
+    },
+    useQuery: ({ queryKey }) => {
+      if (queryKey[0] === "extensions") {
+        return { data: { extensions: [] }, isLoading: false };
+      }
+      if (queryKey[0] === "extension-registry") {
+        return { data: { entries: [] }, isLoading: false };
+      }
+      if (queryKey[0] === "connectable-channels") {
+        return { data: { channels: [] }, isLoading: false };
+      }
+      return { data: {}, isLoading: false };
+    },
+  };
+  vm.runInNewContext(useExtensionsSourceForTest(), context);
+
+  context.globalThis.__testExports.useExtensions();
+  mutationConfigs[0].onSuccess(
+    { success: true, message: "Slack is installed. Activate it to make its tools available." },
+    { displayName: "Slack", kind: "channel" }
+  );
+
+  assert.deepEqual(JSON.parse(JSON.stringify(actionResults[0])), {
+    type: "success",
+    message: "Slack installed. Connect the account using the setup panel below.",
+  });
+});
+
 test("useExtensions places uninstalled wasm_channel registry entry in channelRegistry not toolRegistry", () => {
   const context = {
     ...contextFor(

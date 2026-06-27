@@ -3,12 +3,17 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "../design-system/button.js";
 import { useT } from "../lib/i18n.js";
 import { redeemSlackPairingCode } from "../lib/slack-pairing-api.js";
+import { activateExtension } from "../pages/extensions/lib/extensions-api.js";
 
 export function SlackPairingSection({ action }) {
   const t = useT();
   const queryClient = useQueryClient();
   const redeemMutation = useMutation({
-    mutationFn: ({ code }) => redeemSlackPairingCode(code),
+    mutationFn: async ({ code }) => {
+      const result = await redeemSlackPairingCode(code);
+      await activateExtension({ id: "slack" });
+      return result;
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["extensions"] });
       queryClient.invalidateQueries({ queryKey: ["connectable-channels"] });

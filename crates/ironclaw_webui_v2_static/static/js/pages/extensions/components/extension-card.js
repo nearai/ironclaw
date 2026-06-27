@@ -305,7 +305,7 @@ export function RegistryCard({ entry, onInstall, isBusy, statusLabel }) {
           <${Button}
             variant="outline"
             size="sm"
-            onClick=${() => onInstall({ packageRef: entry.package_ref, displayName })}
+            onClick=${() => onInstall({ packageRef: entry.package_ref, displayName, kind: entry.kind })}
             disabled=${isBusy}
           >
             <${Icon} name="plus" className="mr-1.5 h-3.5 w-3.5" />
