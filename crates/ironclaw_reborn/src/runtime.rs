@@ -36,7 +36,7 @@ use ironclaw_host_runtime::{
 };
 
 use crate::{
-    app_loop_family::build_loop_family_registry,
+    app_loop_family::build_loop_family_registry_with_default_iteration_limit,
     driver_registry::{DriverRegistry, DriverRegistryError},
     loop_driver_host::{
         HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
@@ -102,6 +102,7 @@ pub struct DefaultPlannedRuntimeConfig {
     pub worker_count: Option<std::num::NonZeroUsize>,
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
+    pub planned_default_iteration_limit: Option<u32>,
 }
 
 impl Default for DefaultPlannedRuntimeConfig {
@@ -112,6 +113,7 @@ impl Default for DefaultPlannedRuntimeConfig {
             worker_count: Some(DEFAULT_TURN_RUNNER_WORKER_COUNT),
             text_only_driver: TextOnlyModelReplyDriverConfig::default(),
             host: TextOnlyLoopHostConfig::default(),
+            planned_default_iteration_limit: None,
         }
     }
 }
@@ -489,7 +491,10 @@ where
 {
     let mut registry = DriverRegistry::new();
     register_default_text_only_driver(&mut registry, parts.config.text_only_driver)?;
-    let family_registry = build_loop_family_registry().map_err(|error| {
+    let family_registry = build_loop_family_registry_with_default_iteration_limit(
+        parts.config.planned_default_iteration_limit,
+    )
+    .map_err(|error| {
         DefaultPlannedRuntimeBuildError::PlannedDriver(
             DefaultPlannedDriverRegistrationError::DriverBuild(
                 AgentLoopDriverError::InvalidRequest {

@@ -133,6 +133,24 @@ test("Tools tab renders global auto-approve control and saves the operator key",
   assert.deepEqual(saved, [{ key: "agent.auto_approve_tools", value: true }]);
 });
 
+test("Auto-approve toggle defaults ON when unset and reads present values strictly", () => {
+  const { exports } = renderToolsModule();
+  const checkedFor = (settings) => {
+    const rendered = exports.AutoApproveCard({ settings, savedKeys: {}, onSave: () => {} });
+    const node = findComponentNode(rendered, exports.Switch);
+    return componentProps(node, exports.Switch).checked;
+  };
+  // Absent → default ON.
+  assert.equal(checkedFor({}), true, "unset must default ON");
+  // Present values read strictly.
+  assert.equal(checkedFor({ "agent.auto_approve_tools": true }), true);
+  assert.equal(checkedFor({ "agent.auto_approve_tools": "true" }), true);
+  assert.equal(checkedFor({ "agent.auto_approve_tools": false }), false);
+  // Unexpected falsy must read OFF, not silently ON.
+  assert.equal(checkedFor({ "agent.auto_approve_tools": 0 }), false, "0 must read OFF");
+  assert.equal(checkedFor({ "agent.auto_approve_tools": "" }), false, "empty string must read OFF");
+});
+
 test("Tool permission select follows global unless a per-tool override exists", () => {
   const { exports } = renderToolsModule();
   const globalTool = exports.ToolRow({

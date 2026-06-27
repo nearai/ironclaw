@@ -1999,11 +1999,11 @@ ${ke}`;if(Ue.current.gateKey!==N&&(Ue.current={gateKey:N,credentialRef:null,inFl
         onClose=${()=>Da(!1)}
       />
     </div>
-  `}function bh(){let{threadsState:e,gatewayStatus:t}=ya(),{threadId:a}=it(),n=pe(),r=Le(),s=r.state?.composerDraft||"";h.default.useEffect(()=>{a&&a!==e.activeThreadId?e.setActiveThreadId(a):a||e.setActiveThreadId(null)},[a]);let i=h.default.useCallback((o,l={})=>{if(!o){e.setActiveThreadId(null),n("/chat",l);return}e.setActiveThreadId(o),n(`/chat/${o}`,l)},[e,n]);return u`
+  `}function bh(){let{threadsState:e,gatewayStatus:t}=ya(),{threadId:a}=it(),n=pe(),r=Le(),s=r.state?.composerDraft||"",i=a||null;h.default.useEffect(()=>{i&&i!==e.activeThreadId?e.setActiveThreadId(i):i||e.setActiveThreadId(null)},[i]);let o=h.default.useCallback((l,c={})=>{if(!l){e.setActiveThreadId(null),n("/chat",c);return}e.setActiveThreadId(l),n(`/chat/${l}`,c)},[e,n]);return u`
     <${F2}
       threads=${e.threads}
-      activeThreadId=${e.activeThreadId}
-      onSelectThread=${i}
+      activeThreadId=${i}
+      onSelectThread=${o}
       isCreatingThread=${e.isCreating}
       composerDraft=${s}
       composerResetKey=${r.key}
