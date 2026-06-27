@@ -279,6 +279,14 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-081-TC-01",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "REBCLI-083-TC-06",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-097-TC-01",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -727,6 +735,24 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-070-TC-04",
                     "REBCLI-070-TC-05",
                     "REBCLI-070-TC-06",
+                    "REBCLI-081-TC-01",
+                    "REBCLI-081-TC-02",
+                    "REBCLI-081-TC-03",
+                    "REBCLI-081-TC-04",
+                    "REBCLI-081-TC-05",
+                    "REBCLI-081-TC-06",
+                    "REBCLI-082-TC-01",
+                    "REBCLI-082-TC-02",
+                    "REBCLI-082-TC-03",
+                    "REBCLI-082-TC-04",
+                    "REBCLI-082-TC-05",
+                    "REBCLI-082-TC-06",
+                    "REBCLI-083-TC-01",
+                    "REBCLI-083-TC-02",
+                    "REBCLI-083-TC-03",
+                    "REBCLI-083-TC-04",
+                    "REBCLI-083-TC-05",
+                    "REBCLI-083-TC-06",
                 ],
             )
             commands = results["results"][0]["details"]["commands"]
@@ -736,6 +762,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             )
             self.assertIn("routes.test.mjs", commands[0]["command"])
             self.assertIn("hidden-stub-apis.test.mjs", commands[0]["command"])
+            self.assertIn("hidden-stub-presenters.test.mjs", commands[0]["command"])
 
     def test_slack_personal_oauth_binding_case_dry_run_maps_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:

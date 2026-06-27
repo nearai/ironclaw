@@ -458,13 +458,15 @@ WEBUI_V2_HIDDEN_STUBBED_ROUTE_COMMAND = CommandSpec(
     description=(
         "Focused WebUI v2 hidden/stubbed direct-route contracts for hidden "
         "route metadata, registered direct routes, and jobs/routines/missions/"
-        "admin TODO API adapters that must not call unsupported v1 endpoints."
+        "admin TODO API adapters that must not call unsupported v1 endpoints, "
+        "plus jobs/routines/missions shell presenter contracts."
     ),
     argv=[
         "node",
         "--test",
         "crates/ironclaw_webui_v2_static/static/js/app/routes.test.mjs",
         "crates/ironclaw_webui_v2_static/static/js/app/hidden-stub-apis.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/app/hidden-stub-presenters.test.mjs",
     ],
 )
 
@@ -1901,6 +1903,24 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-070-TC-04",
             "REBCLI-070-TC-05",
             "REBCLI-070-TC-06",
+            "REBCLI-081-TC-01",
+            "REBCLI-081-TC-02",
+            "REBCLI-081-TC-03",
+            "REBCLI-081-TC-04",
+            "REBCLI-081-TC-05",
+            "REBCLI-081-TC-06",
+            "REBCLI-082-TC-01",
+            "REBCLI-082-TC-02",
+            "REBCLI-082-TC-03",
+            "REBCLI-082-TC-04",
+            "REBCLI-082-TC-05",
+            "REBCLI-082-TC-06",
+            "REBCLI-083-TC-01",
+            "REBCLI-083-TC-02",
+            "REBCLI-083-TC-03",
+            "REBCLI-083-TC-04",
+            "REBCLI-083-TC-05",
+            "REBCLI-083-TC-06",
         ],
         commands=[WEBUI_V2_HIDDEN_STUBBED_ROUTE_COMMAND],
         notes=(
@@ -1909,8 +1929,11 @@ CASES: dict[str, CaseSpec] = {
             "route metadata stays registered but hidden, routeForId direct "
             "lookup remains available, and jobs/routines/missions/admin API "
             "adapters return empty TODO shapes without calling fetch or "
-            "unsupported v1 gateway endpoints. Browser rows TC-10/11 remain "
-            "separate browser/live coverage."
+            "unsupported v1 gateway endpoints. Jobs/routines/missions shell "
+            "presenters keep deterministic state labels, action visibility, "
+            "sorting, summarization, and duration/id formatting while the "
+            "routes remain stubbed. Browser rows TC-10/11 remain separate "
+            "browser/live coverage."
         ),
     ),
     "slack_personal_oauth_binding_regression": CaseSpec(
