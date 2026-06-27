@@ -80,6 +80,46 @@ class ReportCoverageTests(unittest.TestCase):
             self.assertEqual(feature_ids, {"REBCLI-055", "REBCLI-099"})
             self.assertEqual(test_ids, {"REBCLI-055-TC-01", "REBCLI-099-TC-01"})
 
+    def test_build_report_prunes_external_and_existing_workbook_rows_from_actionable_gaps(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "matrix.xlsx"
+            _write_workbook(
+                workbook_path,
+                feature_rows=[["Feature ID"], ["REBCLI-777"]],
+                test_rows=[
+                    ["Test ID", "Feature ID", "Status", "Notes"],
+                    [
+                        "REBCLI-777-TC-01",
+                        "REBCLI-777",
+                        "External-existing coverage",
+                        "nearai/ironclaw#5348 owns this browser workflow",
+                    ],
+                    [
+                        "REBCLI-777-TC-02",
+                        "REBCLI-777",
+                        "Passed",
+                        "Evidence: existing smoke test covers this CLI path",
+                    ],
+                    [
+                        "REBCLI-777-TC-03",
+                        "REBCLI-777",
+                        "Partial",
+                        "Needs implementation",
+                    ],
+                ],
+            )
+
+            report = report_coverage.build_report(workbook_path, Path(tmpdir))
+
+            self.assertEqual(report["workbook_external_existing_test_count"], 1)
+            self.assertIn("REBCLI-777-TC-01", report["workbook_external_existing_ids"])
+            self.assertIn(
+                "REBCLI-777-TC-02",
+                report["workbook_existing_evidence_not_in_runner_ids"],
+            )
+            self.assertEqual(report["actionable_gap_ids"], ["REBCLI-777-TC-03"])
+            self.assertEqual(report["actionable_gap_test_count"], 1)
+
     def test_build_report_tracks_runner_ids_missing_from_workbook(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = Path(tmpdir) / "matrix.xlsx"

@@ -108,6 +108,45 @@ def workbook_ids(workbook_path: Path) -> tuple[set[str], set[str]]:
     return feature_ids, test_ids
 
 
+def _row_record(headers: list[str], row: list[str]) -> dict[str, str]:
+    values = row + [""] * max(0, len(headers) - len(row))
+    return {
+        header: values[index].strip()
+        for index, header in enumerate(headers)
+        if header
+    }
+
+
+def workbook_test_records(workbook_path: Path) -> dict[str, dict[str, str]]:
+    with ZipFile(workbook_path) as xlsx:
+        test_rows = _sheet_rows(xlsx, "Test Cases")
+    if not test_rows:
+        return {}
+    headers = test_rows[0]
+    records: dict[str, dict[str, str]] = {}
+    for row in test_rows[1:]:
+        if not row or not TEST_ID_RE.fullmatch(row[0] or ""):
+            continue
+        records[row[0]] = _row_record(headers, row)
+    return records
+
+
+def _external_existing_ids(records: dict[str, dict[str, str]]) -> set[str]:
+    return {
+        test_id
+        for test_id, record in records.items()
+        if (record.get("Status") or "").lower() == "external-existing coverage"
+    }
+
+
+def _workbook_existing_evidence_ids(records: dict[str, dict[str, str]]) -> set[str]:
+    return {
+        test_id
+        for test_id, record in records.items()
+        if (record.get("Status") or "").lower().startswith("passed")
+    }
+
+
 def hermetic_runner_ids(default_only: bool = False) -> set[str]:
     ids: set[str] = set()
     for case in run_hermetic_qa.CASES.values():
@@ -150,6 +189,9 @@ def _pct(numerator: int, denominator: int) -> float:
 
 def build_report(workbook_path: Path, repo_root: Path = ROOT) -> dict[str, object]:
     feature_ids, matrix_ids = workbook_ids(workbook_path)
+    workbook_records = workbook_test_records(workbook_path)
+    workbook_external_existing_ids = _external_existing_ids(workbook_records) & matrix_ids
+    workbook_existing_evidence_ids = _workbook_existing_evidence_ids(workbook_records) & matrix_ids
     hermetic_ids = hermetic_runner_ids()
     default_hermetic_ids = hermetic_runner_ids(default_only=True)
     matrix_only_ids = matrix_only_runner_ids(default_only=True)
@@ -161,6 +203,8 @@ def build_report(workbook_path: Path, repo_root: Path = ROOT) -> dict[str, objec
     matrix_only_covered_ids = matrix_ids & matrix_only_combined_ids
     covered_features = {test_id[:10] for test_id in covered_matrix_ids}
     matrix_only_covered_features = {test_id[:10] for test_id in matrix_only_covered_ids}
+    raw_missing_ids = matrix_ids - combined_ids
+    actionable_gap_ids = raw_missing_ids - workbook_external_existing_ids - workbook_existing_evidence_ids
     return {
         "workbook": str(workbook_path),
         "feature_count": len(feature_ids),
@@ -172,6 +216,12 @@ def build_report(workbook_path: Path, repo_root: Path = ROOT) -> dict[str, objec
         "matrix_only_or_new_runner_test_count": len(matrix_ids & matrix_only_ids),
         "existing_ci_only_test_count": len(matrix_ids & existing_ci_ids),
         "matrix_only_or_new_combined_test_count": len(matrix_only_covered_ids),
+        "workbook_external_existing_test_count": len(workbook_external_existing_ids),
+        "workbook_existing_evidence_test_count": len(workbook_existing_evidence_ids),
+        "workbook_existing_evidence_not_in_runner_count": len(
+            raw_missing_ids & workbook_existing_evidence_ids
+        ),
+        "actionable_gap_test_count": len(actionable_gap_ids),
         "hermetic_runner_coverage_pct": _pct(len(matrix_ids & hermetic_ids), len(matrix_ids)),
         "combined_runner_coverage_pct": _pct(len(covered_matrix_ids), len(matrix_ids)),
         "matrix_only_or_new_runner_coverage_pct": _pct(
@@ -188,7 +238,12 @@ def build_report(workbook_path: Path, repo_root: Path = ROOT) -> dict[str, objec
         ),
         "runner_ids_not_in_workbook": sorted(combined_ids - matrix_ids),
         "workbook_ids_not_in_hermetic_runner": sorted(matrix_ids - hermetic_ids),
-        "workbook_ids_not_in_combined_runner": sorted(matrix_ids - combined_ids),
+        "workbook_ids_not_in_combined_runner": sorted(raw_missing_ids),
+        "workbook_external_existing_ids": sorted(workbook_external_existing_ids),
+        "workbook_existing_evidence_not_in_runner_ids": sorted(
+            raw_missing_ids & workbook_existing_evidence_ids
+        ),
+        "actionable_gap_ids": sorted(actionable_gap_ids),
     }
 
 
@@ -210,6 +265,20 @@ def _print_text(report: dict[str, object], include_missing: bool) -> None:
     print(
         "Already-existing CI-only traceability: "
         f"{report['existing_ci_only_test_count']} / {report['matrix_test_count']}"
+    )
+    print(
+        "Workbook external-existing coverage: "
+        f"{report['workbook_external_existing_test_count']} / "
+        f"{report['matrix_test_count']}"
+    )
+    print(
+        "Workbook-existing evidence not represented by runner: "
+        f"{report['workbook_existing_evidence_not_in_runner_count']} / "
+        f"{report['matrix_test_count']}"
+    )
+    print(
+        "Actionable coverage gaps after duplicate/existing pruning: "
+        f"{report['actionable_gap_test_count']} / {report['matrix_test_count']}"
     )
     print(
         "Hermetic + live runner coverage: "
@@ -239,6 +308,9 @@ def _print_text(report: dict[str, object], include_missing: bool) -> None:
     if include_missing:
         print("Workbook IDs not in hermetic runner:")
         for test_id in report["workbook_ids_not_in_hermetic_runner"]:
+            print(f"  {test_id}")
+        print("Actionable gap IDs:")
+        for test_id in report["actionable_gap_ids"]:
             print(f"  {test_id}")
 
 
