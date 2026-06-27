@@ -742,6 +742,42 @@ WEBUI_V2_CHAT_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_CHAT_BROWSER_MATRIX_COMMAND = CommandSpec(
+    name="webui_v2_chat_browser_matrix_contracts",
+    description=(
+        "Focused Playwright browser matrix for the committed Reborn WebUI v2 "
+        "chat bundle with stubbed WebChat v2 APIs: first-message starter and "
+        "typed sends, existing-thread follow-up, text/image attachments, "
+        "picker/drop/paste validation, busy and failure recovery, retry, "
+        "cancellation, keyboard, accessibility, focus, and mobile overflow."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_chat_browser_matrix.py",
+        "-q",
+    ],
+)
+
 WEBUI_V2_WORKSPACE_PROJECT_CLIENT_COMMAND = CommandSpec(
     name="webui_v2_workspace_project_client_contracts",
     description=(
@@ -3366,6 +3402,49 @@ CASES: dict[str, CaseSpec] = {
             "grouping, cancellation, thread isolation, failed first-message "
             "retry metadata preservation, and explicit localized composer "
             "aria-label coverage."
+        ),
+    ),
+    "webui_v2_chat_browser_matrix_regression": CaseSpec(
+        name="webui_v2_chat_browser_matrix_regression",
+        feature="WebUI v2 chat screen and gate UX",
+        category="Hermetic Chat Browser Matrix Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-065-TC-07",
+            "REBCLI-065-TC-08",
+            "REBCLI-065-TC-09",
+            "REBCLI-065-TC-10",
+            "REBCLI-065-TC-11",
+            "REBCLI-065-TC-12",
+            "REBCLI-065-TC-13",
+            "REBCLI-065-TC-14",
+            "REBCLI-065-TC-15",
+            "REBCLI-065-TC-16",
+            "REBCLI-065-TC-17",
+            "REBCLI-065-TC-18",
+            "REBCLI-065-TC-19",
+            "REBCLI-065-TC-20",
+            "REBCLI-065-TC-21",
+            "REBCLI-065-TC-22",
+            "REBCLI-065-TC-27",
+            "REBCLI-065-TC-29",
+            "REBCLI-065-TC-30",
+            "REBCLI-065-TC-31",
+            "REBCLI-065-TC-32",
+            "REBCLI-065-TC-33",
+            "REBCLI-065-TC-34",
+            "REBCLI-065-TC-35",
+            "REBCLI-065-TC-36",
+        ],
+        commands=[WEBUI_V2_CHAT_BROWSER_MATRIX_COMMAND],
+        notes=(
+            "Runs the committed WebUI v2 chat bundle in Chromium while "
+            "stubbing only the WebChat v2 browser API and EventSource stream. "
+            "Covers the real-browser matrix rows without live LLM calls: "
+            "starter and typed first-message sends, existing-thread follow-up, "
+            "attachment picker/drop/paste wire shapes and validation, image "
+            "thumbnail rendering, busy/failure/retry behavior, cancellation, "
+            "keyboard multiline submit, accessibility landmarks/named "
+            "controls, focus restoration, and mobile no-overflow smoke."
         ),
     ),
     "webui_v2_workspace_project_client_regression": CaseSpec(

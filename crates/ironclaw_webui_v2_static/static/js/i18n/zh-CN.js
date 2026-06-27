@@ -77,6 +77,7 @@ registerPack("zh-CN", {
 
   // Chat — input
   "chat.placeholder": "给 IronClaw 发消息...",
+  "chat.composerLabel": "给 IronClaw 发消息",
   "chat.heroPlaceholder": "向 IronClaw 提问。",
   "chat.followUpPlaceholder": "请求后续修改",
   "chat.send": "发送消息",

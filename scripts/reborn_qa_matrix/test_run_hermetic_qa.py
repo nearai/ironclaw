@@ -1159,6 +1159,64 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn("node --test", commands[0]["command"])
             self.assertIn("static/js/pages/chat", commands[0]["command"])
 
+    def test_webui_chat_browser_matrix_case_dry_run_maps_browser_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "webui_v2_chat_browser_matrix_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-065-TC-07",
+                    "REBCLI-065-TC-08",
+                    "REBCLI-065-TC-09",
+                    "REBCLI-065-TC-10",
+                    "REBCLI-065-TC-11",
+                    "REBCLI-065-TC-12",
+                    "REBCLI-065-TC-13",
+                    "REBCLI-065-TC-14",
+                    "REBCLI-065-TC-15",
+                    "REBCLI-065-TC-16",
+                    "REBCLI-065-TC-17",
+                    "REBCLI-065-TC-18",
+                    "REBCLI-065-TC-19",
+                    "REBCLI-065-TC-20",
+                    "REBCLI-065-TC-21",
+                    "REBCLI-065-TC-22",
+                    "REBCLI-065-TC-27",
+                    "REBCLI-065-TC-29",
+                    "REBCLI-065-TC-30",
+                    "REBCLI-065-TC-31",
+                    "REBCLI-065-TC-32",
+                    "REBCLI-065-TC-33",
+                    "REBCLI-065-TC-34",
+                    "REBCLI-065-TC-35",
+                    "REBCLI-065-TC-36",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                [command["name"] for command in commands],
+                ["webui_v2_chat_browser_matrix_contracts"],
+            )
+            self.assertIn("pytest", commands[0]["command"])
+            self.assertIn(
+                "test_reborn_webui_v2_chat_browser_matrix.py",
+                commands[0]["command"],
+            )
+
     def test_webui_workspace_project_case_dry_run_maps_client_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)

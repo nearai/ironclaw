@@ -147,6 +147,18 @@ export function Chat({
     [composerSendDisabled, handleSend, setSuggestions]
   );
 
+  const handleRetryMessage = React.useCallback(
+    async (message) => {
+      const response = await retryMessage(message);
+      const responseThreadId = response?.thread_id || activeThreadId;
+      if (!activeThreadId && responseThreadId && onSelectThread) {
+        onSelectThread(responseThreadId, { replace: true });
+      }
+      return response;
+    },
+    [activeThreadId, onSelectThread, retryMessage]
+  );
+
   const handleCancelRun = React.useCallback(
     () => cancelRun("user_requested"),
     [cancelRun]
@@ -255,7 +267,7 @@ export function Chat({
             isLoading=${historyLoading}
             hasMore=${hasMore}
             onLoadMore=${loadMore}
-            onRetryMessage=${retryMessage}
+            onRetryMessage=${handleRetryMessage}
             threadId=${activeThreadId}
             pending=${activeThreadIsProcessing}
           >

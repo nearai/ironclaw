@@ -77,6 +77,7 @@ registerPack("ja", {
 
   // Chat — input
   "chat.placeholder": "IronClaw にメッセージ…",
+  "chat.composerLabel": "IronClaw にメッセージ",
   "chat.heroPlaceholder": "IronClaw に何でも聞いてください。",
   "chat.followUpPlaceholder": "フォローアップ変更を依頼",
   "chat.send": "送信",

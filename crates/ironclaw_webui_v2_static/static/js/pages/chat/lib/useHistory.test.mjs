@@ -189,6 +189,53 @@ test("useHistory can seed a newly-created thread before navigation", async () =>
   ]);
 });
 
+test("useHistory full refresh preserves locally generated rejected-busy notices", () => {
+  const context = {
+    console,
+    fetchTimeline: async () => ({ messages: [], next_cursor: null }),
+    globalThis: {},
+    messagesFromTimeline: () => [],
+    React: createReactStub(),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+
+  const merged = context.globalThis.__testExports.mergeFullRefresh(
+    [],
+    [
+      {
+        id: "pending-1",
+        role: "user",
+        content: "still busy?",
+        timestamp: "2026-06-27T00:00:00.000Z",
+        isOptimistic: false,
+        status: "error",
+      },
+      {
+        id: "system-rejected-2",
+        role: "system",
+        content: "Thread is busy; try again soon.",
+        timestamp: "2026-06-27T00:00:01.000Z",
+        isOptimistic: false,
+      },
+    ],
+  );
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(merged)),
+    [
+      {
+        id: "system-rejected-2",
+        role: "system",
+        content: "Thread is busy; try again soon.",
+        timestamp: "2026-06-27T00:00:01.000Z",
+        isOptimistic: false,
+      },
+    ],
+  );
+});
+
 test("useHistory seedThreadMessages updates an accepted first message by timeline id", async () => {
   const context = {
     console,

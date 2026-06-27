@@ -77,6 +77,7 @@ registerPack("hi", {
 
   // Chat — input
   "chat.placeholder": "IronClaw को संदेश...",
+  "chat.composerLabel": "IronClaw को संदेश",
   "chat.heroPlaceholder": "IronClaw से कुछ भी पूछें.",
   "chat.followUpPlaceholder": "फॉलो-अप बदलाव मांगें",
   "chat.send": "संदेश भेजें",

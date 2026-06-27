@@ -250,6 +250,7 @@ function mergeFullRefresh(fresh, current, options = {}) {
       return false;
     }
     if (isSeededOptimisticMessage(message)) return true;
+    if (isRejectedBusyNotice(message)) return true;
     return preserveClientOnly && message.id.startsWith("err-");
   });
   return mergePreservedMessages(hydratedFresh, preserved);
@@ -317,6 +318,14 @@ function isSeededOptimisticMessage(message) {
     typeof message.id === "string" &&
     message.id.startsWith("pending-") &&
     (message.role === "user" || message.role === "assistant")
+  );
+}
+
+function isRejectedBusyNotice(message) {
+  return (
+    message?.role === "system" &&
+    typeof message.id === "string" &&
+    message.id.startsWith("system-rejected-")
   );
 }
 

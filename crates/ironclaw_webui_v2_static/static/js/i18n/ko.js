@@ -77,6 +77,7 @@ registerPack("ko", {
 
   // Chat — input
   "chat.placeholder": "IronClaw에 메시지 보내기...",
+  "chat.composerLabel": "IronClaw에 메시지 보내기",
   "chat.heroPlaceholder": "IronClaw에 무엇이든 물어보세요.",
   "chat.followUpPlaceholder": "후속 변경 요청",
   "chat.send": "메시지 보내기",
