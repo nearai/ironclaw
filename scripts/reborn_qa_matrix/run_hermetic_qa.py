@@ -286,6 +286,75 @@ WEBUI_V2_FS_HANDLER_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_PROJECT_HANDLER_COMMAND = CommandSpec(
+    name="webui_v2_project_handler_contracts",
+    description=(
+        "Focused WebUI v2 project route contracts for list/unwired handling, "
+        "project path/body precedence, member add routing, and delete responses."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_handlers_contract",
+        "project_",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_PROJECTS_HANDLER_COMMAND = CommandSpec(
+    name="webui_v2_projects_handler_contracts",
+    description=(
+        "Focused WebUI v2 projects collection/session contracts for unwired "
+        "project service handling and reborn-projects feature projection."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_handlers_contract",
+        "projects",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_MEMBER_HANDLER_COMMAND = CommandSpec(
+    name="webui_v2_member_handler_contracts",
+    description=(
+        "Focused WebUI v2 project-member route contracts for add/update/remove "
+        "path/body precedence and no-content delete responses."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_handlers_contract",
+        "member",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 COMPOSITION_PROJECT_FS_COMMAND = CommandSpec(
     name="composition_project_filesystem_reader",
     description=(
@@ -698,6 +767,33 @@ CASES: dict[str, CaseSpec] = {
             "hidden/sensitive path denial, oversize and missing-file handling, "
             "mount-relative traversal rejection, and attachment download "
             "headers without duplicating browser file-tree smoke coverage."
+        ),
+    ),
+    "webui_v2_project_membership_api_regression": CaseSpec(
+        name="webui_v2_project_membership_api_regression",
+        feature="WebUI v2 project and membership APIs",
+        category="Hermetic Project/Membership API Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-050-TC-01",
+            "REBCLI-050-TC-02",
+            "REBCLI-050-TC-03",
+            "REBCLI-050-TC-04",
+            "REBCLI-050-TC-05",
+            "REBCLI-050-TC-06",
+        ],
+        commands=[
+            WEBUI_V2_DESCRIPTOR_POLICY_COMMAND,
+            WEBUI_V2_PROJECT_HANDLER_COMMAND,
+            WEBUI_V2_PROJECTS_HANDLER_COMMAND,
+            WEBUI_V2_MEMBER_HANDLER_COMMAND,
+        ],
+        notes=(
+            "Covers WebUI v2 project and membership API rows without "
+            "duplicating PR #5348 browser project overview coverage: "
+            "descriptor policy, project collection and item routes, path/body "
+            "ID precedence, member add/update/remove routing, unwired service "
+            "fail-closed behavior, no-content delete responses, and "
+            "reborn-projects session feature projection."
         ),
     ),
     "webui_v2_rust_static_regression": CaseSpec(
