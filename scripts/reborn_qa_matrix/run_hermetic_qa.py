@@ -1683,6 +1683,48 @@ SLACK_EVENTS_INGRESS_COMMAND = CommandSpec(
     ],
 )
 
+SLACK_SHARED_CHANNEL_ADMIN_COMMAND = CommandSpec(
+    name="slack_shared_channel_admin_contracts",
+    description=(
+        "Focused Slack shared-channel admin and target contracts for route "
+        "list/upsert/delete, operator-only access, subject validation, "
+        "stored/static route merging, outbound target listing, owner changes, "
+        "target authority revocation, route visibility gating, duplicate "
+        "channel-route rejection, and binding-ref validation."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "slack-v2-host-beta",
+        "slack_channel",
+        "--lib",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_SLACK_CHANNEL_ADMIN_CLIENT_COMMAND = CommandSpec(
+    name="webui_v2_slack_channel_admin_client_contracts",
+    description=(
+        "Focused WebUI v2 Slack shared-channel admin client contracts for "
+        "allowed-channel normalization, list/save route selection, explicit "
+        "subject payloads, partial subject preservation, setup-panel dirty "
+        "field protection, secret validation, and picker error states."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/components/slack-channel-picker.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/components/slack-setup-panel.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/lib/slack-channels-api.test.mjs",
+    ],
+)
+
 SLACK_DELIVERY_COMMAND = CommandSpec(
     name="slack_delivery_contracts",
     description=(
@@ -3752,6 +3794,37 @@ CASES: dict[str, CaseSpec] = {
             "rate limiting, adapter panic/timeout response mapping, route "
             "descriptor body/rate policy, e2e native ProductAdapter flow, "
             "and env-enabled serve route mounting."
+        ),
+    ),
+    "slack_shared_channel_admin_regression": CaseSpec(
+        name="slack_shared_channel_admin_regression",
+        feature="Slack shared-channel admin and target workflow",
+        category="Hermetic Slack Shared-Channel Admin Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-054-TC-01",
+            "REBCLI-054-TC-02",
+            "REBCLI-054-TC-03",
+            "REBCLI-054-TC-04",
+            "REBCLI-054-TC-05",
+            "REBCLI-054-TC-06",
+            "REBCLI-054-TC-07",
+            "REBCLI-054-TC-08",
+            "REBCLI-054-TC-09",
+            "REBCLI-054-TC-10",
+            "REBCLI-054-TC-11",
+        ],
+        commands=[
+            SLACK_SHARED_CHANNEL_ADMIN_COMMAND,
+            WEBUI_V2_SLACK_CHANNEL_ADMIN_CLIENT_COMMAND,
+        ],
+        notes=(
+            "Covers Slack shared-channel admin rows without live Slack "
+            "network calls: WebUI channel route list/upsert/delete, "
+            "operator-only and cross-tenant gating, dynamic/static route "
+            "merging, route owner changes, outbound target authority updates, "
+            "invalid/duplicate channel validation, client allowed-channel "
+            "normalization/save/list payloads, subject preservation, setup "
+            "dirty-field protection, and picker error states."
         ),
     ),
     "slack_host_beta_serve_mount_regression": CaseSpec(

@@ -1839,6 +1839,53 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 commands[1]["command"],
             )
 
+    def test_slack_shared_channel_admin_case_dry_run_maps_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "slack_shared_channel_admin_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-054-TC-01",
+                    "REBCLI-054-TC-02",
+                    "REBCLI-054-TC-03",
+                    "REBCLI-054-TC-04",
+                    "REBCLI-054-TC-05",
+                    "REBCLI-054-TC-06",
+                    "REBCLI-054-TC-07",
+                    "REBCLI-054-TC-08",
+                    "REBCLI-054-TC-09",
+                    "REBCLI-054-TC-10",
+                    "REBCLI-054-TC-11",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                [command["name"] for command in commands],
+                [
+                    "slack_shared_channel_admin_contracts",
+                    "webui_v2_slack_channel_admin_client_contracts",
+                ],
+            )
+            self.assertIn("--features slack-v2-host-beta", commands[0]["command"])
+            self.assertIn("slack_channel", commands[0]["command"])
+            self.assertIn("slack-channel-picker.test.mjs", commands[1]["command"])
+            self.assertIn("slack-setup-panel.test.mjs", commands[1]["command"])
+            self.assertIn("slack-channels-api.test.mjs", commands[1]["command"])
+
     def test_slack_host_beta_serve_mount_case_dry_run_maps_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
