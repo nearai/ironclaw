@@ -6347,6 +6347,7 @@ CASES: dict[str, CaseSpec] = {
         requires_google_product_auth=True,
         requires_google_runtime_access=True,
         default_enabled=False,
+        qa_matrix_test_ids=["REBCLI-055-TC-18"],
     ),
     "qa_3a_slack_connect": CaseSpec(
         case_qa_3a_slack_connect,
@@ -6508,6 +6509,7 @@ CASES: dict[str, CaseSpec] = {
         requires_google_product_auth=True,
         requires_google_runtime_access=True,
         default_enabled=False,
+        qa_matrix_test_ids=["REBCLI-055-TC-19"],
     ),
     "qa_5a_slack_connect": CaseSpec(
         case_qa_5a_slack_connect,

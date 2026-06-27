@@ -323,6 +323,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     [
                         "qa_2d_calendar_prep_live_chat",
                         "qa_2f_calendar_prep_email_delivery",
+                        "qa_4e_github_release_email_delivery",
                     ],
                 )
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -360,6 +361,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertIn(
             "REBCLI-055-TC-06",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
+        self.assertIn(
+            "REBCLI-055-TC-18",
+            manifest["qa_matrix"]["represented_test_ids"],
+        )
+        self.assertIn(
+            "REBCLI-055-TC-19",
             manifest["qa_matrix"]["represented_test_ids"],
         )
         self.assertIn(
@@ -636,10 +645,18 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             cases["qa_2f_calendar_prep_email_delivery"]["status"],
             "gated:requires_live_google_product_auth",
         )
+        self.assertEqual(
+            cases["qa_2f_calendar_prep_email_delivery"]["qa_matrix_test_ids"],
+            ["REBCLI-055-TC-18"],
+        )
         self.assertTrue(cases["qa_4e_github_release_email_delivery"]["implemented"])
         self.assertEqual(
             cases["qa_4e_github_release_email_delivery"]["status"],
             "gated:requires_live_google_product_auth",
+        )
+        self.assertEqual(
+            cases["qa_4e_github_release_email_delivery"]["qa_matrix_test_ids"],
+            ["REBCLI-055-TC-19"],
         )
         self.assertTrue(cases["qa_5d_slack_strategy_doc_answer"]["implemented"])
         self.assertTrue(cases["qa_5d_slack_strategy_doc_answer"]["requires_slack_target"])
