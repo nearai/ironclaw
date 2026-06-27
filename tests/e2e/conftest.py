@@ -616,7 +616,8 @@ async def reset_mock_llm_state(mock_llm_server):
             f"{mock_llm_server}/__mock/capability_policy/reset",
             timeout=10,
         )
-        response.raise_for_status()
+        if response.status_code != 404:
+            response.raise_for_status()
 
 
 @pytest.fixture(autouse=True)
