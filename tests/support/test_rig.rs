@@ -1586,6 +1586,7 @@ impl TestRigBuilder {
             channels,
             None, // heartbeat_config
             None, // hygiene_config
+            None, // snapshot_config
             routine_config,
             Some(Arc::clone(&components.context_manager)),
             Some(Arc::clone(&session_manager_ref)),

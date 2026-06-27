@@ -3329,6 +3329,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(Arc::new(crate::context::ContextManager::new(1))),
             None,
         );
@@ -4753,6 +4754,7 @@ mod tests {
             },
             deps,
             Arc::new(manager),
+            None,
             None,
             None,
             None,

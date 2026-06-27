@@ -363,6 +363,12 @@ impl Agent {
         let runner = crate::agent::HeartbeatRunner::new(
             crate::agent::HeartbeatConfig::default(),
             crate::workspace::hygiene::HygieneConfig::default(),
+            crate::workspace::snapshot::SnapshotConfig {
+                enabled: false, // manual heartbeat only runs check, not snapshot
+                cadence_hours: 24,
+                snapshot_path: std::path::PathBuf::new(),
+                state_path: std::path::PathBuf::new(),
+            },
             workspace.clone(),
             self.llm().clone(),
         );

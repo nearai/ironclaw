@@ -39,6 +39,7 @@ mod sandbox;
 mod search;
 mod secrets;
 mod skills;
+pub(crate) mod snapshot;
 mod transcription;
 mod tunnel;
 mod wasm;
@@ -72,6 +73,7 @@ pub use self::sandbox::{AcpModeConfig, ClaudeCodeConfig, SandboxModeConfig};
 pub use self::search::WorkspaceSearchConfig;
 pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
+pub use self::snapshot::SnapshotConfig;
 pub use self::transcription::TranscriptionConfig;
 pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
@@ -119,6 +121,7 @@ pub struct Config {
     pub builder: BuilderModeConfig,
     pub heartbeat: HeartbeatConfig,
     pub hygiene: HygieneConfig,
+    pub snapshot: SnapshotConfig,
     pub routines: RoutineConfig,
     /// Resolved runtime profile / deployment-mode policy. Source of truth for
     /// PR 5+ planner integration (which backends to expose, what approval
@@ -247,6 +250,7 @@ impl Config {
             },
             heartbeat: HeartbeatConfig::default(),
             hygiene: HygieneConfig::default(),
+            snapshot: SnapshotConfig::default(),
             routines: RoutineConfig {
                 enabled: false,
                 ..RoutineConfig::default()
@@ -603,6 +607,7 @@ impl Config {
             builder: BuilderModeConfig::resolve(settings)?,
             heartbeat: HeartbeatConfig::resolve(settings)?,
             hygiene: HygieneConfig::resolve(settings)?,
+            snapshot: SnapshotConfig::resolve()?,
             routines: RoutineConfig::resolve(settings)?,
             // PR 3 of #3045: read runtime profile / deployment mode from
             // env vars only for now. CLI overrides arrive via
