@@ -456,6 +456,22 @@ WEBUI_V2_SHELL_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_TEE_CLIENT_COMMAND = CommandSpec(
+    name="webui_v2_tee_attestation_client_contracts",
+    description=(
+        "Focused WebUI v2 TEE attestation client contracts for public-host "
+        "endpoint derivation, local/IP suppression, attestation/report fetch "
+        "paths, clipboard payload formatting, hidden unavailable state, "
+        "loading/error/copy UI states, and header integration."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/lib/tee-attestation.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/layout/shell-static-contracts.test.mjs",
+    ],
+)
+
 WEBUI_V2_OPERATOR_LOGS_HANDLER_COMMAND = CommandSpec(
     name="webui_v2_operator_logs_handler_contract",
     description=(
@@ -1894,6 +1910,29 @@ CASES: dict[str, CaseSpec] = {
             "shape, static JS suite, embedded static asset/router tests, and "
             "composition static route contracts. This is not browser/live "
             "coverage and does not duplicate PR #5348."
+        ),
+    ),
+    "webui_v2_tee_attestation_regression": CaseSpec(
+        name="webui_v2_tee_attestation_regression",
+        feature="WebUI v2 TEE attestation indicator and report copy",
+        category="Hermetic TEE Attestation Client Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-076-TC-01",
+            "REBCLI-076-TC-02",
+            "REBCLI-076-TC-03",
+            "REBCLI-076-TC-04",
+            "REBCLI-076-TC-05",
+            "REBCLI-076-TC-06",
+        ],
+        commands=[WEBUI_V2_TEE_CLIENT_COMMAND],
+        notes=(
+            "Covers WebUI v2 TEE attestation rows at the static client "
+            "contract layer: deployment-owned API endpoint derivation, "
+            "localhost/IP suppression, encoded instance attestation fetch, "
+            "on-demand report fetch with reuse/error state, clipboard payload "
+            "formatting and no-clipboard gating, hidden shield unavailable "
+            "state, loading/error/copy UI states, and PageHeader integration. "
+            "Live enclave evidence remains outside this hermetic lane."
         ),
     ),
     "webui_v2_filesystem_api_regression": CaseSpec(
