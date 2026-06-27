@@ -2995,6 +2995,13 @@ async def _gmail_delivery_target_email(
     if configured:
         return configured[1]
 
+    return await _gmail_profile_email(access_token=access_token)
+
+
+async def _gmail_profile_email(
+    *,
+    access_token: str,
+) -> str:
     import httpx
 
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -3820,6 +3827,7 @@ async def case_qa_2f_calendar_prep_email_delivery(ctx: LiveQaContext) -> ProbeRe
             access_token=access_token,
             extra_env=ctx.env,
         )
+        sender_email = await _gmail_profile_email(access_token=access_token)
     except Exception as exc:
         return _result(
             "qa_2f_calendar_prep_email_delivery",
@@ -3831,6 +3839,24 @@ async def case_qa_2f_calendar_prep_email_delivery(ctx: LiveQaContext) -> ProbeRe
                 "target_email_present": False,
             },
         )
+
+    email_subject = f"Reborn QA 2F meeting prep {suffix}"
+    email_body = (
+        f"{marker}\n\n"
+        "Reborn WebUIv2 live QA 2F calendar-prep delivery check. "
+        "This message confirms the Gmail side effect after inspecting Calendar."
+    )
+    email_tool_input = json.dumps(
+        {
+            "message": {
+                "from": sender_email,
+                "to": target_email,
+                "subject": email_subject,
+                "body": email_body,
+            }
+        },
+        separators=(",", ":"),
+    )
 
     result = await _live_chat_with_extensions_case(
         ctx,
@@ -3868,16 +3894,17 @@ async def case_qa_2f_calendar_prep_email_delivery(ctx: LiveQaContext) -> ProbeRe
             "QA case 2F: perform the meeting-prep email side effect now. Use my "
             "live Google Calendar connection to inspect upcoming events, and use "
             "Google Drive or Docs and live web search for context if available. "
-            f"Send a Gmail email to {target_email} with subject "
-            f"`Reborn QA 2F meeting prep {suffix}`. The email body must include "
-            f"the exact marker {marker}. If no upcoming meeting is available, "
-            "send a short email that clearly says no upcoming calendar event was "
-            "available. In the final answer include the exact marker "
+            "Send the Gmail message using structured message fields, not "
+            f"`message.raw`. Use this exact gmail.send_message input: "
+            f"{email_tool_input}. If no upcoming meeting is available, still "
+            "send this exact message after checking Calendar. In the final answer "
+            "include the exact marker "
             f"{marker}, include the word Gmail, and include the word email."
         ),
         timeout=420.0,
         extra_details={
             "target_email_present": True,
+            "gmail_structured_input": True,
             "target_source": (
                 "env"
                 if _first_env_value(
@@ -4522,6 +4549,7 @@ async def case_qa_4e_github_release_email_delivery(ctx: LiveQaContext) -> ProbeR
             access_token=access_token,
             extra_env=ctx.env,
         )
+        sender_email = await _gmail_profile_email(access_token=access_token)
     except Exception as exc:
         return _result(
             "qa_4e_github_release_email_delivery",
@@ -4533,6 +4561,23 @@ async def case_qa_4e_github_release_email_delivery(ctx: LiveQaContext) -> ProbeR
                 "target_email_present": False,
             },
         )
+
+    email_subject = f"Reborn QA 4E release {release['tag_name']} {suffix}"
+    email_body = (
+        f"{marker}\n\n"
+        f"GitHub release check for nearai/ironclaw: {release['tag_name']}."
+    )
+    email_tool_input = json.dumps(
+        {
+            "message": {
+                "from": sender_email,
+                "to": target_email,
+                "subject": email_subject,
+                "body": email_body,
+            }
+        },
+        separators=(",", ":"),
+    )
 
     result = await _live_chat_with_extensions_case(
         ctx,
@@ -4555,11 +4600,10 @@ async def case_qa_4e_github_release_email_delivery(ctx: LiveQaContext) -> ProbeR
             "QA case 4E: perform the GitHub release email side effect now. "
             "Check the latest public nearai/ironclaw release using live web or "
             f"HTTP context. The release API URL is {release['api_url']} and the "
-            f"expected latest release tag is {release['tag_name']}. Send a Gmail "
-            f"email to {target_email} with subject `Reborn QA 4E release "
-            f"{release['tag_name']} {suffix}`. The email body must include the "
-            f"exact marker {marker}, the word GitHub, and the release tag "
-            f"{release['tag_name']}. In the final answer include the exact marker "
+            "expected latest release tag is "
+            f"{release['tag_name']}. Send the Gmail message using structured "
+            "message fields, not `message.raw`. Use this exact gmail.send_message "
+            f"input: {email_tool_input}. In the final answer include the exact marker "
             f"{marker}, include the word Gmail, and include the release tag "
             f"{release['tag_name']}."
         ),
@@ -4567,6 +4611,7 @@ async def case_qa_4e_github_release_email_delivery(ctx: LiveQaContext) -> ProbeR
         extra_details={
             **release,
             "target_email_present": True,
+            "gmail_structured_input": True,
             "target_source": (
                 "env"
                 if _first_env_value(

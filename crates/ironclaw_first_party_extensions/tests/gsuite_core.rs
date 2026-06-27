@@ -3,6 +3,7 @@ mod support;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, CredentialAccount,
     CredentialAccountChoiceRequest, CredentialAccountLabel, CredentialAccountListPage,
@@ -712,6 +713,68 @@ async fn gsuite_handler_uses_selected_credential_handle_for_runtime_egress() {
         requests[0].credential_injections[0].handle,
         SecretHandle::new("google-access-token").unwrap()
     );
+}
+
+#[tokio::test]
+async fn gmail_send_message_accepts_structured_fields_and_encodes_raw_body() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
+    let egress = Arc::new(RecordingEgress::permissive_success());
+
+    dispatch_ok(
+        auth,
+        scope,
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        json!({
+            "message": {
+                "to": ["qa@example.test", "ops@example.test"],
+                "cc": "lead@example.test",
+                "subject": "Reborn QA marker",
+                "body": "REBORN_QA_GMAIL_MARKER"
+            }
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert!(body.get("to").is_none());
+    assert!(body.get("subject").is_none());
+    let raw = body["raw"].as_str().expect("raw body");
+    let decoded = String::from_utf8(URL_SAFE_NO_PAD.decode(raw).unwrap()).unwrap();
+    assert!(decoded.contains("To: qa@example.test, ops@example.test\r\n"));
+    assert!(decoded.contains("Cc: lead@example.test\r\n"));
+    assert!(decoded.contains("Subject: Reborn QA marker\r\n"));
+    assert!(decoded.contains("\r\n\r\nREBORN_QA_GMAIL_MARKER"));
+}
+
+#[tokio::test]
+async fn gmail_send_message_rejects_structured_header_injection_before_egress() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
+    let egress = Arc::new(RecordingEgress::permissive_success());
+
+    let error = dispatch_error(
+        auth,
+        scope,
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        json!({
+            "message": {
+                "to": "qa@example.test\r\nBcc: leaked@example.test",
+                "subject": "Reborn QA marker",
+                "body": "REBORN_QA_GMAIL_MARKER"
+            }
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+    assert!(egress.requests().is_empty());
 }
 
 #[tokio::test]

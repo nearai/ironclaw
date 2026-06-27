@@ -83,12 +83,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertFalse(absent.clicked)
 
     def test_live_google_side_effect_cases_install_required_extensions(self):
-        captured: dict[str, list[dict[str, object]]] = {}
+        captured: dict[str, dict[str, object]] = {}
         spreadsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
 
         async def fake_live_chat_with_extensions_case(_ctx, **kwargs):
             case_name = kwargs["case_name"]
-            captured[case_name] = kwargs["extensions"]
+            captured[case_name] = kwargs
             details = {
                 "text_excerpt": (
                     f"Created https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
@@ -104,6 +104,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         async def fake_gmail_delivery_target_email(**_kwargs):
             return "qa@example.test"
+
+        async def fake_gmail_profile_email(**_kwargs):
+            return "sender@example.test"
+
+        async def fake_live_github_latest_release(*_args, **_kwargs):
+            return {
+                "api_url": "https://api.github.test/repos/nearai/ironclaw/releases/latest",
+                "tag_name": "ironclaw-v0.test",
+            }
 
         async def fake_wait_for_gmail_marker(**_kwargs):
             return {"found": True}
@@ -129,6 +138,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ),
             patch.object(
                 run_live_qa,
+                "_gmail_profile_email",
+                side_effect=fake_gmail_profile_email,
+            ),
+            patch.object(
+                run_live_qa,
+                "_live_github_latest_release",
+                side_effect=fake_live_github_latest_release,
+            ),
+            patch.object(
+                run_live_qa,
                 "_wait_for_gmail_marker",
                 side_effect=fake_wait_for_gmail_marker,
             ),
@@ -143,6 +162,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 asyncio.run(run_live_qa.case_qa_2f_calendar_prep_email_delivery(ctx)).success
             )
             self.assertTrue(
+                asyncio.run(run_live_qa.case_qa_4e_github_release_email_delivery(ctx)).success
+            )
+            self.assertTrue(
                 asyncio.run(run_live_qa.case_qa_6c_gmail_to_sheet_live_chat(ctx)).success
             )
             self.assertTrue(
@@ -150,9 +172,22 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
 
         extensions_by_case = {
-            case: {extension["package_id"]: extension for extension in extensions}
-            for case, extensions in captured.items()
+            case: {extension["package_id"]: extension for extension in kwargs["extensions"]}
+            for case, kwargs in captured.items()
         }
+        prompt_2f = str(captured["qa_2f_calendar_prep_email_delivery"]["prompt"])
+        self.assertIn("not `message.raw`", prompt_2f)
+        self.assertIn('"from":"sender@example.test"', prompt_2f)
+        self.assertIn('"to":"qa@example.test"', prompt_2f)
+        self.assertIn('"body":"REBORN_QA_2F_CALENDAR_PREP_EMAIL_DELIVERED_', prompt_2f)
+
+        prompt_4e = str(captured["qa_4e_github_release_email_delivery"]["prompt"])
+        self.assertIn("not `message.raw`", prompt_4e)
+        self.assertIn('"from":"sender@example.test"', prompt_4e)
+        self.assertIn('"to":"qa@example.test"', prompt_4e)
+        self.assertIn('"body":"REBORN_QA_4E_GITHUB_RELEASE_EMAIL_DELIVERED_', prompt_4e)
+        self.assertIn("ironclaw-v0.test", prompt_4e)
+
         self.assertTrue(
             extensions_by_case["qa_2f_calendar_prep_email_delivery"]["google-docs"].get(
                 "ensure_installed",

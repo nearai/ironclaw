@@ -7,6 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::FutureExt as _;
 use ironclaw_auth::{
     CredentialAccountRecordSource, CredentialAccountService, CredentialRecoveryKind,
@@ -734,11 +735,65 @@ fn gmail_get_message_request(
 fn gmail_send_message_request(
     input: &Value,
 ) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
+    let message = gmail_outgoing_message_body(required_object(input, "message")?)?;
     Ok((
         NetworkMethod::Post,
         format!("{GMAIL_API_BASE}/users/me/messages/send"),
-        json_body(required_object(input, "message")?)?,
+        json_body(&message)?,
     ))
+}
+
+fn gmail_outgoing_message_body(message: &Value) -> Result<Value, GsuiteDispatchError> {
+    if optional_str(message, "raw")?.is_some() {
+        return Ok(message.clone());
+    }
+
+    let mut body = json!({
+        "raw": encode_plain_text_gmail_message(message)?,
+    });
+    if let Some(thread_id) = optional_str(message, "threadId")? {
+        body["threadId"] = json!(thread_id);
+    }
+    Ok(body)
+}
+
+fn encode_plain_text_gmail_message(message: &Value) -> Result<String, GsuiteDispatchError> {
+    let to = required_recipient_header(message, "to")?;
+    let cc = optional_recipient_header(message, "cc")?;
+    let bcc = optional_recipient_header(message, "bcc")?;
+    let from = optional_header_value(message, "from")?;
+    let subject = required_header_value(message, "subject")?;
+    let body = required_str(message, "body")?;
+    if body.is_empty() {
+        return Err(input_error());
+    }
+
+    let mut rfc822 = String::new();
+    if let Some(from) = from {
+        push_mail_header(&mut rfc822, "From", from);
+    }
+    push_mail_header(&mut rfc822, "To", &to);
+    if let Some(cc) = cc {
+        push_mail_header(&mut rfc822, "Cc", &cc);
+    }
+    if let Some(bcc) = bcc {
+        push_mail_header(&mut rfc822, "Bcc", &bcc);
+    }
+    push_mail_header(&mut rfc822, "Subject", subject);
+    rfc822.push_str("MIME-Version: 1.0\r\n");
+    rfc822.push_str("Content-Type: text/plain; charset=UTF-8\r\n");
+    rfc822.push_str("Content-Transfer-Encoding: 8bit\r\n");
+    rfc822.push_str("\r\n");
+    rfc822.push_str(body);
+
+    Ok(URL_SAFE_NO_PAD.encode(rfc822.as_bytes()))
+}
+
+fn push_mail_header(message: &mut String, name: &str, value: &str) {
+    message.push_str(name);
+    message.push_str(": ");
+    message.push_str(value);
+    message.push_str("\r\n");
 }
 
 fn gmail_create_draft_request(
@@ -963,6 +1018,61 @@ fn optional_str<'a>(input: &'a Value, key: &str) -> Result<Option<&'a str>, Gsui
         .get(key)
         .map(|value| value.as_str().ok_or_else(input_error))
         .transpose()
+}
+
+fn required_header_value<'a>(input: &'a Value, key: &str) -> Result<&'a str, GsuiteDispatchError> {
+    let value = required_str(input, key)?;
+    validate_header_value(value)
+}
+
+fn optional_header_value<'a>(
+    input: &'a Value,
+    key: &str,
+) -> Result<Option<&'a str>, GsuiteDispatchError> {
+    optional_str(input, key)?
+        .map(validate_header_value)
+        .transpose()
+}
+
+fn required_recipient_header(input: &Value, key: &str) -> Result<String, GsuiteDispatchError> {
+    recipient_header(input.get(key).ok_or_else(input_error)?)
+}
+
+fn optional_recipient_header(
+    input: &Value,
+    key: &str,
+) -> Result<Option<String>, GsuiteDispatchError> {
+    input.get(key).map(recipient_header).transpose()
+}
+
+fn recipient_header(value: &Value) -> Result<String, GsuiteDispatchError> {
+    match value {
+        Value::String(value) => Ok(validate_header_value(value)?.to_string()),
+        Value::Array(values) => {
+            if values.is_empty() {
+                return Err(input_error());
+            }
+            values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .ok_or_else(input_error)
+                        .and_then(validate_header_value)
+                        .map(ToString::to_string)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(|values| values.join(", "))
+        }
+        _ => Err(input_error()),
+    }
+}
+
+fn validate_header_value(value: &str) -> Result<&str, GsuiteDispatchError> {
+    if value.trim().is_empty() || value.contains('\r') || value.contains('\n') {
+        return Err(input_error());
+    }
+    Ok(value)
 }
 
 fn required_object<'a>(input: &'a Value, key: &str) -> Result<&'a Value, GsuiteDispatchError> {
