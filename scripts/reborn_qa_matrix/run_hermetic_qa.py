@@ -1805,6 +1805,12 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-066-TC-04",
             "REBCLI-066-TC-05",
             "REBCLI-066-TC-06",
+            "REBCLI-084-TC-01",
+            "REBCLI-084-TC-02",
+            "REBCLI-084-TC-03",
+            "REBCLI-084-TC-04",
+            "REBCLI-084-TC-05",
+            "REBCLI-084-TC-06",
         ],
         commands=[WEBUI_V2_WORKSPACE_PROJECT_CLIENT_COMMAND],
         notes=(
@@ -1812,11 +1818,13 @@ CASES: dict[str, CaseSpec] = {
             "static client contract layer without duplicating PR #5348 "
             "browser project/workspace smoke coverage: root mount browsing, "
             "mount-qualified directory entries, mount-root directory handling, "
-            "bounded text preview via authed bytes, known-binary download-only "
-            "behavior, project overview/detail mapping, project create/update "
-            "payloads, membership route encoding, and TODO subresource stubs "
-            "that must not call unsupported v1 APIs. Browser-smoke TC-20 "
-            "stays guarded by PR #5348/live coverage."
+            "bounded text and image preview via authed bytes, oversized "
+            "text/image download-only behavior, unknown MIME UTF-8 versus "
+            "binary sniffing, known-binary download-only behavior, project "
+            "overview/detail mapping, project create/update payloads, "
+            "membership route encoding, and TODO subresource stubs that must "
+            "not call unsupported v1 APIs. Browser-smoke rows stay guarded by "
+            "PR #5348/live coverage."
         ),
     ),
     "webui_v2_automations_client_regression": CaseSpec(

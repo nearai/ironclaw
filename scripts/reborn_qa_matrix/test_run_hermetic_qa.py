@@ -287,6 +287,14 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-084-TC-01",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "REBCLI-084-TC-08",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-097-TC-01",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -584,6 +592,12 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-066-TC-04",
                     "REBCLI-066-TC-05",
                     "REBCLI-066-TC-06",
+                    "REBCLI-084-TC-01",
+                    "REBCLI-084-TC-02",
+                    "REBCLI-084-TC-03",
+                    "REBCLI-084-TC-04",
+                    "REBCLI-084-TC-05",
+                    "REBCLI-084-TC-06",
                 ],
             )
             commands = results["results"][0]["details"]["commands"]
