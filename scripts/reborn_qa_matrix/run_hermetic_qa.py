@@ -394,6 +394,49 @@ WEBUI_V2_HIDDEN_STUBBED_ROUTE_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_LOGS_CLIENT_COMMAND = CommandSpec(
+    name="webui_v2_logs_client_contracts",
+    description=(
+        "Focused WebUI v2 logs screen client contracts for scoped filter "
+        "normalization, polling/fallback behavior, unsupported operator route "
+        "handling, empty/error states, page scroll layout, and chat/automation "
+        "scoped log links."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/pages/logs/lib/logs-data.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/pages/logs/hooks/useLogs.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/pages/logs/logs-page.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/pages/automations/components/automation-recent-runs.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/pages/chat/lib/chat.test.mjs",
+    ],
+)
+
+WEBUI_V2_OPERATOR_LOGS_HANDLER_COMMAND = CommandSpec(
+    name="webui_v2_operator_logs_handler_contract",
+    description=(
+        "Focused WebUI v2 operator logs handler contract for enforcing "
+        "operator capability before serving scoped operator log queries."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_handlers_contract",
+        "operator_logs_require_operator_capability",
+        "--",
+        "--exact",
+        "--format",
+        "terse",
+    ],
+)
+
 SLACK_PERSONAL_BINDING_ROUTE_COMMAND = CommandSpec(
     name="slack_personal_binding_oauth_route_contracts",
     description=(
@@ -1731,6 +1774,32 @@ CASES: dict[str, CaseSpec] = {
             "personal DM open/list/resolve, shared-channel target resolution, "
             "host-mediated HTTPS egress policy, opaque credential-handle bearer "
             "injection, and token-safe Slack ok:false handling."
+        ),
+    ),
+    "webui_v2_logs_screen_regression": CaseSpec(
+        name="webui_v2_logs_screen_regression",
+        feature="WebUI v2 logs screen and scoped log filters",
+        category="Hermetic Logs Screen Client/API Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-073-TC-01",
+            "REBCLI-073-TC-02",
+            "REBCLI-073-TC-03",
+            "REBCLI-073-TC-04",
+            "REBCLI-073-TC-05",
+            "REBCLI-073-TC-06",
+        ],
+        commands=[
+            WEBUI_V2_LOGS_CLIENT_COMMAND,
+            WEBUI_V2_OPERATOR_LOGS_HANDLER_COMMAND,
+        ],
+        notes=(
+            "Covers the non-browser-smoke WebUI v2 logs rows without duplicating "
+            "PR #5348 scoped logs browser coverage: scoped query normalization, "
+            "public/operator log fallback behavior, paused scope reloads, stale "
+            "entry suppression, unsupported operator-route handling, empty/error "
+            "states, scroll layout, chat duplicate-log-bar suppression, "
+            "automation recent-run log links, and operator logs capability "
+            "enforcement."
         ),
     ),
     "webui_v2_filesystem_api_regression": CaseSpec(
