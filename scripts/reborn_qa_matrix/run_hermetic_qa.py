@@ -5634,13 +5634,20 @@ def _selected_case_names(args: argparse.Namespace) -> list[str]:
         return [
             name
             for name, spec in CASES.items()
-            if spec.default_enabled
-            and (args.run_existing_ci_coverage or _case_has_matrix_only_command(spec))
+            if spec.default_enabled and _case_has_matrix_only_command(spec)
         ]
+    active_names = {
+        name for name, spec in CASES.items() if _case_has_matrix_only_command(spec)
+    }
     names: list[str] = []
     for name in args.case:
         if name not in CASES:
             raise SystemExit(f"unknown case {name!r}; valid cases: {', '.join(CASES)}")
+        if name not in active_names:
+            raise SystemExit(
+                f"case {name!r} has only existing-CI coverage and is not "
+                "runnable in this QA lane"
+            )
         if name not in names:
             names.append(name)
     return names
@@ -5697,11 +5704,7 @@ def _case_existing_ci_only(case: CaseSpec) -> bool:
     return bool(case.commands) and not _case_has_matrix_only_command(case)
 
 
-def _commands_for_case(
-    case: CaseSpec, *, run_existing_ci_coverage: bool
-) -> list[CommandSpec]:
-    if run_existing_ci_coverage:
-        return case.commands
+def _commands_for_case(case: CaseSpec) -> list[CommandSpec]:
     return [
         command for command in case.commands if _command_ci_coverage(command) is None
     ]
@@ -5724,18 +5727,23 @@ def _removed_existing_ci_commands(case: CaseSpec) -> list[dict[str, str | None]]
 def write_case_manifest(
     output_dir: Path,
     selected_cases: list[str],
-    *,
-    run_existing_ci_coverage: bool = False,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     selected_specs = [CASES[name] for name in selected_cases]
     all_specs = list(CASES.values())
+    active_case_items = [
+        (name, spec)
+        for name, spec in CASES.items()
+        if _case_has_matrix_only_command(spec)
+    ]
     matrix_path = os.environ.get("REBORN_QA_MATRIX_PATH", "").strip()
     manifest = {
         "generated_at": _now_iso(),
         "selected_cases": selected_cases,
         "default_cases": [
-            name for name, spec in CASES.items() if spec.default_enabled
+            name
+            for name, spec in CASES.items()
+            if spec.default_enabled and _case_has_matrix_only_command(spec)
         ],
         "qa_matrix": {
             "source": "local_xlsx",
@@ -5768,17 +5776,11 @@ def write_case_manifest(
                         "coverage_source": "matrix_only_or_new",
                         "existing_ci_coverage": None,
                     }
-                    for command in _commands_for_case(
-                        spec, run_existing_ci_coverage=run_existing_ci_coverage
-                    )
+                    for command in _commands_for_case(spec)
                 ],
-                "removed_existing_ci_commands": (
-                    []
-                    if run_existing_ci_coverage
-                    else _removed_existing_ci_commands(spec)
-                ),
+                "removed_existing_ci_commands": _removed_existing_ci_commands(spec),
             }
-            for name, spec in CASES.items()
+            for name, spec in active_case_items
         ],
     }
     path = output_dir / "case-manifest.json"
@@ -5793,7 +5795,6 @@ def run_command(
     case_name: str,
     timeout_seconds: int,
     dry_run: bool,
-    run_existing_ci_coverage: bool = False,
 ) -> dict[str, Any]:
     log_base = f"{_safe_log_name(case_name)}.{_safe_log_name(command.name)}"
     stdout_log = output_dir / f"{log_base}.stdout.log"
@@ -5867,14 +5868,11 @@ def run_case(
     output_dir: Path,
     timeout_seconds: int,
     dry_run: bool,
-    run_existing_ci_coverage: bool = False,
 ) -> dict[str, Any]:
     started = time.monotonic()
     command_results: list[dict[str, Any]] = []
     failed = False
-    commands = _commands_for_case(
-        case, run_existing_ci_coverage=run_existing_ci_coverage
-    )
+    commands = _commands_for_case(case)
     for command in commands:
         if failed:
             command_results.append(
@@ -5894,17 +5892,12 @@ def run_case(
             case_name=case.name,
             timeout_seconds=timeout_seconds,
             dry_run=dry_run,
-            run_existing_ci_coverage=run_existing_ci_coverage,
         )
         command_results.append(result)
         failed = not bool(result["success"])
 
     success = all(bool(result.get("success")) for result in command_results)
-    removed_existing_ci_commands = (
-        []
-        if run_existing_ci_coverage
-        else _removed_existing_ci_commands(case)
-    )
+    removed_existing_ci_commands = _removed_existing_ci_commands(case)
     return {
         "provider": PROVIDER,
         "mode": MODE,
@@ -5928,7 +5921,6 @@ def write_results(
     selected_cases: list[str],
     timeout_seconds: int,
     dry_run: bool,
-    run_existing_ci_coverage: bool,
     results: list[dict[str, Any]],
 ) -> Path:
     passed = sum(1 for result in results if result["success"])
@@ -5939,7 +5931,7 @@ def write_results(
         "generated_at": _now_iso(),
         "success": failed == 0,
         "dry_run": dry_run,
-        "run_existing_ci_coverage": run_existing_ci_coverage,
+        "run_existing_ci_coverage": False,
         "selected_cases": selected_cases,
         "timeout_seconds": timeout_seconds,
         "summary": {
@@ -5993,14 +5985,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="write manifest/results without executing cargo commands",
     )
     parser.add_argument(
-        "--run-existing-ci-coverage",
-        action="store_true",
-        help=(
-            "also execute commands marked as already covered by existing GitHub "
-            "Actions CI; by default they are removed from the active QA plan"
-        ),
-    )
-    parser.add_argument(
         "--list-cases",
         action="store_true",
         help="print available cases and exit",
@@ -6013,6 +5997,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.list_cases:
         for name, spec in CASES.items():
+            if not _case_has_matrix_only_command(spec):
+                continue
             default = "default" if spec.default_enabled else "targeted"
             print(f"{name}\t{default}\t{','.join(spec.qa_matrix_test_ids)}")
         return 0
@@ -6022,7 +6008,6 @@ def main(argv: list[str] | None = None) -> int:
     write_case_manifest(
         args.output_dir,
         selected_cases,
-        run_existing_ci_coverage=args.run_existing_ci_coverage,
     )
     results = [
         run_case(
@@ -6030,7 +6015,6 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.output_dir,
             timeout_seconds=timeout_seconds,
             dry_run=args.dry_run,
-            run_existing_ci_coverage=args.run_existing_ci_coverage,
         )
         for name in selected_cases
     ]
@@ -6039,7 +6023,6 @@ def main(argv: list[str] | None = None) -> int:
         selected_cases=selected_cases,
         timeout_seconds=timeout_seconds,
         dry_run=args.dry_run,
-        run_existing_ci_coverage=args.run_existing_ci_coverage,
         results=results,
     )
     print(str(results_path))
