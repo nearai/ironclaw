@@ -2,12 +2,8 @@ import { Link } from "react-router";
 import { html } from "../lib/html.js";
 import { Icon } from "../design-system/icons.js";
 import { useT } from "../lib/i18n.js";
+import { sidebarTraceCreditsSummary } from "../lib/trace-credits-card.js";
 import { useTraceCredits } from "../pages/settings/hooks/useTraceCredits.js";
-
-function formatSignedCredit(value) {
-  const numeric = Number(value) || 0;
-  return `${numeric >= 0 ? "+" : ""}${numeric.toFixed(2)}`;
-}
 
 // Compact Trace Commons credits summary pinned above the conversation list.
 //
@@ -22,13 +18,11 @@ function formatSignedCredit(value) {
 export function SidebarTraceCredits() {
   const t = useT();
   const { credits } = useTraceCredits();
+  const summary = sidebarTraceCreditsSummary(credits);
 
-  if (!credits || !credits.enrolled) return null;
+  if (!summary) return null;
 
-  const final = formatSignedCredit(credits.final_credit);
-  const accepted = credits.submissions_accepted || 0;
-  const submitted = credits.submissions_submitted || 0;
-  const heldCount = credits.manual_review_hold_count || 0;
+  const { final, accepted, submitted, heldCount } = summary;
 
   return html`
     <div className="px-3 pb-1">

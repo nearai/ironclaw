@@ -472,6 +472,22 @@ WEBUI_V2_TEE_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_TRACE_CREDITS_CLIENT_COMMAND = CommandSpec(
+    name="webui_v2_trace_credits_client_contracts",
+    description=(
+        "Focused WebUI v2 sidebar Trace Commons credits client contracts for "
+        "hidden loading/error/not-enrolled state, signed final-credit "
+        "formatting, accepted/submitted count defaults, positive held-count "
+        "copy, settings/traces navigation, shared trace-credits query key, "
+        "and display-only sidebar wiring."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/lib/trace-credits-card.test.mjs",
+    ],
+)
+
 WEBUI_V2_OPERATOR_LOGS_HANDLER_COMMAND = CommandSpec(
     name="webui_v2_operator_logs_handler_contract",
     description=(
@@ -1933,6 +1949,29 @@ CASES: dict[str, CaseSpec] = {
             "formatting and no-clipboard gating, hidden shield unavailable "
             "state, loading/error/copy UI states, and PageHeader integration. "
             "Live enclave evidence remains outside this hermetic lane."
+        ),
+    ),
+    "webui_v2_sidebar_trace_credits_regression": CaseSpec(
+        name="webui_v2_sidebar_trace_credits_regression",
+        feature="WebUI v2 sidebar Trace Commons credits card",
+        category="Hermetic Trace Credits Sidebar Client Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-077-TC-01",
+            "REBCLI-077-TC-02",
+            "REBCLI-077-TC-03",
+            "REBCLI-077-TC-04",
+            "REBCLI-077-TC-05",
+            "REBCLI-077-TC-06",
+        ],
+        commands=[WEBUI_V2_TRACE_CREDITS_CLIENT_COMMAND],
+        notes=(
+            "Covers the WebUI v2 sidebar Trace Commons credits card at the "
+            "static client contract layer: hidden loading/error/not-enrolled "
+            "states, signed two-decimal final-credit formatting, accepted and "
+            "submitted defaults, positive held-count visibility, "
+            "settings/traces navigation, shared trace-credits react-query key, "
+            "and display-only sidebar placement. Live Trace Commons ledger/API "
+            "behavior remains outside this hermetic lane."
         ),
     ),
     "webui_v2_filesystem_api_regression": CaseSpec(
