@@ -307,9 +307,14 @@ impl DefaultExecutorPipeline {
                     let resume = *resume;
                     pending_input_ack = resume.pending_input_ack;
                     pending_input_ack.ack(host).await?;
-                    let capability_input =
-                        resume_capability_input(resume.state, resume.surface, vec![resume.call])?;
-                    let completed = self.capabilities.process(ctx, capability_input).await?;
+                    let completed = self
+                        .process_resume_capability_calls(
+                            ctx,
+                            resume.state,
+                            resume.surface,
+                            vec![resume.call],
+                        )
+                        .await?;
 
                     let completed = self.post_capability.process(ctx, completed).await?;
 
@@ -452,6 +457,17 @@ impl DefaultExecutorPipeline {
                 }
             }
         }
+    }
+
+    pub(super) async fn process_resume_capability_calls(
+        &self,
+        ctx: StageContext<'_>,
+        state: LoopExecutionState,
+        surface: VisibleCapabilitySurface,
+        calls: Vec<CapabilityCallCandidate>,
+    ) -> Result<TurnCompletedStep, AgentLoopExecutorError> {
+        let capability_input = resume_capability_input(state, surface, calls)?;
+        self.capabilities.process(ctx, capability_input).await
     }
 }
 
