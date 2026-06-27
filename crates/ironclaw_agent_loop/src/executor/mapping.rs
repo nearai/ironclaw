@@ -1,5 +1,5 @@
 use ironclaw_turns::{
-    LoopBlockedKind, LoopFailureKind,
+    LoopBlockedKind, LoopFailureKind, SanitizedFailure,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind,
         CapabilityOutcome, LoopCheckpointKind, LoopGateKind,
@@ -95,6 +95,7 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
     match error.kind {
         AgentLoopHostErrorKind::Unavailable => Some(ModelErrorClass::Unavailable),
         AgentLoopHostErrorKind::Internal => Some(ModelErrorClass::Internal),
+        AgentLoopHostErrorKind::InvalidOutput => Some(ModelErrorClass::InvalidOutput),
         AgentLoopHostErrorKind::BudgetExceeded => Some(ModelErrorClass::ContextOverflow),
         AgentLoopHostErrorKind::BudgetAccountingFailed => Some(ModelErrorClass::Unavailable),
         // Budget approval requirement is a gate, not a transient model
@@ -173,6 +174,41 @@ pub(super) fn capability_failure_kind(kind: &CapabilityFailureKind) -> LoopFailu
     }
 }
 
+pub(super) fn capability_error_failure_category(
+    class: CapabilityErrorClass,
+) -> Result<SanitizedFailure, AgentLoopExecutorError> {
+    sanitized_failure_category(match class {
+        CapabilityErrorClass::Transient => "capability_transient",
+        CapabilityErrorClass::Permanent => "capability_permanent",
+        CapabilityErrorClass::InputInvalid => "capability_input_invalid",
+        CapabilityErrorClass::OperationFailed => "capability_operation_failed",
+        CapabilityErrorClass::PolicyDenied => "capability_policy_denied",
+        CapabilityErrorClass::Unavailable => "capability_unavailable",
+        CapabilityErrorClass::Internal => "capability_internal",
+    })
+}
+
+pub(super) fn model_error_failure_category(
+    class: ModelErrorClass,
+) -> Result<SanitizedFailure, AgentLoopExecutorError> {
+    sanitized_failure_category(match class {
+        ModelErrorClass::Transient => "model_transient",
+        ModelErrorClass::ContextOverflow => "model_context_overflow",
+        ModelErrorClass::ContentFiltered => "model_content_filtered",
+        ModelErrorClass::InvalidOutput => "model_invalid_output",
+        ModelErrorClass::Unavailable => "model_unavailable",
+        ModelErrorClass::Internal => "model_internal",
+    })
+}
+
+fn sanitized_failure_category(
+    category: &'static str,
+) -> Result<SanitizedFailure, AgentLoopExecutorError> {
+    SanitizedFailure::new(category).map_err(|_| AgentLoopExecutorError::PlannerContract {
+        detail: "static failure category was invalid",
+    })
+}
+
 pub(super) fn sanitized_strategy_summary(
     summary: String,
 ) -> Result<SanitizedStrategySummary, AgentLoopExecutorError> {
@@ -217,6 +253,19 @@ mod tests {
         assert_eq!(
             capability_failure_kind(&CapabilityFailureKind::PolicyDenied),
             LoopFailureKind::PolicyDenied
+        );
+    }
+
+    #[test]
+    fn invalid_model_output_is_distinct_from_unavailable() {
+        let error = AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidOutput,
+            "model output was structurally invalid",
+        );
+
+        assert_eq!(
+            model_error_class(&error),
+            Some(ModelErrorClass::InvalidOutput)
         );
     }
 }

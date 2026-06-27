@@ -291,6 +291,13 @@ impl TurnStateStore for DurableLikeTurnStore {
         self.inner.resume_turn(request).await
     }
 
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        self.inner.retry_turn(request).await
+    }
+
     async fn request_cancel(
         &self,
         request: CancelRunRequest,
@@ -436,6 +443,16 @@ impl TurnStateStore for DurableTurnStoreStub {
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
         panic!("store stub should not resume turns")
+    }
+
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        // WS-3 implements this.
+        Err(TurnError::RunNotRetryable {
+            run_id: request.run_id,
+        })
     }
 
     async fn request_cancel(

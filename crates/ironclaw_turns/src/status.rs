@@ -211,7 +211,24 @@ impl<'de> Deserialize<'de> for SanitizedFailure {
         }
 
         let wire = WireFailure::deserialize(deserializer)?;
-        Self::new(wire.category).map_err(serde::de::Error::custom)
+        // Backward compatibility: historical rows used the colon-delimited
+        // category `host_stage_unavailable:model` (one colon between two
+        // non-empty parts) before the charset was tightened to reject `:`.
+        // Normalize *only* that exact shape on the read path so loading a
+        // persisted snapshot never borks — a failed deserialize here would
+        // defeat the whole no-borking-failures goal. Any other colon payload
+        // (`a::b`, `:model`, `host_stage_unavailable:`, `:`) is passed through
+        // untouched so `Self::new` still rejects it; we must not mint values the
+        // strict write path could never produce. The write path stays strict.
+        let normalized = match wire.category.split_once(':') {
+            Some((left, right))
+                if !left.is_empty() && !right.is_empty() && !right.contains(':') =>
+            {
+                format!("{left}_{right}")
+            }
+            _ => wire.category,
+        };
+        Self::new(normalized).map_err(serde::de::Error::custom)
     }
 }
 
@@ -401,6 +418,8 @@ pub enum TurnError {
         resource: TurnCapacityResource,
         cap: u64,
     },
+    #[error("turn run {run_id} is not retryable")]
+    RunNotRetryable { run_id: TurnRunId },
     #[error("invalid turn transition from {from:?} to {to:?}")]
     InvalidTransition { from: TurnStatus, to: TurnStatus },
     #[error("turn run lease mismatch")]
@@ -426,9 +445,10 @@ impl TurnError {
             Self::Unauthorized => TurnErrorCategory::Unauthorized,
             Self::InvalidRequest { .. } => TurnErrorCategory::InvalidRequest,
             Self::Unavailable { .. } => TurnErrorCategory::Unavailable,
-            Self::Conflict { .. } | Self::InvalidTransition { .. } | Self::LeaseMismatch => {
-                TurnErrorCategory::Conflict
-            }
+            Self::Conflict { .. }
+            | Self::RunNotRetryable { .. }
+            | Self::InvalidTransition { .. }
+            | Self::LeaseMismatch => TurnErrorCategory::Conflict,
             Self::CapacityExceeded { .. } => TurnErrorCategory::CapacityExceeded,
             Self::InvalidRunOriginAdapter => TurnErrorCategory::InvalidRequest,
         }
@@ -487,5 +507,54 @@ mod tests {
         let json = serde_json::to_string(&reason).expect("serialize");
         let decoded: BlockedReason = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, reason);
+    }
+
+    #[test]
+    fn sanitized_failure_accepts_snake_case_category() {
+        let failure =
+            SanitizedFailure::new("host_stage_unavailable_model").expect("category is valid");
+        assert_eq!(failure.category(), "host_stage_unavailable_model");
+    }
+
+    #[test]
+    fn sanitized_failure_rejects_colons() {
+        for invalid in [
+            "host_stage_unavailable:model",
+            "a::b",
+            ":model",
+            "host_stage_unavailable:",
+            ":",
+        ] {
+            assert!(
+                SanitizedFailure::new(invalid).is_err(),
+                "category {invalid:?} with a colon must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitized_failure_deserialize_normalizes_legacy_colon_categories() {
+        // Historical persisted rows used the single-colon category
+        // `host_stage_unavailable:model`. The strict write path rejects it, but
+        // loading a snapshot must not fail — the read path normalizes that exact
+        // shape so old data stays loadable.
+        let failure: SanitizedFailure =
+            serde_json::from_str(r#"{"category":"host_stage_unavailable:model"}"#)
+                .expect("legacy colon category must deserialize");
+        assert_eq!(failure.category(), "host_stage_unavailable_model");
+    }
+
+    #[test]
+    fn sanitized_failure_deserialize_rejects_malformed_colon_categories() {
+        // Normalization is restricted to the one legacy shape. Malformed colon
+        // payloads must still be rejected, not silently minted into values the
+        // strict write path could never produce (e.g. `a::b` -> `a__b`).
+        for malformed in ["a::b", ":model", "host_stage_unavailable:", ":", "a:b:c"] {
+            let json = format!(r#"{{"category":"{malformed}"}}"#);
+            assert!(
+                serde_json::from_str::<SanitizedFailure>(&json).is_err(),
+                "malformed colon category {malformed:?} must be rejected"
+            );
+        }
     }
 }

@@ -34,6 +34,13 @@ pub struct ResumeTurnResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryTurnResponse {
+    pub run_id: TurnRunId,
+    pub status: TurnStatus,
+    pub event_cursor: EventCursor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelRunResponse {
     pub run_id: TurnRunId,
     pub status: TurnStatus,

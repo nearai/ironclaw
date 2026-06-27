@@ -45,11 +45,11 @@ use crate::{
     AllowAllTurnAdmissionLimitProvider, CancelRunRequest, CancelRunResponse, EventCursor,
     GetLoopCheckpointRequest, GetRunStateRequest, InMemoryTurnStateStore,
     InMemoryTurnStateStoreLimits, LoopCheckpointRecord, LoopCheckpointStore,
-    PutLoopCheckpointRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
-    SpawnTreeReservation, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
-    TurnAdmissionLimitProvider, TurnAdmissionPolicy, TurnError, TurnEventPage,
-    TurnEventProjectionSource, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState,
-    TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    PutLoopCheckpointRequest, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
+    RetryTurnResponse, RunProfileResolver, SpawnTreeReservation, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionLimitProvider, TurnAdmissionPolicy,
+    TurnError, TurnEventPage, TurnEventProjectionSource, TurnPersistenceSnapshot, TurnRunId,
+    TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     events::project_turn_events,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -558,6 +558,18 @@ where
         .await
     }
 
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        self.apply(RunnerLeaseOverlay::None, |store| {
+            let request = request.clone();
+            async move {
+                // WS-3 implements failed-run retry semantics and idempotency.
+                let outcome = store.retry_turn(request).await;
+                (outcome, store)
+            }
+        })
+        .await
+    }
+
     async fn request_cancel(
         &self,
         request: CancelRunRequest,
@@ -796,6 +808,18 @@ where
             self.clear_snapshot_cache();
         }
         result
+    }
+
+    async fn latest_resumable_checkpoint(
+        &self,
+        scope: &TurnScope,
+        turn_id: crate::TurnId,
+        run_id: TurnRunId,
+    ) -> Result<Option<crate::TurnCheckpointId>, TurnError> {
+        let (snapshot, _) = self.read_snapshot().await?;
+        self.build_in_memory_store(snapshot)?
+            .latest_resumable_checkpoint(scope, turn_id, run_id)
+            .await
     }
 
     async fn record_model_route_snapshot(

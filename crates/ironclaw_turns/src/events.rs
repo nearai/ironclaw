@@ -86,6 +86,12 @@ pub struct TurnLifecycleEvent {
     // adapters that persist `TurnLifecycleEvent` do not need a migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sanitized_reason: Option<String>,
+    /// Present only on `Failed` events: whether the failed run recorded a
+    /// resumable checkpoint and can be retried. Same serde shape as
+    /// `sanitized_reason`, so persisted pre-retry event rows rehydrate as
+    /// `None` without migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
 }
 
 impl TurnLifecycleEvent {
@@ -108,6 +114,7 @@ impl TurnLifecycleEvent {
         } else {
             None
         };
+        let retryable = (kind == TurnEventKind::Failed).then(|| state.checkpoint_id.is_some());
         Self {
             cursor: state.event_cursor,
             scope: state.scope.clone(),
@@ -121,6 +128,7 @@ impl TurnLifecycleEvent {
             kind,
             blocked_gate,
             sanitized_reason,
+            retryable,
         }
     }
 
@@ -553,6 +561,7 @@ mod tests {
                 }],
             }),
             sanitized_reason: Some("approval_required".to_string()),
+            retryable: None,
         }
     }
 

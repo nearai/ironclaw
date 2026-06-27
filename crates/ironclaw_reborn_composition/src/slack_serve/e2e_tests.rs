@@ -1709,6 +1709,13 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         panic!("approval test uses fake ApprovalInteractionService")
     }
 
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        panic!("retry_turn is not used")
+    }
+
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         let mut state = self
             .state

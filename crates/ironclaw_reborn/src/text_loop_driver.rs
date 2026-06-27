@@ -81,6 +81,7 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
 
         let model_response = host
             .stream_model(LoopModelRequest {
+                inline_messages: Vec::new(),
                 messages: prompt_bundle.messages,
                 surface_version: prompt_bundle.surface_version,
                 model_preference: None,
@@ -198,6 +199,9 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
                 reason: format!("{stage}: {}", error.kind.as_str()),
             }
         }
+        AgentLoopHostErrorKind::InvalidOutput => AgentLoopDriverError::Failed {
+            reason_kind: loop_failure_kind_name(LoopFailureKind::InvalidModelOutput).to_string(),
+        },
         AgentLoopHostErrorKind::Internal => AgentLoopDriverError::Unavailable {
             reason: format!("{stage}: unavailable"),
         },

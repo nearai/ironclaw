@@ -106,9 +106,13 @@ async fn reborn_trace_unadvertised_capability_is_rejected() {
         .wait_for_status(submitted.run_id, TurnStatus::Failed)
         .await
         .expect("failed run");
+    // WS-3 upgraded the opaque `driver_unavailable` category to a
+    // stage-scoped `host_stage_unavailable_*` category so the failure is
+    // actionable and retryable. An unadvertised capability surfaces as a
+    // model-stage host-unavailable failure.
     assert_eq!(
         state.failure.expect("failure category").category(),
-        "driver_unavailable"
+        "host_stage_unavailable_model"
     );
 
     assert!(
