@@ -220,6 +220,28 @@ WEBUI_V2_STATIC_JS_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_FRONTEND_BUILD_COMMAND = CommandSpec(
+    name="webui_v2_frontend_supply_chain_build",
+    description=(
+        "WebUI v2 frontend supply-chain and bundle build check: install from "
+        "the committed package-lock, fail on high-severity npm audit entries, "
+        "rebuild static/dist without refreshing vendored CDN assets, and "
+        "verify app plus locale chunks exist."
+    ),
+    argv=[
+        "bash",
+        "-lc",
+        (
+            "cd crates/ironclaw_webui_v2_static/frontend "
+            "&& npm ci "
+            "&& npm audit --audit-level=high "
+            "&& bash build.sh --no-vendor "
+            "&& test -s ../static/dist/app.js "
+            "&& test -n \"$(find ../static/dist/chunks -type f -name '*.js' -print -quit)\""
+        ),
+    ],
+)
+
 WEBUI_V2_STATIC_ROUTER_COMMAND = CommandSpec(
     name="webui_v2_static_router_contracts",
     description=(
@@ -1845,6 +1867,33 @@ CASES: dict[str, CaseSpec] = {
             "theme/sign-out controls, header logs/docs/TEE affordances, "
             "toasts, and thread-delete error messaging. Browser-smoke TC-07 "
             "stays guarded by PR #5348/live coverage."
+        ),
+    ),
+    "webui_v2_frontend_bundle_supply_chain_regression": CaseSpec(
+        name="webui_v2_frontend_bundle_supply_chain_regression",
+        feature="WebUI v2 frontend bundle build and dependency supply chain",
+        category="Hermetic Frontend Build/Supply-Chain Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-075-TC-01",
+            "REBCLI-075-TC-02",
+            "REBCLI-075-TC-03",
+            "REBCLI-075-TC-04",
+            "REBCLI-075-TC-05",
+            "REBCLI-075-TC-06",
+        ],
+        commands=[
+            WEBUI_V2_FRONTEND_BUILD_COMMAND,
+            WEBUI_V2_STATIC_JS_COMMAND,
+            WEBUI_V2_RUST_STATIC_COMMAND,
+            WEBUI_V2_COMPOSITION_STATIC_COMMAND,
+        ],
+        notes=(
+            "Covers the WebUI v2 frontend build and dependency supply-chain "
+            "rows: npm ci package-lock consistency, high-severity npm audit "
+            "gate, no-vendor esbuild bundle rebuild, committed app/chunk output "
+            "shape, static JS suite, embedded static asset/router tests, and "
+            "composition static route contracts. This is not browser/live "
+            "coverage and does not duplicate PR #5348."
         ),
     ),
     "webui_v2_filesystem_api_regression": CaseSpec(
