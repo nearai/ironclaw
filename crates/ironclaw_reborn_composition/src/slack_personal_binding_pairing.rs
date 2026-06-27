@@ -114,6 +114,17 @@ pub trait SlackPersonalBindingPairingChallengeStore: Send + Sync {
         &self,
         code: &SlackPersonalBindingPairingCode,
     ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>;
+
+    /// Force-mint a brand-new pairing code for the actor, invalidating any
+    /// outstanding code. Used by explicit recovery (the `/pair` command). The
+    /// default delegates to [`Self::issue_challenge`]; durable stores override
+    /// this to guarantee a fresh code even when an active challenge exists.
+    async fn reissue_challenge(
+        &self,
+        challenge: SlackPersonalBindingPairingChallenge,
+    ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError> {
+        self.issue_challenge(challenge).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -255,6 +266,28 @@ impl SlackPersonalBindingPairingService {
             })
             .await?;
         Ok(issued)
+    }
+
+    /// Force-mint a brand-new pairing code for an explicit `/pair` recovery,
+    /// invalidating any outstanding code, and return it to the caller.
+    ///
+    /// Unlike [`Self::issue_challenge`], this does **not** DM the code: the
+    /// spec delivers `/pair` codes *ephemerally* in the slash response and
+    /// keeps the code out of DM history ("DM/channel delivery of the code" is
+    /// a non-goal; "Code never enters a non-ephemeral message"). The handler
+    /// places the returned code in the ephemeral reply.
+    pub async fn reissue_challenge(
+        &self,
+        installation_id: AdapterInstallationId,
+        slack_user_id: SlackUserId,
+    ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError> {
+        self.challenge_store
+            .reissue_challenge(SlackPersonalBindingPairingChallenge {
+                installation_id,
+                slack_user_id,
+                setup_revision: None,
+            })
+            .await
     }
 
     pub async fn redeem_challenge(
@@ -730,6 +763,86 @@ mod tests {
             issue_error,
             ProductWorkflowError::BindingResolutionFailed { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn reissue_challenge_service_mints_fresh_without_dm() {
+        let store = Arc::new(ReissueRecordingStore::default());
+        let notifier = Arc::new(RecordingNotifier::default());
+        let pairing = SlackPersonalBindingPairingService::new(
+            binding_service(Arc::new(RecordingBindingStore::default())),
+            store.clone(),
+            notifier.clone(),
+        );
+
+        let issued = pairing
+            .reissue_challenge(installation("install-a"), SlackUserId::new("U123"))
+            .await
+            .expect("reissue mints a fresh code");
+
+        // Force-mint path: the store's `reissue_challenge` was used, not `issue_challenge`.
+        assert_eq!(store.reissued(), 1);
+        assert_eq!(issued.code.as_str(), "REISSUE1");
+        // Spec contract: `/pair` codes are delivered ephemerally by the handler and
+        // never DM'd ("Code never enters a non-ephemeral message"), so the notifier
+        // must be untouched by reissue.
+        assert!(notifier.notifications().is_empty());
+    }
+
+    /// Store fake that returns a distinct code from `issue_challenge` vs
+    /// `reissue_challenge` and counts reissues, so a service test can prove the
+    /// force-mint path was taken rather than the reuse path.
+    #[derive(Default)]
+    struct ReissueRecordingStore {
+        reissued: Mutex<usize>,
+    }
+
+    impl ReissueRecordingStore {
+        fn reissued(&self) -> usize {
+            *self.reissued.lock().unwrap()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SlackPersonalBindingPairingChallengeStore for ReissueRecordingStore {
+        async fn issue_challenge(
+            &self,
+            challenge: SlackPersonalBindingPairingChallenge,
+        ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            Ok(IssuedSlackPersonalBindingPairingChallenge {
+                code: super::tests::code("ISSUE000"),
+                challenge,
+            })
+        }
+
+        async fn get_challenge(
+            &self,
+            _code: &SlackPersonalBindingPairingCode,
+        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            Err(SlackPersonalBindingPairingError::ChallengeNotFound)
+        }
+
+        async fn consume_challenge(
+            &self,
+            _code: &SlackPersonalBindingPairingCode,
+        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            Err(SlackPersonalBindingPairingError::ChallengeNotFound)
+        }
+
+        async fn reissue_challenge(
+            &self,
+            challenge: SlackPersonalBindingPairingChallenge,
+        ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            *self.reissued.lock().unwrap() += 1;
+            Ok(IssuedSlackPersonalBindingPairingChallenge {
+                code: super::tests::code("REISSUE1"),
+                challenge,
+            })
+        }
     }
 
     fn binding_service(

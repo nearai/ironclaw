@@ -848,11 +848,11 @@ registerPack("fr", {
   "pairing.error": "Le couplage a échoué.",
   "pairing.none": "Aucune demande d’appairage en attente.",
   "pairing.slackTitle": "Connexion au compte Slack",
-  "pairing.slackInstructions": "Envoyez un message à l'application Slack, puis saisissez le code ici.",
+  "pairing.slackInstructions": "Exécutez /pair dans Slack pour obtenir un code, puis collez-le ici. Les codes expirent au bout de 10 minutes.",
   "pairing.slackPlaceholder": "Entrez le code d'appairage Slack…",
   "pairing.connect": "Connectez-vous",
   "pairing.slackSuccess": "Compte Slack connecté.",
-  "pairing.slackError": "Code d'appairage Slack invalide ou expiré.",
+  "pairing.slackError": "Code d'appairage Slack invalide ou expiré. Exécutez /pair dans Slack pour en obtenir un nouveau.",
 
   // Admin — tabs
   "admin.tab.dashboard": "Tableau de bord",

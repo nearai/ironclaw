@@ -848,11 +848,11 @@ registerPack("ja", {
   "pairing.error": "ペアリングに失敗しました。",
   "pairing.none": "保留中のペアリング要求はありません。",
   "pairing.slackTitle": "Slack アカウント接続",
-  "pairing.slackInstructions": "Slack アプリにメッセージを送り、ここにコードを入力します。",
+  "pairing.slackInstructions": "Slack で /pair を実行してコードを取得し、ここに貼り付けます。コードは 10 分で期限切れになります。",
   "pairing.slackPlaceholder": "Slack ペアリング コードを入力してください…",
   "pairing.connect": "接続",
   "pairing.slackSuccess": "Slack アカウントが接続されました。",
-  "pairing.slackError": "Slack ペアリング コードが無効または期限切れです。",
+  "pairing.slackError": "Slack ペアリング コードが無効または期限切れです。Slack で /pair を実行して新しいコードを取得してください。",
 
   // Admin — tabs
   "admin.tab.dashboard": "ダッシュボード",

@@ -166,11 +166,15 @@ fn slack_inbound_proof_code_connectable_channel() -> RebornConnectableChannelInf
         strategy: RebornChannelConnectStrategy::InboundProofCode,
         action: RebornChannelConnectAction {
             title: "Slack account connection".to_string(),
-            instructions: "Message the Slack app, then enter the code here.".to_string(),
+            instructions:
+                "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes."
+                    .to_string(),
             input_placeholder: "Enter Slack pairing code...".to_string(),
             submit_label: "Connect".to_string(),
             success_message: "Slack account connected.".to_string(),
-            error_message: "Invalid or expired Slack pairing code.".to_string(),
+            error_message:
+                "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
+                    .to_string(),
         },
         command_aliases: vec![
             "slack".to_string(),
@@ -244,6 +248,14 @@ mod tests {
         assert_eq!(
             channel.action.input_placeholder,
             "Enter Slack pairing code..."
+        );
+        assert_eq!(
+            channel.action.instructions,
+            "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes."
+        );
+        assert_eq!(
+            channel.action.error_message,
+            "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
         );
         assert_eq!(
             channel.command_aliases,

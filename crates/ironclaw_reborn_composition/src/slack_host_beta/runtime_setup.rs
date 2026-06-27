@@ -50,8 +50,9 @@ use crate::slack_personal_binding_pairing::{
 };
 use crate::slack_personal_binding_pairing_serve::SlackPersonalBindingPairingRouteConfig;
 use crate::slack_serve::{
-    ResolvedSlackIngress, SlackEventsRouteState, SlackIngressError, SlackInstallationResolver,
-    SlackInstallationSelector, SlackTeamId, SlackUserId, StaticSlackInstallationResolver,
+    ResolvedSlackCommand, ResolvedSlackIngress, SlackCommandsRouteState, SlackEventsRouteState,
+    SlackIngressError, SlackIngressService, SlackInstallationResolver, SlackInstallationSelector,
+    SlackTeamId, SlackUserId, StaticSlackInstallationResolver, slack_commands_route_mount,
     slack_events_route_mount,
 };
 use crate::slack_setup::{
@@ -195,8 +196,19 @@ pub(super) async fn build_runtime_mounts(
         });
     }
 
+    // Share one installation resolver across the events and `/pair` commands
+    // routes: a single source of truth for the Slack signing identity, and the
+    // events drain covers the shared resolver.
+    let resolver: Arc<dyn SlackInstallationResolver> = Arc::new(resolver);
+    let commands = slack_commands_route_mount(SlackCommandsRouteState::new(
+        SlackIngressService::new(Arc::clone(&resolver)),
+        pairing.clone(),
+        state.clone(),
+    ));
+
     Ok(SlackHostBetaMounts {
-        events: slack_events_route_mount(SlackEventsRouteState::from_resolver(Arc::new(resolver))),
+        events: slack_events_route_mount(SlackEventsRouteState::from_resolver(resolver)),
+        commands,
         personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
         channel_routes,
         user_identity_lookup,
@@ -723,6 +735,25 @@ impl SlackInstallationResolver for DynamicSlackInstallationResolver {
         Box::pin(async move { self.resolver().await?.resolve_ingress(headers, body).await })
     }
 
+    fn resolve_command_ingress<'a>(
+        &'a self,
+        headers: &'a axum::http::HeaderMap,
+        body: &'a [u8],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ResolvedSlackCommand, SlackIngressError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.resolver()
+                .await?
+                .resolve_command_ingress(headers, body)
+                .await
+        })
+    }
+
     fn drain_installations<'a>(
         &'a self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
@@ -821,6 +852,19 @@ impl SlackPersonalBindingPairingChallengeStore for DynamicSlackPairingChallengeS
     ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError> {
         let challenge = self.bind_to_current_setup(challenge).await?;
         self.store.issue_challenge(challenge).await
+    }
+
+    async fn reissue_challenge(
+        &self,
+        challenge: SlackPersonalBindingPairingChallenge,
+    ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError> {
+        // `/pair` force-mint must reach the inner store's `reissue_challenge`.
+        // The trait default delegates to `issue_challenge`, which reuses an
+        // active code — that would silently defeat the force-fresh semantic for
+        // the production serve path. Bind to the current setup revision exactly
+        // like `issue_challenge`, then force-mint through the inner store.
+        let challenge = self.bind_to_current_setup(challenge).await?;
+        self.store.reissue_challenge(challenge).await
     }
 
     async fn get_challenge(
@@ -1181,6 +1225,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dynamic_pairing_challenge_store_reissue_forwards_to_inner_force_mint() {
+        // The `/pair` force-mint must reach the inner store's `reissue_challenge`.
+        // Without the wrapper override it would inherit the trait default, which
+        // delegates to `issue_challenge` (code reuse) — silently defeating the
+        // force-fresh semantic on the production serve path. Drive the wrapper
+        // (the caller) and assert the inner force-mint path actually ran.
+        let setup_service = Arc::new(SlackSetupService::new(
+            TenantId::new("tenant:slack").unwrap(),
+            AgentId::new("agent:slack").unwrap(),
+            None,
+            UserId::new("user:operator").unwrap(),
+            Arc::new(InMemorySetupStore::new(setup_record(1))),
+            Arc::new(InMemorySecretStore::default()),
+        ));
+        let inner = Arc::new(StaticChallengeStore::default());
+        let store = DynamicSlackPairingChallengeStore::new(setup_service, inner.clone());
+        let challenge = SlackPersonalBindingPairingChallenge {
+            installation_id: AdapterInstallationId::new("install-a").unwrap(),
+            slack_user_id: SlackUserId::new("U123"),
+            setup_revision: None,
+        };
+
+        let issued = store
+            .reissue_challenge(challenge)
+            .await
+            .expect("reissue mints via inner force-mint");
+
+        // Inner force-mint ran exactly once (not the reuse path).
+        assert_eq!(*inner.reissued.lock().unwrap(), 1);
+        // The distinct force-mint code came back, not the `issue_challenge` reuse code.
+        assert_eq!(issued.code.as_str(), "RAW99999");
+        // `bind_to_current_setup` still ran: the challenge carries the live revision.
+        assert_eq!(issued.challenge.setup_revision, Some(1));
+    }
+
+    #[tokio::test]
     async fn seed_legacy_slack_setup_persists_setup_routes_and_identity_binding() {
         let setup_store = Arc::new(InMemorySetupStore::empty());
         let secret_store = Arc::new(InMemorySecretStore::default());
@@ -1374,6 +1454,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct StaticChallengeStore {
         challenge: StdMutex<Option<SlackPersonalBindingPairingChallenge>>,
+        reissued: StdMutex<usize>,
     }
 
     #[derive(Debug, Default)]
@@ -1470,6 +1551,22 @@ mod tests {
             *self.challenge.lock().unwrap() = Some(challenge.clone());
             Ok(IssuedSlackPersonalBindingPairingChallenge {
                 code: SlackPersonalBindingPairingCode::new("ABC12345").unwrap(),
+                challenge,
+            })
+        }
+
+        async fn reissue_challenge(
+            &self,
+            challenge: SlackPersonalBindingPairingChallenge,
+        ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            // Distinct code + counter so a caller test can prove the dynamic
+            // wrapper forwarded to this force-mint path rather than falling
+            // through to `issue_challenge` (which would reuse "ABC12345").
+            *self.reissued.lock().unwrap() += 1;
+            *self.challenge.lock().unwrap() = Some(challenge.clone());
+            Ok(IssuedSlackPersonalBindingPairingChallenge {
+                code: SlackPersonalBindingPairingCode::new("RAW99999").unwrap(),
                 challenge,
             })
         }
