@@ -428,7 +428,7 @@ pub enum ScriptedModelResponse {
         /// Host error kind to return.
         kind: AgentLoopHostErrorKind,
         /// Safe summary exposed to loop recovery.
-        safe_summary: String,
+        safe_summary: &'static str,
     },
 }
 
