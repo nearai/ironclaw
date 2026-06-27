@@ -361,7 +361,9 @@ export function useChat(threadId) {
     // user message from the server doesn't render alongside its
     // pre-submit optimistic twin.
     onRunSettled: (_runId, { success }) => {
-      submitBusyRef.current = false;
+      // submitBusyRef is released by send()'s `finally` when the POST settles —
+      // it is NOT this callback's to clear. Releasing the POST re-entrancy guard
+      // on run settlement is the wrong layer (and was the deadlock #5256 fixed).
       if (success) setPendingMessages([]);
       loadHistory(undefined, {
         preserveClientOnly: true,
@@ -400,15 +402,29 @@ export function useChat(threadId) {
       if (pendingGate || pendingGateRef.current) {
         throw approvalGatePendingSendError();
       }
+      // Admission: block a send only when the *destination* thread is the one
+      // that's busy. The destination is `targetThreadId` when the caller names
+      // one, otherwise the open thread (the same `targetThreadId || threadId`
+      // resolved below). BOTH the in-flight-run guard and the viewed-thread
+      // `isProcessing` flag must key on that destination — a running thread
+      // carries both, so narrowing only one still drops a parallel send to
+      // another thread, or a new chat, just because the thread on screen is
+      // running. Keying either guard on the viewed thread (or on the mere
+      // absence of a target) is what broke parallel threads and "new chat
+      // while a run is active".
+      const sendTargetThreadId = targetThreadId || threadId;
       const activeRunForSend = activeRunRef.current;
       const activeRunBlocksSend =
-        activeRunForSend &&
-        (!targetThreadId ||
-          activeRunForSend.threadId === targetThreadId ||
-          activeRunForSend.threadId === threadId);
+        Boolean(activeRunForSend) &&
+        Boolean(sendTargetThreadId) &&
+        activeRunForSend.threadId === sendTargetThreadId;
+      const processingBlocksSend =
+        isProcessingRef.current &&
+        Boolean(sendTargetThreadId) &&
+        sendTargetThreadId === threadId;
       if (
         submitBusyRef.current ||
-        isProcessingRef.current ||
+        processingBlocksSend ||
         activeRunBlocksSend
       ) {
         return null;
@@ -588,6 +604,16 @@ export function useChat(threadId) {
         submitBusyRef.current = false;
         throw err;
       } finally {
+        // Release the re-entrancy guard once the send POST settles — that is
+        // the window it exists to protect (one in-flight submit at a time).
+        // It must NOT stay held until the run settles: clearing it only in
+        // `onRunSettled` (delivered over the *current* thread's SSE) deadlocks
+        // the moment the user navigates to a new chat while a run is in
+        // flight — that thread's SSE is torn down, its settle event never
+        // arrives, the guard stays `true`, and every later send is silently
+        // dropped. Blocking a resubmit into a still-running thread is the job
+        // of the per-destination `activeRunBlocksSend` guard above, not this.
+        submitBusyRef.current = false;
         // Drop the optimistic from the pending ref unconditionally:
         // on success the confirmed row arrives via /timeline, and on
         // failure we mark the optimistic with `status: "error"` in

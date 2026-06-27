@@ -523,7 +523,7 @@ async fn multi_worker_runtime_does_not_raise_worker_stopped_while_workers_are_al
     .with_runner_settings(TurnRunnerSettings {
         // Explicitly set 2 workers — ensures the guard uses .all() semantics
         // and does not fire when only a subset of workers have finished.
-        worker_count: NonZeroUsize::new(2).unwrap(),
+        worker_count: Some(NonZeroUsize::new(2).unwrap()),
         heartbeat_interval: Duration::from_millis(25),
         poll_interval: Duration::from_secs(60),
         ..TurnRunnerSettings::default()

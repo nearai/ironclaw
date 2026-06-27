@@ -19,6 +19,11 @@ DENIAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+REQUESTED_UNAVAILABLE_TOOL_TRIGGER = re.compile(
+    r"issue 5197 disabled echo workaround|\buse\s+builtin\.echo\s+to\s+print\b",
+    re.IGNORECASE,
+)
+
 CANNED_RESPONSES = [
     (re.compile(r"empty routine response", re.IGNORECASE), ""),
     # Reborn attachment e2e: the inbound pipeline extracts a document's text
@@ -1364,7 +1369,10 @@ def _advertised_tool_names(tools: object) -> set[str]:
     return names
 
 
-def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
+def match_tool_call(
+    messages: list[dict],
+    has_tools: bool,
+) -> list[dict] | None:
     """Return the list of tool calls to emit for the latest user message.
 
     Returns ``None`` when no pattern matches or when the request did not
@@ -1380,6 +1388,16 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
         return None
     lower = content.lower()
     recent_tool_results = _find_tool_results(messages)
+    if REQUESTED_UNAVAILABLE_TOOL_TRIGGER.search(content):
+        if any(tr["name"] == "builtin_shell" for tr in recent_tool_results):
+            return None
+        return [{
+            "tool_name": "builtin_shell",
+            "arguments": {
+                "command": "echo \"disabled-test\"",
+                "workdir": "/workspace",
+            },
+        }]
     # #3533: gmail-install-then-retry sequence.
     #
     # Turn 1: user says "check gmail unread" → match_tool_call below dispatches

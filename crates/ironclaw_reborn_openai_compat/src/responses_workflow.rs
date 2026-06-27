@@ -889,16 +889,33 @@ fn validate_responses_supported_fields(
         )));
     }
     if let Some(context) = &request.x_context
-        && serde_json::to_vec(context)
-            .map(|bytes| bytes.len())
-            .unwrap_or(usize::MAX)
-            > MAX_RESPONSES_CONTEXT_BYTES
+        && serialized_json_len(context) > MAX_RESPONSES_CONTEXT_BYTES
     {
         return Err(OpenAiCompatHttpError::invalid_request(Some(
             "x_context".to_string(),
         )));
     }
     Ok(())
+}
+
+fn serialized_json_len(value: &serde_json::Value) -> usize {
+    struct CountingWriter(usize);
+
+    impl std::io::Write for CountingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(buf.len());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut writer = CountingWriter(0);
+    serde_json::to_writer(&mut writer, value)
+        .map(|_| writer.0)
+        .unwrap_or(usize::MAX)
 }
 
 fn accepted_ack_from_ack(
@@ -1072,43 +1089,46 @@ fn responses_input_to_product_text(
 }
 
 fn responses_context_to_product_text(context: &serde_json::Value) -> String {
+    use std::fmt::Write as _;
+
     let Some(object) = context.as_object() else {
-        return format!(
-            "[Context: {}]",
-            sanitize_product_text_fragment(&context.to_string())
-        );
+        let val_str = context_value_to_product_text(context);
+        return format!("[Context: {val_str}]");
     };
 
-    object
-        .iter()
-        .map(|(key, value)| {
-            let key = sanitize_product_text_fragment(key);
-            match value.as_object() {
-                Some(inner) => {
-                    let fields = inner
-                        .iter()
-                        .map(|(field, value)| {
-                            let field = sanitize_product_text_fragment(field);
-                            let value = match value {
-                                serde_json::Value::String(text) => {
-                                    sanitize_product_text_fragment(text)
-                                }
-                                other => sanitize_product_text_fragment(&other.to_string()),
-                            };
-                            format!("{field}: {value}")
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("[Context: {key} - {fields}]")
+    let mut result = String::new();
+    for (index, (key, value)) in object.iter().enumerate() {
+        if index > 0 {
+            result.push('\n');
+        }
+        let key = sanitize_product_text_fragment(key);
+        match value.as_object() {
+            Some(inner) => {
+                let mut fields = String::new();
+                for (field_index, (field, value)) in inner.iter().enumerate() {
+                    if field_index > 0 {
+                        fields.push_str(", ");
+                    }
+                    let field = sanitize_product_text_fragment(field);
+                    let value = context_value_to_product_text(value);
+                    let _ = write!(&mut fields, "{field}: {value}");
                 }
-                None => format!(
-                    "[Context: {key}: {}]",
-                    sanitize_product_text_fragment(&value.to_string())
-                ),
+                let _ = write!(&mut result, "[Context: {key} - {fields}]");
             }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+            None => {
+                let value = context_value_to_product_text(value);
+                let _ = write!(&mut result, "[Context: {key}: {value}]");
+            }
+        }
+    }
+    result
+}
+
+fn context_value_to_product_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => sanitize_product_text_fragment(text),
+        other => sanitize_product_text_fragment(&other.to_string()),
+    }
 }
 
 fn response_input_item_to_value(item: &OpenAiResponsesInputItem) -> serde_json::Value {

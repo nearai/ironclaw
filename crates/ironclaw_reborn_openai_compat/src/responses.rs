@@ -61,7 +61,9 @@ impl<'de> Deserialize<'de> for OpenAiResponsesInputItem {
             .as_object()
             .ok_or_else(|| de::Error::custom("responses input item must be an object"))?;
         match object.get("type").and_then(serde_json::Value::as_str) {
-            Some("message") | None if object.contains_key("role") => {
+            Some("message") | None
+                if object.contains_key("role") || object.get("type").is_some() =>
+            {
                 #[derive(Deserialize)]
                 struct MessageWire {
                     role: OpenAiResponsesMessageRole,

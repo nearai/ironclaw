@@ -14,6 +14,11 @@
 //! Uses async I/O throughout to avoid blocking the tokio runtime.
 
 use std::collections::HashSet;
+// `io`/`Read` are used only by the `#[cfg(unix)]` permission-check helpers
+// (`identity_matches`, `read_file_bytes_limited`); gate the import to match so
+// the non-unix build doesn't see them as unused (`std::io::ErrorKind` elsewhere
+// uses the full path and needs no import).
+#[cfg(unix)]
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
