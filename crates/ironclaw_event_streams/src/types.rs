@@ -191,6 +191,32 @@ pub enum ThreadLiveProjectionItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error_kind: Option<String>,
     },
+    CapabilityDisplayPreview {
+        run_id: TurnRunId,
+        invocation_id: InvocationId,
+        capability_id: CapabilityId,
+        #[serde(default = "default_capability_activity_status")]
+        status: CapabilityActivityStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_kind: Option<String>,
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subtitle: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_preview: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_bytes: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result_ref: Option<String>,
+        #[serde(default)]
+        truncated: bool,
+    },
     WorkSummary {
         id: String,
         run_id: TurnRunId,

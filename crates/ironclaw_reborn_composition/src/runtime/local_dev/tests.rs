@@ -12,9 +12,11 @@ mod tests {
         ToolPermissionOverrideInput,
     };
     use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore};
+    use ironclaw_events::{DurableEventLog, InMemoryDurableEventLog};
     use ironclaw_host_api::{
-        AgentId, CapabilityId, EffectKind, GrantConstraints, InvocationId, MountPermissions,
-        NetworkPolicy, Principal, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
+        AgentId, ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CorrelationId,
+        EffectKind, GrantConstraints, InvocationId, MountPermissions, NetworkPolicy, Principal,
+        ProjectId, ProviderToolName, ResourceEstimate, TenantId, ThreadId, UserId,
     };
     use ironclaw_host_runtime::{
         APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
@@ -24,9 +26,13 @@ mod tests {
         WRITE_FILE_CAPABILITY_ID,
     };
     use ironclaw_loop_support::{
-        CapabilityWriteResult, HostManagedModelMessage, HostSkillContextSource,
+        CapabilityResultWrite, CapabilityWriteResult, HostManagedModelMessage,
+        HostSkillContextSource, LoopCapabilityResultWriter,
     };
     use ironclaw_outbound::CommunicationPreferenceKey;
+    use ironclaw_product_adapters::{
+        ProductOutboundPayload, ProductProjectionItem, ProjectionSubscriptionRequest,
+    };
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
         LifecycleProductFacade, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
@@ -38,12 +44,13 @@ mod tests {
         ToolResultReferenceEnvelope, ToolResultSafeSummary,
     };
     use ironclaw_turns::{
-        AcceptedMessageRef, LoopMessageRef, ReplyTargetBindingRef, RunProfileResolutionRequest,
-        RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope,
+        AcceptedMessageRef, LoopMessageRef, LoopResultRef, ReplyTargetBindingRef,
+        RunProfileResolutionRequest, RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope,
         run_profile::{
-            CapabilityCallCandidate, CapabilityFailureKind, CapabilityInputRef,
-            CapabilityInvocation, CapabilityOutcome, InMemoryLoopHostMilestoneSink,
-            InMemoryRunProfileResolver, ModelProfileId, RegisterProviderToolCallRequest,
+            CapabilityApprovalResume, CapabilityCallCandidate, CapabilityFailureKind,
+            CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilityResumeToken,
+            InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopHostMilestone,
+            LoopHostMilestoneKind, ModelProfileId, RegisterProviderToolCallRequest,
             VisibleCapabilityRequest,
         },
     };
@@ -214,6 +221,44 @@ mod tests {
             input_ref: candidate.input_ref.clone(),
             approval_resume: None,
             auth_resume: None,
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordedCapabilityResultWrite {
+        run_context: LoopRunContext,
+        input_ref: CapabilityInputRef,
+        invocation_id: InvocationId,
+        capability_id: CapabilityId,
+        output: serde_json::Value,
+        display_preview: Option<CapabilityDisplayOutputPreview>,
+    }
+
+    struct RecordingCapabilityResultWriter {
+        writes: Arc<std::sync::Mutex<Vec<RecordedCapabilityResultWrite>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
+        async fn write_capability_result(
+            &self,
+            write: CapabilityResultWrite<'_>,
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            self.writes
+                .lock()
+                .expect("capability result writes lock")
+                .push(RecordedCapabilityResultWrite {
+                    run_context: write.run_context.clone(),
+                    input_ref: write.input_ref.clone(),
+                    invocation_id: write.invocation_id,
+                    capability_id: write.capability_id.clone(),
+                    output: write.output.clone(),
+                    display_preview: write.display_preview.clone(),
+                });
+            Ok(CapabilityWriteResult::without_output_digest(
+                LoopResultRef::new("result:recording-capability-writer").expect("valid result ref"),
+                0,
+            ))
         }
     }
 
@@ -497,6 +542,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
             None,
@@ -1197,8 +1243,12 @@ mod tests {
         .expect("skill context source");
         let activation_source = skill_context.activation_source;
         let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let result_writes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
-        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> =
+            Arc::new(RecordingCapabilityResultWriter {
+                writes: Arc::clone(&result_writes),
+            });
         let policy = Arc::new(
             crate::local_dev_capability_policy::local_dev_capability_policy()
                 .expect("policy parses"),
@@ -1276,11 +1326,39 @@ mod tests {
             candidate.capability_id.as_str(),
             SKILL_ACTIVATE_CAPABILITY_ID
         );
+        let resumed_input_ref =
+            CapabilityInputRef::new("input:skill-activate-resumed").expect("input ref");
+        let mut invocation = invocation_for_candidate(&candidate);
+        invocation.approval_resume = Some(CapabilityApprovalResume {
+            approval_request_id: ApprovalRequestId::new(),
+            resume_token: CapabilityResumeToken::new(candidate.activity_id.to_string())
+                .expect("resume token"),
+            correlation_id: CorrelationId::new(),
+            input_ref: resumed_input_ref.clone(),
+            input: serde_json::json!({"names": ["unit-activate-helper"]}),
+            estimate: ResourceEstimate::default(),
+        });
         let outcome = port
-            .invoke_capability(invocation_for_candidate(&candidate))
+            .invoke_capability(invocation)
             .await
             .expect("skill activation invokes");
         assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        {
+            let writes = result_writes.lock().expect("capability result writes lock");
+            assert_eq!(writes.len(), 1);
+            assert_eq!(writes[0].run_context, run_context);
+            assert_eq!(writes[0].input_ref, resumed_input_ref);
+            assert_eq!(
+                writes[0].invocation_id,
+                InvocationId::from_uuid(candidate.activity_id.as_uuid())
+            );
+            assert_eq!(
+                writes[0].capability_id.as_str(),
+                SKILL_ACTIVATE_CAPABILITY_ID
+            );
+            assert_eq!(writes[0].output["activated"][0], "unit-activate-helper");
+            assert!(writes[0].display_preview.is_none());
+        }
 
         let selected = activation_source
             .load_skill_context_candidates(&run_context)
@@ -1336,6 +1414,7 @@ mod tests {
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
             Some(skill_context.activation_source),
+            None,
             None,
             None,
         )
@@ -2148,6 +2227,7 @@ mod tests {
             None,
             Some(outbound_preferences_facade),
             None,
+            None,
         )
         .expect("capability wiring");
         let port = wiring
@@ -2902,6 +2982,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("local-dev capability wiring");
         assert_github_capabilities_visible(&wiring, &run_context).await;
@@ -2936,6 +3017,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
             None,
@@ -3054,11 +3136,17 @@ mod tests {
             owner_user_id: None,
             mission_id: None,
         };
+        let projection_services = crate::projection::build_reborn_projection_services(
+            Arc::new(InMemoryDurableEventLog::new()) as Arc<dyn DurableEventLog>,
+            ReplyTargetBindingRef::new("extension-search-live-reply").expect("reply target"),
+        );
+        let user_id = UserId::new("local-dev-extension-search-user").expect("user id");
+        let live_publisher = projection_services.live_projection_publisher(user_id.clone());
         let wiring = capability_wiring(
             &services,
             Arc::new(InMemorySessionThreadService::default()),
             thread_scope,
-            UserId::new("local-dev-extension-search-user").expect("user id"),
+            user_id.clone(),
             Arc::new(
                 crate::local_dev_capability_policy::local_dev_capability_policy()
                     .expect("policy parses"),
@@ -3068,6 +3156,7 @@ mod tests {
             None,
             None,
             None,
+            Some(live_publisher),
         )
         .expect("local-dev capability wiring");
         let port = wiring
@@ -3108,6 +3197,189 @@ mod tests {
             matches!(outcome, CapabilityOutcome::Completed(_)),
             "extension_search should be authorized to read the system extension catalog, got {outcome:?}"
         );
+        let invocation_id = InvocationId::from_uuid(candidate.activity_id.as_uuid());
+        let preview = wiring
+            .display_previews
+            .record_for_invocation(invocation_id)
+            .expect("extension_search result preview should use the activity invocation id");
+        assert!(
+            preview
+                .input_summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains("\"query\": \"gmail\"")),
+            "extension_search preview should retain the searched query: {preview:?}"
+        );
+        let events = projection_services
+            .webui_event_stream()
+            .drain(ProjectionSubscriptionRequest {
+                actor: TurnActor::new(user_id),
+                scope: run_context.scope.clone(),
+                after_cursor: None,
+            })
+            .await
+            .expect("live projection drains");
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    event.payload(),
+                    ProductOutboundPayload::ProjectionUpdate { state }
+                        if state.items.iter().any(|item| matches!(
+                            item,
+                            ProductProjectionItem::CapabilityDisplayPreview(preview)
+                                if preview.invocation_id == invocation_id
+                                    && preview.capability_id.as_str() == EXTENSION_SEARCH_CAPABILITY_ID
+                                    && preview.result_ref.as_deref().is_some()
+                                    && preview.input_summary.as_deref().is_some_and(|summary| summary.contains("\"query\": \"gmail\""))
+                                    && (preview.output_preview.is_some() || preview.output_summary.is_some())
+                        ))
+                )
+            }),
+            "extension_search result write should publish a live completed preview before turn end: {events:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_result_writer_publishes_completed_preview_on_running_invocation_id() {
+        let run_context = run_context("local-dev-live-result-linked-id").await;
+        let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+        let projection_services = crate::projection::build_reborn_projection_services(
+            Arc::new(InMemoryDurableEventLog::new()) as Arc<dyn DurableEventLog>,
+            ReplyTargetBindingRef::new("local-dev-live-result-linked-id-reply")
+                .expect("reply target"),
+        )
+        .with_display_previews(Arc::clone(&display_previews));
+        let user_id = UserId::new("local-dev-live-result-linked-id-user").expect("user id");
+        let live_publisher = projection_services.live_projection_publisher(user_id.clone());
+        let live_sink = projection_services.with_live_progress_milestone_sink_for_publisher(
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            Arc::clone(&live_publisher),
+        );
+        let capability_io = LocalDevCapabilityIo::new(Arc::clone(&display_previews))
+            .with_live_projection_publisher(Some(live_publisher));
+        let capability_id = CapabilityId::new(EXTENSION_SEARCH_CAPABILITY_ID)
+            .expect("extension_search capability id");
+        let input_ref = CapabilityInputRef::new(format!(
+            "input:{}:local-dev-live-result-linked-id",
+            run_context.run_id
+        ))
+        .expect("input ref");
+        let tool_call =
+            provider_tool_call_with_name("extension_search", serde_json::json!({"query": "gmail"}));
+        capability_io.record_provider_tool_call_display_input(
+            &run_context,
+            &input_ref,
+            &capability_id,
+            &tool_call,
+        );
+        let running_invocation_id = InvocationId::new();
+        let stale_result_invocation_id = InvocationId::new();
+        capability_io.record_running_invocation(&run_context, running_invocation_id, &input_ref);
+        let activity_id =
+            ironclaw_turns::CapabilityActivityId::from_uuid(running_invocation_id.as_uuid());
+
+        live_sink
+            .publish_loop_milestone(LoopHostMilestone {
+                scope: run_context.scope.clone(),
+                actor: run_context.actor.clone(),
+                turn_id: run_context.turn_id,
+                run_id: run_context.run_id,
+                loop_driver_id: run_context.loop_driver_id.clone(),
+                kind: LoopHostMilestoneKind::CapabilityInvoked {
+                    activity_id,
+                    capability_id: capability_id.clone(),
+                },
+            })
+            .await
+            .expect("running live projection publishes");
+
+        let running_events = projection_services
+            .webui_event_stream()
+            .drain(ProjectionSubscriptionRequest {
+                actor: TurnActor::new(user_id.clone()),
+                scope: run_context.scope.clone(),
+                after_cursor: None,
+            })
+            .await
+            .expect("running live projection drains");
+        assert!(
+            running_events.iter().any(|event| {
+                matches!(
+                    event.payload(),
+                    ProductOutboundPayload::ProjectionUpdate { state }
+                        if state.items.iter().any(|item| matches!(
+                            item,
+                            ProductProjectionItem::CapabilityActivity(activity)
+                                if activity.invocation_id == running_invocation_id
+                                    && activity.status == ironclaw_product_adapters::CapabilityActivityStatusView::Started
+                                    && activity.input_summary.as_deref().is_some_and(|summary| summary.contains("\"query\": \"gmail\""))
+                        ))
+                )
+            }),
+            "running preview should drain before result write: {running_events:#?}"
+        );
+        let running_cursor = running_events
+            .last()
+            .expect("running live event")
+            .projection_cursor()
+            .clone();
+
+        capability_io
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
+                invocation_id: stale_result_invocation_id,
+                capability_id: &capability_id,
+                output: serde_json::json!({"installed": ["gmail"]}),
+                display_preview: None,
+            })
+            .await
+            .expect("capability result writes");
+
+        assert!(
+            display_previews
+                .record_for_invocation(running_invocation_id)
+                .is_some(),
+            "completed preview should be stored under the running activity id"
+        );
+        assert!(
+            display_previews
+                .record_for_invocation(stale_result_invocation_id)
+                .is_none(),
+            "completed preview should not be stored under the stale result id"
+        );
+
+        let events = projection_services
+            .webui_event_stream()
+            .drain(ProjectionSubscriptionRequest {
+                actor: TurnActor::new(user_id),
+                scope: run_context.scope.clone(),
+                after_cursor: Some(running_cursor),
+            })
+            .await
+            .expect("live projection drains");
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    event.payload(),
+                    ProductOutboundPayload::ProjectionUpdate { state }
+                        if state.items.iter().any(|item| matches!(
+                            item,
+                            ProductProjectionItem::CapabilityActivity(activity)
+                                if activity.invocation_id == running_invocation_id
+                                    && activity.status == ironclaw_product_adapters::CapabilityActivityStatusView::Completed
+                        ))
+                        && state.items.iter().any(|item| matches!(
+                            item,
+                            ProductProjectionItem::CapabilityDisplayPreview(preview)
+                                if preview.invocation_id == running_invocation_id
+                                    && preview.capability_id == capability_id
+                                    && preview.input_summary.as_deref().is_some_and(|summary| summary.contains("\"query\": \"gmail\""))
+                                    && preview.result_ref.as_deref().is_some()
+                        ))
+                )
+            }),
+            "result writer should publish a completed live preview on the running activity id: {events:#?}"
+        );
     }
 
     #[tokio::test]
@@ -3143,6 +3415,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
             None,
             None,
             None,

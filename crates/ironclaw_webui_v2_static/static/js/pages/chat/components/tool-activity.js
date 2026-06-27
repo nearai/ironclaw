@@ -121,12 +121,16 @@ function ToolActivityCard({ activity, nested = false }) {
     toolResultPreview,
   } = activity;
 
-  const [expanded, setExpanded] = React.useState(
-    toolStatus === "error" || toolStatus === "declined",
-  );
+  const shouldAutoExpand = shouldAutoExpandToolCard({
+    toolStatus,
+    toolDetail,
+    toolParameters,
+    toolResultPreview,
+  });
+  const [expanded, setExpanded] = React.useState(shouldAutoExpand);
   React.useEffect(() => {
-    if (toolStatus === "error" || toolStatus === "declined") setExpanded(true);
-  }, [toolStatus]);
+    if (shouldAutoExpand) setExpanded(true);
+  }, [shouldAutoExpand, toolStatus, toolDetail, toolParameters, toolResultPreview]);
 
   const dotClass = DOT_STYLE[toolStatus] || DOT_STYLE.running;
   const hasDuration = toolDurationMs !== null && toolDurationMs !== undefined;
@@ -187,6 +191,14 @@ function ToolActivityCard({ activity, nested = false }) {
       </div>
     </div>
   `;
+}
+
+function shouldAutoExpandToolCard({ toolStatus, toolDetail, toolParameters, toolResultPreview }) {
+  if (toolStatus === "error" || toolStatus === "declined") return true;
+  return (
+    (toolStatus === "running" || toolStatus === "success") &&
+    Boolean(toolDetail || toolParameters || toolResultPreview)
+  );
 }
 
 /* Tabbed Panel — Details / Parameters / Result / Error. Only tabs that have

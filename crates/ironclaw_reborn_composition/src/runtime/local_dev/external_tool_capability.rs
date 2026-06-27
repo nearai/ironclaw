@@ -201,18 +201,24 @@ impl ExternalToolCapabilityPort {
             .unwrap_or_else(|| input_ref.clone());
         // Client already submitted the output → complete the parked call by
         // writing the output as the capability result (no host-side execution).
-        if let Some(output) = self
+        let output = self
             .catalog
             .take_output_for_input_ref(self.run_id, &input_ref)
             .await
-            .map_err(catalog_error)?
-        {
+            .map_err(catalog_error)?;
+        let activity_invocation_id = InvocationId::from_uuid(request.activity_id.as_uuid());
+        self.result_writer.record_running_invocation(
+            &self.run_context,
+            activity_invocation_id,
+            &request.input_ref,
+        );
+        if let Some(output) = output {
             let write = self
                 .result_writer
                 .write_capability_result(CapabilityResultWrite {
                     run_context: &self.run_context,
                     input_ref: &request.input_ref,
-                    invocation_id: InvocationId::new(),
+                    invocation_id: activity_invocation_id,
                     capability_id: &request.capability_id,
                     output,
                     display_preview: None,
@@ -319,6 +325,12 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
             )
             .await
             .map_err(catalog_error)?;
+        self.input_resolver.record_provider_tool_call_display_input(
+            &self.run_context,
+            &input_ref,
+            &capability_id,
+            &tool_call,
+        );
         Ok(CapabilityCallCandidate {
             activity_id: activity_id.unwrap_or_default(),
             surface_version: self.surface_version()?,
@@ -474,7 +486,7 @@ mod tests {
     use ironclaw_host_api::{TenantId, ThreadId};
     use ironclaw_loop_support::CapabilityWriteResult;
     use ironclaw_turns::{
-        ExternalToolCatalogError, ExternalToolSpec, InMemoryExternalToolCatalog,
+        ExternalToolCatalogError, ExternalToolSpec, InMemoryExternalToolCatalog, LoopResultRef,
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnScope,
         run_profile::{CapabilityInputRef, InMemoryRunProfileResolver},
     };
@@ -516,6 +528,17 @@ mod tests {
 
     struct TestInputResolver;
 
+    struct RecordedDisplayInput {
+        input_ref: CapabilityInputRef,
+        capability_id: CapabilityId,
+        arguments: serde_json::Value,
+    }
+
+    struct RecordingInputResolver {
+        input_ref: CapabilityInputRef,
+        display_inputs: Arc<StdMutex<Vec<RecordedDisplayInput>>>,
+    }
+
     #[async_trait]
     impl LoopCapabilityInputResolver for TestInputResolver {
         async fn resolve_capability_input(
@@ -538,7 +561,62 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl LoopCapabilityInputResolver for RecordingInputResolver {
+        async fn resolve_capability_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
+        ) -> Result<serde_json::Value, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "test input resolver does not resolve inputs",
+            ))
+        }
+
+        async fn register_provider_tool_call_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _tool_call: &ProviderToolCall,
+        ) -> Result<CapabilityInputRef, AgentLoopHostError> {
+            Ok(self.input_ref.clone())
+        }
+
+        fn record_provider_tool_call_display_input(
+            &self,
+            _run_context: &LoopRunContext,
+            input_ref: &CapabilityInputRef,
+            capability_id: &CapabilityId,
+            tool_call: &ProviderToolCall,
+        ) {
+            self.display_inputs
+                .lock()
+                .expect("display inputs lock")
+                .push(RecordedDisplayInput {
+                    input_ref: input_ref.clone(),
+                    capability_id: capability_id.clone(),
+                    arguments: tool_call.arguments.clone(),
+                });
+        }
+    }
+
     struct TestResultWriter;
+
+    struct RecordingResultWriter {
+        running_invocations: Arc<StdMutex<Vec<(InvocationId, CapabilityInputRef)>>>,
+    }
+
+    #[derive(Debug)]
+    struct RecordedResultWrite {
+        input_ref: CapabilityInputRef,
+        invocation_id: InvocationId,
+        capability_id: CapabilityId,
+        output: serde_json::Value,
+    }
+
+    struct CompletingResultWriter {
+        writes: Arc<StdMutex<Vec<RecordedResultWrite>>>,
+    }
 
     #[async_trait]
     impl LoopCapabilityResultWriter for TestResultWriter {
@@ -550,6 +628,53 @@ mod tests {
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "test result writer does not write results",
             ))
+        }
+    }
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for CompletingResultWriter {
+        async fn write_capability_result(
+            &self,
+            write: CapabilityResultWrite<'_>,
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            self.writes
+                .lock()
+                .expect("result writes lock")
+                .push(RecordedResultWrite {
+                    input_ref: write.input_ref.clone(),
+                    invocation_id: write.invocation_id,
+                    capability_id: write.capability_id.clone(),
+                    output: write.output.clone(),
+                });
+            Ok(CapabilityWriteResult::without_output_digest(
+                LoopResultRef::new("result:external-tool-output").expect("valid result ref"),
+                0,
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for RecordingResultWriter {
+        async fn write_capability_result(
+            &self,
+            _write: CapabilityResultWrite<'_>,
+        ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "test result writer does not write results",
+            ))
+        }
+
+        fn record_running_invocation(
+            &self,
+            _run_context: &LoopRunContext,
+            invocation_id: InvocationId,
+            input_ref: &CapabilityInputRef,
+        ) {
+            self.running_invocations
+                .lock()
+                .expect("running invocations lock")
+                .push((invocation_id, input_ref.clone()));
         }
     }
 
@@ -613,12 +738,13 @@ mod tests {
         }
     }
 
-    struct BindFailingExternalToolCatalog {
-        error: ExternalToolCatalogError,
+    struct OperationFailingExternalToolCatalog {
+        bind_error: Option<ExternalToolCatalogError>,
+        lookup_error: Option<ExternalToolCatalogError>,
     }
 
     #[async_trait]
-    impl ExternalToolCatalog for BindFailingExternalToolCatalog {
+    impl ExternalToolCatalog for OperationFailingExternalToolCatalog {
         async fn register(
             &self,
             _run_id: TurnRunId,
@@ -640,7 +766,11 @@ mod tests {
             _input_ref: String,
             _call_id: String,
         ) -> Result<(), ExternalToolCatalogError> {
-            Err(self.error.clone())
+            if let Some(error) = &self.bind_error {
+                Err(error.clone())
+            } else {
+                Ok(())
+            }
         }
 
         async fn call_id_for_input_ref(
@@ -648,7 +778,11 @@ mod tests {
             _run_id: TurnRunId,
             _input_ref: &str,
         ) -> Result<Option<String>, ExternalToolCatalogError> {
-            Ok(None)
+            if let Some(error) = &self.lookup_error {
+                Err(error.clone())
+            } else {
+                Ok(None)
+            }
         }
 
         async fn submit_output(
@@ -698,6 +832,20 @@ mod tests {
             serde_json::json!({"type": "object"}),
         )
         .expect("external tool spec")
+    }
+
+    fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
+        ProviderToolCall {
+            provider_id: "test-provider".to_string(),
+            provider_model_id: "test-model".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            id: "call-1".to_string(),
+            name: ProviderToolName::new("clienttool").expect("provider tool name"),
+            arguments,
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }
     }
 
     async fn wrapped_port_with_specs(
@@ -778,6 +926,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn external_tool_provider_call_records_display_input_under_registered_ref() {
+        let run_context = run_context().await;
+        let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+        catalog
+            .register(run_context.run_id, vec![external_tool_spec("ClientTool")])
+            .await
+            .expect("register external tools");
+        let input_ref = CapabilityInputRef::new("input:external-tool-bind").expect("input ref");
+        let display_inputs = Arc::new(StdMutex::new(Vec::new()));
+        let port = wrap_local_dev_external_tools(
+            Arc::new(EmptyInnerPort),
+            run_context,
+            Arc::new(RecordingInputResolver {
+                input_ref: input_ref.clone(),
+                display_inputs: Arc::clone(&display_inputs),
+            }),
+            Arc::new(TestResultWriter),
+            catalog,
+        );
+
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible capabilities");
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call(
+                serde_json::json!({"message": "hello"}),
+            )))
+            .await
+            .expect("provider call registers");
+
+        let records = display_inputs.lock().expect("display inputs lock");
+        assert_eq!(records.len(), 1);
+        assert_eq!(candidate.input_ref, input_ref);
+        assert_eq!(records[0].input_ref, candidate.input_ref);
+        assert_eq!(
+            records[0].capability_id.as_str(),
+            "external_tool.clienttool"
+        );
+        assert_eq!(
+            records[0].arguments,
+            serde_json::json!({"message": "hello"})
+        );
+    }
+
+    #[tokio::test]
+    async fn external_tool_invocation_records_running_input_link() {
+        let run_context = run_context().await;
+        let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+        catalog
+            .register(run_context.run_id, vec![external_tool_spec("ClientTool")])
+            .await
+            .expect("register external tools");
+        let running_invocations = Arc::new(StdMutex::new(Vec::new()));
+        let port = wrap_local_dev_external_tools(
+            Arc::new(EmptyInnerPort),
+            run_context,
+            Arc::new(TestInputResolver),
+            Arc::new(RecordingResultWriter {
+                running_invocations: Arc::clone(&running_invocations),
+            }),
+            catalog,
+        );
+
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible capabilities");
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call(
+                serde_json::json!({"message": "hello"}),
+            )))
+            .await
+            .expect("provider call registers");
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: candidate.activity_id,
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref.clone(),
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("external tool invocation parks");
+
+        assert!(matches!(
+            outcome,
+            CapabilityOutcome::ExternalToolPending { .. }
+        ));
+        let records = running_invocations
+            .lock()
+            .expect("running invocations lock");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].0,
+            InvocationId::from_uuid(candidate.activity_id.as_uuid())
+        );
+        assert_eq!(records[0].1, candidate.input_ref);
+    }
+
+    #[tokio::test]
+    async fn external_tool_invocation_completes_with_buffered_output() {
+        let run_context = run_context().await;
+        let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+        catalog
+            .register(run_context.run_id, vec![external_tool_spec("ClientTool")])
+            .await
+            .expect("register external tools");
+        let catalog_for_port: Arc<dyn ExternalToolCatalog> = catalog.clone();
+        let result_writes = Arc::new(StdMutex::new(Vec::new()));
+        let port = wrap_local_dev_external_tools(
+            Arc::new(EmptyInnerPort),
+            run_context.clone(),
+            Arc::new(TestInputResolver),
+            Arc::new(CompletingResultWriter {
+                writes: Arc::clone(&result_writes),
+            }),
+            catalog_for_port,
+        );
+
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible capabilities");
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call(
+                serde_json::json!({"message": "hello"}),
+            )))
+            .await
+            .expect("provider call registers");
+        let output = serde_json::json!({"ok": true});
+        catalog
+            .submit_output(run_context.run_id, "call-1".to_string(), output.clone())
+            .await
+            .expect("submit buffered client output");
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: candidate.activity_id,
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id.clone(),
+                input_ref: candidate.input_ref.clone(),
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("external tool invocation completes");
+
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        let writes = result_writes.lock().expect("result writes lock");
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].input_ref, candidate.input_ref);
+        assert_eq!(
+            writes[0].invocation_id,
+            InvocationId::from_uuid(candidate.activity_id.as_uuid())
+        );
+        assert_eq!(writes[0].capability_id, candidate.capability_id);
+        assert_eq!(writes[0].output, output);
+    }
+
+    #[tokio::test]
     async fn invalid_catalog_registration_surfaces_as_invalid_invocation() {
         let (port, _run_context) =
             wrapped_port_with_catalog(Arc::new(FailingExternalToolCatalog {
@@ -798,13 +1106,23 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_catalog_bind_surfaces_as_invalid_invocation() {
-        let (port, _run_context) =
-            wrapped_port_with_catalog(Arc::new(BindFailingExternalToolCatalog {
-                error: ExternalToolCatalogError::InvalidRegistration {
+        let run_context = run_context().await;
+        let display_inputs = Arc::new(StdMutex::new(Vec::new()));
+        let port = wrap_local_dev_external_tools(
+            Arc::new(EmptyInnerPort),
+            run_context,
+            Arc::new(RecordingInputResolver {
+                input_ref: CapabilityInputRef::new("input:bind-failure").expect("input ref"),
+                display_inputs: Arc::clone(&display_inputs),
+            }),
+            Arc::new(TestResultWriter),
+            Arc::new(OperationFailingExternalToolCatalog {
+                bind_error: Some(ExternalToolCatalogError::InvalidRegistration {
                     reason: "bind rejected external tool call",
-                },
-            }))
-            .await;
+                }),
+                lookup_error: None,
+            }),
+        );
 
         port.visible_capabilities(VisibleCapabilityRequest)
             .await
@@ -830,6 +1148,60 @@ mod tests {
             error
                 .safe_summary
                 .contains("bind rejected external tool call")
+        );
+        assert!(
+            display_inputs
+                .lock()
+                .expect("display inputs lock")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_catalog_lookup_does_not_record_running_invocation() {
+        let run_context = run_context().await;
+        let running_invocations = Arc::new(StdMutex::new(Vec::new()));
+        let port = wrap_local_dev_external_tools(
+            Arc::new(EmptyInnerPort),
+            run_context,
+            Arc::new(TestInputResolver),
+            Arc::new(RecordingResultWriter {
+                running_invocations: Arc::clone(&running_invocations),
+            }),
+            Arc::new(OperationFailingExternalToolCatalog {
+                bind_error: None,
+                lookup_error: Some(ExternalToolCatalogError::Unavailable),
+            }),
+        );
+
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible capabilities");
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call(
+                serde_json::json!({"message": "hello"}),
+            )))
+            .await
+            .expect("provider call registers");
+
+        let error = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: candidate.activity_id,
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect_err("catalog lookup failure should fail invocation");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+        assert!(
+            running_invocations
+                .lock()
+                .expect("running invocations lock")
+                .is_empty()
         );
     }
 

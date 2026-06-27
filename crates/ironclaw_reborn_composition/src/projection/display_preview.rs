@@ -11,7 +11,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapters::{
     CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
-    CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, ProductAdapterError,
+    CapabilityActivityStatusView, CapabilityActivityView, CapabilityDisplayPreviewView,
+    CapabilityDisplayPreviewViewInput, ProductAdapterError,
 };
 use ironclaw_safety::{
     sanitize_display_text as safety_sanitize_text, sanitize_url_for_display,
@@ -32,10 +33,17 @@ pub(super) trait CapabilityDisplayPreviewSource: Send + Sync {
         activity: &CapabilityActivityProjection,
     ) -> Result<CapabilityDisplayPreviewResolution, ProductAdapterError>;
 
-    /// Input a still-running invocation should display inline, or `None` if the
-    /// invocation is not in-flight (or has no recorded input). Default `None`.
+    /// Input an invocation should display inline on its activity row, or `None`
+    /// if no recorded input can be surfaced. Default `None`.
     fn running_input(&self, _invocation_id: InvocationId) -> Option<CapabilityRunningInput> {
         None
+    }
+
+    fn live_preview(
+        &self,
+        _activity: &CapabilityActivityView,
+    ) -> Result<Option<CapabilityDisplayPreviewView>, ProductAdapterError> {
+        Ok(None)
     }
 
     #[cfg(test)]
@@ -77,13 +85,21 @@ pub(crate) struct CapabilityDisplayPreviewStore {
 
 #[derive(Default)]
 struct CapabilityDisplayPendingInputs {
-    by_ref: HashMap<String, CapabilityDisplayInputPreview>,
+    by_ref: HashMap<CapabilityDisplayPendingInputKey, CapabilityDisplayInputPreview>,
     refs_by_run: HashMap<String, Vec<String>>,
-    /// `invocation_id -> input_ref`, established when the invocation starts
-    /// executing (the activity frame only knows the invocation id, but the
-    /// input was recorded under its ref at registration). Lets the
+    /// `invocation_id -> run/input_ref`, established when the invocation
+    /// starts executing (the activity frame only knows the invocation id, but
+    /// the input was recorded under its ref at registration). Lets the
     /// still-running activity frame surface the input before the result lands.
-    input_ref_by_invocation: HashMap<String, String>,
+    input_ref_by_invocation: HashMap<String, CapabilityRunningInvocationInput>,
+}
+
+type CapabilityDisplayPendingInputKey = (String, String);
+
+#[derive(Debug, Clone)]
+struct CapabilityRunningInvocationInput {
+    run_id: String,
+    input_ref: String,
 }
 
 /// The input a still-running invocation shows in its activity row.
@@ -155,14 +171,14 @@ impl CapabilityDisplayPreviewStore {
             return false;
         };
         let pending = self.lock_pending_inputs();
-        pending
-            .refs_by_run
-            .get(&run_id.to_string())
-            .is_some_and(|input_refs| {
-                input_refs
-                    .iter()
-                    .any(|input_ref| pending.by_ref.contains_key(input_ref))
+        let run_key = run_id.to_string();
+        pending.refs_by_run.get(&run_key).is_some_and(|input_refs| {
+            input_refs.iter().any(|input_ref| {
+                pending
+                    .by_ref
+                    .contains_key(&(run_key.clone(), input_ref.clone()))
             })
+        })
     }
 
     pub(crate) fn record_input(
@@ -183,7 +199,9 @@ impl CapabilityDisplayPreviewStore {
             input_summary: input_summary.map(|summary| summary.text),
         };
         let input_ref = input_ref.as_str().to_string();
-        pending.by_ref.insert(input_ref.clone(), input);
+        pending
+            .by_ref
+            .insert((run_id.to_string(), input_ref.clone()), input);
         pending
             .refs_by_run
             .entry(run_id.to_string())
@@ -195,13 +213,18 @@ impl CapabilityDisplayPreviewStore {
     /// so the running activity frame can surface that input before completion.
     pub(crate) fn record_running_invocation(
         &self,
+        run_id: &str,
         invocation_id: InvocationId,
         input_ref: &CapabilityInputRef,
     ) {
         let mut pending = self.lock_pending_inputs();
-        pending
-            .input_ref_by_invocation
-            .insert(invocation_id.to_string(), input_ref.as_str().to_string());
+        pending.input_ref_by_invocation.insert(
+            invocation_id.to_string(),
+            CapabilityRunningInvocationInput {
+                run_id: run_id.to_string(),
+                input_ref: input_ref.as_str().to_string(),
+            },
+        );
     }
 
     #[cfg(test)]
@@ -213,15 +236,41 @@ impl CapabilityDisplayPreviewStore {
         &self,
         result: CapabilityDisplayPreviewResult<'_>,
         display_preview: Option<&CapabilityDisplayOutputPreview>,
-    ) {
-        let input = {
+    ) -> InvocationId {
+        let (invocation_id, invocation_key, input) = {
             let mut pending = self.lock_pending_inputs();
-            // The result has landed: drop the running-input link so the
-            // activity frame stops surfacing it as in-flight.
-            pending
+            let result_run_key = result.run_id.to_string();
+            let result_input_key = result.input_ref.as_str().to_string();
+            let requested_invocation_id = result.invocation_id;
+            let requested_invocation_key = requested_invocation_id.to_string();
+            let invocation_id = pending
                 .input_ref_by_invocation
-                .remove(&result.invocation_id.to_string());
-            pending.by_ref.remove(result.input_ref.as_str())
+                .iter()
+                .find_map(|(invocation_key, link)| {
+                    if link.run_id == result_run_key && link.input_ref == result_input_key {
+                        InvocationId::parse(invocation_key).ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(requested_invocation_id);
+            // The result has landed: drop the running-input link so the activity
+            // frame stops surfacing it as in-flight. Prefer the invocation id
+            // linked at dispatch time; a few synthetic/local-dev result writers
+            // used to pass a fresh id, which made completed previews land under
+            // an id the live activity card would never query.
+            let invocation_key = invocation_id.to_string();
+            pending.input_ref_by_invocation.remove(&invocation_key);
+            if invocation_id != requested_invocation_id {
+                pending
+                    .input_ref_by_invocation
+                    .remove(&requested_invocation_key);
+            }
+            (
+                invocation_id,
+                invocation_key,
+                pending.by_ref.remove(&(result_run_key, result_input_key)),
+            )
         };
         let title = input
             .as_ref()
@@ -245,27 +294,26 @@ impl CapabilityDisplayPreviewStore {
             truncated: input.as_ref().is_some_and(|input| input.truncated) || output.truncated,
         };
         let mut completed = self.lock_completed_previews();
-        let invocation_id = result.invocation_id.to_string();
         completed
             .by_invocation
-            .insert(invocation_id.clone(), record);
+            .insert(invocation_key.clone(), record);
         completed
             .invocations_by_run
             .entry(result.run_id.to_string())
             .or_default()
-            .push(invocation_id);
+            .push(invocation_key);
+        invocation_id
     }
 
     pub(crate) fn prune_run(&self, run_id: &str) {
         let mut pending = self.lock_pending_inputs();
         if let Some(input_refs) = pending.refs_by_run.remove(run_id) {
-            let pruned: std::collections::HashSet<String> = input_refs.into_iter().collect();
-            for input_ref in &pruned {
-                pending.by_ref.remove(input_ref);
+            for input_ref in input_refs {
+                pending.by_ref.remove(&(run_id.to_string(), input_ref));
             }
             pending
                 .input_ref_by_invocation
-                .retain(|_, input_ref| !pruned.contains(input_ref));
+                .retain(|_, link| link.run_id != run_id);
         }
         drop(pending);
 
@@ -309,15 +357,69 @@ impl CapabilityDisplayPreviewSource for CapabilityDisplayPreviewStore {
     }
 
     fn running_input(&self, invocation_id: InvocationId) -> Option<CapabilityRunningInput> {
-        let pending = self.lock_pending_inputs();
-        let input_ref = pending
-            .input_ref_by_invocation
-            .get(&invocation_id.to_string())?;
-        let input = pending.by_ref.get(input_ref)?;
-        Some(CapabilityRunningInput {
-            subtitle: input.subtitle.clone(),
-            input_summary: input.input_summary.clone(),
+        let invocation_key = invocation_id.to_string();
+        {
+            let pending = self.lock_pending_inputs();
+            if let Some(link) = pending.input_ref_by_invocation.get(&invocation_key)
+                && let Some(input) = pending
+                    .by_ref
+                    .get(&(link.run_id.clone(), link.input_ref.clone()))
+            {
+                return Some(CapabilityRunningInput {
+                    subtitle: input.subtitle.clone(),
+                    input_summary: input.input_summary.clone(),
+                });
+            }
+        }
+
+        let completed = self.lock_completed_previews();
+        completed
+            .by_invocation
+            .get(&invocation_key)
+            .map(|record| CapabilityRunningInput {
+                subtitle: record.subtitle.clone(),
+                input_summary: record.input_summary.clone(),
+            })
+    }
+
+    fn live_preview(
+        &self,
+        activity: &CapabilityActivityView,
+    ) -> Result<Option<CapabilityDisplayPreviewView>, ProductAdapterError> {
+        if !matches!(
+            activity.status,
+            CapabilityActivityStatusView::Completed
+                | CapabilityActivityStatusView::Failed
+                | CapabilityActivityStatusView::Killed
+        ) {
+            return Ok(None);
+        }
+        let Some(record) = self.record_for_invocation(activity.invocation_id) else {
+            return Ok(None);
+        };
+        CapabilityDisplayPreviewView::new(CapabilityDisplayPreviewViewInput {
+            timeline_message_id: record
+                .timeline_message_id
+                .map(|message_id| message_id.to_string()),
+            invocation_id: activity.invocation_id,
+            turn_run_id: activity.turn_run_id,
+            thread_id: activity.thread_id.clone(),
+            capability_id: activity.capability_id.clone(),
+            status: activity.status,
+            error_kind: activity.error_kind.clone(),
+            title: record.title,
+            subtitle: record.subtitle,
+            input_summary: record.input_summary,
+            output_summary: record.output_summary,
+            output_preview: record.output_preview,
+            output_kind: record.output_kind,
+            output_bytes: activity.output_bytes.or(record.output_bytes),
+            result_ref: record.result_ref,
+            truncated: record.truncated,
+            updated_at: activity.updated_at,
+            activity_order: activity.activity_order,
         })
+        .map(Some)
     }
 }
 
@@ -1019,7 +1121,10 @@ mod tests {
         let pending = store.lock_pending_inputs();
         let input = pending
             .by_ref
-            .get(input_ref.as_str())
+            .get(&(
+                "run-poisoned-preview".to_string(),
+                input_ref.as_str().to_string(),
+            ))
             .expect("input preview should be recorded after poisoned lock recovery");
         assert_eq!(input.title, "shell");
         assert_eq!(input.input_summary.as_deref(), Some("command: echo hi"));

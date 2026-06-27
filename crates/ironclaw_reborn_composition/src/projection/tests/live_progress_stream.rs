@@ -1,10 +1,10 @@
 use super::*;
-use ironclaw_host_api::RuntimeKind;
+use ironclaw_host_api::{ExtensionId, RuntimeKind};
 use ironclaw_turns::{
     CapabilityActivityId, TurnId,
     run_profile::{
-        CapabilityFailureKind, InMemoryLoopHostMilestoneSink, LoopDriverId, LoopHostMilestone,
-        LoopHostMilestoneKind, LoopHostMilestoneSink,
+        CapabilityFailureKind, CapabilityInputRef, InMemoryLoopHostMilestoneSink, LoopDriverId,
+        LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
     },
 };
 use std::sync::Arc;
@@ -15,6 +15,7 @@ struct LiveProjectionFixture {
     scope: TurnScope,
     services: RebornProjectionServices,
     sink: Arc<dyn LoopHostMilestoneSink>,
+    display_previews: Arc<CapabilityDisplayPreviewStore>,
 }
 
 fn live_projection_fixture(label: &str) -> LiveProjectionFixture {
@@ -23,10 +24,12 @@ fn live_projection_fixture(label: &str) -> LiveProjectionFixture {
     let agent_id = AgentId::new(format!("{label}-agent")).unwrap();
     let thread_id = ThreadId::new(format!("{label}-thread")).unwrap();
     let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
     let services = build_reborn_projection_services(
         event_log,
         ReplyTargetBindingRef::new(format!("{label}-reply")).unwrap(),
-    );
+    )
+    .with_display_previews(Arc::clone(&display_previews));
     let sink = services.with_live_progress_milestone_sink_for_publisher(
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
         services.live_projection_publisher(user_id.clone()),
@@ -38,6 +41,7 @@ fn live_projection_fixture(label: &str) -> LiveProjectionFixture {
         scope,
         services,
         sink,
+        display_previews,
     }
 }
 
@@ -376,6 +380,391 @@ async fn webui_event_stream_preserves_live_reasoning_and_tool_start_order() {
             "tool:builtin.http".to_string(),
             "thinking:after tool".to_string(),
         ]
+    );
+}
+
+#[tokio::test]
+async fn webui_event_stream_includes_live_completed_tool_preview() {
+    let fixture = live_projection_fixture("webui-live-tool-preview");
+    let user_id = fixture.user_id.clone();
+    let thread_id = fixture.thread_id.clone();
+    let scope = fixture.scope.clone();
+    let run_id = TurnRunId::new();
+    let capability_id = CapabilityId::new("builtin.extension_search").unwrap();
+    let activity_id = CapabilityActivityId::new();
+    let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
+    let input_ref = CapabilityInputRef::new("input:live-tool-preview").unwrap();
+    let input = serde_json::json!({ "query": "gmail" });
+    let output = serde_json::json!({ "installed": ["gmail"] });
+
+    fixture.display_previews.record_input(
+        &run_id.to_string(),
+        &input_ref,
+        capability_id.as_str(),
+        &input,
+    );
+    fixture.display_previews.record_running_invocation(
+        &run_id.to_string(),
+        invocation_id,
+        &input_ref,
+    );
+    fixture
+        .display_previews
+        .record_result(CapabilityDisplayPreviewResult {
+            run_id: &run_id.to_string(),
+            input_ref: &input_ref,
+            invocation_id,
+            capability_id: &capability_id,
+            result_ref: "result:live-tool-preview",
+            output: &output,
+            output_bytes: 25,
+        });
+
+    fixture
+        .sink
+        .publish_loop_milestone(LoopHostMilestone {
+            scope: scope.clone(),
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id,
+            loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+            kind: LoopHostMilestoneKind::CapabilityCompleted {
+                activity_id,
+                capability_id: capability_id.clone(),
+                provider: ExtensionId::new("builtin").unwrap(),
+                runtime: RuntimeKind::FirstParty,
+                output_bytes: 25,
+            },
+        })
+        .await
+        .unwrap();
+
+    let events = fixture
+        .services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let live_items = events
+        .iter()
+        .find_map(|event| match event.payload() {
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.thread_id == thread_id.to_string() =>
+            {
+                Some(&state.items)
+            }
+            _ => None,
+        })
+        .expect("live completed tool projection update");
+
+    assert!(live_items.iter().any(|item| {
+        matches!(
+            item,
+            ProductProjectionItem::CapabilityActivity(activity)
+                if activity.invocation_id == invocation_id
+                    && activity.status == CapabilityActivityStatusView::Completed
+        )
+    }));
+    assert!(live_items.iter().any(|item| {
+        matches!(
+            item,
+            ProductProjectionItem::CapabilityDisplayPreview(preview)
+                if preview.invocation_id == invocation_id
+                    && preview.capability_id == capability_id
+                    && preview.input_summary.as_deref().is_some_and(|summary| summary.contains("\"query\": \"gmail\""))
+                    && preview.result_ref.as_deref() == Some("result:live-tool-preview")
+        )
+    }));
+}
+
+#[tokio::test]
+async fn webui_event_stream_drains_explicit_live_completed_preview_without_store_lookup() {
+    let label = "webui-explicit-live-tool-preview";
+    let tenant_id = TenantId::new(format!("{label}-tenant")).unwrap();
+    let user_id = UserId::new(format!("{label}-user")).unwrap();
+    let agent_id = AgentId::new(format!("{label}-agent")).unwrap();
+    let thread_id = ThreadId::new(format!("{label}-thread")).unwrap();
+    let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id.clone());
+    let services = build_reborn_projection_services(
+        Arc::new(InMemoryDurableEventLog::new()),
+        ReplyTargetBindingRef::new(format!("{label}-reply")).unwrap(),
+    );
+    let display_previews = CapabilityDisplayPreviewStore::default();
+    let run_id = TurnRunId::new();
+    let capability_id = CapabilityId::new("builtin.extension_search").unwrap();
+    let activity_id = CapabilityActivityId::new();
+    let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
+    let input_ref = CapabilityInputRef::new("input:explicit-live-tool-preview").unwrap();
+    let input = serde_json::json!({ "query": "gmail" });
+    let output = serde_json::json!({ "installed": ["gmail"] });
+
+    display_previews.record_input(
+        &run_id.to_string(),
+        &input_ref,
+        capability_id.as_str(),
+        &input,
+    );
+    display_previews.record_running_invocation(&run_id.to_string(), invocation_id, &input_ref);
+    display_previews.record_result(CapabilityDisplayPreviewResult {
+        run_id: &run_id.to_string(),
+        input_ref: &input_ref,
+        invocation_id,
+        capability_id: &capability_id,
+        result_ref: "result:explicit-live-tool-preview",
+        output: &output,
+        output_bytes: 25,
+    });
+    let preview = display_previews
+        .record_for_invocation(invocation_id)
+        .expect("completed preview record");
+
+    services
+        .live_projection_publisher(user_id.clone())
+        .publish_completed_capability_preview(
+            Some(&user_id),
+            &scope,
+            CompletedCapabilityPreviewLiveUpdate {
+                run_id,
+                invocation_id,
+                capability_id: capability_id.clone(),
+                output_bytes: 25,
+                preview,
+            },
+        );
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                event.payload(),
+                ProductOutboundPayload::ProjectionUpdate { state }
+                    if state.thread_id == thread_id.to_string()
+                        && state.items.iter().any(|item| matches!(
+                            item,
+                            ProductProjectionItem::CapabilityActivity(activity)
+                                if activity.invocation_id == invocation_id
+                                    && activity.status == CapabilityActivityStatusView::Completed
+                        ))
+                        && state.items.iter().any(|item| matches!(
+                            item,
+                            ProductProjectionItem::CapabilityDisplayPreview(preview)
+                                if preview.invocation_id == invocation_id
+                                    && preview.capability_id == capability_id
+                                    && preview.input_summary.as_deref().is_some_and(|summary| summary.contains("\"query\": \"gmail\""))
+                                    && preview.output_preview.is_some()
+                                    && preview.result_ref.as_deref() == Some("result:explicit-live-tool-preview")
+                        ))
+            )
+        }),
+        "explicit live preview should not depend on projection-side store lookup: {events:#?}"
+    );
+}
+
+#[tokio::test]
+async fn webui_event_stream_deduplicates_explicit_completed_preview_from_store_lookup() {
+    let fixture = live_projection_fixture("webui-explicit-live-tool-preview-dedupe");
+    let user_id = fixture.user_id.clone();
+    let thread_id = fixture.thread_id.clone();
+    let scope = fixture.scope.clone();
+    let run_id = TurnRunId::new();
+    let capability_id = CapabilityId::new("builtin.extension_search").unwrap();
+    let activity_id = CapabilityActivityId::new();
+    let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
+    let input_ref = CapabilityInputRef::new("input:explicit-live-tool-preview-dedupe").unwrap();
+    let input = serde_json::json!({ "query": "gmail" });
+    let output = serde_json::json!({ "installed": ["gmail"] });
+
+    fixture.display_previews.record_input(
+        &run_id.to_string(),
+        &input_ref,
+        capability_id.as_str(),
+        &input,
+    );
+    fixture.display_previews.record_running_invocation(
+        &run_id.to_string(),
+        invocation_id,
+        &input_ref,
+    );
+    fixture
+        .display_previews
+        .record_result(CapabilityDisplayPreviewResult {
+            run_id: &run_id.to_string(),
+            input_ref: &input_ref,
+            invocation_id,
+            capability_id: &capability_id,
+            result_ref: "result:explicit-live-tool-preview-dedupe",
+            output: &output,
+            output_bytes: 25,
+        });
+    let preview = fixture
+        .display_previews
+        .record_for_invocation(invocation_id)
+        .expect("completed preview record");
+
+    fixture
+        .services
+        .live_projection_publisher(user_id.clone())
+        .publish_completed_capability_preview(
+            Some(&user_id),
+            &scope,
+            CompletedCapabilityPreviewLiveUpdate {
+                run_id,
+                invocation_id,
+                capability_id: capability_id.clone(),
+                output_bytes: 25,
+                preview,
+            },
+        );
+
+    let events = fixture
+        .services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let live_items = events
+        .iter()
+        .find_map(|event| match event.payload() {
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.thread_id == thread_id.to_string() =>
+            {
+                Some(&state.items)
+            }
+            _ => None,
+        })
+        .expect("live completed tool projection update");
+
+    assert!(live_items.iter().any(|item| {
+        matches!(
+            item,
+            ProductProjectionItem::CapabilityActivity(activity)
+                if activity.invocation_id == invocation_id
+                    && activity.status == CapabilityActivityStatusView::Completed
+        )
+    }));
+    let preview_count = live_items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                ProductProjectionItem::CapabilityDisplayPreview(preview)
+                    if preview.invocation_id == invocation_id
+                        && preview.capability_id == capability_id
+                        && preview.result_ref.as_deref()
+                            == Some("result:explicit-live-tool-preview-dedupe")
+            )
+        })
+        .count();
+    assert_eq!(
+        preview_count, 1,
+        "explicit live preview should not duplicate the store-derived preview: {live_items:#?}"
+    );
+}
+
+#[tokio::test]
+async fn webui_event_stream_uses_running_invocation_for_completed_preview() {
+    let fixture = live_projection_fixture("webui-live-tool-preview-linked-id");
+    let user_id = fixture.user_id.clone();
+    let thread_id = fixture.thread_id.clone();
+    let scope = fixture.scope.clone();
+    let run_id = TurnRunId::new();
+    let capability_id = CapabilityId::new("builtin.extension_search").unwrap();
+    let activity_id = CapabilityActivityId::new();
+    let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
+    let stale_result_invocation_id = InvocationId::new();
+    let input_ref = CapabilityInputRef::new("input:live-tool-preview-linked-id").unwrap();
+    let input = serde_json::json!({ "query": "gmail" });
+    let output = serde_json::json!({ "installed": ["gmail"] });
+
+    fixture.display_previews.record_input(
+        &run_id.to_string(),
+        &input_ref,
+        capability_id.as_str(),
+        &input,
+    );
+    fixture.display_previews.record_running_invocation(
+        &run_id.to_string(),
+        invocation_id,
+        &input_ref,
+    );
+    fixture
+        .display_previews
+        .record_result(CapabilityDisplayPreviewResult {
+            run_id: &run_id.to_string(),
+            input_ref: &input_ref,
+            invocation_id: stale_result_invocation_id,
+            capability_id: &capability_id,
+            result_ref: "result:live-tool-preview-linked-id",
+            output: &output,
+            output_bytes: 25,
+        });
+
+    fixture
+        .sink
+        .publish_loop_milestone(LoopHostMilestone {
+            scope: scope.clone(),
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id,
+            loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+            kind: LoopHostMilestoneKind::CapabilityCompleted {
+                activity_id,
+                capability_id: capability_id.clone(),
+                provider: ExtensionId::new("builtin").unwrap(),
+                runtime: RuntimeKind::FirstParty,
+                output_bytes: 25,
+            },
+        })
+        .await
+        .unwrap();
+
+    let events = fixture
+        .services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                event.payload(),
+                ProductOutboundPayload::ProjectionUpdate { state }
+                    if state.thread_id == thread_id.to_string()
+                        && state.items.iter().any(|item| matches!(
+                            item,
+                            ProductProjectionItem::CapabilityDisplayPreview(preview)
+                                if preview.invocation_id == invocation_id
+                                    && preview.capability_id == capability_id
+                                    && preview.input_summary.as_deref().is_some_and(|summary| summary.contains("\"query\": \"gmail\""))
+                                    && preview.result_ref.as_deref() == Some("result:live-tool-preview-linked-id")
+                        ))
+            )
+        }),
+        "completed tool preview should be keyed to the running activity id: {events:#?}"
     );
 }
 

@@ -350,13 +350,11 @@ export function useChat(threadId) {
     locallyResolvedGatesRef,
     toolActivityStateRef,
     // Reborn's projection bridge does not yet emit `Text` items for
-    // assistant replies, and never emits `capability_display_preview`
-    // items in the projection state — the assistant reply and the rich
-    // tool input/output cards live only in the thread timeline. Refetch
-    // the timeline on EVERY terminal run (success or not) so both become
-    // visible; a failed/cancelled run still recovers the tool previews for
-    // tools that completed before it terminated. `preserveClientOnly`
-    // keeps the client-side `err-*` failure bubble across the reload.
+    // assistant replies. Refetch the timeline on EVERY terminal run
+    // (success or not) so the final reply becomes visible; a failed or
+    // cancelled run still recovers any durable tool previews not seen live.
+    // `preserveClientOnly` keeps the client-side `err-*` failure bubble
+    // across the reload.
     // On success, clear pending optimistic messages first so the real
     // user message from the server doesn't render alongside its
     // pre-submit optimistic twin.

@@ -2859,6 +2859,7 @@ pub async fn build_reborn_runtime(
     // the milestone-sink builder consumes the original by value.
     #[cfg(feature = "root-llm-provider")]
     let skill_learning_publisher = Arc::clone(&live_projection_publisher);
+    let capability_result_publisher = Arc::clone(&live_projection_publisher);
     let milestone_sink = projection_services.with_live_progress_milestone_sink_for_publisher(
         durable_milestone_sink,
         live_projection_publisher,
@@ -2890,6 +2891,7 @@ pub async fn build_reborn_runtime(
             skill_activation_source.clone(),
             outbound_preferences_facade.clone(),
             trajectory_observer,
+            Some(capability_result_publisher),
         )
         .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
         (

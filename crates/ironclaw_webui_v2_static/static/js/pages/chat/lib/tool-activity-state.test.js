@@ -42,7 +42,7 @@ function runtimeActivity(overrides = {}) {
     toolDurationMs: null,
     updatedAt: "2026-06-17T01:00:00.000Z",
     resultRef: null,
-    truncated: false,
+    truncated: null,
     outputBytes: null,
     outputKind: null,
     turnRunId: "run-1",
@@ -103,6 +103,39 @@ test("runtime activity adopts an earlier gate card by invocation id", () => {
   assert.equal(harness.messages[0].toolStatus, "declined");
   assert.equal(harness.messages[0].activityOrder, 42);
   assert.equal(harness.messages[0].activityOrderSource, "projection");
+});
+
+test("runtime activity does not clear existing preview details", () => {
+  const harness = messageHarness();
+  upsertToolActivityMessage(
+    harness.setMessages,
+    runtimeActivity({
+      toolStatus: "success",
+      toolDetail: "gmail",
+      toolParameters: '{\n  "query": "gmail"\n}',
+      toolResultPreview: '{ "ok": true }',
+      resultRef: "result:preview",
+    }),
+    harness.stateRef,
+  );
+  upsertToolActivityMessage(
+    harness.setMessages,
+    runtimeActivity({
+      toolStatus: "success",
+      toolDetail: null,
+      toolParameters: null,
+      toolResultPreview: null,
+      resultRef: null,
+      truncated: null,
+    }),
+    harness.stateRef,
+  );
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].toolDetail, "gmail");
+  assert.equal(harness.messages[0].toolParameters, '{\n  "query": "gmail"\n}');
+  assert.equal(harness.messages[0].toolResultPreview, '{ "ok": true }');
+  assert.equal(harness.messages[0].resultRef, "result:preview");
 });
 
 test("approval gate without invocation id does not synthesize an activity card", () => {
