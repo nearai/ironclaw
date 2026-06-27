@@ -466,8 +466,10 @@ async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v
     ).to_be_visible(timeout=15000)
 
     await expect(composer).to_be_enabled()
+    await expect(composer).to_have_attribute("data-send-disabled", "true")
     await composer.fill("draft while the reply is still running")
     await expect(composer).to_have_value("draft while the reply is still running")
+    await expect(composer).to_have_attribute("data-send-disabled", "true")
 
     await composer.press("Enter")
     await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)

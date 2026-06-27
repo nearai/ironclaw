@@ -48,6 +48,7 @@ use ironclaw_product_adapters::{
 const DEFAULT_RESPONSES_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_BIND_INTERNAL_REFS_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RESPONSES_BODY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_RESPONSES_CONTEXT_BYTES: usize = 10 * 1024;
 const MAX_RESPONSES_INPUT_ITEMS: usize = 1_000;
 const OPENAI_COMPAT_CONVERSATION_PREFIX: &str = "response";
 
@@ -887,7 +888,34 @@ fn validate_responses_supported_fields(
             "tool_choice".to_string(),
         )));
     }
+    if let Some(context) = &request.x_context
+        && serialized_json_len(context) > MAX_RESPONSES_CONTEXT_BYTES
+    {
+        return Err(OpenAiCompatHttpError::invalid_request(Some(
+            "x_context".to_string(),
+        )));
+    }
     Ok(())
+}
+
+fn serialized_json_len(value: &serde_json::Value) -> usize {
+    struct CountingWriter(usize);
+
+    impl std::io::Write for CountingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(buf.len());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut writer = CountingWriter(0);
+    serde_json::to_writer(&mut writer, value)
+        .map(|_| writer.0)
+        .unwrap_or(usize::MAX)
 }
 
 fn accepted_ack_from_ack(
@@ -1025,6 +1053,11 @@ fn responses_input_to_product_text(
 ) -> Result<String, OpenAiCompatHttpError> {
     let input = match &request.input {
         OpenAiResponsesInput::Text(text) => {
+            if text.trim().is_empty() {
+                return Err(OpenAiCompatHttpError::invalid_request(Some(
+                    "input".to_string(),
+                )));
+            }
             vec![serde_json::json!({
                 "type": "message",
                 "role": "user",
@@ -1040,7 +1073,7 @@ fn responses_input_to_product_text(
             items.iter().map(response_input_item_to_value).collect()
         }
     };
-    serde_json::to_string(&serde_json::json!({
+    let mut payload = serde_json::json!({
         "format": "openai_compat.responses_input.v1",
         "instructions": request
             .instructions
@@ -1048,8 +1081,54 @@ fn responses_input_to_product_text(
             .filter(|value| !value.is_empty())
             .map(|value| sanitize_product_text_fragment(value)),
         "input": input,
-    }))
-    .map_err(|_| OpenAiCompatHttpError::internal())
+    });
+    if let Some(context) = &request.x_context {
+        payload["context"] = serde_json::Value::String(responses_context_to_product_text(context));
+    }
+    serde_json::to_string(&payload).map_err(|_| OpenAiCompatHttpError::internal())
+}
+
+fn responses_context_to_product_text(context: &serde_json::Value) -> String {
+    use std::fmt::Write as _;
+
+    let Some(object) = context.as_object() else {
+        let val_str = context_value_to_product_text(context);
+        return format!("[Context: {val_str}]");
+    };
+
+    let mut result = String::new();
+    for (index, (key, value)) in object.iter().enumerate() {
+        if index > 0 {
+            result.push('\n');
+        }
+        let key = sanitize_product_text_fragment(key);
+        match value.as_object() {
+            Some(inner) => {
+                let mut fields = String::new();
+                for (field_index, (field, value)) in inner.iter().enumerate() {
+                    if field_index > 0 {
+                        fields.push_str(", ");
+                    }
+                    let field = sanitize_product_text_fragment(field);
+                    let value = context_value_to_product_text(value);
+                    let _ = write!(&mut fields, "{field}: {value}");
+                }
+                let _ = write!(&mut result, "[Context: {key} - {fields}]");
+            }
+            None => {
+                let value = context_value_to_product_text(value);
+                let _ = write!(&mut result, "[Context: {key}: {value}]");
+            }
+        }
+    }
+    result
+}
+
+fn context_value_to_product_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => sanitize_product_text_fragment(text),
+        other => sanitize_product_text_fragment(&other.to_string()),
+    }
 }
 
 fn response_input_item_to_value(item: &OpenAiResponsesInputItem) -> serde_json::Value {

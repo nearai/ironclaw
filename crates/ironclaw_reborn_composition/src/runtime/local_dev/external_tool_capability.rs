@@ -741,7 +741,7 @@ mod tests {
     #[tokio::test]
     async fn external_tool_surface_maps_provider_name_to_capability_id() {
         let (port, _run_context) =
-            wrapped_port_with_specs(vec![external_tool_spec("ClientTool")]).await;
+            wrapped_port_with_specs(vec![external_tool_spec("client_tool")]).await;
 
         let surface = port
             .visible_capabilities(VisibleCapabilityRequest)
@@ -750,13 +750,13 @@ mod tests {
         assert_eq!(surface.descriptors.len(), 1);
         assert_eq!(
             surface.descriptors[0].capability_id.as_str(),
-            "external_tool.clienttool"
+            "external_tool.client_tool"
         );
-        assert_eq!(surface.descriptors[0].safe_name, "clienttool");
+        assert_eq!(surface.descriptors[0].safe_name, "client_tool");
 
         let definitions = port.tool_definitions().expect("tool definitions");
         assert_eq!(definitions.len(), 1);
-        assert_eq!(definitions[0].name.as_str(), "clienttool");
+        assert_eq!(definitions[0].name.as_str(), "client_tool");
 
         let ids = port
             .provider_tool_call_capability_ids(&ProviderToolCall {
@@ -764,7 +764,7 @@ mod tests {
                 provider_model_id: "test-model".to_string(),
                 turn_id: Some("turn-1".to_string()),
                 id: "call-1".to_string(),
-                name: ProviderToolName::new("clienttool").expect("provider tool name"),
+                name: ProviderToolName::new("client_tool").expect("provider tool name"),
                 arguments: serde_json::json!({}),
                 response_reasoning: None,
                 reasoning: None,
@@ -773,7 +773,7 @@ mod tests {
             .expect("capability ids");
         assert_eq!(
             ids.provider_capability_id.as_str(),
-            "external_tool.clienttool"
+            "external_tool.client_tool"
         );
     }
 
