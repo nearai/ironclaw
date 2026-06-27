@@ -36,7 +36,6 @@ class CommandSpec:
     unset_env: list[str] = field(default_factory=list)
     description: str = ""
     existing_ci_coverage: str | None = None
-    external_coverage_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -1007,22 +1006,6 @@ WEBUI_V2_LOGIN_OAUTH_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
-WEBUI_V2_LOGIN_BROWSER_MATRIX_COMMAND = CommandSpec(
-    name="webui_v2_login_browser_matrix_contracts",
-    description=(
-        "External Playwright coverage from PR #5348 for the Reborn WebUI v2 "
-        "login/session bundle: manual-token, auth prompt, OAuth callback, "
-        "session isolation, sign-out, token retention, and browser-visible "
-        "auth error behavior."
-    ),
-    argv=[],
-    existing_ci_coverage=(
-        "already covered by ilblackdragon PR #5348 Playwright legacy auth-flow "
-        "and core auth/session browser tests"
-    ),
-    external_coverage_only=True,
-)
-
 WEBUI_V2_CHAT_CLIENT_COMMAND = CommandSpec(
     name="webui_v2_chat_client_contracts",
     description=(
@@ -1040,23 +1023,6 @@ WEBUI_V2_CHAT_CLIENT_COMMAND = CommandSpec(
             "-print0 | xargs -0 node --test"
         ),
     ],
-)
-
-WEBUI_V2_CHAT_BROWSER_MATRIX_COMMAND = CommandSpec(
-    name="webui_v2_chat_browser_matrix_contracts",
-    description=(
-        "External Playwright coverage from PR #5348 for the Reborn WebUI v2 "
-        "chat bundle: first conversation, multi-message send/receive, "
-        "attachments, pending messages, SSE/history behavior, cancellation, "
-        "retry, rendering, and shell navigation."
-    ),
-    argv=[],
-    existing_ci_coverage=(
-        "already covered by ilblackdragon PR #5348 Playwright legacy core, "
-        "chat actions, attachments, pending messages, SSE/history, rendering, "
-        "and message persistence tests"
-    ),
-    external_coverage_only=True,
 )
 
 WEBUI_V2_WORKSPACE_PROJECT_CLIENT_COMMAND = CommandSpec(
@@ -1756,21 +1722,6 @@ WEBUI_V2_SETTINGS_DIRECT_TABS_COMMAND = CommandSpec(
         "crates/ironclaw_webui_v2_static/static/js/pages/settings/lib/settings-api.test.mjs",
         "crates/ironclaw_webui_v2_static/static/js/pages/settings/lib/settings-schema.test.mjs",
     ],
-)
-
-WEBUI_V2_SETTINGS_DIRECT_TABS_BROWSER_COMMAND = CommandSpec(
-    name="webui_v2_settings_direct_tabs_browser_smoke",
-    description=(
-        "External Playwright coverage from PR #5348 for browser-visible "
-        "Settings tools search, auto-approve, and tool-permission behavior. "
-        "Local direct-tab and role-gating coverage stays in static node tests."
-    ),
-    argv=[],
-    existing_ci_coverage=(
-        "already covered by ilblackdragon PR #5348 Playwright settings-search "
-        "and tool-permissions browser tests"
-    ),
-    external_coverage_only=True,
 )
 
 WEBUI_V2_ADMIN_CLIENT_COMMAND = CommandSpec(
@@ -4280,49 +4231,6 @@ CASES: dict[str, CaseSpec] = {
             "aria-label coverage."
         ),
     ),
-    "webui_v2_chat_browser_matrix_regression": CaseSpec(
-        name="webui_v2_chat_browser_matrix_regression",
-        feature="WebUI v2 chat screen and gate UX",
-        category="Hermetic Chat Browser Matrix Regression",
-        qa_matrix_test_ids=[
-            "REBCLI-065-TC-07",
-            "REBCLI-065-TC-08",
-            "REBCLI-065-TC-09",
-            "REBCLI-065-TC-10",
-            "REBCLI-065-TC-11",
-            "REBCLI-065-TC-12",
-            "REBCLI-065-TC-13",
-            "REBCLI-065-TC-14",
-            "REBCLI-065-TC-15",
-            "REBCLI-065-TC-16",
-            "REBCLI-065-TC-17",
-            "REBCLI-065-TC-18",
-            "REBCLI-065-TC-19",
-            "REBCLI-065-TC-20",
-            "REBCLI-065-TC-21",
-            "REBCLI-065-TC-22",
-            "REBCLI-065-TC-27",
-            "REBCLI-065-TC-29",
-            "REBCLI-065-TC-30",
-            "REBCLI-065-TC-31",
-            "REBCLI-065-TC-32",
-            "REBCLI-065-TC-33",
-            "REBCLI-065-TC-34",
-            "REBCLI-065-TC-35",
-            "REBCLI-065-TC-36",
-        ],
-        commands=[WEBUI_V2_CHAT_BROWSER_MATRIX_COMMAND],
-        notes=(
-            "Runs the committed WebUI v2 chat bundle in Chromium while "
-            "stubbing only the WebChat v2 browser API and EventSource stream. "
-            "Covers the real-browser matrix rows without live LLM calls: "
-            "starter and typed first-message sends, existing-thread follow-up, "
-            "attachment picker/drop/paste wire shapes and validation, image "
-            "thumbnail rendering, busy/failure/retry behavior, cancellation, "
-            "keyboard multiline submit, accessibility landmarks/named "
-            "controls, focus restoration, and mobile no-overflow smoke."
-        ),
-    ),
     "webui_v2_workspace_project_client_regression": CaseSpec(
         name="webui_v2_workspace_project_client_regression",
         feature="WebUI v2 workspace and project browser screens",
@@ -5076,7 +4984,6 @@ CASES: dict[str, CaseSpec] = {
         ],
         commands=[
             WEBUI_V2_SETTINGS_DIRECT_TABS_COMMAND,
-            WEBUI_V2_SETTINGS_DIRECT_TABS_BROWSER_COMMAND,
         ],
         notes=(
             "Covers WebUI v2 Settings direct-tab/configuration panel rows "
@@ -5448,7 +5355,6 @@ CASES: dict[str, CaseSpec] = {
             WEBUI_V2_STATIC_AUTH_JS_COMMAND,
             WEBUI_V2_STATIC_API_AUTH_COMMAND,
             WEBUI_V2_LOGIN_OAUTH_CLIENT_COMMAND,
-            WEBUI_V2_LOGIN_BROWSER_MATRIX_COMMAND,
             WEBUI_V2_INGRESS_SESSION_AUTH_COMMAND,
         ],
         notes=(
@@ -5670,8 +5576,6 @@ def parse_duration_seconds(raw: str | None) -> int:
 
 
 def render_command(command: CommandSpec) -> str:
-    if command.external_coverage_only:
-        return f"external coverage only: {command.existing_ci_coverage or command.name}"
     unset_prefix = " ".join(f"unset {shlex.quote(name)};" for name in command.unset_env)
     env_prefix = " ".join(
         f"{name}={shlex.quote(value)}" for name, value in sorted(command.env.items())
@@ -5845,23 +5749,6 @@ def run_command(
         stdout_log.write_text("", encoding="utf-8")
         stderr_log.write_text("", encoding="utf-8")
         details.update({"success": True, "returncode": None, "latency_ms": 0})
-        return details
-
-    if command.external_coverage_only:
-        stdout_log.write_text(
-            f"{command.name} is external coverage only: {existing_ci_coverage}\n",
-            encoding="utf-8",
-        )
-        stderr_log.write_text("", encoding="utf-8")
-        details.update(
-            {
-                "success": True,
-                "returncode": None,
-                "latency_ms": 0,
-                "skipped": True,
-                "reason": "external coverage only",
-            }
-        )
         return details
 
     env = os.environ.copy()

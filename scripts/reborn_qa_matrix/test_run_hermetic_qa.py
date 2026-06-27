@@ -1259,62 +1259,6 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn("node --test", commands[0]["command"])
             self.assertIn("static/js/pages/chat", commands[0]["command"])
 
-    def test_webui_chat_browser_matrix_case_dry_run_maps_browser_matrix_ids(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output_dir = Path(tmpdir)
-            exit_code = run_hermetic_qa.main(
-                [
-                    "--output-dir",
-                    str(output_dir),
-                    "--case",
-                    "webui_v2_chat_browser_matrix_regression",
-                    "--dry-run",
-                ]
-            )
-
-            self.assertEqual(exit_code, 0)
-            results = json.loads(
-                (output_dir / "results.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(
-                results["summary"]["qa_matrix_test_ids"],
-                [
-                    "REBCLI-065-TC-07",
-                    "REBCLI-065-TC-08",
-                    "REBCLI-065-TC-09",
-                    "REBCLI-065-TC-10",
-                    "REBCLI-065-TC-11",
-                    "REBCLI-065-TC-12",
-                    "REBCLI-065-TC-13",
-                    "REBCLI-065-TC-14",
-                    "REBCLI-065-TC-15",
-                    "REBCLI-065-TC-16",
-                    "REBCLI-065-TC-17",
-                    "REBCLI-065-TC-18",
-                    "REBCLI-065-TC-19",
-                    "REBCLI-065-TC-20",
-                    "REBCLI-065-TC-21",
-                    "REBCLI-065-TC-22",
-                    "REBCLI-065-TC-27",
-                    "REBCLI-065-TC-29",
-                    "REBCLI-065-TC-30",
-                    "REBCLI-065-TC-31",
-                    "REBCLI-065-TC-32",
-                    "REBCLI-065-TC-33",
-                    "REBCLI-065-TC-34",
-                    "REBCLI-065-TC-35",
-                    "REBCLI-065-TC-36",
-                ],
-            )
-            commands = results["results"][0]["details"]["commands"]
-            self.assertEqual(
-                [command["name"] for command in commands],
-                ["webui_v2_chat_browser_matrix_contracts"],
-            )
-            self.assertEqual(commands[0]["coverage_source"], "existing_ci_coverage")
-            self.assertIn("PR #5348", commands[0]["existing_ci_coverage"])
-            self.assertIn("external coverage only", commands[0]["command"])
-
     def test_webui_workspace_project_case_dry_run_maps_client_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
@@ -2548,10 +2492,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             commands = results["results"][0]["details"]["commands"]
             self.assertEqual(
                 [command["name"] for command in commands],
-                [
-                    "webui_v2_settings_direct_tabs_contracts",
-                    "webui_v2_settings_direct_tabs_browser_smoke",
-                ],
+                ["webui_v2_settings_direct_tabs_contracts"],
             )
             self.assertIn("settings-shell.test.mjs", commands[0]["command"])
             self.assertIn("settings-restart.test.mjs", commands[0]["command"])
@@ -2559,9 +2500,6 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn("tools-tab.test.mjs", commands[0]["command"])
             self.assertIn("settings-api.test.mjs", commands[0]["command"])
             self.assertIn("settings-schema.test.mjs", commands[0]["command"])
-            self.assertEqual(commands[1]["coverage_source"], "existing_ci_coverage")
-            self.assertIn("PR #5348", commands[1]["existing_ci_coverage"])
-            self.assertIn("external coverage only", commands[1]["command"])
 
     def test_webui_v2_admin_console_usage_case_dry_run_maps_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3086,18 +3024,14 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "webui_v2_static_auth_js_contract",
                     "webui_v2_static_api_auth_client_contracts",
                     "webui_v2_login_oauth_client_contracts",
-                    "webui_v2_login_browser_matrix_contracts",
                     "webui_v2_ingress_session_auth_contracts",
                 ],
             )
             self.assertIn("auth_js_carries_login_ticket_contract", commands[0]["command"])
             self.assertIn("api.test.mjs", commands[1]["command"])
             self.assertIn("login-oauth.test.mjs", commands[2]["command"])
-            self.assertEqual(commands[3]["coverage_source"], "existing_ci_coverage")
-            self.assertIn("PR #5348", commands[3]["existing_ci_coverage"])
-            self.assertIn("external coverage only", commands[3]["command"])
-            self.assertIn("ironclaw_reborn_webui_ingress", commands[4]["command"])
-            self.assertIn("session", commands[4]["command"])
+            self.assertIn("ironclaw_reborn_webui_ingress", commands[3]["command"])
+            self.assertIn("session", commands[3]["command"])
 
     def test_chat_completions_case_dry_run_maps_primary_chat_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
