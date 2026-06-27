@@ -219,6 +219,8 @@ export function useChat(threadId) {
   const submitBusyRef = React.useRef(false);
   const locallyRunningThreadIdsRef = React.useRef(new Set());
   const locallyRunningThreadByRunIdRef = React.useRef(new Map());
+  const awaitingLocalRunResponseRef = React.useRef(false);
+  const locallySettledBeforeResponseRunIdsRef = React.useRef(new Set());
 
   // Per-thread transient state must not leak across thread switches.
   // Without this reset, clicking "+ New" while the previous thread is
@@ -367,6 +369,9 @@ export function useChat(threadId) {
       if (settledThreadId) {
         locallyRunningThreadByRunIdRef.current.delete(_runId);
         locallyRunningThreadIdsRef.current.delete(settledThreadId);
+      } else if (_runId && awaitingLocalRunResponseRef.current) {
+        // The terminal SSE can arrive before the POST response exposes run_id.
+        locallySettledBeforeResponseRunIdsRef.current.add(_runId);
       }
       // submitBusyRef is released by send()'s `finally` when the POST settles —
       // it is NOT this callback's to clear. Releasing the POST re-entrancy guard
@@ -499,6 +504,7 @@ export function useChat(threadId) {
       const shouldTrackLocalRun = shouldRenderInCurrentThread;
       if (shouldTrackLocalRun) {
         locallyRunningThreadIdsRef.current.add(sendThreadId);
+        awaitingLocalRunResponseRef.current = true;
       }
       submitBusyRef.current = true;
       updateCurrentThread((prev) => [...prev, pendingRenderMessage]);
@@ -523,13 +529,32 @@ export function useChat(threadId) {
         if (threadNeedsSidebarRefresh(sendThreadId)) {
           queryClient.invalidateQueries({ queryKey: ["threads"] });
         }
-        if (response?.run_id && shouldTrackLocalRun) {
-          locallyRunningThreadByRunIdRef.current.set(
-            response.run_id,
-            sendThreadId,
-          );
+        let runSettledBeforeResponse = false;
+        if (shouldTrackLocalRun) {
+          awaitingLocalRunResponseRef.current = false;
         }
-        if (response?.run_id && shouldRenderInCurrentThread) {
+        if (response?.run_id && shouldTrackLocalRun) {
+          runSettledBeforeResponse =
+            locallySettledBeforeResponseRunIdsRef.current.delete(
+              response.run_id,
+            );
+          locallySettledBeforeResponseRunIdsRef.current.clear();
+          if (runSettledBeforeResponse) {
+            locallyRunningThreadIdsRef.current.delete(sendThreadId);
+          } else {
+            locallyRunningThreadByRunIdRef.current.set(
+              response.run_id,
+              sendThreadId,
+            );
+          }
+        } else if (shouldTrackLocalRun) {
+          locallySettledBeforeResponseRunIdsRef.current.clear();
+        }
+        if (
+          response?.run_id &&
+          shouldRenderInCurrentThread &&
+          !runSettledBeforeResponse
+        ) {
           setActiveRun({
             runId: response.run_id,
             threadId: response.thread_id || sendThreadId,
@@ -616,6 +641,8 @@ export function useChat(threadId) {
         return response;
       } catch (err) {
         if (shouldTrackLocalRun) {
+          awaitingLocalRunResponseRef.current = false;
+          locallySettledBeforeResponseRunIdsRef.current.clear();
           locallyRunningThreadIdsRef.current.delete(sendThreadId);
         }
         if (err.status === 429) {
@@ -803,6 +830,8 @@ export function useChat(threadId) {
       setIsProcessing(false);
       setActiveRun(null);
       submitBusyRef.current = false;
+      awaitingLocalRunResponseRef.current = false;
+      locallySettledBeforeResponseRunIdsRef.current.clear();
       const runThreadId =
         locallyRunningThreadByRunIdRef.current.get(runId) ||
         activeRun?.threadId ||
