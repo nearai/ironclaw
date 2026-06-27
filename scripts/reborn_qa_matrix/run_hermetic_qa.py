@@ -514,6 +514,20 @@ WEBUI_V2_SETTINGS_RESTART_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_ADMIN_CLIENT_COMMAND = CommandSpec(
+    name="webui_v2_admin_client_contracts",
+    description=(
+        "Focused WebUI v2 Admin console client contracts for page routing, "
+        "tab navigation, fail-closed TODO API stubs, and admin usage/user "
+        "presenter formatting, filtering, and aggregation."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/pages/admin/admin-contracts.test.mjs",
+    ],
+)
+
 WEBUI_V2_HIDDEN_STUBBED_ROUTE_COMMAND = CommandSpec(
     name="webui_v2_hidden_stubbed_route_contracts",
     description=(
@@ -2202,6 +2216,28 @@ CASES: dict[str, CaseSpec] = {
             "false, banner rendering when needsRestart is true, disabled "
             "restart interface, unavailable reason, local confirmation "
             "callbacks, and no v1 restart side effects."
+        ),
+    ),
+    "webui_v2_admin_console_usage_regression": CaseSpec(
+        name="webui_v2_admin_console_usage_regression",
+        feature="WebUI v2 admin console and usage presentation",
+        category="Hermetic Admin Console/Usage Client Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-093-TC-01",
+            "REBCLI-093-TC-02",
+            "REBCLI-093-TC-03",
+            "REBCLI-093-TC-04",
+            "REBCLI-093-TC-05",
+            "REBCLI-093-TC-06",
+        ],
+        commands=[WEBUI_V2_ADMIN_CLIENT_COMMAND],
+        notes=(
+            "Covers WebUI v2 Admin console rows without duplicating PR #5348 "
+            "browser legacy coverage: dashboard/users/usage routing, user "
+            "drilldown handoff, desktop/mobile admin tab navigation, fail-"
+            "closed v2 TODO API stubs with no legacy v1 fetches, and usage/"
+            "user presenter formatting, filtering, summarization, and cost-"
+            "sorted aggregation."
         ),
     ),
     "webui_v2_tee_attestation_regression": CaseSpec(
