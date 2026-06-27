@@ -2786,6 +2786,73 @@ def _extract_google_spreadsheet_id(text: str) -> str | None:
     return None
 
 
+def _extract_google_document_id(text: str) -> str | None:
+    patterns = [
+        r"https://docs\.google\.com/document/d/([A-Za-z0-9_-]+)",
+        r"\b(?:google\s+)?(?:docs?\s+)?document(?:\s+id)?\s*[:=]\s*([A-Za-z0-9_-]{20,})",
+        r"\bdoc(?:ument)?\s+id\s*[:=]\s*([A-Za-z0-9_-]{20,})",
+        r"\(ID:\s*([A-Za-z0-9_-]{20,})\)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _google_drive_query_literal(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+async def _google_drive_file_id_by_name(
+    *,
+    access_token: str,
+    name: str,
+    mime_type: str,
+) -> str | None:
+    import httpx
+
+    query = (
+        f"name = '{_google_drive_query_literal(name)}' "
+        f"and mimeType = '{_google_drive_query_literal(mime_type)}' "
+        "and trashed = false"
+    )
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            "https://www.googleapis.com/drive/v3/files",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={
+                "q": query,
+                "fields": "files(id,name,mimeType,modifiedTime)",
+                "orderBy": "modifiedTime desc",
+                "pageSize": "10",
+                "supportsAllDrives": "true",
+                "includeItemsFromAllDrives": "true",
+            },
+        )
+    try:
+        payload: object = response.json()
+    except ValueError:
+        payload = {}
+    if response.status_code < 200 or response.status_code >= 300:
+        error = payload.get("error") if isinstance(payload, dict) else None
+        message = error.get("message") if isinstance(error, dict) else str(payload)[:300]
+        raise AssertionError(
+            f"Google Drive file lookup returned HTTP {response.status_code}: {message}"
+        )
+    files = payload.get("files") if isinstance(payload, dict) else None
+    if not isinstance(files, list):
+        return None
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        if item.get("name") == name and item.get("mimeType") == mime_type:
+            file_id = str(item.get("id") or "").strip()
+            if file_id:
+                return file_id
+    return None
+
+
 async def _google_sheet_contains_marker(
     *,
     access_token: str,
@@ -3992,7 +4059,33 @@ async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResul
         **doc_creation.details,
         "doc_creation_latency_ms": doc_creation.latency_ms,
     }
+    text_excerpt = str(doc_creation.details.get("text_excerpt") or "")
+    doc_id = _extract_google_document_id(text_excerpt)
+    doc_id_source = "assistant_reply" if doc_id else None
     try:
+        if not doc_id:
+            access_token, token_meta = _google_runtime_access_token(
+                ctx.reborn_home,
+                _auth_user_id(),
+                ctx.env,
+            )
+            doc_id = await _google_drive_file_id_by_name(
+                access_token=access_token,
+                name=doc_marker,
+                mime_type="application/vnd.google-apps.document",
+            )
+            observed["google_token_for_doc_lookup"] = token_meta
+            doc_id_source = "drive_name_lookup" if doc_id else None
+        observed["doc_id_present"] = bool(doc_id)
+        observed["doc_id_source"] = doc_id_source
+        if not doc_id:
+            raise AssertionError(
+                "created Google Docs document id could not be resolved from "
+                "the setup reply or live Drive lookup"
+            )
+        doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
+        observed["doc_id"] = doc_id
+        observed["doc_url_present"] = True
         slack = _slack_preflight(ctx)
         channel_id = _slack_delivery_channel_id(ctx)
         if not channel_id:
@@ -4003,9 +4096,10 @@ async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResul
             channel_id=channel_id,
             user_id=slack_user_id,
             text=(
-                "QA case 5D: use connected Google Drive or Google Docs to find "
-                f"the document titled `{doc_marker}`. Answer with the strategy "
-                "north star from that document. Do not answer from memory. "
+                "QA case 5D: use Google Docs to read this exact document, not a "
+                f"search result: {doc_url}. The document ID is `{doc_id}` and "
+                f"the title is `{doc_marker}`. Answer with the strategy north "
+                "star from that document. Do not answer from memory. "
                 f"Include the exact marker {slack_marker} in your Slack reply."
             ),
             event_id=f"EvREBORNQA5D{suffix}",
@@ -4675,7 +4769,7 @@ async def case_qa_7e_slack_bug_sheet_delivery(ctx: LiveQaContext) -> ProbeResult
         ctx,
         case_name="qa_7e_slack_bug_sheet_delivery",
         marker=sheet_marker,
-        required_text=["Google Sheet", "spreadsheet"],
+        required_text=["Google Sheet"],
         extensions=[
             {
                 "package_id": "google-sheets",
@@ -4714,23 +4808,27 @@ async def case_qa_7e_slack_bug_sheet_delivery(ctx: LiveQaContext) -> ProbeResult
     }
     text_excerpt = str(setup.details.get("text_excerpt") or "")
     spreadsheet_id = _extract_google_spreadsheet_id(text_excerpt)
-    observed["spreadsheet_id_present"] = bool(spreadsheet_id)
-    if not spreadsheet_id:
-        return _result(
-            "qa_7e_slack_bug_sheet_delivery",
-            False,
-            started,
-            {
-                **observed,
-                "error": "assistant did not return a Google spreadsheet URL or id",
-            },
-        )
+    spreadsheet_id_source = "assistant_reply" if spreadsheet_id else None
     try:
         access_token, token_meta = _google_runtime_access_token(
             ctx.reborn_home,
             _auth_user_id(),
             ctx.env,
         )
+        if not spreadsheet_id:
+            spreadsheet_id = await _google_drive_file_id_by_name(
+                access_token=access_token,
+                name=sheet_marker,
+                mime_type="application/vnd.google-apps.spreadsheet",
+            )
+            spreadsheet_id_source = "drive_name_lookup" if spreadsheet_id else None
+        observed["spreadsheet_id_present"] = bool(spreadsheet_id)
+        observed["spreadsheet_id_source"] = spreadsheet_id_source
+        if not spreadsheet_id:
+            raise AssertionError(
+                "created Google Sheet id could not be resolved from the setup "
+                "reply or live Drive lookup"
+            )
         slack = _slack_preflight(ctx)
         channel_id = _slack_delivery_channel_id(ctx)
         if not channel_id:

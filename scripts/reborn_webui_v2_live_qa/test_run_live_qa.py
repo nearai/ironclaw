@@ -180,21 +180,23 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
     def test_slack_side_effect_setup_prompts_avoid_connect_action_trigger(self):
         captured_prompts: dict[str, str] = {}
+        document_id = "1DocCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
         spreadsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
 
         async def fake_live_chat_with_extensions_case(_ctx, **kwargs):
             case_name = kwargs["case_name"]
             captured_prompts[case_name] = kwargs["prompt"]
+            file_url = (
+                f"https://docs.google.com/document/d/{document_id}/edit"
+                if case_name == "qa_5d_slack_strategy_doc_answer"
+                else f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+            )
             return run_live_qa.ProbeResult(
                 provider="test",
                 mode=f"live:{case_name}",
                 success=True,
                 latency_ms=1,
-                details={
-                    "text_excerpt": (
-                        f"Created https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
-                    )
-                },
+                details={"text_excerpt": f"Created {file_url}"},
             )
 
         async def fake_post_signed_slack_dm_event(*_args, **_kwargs):
@@ -734,6 +736,26 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
         )
         self.assertIsNone(run_live_qa._extract_google_spreadsheet_id("no sheet here"))
+
+    def test_extract_google_document_id_from_url_or_label(self):
+        document_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
+        self.assertEqual(
+            run_live_qa._extract_google_document_id(
+                f"Created: https://docs.google.com/document/d/{document_id}/edit"
+            ),
+            document_id,
+        )
+        self.assertEqual(
+            run_live_qa._extract_google_document_id(
+                f"Document created: QA doc (ID: {document_id})"
+            ),
+            document_id,
+        )
+        self.assertIsNone(
+            run_live_qa._extract_google_document_id(
+                "Document created: REBORN_QA_5D_STRATEGY_DOC_1782597084534"
+            )
+        )
 
     def test_google_runtime_token_requires_client_secret_for_expired_copied_account(self):
         if importlib.util.find_spec("cryptography") is None:
