@@ -855,6 +855,46 @@ WEBUI_V2_TOAST_QUERY_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+REBORN_CLI_TRIGGER_POLLER_SETTINGS_COMMAND = CommandSpec(
+    name="reborn_cli_trigger_poller_settings_contracts",
+    description=(
+        "Focused Reborn CLI trigger-poller runtime settings contracts for "
+        "run/serve defaults, config and environment overrides, strict parsing, "
+        "interval validation, and runtime-input propagation used by WebUI v2 "
+        "scheduled automations."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_cli",
+        "trigger_poller",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+REBORN_CLI_WEBUI_V2_BINARY_COMMAND = CommandSpec(
+    name="reborn_cli_webui_v2_binary",
+    description=(
+        "Build the Reborn CLI binary with the WebUI v2 serve surface before "
+        "browser smokes launch target/debug/ironclaw-reborn."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "build",
+        "-p",
+        "ironclaw_reborn_cli",
+        "--features",
+        "webui-v2-beta",
+        "--bin",
+        "ironclaw-reborn",
+    ],
+)
+
 WEBUI_V2_HIDDEN_STUBBED_ROUTE_COMMAND = CommandSpec(
     name="webui_v2_hidden_stubbed_route_contracts",
     description=(
@@ -2717,12 +2757,37 @@ CASES: dict[str, CaseSpec] = {
             "separate browser/live coverage."
         ),
     ),
+    "reborn_cli_trigger_poller_settings_regression": CaseSpec(
+        name="reborn_cli_trigger_poller_settings_regression",
+        feature="Trigger poller runtime settings",
+        category="Hermetic Reborn CLI Runtime Settings Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-040-TC-01",
+            "REBCLI-040-TC-02",
+            "REBCLI-040-TC-03",
+            "REBCLI-040-TC-04",
+            "REBCLI-040-TC-05",
+            "REBCLI-040-TC-06",
+        ],
+        commands=[REBORN_CLI_TRIGGER_POLLER_SETTINGS_COMMAND],
+        notes=(
+            "Covers the non-duplicate Reborn CLI runtime settings row that "
+            "WebUI v2 scheduled automations depend on: run defaults keep the "
+            "poller disabled, serve defaults keep it enabled, config/env "
+            "overrides propagate into RuntimeInput, invalid env values fail "
+            "closed, and min/max poll intervals are validated before runtime "
+            "startup."
+        ),
+    ),
     "webui_v2_hidden_workflow_direct_routes_browser_smoke": CaseSpec(
         name="webui_v2_hidden_workflow_direct_routes_browser_smoke",
         feature="WebUI v2 hidden and stubbed direct routes",
         category="Hermetic Reborn v2 Browser Smoke",
         qa_matrix_test_ids=["REBCLI-070-TC-10"],
-        commands=[WEBUI_V2_HIDDEN_WORKFLOW_BROWSER_COMMAND],
+        commands=[
+            REBORN_CLI_WEBUI_V2_BINARY_COMMAND,
+            WEBUI_V2_HIDDEN_WORKFLOW_BROWSER_COMMAND,
+        ],
         notes=(
             "Covers the non-duplicate browser-visible hidden workflow route "
             "row: starts the Reborn WebUI v2 server against the mock LLM, "

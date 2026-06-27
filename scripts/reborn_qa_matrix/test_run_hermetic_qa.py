@@ -43,6 +43,14 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-040-TC-01",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "REBCLI-040-TC-06",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-043-TC-01",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -1204,6 +1212,46 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn("hidden-stub-apis.test.mjs", commands[0]["command"])
             self.assertIn("hidden-stub-presenters.test.mjs", commands[0]["command"])
 
+    def test_reborn_cli_trigger_poller_settings_case_dry_run_maps_matrix_ids(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "reborn_cli_trigger_poller_settings_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-040-TC-01",
+                    "REBCLI-040-TC-02",
+                    "REBCLI-040-TC-03",
+                    "REBCLI-040-TC-04",
+                    "REBCLI-040-TC-05",
+                    "REBCLI-040-TC-06",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                [command["name"] for command in commands],
+                ["reborn_cli_trigger_poller_settings_contracts"],
+            )
+            self.assertIn(
+                "cargo test -p ironclaw_reborn_cli trigger_poller",
+                commands[0]["command"],
+            )
+
     def test_webui_hidden_workflow_browser_case_dry_run_maps_matrix_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
@@ -1228,13 +1276,18 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             commands = results["results"][0]["details"]["commands"]
             self.assertEqual(
                 [command["name"] for command in commands],
-                ["webui_v2_hidden_workflow_direct_routes_browser_smoke"],
+                [
+                    "reborn_cli_webui_v2_binary",
+                    "webui_v2_hidden_workflow_direct_routes_browser_smoke",
+                ],
             )
-            self.assertIn("uv run --no-project", commands[0]["command"])
-            self.assertIn("pytest-playwright", commands[0]["command"])
+            self.assertIn("cargo build -p ironclaw_reborn_cli", commands[0]["command"])
+            self.assertIn("--features webui-v2-beta", commands[0]["command"])
+            self.assertIn("uv run --no-project", commands[1]["command"])
+            self.assertIn("pytest-playwright", commands[1]["command"])
             self.assertIn(
                 "test_reborn_v2_hidden_workflow_direct_routes_render_without_legacy_v1_calls",
-                commands[0]["command"],
+                commands[1]["command"],
             )
 
     def test_webui_hidden_workflow_presenters_case_dry_run_maps_matrix_ids(self):
