@@ -1659,6 +1659,30 @@ SLACK_HOST_BETA_COMPOSITION_COMMAND = CommandSpec(
     ],
 )
 
+SLACK_EVENTS_INGRESS_COMMAND = CommandSpec(
+    name="slack_events_ingress_contracts",
+    description=(
+        "Focused Slack Events ingress contracts for URL verification, signed "
+        "event dispatch, malformed/unknown/ambiguous installation rejection, "
+        "capacity/rate-limit mapping, adapter panic/timeout mapping, route "
+        "descriptor policy, and e2e ProductAdapter flow behavior."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "slack-v2-host-beta",
+        "slack_serve",
+        "--lib",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 SLACK_DELIVERY_COMMAND = CommandSpec(
     name="slack_delivery_contracts",
     description=(
@@ -3701,6 +3725,33 @@ CASES: dict[str, CaseSpec] = {
             "tenant/app/team/installation validation, tenant-app-scope "
             "enforcement, invalid Slack id rejection, and binding-store error "
             "propagation."
+        ),
+    ),
+    "slack_events_ingress_regression": CaseSpec(
+        name="slack_events_ingress_regression",
+        feature="Slack Events host ingress workflow",
+        category="Hermetic Slack Events Ingress Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-052-TC-01",
+            "REBCLI-052-TC-02",
+            "REBCLI-052-TC-03",
+            "REBCLI-052-TC-04",
+            "REBCLI-052-TC-05",
+            "REBCLI-052-TC-06",
+            "REBCLI-052-TC-07",
+            "REBCLI-052-TC-08",
+        ],
+        commands=[
+            SLACK_EVENTS_INGRESS_COMMAND,
+            SLACK_HOST_BETA_CLI_SERVE_COMMAND,
+        ],
+        notes=(
+            "Covers Slack Events host ingress rows without live Slack network "
+            "calls: URL verification, signed event dispatch, malformed "
+            "envelopes, missing/ambiguous installation rejection, per-install "
+            "rate limiting, adapter panic/timeout response mapping, route "
+            "descriptor body/rate policy, e2e native ProductAdapter flow, "
+            "and env-enabled serve route mounting."
         ),
     ),
     "slack_host_beta_serve_mount_regression": CaseSpec(
