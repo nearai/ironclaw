@@ -15,6 +15,7 @@ export function RestartBanner({ visible, gatewayStatus, gatewayStatusQuery }) {
     <div className="space-y-3">
       <div
         role="alert"
+        data-testid="settings-restart-banner"
         className="flex flex-col gap-3 rounded-xl border border-copper/30 bg-copper/10 px-4 py-3 sm:flex-row sm:items-center"
       >
         <div className="flex min-w-0 flex-1 items-start gap-3">
@@ -25,7 +26,10 @@ export function RestartBanner({ visible, gatewayStatus, gatewayStatusQuery }) {
             </p>
             ${!restart.restartEnabled &&
             html`
-              <p className="mt-1 text-xs text-[var(--v2-text-muted)]">
+              <p
+                data-testid="settings-restart-unavailable"
+                className="mt-1 text-xs text-[var(--v2-text-muted)]"
+              >
                 ${restart.unavailableReason}
               </p>
             `}
@@ -40,6 +44,7 @@ export function RestartBanner({ visible, gatewayStatus, gatewayStatusQuery }) {
 
         <${Button}
           type="button"
+          data-testid="settings-restart-action"
           variant="secondary"
           size="sm"
           disabled=${!restart.restartEnabled || restart.isRestarting}

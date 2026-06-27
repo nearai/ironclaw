@@ -344,6 +344,9 @@ SEL_V2 = {
     "trace_credits_final": "[data-testid='sidebar-trace-credits-final']",
     "trace_credits_counts": "[data-testid='sidebar-trace-credits-counts']",
     "trace_credits_held": "[data-testid='sidebar-trace-credits-held']",
+    "settings_restart_banner": "[data-testid='settings-restart-banner']",
+    "settings_restart_unavailable": "[data-testid='settings-restart-unavailable']",
+    "settings_restart_action": "[data-testid='settings-restart-action']",
 }
 
 

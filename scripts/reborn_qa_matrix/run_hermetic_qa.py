@@ -1590,6 +1590,39 @@ WEBUI_V2_SETTINGS_RESTART_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SETTINGS_RESTART_BROWSER_COMMAND = CommandSpec(
+    name="webui_v2_settings_restart_banner_browser_smoke",
+    description=(
+        "Served WebUI v2 browser smoke for Settings restart-required banner "
+        "visibility after importing a restart-required key, disabled v2 "
+        "restart affordance, unavailable copy, and no legacy restart request."
+    ),
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_settings_restart_browser.py",
+        "-q",
+    ],
+)
+
 WEBUI_V2_SETTINGS_TOOLBAR_SEARCH_COMMAND = CommandSpec(
     name="webui_v2_settings_toolbar_search_contracts",
     description=(
@@ -4820,13 +4853,17 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-089-TC-05",
             "REBCLI-089-TC-06",
         ],
-        commands=[WEBUI_V2_SETTINGS_RESTART_COMMAND],
+        commands=[
+            WEBUI_V2_SETTINGS_RESTART_COMMAND,
+            WEBUI_V2_SETTINGS_RESTART_BROWSER_COMMAND,
+        ],
         notes=(
             "Covers WebUI v2 Settings restart banner rows without adding a "
             "legacy restart implementation: no banner when needsRestart is "
             "false, banner rendering when needsRestart is true, disabled "
             "restart interface, unavailable reason, local confirmation "
-            "callbacks, and no v1 restart side effects."
+            "callbacks, served Settings import path for a restart-required "
+            "key, and no v1 restart side effects."
         ),
     ),
     "webui_v2_settings_toolbar_search_regression": CaseSpec(
