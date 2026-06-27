@@ -514,6 +514,22 @@ WEBUI_V2_SETTINGS_RESTART_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SETTINGS_TOOLBAR_SEARCH_COMMAND = CommandSpec(
+    name="webui_v2_settings_toolbar_search_contracts",
+    description=(
+        "Focused WebUI v2 Settings toolbar/search contracts for SettingsPage "
+        "toolbar reachability, JSON import/export actions, search matching, "
+        "settings-shell callback wiring, and v2 settings API route selection."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/pages/settings/components/settings-toolbar.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/pages/settings/settings-shell.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/pages/settings/lib/settings-api.test.mjs",
+    ],
+)
+
 WEBUI_V2_ADMIN_CLIENT_COMMAND = CommandSpec(
     name="webui_v2_admin_client_contracts",
     description=(
@@ -2253,6 +2269,28 @@ CASES: dict[str, CaseSpec] = {
             "false, banner rendering when needsRestart is true, disabled "
             "restart interface, unavailable reason, local confirmation "
             "callbacks, and no v1 restart side effects."
+        ),
+    ),
+    "webui_v2_settings_toolbar_search_regression": CaseSpec(
+        name="webui_v2_settings_toolbar_search_regression",
+        feature="WebUI v2 settings search and JSON import/export toolbar",
+        category="Hermetic Settings Toolbar/Search Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-090-TC-01",
+            "REBCLI-090-TC-02",
+            "REBCLI-090-TC-03",
+            "REBCLI-090-TC-04",
+            "REBCLI-090-TC-05",
+            "REBCLI-090-TC-06",
+        ],
+        commands=[WEBUI_V2_SETTINGS_TOOLBAR_SEARCH_COMMAND],
+        notes=(
+            "Covers WebUI v2 Settings toolbar/search rows without duplicating "
+            "PR #5348 browser settings coverage: toolbar reachability from "
+            "SettingsPage, search change/clear wiring, JSON export payload "
+            "shape, valid import dispatch, invalid import rejection, empty "
+            "file handling, settings search matching, and v2 settings API "
+            "route selection."
         ),
     ),
     "webui_v2_admin_console_usage_regression": CaseSpec(

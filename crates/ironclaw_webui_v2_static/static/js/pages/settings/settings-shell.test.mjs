@@ -80,6 +80,8 @@ const SETTINGS_TABS = [
 
 function renderSettingsPage({ requestedTab, isAdmin = false } = {}) {
   const Navigate = "Navigate";
+  const settingsExport = { settings: { "agent.auto_approve_tools": false } };
+  const importCalls = [];
   const components = {
     AgentTab: "AgentTab",
     ChannelsTab: "ChannelsTab",
@@ -87,6 +89,7 @@ function renderSettingsPage({ requestedTab, isAdmin = false } = {}) {
     LanguageTab: "LanguageTab",
     NetworkingTab: "NetworkingTab",
     RestartBanner: "RestartBanner",
+    SettingsToolbar: "SettingsToolbar",
     SkillsTab: "SkillsTab",
     ToolsTab: "ToolsTab",
     TraceCommonsTab: "TraceCommonsTab",
@@ -113,10 +116,12 @@ function renderSettingsPage({ requestedTab, isAdmin = false } = {}) {
     useParams: () => (requestedTab == null ? {} : { tab: requestedTab }),
     useSettings: () => ({
       settings: {},
-      query: { isLoading: false },
+      query: { data: settingsExport, isLoading: false },
       save: () => {},
       savedKeys: {},
       needsRestart: false,
+      importSettings: (payload) => importCalls.push(payload),
+      isImporting: false,
       saveError: null,
     }),
     useT: () => (key) => key,
@@ -126,7 +131,9 @@ function renderSettingsPage({ requestedTab, isAdmin = false } = {}) {
   return {
     ...components,
     Navigate,
+    importCalls,
     rendered: context.globalThis.__testExports.SettingsPage(),
+    settingsExport,
     stateSetters,
   };
 }
@@ -178,6 +185,24 @@ test("SettingsPage redirects non-admin operator tabs to language", () => {
 
     assert.equal(componentProps(navigate, result.Navigate).to, "/settings/language");
   }
+});
+
+test("SettingsPage renders SettingsToolbar with search and import wiring", () => {
+  const result = renderSettingsPage({ requestedTab: "agent", isAdmin: true });
+  const toolbar = findComponentNodes(result.rendered, result.SettingsToolbar)[0];
+  const props = componentProps(toolbar, result.SettingsToolbar);
+  const payload = { settings: { "language.locale": "en-US" } };
+
+  props.onSearchChange("network");
+  props.onSearchClear();
+  props.onImport(payload);
+
+  assert.equal(props.settingsExport, result.settingsExport);
+  assert.equal(props.isImporting, false);
+  assert.equal(props.searchQuery, "");
+  assert.equal(props.canGoBack, false);
+  assert.deepEqual(result.stateSetters, ["", "network", ""]);
+  assert.deepEqual(result.importCalls, [payload]);
 });
 
 test("SettingsTabs hide operator-only tabs for members and expose all tabs for admins", () => {
