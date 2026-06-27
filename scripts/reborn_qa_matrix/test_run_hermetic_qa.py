@@ -359,6 +359,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-070-TC-11",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-095-TC-01",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -1801,7 +1805,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             )
             self.assertEqual(
                 results["summary"]["qa_matrix_test_ids"],
-                ["REBCLI-070-TC-10"],
+                ["REBCLI-070-TC-10", "REBCLI-070-TC-11"],
             )
             commands = results["results"][0]["details"]["commands"]
             self.assertEqual(
@@ -1817,6 +1821,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn("pytest-playwright", commands[1]["command"])
             self.assertIn(
                 "test_reborn_v2_hidden_workflow_direct_routes_render_without_legacy_v1_calls",
+                commands[1]["command"],
+            )
+            self.assertIn(
+                "test_reborn_v2_admin_hidden_route_redirects_by_capability",
                 commands[1]["command"],
             )
 

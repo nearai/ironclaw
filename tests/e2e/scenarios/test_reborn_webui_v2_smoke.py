@@ -889,6 +889,76 @@ async def test_reborn_v2_hidden_workflow_direct_routes_render_without_legacy_v1_
         await context.close()
 
 
+async def test_reborn_v2_admin_hidden_route_redirects_by_capability(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Hidden admin route access is driven by the v2 session capability."""
+
+    async def fulfill_session(route, *, operator: bool, user_id: str):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "tenant_id": "reborn-v2-e2e",
+                    "user_id": user_id,
+                    "capabilities": {"operator_webui_config": operator},
+                    "features": {"reborn_projects": False},
+                    "attachments": {
+                        "accept": ["text/plain"],
+                        "max_files_per_message": 4,
+                        "max_bytes_per_file": 1048576,
+                        "max_bytes_per_message": 4194304,
+                    },
+                }
+            ),
+        )
+
+    member_context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 720}
+    )
+    member_page = await member_context.new_page()
+
+    async def handle_member_session(route):
+        await fulfill_session(route, operator=False, user_id="member-user")
+
+    await member_page.route("**/api/webchat/v2/session", handle_member_session)
+    try:
+        await member_page.goto(
+            f"{reborn_v2_server}/v2/admin?token={REBORN_V2_AUTH_TOKEN}",
+            wait_until="domcontentloaded",
+        )
+        await expect(member_page).to_have_url(re.compile(r"/v2/chat/?$"), timeout=15000)
+        await expect(member_page.locator(SEL_V2["chat_composer"])).to_be_visible(
+            timeout=15000
+        )
+    finally:
+        await member_context.close()
+
+    admin_context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 720}
+    )
+    admin_page = await admin_context.new_page()
+
+    async def handle_admin_session(route):
+        await fulfill_session(route, operator=True, user_id="admin-user")
+
+    await admin_page.route("**/api/webchat/v2/session", handle_admin_session)
+    try:
+        await admin_page.goto(
+            f"{reborn_v2_server}/v2/admin/not-a-tab?token={REBORN_V2_AUTH_TOKEN}",
+            wait_until="domcontentloaded",
+        )
+        await expect(admin_page).to_have_url(
+            re.compile(r"/v2/admin/dashboard/?$"), timeout=15000
+        )
+        await expect(admin_page.locator("body")).to_contain_text(
+            "System overview", timeout=15000
+        )
+    finally:
+        await admin_context.close()
+
+
 async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
     """Threads are listed for the caller and deletion removes the thread and transcript."""
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}

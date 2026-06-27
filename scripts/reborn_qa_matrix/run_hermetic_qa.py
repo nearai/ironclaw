@@ -1572,8 +1572,8 @@ WEBUI_V2_HIDDEN_WORKFLOW_BROWSER_COMMAND = CommandSpec(
     name="webui_v2_hidden_workflow_direct_routes_browser_smoke",
     description=(
         "Focused Playwright smoke for Reborn WebUI v2 hidden Jobs, Missions, "
-        "and Routines direct routes, verifying they render in Chromium without "
-        "legacy v1-shaped browser API calls."
+        "Routines, and Admin direct routes, verifying they render or redirect "
+        "in Chromium without legacy v1-shaped browser API calls."
     ),
     env={"CARGO_INCREMENTAL": "0"},
     argv=[
@@ -1598,6 +1598,7 @@ WEBUI_V2_HIDDEN_WORKFLOW_BROWSER_COMMAND = CommandSpec(
         "cryptography",
         "pytest",
         "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py::test_reborn_v2_hidden_workflow_direct_routes_render_without_legacy_v1_calls",
+        "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py::test_reborn_v2_admin_hidden_route_redirects_by_capability",
         "-q",
     ],
 )
@@ -4083,17 +4084,19 @@ CASES: dict[str, CaseSpec] = {
         name="webui_v2_hidden_workflow_direct_routes_browser_smoke",
         feature="WebUI v2 hidden and stubbed direct routes",
         category="Hermetic Reborn v2 Browser Smoke",
-        qa_matrix_test_ids=["REBCLI-070-TC-10"],
+        qa_matrix_test_ids=["REBCLI-070-TC-10", "REBCLI-070-TC-11"],
         commands=[
             REBORN_CLI_WEBUI_V2_BINARY_COMMAND,
             WEBUI_V2_HIDDEN_WORKFLOW_BROWSER_COMMAND,
         ],
         notes=(
-            "Covers the non-duplicate browser-visible hidden workflow route "
-            "row: starts the Reborn WebUI v2 server against the mock LLM, "
-            "drives Chromium to /v2/jobs, /v2/missions, and /v2/routines, "
-            "asserts each route renders its empty/TODO shell, and fails if "
-            "the browser calls legacy /api/jobs, /api/routines, or "
+            "Covers the non-duplicate browser-visible hidden workflow/admin "
+            "route rows: starts the Reborn WebUI v2 server against the mock "
+            "LLM, drives Chromium to /v2/jobs, /v2/missions, /v2/routines, "
+            "and /v2/admin, asserts workflow routes render their empty/TODO "
+            "shells, verifies member admin access redirects to chat, verifies "
+            "admin bad-tab fallback to /admin/dashboard, and fails if the "
+            "browser calls legacy /api/jobs, /api/routines, or "
             "/api/engine/missions endpoints."
         ),
     ),
