@@ -2045,9 +2045,9 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
         | ProcessManagerMissing { .. }
         | ResumeNotBlocked { .. }
         | ResumeContextMismatch { .. } => Some(error.to_string()),
-        Dispatch { safe_summary, .. } => {
-            Some(dispatch_failure_message(safe_summary.as_deref(), error))
-        }
+        Dispatch {
+            safe_summary, kind, ..
+        } => Some(dispatch_failure_message(safe_summary.as_deref(), *kind)),
         InvocationFingerprint { .. } => Some("invocation fingerprint failed".to_string()),
         Lease(_) => Some("capability lease store unavailable".to_string()),
         RunState(_) => Some("run-state store unavailable".to_string()),
@@ -2057,12 +2057,16 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
 
 fn dispatch_failure_message(
     safe_summary: Option<&str>,
-    error: &CapabilityInvocationError,
+    kind: ironclaw_host_api::DispatchFailureKind,
 ) -> String {
+    // Prefer a host-authored safe summary; otherwise fall back to a plain
+    // human sentence for the failure category rather than the stable category
+    // token (e.g. "the tool input could not be encoded" instead of
+    // "dispatch failed: InputEncode").
     safe_summary
         .and_then(|summary| LoopSafeSummary::new(summary).ok())
         .map(|summary| summary.to_string())
-        .unwrap_or_else(|| error.to_string())
+        .unwrap_or_else(|| kind.human_summary().to_string())
 }
 
 pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFailureKind {
@@ -2478,12 +2482,10 @@ output_schema_ref = "schemas/test.output.json"
             RuntimeDispatchErrorKind::NetworkDenied,
         ));
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
-        // Stable form: relies only on the redacted kind token, never on raw
-        // backend strings.
-        assert!(
-            message.contains("NetworkDenied"),
-            "sanitized dispatch message should expose the redacted kind, got {message:?}"
-        );
+        // With no host-authored safe_summary, the message is the fixed
+        // human-readable summary for the redacted kind — derived only from the
+        // category, never from raw backend strings.
+        assert_eq!(message, "the tool was denied network access");
     }
 
     #[test]
@@ -2512,7 +2514,9 @@ output_schema_ref = "schemas/test.output.json"
         };
 
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
-        assert_eq!(message, "dispatch failed: OperationFailed");
+        // The unsafe safe_summary is rejected, so the message falls back to the
+        // host-authored human summary for the kind (not the raw category token).
+        assert_eq!(message, "the tool operation failed");
         assert!(!message.contains("api_key"));
     }
 
