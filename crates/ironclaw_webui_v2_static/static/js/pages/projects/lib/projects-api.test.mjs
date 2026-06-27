@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   addProjectMember,
   createProject,
+  deleteProject,
   fetchMissionDetail,
   fetchProjectDetail,
   fetchProjectMembers,
@@ -12,7 +13,9 @@ import {
   fetchProjectWidgets,
   fetchProjectsOverview,
   fireMission,
+  pauseMission,
   removeProjectMember,
+  resumeMission,
   updateProject,
   updateProjectMemberRole,
 } from "./projects-api.js";
@@ -39,6 +42,10 @@ function jsonResponse(body) {
     status: 200,
     headers: { "content-type": "application/json" },
   });
+}
+
+function noContentResponse() {
+  return new Response(null, { status: 204 });
 }
 
 test("fetchProjectsOverview maps project records for page cards", async () => {
@@ -90,11 +97,35 @@ test("fetchProjectDetail returns null without a project id", async () => {
   assert.equal(calls.length, 0);
 });
 
-test("project create and update send v2 project payloads", async () => {
+test("fetchProjectDetail reads the encoded v2 project detail route", async () => {
+  const calls = installBrowserStubs({
+    responses: [
+      jsonResponse({
+        project: {
+          project_id: "project/1",
+          name: "Alpha",
+          state: "active",
+          metadata: { goals: ["ship"] },
+        },
+      }),
+    ],
+  });
+
+  const result = await fetchProjectDetail("project/1");
+
+  assert.equal(result.id, "project/1");
+  assert.equal(result.name, "Alpha");
+  assert.deepEqual(result.goals, ["ship"]);
+  assert.equal(calls[0].path, "/api/webchat/v2/projects/project%2F1");
+  assert.equal(calls[0].options.headers.get("Authorization"), "Bearer projects-token");
+});
+
+test("project create, update, and delete send v2 project payloads", async () => {
   const calls = installBrowserStubs({
     responses: [
       jsonResponse({ project: { project_id: "created", name: "Created" } }),
       jsonResponse({ project: { project_id: "project/1", name: "Renamed" } }),
+      noContentResponse(),
     ],
   });
 
@@ -108,6 +139,7 @@ test("project create and update send v2 project payloads", async () => {
     name: "Renamed",
     state: "archived",
   });
+  await deleteProject("project/1");
 
   assert.equal(calls[0].path, "/api/webchat/v2/projects");
   assert.equal(calls[0].options.method, "POST");
@@ -122,6 +154,10 @@ test("project create and update send v2 project payloads", async () => {
     name: "Renamed",
     state: "archived",
   });
+  assert.equal(calls[2].path, "/api/webchat/v2/projects/project%2F1");
+  assert.equal(calls[2].options.method, "DELETE");
+
+  await assert.rejects(deleteProject(""), /projectId is required/);
 });
 
 test("project membership helpers encode ids and fail closed on missing fields", async () => {
@@ -156,6 +192,13 @@ test("project membership helpers encode ids and fail closed on missing fields", 
   await assert.rejects(removeProjectMember("project", ""), /projectId and userId/);
 });
 
+test("fetchProjectMembers returns an empty list without a project id", async () => {
+  const calls = installBrowserStubs({ responses: [] });
+
+  assert.deepEqual(await fetchProjectMembers(""), { members: [] });
+  assert.equal(calls.length, 0);
+});
+
 test("project mission and thread helpers remain TODO stubs without fetch", async () => {
   const calls = installBrowserStubs({ responses: [] });
 
@@ -173,6 +216,14 @@ test("project mission and thread helpers remain TODO stubs without fetch", async
   });
   assert.equal(await fetchMissionDetail("mission-1"), null);
   assert.deepEqual(await fireMission("mission-1"), {
+    success: false,
+    message: "TODO: requires v2 missions endpoint",
+  });
+  assert.deepEqual(await pauseMission("mission-1"), {
+    success: false,
+    message: "TODO: requires v2 missions endpoint",
+  });
+  assert.deepEqual(await resumeMission("mission-1"), {
     success: false,
     message: "TODO: requires v2 missions endpoint",
   });

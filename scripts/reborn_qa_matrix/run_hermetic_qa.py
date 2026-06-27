@@ -373,6 +373,21 @@ WEBUI_V2_WORKSPACE_PROJECT_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_PROJECTS_CLIENT_API_COMMAND = CommandSpec(
+    name="webui_v2_projects_client_api_contracts",
+    description=(
+        "Focused WebUI v2 projects client API contracts for project overview "
+        "and detail mapping, project create/update/delete route selection, "
+        "project membership route encoding, missing-id fail-closed behavior, "
+        "and explicit mission/thread/widget TODO stubs."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/pages/projects/lib/projects-api.test.mjs",
+    ],
+)
+
 WEBUI_V2_AUTOMATIONS_CLIENT_COMMAND = CommandSpec(
     name="webui_v2_automations_client_contracts",
     description=(
@@ -884,6 +899,27 @@ WEBUI_V2_MEMBER_HANDLER_COMMAND = CommandSpec(
         "--test",
         "webui_v2_handlers_contract",
         "member",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+COMPOSITION_PROJECT_SERVICE_COMMAND = CommandSpec(
+    name="composition_project_service_contracts",
+    description=(
+        "Focused Reborn project service contracts for project ACL enforcement, "
+        "revoked-access filtering, revoked-member mutation rejection, and "
+        "owner role projection on project creation."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--lib",
+        "project_service",
         "--",
         "--format",
         "terse",
@@ -2163,20 +2199,29 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-050-TC-04",
             "REBCLI-050-TC-05",
             "REBCLI-050-TC-06",
+            "REBCLI-080-TC-01",
+            "REBCLI-080-TC-02",
+            "REBCLI-080-TC-03",
+            "REBCLI-080-TC-04",
+            "REBCLI-080-TC-05",
+            "REBCLI-080-TC-06",
         ],
         commands=[
             WEBUI_V2_DESCRIPTOR_POLICY_COMMAND,
             WEBUI_V2_PROJECT_HANDLER_COMMAND,
             WEBUI_V2_PROJECTS_HANDLER_COMMAND,
             WEBUI_V2_MEMBER_HANDLER_COMMAND,
+            WEBUI_V2_PROJECTS_CLIENT_API_COMMAND,
+            COMPOSITION_PROJECT_SERVICE_COMMAND,
         ],
         notes=(
             "Covers WebUI v2 project and membership API rows without "
             "duplicating PR #5348 browser project overview coverage: "
-            "descriptor policy, project collection and item routes, path/body "
-            "ID precedence, member add/update/remove routing, unwired service "
-            "fail-closed behavior, no-content delete responses, and "
-            "reborn-projects session feature projection."
+            "descriptor policy, project collection and item routes, project "
+            "client API mapping and route encoding, path/body ID precedence, "
+            "member add/update/remove routing, unwired service fail-closed "
+            "behavior, no-content delete responses, reborn-projects session "
+            "feature projection, and project service authorization contracts."
         ),
     ),
     "webui_v2_public_sso_session_regression": CaseSpec(

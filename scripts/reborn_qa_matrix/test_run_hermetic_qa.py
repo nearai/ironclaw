@@ -271,6 +271,14 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-080-TC-01",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "REBCLI-080-TC-06",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-097-TC-01",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -1470,6 +1478,12 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-050-TC-04",
                     "REBCLI-050-TC-05",
                     "REBCLI-050-TC-06",
+                    "REBCLI-080-TC-01",
+                    "REBCLI-080-TC-02",
+                    "REBCLI-080-TC-03",
+                    "REBCLI-080-TC-04",
+                    "REBCLI-080-TC-05",
+                    "REBCLI-080-TC-06",
                 ],
             )
             self.assertEqual(
@@ -1482,6 +1496,8 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "webui_v2_project_handler_contracts",
                     "webui_v2_projects_handler_contracts",
                     "webui_v2_member_handler_contracts",
+                    "webui_v2_projects_client_api_contracts",
+                    "composition_project_service_contracts",
                 ],
             )
             commands = results["results"][0]["details"]["commands"]
@@ -1489,6 +1505,8 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn("project_", commands[1]["command"])
             self.assertIn("projects", commands[2]["command"])
             self.assertIn("member", commands[3]["command"])
+            self.assertIn("projects-api.test.mjs", commands[4]["command"])
+            self.assertIn("project_service", commands[5]["command"])
 
     def test_public_sso_session_case_dry_run_maps_api_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
