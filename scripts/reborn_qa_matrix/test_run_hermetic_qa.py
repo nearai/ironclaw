@@ -383,6 +383,14 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-044-TC-01",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "REBCLI-044-TC-06",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-093-TC-01",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -456,6 +464,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             )
             self.assertIn(
                 "webui_v2_session_thread_message_api_regression",
+                {case["case"] for case in manifest["cases"]},
+            )
+            self.assertIn(
+                "webui_v2_streaming_run_control_api_regression",
                 {case["case"] for case in manifest["cases"]},
             )
             self.assertIn(
@@ -630,6 +642,44 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             )
             self.assertIn(
                 "session_thread_message_routes_dispatch_to_facade_methods",
+                commands[0]["command"],
+            )
+
+    def test_webui_streaming_run_control_case_dry_run_maps_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "webui_v2_streaming_run_control_api_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-044-TC-01",
+                    "REBCLI-044-TC-02",
+                    "REBCLI-044-TC-03",
+                    "REBCLI-044-TC-04",
+                    "REBCLI-044-TC-05",
+                    "REBCLI-044-TC-06",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                [command["name"] for command in commands],
+                ["webui_v2_streaming_run_control_handler_contract"],
+            )
+            self.assertIn(
+                "streaming_run_control_routes_dispatch_to_facade_methods",
                 commands[0]["command"],
             )
 

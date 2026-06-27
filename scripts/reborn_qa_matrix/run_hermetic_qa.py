@@ -1202,6 +1202,31 @@ WEBUI_V2_SESSION_THREAD_MESSAGE_HANDLER_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_STREAMING_RUN_CONTROL_HANDLER_COMMAND = CommandSpec(
+    name="webui_v2_streaming_run_control_handler_contract",
+    description=(
+        "Focused WebUI v2 streaming/run-control route-family contract for "
+        "SSE event subscriptions, cursor precedence, run cancellation, and "
+        "approval/auth gate resolution plumbing."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_handlers_contract",
+        "streaming_run_control_routes_dispatch_to_facade_methods",
+        "--",
+        "--exact",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_FS_HANDLER_COMMAND = CommandSpec(
     name="webui_v2_filesystem_handler_slice",
     description="Focused WebUI v2 filesystem handler negative-path contract slice.",
@@ -2133,6 +2158,26 @@ CASES: dict[str, CaseSpec] = {
             "session/thread/message API family. This is hermetic Rust route "
             "coverage and intentionally does not duplicate PR #5348 browser "
             "Playwright ports."
+        ),
+    ),
+    "webui_v2_streaming_run_control_api_regression": CaseSpec(
+        name="webui_v2_streaming_run_control_api_regression",
+        feature="WebUI v2 streaming and run-control APIs",
+        category="Hermetic WebUI v2 API Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-044-TC-01",
+            "REBCLI-044-TC-02",
+            "REBCLI-044-TC-03",
+            "REBCLI-044-TC-04",
+            "REBCLI-044-TC-05",
+            "REBCLI-044-TC-06",
+        ],
+        commands=[WEBUI_V2_STREAMING_RUN_CONTROL_HANDLER_COMMAND],
+        notes=(
+            "Runs a focused caller-level WebUI v2 router contract for SSE "
+            "event subscriptions, cursor handling, cancel, and gate "
+            "resolution. Browser approval UX overlap remains referenced to "
+            "PR #5348 instead of duplicated in this matrix branch."
         ),
     ),
     "webui_v2_route_contract_regression": CaseSpec(

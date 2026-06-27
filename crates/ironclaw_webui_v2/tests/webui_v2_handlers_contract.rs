@@ -2373,6 +2373,119 @@ async fn stream_events_last_event_id_header_takes_precedence_over_query() {
 }
 
 #[tokio::test]
+async fn streaming_run_control_routes_dispatch_to_facade_methods() {
+    let header_cursor =
+        ironclaw_product_workflow::ProjectionCursor::new("cursor-from-header").expect("cursor");
+    let query_cursor =
+        ironclaw_product_workflow::ProjectionCursor::new("cursor-from-query").expect("cursor");
+    let header_json = serde_json::to_string(&header_cursor).expect("serialize header cursor");
+    let query_json = serde_json::to_string(&query_cursor).expect("serialize query cursor");
+    let query_encoded = url_encode(&query_json);
+
+    let services = Arc::new(StubServices::default());
+    let signal = services.stream_events_signal();
+    let router = router_with(services.clone());
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/api/webchat/v2/threads/thread-run/events?after_cursor={query_encoded}"
+                ))
+                .header("Last-Event-ID", header_json)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        content_type.starts_with("text/event-stream"),
+        "SSE content type expected, got: {content_type}"
+    );
+
+    let mut body = response.into_body();
+    let poll = tokio::spawn(async move {
+        let _ = body.frame().await;
+    });
+    tokio::time::timeout(Duration::from_secs(2), signal.notified())
+        .await
+        .expect("stream_events must be called within 2s after the body is polled");
+    poll.abort();
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-run/runs/run-from-path/cancel")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"client_action_id":"cancel-1","thread_id":"other-thread","run_id":"run-from-body","reason":"user_requested"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(
+                    "/api/webchat/v2/threads/thread-run/runs/run-from-path/gates/gate-from-path/resolve",
+                )
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"client_action_id":"gate-1","thread_id":"other-thread","run_id":"run-from-body","gate_ref":"gate-from-body","resolution":"approved"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let stream_calls = services.stream_events_calls.lock().expect("lock").clone();
+    assert_eq!(stream_calls.len(), 1);
+    assert_eq!(stream_calls[0].thread_id, "thread-run");
+    assert_eq!(
+        stream_calls[0].after_cursor.as_ref(),
+        Some(&header_cursor),
+        "Last-Event-ID header must win over ?after_cursor= query param"
+    );
+
+    let cancel_calls = services.cancel_run_calls.lock().expect("lock").clone();
+    assert_eq!(cancel_calls.len(), 1);
+    assert_eq!(cancel_calls[0].thread_id.as_deref(), Some("thread-run"));
+    assert_eq!(cancel_calls[0].run_id.as_deref(), Some("run-from-path"));
+
+    let resolve_gate_calls = services.resolve_gate_calls.lock().expect("lock").clone();
+    assert_eq!(resolve_gate_calls.len(), 1);
+    assert_eq!(
+        resolve_gate_calls[0].thread_id.as_deref(),
+        Some("thread-run")
+    );
+    assert_eq!(
+        resolve_gate_calls[0].run_id.as_deref(),
+        Some("run-from-path")
+    );
+    assert_eq!(
+        resolve_gate_calls[0].gate_ref.as_deref(),
+        Some("gate-from-path")
+    );
+}
+
+#[tokio::test]
 async fn list_automations_forwards_query_limits_to_facade() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
