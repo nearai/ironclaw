@@ -216,6 +216,7 @@ impl OAuthProvider for GoogleProvider {
         // depth against a forged TLS termination), and `exp` so
         // expired tokens still fail closed.
         let mut validation = jsonwebtoken::Validation::default();
+        #[allow(deprecated)]
         validation.insecure_disable_signature_validation();
         validation.set_audience(&[&self.client_id]);
         validation.set_issuer(&[GOOGLE_ISSUER, "accounts.google.com"]);
