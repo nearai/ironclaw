@@ -1738,6 +1738,39 @@ WEBUI_V2_ADMIN_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_ADMIN_BROWSER_COMMAND = CommandSpec(
+    name="webui_v2_admin_console_browser_smoke",
+    description=(
+        "Focused WebUI v2 Admin console browser smoke for dashboard, users, "
+        "usage empty-state rendering, period interaction, and no legacy admin "
+        "API calls."
+    ),
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_admin_console_browser.py",
+        "-q",
+    ],
+)
+
 WEBUI_V2_TOAST_QUERY_CLIENT_COMMAND = CommandSpec(
     name="webui_v2_toast_query_client_contracts",
     description=(
@@ -4995,14 +5028,17 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-093-TC-05",
             "REBCLI-093-TC-06",
         ],
-        commands=[WEBUI_V2_ADMIN_CLIENT_COMMAND],
+        commands=[
+            WEBUI_V2_ADMIN_CLIENT_COMMAND,
+            WEBUI_V2_ADMIN_BROWSER_COMMAND,
+        ],
         notes=(
-            "Covers WebUI v2 Admin console rows without duplicating PR #5348 "
-            "browser legacy coverage: dashboard/users/usage routing, user "
+            "Covers WebUI v2 Admin console rows through static contracts and "
+            "a served browser smoke: dashboard/users/usage routing, user "
             "drilldown handoff, desktop/mobile admin tab navigation, fail-"
-            "closed v2 TODO API stubs with no legacy v1 fetches, and usage/"
-            "user presenter formatting, filtering, summarization, and cost-"
-            "sorted aggregation."
+            "closed v2 TODO API stubs with no legacy v1 fetches, usage/user "
+            "presenter formatting/filtering/summarization/cost sorting, and "
+            "browser-visible empty states for dashboard, users, and usage."
         ),
     ),
     "webui_v2_toast_query_defaults_regression": CaseSpec(
