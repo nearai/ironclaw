@@ -905,14 +905,14 @@ impl OpenAiResponsesWorkflow {
             .await?;
         let mapping = match reservation {
             OpenAiCompatRefReservationOutcome::Created(mapping) => {
-                self.bind_and_drive_resume(caller, request, previous_mapping, mapping)
+                self.bind_and_drive_resume(caller, request, previous_mapping, mapping, false)
                     .await?
             }
             OpenAiCompatRefReservationOutcome::Replayed(mapping) => {
                 if mapping.external_tool_resume_completed {
                     mapping
                 } else {
-                    self.bind_and_drive_resume(caller, request, previous_mapping, mapping)
+                    self.bind_and_drive_resume(caller, request, previous_mapping, mapping, true)
                         .await?
                 }
             }
@@ -967,6 +967,7 @@ impl OpenAiResponsesWorkflow {
         request: &OpenAiResponsesCreateRequest,
         previous_mapping: &OpenAiCompatResourceMapping,
         mapping: OpenAiCompatResourceMapping,
+        allow_already_resumed_conflict: bool,
     ) -> Result<OpenAiCompatResourceMapping, OpenAiCompatHttpError> {
         let store = self
             .external_tool_store
@@ -999,13 +1000,18 @@ impl OpenAiResponsesWorkflow {
                 .submit_tool_output(run_ref.clone(), call_id, output)
                 .await?;
         }
-        resume
+        let resume_result = resume
             .resume_external_tool_run(OpenAiCompatExternalToolResumeRequest {
                 actor_scope: caller.scope().clone(),
                 run_ref: run_ref.clone(),
                 thread_id: thread_id.as_str().to_string(),
             })
-            .await?;
+            .await;
+        if let Err(error) = resume_result
+            && !(allow_already_resumed_conflict && is_already_resumed_conflict(&error))
+        {
+            return Err(error);
+        }
         self.ref_store
             .mark_external_tool_resume_completed(OpenAiCompatMarkExternalToolResumeCompleted::new(
                 caller.scope().clone(),
@@ -1014,6 +1020,12 @@ impl OpenAiResponsesWorkflow {
             .await?
             .ok_or_else(bind_internal_refs_unavailable)
     }
+}
+
+fn is_already_resumed_conflict(error: &OpenAiCompatHttpError) -> bool {
+    error.status_code() == 409
+        && !error.retryable()
+        && error.body().error.param() == Some("previous_response_id")
 }
 
 fn request_has_function_call_output(request: &OpenAiResponsesCreateRequest) -> bool {

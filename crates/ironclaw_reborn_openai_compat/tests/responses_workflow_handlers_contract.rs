@@ -18,14 +18,18 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_reborn_openai_compat::{
     InMemoryOpenAiCompatRefStore, OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller,
-    OpenAiCompatExternalToolResume, OpenAiCompatExternalToolResumeRequest,
-    OpenAiCompatExternalToolSpec, OpenAiCompatExternalToolStore, OpenAiCompatHttpError,
-    OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
-    OpenAiCompatRouterState, OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
-    OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
-    OpenAiResponseReadRequest, OpenAiResponseStatus, OpenAiResponseUsage,
-    OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
-    OpenAiResponsesWorkflow, openai_compat_router_with_state,
+    OpenAiCompatBindInternalRefs, OpenAiCompatExternalToolResume,
+    OpenAiCompatExternalToolResumeRequest, OpenAiCompatExternalToolSpec,
+    OpenAiCompatExternalToolStore, OpenAiCompatHttpError, OpenAiCompatInternalRefs,
+    OpenAiCompatMarkExternalToolResumeCompleted, OpenAiCompatProductActionRef,
+    OpenAiCompatProjectionRef, OpenAiCompatRecordAcceptedAck, OpenAiCompatRefError,
+    OpenAiCompatRefLookup, OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome,
+    OpenAiCompatRefStore, OpenAiCompatResourceMapping, OpenAiCompatRouterState,
+    OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject, OpenAiResponseOutputItem,
+    OpenAiResponseOutputItemStatus, OpenAiResponseProjection, OpenAiResponseReadRequest,
+    OpenAiResponseStatus, OpenAiResponseUsage, OpenAiResponseWaitRequest,
+    OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow,
+    openai_compat_router_with_state,
 };
 use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnRunId, TurnScope};
 use serde_json::{Value, json};
@@ -1614,11 +1618,17 @@ impl OpenAiCompatExternalToolStore for RecordingExternalToolStore {
         call_id: String,
         output: Value,
     ) -> Result<(), OpenAiCompatHttpError> {
-        self.outputs.lock().expect("outputs lock").push((
-            run_ref.as_str().to_string(),
-            call_id,
-            output,
-        ));
+        let mut outputs = self.outputs.lock().expect("outputs lock");
+        let run_ref = run_ref.as_str().to_string();
+        if outputs
+            .iter()
+            .any(|(existing_run, existing_call, existing_output)| {
+                existing_run == &run_ref && existing_call == &call_id && existing_output == &output
+            })
+        {
+            return Ok(());
+        }
+        outputs.push((run_ref, call_id, output));
         Ok(())
     }
 }
@@ -1642,9 +1652,109 @@ impl OpenAiCompatExternalToolResume for RecordingExternalToolResume {
     }
 }
 
+struct ConflictAfterFirstResume {
+    attempts: Mutex<usize>,
+}
+
+impl ConflictAfterFirstResume {
+    fn new() -> Self {
+        Self {
+            attempts: Mutex::new(0),
+        }
+    }
+
+    fn attempts(&self) -> usize {
+        *self.attempts.lock().expect("attempts lock")
+    }
+}
+
+#[async_trait]
+impl OpenAiCompatExternalToolResume for ConflictAfterFirstResume {
+    async fn resume_external_tool_run(
+        &self,
+        _request: OpenAiCompatExternalToolResumeRequest,
+    ) -> Result<(), OpenAiCompatHttpError> {
+        let mut attempts = self.attempts.lock().expect("attempts lock");
+        *attempts += 1;
+        if *attempts == 1 {
+            Ok(())
+        } else {
+            Err(OpenAiCompatHttpError::conflict(Some(
+                "previous_response_id".to_string(),
+            )))
+        }
+    }
+}
+
+struct FailsFirstResumeCompletionMark {
+    inner: InMemoryOpenAiCompatRefStore,
+    fail_next_mark: Mutex<bool>,
+}
+
+impl FailsFirstResumeCompletionMark {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryOpenAiCompatRefStore::new(),
+            fail_next_mark: Mutex::new(true),
+        }
+    }
+}
+
+#[async_trait]
+impl OpenAiCompatRefStore for FailsFirstResumeCompletionMark {
+    async fn reserve(
+        &self,
+        request: OpenAiCompatRefReservation,
+    ) -> Result<OpenAiCompatRefReservationOutcome, OpenAiCompatRefError> {
+        self.inner.reserve(request).await
+    }
+
+    async fn bind_internal_refs(
+        &self,
+        request: OpenAiCompatBindInternalRefs,
+    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
+        self.inner.bind_internal_refs(request).await
+    }
+
+    async fn record_accepted_ack(
+        &self,
+        request: OpenAiCompatRecordAcceptedAck,
+    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
+        self.inner.record_accepted_ack(request).await
+    }
+
+    async fn mark_external_tool_resume_completed(
+        &self,
+        request: OpenAiCompatMarkExternalToolResumeCompleted,
+    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
+        let should_fail = {
+            let mut fail_next_mark = self.fail_next_mark.lock().expect("fail mark lock");
+            if *fail_next_mark {
+                *fail_next_mark = false;
+                true
+            } else {
+                false
+            }
+        };
+        if should_fail {
+            return Err(OpenAiCompatRefError::StoreUnavailable);
+        }
+        self.inner
+            .mark_external_tool_resume_completed(request)
+            .await
+    }
+
+    async fn lookup_authorized(
+        &self,
+        request: OpenAiCompatRefLookup,
+    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
+        self.inner.lookup_authorized(request).await
+    }
+}
+
 fn router_with_external_tools(
     workflow: Arc<FakeProductWorkflow>,
-    ref_store: Arc<InMemoryOpenAiCompatRefStore>,
+    ref_store: Arc<dyn OpenAiCompatRefStore>,
     reader: Arc<dyn OpenAiResponsesProjectionReader>,
     store: Arc<dyn OpenAiCompatExternalToolStore>,
     resume: Arc<dyn OpenAiCompatExternalToolResume>,
@@ -1832,6 +1942,78 @@ async fn responses_function_call_output_idempotency_replay_does_not_resubmit_out
     assert_eq!(workflow.accepted_count(), 1);
     assert_eq!(store.outputs.lock().expect("outputs lock").len(), 1);
     assert_eq!(resume.resumed.lock().expect("resumed lock").len(), 1);
+}
+
+#[tokio::test]
+async fn responses_function_call_output_replay_recovers_when_completion_marker_failed_after_resume()
+{
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let ref_store = Arc::new(FailsFirstResumeCompletionMark::new());
+    let store = Arc::new(RecordingExternalToolStore::default());
+    let resume = Arc::new(ConflictAfterFirstResume::new());
+    let router = router_with_external_tools(
+        workflow.clone(),
+        ref_store,
+        Arc::new(CompletedNoRebindReader),
+        store.clone(),
+        resume.clone(),
+    );
+
+    let created = json_body(
+        router
+            .clone()
+            .oneshot(response_create_request(
+                "/api/v1/responses",
+                json!({
+                    "model": "gpt-reborn",
+                    "input": "what's the weather?",
+                    "tools": [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}]
+                }),
+                None,
+            ))
+            .await
+            .expect("create"),
+    )
+    .await;
+    let previous_id = created["id"].as_str().expect("id").to_string();
+    let continuation = json!({
+        "model": "gpt-reborn",
+        "previous_response_id": previous_id,
+        "input": [{"type": "function_call_output", "call_id": "call_abc", "output": "72F"}]
+    });
+
+    let first = router
+        .clone()
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            continuation.clone(),
+            Some("resume-key"),
+        ))
+        .await
+        .expect("first resume");
+    assert_eq!(
+        first.status(),
+        http::StatusCode::SERVICE_UNAVAILABLE,
+        "first attempt resumed the run but failed to persist the completion marker"
+    );
+
+    let second = router
+        .oneshot(response_create_request(
+            "/api/v1/responses",
+            continuation,
+            Some("resume-key"),
+        ))
+        .await
+        .expect("replay resume");
+
+    assert_eq!(second.status(), http::StatusCode::OK);
+    assert_eq!(workflow.accepted_count(), 1);
+    assert_eq!(store.outputs.lock().expect("outputs lock").len(), 1);
+    assert_eq!(
+        resume.attempts(),
+        2,
+        "replay re-drives resume and treats the already-resumed conflict as complete"
+    );
 }
 
 #[tokio::test]
