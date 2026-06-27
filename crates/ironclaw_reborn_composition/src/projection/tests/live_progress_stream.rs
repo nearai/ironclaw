@@ -402,7 +402,8 @@ async fn webui_event_stream_projects_live_tool_failure() {
                 capability_id: capability_id.clone(),
                 provider: None,
                 runtime: Some(RuntimeKind::FirstParty),
-                reason_kind: CapabilityFailureKind::Authorization,
+                reason_kind: CapabilityFailureKind::InvalidInput,
+                safe_summary: Some("invalid JSON: expected value at line 1".to_string()),
             },
         })
         .await
@@ -440,5 +441,12 @@ async fn webui_event_stream_projects_live_tool_failure() {
     assert_eq!(&activity.capability_id, &capability_id);
     assert_eq!(activity.status, CapabilityActivityStatusView::Failed);
     assert_eq!(activity.runtime.as_ref(), Some(&RuntimeKind::FirstParty));
-    assert_eq!(activity.error_kind.as_deref(), Some("authorization"));
+    assert_eq!(activity.error_kind.as_deref(), Some("invalid_input"));
+    // Regression: the sanitized failure summary on the milestone must reach the
+    // live activity view's `error_detail`, so the per-tool UI card shows the
+    // real reason instead of only the bare kind.
+    assert_eq!(
+        activity.error_detail.as_deref(),
+        Some("invalid JSON: expected value at line 1")
+    );
 }

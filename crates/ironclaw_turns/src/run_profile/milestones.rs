@@ -106,6 +106,12 @@ pub enum LoopHostMilestoneKind {
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
         reason_kind: CapabilityFailureKind,
+        /// Bounded, host-authored sanitized failure summary (e.g. a builtin's
+        /// `"invalid JSON: ..."` message). Additive; pre-existing producers
+        /// emit `None`. Never carries raw backend errors or tool input — only
+        /// the already-sanitized `RuntimeCapabilityFailure` message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        safe_summary: Option<String>,
     },
     CapabilityBatchStarted {
         iteration: u32,
@@ -498,6 +504,7 @@ where
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
         reason_kind: CapabilityFailureKind,
+        safe_summary: Option<String>,
     ) -> Result<(), AgentLoopHostError> {
         self.publish(LoopHostMilestoneKind::CapabilityFailed {
             activity_id,
@@ -505,6 +512,7 @@ where
             provider,
             runtime,
             reason_kind,
+            safe_summary,
         })
         .await
     }

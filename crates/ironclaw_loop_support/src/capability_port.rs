@@ -1907,6 +1907,9 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     provider: Some(provider),
                     runtime: Some(runtime),
                     reason_kind: capability_failure_kind(host_error.kind.as_str())?,
+                    // Host/infra fault, not a model-visible tool error: keep the
+                    // detail server-side, surface only the kind.
+                    safe_summary: None,
                 };
                 guard.commit();
                 return self
@@ -2590,6 +2593,10 @@ fn runtime_terminal_milestone(
                 provider: Some(provider),
                 runtime: Some(runtime),
                 reason_kind: runtime_failure_kind_to_loop(failure.kind)?,
+                // Sanitized, host-authored message (e.g. "invalid JSON: ...")
+                // so the live per-tool UI card shows the real reason, not just
+                // the bare error kind.
+                safe_summary: failure.message.clone(),
             })
         }
         RuntimeCapabilityOutcome::Unknown(unknown) => {
@@ -2599,6 +2606,7 @@ fn runtime_terminal_milestone(
                 provider: Some(provider),
                 runtime: Some(runtime),
                 reason_kind: capability_failure_kind(unknown.kind.clone())?,
+                safe_summary: None,
             })
         }
         RuntimeCapabilityOutcome::ApprovalRequired(_)

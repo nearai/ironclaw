@@ -2119,6 +2119,11 @@ pub enum LoopProgressEvent {
         activity_id: CapabilityActivityId,
         capability_id: CapabilityId,
         reason_kind: CapabilityFailureKind,
+        /// Bounded, host-authored sanitized failure summary (e.g. a builtin's
+        /// `"invalid JSON: ..."` message) so the live per-tool UI card can show
+        /// the real reason, not just the kind. Additive; `None` when no
+        /// host-authored summary is available.
+        safe_summary: Option<String>,
     },
     GateBlocked {
         iteration: u32,

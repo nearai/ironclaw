@@ -1117,6 +1117,9 @@ impl CapabilityStage {
                         activity_id: denied_activity_id,
                         capability_id: call.capability_id.clone(),
                         reason_kind: CapabilityFailureKind::GateDeclined,
+                        // Gate denial carries no host-authored message; the
+                        // model-visible text is produced separately below.
+                        safe_summary: None,
                     },
                 )
                 .await;

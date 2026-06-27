@@ -234,7 +234,10 @@ export function toolCardFromActivity(activity) {
     toolDetail: activity.subtitle || null,
     toolParameters: activity.input_summary || null,
     toolResultPreview: null,
-    toolError: toolErrorText(errorKind),
+    // Prefer the backend's sanitized failure summary (e.g. "invalid JSON: ...")
+    // over the bare error kind, so a live failed tool card shows the real
+    // reason. Falls back to the kind when no detail is present.
+    toolError: activity.error_detail || toolErrorText(errorKind),
     toolErrorKind: errorKind,
     toolDurationMs: null,
     updatedAt: activity.updated_at || null,
