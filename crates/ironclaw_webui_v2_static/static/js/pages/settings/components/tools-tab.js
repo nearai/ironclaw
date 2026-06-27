@@ -107,14 +107,18 @@ function ToolRow({ tool, onPermissionChange, isSaved }) {
 
   return html`
     <div
+      data-testid="settings-tool-row"
+      data-tool-name=${tool.name}
       className="flex items-center justify-between gap-4 border-t border-[var(--v2-panel-border)] py-3.5 first:border-0 first:pt-0"
     >
       <div className="flex min-w-0 items-center gap-3">
         ${isLocked &&
-        html`<${Icon}
-          name="lock"
-          className="h-3.5 w-3.5 shrink-0 text-[var(--v2-text-faint)]"
-        />`}
+        html`<span data-testid="settings-tool-lock" className="shrink-0">
+          <${Icon}
+            name="lock"
+            className="h-3.5 w-3.5 text-[var(--v2-text-faint)]"
+          />
+        </span>`}
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="truncate font-mono text-sm text-[var(--v2-text)]"
