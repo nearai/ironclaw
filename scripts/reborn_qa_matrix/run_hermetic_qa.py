@@ -413,6 +413,27 @@ WEBUI_V2_LOGS_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SHELL_CLIENT_COMMAND = CommandSpec(
+    name="webui_v2_shell_client_contracts",
+    description=(
+        "Focused WebUI v2 shell/navigation/session-control client contracts "
+        "for onboarding redirects, sidebar responsiveness, route filtering, "
+        "thread pin/search/delete behavior, command palette actions, account "
+        "controls, toasts, and TEE/report affordances."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/layout/shell-static-contracts.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/hooks/useSidebar.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/lib/onboarding-gate.test.js",
+        "crates/ironclaw_webui_v2_static/static/js/lib/pin-store.test.js",
+        "crates/ironclaw_webui_v2_static/static/js/lib/thread-errors.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/pages/chat/hooks/useThreads.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/app/routes.test.mjs",
+    ],
+)
+
 WEBUI_V2_OPERATOR_LOGS_HANDLER_COMMAND = CommandSpec(
     name="webui_v2_operator_logs_handler_contract",
     description=(
@@ -1800,6 +1821,30 @@ CASES: dict[str, CaseSpec] = {
             "states, scroll layout, chat duplicate-log-bar suppression, "
             "automation recent-run log links, and operator logs capability "
             "enforcement."
+        ),
+    ),
+    "webui_v2_shell_navigation_regression": CaseSpec(
+        name="webui_v2_shell_navigation_regression",
+        feature="WebUI v2 global shell, navigation, and session controls",
+        category="Hermetic Shell Navigation Client Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-074-TC-01",
+            "REBCLI-074-TC-02",
+            "REBCLI-074-TC-03",
+            "REBCLI-074-TC-04",
+            "REBCLI-074-TC-05",
+            "REBCLI-074-TC-06",
+        ],
+        commands=[WEBUI_V2_SHELL_CLIENT_COMMAND],
+        notes=(
+            "Covers the non-browser-smoke WebUI v2 shell/navigation rows "
+            "without duplicating PR #5348 browser shell coverage: first-run "
+            "onboarding redirects, responsive sidebar state, command palette "
+            "actions and thread jumps, admin/settings route filtering, "
+            "explicit thread pin/search/delete handling, account popover, "
+            "theme/sign-out controls, header logs/docs/TEE affordances, "
+            "toasts, and thread-delete error messaging. Browser-smoke TC-07 "
+            "stays guarded by PR #5348/live coverage."
         ),
     ),
     "webui_v2_filesystem_api_regression": CaseSpec(
