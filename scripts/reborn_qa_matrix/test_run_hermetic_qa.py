@@ -2913,12 +2913,19 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             )
             commands = results["results"][0]["details"]["commands"]
             self.assertEqual(
-                commands[0]["name"],
-                "openai_responses_workflow_handlers_contract",
+                [command["name"] for command in commands],
+                [
+                    "openai_responses_workflow_handlers_contract",
+                    "openai_responses_streaming_handlers_contract",
+                ],
             )
             self.assertIn(
                 "--test responses_workflow_handlers_contract",
                 commands[0]["command"],
+            )
+            self.assertIn(
+                "--test streaming_handlers_contract responses_stream",
+                commands[1]["command"],
             )
 
     def test_webui_static_js_case_dry_run_maps_static_matrix_ids(self):
@@ -3126,12 +3133,19 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             )
             commands = results["results"][0]["details"]["commands"]
             self.assertEqual(
-                commands[0]["name"],
-                "openai_chat_workflow_handlers_contract",
+                [command["name"] for command in commands],
+                [
+                    "openai_chat_workflow_handlers_contract",
+                    "openai_chat_streaming_handlers_contract",
+                ],
             )
             self.assertIn(
                 "--test chat_workflow_handlers_contract",
                 commands[0]["command"],
+            )
+            self.assertIn(
+                "--test streaming_handlers_contract chat_stream",
+                commands[1]["command"],
             )
 
     def test_models_list_api_case_dry_run_maps_handler_matrix_ids(self):

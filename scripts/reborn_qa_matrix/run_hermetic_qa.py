@@ -314,6 +314,32 @@ OPENAI_RESPONSES_WORKFLOW_COMMAND = CommandSpec(
     ],
 )
 
+OPENAI_RESPONSES_STREAMING_COMMAND = CommandSpec(
+    name="openai_responses_streaming_handlers_contract",
+    description=(
+        "Focused OpenAI-compatible Responses SSE contracts for stream=true "
+        "completion, final replies, failed/cancelled terminal events, timeout, "
+        "and sanitized in-stream errors."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_openai_compat",
+        "--features",
+        "openai-compat-beta",
+        "--test",
+        "streaming_handlers_contract",
+        "responses_stream",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 OPENAI_CHAT_WORKFLOW_COMMAND = CommandSpec(
     name="openai_chat_workflow_handlers_contract",
     description=(
@@ -329,6 +355,32 @@ OPENAI_CHAT_WORKFLOW_COMMAND = CommandSpec(
         "ironclaw_reborn_openai_compat",
         "--test",
         "chat_workflow_handlers_contract",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+OPENAI_CHAT_STREAMING_COMMAND = CommandSpec(
+    name="openai_chat_streaming_handlers_contract",
+    description=(
+        "Focused OpenAI-compatible Chat Completions SSE contracts for stream=true "
+        "OpenAI chunks, terminal/final-reply completion, early-completed waits, "
+        "sanitized stream errors, timeouts, and idempotency replay/busy paths."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_openai_compat",
+        "--features",
+        "openai-compat-beta",
+        "--test",
+        "streaming_handlers_contract",
+        "chat_stream",
         "--jobs",
         "2",
         "--",
@@ -3999,12 +4051,13 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-058-TC-05",
             "REBCLI-058-TC-06",
         ],
-        commands=[OPENAI_RESPONSES_WORKFLOW_COMMAND],
+        commands=[OPENAI_RESPONSES_WORKFLOW_COMMAND, OPENAI_RESPONSES_STREAMING_COMMAND],
         notes=(
             "Focused ResponsesAPI contract coverage that PR #5348 does not "
             "duplicate: create on /api/v1 and /v1, retrieve/cancel, auth, "
             "invalid input, unsupported fields, wait timeout, cross-scope "
-            "not-found shape, and sanitized ProductWorkflow errors."
+            "not-found shape, stream=true SSE terminal/error behavior, and "
+            "sanitized ProductWorkflow errors."
         ),
     ),
     "openai_chat_completions_workflow_regression": CaseSpec(
@@ -4019,13 +4072,13 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-056-TC-05",
             "REBCLI-056-TC-06",
         ],
-        commands=[OPENAI_CHAT_WORKFLOW_COMMAND],
+        commands=[OPENAI_CHAT_WORKFLOW_COMMAND, OPENAI_CHAT_STREAMING_COMMAND],
         notes=(
             "Focused Chat Completions contract coverage that PR #5348 does "
             "not duplicate: non-stream success, idempotency replay/conflict, "
             "malformed JSON, model/idempotency validation, streaming "
-            "guardrails, projection metadata, and sanitized ProductWorkflow "
-            "errors."
+            "guardrails, stream=true SSE terminal/error behavior, projection "
+            "metadata, and sanitized ProductWorkflow errors."
         ),
     ),
     "openai_models_list_api_regression": CaseSpec(
