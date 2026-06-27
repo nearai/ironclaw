@@ -221,6 +221,8 @@ export function toolCardFromPreview(preview) {
 export function toolCardFromActivity(activity) {
   const activityOrder = numericActivityOrder(activity.activity_order);
   const errorKind = activity.error_kind || null;
+  const errorSummary =
+    typeof activity.error_summary === "string" ? activity.error_summary.trim() : "";
   return {
     invocationId: activity.invocation_id,
     callId: activity.invocation_id,
@@ -230,7 +232,7 @@ export function toolCardFromActivity(activity) {
     toolDetail: activity.subtitle || null,
     toolParameters: activity.input_summary || null,
     toolResultPreview: null,
-    toolError: toolErrorText(errorKind),
+    toolError: toolErrorText(errorKind, errorSummary),
     toolErrorKind: errorKind,
     toolDurationMs: null,
     updatedAt: activity.updated_at || null,
@@ -244,7 +246,9 @@ export function toolCardFromActivity(activity) {
   };
 }
 
-function toolErrorText(errorKind) {
+function toolErrorText(errorKind, errorSummary = "") {
+  const summary = typeof errorSummary === "string" ? errorSummary.trim() : "";
+  if (summary) return summary;
   const value = typeof errorKind === "string" ? errorKind.trim() : "";
   if (!value) return null;
   const normalized = value.toLowerCase().replaceAll("-", "_");

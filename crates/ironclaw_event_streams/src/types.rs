@@ -190,6 +190,8 @@ pub enum ThreadLiveProjectionItem {
         output_bytes: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_summary: Option<String>,
     },
     WorkSummary {
         id: String,

@@ -40,6 +40,7 @@ use ironclaw_turns::{
     run_profile::LoopInput,
 };
 use secrecy::{ExposeSecret as _, SecretString};
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use url::Url;
 use uuid::Uuid;
@@ -705,6 +706,7 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
 enum GateResolutionRoute {
     Approval,
     Auth,
+    Resource,
     Generic,
 }
 
@@ -732,6 +734,14 @@ impl GateResolutionRoute {
                 )?;
                 Ok(Self::Auth)
             }
+            TurnStatus::BlockedResource if is_budget_gate_ref(requested_gate_ref.as_str()) => {
+                validate_current_gate_ref(
+                    parked_gate_ref,
+                    requested_gate_ref,
+                    RebornServicesErrorKind::Conflict,
+                )?;
+                Ok(Self::Resource)
+            }
             status if status.is_terminal() => Err(RebornServicesError::from_status_kind(
                 RebornServicesErrorCode::Conflict,
                 RebornServicesErrorKind::Conflict,
@@ -750,9 +760,16 @@ impl GateResolutionRoute {
         ) {
             (true, _, _) => Self::Approval,
             (_, true, _) | (_, _, true) => Self::Auth,
+            _ if is_budget_gate_ref(gate_ref.as_str()) => Self::Resource,
             _ => Self::Generic,
         }
     }
+}
+
+fn is_budget_gate_ref(gate_ref: &str) -> bool {
+    gate_ref
+        .strip_prefix("gate:budget-")
+        .is_some_and(|value| Uuid::parse_str(value).is_ok())
 }
 
 fn operator_setup_validation_error(field: &str) -> RebornServicesError {
@@ -1670,6 +1687,14 @@ pub trait RebornServicesApi: Send + Sync {
         request: RebornGetRunStateRequest,
     ) -> Result<RebornGetRunStateResponse, RebornServicesError>;
 
+    async fn get_budget_settings(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornBudgetSettingsResponse, RebornServicesError> {
+        let _ = caller;
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     /// List a directory under the thread's project workspace.
     ///
     /// Read-only navigation surface over the same `/workspace` mount the agent's
@@ -2342,6 +2367,90 @@ pub trait InboundAttachmentReader: Send + Sync {
     ) -> Result<Vec<u8>, RebornServicesError>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceGateResolutionDecision {
+    Approve,
+    Decline,
+}
+
+pub struct ResourceGateResolutionRequest {
+    pub scope: TurnScope,
+    pub actor: TurnActor,
+    pub gate_ref: GateRef,
+    pub decision: ResourceGateResolutionDecision,
+}
+
+#[async_trait]
+pub trait ResourceGateResolutionService: Send + Sync {
+    async fn resolve_resource_gate(
+        &self,
+        request: ResourceGateResolutionRequest,
+    ) -> Result<(), RebornServicesError>;
+}
+
+struct RejectingResourceGateResolutionService;
+
+#[async_trait]
+impl ResourceGateResolutionService for RejectingResourceGateResolutionService {
+    async fn resolve_resource_gate(
+        &self,
+        _request: ResourceGateResolutionRequest,
+    ) -> Result<(), RebornServicesError> {
+        Err(RebornServicesError::service_unavailable(false))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornBudgetThresholdView {
+    pub warn_at: f64,
+    pub pause_at: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornBudgetAccountView {
+    pub account: String,
+    pub usage_usd: String,
+    pub reserved_usd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_usd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utilization: Option<f64>,
+    pub unlimited: bool,
+    pub period: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_end: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thresholds: Option<RebornBudgetThresholdView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornBudgetSettingsResponse {
+    pub generated_at: String,
+    pub accounts: Vec<RebornBudgetAccountView>,
+}
+
+#[async_trait]
+pub trait BudgetSettingsService: Send + Sync {
+    async fn budget_settings(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornBudgetSettingsResponse, RebornServicesError>;
+}
+
+struct RejectingBudgetSettingsService;
+
+#[async_trait]
+impl BudgetSettingsService for RejectingBudgetSettingsService {
+    async fn budget_settings(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornBudgetSettingsResponse, RebornServicesError> {
+        Err(RebornServicesError::service_unavailable(false))
+    }
+}
+
 /// Default facade implementation composed at the WebUI boundary.
 #[derive(Clone)]
 pub struct RebornServices {
@@ -2364,6 +2473,8 @@ pub struct RebornServices {
     operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
+    resource_gate_resolver: Arc<dyn ResourceGateResolutionService>,
+    budget_settings: Arc<dyn BudgetSettingsService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
@@ -2401,6 +2512,8 @@ impl RebornServices {
             operator_service_lifecycle: Arc::new(UnsupportedOperatorServiceLifecycleService),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
+            resource_gate_resolver: Arc::new(RejectingResourceGateResolutionService),
+            budget_settings: Arc::new(RejectingBudgetSettingsService),
             extension_credentials: None,
             skill_activation_recorder: None,
             skill_activation_clearer: None,
@@ -2571,6 +2684,19 @@ impl RebornServices {
         auth_interactions: Arc<dyn AuthInteractionService>,
     ) -> Self {
         self.auth_interactions = auth_interactions;
+        self
+    }
+
+    pub fn with_resource_gate_resolver(
+        mut self,
+        resource_gate_resolver: Arc<dyn ResourceGateResolutionService>,
+    ) -> Self {
+        self.resource_gate_resolver = resource_gate_resolver;
+        self
+    }
+
+    pub fn with_budget_settings(mut self, budget_settings: Arc<dyn BudgetSettingsService>) -> Self {
+        self.budget_settings = budget_settings;
         self
     }
 
@@ -3655,6 +3781,17 @@ impl RebornServicesApi for RebornServices {
                 )
                 .await
             }
+            GateResolutionRoute::Resource => {
+                self.resolve_resource_gate(
+                    access.scope,
+                    access.run_actor,
+                    run_id,
+                    gate_ref,
+                    client_action_id,
+                    resolution,
+                )
+                .await
+            }
             GateResolutionRoute::Generic => {
                 self.resolve_generic_gate(
                     access.scope,
@@ -3694,6 +3831,13 @@ impl RebornServicesApi for RebornServices {
             .await
             .map_err(map_turn_error)?;
         Ok(state.into())
+    }
+
+    async fn get_budget_settings(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornBudgetSettingsResponse, RebornServicesError> {
+        self.budget_settings.budget_settings(caller).await
     }
 
     async fn list_threads(
@@ -5107,6 +5251,80 @@ impl RebornServices {
                 Ok(RebornResolveGateResponse::Resumed(response.into()))
             }
             ResolveAuthInteractionResponse::Canceled(response) => {
+                Ok(RebornResolveGateResponse::Cancelled(response.into()))
+            }
+        }
+    }
+
+    async fn resolve_resource_gate(
+        &self,
+        scope: TurnScope,
+        actor: TurnActor,
+        run_id: TurnRunId,
+        gate_ref: GateRef,
+        client_action_id: IdempotencyKey,
+        resolution: WebUiGateResolution,
+    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+        match resolution {
+            WebUiGateResolution::Approved { always } => {
+                if always {
+                    return Err(persistent_approval_unavailable());
+                }
+                self.resource_gate_resolver
+                    .resolve_resource_gate(ResourceGateResolutionRequest {
+                        scope: scope.clone(),
+                        actor: actor.clone(),
+                        gate_ref: gate_ref.clone(),
+                        decision: ResourceGateResolutionDecision::Approve,
+                    })
+                    .await?;
+                let binding_id = webui_gate_binding_id(&scope, &gate_ref_string(&gate_ref));
+                let response = self
+                    .turn_coordinator
+                    .resume_turn(ResumeTurnRequest {
+                        scope,
+                        actor,
+                        run_id,
+                        gate_resolution_ref: gate_ref,
+                        precondition: ResumeTurnPrecondition::AnyBlockedGate,
+                        source_binding_ref: webui_source_binding_ref_from_raw(
+                            "webui-gate-src",
+                            &binding_id,
+                        )?,
+                        reply_target_binding_ref: webui_reply_target_binding_ref_from_raw(
+                            "webui-gate-reply",
+                            &binding_id,
+                        )?,
+                        idempotency_key: client_action_id,
+                        resume_disposition: None,
+                    })
+                    .await
+                    .map_err(map_turn_error)?;
+                Ok(RebornResolveGateResponse::Resumed(response.into()))
+            }
+            WebUiGateResolution::CredentialProvided { .. } => {
+                Err(blocked_authentication_unavailable())
+            }
+            WebUiGateResolution::Declined => {
+                self.resource_gate_resolver
+                    .resolve_resource_gate(ResourceGateResolutionRequest {
+                        scope: scope.clone(),
+                        actor: actor.clone(),
+                        gate_ref,
+                        decision: ResourceGateResolutionDecision::Decline,
+                    })
+                    .await?;
+                let response = self
+                    .turn_coordinator
+                    .cancel_run(ironclaw_turns::CancelRunRequest {
+                        scope,
+                        actor,
+                        run_id,
+                        reason: SanitizedCancelReason::UserRequested,
+                        idempotency_key: client_action_id,
+                    })
+                    .await
+                    .map_err(map_turn_error)?;
                 Ok(RebornResolveGateResponse::Cancelled(response.into()))
             }
         }

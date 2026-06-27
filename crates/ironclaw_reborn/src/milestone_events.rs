@@ -240,6 +240,7 @@ impl DurableLoopHostMilestoneSink {
                 provider,
                 runtime,
                 reason_kind,
+                safe_summary,
             } => {
                 let mut scope = scope;
                 scope.invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
@@ -249,7 +250,8 @@ impl DurableLoopHostMilestoneSink {
                     provider.clone(),
                     *runtime,
                     reason_kind.as_str(),
-                );
+                )
+                .with_error_summary(safe_summary.as_ref().map(|summary| summary.to_string()));
                 event.parent_invocation_id =
                     Some(InvocationId::from_uuid(milestone.run_id.as_uuid()));
                 event
@@ -382,6 +384,7 @@ mod tests {
         CapabilityActivityId, TurnId, TurnScope,
         run_profile::{
             CapabilityFailureKind, HookDecisionSummary, LoopDriverId, LoopHostMilestone,
+            LoopSafeSummary,
         },
     };
 
@@ -533,6 +536,7 @@ mod tests {
                 provider: Some(provider.clone()),
                 runtime: Some(RuntimeKind::Script),
                 reason_kind: CapabilityFailureKind::OperationFailed,
+                safe_summary: LoopSafeSummary::new("demo.echo failed to execute").ok(),
             });
 
         let sink = projector_for(thread_id, run_id);
@@ -554,6 +558,10 @@ mod tests {
         assert_eq!(event.provider.as_ref(), Some(&provider));
         assert_eq!(event.runtime, Some(RuntimeKind::Script));
         assert_eq!(event.error_kind.as_deref(), Some("operation_failed"));
+        assert_eq!(
+            event.error_summary.as_deref(),
+            Some("demo.echo failed to execute")
+        );
     }
 
     #[tokio::test]
@@ -580,6 +588,7 @@ mod tests {
                 provider: Some(provider.clone()),
                 runtime: Some(RuntimeKind::Script),
                 reason_kind: CapabilityFailureKind::OperationFailed,
+                safe_summary: None,
             },
         ] {
             let (mut milestone, thread_id, run_id) = fixture_milestone(kind);

@@ -1809,6 +1809,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     provider: Some(provider),
                     runtime: Some(runtime),
                     reason_kind: capability_failure_kind(host_error.kind.as_str())?,
+                    safe_summary: LoopSafeSummary::new(host_error.safe_summary.clone()).ok(),
                 };
                 guard.commit();
                 return self
@@ -2472,6 +2473,9 @@ fn runtime_terminal_milestone(
                 provider: Some(provider),
                 runtime: Some(runtime),
                 reason_kind: runtime_failure_kind_to_loop(failure.kind)?,
+                safe_summary: failure
+                    .safe_summary()
+                    .and_then(|summary| LoopSafeSummary::new(summary).ok()),
             })
         }
         RuntimeCapabilityOutcome::Unknown(unknown) => {
@@ -2481,6 +2485,10 @@ fn runtime_terminal_milestone(
                 provider: Some(provider),
                 runtime: Some(runtime),
                 reason_kind: capability_failure_kind(unknown.kind.clone())?,
+                safe_summary: unknown
+                    .message
+                    .clone()
+                    .and_then(|summary| LoopSafeSummary::new(summary).ok()),
             })
         }
         RuntimeCapabilityOutcome::ApprovalRequired(_)

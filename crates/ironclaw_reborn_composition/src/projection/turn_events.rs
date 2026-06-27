@@ -17,6 +17,10 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     ApprovalInteractionScope, approval_request_id_from_gate_ref, is_approval_gate_ref,
 };
+use ironclaw_resources::{
+    BudgetGateId, BudgetGateStore, ResourceApprovalNeeded, ResourceDimension, ResourceGovernor,
+    ResourceLimits, ResourceValue,
+};
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
     GateRef, GetRunStateRequest, SanitizedFailure, TurnActor, TurnBlockedGateKind, TurnCoordinator,
@@ -29,6 +33,7 @@ use ironclaw_turns::{
         sanitize_model_visible_text,
     },
 };
+use rust_decimal::prelude::FromPrimitive;
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use crate::AuthChallengeProvider;
@@ -76,6 +81,8 @@ pub(super) enum TurnEventBridge {
         service: Arc<TurnEventReducerService<dyn TurnEventProjectionSource>>,
         coordinator: Arc<dyn TurnCoordinator>,
         approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
+        budget_gates: Option<Arc<dyn BudgetGateStore>>,
+        budget_governor: Option<Arc<dyn ResourceGovernor>>,
         failure_explainer: Arc<dyn FailureExplanationProvider>,
         failure_explanation_cache: Arc<Mutex<FailureExplanationCache>>,
     },
@@ -114,11 +121,15 @@ impl TurnEventBridge {
         source: Arc<dyn TurnEventProjectionSource>,
         coordinator: Arc<dyn TurnCoordinator>,
         approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
+        budget_gates: Option<Arc<dyn BudgetGateStore>>,
+        budget_governor: Option<Arc<dyn ResourceGovernor>>,
     ) -> Self {
         Self::Enabled {
             service: Arc::new(TurnEventReducerService::new(source)),
             coordinator,
             approval_requests,
+            budget_gates,
+            budget_governor,
             failure_explainer: Arc::new(NoopFailureExplanationProvider),
             failure_explanation_cache: Arc::new(Mutex::new(FailureExplanationCache::new(
                 FAILURE_EXPLANATION_CACHE_CAPACITY,
@@ -135,6 +146,26 @@ impl TurnEventBridge {
         } = &mut self
         {
             *approval_requests = requests;
+        }
+        self
+    }
+
+    pub(super) fn with_budget_gates(mut self, gates: Option<Arc<dyn BudgetGateStore>>) -> Self {
+        if let Self::Enabled { budget_gates, .. } = &mut self {
+            *budget_gates = gates;
+        }
+        self
+    }
+
+    pub(super) fn with_budget_governor(
+        mut self,
+        governor: Option<Arc<dyn ResourceGovernor>>,
+    ) -> Self {
+        if let Self::Enabled {
+            budget_governor, ..
+        } = &mut self
+        {
+            *budget_governor = governor;
         }
         self
     }
@@ -163,6 +194,8 @@ impl TurnEventBridge {
             service,
             coordinator,
             approval_requests,
+            budget_gates,
+            budget_governor,
             failure_explainer,
             failure_explanation_cache,
         } = self
@@ -221,6 +254,8 @@ impl TurnEventBridge {
                     failure_explanation_cache,
                     auth_challenges,
                     approval_requests.as_deref(),
+                    budget_gates.as_deref(),
+                    budget_governor.as_deref(),
                     page.entries,
                 )
                 .await?,
@@ -244,6 +279,8 @@ async fn turn_event_payloads_for_page(
     failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     approval_requests: Option<&dyn ApprovalRequestStore>,
+    budget_gates: Option<&dyn BudgetGateStore>,
+    budget_governor: Option<&dyn ResourceGovernor>,
     events: Vec<TurnLifecycleEvent>,
 ) -> Result<Vec<TurnEventPayload>, ProductAdapterError> {
     let futures = events.into_iter().map(|event| {
@@ -256,6 +293,8 @@ async fn turn_event_payloads_for_page(
                 failure_explanation_cache,
                 auth_challenges,
                 approval_requests,
+                budget_gates,
+                budget_governor,
                 &event,
             )
             .await
@@ -286,6 +325,8 @@ async fn turn_event_payloads(
     failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     approval_requests: Option<&dyn ApprovalRequestStore>,
+    budget_gates: Option<&dyn BudgetGateStore>,
+    budget_governor: Option<&dyn ResourceGovernor>,
     event: &TurnLifecycleEvent,
 ) -> Result<Vec<ProductOutboundPayload>, ProductAdapterError> {
     let mut payloads = Vec::new();
@@ -295,6 +336,8 @@ async fn turn_event_payloads(
             coordinator,
             auth_challenges,
             approval_requests,
+            budget_gates,
+            budget_governor,
             event,
         )
         .await?
@@ -368,6 +411,8 @@ async fn blocked_prompt_payload(
     coordinator: &dyn TurnCoordinator,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     approval_requests: Option<&dyn ApprovalRequestStore>,
+    budget_gates: Option<&dyn BudgetGateStore>,
+    budget_governor: Option<&dyn ResourceGovernor>,
     event: &TurnLifecycleEvent,
 ) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
     let state = match coordinator
@@ -434,8 +479,15 @@ async fn blocked_prompt_payload(
         TurnStatus::BlockedResource => Ok(Some(gate_prompt(
             event,
             gate_ref_str,
-            "Resource unavailable",
+            ProductGateKind::Resource,
+            resource_gate_headline(gate_ref.as_str()),
             false,
+            budget_gate_details(
+                budget_gates,
+                budget_governor,
+                &event.scope,
+                gate_ref.as_str(),
+            ),
         ))),
         // Non-blocked statuses: no prompt payload. Exhaustive match so a new
         // TurnStatus variant forces a compile error and an explicit decision.
@@ -467,8 +519,10 @@ async fn approval_gate_prompt(
     gate_prompt_with_context(
         event,
         gate_ref_string,
+        ProductGateKind::Approval,
         "Approval required",
         is_approval_gate_ref(gate_ref.as_str()),
+        Vec::new(),
         lookup.context,
         lookup.invocation_id,
     )
@@ -689,32 +743,360 @@ fn non_empty_string(value: &str) -> Option<String> {
 fn gate_prompt(
     event: &TurnLifecycleEvent,
     gate_ref: String,
-    headline: &'static str,
+    gate_kind: ProductGateKind,
+    headline: &str,
     allow_always: bool,
+    details: Vec<ApprovalPromptDetailView>,
 ) -> ProductOutboundPayload {
-    gate_prompt_with_context(event, gate_ref, headline, allow_always, None, None)
+    gate_prompt_with_context(
+        event,
+        gate_ref,
+        gate_kind,
+        headline,
+        allow_always,
+        details,
+        None,
+        None,
+    )
 }
 
 fn gate_prompt_with_context(
     event: &TurnLifecycleEvent,
     gate_ref: String,
-    headline: &'static str,
+    gate_kind: ProductGateKind,
+    headline: &str,
     allow_always: bool,
+    details: Vec<ApprovalPromptDetailView>,
     approval_context: Option<ApprovalPromptContextView>,
     invocation_id: Option<InvocationId>,
 ) -> ProductOutboundPayload {
+    let body = event
+        .sanitized_reason
+        .clone()
+        .unwrap_or_else(|| gate_prompt_fallback_body(gate_kind, &gate_ref).to_string());
     ProductOutboundPayload::GatePrompt(GatePromptView {
         turn_run_id: event.run_id,
+        gate_kind,
         gate_ref,
         invocation_id,
         headline: headline.to_string(),
-        body: event
-            .sanitized_reason
-            .clone()
-            .unwrap_or_else(|| "Resolve this gate to continue the run.".to_string()),
+        body,
         allow_always,
+        details,
         approval_context,
     })
+}
+
+fn resource_gate_headline(gate_ref: &str) -> &'static str {
+    if gate_ref.starts_with("gate:budget-") {
+        "Budget approval required"
+    } else {
+        "Resource unavailable"
+    }
+}
+
+fn gate_prompt_fallback_body(gate_kind: ProductGateKind, gate_ref: &str) -> &'static str {
+    match gate_kind {
+        ProductGateKind::Approval => "Resolve this approval gate to continue the run.",
+        ProductGateKind::Auth => "Authenticate to continue this run.",
+        ProductGateKind::Resource if gate_ref.starts_with("gate:budget-") => {
+            "Approve additional model budget to continue this run."
+        }
+        ProductGateKind::Resource => "Resolve this resource gate to continue the run.",
+        ProductGateKind::Generic => "Resolve this gate to continue the run.",
+    }
+}
+
+fn budget_gate_details(
+    budget_gates: Option<&dyn BudgetGateStore>,
+    budget_governor: Option<&dyn ResourceGovernor>,
+    scope: &TurnScope,
+    gate_ref: &str,
+) -> Vec<ApprovalPromptDetailView> {
+    let Some(store) = budget_gates else {
+        return Vec::new();
+    };
+    let Some(gate_id) = budget_gate_id_from_gate_ref(gate_ref) else {
+        return Vec::new();
+    };
+    let gate = match store.get(&scope.to_resource_scope(), gate_id) {
+        Ok(Some(gate)) => gate,
+        Ok(None) => return Vec::new(),
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                %gate_ref,
+                "budget gate detail lookup failed during WebUI projection"
+            );
+            return Vec::new();
+        }
+    };
+    let needed = gate.needed;
+    let mut details = Vec::new();
+    push_detail(
+        &mut details,
+        "Budget scope",
+        budget_account_label(&needed.account),
+    );
+    push_detail(
+        &mut details,
+        "Current usage",
+        format_resource_value(needed.dimension, &needed.current_usage),
+    );
+    if !resource_value_is_zero(&needed.active_reserved) {
+        push_detail(
+            &mut details,
+            "Already reserved",
+            format_resource_value(needed.dimension, &needed.active_reserved),
+        );
+    }
+    push_detail(
+        &mut details,
+        "Current limit",
+        format_resource_value(needed.dimension, &needed.limit),
+    );
+    if let Some((approved_limit, limit_increase)) =
+        budget_approval_limit_change(budget_governor, &needed)
+    {
+        push_detail(
+            &mut details,
+            "Limit after approval",
+            format_resource_value(needed.dimension, &approved_limit),
+        );
+        push_detail(
+            &mut details,
+            "Limit increase",
+            format_resource_value(needed.dimension, &limit_increase),
+        );
+    }
+    push_detail(
+        &mut details,
+        "Estimated for this step",
+        format_resource_value(needed.dimension, &needed.requested),
+    );
+    push_detail(
+        &mut details,
+        "Usage after this estimate",
+        format_resource_total(
+            needed.dimension,
+            &needed.current_usage,
+            &needed.active_reserved,
+            &needed.requested,
+        ),
+    );
+    push_detail(
+        &mut details,
+        "Approval means",
+        budget_approval_effect_label(needed.dimension, &needed.requested),
+    );
+    if let Some(period_end) = needed.period_end {
+        push_detail(
+            &mut details,
+            "Budget window resets",
+            period_end.to_rfc3339(),
+        );
+    }
+    details
+}
+
+fn budget_gate_id_from_gate_ref(gate_ref: &str) -> Option<BudgetGateId> {
+    gate_ref
+        .strip_prefix("gate:budget-")
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .map(BudgetGateId::from_uuid)
+}
+
+fn push_detail(details: &mut Vec<ApprovalPromptDetailView>, label: &str, value: String) {
+    if let Ok(detail) = ApprovalPromptDetailView::new(label, value) {
+        details.push(detail);
+    }
+}
+
+fn budget_account_label(account: &ironclaw_resources::ResourceAccount) -> String {
+    match account {
+        ironclaw_resources::ResourceAccount::Tenant { .. } => "tenant budget".to_string(),
+        ironclaw_resources::ResourceAccount::User { .. } => "your user budget".to_string(),
+        ironclaw_resources::ResourceAccount::Project { .. } => "project budget".to_string(),
+        ironclaw_resources::ResourceAccount::Agent { .. } => "agent budget".to_string(),
+        ironclaw_resources::ResourceAccount::Mission { .. } => "mission budget".to_string(),
+        ironclaw_resources::ResourceAccount::Thread { .. } => "thread budget".to_string(),
+    }
+}
+
+fn budget_approval_limit_change(
+    governor: Option<&dyn ResourceGovernor>,
+    needed: &ResourceApprovalNeeded,
+) -> Option<(ResourceValue, ResourceValue)> {
+    let governor = governor?;
+    let limits = governor
+        .account_snapshot(&needed.account)
+        .ok()
+        .flatten()
+        .and_then(|snapshot| snapshot.limits)
+        .unwrap_or_default();
+    let current_limit = dimension_limit(&limits, needed.dimension).unwrap_or(needed.limit.clone());
+    let total = resource_value_total(
+        &needed.current_usage,
+        &needed.active_reserved,
+        &needed.requested,
+    )?;
+    let target = approval_target_limit(current_limit.clone(), total, limits.thresholds.pause_at)?;
+    let approved_limit = max_resource_value(current_limit.clone(), target)?;
+    let limit_increase = subtract_resource_value(approved_limit.clone(), current_limit)?;
+    Some((approved_limit, limit_increase))
+}
+
+fn dimension_limit(limits: &ResourceLimits, dimension: ResourceDimension) -> Option<ResourceValue> {
+    match dimension {
+        ResourceDimension::Usd => limits.max_usd.map(ResourceValue::Decimal),
+        ResourceDimension::InputTokens => limits.max_input_tokens.map(ResourceValue::Integer),
+        ResourceDimension::OutputTokens => limits.max_output_tokens.map(ResourceValue::Integer),
+        ResourceDimension::WallClockMs => limits.max_wall_clock_ms.map(ResourceValue::Integer),
+        ResourceDimension::OutputBytes => limits.max_output_bytes.map(ResourceValue::Integer),
+        ResourceDimension::NetworkEgressBytes => {
+            limits.max_network_egress_bytes.map(ResourceValue::Integer)
+        }
+        ResourceDimension::ProcessCount => limits
+            .max_process_count
+            .map(u64::from)
+            .map(ResourceValue::Integer),
+        ResourceDimension::ConcurrencySlots => limits
+            .max_concurrency_slots
+            .map(u64::from)
+            .map(ResourceValue::Integer),
+    }
+}
+
+fn resource_value_total(
+    usage: &ResourceValue,
+    reserved: &ResourceValue,
+    requested: &ResourceValue,
+) -> Option<ResourceValue> {
+    match (usage, reserved, requested) {
+        (
+            ResourceValue::Decimal(usage),
+            ResourceValue::Decimal(reserved),
+            ResourceValue::Decimal(requested),
+        ) => Some(ResourceValue::Decimal(*usage + *reserved + *requested)),
+        (
+            ResourceValue::Integer(usage),
+            ResourceValue::Integer(reserved),
+            ResourceValue::Integer(requested),
+        ) => Some(ResourceValue::Integer(
+            (*usage)
+                .saturating_add(*reserved)
+                .saturating_add(*requested),
+        )),
+        _ => None,
+    }
+}
+
+fn approval_target_limit(
+    current: ResourceValue,
+    total: ResourceValue,
+    pause_at: f64,
+) -> Option<ResourceValue> {
+    match (current, total) {
+        (ResourceValue::Decimal(current), ResourceValue::Decimal(total)) => {
+            let mut target = current + (current * rust_decimal::Decimal::new(20, 2));
+            if pause_at.is_finite() && pause_at > 0.0 && pause_at < 1.0 {
+                let pause_at_decimal = rust_decimal::Decimal::from_f64(pause_at)?;
+                target = target.max(total / pause_at_decimal + rust_decimal::Decimal::new(1, 4));
+            }
+            Some(ResourceValue::Decimal(target.round_dp(4)))
+        }
+        (ResourceValue::Integer(current), ResourceValue::Integer(total)) => {
+            let mut target = current
+                .saturating_add(current / 5)
+                .saturating_add(u64::from(current % 5 != 0));
+            if pause_at.is_finite() && pause_at > 0.0 && pause_at < 1.0 {
+                target = target.max((((total as f64) / pause_at).ceil() as u64).saturating_add(1));
+            }
+            Some(ResourceValue::Integer(target))
+        }
+        _ => None,
+    }
+}
+
+fn max_resource_value(left: ResourceValue, right: ResourceValue) -> Option<ResourceValue> {
+    match (left, right) {
+        (ResourceValue::Decimal(left), ResourceValue::Decimal(right)) => {
+            Some(ResourceValue::Decimal(left.max(right)))
+        }
+        (ResourceValue::Integer(left), ResourceValue::Integer(right)) => {
+            Some(ResourceValue::Integer(left.max(right)))
+        }
+        _ => None,
+    }
+}
+
+fn subtract_resource_value(left: ResourceValue, right: ResourceValue) -> Option<ResourceValue> {
+    match (left, right) {
+        (ResourceValue::Decimal(left), ResourceValue::Decimal(right)) => Some(
+            ResourceValue::Decimal((left - right).max(rust_decimal::Decimal::ZERO)),
+        ),
+        (ResourceValue::Integer(left), ResourceValue::Integer(right)) => {
+            Some(ResourceValue::Integer(left.saturating_sub(right)))
+        }
+        _ => None,
+    }
+}
+
+fn resource_value_is_zero(value: &ResourceValue) -> bool {
+    match value {
+        ResourceValue::Decimal(value) => *value == rust_decimal::Decimal::ZERO,
+        ResourceValue::Integer(value) => *value == 0,
+    }
+}
+
+fn format_resource_value(dimension: ResourceDimension, value: &ResourceValue) -> String {
+    match (dimension, value) {
+        (ResourceDimension::Usd, ResourceValue::Decimal(value)) => format_usd(*value),
+        (_, ResourceValue::Decimal(value)) => value.normalize().to_string(),
+        (_, ResourceValue::Integer(value)) => value.to_string(),
+    }
+}
+
+fn format_resource_total(
+    dimension: ResourceDimension,
+    usage: &ResourceValue,
+    reserved: &ResourceValue,
+    requested: &ResourceValue,
+) -> String {
+    match (usage, reserved, requested) {
+        (
+            ResourceValue::Decimal(usage),
+            ResourceValue::Decimal(reserved),
+            ResourceValue::Decimal(requested),
+        ) => format_resource_value(
+            dimension,
+            &ResourceValue::Decimal(*usage + *reserved + *requested),
+        ),
+        (
+            ResourceValue::Integer(usage),
+            ResourceValue::Integer(reserved),
+            ResourceValue::Integer(requested),
+        ) => format_resource_value(
+            dimension,
+            &ResourceValue::Integer(
+                (*usage)
+                    .saturating_add(*reserved)
+                    .saturating_add(*requested),
+            ),
+        ),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn budget_approval_effect_label(dimension: ResourceDimension, requested: &ResourceValue) -> String {
+    format!(
+        "raise this account limit enough for this estimated {} step and resume the run",
+        format_resource_value(dimension, requested)
+    )
+}
+
+fn format_usd(value: rust_decimal::Decimal) -> String {
+    format!("${}", value.round_dp(4).normalize())
 }
 
 fn projects_run_status(kind: &TurnEventKind) -> bool {
@@ -755,6 +1137,7 @@ struct GateProjectionPromptContext {
     headline: Option<String>,
     body: Option<String>,
     allow_always: Option<bool>,
+    details: Vec<ApprovalPromptDetailView>,
     approval_context: Option<ApprovalPromptContextView>,
     auth_context: Option<AuthPromptContextView>,
 }
@@ -768,6 +1151,7 @@ fn gate_projection_prompt_context(
             headline: Some(prompt.headline.clone()),
             body: Some(prompt.body.clone()),
             allow_always: Some(prompt.allow_always),
+            details: prompt.details.clone(),
             approval_context: prompt.approval_context.clone(),
             auth_context: None,
         },
@@ -776,6 +1160,7 @@ fn gate_projection_prompt_context(
             headline: Some(prompt.headline.clone()),
             body: Some(prompt.body.clone()),
             allow_always: Some(false),
+            details: Vec::new(),
             approval_context: None,
             auth_context: AuthPromptContextView::from_auth_prompt(prompt)?,
         },
@@ -799,21 +1184,22 @@ fn gate_projection_item(
         .activity_id
         .map(|activity_id| InvocationId::from_uuid(activity_id.as_uuid()));
     let body = prompt_context.body.unwrap_or_else(|| {
-        event
-            .sanitized_reason
-            .clone()
-            .unwrap_or_else(|| gate_projection_body(blocked_gate.gate_kind).to_string())
+        event.sanitized_reason.clone().unwrap_or_else(|| {
+            gate_projection_body(blocked_gate.gate_kind, blocked_gate.gate_ref.as_str()).to_string()
+        })
     });
     Ok(Some(ProductProjectionItem::Gate {
         run_id: event.run_id,
         gate_kind: product_gate_kind(blocked_gate.gate_kind),
         gate_ref: blocked_gate.gate_ref.as_str().to_string(),
         invocation_id: prompt_context.invocation_id.or(blocked_invocation_id),
-        headline: prompt_context
-            .headline
-            .unwrap_or_else(|| gate_projection_headline(blocked_gate.gate_kind).to_string()),
+        headline: prompt_context.headline.unwrap_or_else(|| {
+            gate_projection_headline(blocked_gate.gate_kind, blocked_gate.gate_ref.as_str())
+                .to_string()
+        }),
         body: Some(body),
         allow_always: prompt_context.allow_always.unwrap_or(false),
+        details: prompt_context.details,
         approval_context: prompt_context.approval_context,
         auth_context: prompt_context.auth_context,
     }))
@@ -829,21 +1215,23 @@ fn product_gate_kind(kind: TurnBlockedGateKind) -> ProductGateKind {
     }
 }
 
-fn gate_projection_headline(kind: TurnBlockedGateKind) -> &'static str {
+fn gate_projection_headline(kind: TurnBlockedGateKind, gate_ref: &str) -> &'static str {
     match kind {
         TurnBlockedGateKind::Approval => "Approval required",
         TurnBlockedGateKind::Auth => "Authentication required",
-        TurnBlockedGateKind::Resource => "Resource unavailable",
+        TurnBlockedGateKind::Resource => resource_gate_headline(gate_ref),
         TurnBlockedGateKind::AwaitDependentRun => "Waiting for dependent run",
         TurnBlockedGateKind::ExternalTool => "External tool call pending",
     }
 }
 
-fn gate_projection_body(kind: TurnBlockedGateKind) -> &'static str {
+fn gate_projection_body(kind: TurnBlockedGateKind, gate_ref: &str) -> &'static str {
     match kind {
         TurnBlockedGateKind::Approval => "Resolve this approval gate to continue the run.",
         TurnBlockedGateKind::Auth => "Authenticate to continue this run.",
-        TurnBlockedGateKind::Resource => "Resolve this resource gate to continue the run.",
+        TurnBlockedGateKind::Resource => {
+            gate_prompt_fallback_body(ProductGateKind::Resource, gate_ref)
+        }
         TurnBlockedGateKind::AwaitDependentRun => "Waiting for a dependent run to finish.",
         TurnBlockedGateKind::ExternalTool => "Submit the external tool output to continue the run.",
     }

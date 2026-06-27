@@ -8,9 +8,11 @@ export function gateFromEvent(eventType, prompt) {
 
   if (eventType === "gate") {
     const approvalContext = prompt.approval_context || null;
+    const gateKind = prompt.gate_kind || "approval";
+    const details = Array.isArray(prompt.details) ? prompt.details : [];
     const gate = {
       kind: "gate",
-      gateKind: "approval",
+      gateKind,
       runId: prompt.turn_run_id,
       gateRef: prompt.gate_ref,
       invocationId: prompt.invocation_id || null,
@@ -18,7 +20,7 @@ export function gateFromEvent(eventType, prompt) {
       body: prompt.body,
       allowAlways: prompt.allow_always === true,
     };
-    return gateWithApprovalContext(gate, approvalContext, prompt.body);
+    return gateWithApprovalContext(gate, approvalContext, prompt.body, details);
   }
   if (eventType === "auth_required") {
     return {
@@ -61,6 +63,7 @@ export function gateFromEvent(eventType, prompt) {
 export function gateFromProjectionGate(gate) {
   if (!gate?.run_id || !gate.gate_ref) return null;
   const gateKind = gate.gate_kind || "generic";
+  const details = Array.isArray(gate.details) ? gate.details : [];
   const base = {
     gateKind,
     runId: gate.run_id,
@@ -85,13 +88,14 @@ export function gateFromProjectionGate(gate) {
   return gateWithApprovalContext({
     ...base,
     kind: "gate",
-  }, gate.approval_context || null, base.body);
+  }, gate.approval_context || null, base.body, details);
 }
 
-function gateWithApprovalContext(gate, approvalContext, fallbackDescription) {
+function gateWithApprovalContext(gate, approvalContext, fallbackDescription, details = []) {
   if (!approvalContext) {
     const description = displayDescription(fallbackDescription);
-    return description ? { ...gate, description } : gate;
+    const withDetails = details.length ? { ...gate, approvalDetails: details } : gate;
+    return description ? { ...withDetails, description } : withDetails;
   }
   const approvalDetails = approvalDetailsFromContext(approvalContext);
   return {

@@ -24,6 +24,7 @@ function hasExecContext(context) {
   if (!context) return false;
   const withoutGenericGateCopy = context
     .replace(/\bcontinue the run\b/g, "")
+    .replace(/\bcontinue this run\b/g, "")
     .replace(/\bresolve this (approval )?gate\b/g, "");
   return EXEC_RE.test(withoutGenericGateCopy);
 }

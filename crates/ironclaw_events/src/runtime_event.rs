@@ -90,6 +90,7 @@ pub struct RuntimeEvent {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    pub error_summary: Option<String>,
     /// Hex-encoded blake3 hook identity. Present only on hook events.
     pub hook_id: Option<String>,
     /// Closed-vocabulary hook point label (e.g. `before_capability`). Present
@@ -130,6 +131,8 @@ struct RuntimeEventWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    error_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     hook_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hook_point: Option<String>,
@@ -164,6 +167,7 @@ impl Serialize for RuntimeEvent {
             process_id: self.process_id,
             output_bytes: self.output_bytes,
             error_kind: self.error_kind.clone().map(sanitize_error_kind),
+            error_summary: self.error_summary.clone().and_then(sanitize_error_summary),
             hook_id: self.hook_id.clone().map(sanitize_hook_id),
             hook_point: self.hook_point.clone().map(sanitize_hook_label),
             hook_trust_class: self.hook_trust_class.clone().map(sanitize_hook_label),
@@ -207,6 +211,8 @@ struct TrustedRuntimeEventWire {
     output_bytes: Option<u64>,
     #[serde(default)]
     error_kind: Option<String>,
+    #[serde(default)]
+    error_summary: Option<String>,
     #[serde(default)]
     hook_id: Option<String>,
     #[serde(default)]
@@ -257,6 +263,7 @@ impl RuntimeEventWire {
             process_id: self.process_id,
             output_bytes: self.output_bytes,
             error_kind: self.error_kind.map(sanitize_error_kind),
+            error_summary: self.error_summary.and_then(sanitize_error_summary),
             hook_id: self.hook_id.map(sanitize_hook_id),
             hook_point: self.hook_point.map(sanitize_hook_label),
             hook_trust_class: self.hook_trust_class.map(sanitize_hook_label),
@@ -281,6 +288,7 @@ impl TrustedRuntimeEventWire {
             process_id: self.process_id,
             output_bytes: self.output_bytes,
             error_kind: self.error_kind.map(sanitize_error_kind),
+            error_summary: self.error_summary.and_then(sanitize_error_summary),
             hook_id: self.hook_id.map(sanitize_hook_id),
             hook_point: self.hook_point.map(sanitize_hook_label),
             hook_trust_class: self.hook_trust_class.map(sanitize_hook_label),
@@ -320,6 +328,7 @@ impl RuntimeEvent {
             process_id: None,
             output_bytes: None,
             error_kind: None,
+            error_summary: None,
             hook_id: None,
             hook_point: None,
             hook_trust_class: None,
@@ -344,6 +353,7 @@ impl RuntimeEvent {
             process_id: None,
             output_bytes: None,
             error_kind: None,
+            error_summary: None,
             hook_id: None,
             hook_point: None,
             hook_trust_class: None,
@@ -369,6 +379,7 @@ impl RuntimeEvent {
             process_id: None,
             output_bytes: Some(output_bytes),
             error_kind: None,
+            error_summary: None,
             hook_id: None,
             hook_point: None,
             hook_trust_class: None,
@@ -394,6 +405,7 @@ impl RuntimeEvent {
             process_id: None,
             output_bytes: None,
             error_kind: Some(sanitize_error_kind(error_kind)),
+            error_summary: None,
             hook_id: None,
             hook_point: None,
             hook_trust_class: None,
@@ -425,6 +437,7 @@ impl RuntimeEvent {
             process_id: None,
             output_bytes: None,
             error_kind: Some(sanitize_error_kind(error_kind)),
+            error_summary: None,
             hook_id: None,
             hook_point: None,
             hook_trust_class: None,
@@ -464,6 +477,7 @@ impl RuntimeEvent {
             process_id: None,
             output_bytes: None,
             error_kind: Some(sanitize_error_kind(error_kind)),
+            error_summary: None,
             hook_id: None,
             hook_point: None,
             hook_trust_class: None,
@@ -487,6 +501,7 @@ impl RuntimeEvent {
             process_id: None,
             output_bytes: None,
             error_kind: None,
+            error_summary: None,
             hook_id: None,
             hook_point: None,
             hook_trust_class: None,
@@ -512,6 +527,7 @@ impl RuntimeEvent {
             process_id: Some(process_id),
             output_bytes: None,
             error_kind: None,
+            error_summary: None,
             hook_id: None,
             hook_point: None,
             hook_trust_class: None,
@@ -537,6 +553,7 @@ impl RuntimeEvent {
             process_id: Some(process_id),
             output_bytes: None,
             error_kind: None,
+            error_summary: None,
             hook_id: None,
             hook_point: None,
             hook_trust_class: None,
@@ -563,6 +580,7 @@ impl RuntimeEvent {
             process_id: Some(process_id),
             output_bytes: None,
             error_kind: Some(sanitize_error_kind(error_kind)),
+            error_summary: None,
             hook_id: None,
             hook_point: None,
             hook_trust_class: None,
@@ -588,6 +606,7 @@ impl RuntimeEvent {
             process_id: Some(process_id),
             output_bytes: None,
             error_kind: None,
+            error_summary: None,
             hook_id: None,
             hook_point: None,
             hook_trust_class: None,
@@ -610,6 +629,7 @@ impl RuntimeEvent {
             process_id: payload.process_id,
             output_bytes: payload.output_bytes,
             error_kind: payload.error_kind,
+            error_summary: payload.error_summary.and_then(sanitize_error_summary),
             hook_id: payload.hook_id,
             hook_point: payload.hook_point,
             hook_trust_class: payload.hook_trust_class,
@@ -655,6 +675,11 @@ impl RuntimeEvent {
         }
     }
 
+    pub fn with_error_summary(mut self, error_summary: Option<String>) -> Self {
+        self.error_summary = error_summary.and_then(sanitize_error_summary);
+        self
+    }
+
     /// Construct a [`RuntimeEventKind::HookDispatched`] event.
     ///
     /// `hook_id` is the hex form of the hook's blake3-derived identity. `point`
@@ -678,6 +703,7 @@ impl RuntimeEvent {
             process_id: None,
             output_bytes: None,
             error_kind: None,
+            error_summary: None,
             hook_id: Some(sanitize_hook_id(hook_id)),
             hook_point: Some(sanitize_hook_label(point)),
             hook_trust_class: Some(sanitize_hook_label(trust_class)),
@@ -708,6 +734,7 @@ impl RuntimeEvent {
             process_id: None,
             output_bytes: None,
             error_kind: None,
+            error_summary: None,
             hook_id: Some(sanitize_hook_id(hook_id)),
             hook_point: None,
             hook_trust_class: None,
@@ -735,6 +762,7 @@ impl RuntimeEvent {
             process_id: None,
             output_bytes: None,
             error_kind: None,
+            error_summary: None,
             hook_id: Some(sanitize_hook_id(hook_id)),
             hook_point: None,
             hook_trust_class: None,
@@ -754,6 +782,7 @@ struct RuntimeEventPayload {
     process_id: Option<ProcessId>,
     output_bytes: Option<u64>,
     error_kind: Option<String>,
+    error_summary: Option<String>,
     hook_id: Option<String>,
     hook_point: Option<String>,
     hook_trust_class: Option<String>,
@@ -768,6 +797,7 @@ pub const UNCLASSIFIED_ERROR_KIND: &str = "Unclassified";
 
 const MAX_ERROR_KIND_LEN: usize = 64;
 const MAX_ERROR_KIND_SEGMENT_LEN: usize = 24;
+const MAX_ERROR_SUMMARY_LEN: usize = 2048;
 
 /// Collapse any error_kind value that does not match the stable classification
 /// shape into the single `Unclassified` token. This is the redaction guard
@@ -791,6 +821,32 @@ pub fn sanitize_error_kind(error_kind: impl Into<String>) -> String {
         value
     } else {
         UNCLASSIFIED_ERROR_KIND.to_string()
+    }
+}
+
+fn sanitize_error_summary(error_summary: impl Into<String>) -> Option<String> {
+    let value = error_summary.into();
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut sanitized = String::with_capacity(trimmed.len().min(MAX_ERROR_SUMMARY_LEN));
+    for ch in trimmed.chars() {
+        if ch == '\0' || (ch.is_control() && ch != '\n' && ch != '\t') {
+            continue;
+        }
+        let next_len = sanitized.len() + ch.len_utf8();
+        if next_len > MAX_ERROR_SUMMARY_LEN {
+            break;
+        }
+        sanitized.push(ch);
+    }
+
+    if sanitized.trim().is_empty() {
+        None
+    } else {
+        Some(sanitized)
     }
 }
 

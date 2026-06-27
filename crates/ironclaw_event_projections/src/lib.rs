@@ -299,6 +299,8 @@ pub struct CapabilityActivityProjection {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_summary: Option<String>,
     #[serde(default)]
     pub first_cursor: EventCursor,
     pub last_cursor: EventCursor,

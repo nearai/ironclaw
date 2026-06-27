@@ -2787,7 +2787,9 @@ pub async fn build_reborn_runtime(
     if let Some(local_runtime) = local_runtime {
         projection_services = projection_services
             .with_approval_requests(Arc::clone(&local_runtime.approval_requests)
-                as Arc<dyn ironclaw_run_state::ApprovalRequestStore>);
+                as Arc<dyn ironclaw_run_state::ApprovalRequestStore>)
+            .with_budget_gates(Arc::clone(&local_runtime.budget_gate_store))
+            .with_budget_governor(Arc::clone(&local_runtime.resource_governor));
     }
     let live_projection_publisher =
         projection_services.live_projection_publisher(actor_user_id.clone());

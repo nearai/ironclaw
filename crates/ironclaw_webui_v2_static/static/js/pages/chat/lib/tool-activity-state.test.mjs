@@ -289,6 +289,52 @@ test("tool activity cards map gate-declined lifecycle frames to declined status"
   assert.equal(card.toolErrorKind, "gate_declined");
 });
 
+test("tool activity cards prefer backend error summary over generic kind", () => {
+  const card = toolCardFromActivity({
+    invocation_id: "invocation-shell",
+    capability_id: "builtin.shell",
+    status: "failed",
+    error_kind: "backend",
+    error_summary: "failed to spawn command: command not found",
+  });
+
+  assert.equal(card.toolStatus, "error");
+  assert.equal(card.toolError, "failed to spawn command: command not found");
+  assert.equal(card.toolErrorKind, "backend");
+});
+
+test("terminal failed live and refresh tool cards render the same visible fields", () => {
+  const live = toolCardFromActivity({
+    invocation_id: "invocation-shell",
+    turn_run_id: "run-shell",
+    capability_id: "builtin.shell",
+    status: "failed",
+    subtitle: "cargo test",
+    input_summary: "command: cargo test",
+    error_kind: "backend",
+    error_summary: "process execution failed: command not found",
+    output_bytes: 0,
+    activity_order: 7,
+  });
+  const refreshed = toolCardFromPreview({
+    invocation_id: "invocation-shell",
+    turn_run_id: "run-shell",
+    capability_id: "builtin.shell",
+    title: "builtin.shell",
+    status: "failed",
+    subtitle: "cargo test",
+    input_summary: "command: cargo test",
+    error_kind: "backend",
+    output_summary: "process execution failed: command not found",
+    output_preview: "process execution failed: command not found",
+    output_kind: "text",
+    output_bytes: 0,
+    activity_order: 7,
+  });
+
+  assert.deepEqual(visibleTerminalToolFields(live), visibleTerminalToolFields(refreshed));
+});
+
 test("tool preview cards preserve gate-declined error kind as declined status", () => {
   const card = toolCardFromPreview({
     invocation_id: "invocation-preview-declined",
@@ -303,6 +349,24 @@ test("tool preview cards preserve gate-declined error kind as declined status", 
   assert.equal(card.toolError, "gate_declined");
   assert.equal(card.toolErrorKind, "gate_declined");
 });
+
+function visibleTerminalToolFields(card) {
+  return {
+    invocationId: card.invocationId,
+    capabilityId: card.capabilityId,
+    toolName: card.toolName,
+    toolStatus: card.toolStatus,
+    toolDetail: card.toolDetail,
+    toolParameters: card.toolParameters,
+    toolResultPreview: card.toolResultPreview,
+    toolError: card.toolError,
+    toolErrorKind: card.toolErrorKind,
+    outputBytes: card.outputBytes,
+    turnRunId: card.turnRunId,
+    activityOrder: card.activityOrder,
+    activityOrderSource: card.activityOrderSource,
+  };
+}
 
 test("tool activity state leaves pending gates unnumbered after existing timeline activity", () => {
   const runId = "run-refresh-order";

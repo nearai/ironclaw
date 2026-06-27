@@ -252,11 +252,11 @@ fn shell_error(error: shell_core::ShellExecutionError) -> FirstPartyCapabilityEr
 }
 
 fn process_error(error: RuntimeProcessError) -> FirstPartyCapabilityError {
-    let kind = match error {
+    let kind = match &error {
         RuntimeProcessError::Timeout(_) => RuntimeDispatchErrorKind::Resource,
         RuntimeProcessError::ExecutionFailed(_) => RuntimeDispatchErrorKind::Executor,
     };
-    FirstPartyCapabilityError::new(kind)
+    FirstPartyCapabilityError::with_safe_summary(kind, error.to_string())
 }
 
 #[cfg(test)]
@@ -301,6 +301,20 @@ mod tests {
         assert!(rendered.contains("Full output was not saved because"));
         assert!(rendered.contains("marker saved to: /workspace/command-outputs/command.log"));
         assert!(!rendered.contains("/tmp/command.log"));
+    }
+
+    #[test]
+    fn process_error_preserves_backend_safe_summary() {
+        let error = process_error(RuntimeProcessError::ExecutionFailed(
+            "failed to spawn command: command not found".to_string(),
+        ));
+
+        assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::Executor));
+        assert!(
+            error.safe_summary().as_deref().is_some_and(
+                |summary| summary.contains("failed to spawn command: command not found")
+            )
+        );
     }
 
     #[test]
