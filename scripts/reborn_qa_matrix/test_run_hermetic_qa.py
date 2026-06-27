@@ -503,6 +503,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 {case["case"] for case in manifest["cases"]},
             )
             self.assertIn(
+                "webui_v2_serve_listener_regression",
+                {case["case"] for case in manifest["cases"]},
+            )
+            self.assertIn(
                 "webui_v2_workspace_project_client_regression",
                 {case["case"] for case in manifest["cases"]},
             )
@@ -852,6 +856,45 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 "--test webui_v2_product_auth_4201",
                 commands[0]["command"],
             )
+
+    def test_webui_serve_listener_case_dry_run_maps_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "webui_v2_serve_listener_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-033-TC-01",
+                    "REBCLI-033-TC-02",
+                    "REBCLI-033-TC-03",
+                    "REBCLI-033-TC-04",
+                    "REBCLI-033-TC-05",
+                    "REBCLI-033-TC-06",
+                    "REBCLI-033-TC-07",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                [command["name"] for command in commands],
+                ["webui_v2_serve_listener_cli_smoke"],
+            )
+            self.assertIn("ironclaw_reborn_cli", commands[0]["command"])
+            self.assertIn("--features webui-v2-beta", commands[0]["command"])
+            self.assertIn("--test smoke", commands[0]["command"])
+            self.assertIn("serve_", commands[0]["command"])
 
     def test_webui_chat_client_case_dry_run_maps_chat_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:

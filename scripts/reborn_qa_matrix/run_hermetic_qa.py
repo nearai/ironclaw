@@ -47,6 +47,32 @@ class CaseSpec:
     notes: str = ""
 
 
+WEBUI_V2_SERVE_LISTENER_CLI_COMMAND = CommandSpec(
+    name="webui_v2_serve_listener_cli_smoke",
+    description=(
+        "Caller-level ironclaw-reborn serve smoke tests for listener help, "
+        "env-bearer fail-closed startup, config seeding before binding, "
+        "malformed host rejection, and trusted-laptop host-access listener "
+        "guardrails."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_cli",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "smoke",
+        "serve_",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+
 OPENAI_OWNER_CRATE_COMMAND = CommandSpec(
     name="openai_compat_owner_crates",
     description=(
@@ -2409,6 +2435,28 @@ WEBUI_V2_PROVIDER_LOGIN_MOUNT_COMMAND = CommandSpec(
 )
 
 CASES: dict[str, CaseSpec] = {
+    "webui_v2_serve_listener_regression": CaseSpec(
+        name="webui_v2_serve_listener_regression",
+        feature="WebUI v2 serve listener",
+        category="Hermetic WebUI v2 CLI Serve Listener Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-033-TC-01",
+            "REBCLI-033-TC-02",
+            "REBCLI-033-TC-03",
+            "REBCLI-033-TC-04",
+            "REBCLI-033-TC-05",
+            "REBCLI-033-TC-06",
+            "REBCLI-033-TC-07",
+        ],
+        commands=[WEBUI_V2_SERVE_LISTENER_CLI_COMMAND],
+        notes=(
+            "Covers the CLI-owned WebUI serve listener rows without browser "
+            "duplication: help surface, missing token/user fail-closed "
+            "startup, config seeding before binding, malformed host rejection, "
+            "ephemeral test port startup, and trusted-laptop host-access "
+            "listener guardrails."
+        ),
+    ),
     "openai_compat_beta_routes_regression": CaseSpec(
         name="openai_compat_beta_routes_regression",
         feature="OpenAI-Compatible Beta Routes",
