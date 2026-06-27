@@ -507,6 +507,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 {case["case"] for case in manifest["cases"]},
             )
             self.assertIn(
+                "webui_v2_serve_security_config_regression",
+                {case["case"] for case in manifest["cases"]},
+            )
+            self.assertIn(
                 "webui_v2_workspace_project_client_regression",
                 {case["case"] for case in manifest["cases"]},
             )
@@ -895,6 +899,54 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn("--features webui-v2-beta", commands[0]["command"])
             self.assertIn("--test smoke", commands[0]["command"])
             self.assertIn("serve_", commands[0]["command"])
+
+    def test_webui_serve_security_config_case_dry_run_maps_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "webui_v2_serve_security_config_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-034-TC-01",
+                    "REBCLI-034-TC-02",
+                    "REBCLI-034-TC-03",
+                    "REBCLI-034-TC-04",
+                    "REBCLI-034-TC-05",
+                    "REBCLI-034-TC-06",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                [command["name"] for command in commands],
+                [
+                    "webui_v2_serve_security_cli_smoke",
+                    "webui_v2_serve_cors_contracts",
+                    "webui_v2_serve_body_limit_contracts",
+                    "webui_v2_serve_ws_origin_contracts",
+                    "webui_v2_descriptor_policy_surface",
+                ],
+            )
+            self.assertIn(
+                "serve_rejects_invalid_webui_security_config_before_binding",
+                commands[0]["command"],
+            )
+            self.assertIn("cors_", commands[1]["command"])
+            self.assertIn("body", commands[2]["command"])
+            self.assertIn("ws_upgrade_", commands[3]["command"])
+            self.assertIn("webui_v2_descriptors_contract", commands[4]["command"])
 
     def test_webui_chat_client_case_dry_run_maps_chat_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:

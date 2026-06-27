@@ -72,6 +72,100 @@ WEBUI_V2_SERVE_LISTENER_CLI_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SERVE_SECURITY_CLI_COMMAND = CommandSpec(
+    name="webui_v2_serve_security_cli_smoke",
+    description=(
+        "Caller-level ironclaw-reborn serve smoke for invalid WebUI security "
+        "configuration: canonical host, allowed origins, and max body fallback "
+        "must fail closed before listener binding."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_cli",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "smoke",
+        "serve_rejects_invalid_webui_security_config_before_binding",
+        "--",
+        "--exact",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_SERVE_CORS_COMMAND = CommandSpec(
+    name="webui_v2_serve_cors_contracts",
+    description=(
+        "Composed WebUI v2 gateway CORS allow/deny contracts for configured "
+        "origins and fail-closed cross-origin preflight behavior."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_serve",
+        "cors_",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_SERVE_BODY_LIMIT_COMMAND = CommandSpec(
+    name="webui_v2_serve_body_limit_contracts",
+    description=(
+        "Composed WebUI v2 gateway request-body limit contracts for "
+        "descriptor caps and the outer fallback body limit."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_serve",
+        "body",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_SERVE_WS_ORIGIN_COMMAND = CommandSpec(
+    name="webui_v2_serve_ws_origin_contracts",
+    description=(
+        "Composed WebUI v2 WebSocket same-origin contracts, including "
+        "canonical-host override, missing Origin, and disallowed Origin."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_serve",
+        "ws_upgrade_",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 
 OPENAI_OWNER_CRATE_COMMAND = CommandSpec(
     name="openai_compat_owner_crates",
@@ -2455,6 +2549,33 @@ CASES: dict[str, CaseSpec] = {
             "startup, config seeding before binding, malformed host rejection, "
             "ephemeral test port startup, and trusted-laptop host-access "
             "listener guardrails."
+        ),
+    ),
+    "webui_v2_serve_security_config_regression": CaseSpec(
+        name="webui_v2_serve_security_config_regression",
+        feature="WebUI v2 serve security configuration",
+        category="Hermetic WebUI v2 CLI Serve Security Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-034-TC-01",
+            "REBCLI-034-TC-02",
+            "REBCLI-034-TC-03",
+            "REBCLI-034-TC-04",
+            "REBCLI-034-TC-05",
+            "REBCLI-034-TC-06",
+        ],
+        commands=[
+            WEBUI_V2_SERVE_SECURITY_CLI_COMMAND,
+            WEBUI_V2_SERVE_CORS_COMMAND,
+            WEBUI_V2_SERVE_BODY_LIMIT_COMMAND,
+            WEBUI_V2_SERVE_WS_ORIGIN_COMMAND,
+            WEBUI_V2_DESCRIPTOR_POLICY_COMMAND,
+        ],
+        notes=(
+            "Covers the CLI-owned WebUI serve security-configuration rows "
+            "without browser duplication: invalid canonical host, invalid "
+            "allowed origin, zero body fallback, CORS allow/deny behavior, "
+            "descriptor body caps, WebSocket same-origin policy, and "
+            "canonical-host override behavior."
         ),
     ),
     "openai_compat_beta_routes_regression": CaseSpec(

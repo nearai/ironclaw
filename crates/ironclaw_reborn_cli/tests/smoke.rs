@@ -1628,6 +1628,62 @@ fn serve_rejects_malformed_host_before_webui_handoff() {
     assert!(stderr.contains("invalid value"), "stderr: {stderr}");
 }
 
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_rejects_invalid_webui_security_config_before_binding() {
+    let cases = [
+        (
+            r#"
+[webui]
+canonical_host = "https://app.example.com"
+"#,
+            "[webui].canonical_host `https://app.example.com` must be `host` or `host:port`",
+        ),
+        (
+            r#"
+[webui]
+allowed_origins = ["https://app.example.com", "bad\norigin"]
+"#,
+            "[webui].allowed_origins parse failure",
+        ),
+        (
+            r#"
+[webui]
+max_body_bytes_fallback = 0
+"#,
+            "[webui].max_body_bytes_fallback must be > 0",
+        ),
+    ];
+
+    for (config, expected) in cases {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("reborn home");
+        std::fs::write(reborn_home.join("config.toml"), config).expect("write config");
+
+        let output = isolated_no_llm_command(temp.path(), &reborn_home)
+            .args(["serve", "--host", "127.0.0.1", "--port", "0"])
+            .env("IRONCLAW_REBORN_WEBUI_TOKEN", "test-token")
+            .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
+            .output()
+            .expect("ironclaw-reborn serve should not crash");
+
+        assert!(
+            !output.status.success(),
+            "invalid WebUI security config must fail closed before binding"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(expected),
+            "stderr should contain {expected:?}; got: {stderr}"
+        );
+        assert!(
+            !stderr.contains("ironclaw-reborn: WebChat v2 listener"),
+            "serve must not bind after invalid WebUI security config; got: {stderr}"
+        );
+    }
+}
+
 // Note: port `0` is intentionally accepted now — it lets the kernel
 // pick a free port, which is the path the caller-level serve test
 // uses to avoid hard-coding a port. The earlier zero-port rejection
