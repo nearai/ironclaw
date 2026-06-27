@@ -2860,6 +2860,55 @@ async def _wait_for_google_sheet_marker(
     )
 
 
+async def _wait_for_google_sheet_marker_after_slack_event(
+    ctx: LiveQaContext,
+    *,
+    event_id: str,
+    access_token: str,
+    spreadsheet_id: str,
+    marker: str,
+    timeout: float = 240.0,
+    range_name: str = "A1:Z1000",
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout
+    last_check: dict[str, object] | None = None
+    approved_gate_refs: set[str] = set()
+    approval_attempts: list[dict[str, object]] = []
+    event_run_id: str | None = None
+    while time.monotonic() < deadline:
+        approval = await _approve_slack_event_gates(
+            ctx,
+            event_id=event_id,
+            approved_gate_refs=approved_gate_refs,
+        )
+        if approval.get("run_id"):
+            event_run_id = str(approval["run_id"])
+        attempts = approval.get("approval_attempts")
+        if isinstance(attempts, list):
+            approval_attempts.extend(
+                attempt for attempt in attempts if isinstance(attempt, dict)
+            )
+        last_check = await _google_sheet_contains_marker(
+            access_token=access_token,
+            spreadsheet_id=spreadsheet_id,
+            marker=marker,
+            range_name=range_name,
+        )
+        if last_check.get("found"):
+            return {
+                **last_check,
+                "slack_event_run_id": event_run_id,
+                "approval_attempts": approval_attempts[-5:],
+            }
+        await asyncio.sleep(2.0)
+    raise AssertionError(
+        "Google Sheet marker was not observed before timeout. "
+        f"spreadsheet_id_present={bool(spreadsheet_id)} marker={marker!r} "
+        f"last_check={last_check!r} approval_attempts={approval_attempts[-3:]!r} "
+        f"slack_event_run_id={event_run_id!r}"
+    )
+
+
 async def _gmail_delivery_target_email(
     *,
     access_token: str,
@@ -3077,6 +3126,88 @@ def _delivered_gate_routes_for_run(reborn_home: Path, run_id: str) -> list[dict[
                 }
             )
     return routes
+
+
+def _slack_event_run_id_for_event(reborn_home: Path, event_id: str) -> str | None:
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    if not db_path.exists() or not event_id:
+        return None
+    with sqlite3.connect(db_path) as db:
+        row = db.execute(
+            """
+            SELECT contents FROM root_filesystem_entries
+            WHERE path LIKE '%/slack-product-workflow/idempotency/actions/%'
+              AND CAST(contents AS TEXT) LIKE '%' || ? || '%'
+            ORDER BY updated_at DESC, path DESC
+            LIMIT 1
+            """,
+            (event_id,),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        payload = json.loads(row[0])
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    dispatch_kind = payload.get("dispatch_kind")
+    if isinstance(dispatch_kind, dict):
+        user_message_turn = dispatch_kind.get("user_message_turn")
+        if isinstance(user_message_turn, dict):
+            run_id = str(user_message_turn.get("run_id") or "").strip()
+            if run_id:
+                return run_id
+    outcome = payload.get("outcome")
+    if isinstance(outcome, dict):
+        accepted = outcome.get("accepted")
+        if isinstance(accepted, dict):
+            run_id = str(accepted.get("submitted_run_id") or "").strip()
+            if run_id:
+                return run_id
+    return None
+
+
+async def _approve_delivered_gate_routes_for_run(
+    ctx: LiveQaContext,
+    *,
+    run_id: str,
+    approved_gate_refs: set[str],
+) -> list[dict[str, object]]:
+    approval_attempts: list[dict[str, object]] = []
+    for route in _delivered_gate_routes_for_run(ctx.reborn_home, run_id):
+        gate_ref = str(route.get("gate_ref") or "")
+        if not gate_ref or gate_ref in approved_gate_refs:
+            continue
+        approved_gate_refs.add(gate_ref)
+        approval_attempts.append(
+            await _resolve_webui_approval_gate(
+                ctx,
+                thread_id=str(route["thread_id"]),
+                run_id=run_id,
+                gate_ref=gate_ref,
+            )
+        )
+    return approval_attempts
+
+
+async def _approve_slack_event_gates(
+    ctx: LiveQaContext,
+    *,
+    event_id: str,
+    approved_gate_refs: set[str],
+) -> dict[str, object]:
+    run_id = _slack_event_run_id_for_event(ctx.reborn_home, event_id)
+    if not run_id:
+        return {"run_id": None, "approval_attempts": []}
+    return {
+        "run_id": run_id,
+        "approval_attempts": await _approve_delivered_gate_routes_for_run(
+            ctx,
+            run_id=run_id,
+            approved_gate_refs=approved_gate_refs,
+        ),
+    }
 
 
 async def _resolve_webui_approval_gate(
@@ -3880,9 +4011,27 @@ async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResul
             event_id=f"EvREBORNQA5D{suffix}",
         )
         observed["signed_event"] = post_result
+        event_id = str(post_result.get("event_id") or f"EvREBORNQA5D{suffix}")
         deadline = time.monotonic() + 360.0
         last_history: dict[str, object] | None = None
+        approved_gate_refs: set[str] = set()
+        approval_attempts: list[dict[str, object]] = []
+        event_run_id: str | None = None
         while time.monotonic() < deadline:
+            approval = await _approve_slack_event_gates(
+                ctx,
+                event_id=event_id,
+                approved_gate_refs=approved_gate_refs,
+            )
+            if approval.get("run_id"):
+                event_run_id = str(approval["run_id"])
+                observed["slack_event_run_id"] = event_run_id
+            attempts = approval.get("approval_attempts")
+            if isinstance(attempts, list):
+                approval_attempts.extend(
+                    attempt for attempt in attempts if isinstance(attempt, dict)
+                )
+                observed["approval_attempts"] = approval_attempts[-5:]
             history = await _slack_history_contains_marker(
                 ctx,
                 channel_id=channel_id,
@@ -3897,7 +4046,9 @@ async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResul
             await asyncio.sleep(2.0)
         raise AssertionError(
             "Slack grounded strategy answer marker was not observed after signed "
-            f"Slack event. last_history={last_history!r}"
+            f"Slack event. last_history={last_history!r} "
+            f"approval_attempts={approval_attempts[-3:]!r} "
+            f"slack_event_run_id={event_run_id!r}"
         )
     except Exception as exc:
         return _result(
@@ -4585,6 +4736,7 @@ async def case_qa_7e_slack_bug_sheet_delivery(ctx: LiveQaContext) -> ProbeResult
         if not channel_id:
             raise AssertionError("Slack inbound test could not resolve a DM/channel id")
         slack_user_id = str(slack.get("legacy_actor_user_id") or "U0REBORNQA")
+        event_id = f"EvREBORNQA7E{suffix}"
         post_result = await _post_signed_slack_dm_event(
             ctx,
             channel_id=channel_id,
@@ -4596,9 +4748,11 @@ async def case_qa_7e_slack_bug_sheet_delivery(ctx: LiveQaContext) -> ProbeResult
                 "Slack Timestamp from this Slack event if available, Status as New, "
                 f"and QA Marker exactly {row_marker}. Do not create a new sheet."
             ),
-            event_id=f"EvREBORNQA7E{suffix}",
+            event_id=event_id,
         )
-        marker_check = await _wait_for_google_sheet_marker(
+        marker_check = await _wait_for_google_sheet_marker_after_slack_event(
+            ctx,
+            event_id=str(post_result.get("event_id") or event_id),
             access_token=access_token,
             spreadsheet_id=spreadsheet_id,
             marker=row_marker,

@@ -239,7 +239,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ),
             patch.object(
                 run_live_qa,
-                "_wait_for_google_sheet_marker",
+                "_wait_for_google_sheet_marker_after_slack_event",
                 side_effect=fake_wait_for_google_sheet_marker,
             ),
         ):
@@ -301,6 +301,116 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertFalse(changed)
             self.assertIsNone(user_id)
             self.assertNotIn("slack_user_id", config_path.read_text(encoding="utf-8"))
+
+    def test_slack_event_run_id_reads_idempotency_record(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "reborn-home"
+            db_path = home / "local-dev" / "reborn-local-dev.db"
+            db_path.parent.mkdir(parents=True)
+            with sqlite3.connect(db_path) as db:
+                db.execute(
+                    """
+                    CREATE TABLE root_filesystem_entries (
+                        path TEXT PRIMARY KEY,
+                        contents BLOB NOT NULL,
+                        updated_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z'
+                    )
+                    """
+                )
+                db.execute(
+                    "INSERT INTO root_filesystem_entries(path, contents) VALUES (?, ?)",
+                    (
+                        "/tenants/reborn-cli/shared/slack-product-workflow/"
+                        "idempotency/actions/event.json",
+                        json.dumps(
+                            {
+                                "fingerprint": {
+                                    "external_event_id": (
+                                        "slack-local-dev-installation-EvREBORNQA5D123"
+                                    )
+                                },
+                                "dispatch_kind": {
+                                    "user_message_turn": {"run_id": "run-from-dispatch"}
+                                },
+                                "outcome": {
+                                    "accepted": {"submitted_run_id": "run-from-outcome"}
+                                },
+                            }
+                        ),
+                    ),
+                )
+
+            self.assertEqual(
+                run_live_qa._slack_event_run_id_for_event(home, "EvREBORNQA5D123"),
+                "run-from-dispatch",
+            )
+
+    def test_wait_for_google_sheet_marker_after_slack_event_approves_gate(self):
+        ctx = self._dummy_ctx()
+
+        async def fake_resolve_gate(_ctx, *, thread_id, run_id, gate_ref):
+            return {
+                "status": 200,
+                "thread_id": thread_id,
+                "run_id": run_id,
+                "gate_ref": gate_ref,
+            }
+
+        async def fake_google_sheet_contains_marker(**_kwargs):
+            return {"found": True, "row_count": 2}
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_slack_event_run_id_for_event",
+                return_value="run-123",
+            ),
+            patch.object(
+                run_live_qa,
+                "_delivered_gate_routes_for_run",
+                return_value=[
+                    {
+                        "thread_id": "thread-123",
+                        "run_id": "run-123",
+                        "gate_ref": "gate:approval-123",
+                    }
+                ],
+            ),
+            patch.object(
+                run_live_qa,
+                "_resolve_webui_approval_gate",
+                side_effect=fake_resolve_gate,
+            ),
+            patch.object(
+                run_live_qa,
+                "_google_sheet_contains_marker",
+                side_effect=fake_google_sheet_contains_marker,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa._wait_for_google_sheet_marker_after_slack_event(
+                    ctx,
+                    event_id="EvREBORNQA7E123",
+                    access_token="access-token",
+                    spreadsheet_id="spreadsheet-id",
+                    marker="row-marker",
+                    timeout=1.0,
+                )
+            )
+
+        self.assertTrue(result["found"])
+        self.assertEqual(result["slack_event_run_id"], "run-123")
+        self.assertEqual(
+            result["approval_attempts"],
+            [
+                {
+                    "status": 200,
+                    "thread_id": "thread-123",
+                    "run_id": "run-123",
+                    "gate_ref": "gate:approval-123",
+                }
+            ],
+        )
 
     def test_generated_google_seed_creates_refreshable_product_auth_account(self):
         if importlib.util.find_spec("cryptography") is None:
