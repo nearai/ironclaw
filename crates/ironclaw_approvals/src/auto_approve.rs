@@ -32,6 +32,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::CapabilityPermissionStoreError as ToolPermissionStoreError;
 
+/// Default for the auto-approve toggle when a user has never set it. ON so new
+/// users aren't prompted per tool call. Single source of truth — the dispatch
+/// path and the settings API both resolve unset state through this.
+pub const AUTO_APPROVE_DEFAULT_ENABLED: bool = true;
+
 const SETTING_PREFIX: &str = "/approvals/auto-approve";
 const SETTING_CAS_RETRY_ATTEMPTS: usize = 3;
 
@@ -82,10 +87,13 @@ pub trait AutoApproveSettingStore: Send + Sync {
         key: &AutoApproveSettingKey,
     ) -> Result<Option<AutoApproveSettingRecord>, ToolPermissionStoreError>;
 
-    /// Convenience: the effective boolean, defaulting to `false` when unset.
+    /// Effective boolean; defaults to [`AUTO_APPROVE_DEFAULT_ENABLED`] when unset.
     async fn is_enabled(&self, scope: &ResourceScope) -> Result<bool, ToolPermissionStoreError> {
         let key = AutoApproveSettingKey::from_resource_scope(scope);
-        Ok(self.get(&key).await?.is_some_and(|record| record.enabled))
+        Ok(self
+            .get(&key)
+            .await?
+            .map_or(AUTO_APPROVE_DEFAULT_ENABLED, |record| record.enabled))
     }
 }
 
@@ -381,9 +389,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn in_memory_defaults_to_disabled() {
+    async fn in_memory_defaults_to_enabled_when_unset() {
         let store = InMemoryAutoApproveSettingStore::new();
-        assert!(!store.is_enabled(&scope("alice", None, None)).await.unwrap());
+        assert!(store.is_enabled(&scope("alice", None, None)).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn in_memory_explicit_disable_is_honored() {
+        let store = InMemoryAutoApproveSettingStore::new();
+        let scope = scope("alice", None, None);
+        store.set(input(scope.clone(), false)).await.unwrap();
+        assert!(!store.is_enabled(&scope).await.unwrap());
     }
 
     #[tokio::test]
@@ -424,6 +440,12 @@ mod tests {
         let store = InMemoryAutoApproveSettingStore::new();
         store
             .set(input(scope("alice", None, None), true))
+            .await
+            .unwrap();
+        // Explicit off for bob so the per-user isolation assertion doesn't ride
+        // on the unset default (which is now ON).
+        store
+            .set(input(scope("bob", None, None), false))
             .await
             .unwrap();
 
