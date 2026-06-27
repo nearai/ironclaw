@@ -61,9 +61,19 @@ impl<'de> Deserialize<'de> for OpenAiResponsesInputItem {
             .as_object()
             .ok_or_else(|| de::Error::custom("responses input item must be an object"))?;
         match object.get("type").and_then(serde_json::Value::as_str) {
-            Some("message") | None
-                if object.contains_key("role") || object.get("type").is_some() =>
-            {
+            Some("message") => {
+                #[derive(Deserialize)]
+                struct MessageWire {
+                    role: OpenAiResponsesMessageRole,
+                    content: serde_json::Value,
+                }
+                let wire = MessageWire::deserialize(value).map_err(de::Error::custom)?;
+                Ok(Self::Message {
+                    role: wire.role,
+                    content: wire.content,
+                })
+            }
+            None if object.contains_key("role") => {
                 #[derive(Deserialize)]
                 struct MessageWire {
                     role: OpenAiResponsesMessageRole,
