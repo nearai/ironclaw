@@ -27,6 +27,7 @@ Wiring confirmed manually before this test existed:
 import asyncio
 import json
 import os
+import re
 import signal
 import socket
 import uuid
@@ -470,6 +471,54 @@ async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v
 
     await composer.press("Enter")
     await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
+
+
+async def test_reborn_v2_new_chat_sends_while_a_run_is_active(reborn_v2_page):
+    """A new chat started while another thread's run is in flight must still send.
+
+    Regression for the #5256 ``submitBusyRef`` deadlock: the send re-entrancy
+    guard was released only on run *settlement*, delivered over the open thread's
+    SSE. Starting a new chat tears down that SSE, so the settle event never
+    reaches the hook, the guard stays held, and the new-chat send is silently
+    dropped — "can't start a new chat while one is in progress". The guard must
+    release when the send POST completes instead.
+
+    This drives the *in-app* "+ New" button (client-side navigation), NOT a fresh
+    ``page.goto`` — a full reload would remount the hook and reset the leaked ref,
+    hiding the bug. Only same-instance navigation reproduces it. Unit tests cannot
+    exercise the navigation + SSE-teardown lifecycle that this regression lives in.
+    """
+    composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
+
+    # Thread 1: a slow response keeps the run in flight (mock delays ~5s) so the
+    # new chat is started before thread 1 settles — the deadlock window.
+    await composer.fill("editable composer slow response")
+    await composer.press("Enter")
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+        "editable composer slow response", timeout=15000
+    )
+    await expect(
+        reborn_v2_page.locator(SEL_V2["typing_indicator"])
+    ).to_be_visible(timeout=15000)
+
+    # Start a new chat via the in-app button while thread 1 is still running.
+    await reborn_v2_page.locator(SEL_V2["new_chat"]).click()
+    await expect(composer).to_be_visible(timeout=5000)
+    # The fresh chat carries none of thread 1's messages.
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(0, timeout=5000)
+
+    # The crux: send in the new chat. With the deadlock this is dropped and no
+    # bubble ever renders; with the fix it posts, creates the thread, and shows
+    # the optimistic user bubble.
+    await composer.fill("hi how are you")
+    await composer.press("Enter")
+
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"]).first).to_contain_text(
+        "hi how are you", timeout=15000
+    )
+    await expect(reborn_v2_page).to_have_url(
+        re.compile(r"/v2/chat/[0-9a-fA-F-]+"), timeout=15000
+    )
 
 
 async def test_reborn_v2_approval_gate_blocks_composer_send(
