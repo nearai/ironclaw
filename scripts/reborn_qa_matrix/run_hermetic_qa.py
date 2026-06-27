@@ -441,6 +441,119 @@ SLACK_PERSONAL_BINDING_SERVICE_COMMAND = CommandSpec(
     ],
 )
 
+SLACK_DELIVERY_COMMAND = CommandSpec(
+    name="slack_delivery_contracts",
+    description=(
+        "Focused Slack outbound delivery contracts for accepted/deferred/rejected "
+        "run acknowledgements, final reply delivery, approval/auth prompt "
+        "rendering, timeout/error status recording, duplicate suppression, "
+        "delivery permits, and personal-DM enforcement."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "slack-v2-host-beta",
+        "slack_delivery",
+        "--lib",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+SLACK_EGRESS_COMMAND = CommandSpec(
+    name="slack_egress_contracts",
+    description=(
+        "Focused Slack host-mediated egress contracts for HTTPS host policy, "
+        "opaque credential-handle bearer injection, control-character rejection, "
+        "runtime HTTP failure mapping, and fresh invocation scope per send."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "slack-v2-host-beta",
+        "slack_egress",
+        "--lib",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+SLACK_OUTBOUND_TARGETS_COMMAND = CommandSpec(
+    name="slack_outbound_targets_contracts",
+    description=(
+        "Focused Slack outbound target contracts for shared-channel and personal "
+        "DM target listing, binding-ref parsing, tenant/user isolation, target "
+        "caps, and Slack id validation."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "slack-v2-host-beta",
+        "slack_outbound_targets",
+        "--lib",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+SLACK_DM_OPEN_COMMAND = CommandSpec(
+    name="slack_dm_open_contracts",
+    description=(
+        "Focused Slack personal-DM open contracts for successful channel id "
+        "extraction, non-2xx/oversized/missing-channel failures, and DM channel "
+        "id shape validation."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "slack-v2-host-beta",
+        "slack_dm_open",
+        "--lib",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+SLACK_ADAPTER_COMMAND = CommandSpec(
+    name="slack_v2_adapter_render_delivery_contracts",
+    description=(
+        "Focused Slack v2 adapter contracts for final-reply rendering, long "
+        "message chunking, Slack mrkdwn conversion, auth prompts, status "
+        "recording, partial multipart retry suppression, and token-safe "
+        "ok:false handling."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_slack_v2_adapter",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_SEND_MULTILINE_COMMAND = CommandSpec(
     name="webui_v2_send_multiline_contract",
     description="Focused send-message route contract for preserving multiline content.",
@@ -1589,6 +1702,35 @@ CASES: dict[str, CaseSpec] = {
             "tenant/app/team/installation validation, tenant-app-scope "
             "enforcement, invalid Slack id rejection, and binding-store error "
             "propagation."
+        ),
+    ),
+    "slack_outbound_delivery_rendering_regression": CaseSpec(
+        name="slack_outbound_delivery_rendering_regression",
+        feature="Slack outbound delivery, rendering, and DM targets",
+        category="Hermetic Slack Outbound Delivery Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-072-TC-01",
+            "REBCLI-072-TC-02",
+            "REBCLI-072-TC-03",
+            "REBCLI-072-TC-04",
+            "REBCLI-072-TC-05",
+            "REBCLI-072-TC-06",
+        ],
+        commands=[
+            SLACK_DELIVERY_COMMAND,
+            SLACK_EGRESS_COMMAND,
+            SLACK_OUTBOUND_TARGETS_COMMAND,
+            SLACK_DM_OPEN_COMMAND,
+            SLACK_ADAPTER_COMMAND,
+        ],
+        notes=(
+            "Covers Slack outbound delivery rows without live Slack network "
+            "calls: final reply delivery, long reply chunking, mrkdwn "
+            "rendering, approval/auth prompt rendering, busy/timeout/error "
+            "messages, duplicate/retry suppression, delivery permits and caps, "
+            "personal DM open/list/resolve, shared-channel target resolution, "
+            "host-mediated HTTPS egress policy, opaque credential-handle bearer "
+            "injection, and token-safe Slack ok:false handling."
         ),
     ),
     "webui_v2_filesystem_api_regression": CaseSpec(
