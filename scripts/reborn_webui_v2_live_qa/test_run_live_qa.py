@@ -756,6 +756,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "Document created: REBORN_QA_5D_STRATEGY_DOC_1782597084534"
             )
         )
+        self.assertIsNone(
+            run_live_qa._extract_google_document_id(
+                "Document: REBORN_QA_5D_STRATEGY_DOC_1782599165051 (Google Docs)"
+            )
+        )
 
     def test_google_runtime_token_requires_client_secret_for_expired_copied_account(self):
         if importlib.util.find_spec("cryptography") is None:

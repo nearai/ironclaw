@@ -2789,14 +2789,16 @@ def _extract_google_spreadsheet_id(text: str) -> str | None:
 def _extract_google_document_id(text: str) -> str | None:
     patterns = [
         r"https://docs\.google\.com/document/d/([A-Za-z0-9_-]+)",
-        r"\b(?:google\s+)?(?:docs?\s+)?document(?:\s+id)?\s*[:=]\s*([A-Za-z0-9_-]{20,})",
+        r"\b(?:google\s+)?(?:docs?\s+)?document\s+id\s*[:=]\s*([A-Za-z0-9_-]{20,})",
         r"\bdoc(?:ument)?\s+id\s*[:=]\s*([A-Za-z0-9_-]{20,})",
         r"\(ID:\s*([A-Za-z0-9_-]{20,})\)",
     ]
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            return match.group(1)
+            candidate = match.group(1)
+            if not candidate.startswith("REBORN_QA_"):
+                return candidate
     return None
 
 
