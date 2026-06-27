@@ -26,7 +26,7 @@ Extract the decorator stack (current lines ~1004–1118) into:
 /// configured from `config`; with the corresponding config field
 /// disabled/zero the decorator is a passthrough (returns its inner provider
 /// unchanged). This is the single source of truth for chain assembly.
-pub async fn apply_decorator_chain(
+pub(crate) async fn apply_decorator_chain(
     raw: Arc<dyn LlmProvider>,
     config: &LlmConfig,
     session: Arc<SessionManager>,
@@ -35,6 +35,10 @@ pub async fn apply_decorator_chain(
     Ok(llm)
 }
 ```
+
+The function is crate-internal (`pub(crate)`). Cross-crate test access goes through
+`ironclaw_llm::testing::provider_chain_over` (a feature-gated forwarding fn in
+`crates/ironclaw_llm/src/testing/mod.rs`), not via a `pub use` re-export.
 
 `build_provider_chain_components_with_options` is rewritten to call it:
 
@@ -172,8 +176,9 @@ gateway and only the parts the greeting needs):
    every future test form inherits it and a developer `.env` can never reach a
    vendor), not test-specific — keep the full set even though slice 1's explicit
    passthrough config (step 7) already makes the LLM-chain ones inert.
-   NOTE: `std::env::set_var`/`remove_var` are `unsafe` under edition 2024 — wrap
-   in `unsafe { .. }` if the crate is on 2024 (check `Cargo.toml` edition first).
+   NOTE: `std::env::set_var`/`remove_var` require `unsafe` unconditionally in this
+   crate (edition 2024). Wrap in `unsafe { .. }` — no edition check needed. See
+   the `apply_hermetic_env` pattern in `tests/support/reborn/builder.rs`.
 2. Adapter/ingress: `RebornTestProductAdapter::new("reborn-itest","itest-install")`,
    `RebornTestIngress::new(adapter)`.
 3. Product harness: `RebornProductWorkflowHarness::filesystem_temp(product_scope)`

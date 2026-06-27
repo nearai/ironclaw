@@ -31,7 +31,14 @@ impl RebornScriptedReply {
     }
 
     /// Scripts one model tool-call turn. Accepts a CapabilityId (e.g. `"builtin.http"`);
-    /// the name is realized in ProviderToolName format via the reversible `'.' -> "__"` mapping at this seam.
+    /// the name is realized in ProviderToolName format via the simple `'.' -> "__"` mapping.
+    ///
+    /// **Collision caveat:** this mapping is NOT collision-safe — two distinct capability IDs
+    /// that differ only by `.` vs `__` would produce the same `ProviderToolName`, and
+    /// long names are not truncated. It is valid for the single-capability tests in the
+    /// current slice. Any future slice that scripts colliding or long capability IDs must
+    /// instead resolve the name against the advertised `ProviderToolName` from the tool list
+    /// rather than applying this heuristic mapping.
     ///
     /// The tool-call `id` is auto-filled from a process-scoped counter (`call-N`),
     /// so it is unique within a run but not stable across parallel test processes.

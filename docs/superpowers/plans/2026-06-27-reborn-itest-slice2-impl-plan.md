@@ -133,9 +133,12 @@ Implemented as planned. Deltas worth recording:
 - **Tests:** `tests/reborn_integration_tool_call.rs` — the positive tool-call+egress test plus
   one negative test (`assertions_fail_when_tool_did_not_run`) guarding the assertion-helper
   `Err` branches (added per code-review).
-- **`apply_decorator_chain`** left exactly as shipped (`pub`). A relayed request to narrow it
-  to `pub(crate)` + a `testing` re-export does not compile (`pub use` cannot re-export a
-  `pub(crate)` item — E0364) and contradicts the original task instruction, so it was reverted;
-  `ironclaw_llm` has zero diff.
+- **`apply_decorator_chain`** is `pub(crate)` (NOT public as originally planned). The `pub use`
+  re-export approach was rejected (E0364 — `pub use` cannot re-export a `pub(crate)` item).
+  Instead, `ironclaw_llm::testing` exposes a feature-gated forwarding function
+  `provider_chain_over` that crosses the visibility boundary; the test harness calls
+  `testing::provider_chain_over`, not `apply_decorator_chain` directly. `ironclaw_llm` does
+  have a diff: `apply_decorator_chain` was extracted from the inline chain and narrowed to
+  `pub(crate)`, and `testing/mod.rs` gained the `provider_chain_over` forwarding fn.
 - **Deferred items confirmed not built:** no `StorageMode::LibSql`, no `RecordingProcessPort`,
   no live opt-ins, no URL-keyed matcher, no generic `Recording<P>`, no proc-macro.

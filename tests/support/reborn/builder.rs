@@ -422,8 +422,13 @@ impl Drop for RebornIntegrationHarness {
 fn apply_hermetic_env() {
     static HERMETIC_ENV: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     HERMETIC_ENV.get_or_init(|| {
-        // SAFETY: `get_or_init` guarantees this closure runs exactly once across
-        // all threads, so there is no concurrent env mutation/read.
+        // SAFETY: Edition 2024 requires `unsafe` for `std::env::set_var` /
+        // `remove_var`. These values are constants set exactly once before any
+        // harness `build()` call reads them (enforced by `get_or_init`).
+        // Integration test binaries are separate OS processes, so cross-binary
+        // env interference is bounded at the process boundary. This does NOT
+        // eliminate all possible env races within a single test binary if other
+        // code concurrently reads environment variables.
         unsafe {
             std::env::set_var("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
             std::env::set_var("TZ", "UTC");

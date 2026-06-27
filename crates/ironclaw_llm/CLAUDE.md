@@ -235,7 +235,7 @@ Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT
 ```
 Raw provider
   → RetryProvider           (per-provider backoff; wraps both primary and fallback)
-  → SmartRoutingProvider    (cheap/primary split when NEARAI_CHEAP_MODEL is set)
+  → SmartRoutingProvider    (cheap/primary split when `cheap_model_name()` is non-None; resolves `LLM_CHEAP_MODEL` first, then `NEARAI_CHEAP_MODEL` as NearAI-only fallback)
   → FailoverProvider        (fallback model; only when NEARAI_FALLBACK_MODEL is set)
   → CircuitBreakerProvider  (fast-fail; only when LLM_CIRCUIT_BREAKER_THRESHOLD is set)
   → CachedProvider          (response cache; only when LLM_RESPONSE_CACHE_ENABLED=true)
