@@ -549,6 +549,52 @@ WEBUI_V2_OPERATOR_LOGS_HANDLER_COMMAND = CommandSpec(
     ],
 )
 
+REBORN_OPERATOR_LOGS_SERVICE_COMMAND = CommandSpec(
+    name="reborn_operator_logs_service_contracts",
+    description=(
+        "Focused Reborn operator log buffer contracts for bounded in-memory "
+        "retention, newest-first and cursor queries, level/target/correlation "
+        "filters, tracing-layer capture, secret/path redaction, UTF-8 "
+        "truncation, response byte caps, tail, and follow cursors."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--lib",
+        "operator_logs",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_OPERATOR_LOGS_ROUTE_DISPATCH_COMMAND = CommandSpec(
+    name="webui_v2_operator_logs_route_dispatch_contract",
+    description=(
+        "Focused WebUI v2 operator log route contract for dispatching "
+        "bounded query parameters when operator capability is present."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_handlers_contract",
+        "operator_routes_dispatch_to_facade_with_body_and_query_inputs",
+        "--",
+        "--exact",
+        "--format",
+        "terse",
+    ],
+)
+
 SLACK_PERSONAL_BINDING_ROUTE_COMMAND = CommandSpec(
     name="slack_personal_binding_oauth_route_contracts",
     description=(
@@ -2036,6 +2082,34 @@ CASES: dict[str, CaseSpec] = {
             "payloads, no-store and wallet-scoped relaxed CSP, strict SPA CSP "
             "isolation, and protected backend wallet completion route gating. "
             "Live wallet-provider behavior remains external/canary scope."
+        ),
+    ),
+    "reborn_operator_logs_service_regression": CaseSpec(
+        name="reborn_operator_logs_service_regression",
+        feature="Reborn operator log buffer and correlation query service",
+        category="Hermetic Operator Logs Service Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-079-TC-01",
+            "REBCLI-079-TC-02",
+            "REBCLI-079-TC-03",
+            "REBCLI-079-TC-04",
+            "REBCLI-079-TC-05",
+            "REBCLI-079-TC-06",
+        ],
+        commands=[
+            REBORN_OPERATOR_LOGS_SERVICE_COMMAND,
+            WEBUI_V2_OPERATOR_LOGS_HANDLER_COMMAND,
+            WEBUI_V2_OPERATOR_LOGS_ROUTE_DISPATCH_COMMAND,
+        ],
+        notes=(
+            "Covers the Reborn/WebUI v2 operator log buffer rows without "
+            "duplicating PR #5348 browser log-screen coverage: in-memory ring "
+            "buffer retention, newest-first and before-cursor pagination, "
+            "invalid cursor behavior, level/target/correlation filtering, "
+            "alias precedence, tracing span/event capture, arbitrary-field "
+            "exclusion from stored correlation, secret/path redaction, UTF-8 "
+            "message truncation, response byte caps, tail/follow cursors, and "
+            "operator route capability plus dispatch contracts."
         ),
     ),
     "webui_v2_filesystem_api_regression": CaseSpec(
