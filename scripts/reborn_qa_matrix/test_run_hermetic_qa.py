@@ -51,6 +51,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-040-TC-07",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-041-TC-01",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -59,11 +63,19 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-041-TC-07",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-042-TC-01",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
                 "REBCLI-042-TC-06",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "REBCLI-042-TC-07",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
@@ -1660,6 +1672,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-040-TC-04",
                     "REBCLI-040-TC-05",
                     "REBCLI-040-TC-06",
+                    "REBCLI-040-TC-07",
                 ],
             )
             commands = results["results"][0]["details"]["commands"]
@@ -1700,6 +1713,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-041-TC-04",
                     "REBCLI-041-TC-05",
                     "REBCLI-041-TC-06",
+                    "REBCLI-041-TC-07",
                 ],
             )
             commands = results["results"][0]["details"]["commands"]
@@ -1740,6 +1754,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-042-TC-04",
                     "REBCLI-042-TC-05",
                     "REBCLI-042-TC-06",
+                    "REBCLI-042-TC-07",
                 ],
             )
             commands = results["results"][0]["details"]["commands"]

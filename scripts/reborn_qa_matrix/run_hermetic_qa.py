@@ -3950,6 +3950,7 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-040-TC-04",
             "REBCLI-040-TC-05",
             "REBCLI-040-TC-06",
+            "REBCLI-040-TC-07",
         ],
         commands=[REBORN_CLI_TRIGGER_POLLER_SETTINGS_COMMAND],
         notes=(
@@ -3972,6 +3973,7 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-041-TC-04",
             "REBCLI-041-TC-05",
             "REBCLI-041-TC-06",
+            "REBCLI-041-TC-07",
         ],
         commands=[REBORN_CLI_CREDENTIAL_REFRESH_SETTINGS_COMMAND],
         notes=(
@@ -3994,6 +3996,7 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-042-TC-04",
             "REBCLI-042-TC-05",
             "REBCLI-042-TC-06",
+            "REBCLI-042-TC-07",
         ],
         commands=[
             REBORN_CLI_DOCKERFILE_COMMAND,
