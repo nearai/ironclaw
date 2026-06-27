@@ -3642,6 +3642,45 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
         self.assertNotIn("webui_v2_route_contract_regression", selected)
         self.assertIn("openai_models_list_api_regression", selected)
 
+    def test_ci_owned_contract_commands_are_traceability_only(self):
+        session_service_coverage = run_hermetic_qa._command_ci_coverage(
+            run_hermetic_qa.WEBUI_V2_SESSION_SERVICE_SUBSTRATE_COMMAND
+        )
+        session_execution_coverage = run_hermetic_qa._command_ci_coverage(
+            run_hermetic_qa.WEBUI_V2_SESSION_EXECUTION_SUBSTRATE_COMMAND
+        )
+
+        self.assertIsNotNone(session_service_coverage)
+        self.assertIsNotNone(session_execution_coverage)
+        self.assertIn("reborn-tests.yml", session_service_coverage)
+        self.assertIn("reborn-tests.yml", session_execution_coverage)
+
+    def test_responses_api_commands_remain_matrix_only_runnable_coverage(self):
+        self.assertIsNone(
+            run_hermetic_qa._command_ci_coverage(
+                run_hermetic_qa.OPENAI_RESPONSES_WORKFLOW_COMMAND
+            )
+        )
+        self.assertIsNone(
+            run_hermetic_qa._command_ci_coverage(
+                run_hermetic_qa.OPENAI_RESPONSES_STREAMING_COMMAND
+            )
+        )
+
+    def test_default_selection_prunes_ci_owned_contract_sweeps(self):
+        parser = run_hermetic_qa.build_parser()
+        args = parser.parse_args([])
+
+        selected = run_hermetic_qa._selected_case_names(args)
+
+        self.assertNotIn("support_substrate_product_workflow_regression", selected)
+        self.assertNotIn(
+            "webui_v2_gateway_middleware_serve_foundation_regression",
+            selected,
+        )
+        self.assertIn("openai_responses_api_workflow_regression", selected)
+        self.assertIn("webui_v2_chat_client_regression", selected)
+
     def test_existing_ci_coverage_can_be_opted_back_into_execution(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             result = run_hermetic_qa.run_command(

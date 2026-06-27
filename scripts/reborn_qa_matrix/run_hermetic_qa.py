@@ -27,6 +27,40 @@ DEFAULT_TIMEOUT_SECONDS = 45 * 60
 PROVIDER = "reborn-qa-matrix"
 MODE = "hermetic"
 
+CI_OWNED_CONTRACT_COMMANDS = {
+    "composition_skill_management_contracts",
+    "ironclaw_llm_provider_substrate_contracts",
+    "openai_compat_owner_crates",
+    "product_workflow_storage_durable_ledger",
+    "reborn_composition_all_feature_contracts",
+    "reborn_event_store_foundation_contracts",
+    "reborn_hook_backend_architecture_contracts",
+    "reborn_hook_postgres_feature_contracts",
+    "reborn_hook_postgres_parity_integration_contracts",
+    "reborn_identity_foundation_contracts",
+    "reborn_runtime_tool_substrate_contracts",
+    "slack_v2_adapter_render_delivery_contracts",
+    "support_substrate_regression",
+    "wasm_product_adapter_runtime_contracts",
+    "webui_v2_automations_runtime_tool_substrate_contracts",
+    "webui_v2_github_oauth_routes",
+    "webui_v2_google_oauth_routes",
+    "webui_v2_ingress_session_auth_contracts",
+    "webui_v2_product_auth_service_substrate_contracts",
+    "webui_v2_public_sso_owner_crate_contracts",
+    "webui_v2_session_execution_substrate_contracts",
+    "webui_v2_session_service_substrate_contracts",
+    "webui_v2_sso_auth_route_contracts",
+    "webui_v2_sso_network_limits",
+    "webui_v2_sso_session_round_trip",
+}
+
+CI_OWNED_CONTRACT_COVERAGE = (
+    "already covered by .github/workflows/reborn-tests.yml package-matrix "
+    "crate/root contract coverage; keep the QA matrix runner focused on "
+    "ResponsesAPI/OpenAI-specific and WebUI v2 UI/API deltas"
+)
+
 
 @dataclass(frozen=True)
 class CommandSpec:
@@ -5619,6 +5653,8 @@ def _test_ids_for(cases: list[CaseSpec]) -> list[str]:
 def _command_ci_coverage(command: CommandSpec) -> str | None:
     if command.existing_ci_coverage:
         return command.existing_ci_coverage
+    if command.name in CI_OWNED_CONTRACT_COMMANDS:
+        return CI_OWNED_CONTRACT_COVERAGE
 
     rendered = render_command(command)
     if command.argv[:2] == ["cargo", "test"] and "-p" in command.argv:
