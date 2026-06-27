@@ -106,9 +106,7 @@ function gateWithApprovalContext(gate, approvalContext, fallbackDescription, det
     destination: approvalContext.destination || null,
     approvalScope: approvalContext.scope || null,
     approvalDetails,
-    parameters: approvalDetails.length
-      ? approvalDetails.map((detail) => `${detail.label}: ${detail.value}`).join("\n")
-      : null,
+    parameters: null,
   };
 }
 

@@ -361,7 +361,9 @@ export function useChat(threadId) {
     // user message from the server doesn't render alongside its
     // pre-submit optimistic twin.
     onRunSettled: (_runId, { success }) => {
-      submitBusyRef.current = false;
+      // submitBusyRef is released by send()'s `finally` when the POST settles —
+      // it is NOT this callback's to clear. Releasing the POST re-entrancy guard
+      // on run settlement is the wrong layer (and was the deadlock #5256 fixed).
       if (success) setPendingMessages([]);
       loadHistory(undefined, {
         preserveClientOnly: true,
@@ -582,6 +584,16 @@ export function useChat(threadId) {
         submitBusyRef.current = false;
         throw err;
       } finally {
+        // Release the re-entrancy guard once the send POST settles — that is
+        // the window it exists to protect (one in-flight submit at a time).
+        // It must NOT stay held until the run settles: clearing it only in
+        // `onRunSettled` (delivered over the *current* thread's SSE) deadlocks
+        // the moment the user navigates to a new chat while a run is in
+        // flight — that thread's SSE is torn down, its settle event never
+        // arrives, the guard stays `true`, and every later send is silently
+        // dropped. Follow-up sends into a still-running thread must be allowed
+        // to reach the backend queue after this POST completes.
+        submitBusyRef.current = false;
         // Drop the optimistic from the pending ref unconditionally:
         // on success the confirmed row arrives via /timeline, and on
         // failure we mark the optimistic with `status: "error"` in

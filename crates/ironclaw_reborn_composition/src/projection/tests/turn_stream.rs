@@ -300,10 +300,7 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
     let context = prompt.approval_context.as_ref().expect("approval context");
     assert_eq!(context.tool_name, "builtin.http");
     assert_eq!(context.action.label, "Run tool");
-    assert_eq!(
-        context.reason.as_deref(),
-        Some("raw path /Users/firatsertgoz/.ssh/id_rsa and token sk-secret")
-    );
+    assert!(context.reason.is_none());
     assert_eq!(context.scope.label, "This request only");
     assert!(context.details.iter().any(|detail| {
         detail.label == "Estimated network egress" && detail.value == "4096 bytes"
@@ -328,6 +325,7 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
                     && body.as_deref() == Some("capability requires approval")
                     && approval_context.as_ref().is_some_and(|context| {
                         context.tool_name == "builtin.http"
+                            && context.reason.is_none()
                             && context.details.iter().any(|detail| {
                                 detail.label == "Estimated network egress"
                                     && detail.value == "4096 bytes"

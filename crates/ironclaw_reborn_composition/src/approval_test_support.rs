@@ -1,5 +1,5 @@
-use ironclaw_approvals::ApprovalResolver;
-use ironclaw_host_api::{Action, CapabilityId, ExecutionContext, ResourceEstimate};
+use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, AutoApproveSettingStore};
+use ironclaw_host_api::{Action, CapabilityId, ExecutionContext, Principal, ResourceEstimate};
 use ironclaw_host_runtime::{
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
     RuntimeFailureKind,
@@ -9,11 +9,32 @@ use ironclaw_trust::TrustDecision;
 
 use crate::{
     RebornServices,
+    factory::RebornLocalRuntimeServices,
     local_dev_capability_policy::{
         LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
         local_dev_one_shot_lease_approval,
     },
 };
+
+/// Turn the global auto-approve switch off for `context`'s actor scope.
+/// Global auto-approve defaults ON, so any test exercising the per-tool approval
+/// gate must flip it off first. Shared by every `src` `#[cfg(test)]` site;
+/// integration-test and root-crate binaries keep their own copies (they cannot
+/// see this crate-internal helper).
+pub(crate) async fn disable_global_auto_approve(
+    local_runtime: &RebornLocalRuntimeServices,
+    context: &ExecutionContext,
+) {
+    local_runtime
+        .auto_approve_settings
+        .set(AutoApproveSettingInput {
+            scope: context.resource_scope.clone(),
+            enabled: false,
+            updated_by: Principal::User(context.resource_scope.user_id.clone()),
+        })
+        .await
+        .expect("disable global auto-approve"); // safety: test-only gating precondition
+}
 
 pub(crate) async fn invoke_json_with_local_dev_approval(
     services: &RebornServices,

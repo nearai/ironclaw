@@ -362,6 +362,138 @@ async fn gateway_with_tool_surface_calls_complete_with_tools_and_returns_capabil
 }
 
 #[tokio::test]
+async fn gateway_suppresses_tool_calls_when_user_names_unavailable_capability() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+        id: "call_shell".to_string(),
+        name: "builtin_shell".to_string(),
+        arguments: serde_json::json!({
+            "command": "echo \"disabled-test\"",
+            "workdir": "/workspace"
+        }),
+        reasoning: None,
+        signature: None,
+        arguments_parse_error: None,
+    }]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_builtin_shell_surface());
+    let mut request = model_request(interactive_model());
+    request.messages[1].content = "Use builtin.echo to print:\ndisabled-test".to_string();
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capabilities.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(provider.tool_requests.lock().unwrap().len(), 1);
+    assert!(
+        capabilities.registered.lock().unwrap().is_empty(),
+        "suppressed substitute tool call must not be registered as a capability activity"
+    );
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected assistant reply");
+    };
+    assert!(
+        reply.content.contains("unavailable or disabled"),
+        "expected unavailable capability reply, got {:?}",
+        reply.content
+    );
+    assert!(
+        reply
+            .content
+            .contains("will not route it through another tool"),
+        "expected no-workaround reply, got {:?}",
+        reply.content
+    );
+}
+
+#[tokio::test]
+async fn gateway_suppresses_tool_calls_when_user_names_unavailable_hidden_namespace_capability() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+        id: "call_shell".to_string(),
+        name: "builtin_shell".to_string(),
+        arguments: serde_json::json!({
+            "command": "echo \"gmail workaround\"",
+            "workdir": "/workspace"
+        }),
+        reasoning: None,
+        signature: None,
+        arguments_parse_error: None,
+    }]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_builtin_shell_surface());
+    let mut request = model_request(interactive_model());
+    request.messages[1].content = "Use gmail.send to email the report".to_string();
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capabilities.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(provider.tool_requests.lock().unwrap().len(), 1);
+    assert!(
+        capabilities.registered.lock().unwrap().is_empty(),
+        "suppressed substitute tool call must not be registered as a capability activity"
+    );
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected assistant reply");
+    };
+    assert!(
+        reply.content.contains("unavailable or disabled"),
+        "expected unavailable capability reply, got {:?}",
+        reply.content
+    );
+}
+
+#[tokio::test]
+async fn gateway_does_not_treat_plain_dotted_domain_as_unavailable_capability() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+        id: "call_shell".to_string(),
+        name: "builtin_shell".to_string(),
+        arguments: serde_json::json!({
+            "command": "echo domain-ok",
+            "workdir": "/workspace"
+        }),
+        reasoning: None,
+        signature: None,
+        arguments_parse_error: None,
+    }]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_builtin_shell_surface());
+    let mut request = model_request(interactive_model());
+    request.messages[1].content = "Use meet.google.com to join the meeting".to_string();
+
+    let response = gateway
+        .stream_model_with_capabilities(request, capabilities.clone())
+        .await
+        .unwrap();
+
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected capability calls");
+    };
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].capability_id,
+        CapabilityId::new("builtin.shell").unwrap()
+    );
+    assert_eq!(capabilities.registered.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn gateway_rejects_empty_tool_capable_stop_response_without_text_only_retry() {
     let provider = Arc::new(ToolAwareProvider::tool_response(ToolCompletionResponse {
         content: None,
@@ -3009,6 +3141,24 @@ impl GatewayCapabilityPort {
             registered: Mutex::new(Vec::new()),
         }
     }
+
+    fn with_builtin_shell_surface() -> Self {
+        Self {
+            definitions: vec![ProviderToolDefinition {
+                capability_id: CapabilityId::new("builtin.shell").unwrap(),
+                name: provider_name("builtin_shell"),
+                description: "Run shell commands".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string" },
+                        "workdir": { "type": "string" }
+                    }
+                }),
+            }],
+            registered: Mutex::new(Vec::new()),
+        }
+    }
 }
 
 #[async_trait]
@@ -3064,6 +3214,13 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
     > {
         let tool_call = request.tool_call;
         self.validate_provider_tool_call(&tool_call)?;
+        let capability_id = self
+            .definitions
+            .iter()
+            .find(|definition| definition.name == tool_call.name)
+            .expect("validated tool definition")
+            .capability_id
+            .clone();
         let input_ref =
             ironclaw_turns::run_profile::CapabilityInputRef::new(format!("input:{}", tool_call.id))
                 .unwrap();
@@ -3071,9 +3228,9 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
         Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-            capability_id: CapabilityId::new("demo.echo").unwrap(),
+            capability_id: capability_id.clone(),
             input_ref,
-            effective_capability_ids: vec![CapabilityId::new("demo.echo").unwrap()],
+            effective_capability_ids: vec![capability_id],
             provider_replay: tool_call
                 .turn_id
                 .map(|provider_turn_id| ProviderToolCallReplay {

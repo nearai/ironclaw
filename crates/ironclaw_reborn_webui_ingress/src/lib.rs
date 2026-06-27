@@ -71,7 +71,7 @@ use serde::Serialize;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio::sync::{Notify, watch};
+use tokio::sync::watch;
 use tower::ServiceExt;
 
 /// Errors raised while running the host serve loop.
@@ -211,8 +211,7 @@ pub async fn serve_webui_v2(opts: RebornWebuiServeOptions) -> Result<(), RebornW
         let _ = tx.send(bound);
     }
 
-    let shutdown_observed = Arc::new(Notify::new());
-    let shutdown_observed_for_signal = Arc::clone(&shutdown_observed);
+    let (shutdown_observed_tx, mut shutdown_observed_rx) = watch::channel(false);
     let serve = axum::serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
@@ -226,7 +225,7 @@ pub async fn serve_webui_v2(opts: RebornWebuiServeOptions) -> Result<(), RebornW
             target = "ironclaw::reborn::webui_ingress",
             "WebChat v2 graceful shutdown signal received",
         );
-        shutdown_observed_for_signal.notify_waiters();
+        let _ = shutdown_observed_tx.send(true);
     })
     .into_future();
     tokio::pin!(serve);
@@ -234,10 +233,12 @@ pub async fn serve_webui_v2(opts: RebornWebuiServeOptions) -> Result<(), RebornW
     tokio::select! {
         result = &mut serve => result.map_err(RebornWebuiServeError::Serve),
         () = async {
-            shutdown_observed.notified().await;
+            if !*shutdown_observed_rx.borrow() {
+                let _ = shutdown_observed_rx.changed().await;
+            }
             tokio::time::sleep(WEBUI_GRACEFUL_SHUTDOWN_DRAIN_TIMEOUT).await;
         } => {
-            tracing::warn!(
+            tracing::debug!(
                 target = "ironclaw::reborn::webui_ingress",
                 timeout_ms = WEBUI_GRACEFUL_SHUTDOWN_DRAIN_TIMEOUT.as_millis() as u64,
                 "WebChat v2 graceful shutdown drain timed out; closing listener with active connections",

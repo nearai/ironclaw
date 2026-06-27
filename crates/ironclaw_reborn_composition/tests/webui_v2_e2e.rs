@@ -244,16 +244,13 @@ impl QueuedSteeringGateway {
     }
 
     async fn wait_for_first_model_call(&self) {
-        if self.first_model_started_flag.load(Ordering::Acquire) {
-            return;
-        }
-
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
+                let notified = self.first_model_started.notified();
                 if self.first_model_started_flag.load(Ordering::Acquire) {
                     return;
                 }
-                self.first_model_started.notified().await;
+                notified.await;
             }
         })
         .await
@@ -381,16 +378,13 @@ impl QueuedDuringReplyGateway {
     }
 
     async fn wait_for_reply_model_call(&self) {
-        if self.reply_model_started_flag.load(Ordering::Acquire) {
-            return;
-        }
-
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
+                let notified = self.reply_model_started.notified();
                 if self.reply_model_started_flag.load(Ordering::Acquire) {
                     return;
                 }
-                self.reply_model_started.notified().await;
+                notified.await;
             }
         })
         .await

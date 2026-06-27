@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::default_planner::DefaultPlanner;
 use crate::family::{ComponentDigest, LoopFamily};
 use crate::planner::AgentLoopPlanner;
+use crate::strategies::DefaultBudgetStrategy;
 
 mod subagent;
 
@@ -47,6 +48,21 @@ pub fn default() -> LoopFamily {
     LoopFamily::new(id, version, Arc::new(planner))
 }
 
+/// The default loop family with a caller-supplied iteration limit.
+///
+/// Intended for test and local harnesses that need to exercise the hard budget
+/// path without waiting for the production default of 32 iterations.
+pub fn default_with_iteration_limit(iteration_limit: u32) -> LoopFamily {
+    let planner = DefaultPlanner::compose_default().with_budget(Arc::new(DefaultBudgetStrategy {
+        iteration_limit,
+        wall_clock_limit: None,
+    }));
+    let id = planner.id().clone();
+    let version = planner.version().clone();
+
+    LoopFamily::new(id, version, Arc::new(planner))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::family::LoopFamilyId;
@@ -61,6 +77,15 @@ mod tests {
         assert_eq!(family.version().id, "default");
         assert_ne!(family.version().digest, ComponentDigest([0; 32]));
         assert_eq!(family.version().digest, DEFAULT_FAMILY_DIGEST);
+    }
+
+    #[test]
+    fn default_family_iteration_limit_can_be_overridden_for_harnesses() {
+        let family = default_with_iteration_limit(5);
+        let context = crate::test_support::test_run_context("default-family-budget-override");
+        let state = crate::state::LoopExecutionState::initial_for_run(&context);
+
+        assert_eq!(family.planner().budget().iteration_limit(&state), 5);
     }
 
     #[test]

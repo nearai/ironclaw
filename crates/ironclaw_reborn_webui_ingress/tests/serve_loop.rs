@@ -17,7 +17,7 @@ use axum::{Router, extract::ConnectInfo, routing::get};
 use ironclaw_reborn_webui_ingress::{
     RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2,
 };
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::{oneshot, watch};
 
 async fn build_test_router() -> Router {
     Router::new()
@@ -157,14 +157,14 @@ async fn serve_webui_v2_shuts_down_when_shutdown_sender_drops() {
 async fn serve_webui_v2_bounds_graceful_shutdown_drain_for_long_lived_requests() {
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let (bound_tx, bound_rx) = oneshot::channel::<SocketAddr>();
-    let request_started = Arc::new(Notify::new());
-    let request_started_for_handler = Arc::clone(&request_started);
+    let (request_started_tx, mut request_started_rx) = watch::channel(false);
+    let request_started_for_handler = Arc::new(request_started_tx);
     let router = Router::new().route(
         "/hold",
         get(move || {
             let request_started = Arc::clone(&request_started_for_handler);
             async move {
-                request_started.notify_waiters();
+                let _ = request_started.send(true);
                 std::future::pending::<&'static str>().await
             }
         }),
@@ -185,9 +185,13 @@ async fn serve_webui_v2_bounds_graceful_shutdown_drain_for_long_lived_requests()
     let held_request = tokio::spawn(async move {
         let _ = client.get(format!("http://{bound}/hold")).send().await;
     });
-    tokio::time::timeout(Duration::from_secs(2), request_started.notified())
-        .await
-        .expect("held request must reach handler");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        if !*request_started_rx.borrow() {
+            let _ = request_started_rx.changed().await;
+        }
+    })
+    .await
+    .expect("held request must reach handler");
 
     shutdown_tx
         .send(())

@@ -192,13 +192,7 @@ export function toolCardFromPreview(preview) {
     toolResultPreview: failed
       ? null
       : preview.output_preview || preview.output_summary || null,
-    toolError: failed
-      ? preview.output_summary ||
-        preview.output_preview ||
-        preview.result_ref ||
-        toolErrorText(errorKind) ||
-        null
-      : null,
+    toolError: failed ? previewToolErrorText(preview, errorKind) : null,
     toolErrorKind: errorKind,
     toolDurationMs: null,
     updatedAt: preview.updated_at || null,
@@ -210,6 +204,28 @@ export function toolCardFromPreview(preview) {
     activityOrder,
     activityOrderSource: Number.isFinite(activityOrder) ? "projection" : null,
   };
+}
+
+function previewToolErrorText(preview, errorKind) {
+  const fallback = toolErrorText(errorKind) || null;
+  for (const candidate of [
+    preview.output_summary,
+    preview.output_preview,
+    preview.result_ref,
+  ]) {
+    const normalized = normalizedPreviewError(candidate, errorKind);
+    if (normalized) return normalized;
+  }
+  return fallback;
+}
+
+function normalizedPreviewError(value, errorKind) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (errorKind && trimmed === errorKind) return null;
+  if (errorKind === "backend") return null;
+  return trimmed;
 }
 
 // Map a `CapabilityActivityView` (SSE lifecycle frame) into the same

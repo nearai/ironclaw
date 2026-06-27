@@ -620,7 +620,7 @@ fn approval_context_for_request(request: &ApprovalRequest) -> Option<ApprovalPro
             request.reusable_scope.is_some(),
         )
         .ok()?,
-        non_empty_string(&request.reason),
+        None,
         destination,
         details,
     )
@@ -729,15 +729,6 @@ fn method_label(method: &NetworkMethod) -> String {
 
 fn format_bytes(bytes: u64) -> String {
     format!("{bytes} bytes")
-}
-
-fn non_empty_string(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
 }
 
 fn gate_prompt(
@@ -1152,7 +1143,10 @@ fn gate_projection_prompt_context(
             body: Some(prompt.body.clone()),
             allow_always: Some(prompt.allow_always),
             details: prompt.details.clone(),
-            approval_context: prompt.approval_context.clone(),
+            approval_context: prompt
+                .approval_context
+                .clone()
+                .map(redact_approval_context_reason),
             auth_context: None,
         },
         Some(ProductOutboundPayload::AuthPrompt(prompt)) => GateProjectionPromptContext {
@@ -1167,6 +1161,13 @@ fn gate_projection_prompt_context(
         _ => GateProjectionPromptContext::default(),
     };
     Ok(context)
+}
+
+fn redact_approval_context_reason(
+    mut context: ApprovalPromptContextView,
+) -> ApprovalPromptContextView {
+    context.reason = None;
+    context
 }
 
 fn gate_projection_item(

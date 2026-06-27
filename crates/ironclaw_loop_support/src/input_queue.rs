@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::ThreadId;
-use ironclaw_threads::{SessionThreadService, ThreadMessageId, ThreadScope};
+use ironclaw_threads::{SessionThreadError, SessionThreadService, ThreadMessageId, ThreadScope};
 use ironclaw_turns::{
     TurnId, TurnRunId,
     run_profile::{LoopInput, LoopInputAckToken, LoopInputCursorToken},
@@ -74,6 +74,11 @@ pub enum HostInputQueueError {
     Unavailable { reason: String },
     #[error("cursor invalid for run: {reason}")]
     InvalidCursor { reason: String },
+    #[error("failed to update queued message status: {source}")]
+    ThreadStatusUpdate {
+        #[source]
+        source: SessionThreadError,
+    },
     #[error("input queue internal error")]
     Internal,
 }
@@ -307,16 +312,18 @@ impl HostInputQueue for InMemoryHostInputQueue {
         run_id: TurnRunId,
         tokens: Vec<LoopInputAckToken>,
     ) -> Result<(), HostInputQueueError> {
-        let updates = {
-            let mut state = self
+        let (tokens_to_ack, updates) = {
+            let state = self
                 .state
                 .lock()
                 .map_err(|_| HostInputQueueError::Internal)?;
-            let queue = state.runs.entry(run_id).or_default();
+            let Some(queue) = state.runs.get(&run_id) else {
+                return Ok(());
+            };
+            let mut tokens_to_ack = Vec::new();
             let mut updates = Vec::new();
             for token in tokens {
-                let newly_acked = queue.acked.insert(token.clone());
-                if !newly_acked {
+                if queue.acked.contains(&token) {
                     continue;
                 }
                 if let Some(entry) = queue
@@ -327,8 +334,9 @@ impl HostInputQueue for InMemoryHostInputQueue {
                 {
                     updates.push(update.clone());
                 }
+                tokens_to_ack.push(token);
             }
-            updates
+            (tokens_to_ack, updates)
         };
         if let Some(thread_service) = &self.thread_service {
             for update in updates {
@@ -341,8 +349,16 @@ impl HostInputQueue for InMemoryHostInputQueue {
                         run_id.to_string(),
                     )
                     .await
-                    .map_err(|_| HostInputQueueError::Internal)?;
+                    .map_err(|source| HostInputQueueError::ThreadStatusUpdate { source })?;
             }
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| HostInputQueueError::Internal)?;
+        let queue = state.runs.entry(run_id).or_default();
+        for token in tokens_to_ack {
+            queue.acked.insert(token);
         }
         Ok(())
     }

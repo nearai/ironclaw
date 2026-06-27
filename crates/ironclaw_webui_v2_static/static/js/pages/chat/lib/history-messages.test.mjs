@@ -241,7 +241,7 @@ test("messagesFromTimeline: tool previews use timeline sequence as activity orde
   );
 });
 
-test("messagesFromTimeline: tool preview failures prefer backend error text", () => {
+test("messagesFromTimeline: tool preview failures use sanitized backend text", () => {
   const messages = messagesFromTimeline([
     {
       message_id: "tool-preview-backend",
@@ -275,7 +275,7 @@ test("messagesFromTimeline: tool preview failures prefer backend error text", ()
   assert.deepEqual(
     messages.map((message) => [message.id, message.toolStatus, message.toolError]),
     [
-      ["tool-invocation-backend", "error", "nearai.web_search returned HTTP 502"],
+      ["tool-invocation-backend", "error", "The tool backend failed."],
       [
         "tool-invocation-security",
         "error",

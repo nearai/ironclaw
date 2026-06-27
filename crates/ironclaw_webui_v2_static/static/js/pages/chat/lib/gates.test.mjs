@@ -161,7 +161,7 @@ test("gateFromEvent maps approval context into readable approval card props", ()
     { label: "Capability", value: "builtin.http" },
     { label: "Estimated network egress", value: "4096 bytes" },
   ]);
-  assert.match(gate.parameters, /Estimated network egress: 4096 bytes/);
+  assert.equal(gate.parameters, null);
 });
 
 test("gateFromProjectionGate maps approval context from durable projection", () => {
@@ -179,18 +179,18 @@ test("gateFromProjectionGate maps approval context from durable projection", () 
       tool_name: "builtin.http",
       action: { label: "Network request" },
       scope: { label: "This request only", reusable: false },
-      reason: "raw path /Users/test/.ssh/id_rsa and token sk-secret",
-      details: [{ label: "Secret", value: "sk-secret" }],
+      details: [{ label: "Secret", value: "<redacted>" }],
     },
   }));
 
   assert.equal(gate.toolName, "builtin.http");
-  assert.equal(gate.description, "raw path /Users/test/.ssh/id_rsa and token sk-secret");
+  assert.equal(gate.description, "capability requires approval");
   assert.deepEqual(gate.approvalDetails, [
     { label: "Action", value: "Network request" },
     { label: "Scope", value: "This request only" },
-    { label: "Secret", value: "sk-secret" },
+    { label: "Secret", value: "<redacted>" },
   ]);
+  assert.equal(gate.parameters, null);
 });
 
 test("gateFromEvent keeps modern auth prompts without challenge kind off token card", () => {

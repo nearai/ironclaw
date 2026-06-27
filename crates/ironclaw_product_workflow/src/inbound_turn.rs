@@ -950,17 +950,23 @@ where
     {
         Ok(_) => Ok(()),
         Err(original_error) => {
-            let history = thread_service
+            let history = match thread_service
                 .list_thread_history(ThreadHistoryRequest {
                     scope: thread_scope.clone(),
                     thread_id: thread_id.clone(),
                 })
                 .await
-                .map_err(|e| ProductWorkflowError::Transient {
-                    reason: format!(
-                        "failed to mark message queued ({original_error}); replay lookup failed: {e}"
-                    ),
-                })?;
+            {
+                Ok(history) => history,
+                Err(error) => {
+                    tracing::debug!(
+                        %original_error,
+                        %error,
+                        "queued steering input accepted before transcript queued-status reconciliation failed"
+                    );
+                    return Ok(());
+                }
+            };
             let already_consumed = history.messages.iter().any(|message| {
                 message.message_id == message_id
                     && message.turn_run_id.as_deref() == Some(run_id_string.as_str())
@@ -972,9 +978,11 @@ where
             if already_consumed {
                 return Ok(());
             }
-            Err(ProductWorkflowError::Transient {
-                reason: format!("failed to mark message queued: {original_error}"),
-            })
+            tracing::debug!(
+                %original_error,
+                "queued steering input accepted before transcript queued-status update failed"
+            );
+            Ok(())
         }
     }
 }
