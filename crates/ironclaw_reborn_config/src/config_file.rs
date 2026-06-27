@@ -156,7 +156,13 @@ pub struct HarnessSection {
 pub struct RunnerSection {
     pub heartbeat_interval_secs: Option<u64>,
     pub poll_interval_ms: Option<u64>,
-    /// Number of concurrent turn-runner worker tasks. `None` or `0` defaults to 4. Clamped to 32.
+    /// Number of concurrent turn-runner slots (scheduler semaphore permits).
+    /// `None` (absent) → compiled default (16). `0` → unlimited (no global
+    /// throttle). Positive values are used verbatim as the scheduler-semaphore
+    /// permit count; values above `tokio::sync::Semaphore::MAX_PERMITS` are
+    /// rejected as a config error (they would otherwise panic semaphore
+    /// construction). Overridable at runtime by
+    /// `IRONCLAW_REBORN_RUNNER_WORKER_COUNT`.
     pub worker_count: Option<usize>,
     /// Max concurrent runs in `TurnStatus::Running` per (tenant_id, owner user_id). `None` or `0` = unlimited.
     pub max_concurrent_runs_per_user: Option<u32>,
