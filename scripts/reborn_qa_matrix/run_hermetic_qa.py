@@ -583,6 +583,80 @@ WEBUI_V2_COMPOSITION_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_PRODUCT_AUTH_OAUTH_COMMAND = CommandSpec(
+    name="webui_v2_product_auth_oauth_routes",
+    description=(
+        "Generic product-auth OAuth start/callback route contracts for flow "
+        "creation, callback completion, bearer auth, sanitized invalid input, "
+        "body limits, and per-caller rate limits."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "--test",
+        "webui_v2_product_auth",
+        "product_auth_oauth",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_PRODUCT_AUTH_GOOGLE_OAUTH_COMMAND = CommandSpec(
+    name="webui_v2_product_auth_google_oauth_routes",
+    description=(
+        "Google product-auth OAuth route contracts for authorization URL "
+        "construction, missing config, scope/expiry validation, callback "
+        "completion, provider denial, unknown state, and secret-free browser "
+        "completion notification."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "--test",
+        "webui_v2_product_auth",
+        "product_auth_google_oauth",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_PRODUCT_AUTH_CALLBACK_COMMAND = CommandSpec(
+    name="webui_v2_product_auth_callback_routes",
+    description=(
+        "Product-auth OAuth callback contracts for malformed fields and flow "
+        "ids, unknown flows, provider denial/exchange failures, cross-scope "
+        "rejection, no-body enforcement, per-IP rate limits, and spoofed "
+        "forwarded-header resistance."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "--test",
+        "webui_v2_product_auth",
+        "product_auth_callback",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_DESCRIPTOR_POLICY_COMMAND = CommandSpec(
     name="webui_v2_descriptor_policy_surface",
     description=(
@@ -979,6 +1053,33 @@ CASES: dict[str, CaseSpec] = {
             "Matches the QA matrix composition command for REBCLI-055-TC-09; "
             "this validates the Rust gateway composition layer rather than "
             "duplicating browser coverage from PR #5348."
+        ),
+    ),
+    "webui_v2_product_auth_oauth_regression": CaseSpec(
+        name="webui_v2_product_auth_oauth_regression",
+        feature="WebUI v2 product-auth OAuth start and callback routes",
+        category="Hermetic Product Auth OAuth Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-059-TC-01",
+            "REBCLI-059-TC-02",
+            "REBCLI-059-TC-03",
+            "REBCLI-059-TC-04",
+            "REBCLI-059-TC-05",
+            "REBCLI-059-TC-06",
+        ],
+        commands=[
+            WEBUI_V2_PRODUCT_AUTH_OAUTH_COMMAND,
+            WEBUI_V2_PRODUCT_AUTH_GOOGLE_OAUTH_COMMAND,
+            WEBUI_V2_PRODUCT_AUTH_CALLBACK_COMMAND,
+        ],
+        notes=(
+            "Covers WebUI v2 product-auth OAuth API/runtime rows without "
+            "duplicating PR #5348 browser auth-card coverage: generic and "
+            "Google OAuth start/callback success, browser completion without "
+            "secret leakage, provider denial/exchange failure, malformed and "
+            "unknown callback state, invalid scope/expiry rejection, "
+            "cross-scope rejection, bearer/no-body enforcement, and "
+            "per-caller/per-IP rate limits."
         ),
     ),
     "webui_v2_operator_config_api_regression": CaseSpec(
