@@ -215,6 +215,30 @@ WEBUI_V2_SSO_STARTUP_HELPER_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SSO_USER_ADMISSION_COMMAND = CommandSpec(
+    name="webui_v2_sso_user_admission_contracts",
+    description=(
+        "WebUI SSO UserDirectory admission contracts for verified allowlisted "
+        "canonical/secondary emails, rejection paths, tenant scoping, and "
+        "local trigger-access seeding."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_cli",
+        "--features",
+        "webui-v2-beta",
+        "--bin",
+        "ironclaw-reborn",
+        "user_directory",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 
 OPENAI_OWNER_CRATE_COMMAND = CommandSpec(
     name="openai_compat_owner_crates",
@@ -2651,6 +2675,28 @@ CASES: dict[str, CaseSpec] = {
             "provider secret failures, allowed-domain normalization, explicit "
             "base URL precedence, listener fallback URL, loopback cleartext "
             "allowance, and public cleartext rejection."
+        ),
+    ),
+    "webui_v2_sso_user_admission_regression": CaseSpec(
+        name="webui_v2_sso_user_admission_regression",
+        feature="WebUI v2 SSO user admission",
+        category="Hermetic WebUI v2 SSO User Admission Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-036-TC-01",
+            "REBCLI-036-TC-02",
+            "REBCLI-036-TC-03",
+            "REBCLI-036-TC-04",
+            "REBCLI-036-TC-05",
+            "REBCLI-036-TC-06",
+            "REBCLI-036-TC-07",
+        ],
+        commands=[WEBUI_V2_SSO_USER_ADMISSION_COMMAND],
+        notes=(
+            "Covers the CLI-owned WebUI SSO user-admission adapter without "
+            "live OAuth provider calls: verified allowlisted canonical email, "
+            "off-list rejection, unverified and missing-email rejection, "
+            "case-insensitive domains, allowlisted verified secondary email, "
+            "tenant separation, and local trigger-access seed/no-seed behavior."
         ),
     ),
     "openai_compat_beta_routes_regression": CaseSpec(
