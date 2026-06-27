@@ -249,6 +249,45 @@ async fn openai_responses_retrieve_surfaces_parked_external_tool_call() {
 }
 
 #[tokio::test]
+async fn openai_responses_retrieve_prefers_coordinator_state_over_stale_blocked_event() {
+    let fixture = ResponseReaderFixture::new("blocked-ext-stale-state").await;
+    let run_id = TurnRunId::new();
+    let catalog = Arc::new(InMemoryExternalToolCatalog::new());
+    catalog
+        .record_pending_call(
+            run_id,
+            PendingExternalCall::new("call_stale", "lookup", serde_json::json!({"q": "rust"})),
+        )
+        .await
+        .expect("record pending call");
+    let reader = OpenAiResponsesThreadProjectionReader::new(
+        fixture.threads.clone(),
+        Arc::new(StaticProjectionStream::new(vec![run_status_envelope(
+            fixture.thread_id.as_str(),
+            run_id,
+            "blocked_external_tool",
+        )])),
+        catalog,
+    )
+    .with_turn_coordinator(Arc::new(StaticTurnCoordinator::new(turn_run_state(
+        &fixture.projection_read,
+        run_id,
+        TurnStatus::Running,
+    ))));
+
+    let response = reader
+        .read_response(fixture.read_request(run_id))
+        .await
+        .expect("read response");
+
+    assert_eq!(response.status, OpenAiResponseStatus::InProgress);
+    assert!(
+        response.output.is_empty(),
+        "stale blocked events must not surface pending calls while coordinator says running"
+    );
+}
+
+#[tokio::test]
 async fn openai_responses_wait_surfaces_parked_external_tool_call() {
     let fixture = ResponseReaderFixture::new("blocked-ext-wait").await;
     let run_id = TurnRunId::new();
@@ -637,6 +676,7 @@ impl ResponseReaderFixture {
             created_at: 123,
             idempotency_key: None,
             accepted_ack: None,
+            external_tool_resume_completed: false,
             binding: OpenAiCompatResourceBinding::Bound {
                 internal_refs: OpenAiCompatInternalRefs::new(
                     OpenAiCompatProductActionRef::new("product-action:test").expect("action ref"),

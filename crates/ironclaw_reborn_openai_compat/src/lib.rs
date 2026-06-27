@@ -90,12 +90,13 @@ pub use models_catalog::{OpenAiCompatModelCatalog, OpenAiCompatModelEntry};
 pub use refs::{
     InMemoryOpenAiCompatRefStore, OpenAiChatCompletionId, OpenAiCompatActorScope,
     OpenAiCompatBindInternalRefs, OpenAiCompatIdempotencyConflict, OpenAiCompatIdempotencyKey,
-    OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
-    OpenAiCompatPublicId, OpenAiCompatRecordAcceptedAck, OpenAiCompatRefError,
-    OpenAiCompatRefLookup, OpenAiCompatRefOperation, OpenAiCompatRefReservation,
-    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
-    OpenAiCompatResourceBinding, OpenAiCompatResourceKind, OpenAiCompatResourceMapping,
-    OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef, OpenAiResponseId, unix_timestamp_now,
+    OpenAiCompatInternalRefs, OpenAiCompatMarkExternalToolResumeCompleted,
+    OpenAiCompatProductActionRef, OpenAiCompatProjectionRef, OpenAiCompatPublicId,
+    OpenAiCompatRecordAcceptedAck, OpenAiCompatRefError, OpenAiCompatRefLookup,
+    OpenAiCompatRefOperation, OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome,
+    OpenAiCompatRefStore, OpenAiCompatRequestFingerprint, OpenAiCompatResourceBinding,
+    OpenAiCompatResourceKind, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
+    OpenAiCompatTurnRunRef, OpenAiResponseId, unix_timestamp_now,
 };
 pub use responses::{
     OpenAiResponseErrorObject, OpenAiResponseObject, OpenAiResponseOutputItem,

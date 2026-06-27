@@ -365,9 +365,11 @@ where
                 // A BeforeBlock checkpoint alone is not sufficient for approval,
                 // resource, or dependent-run gates: #3424 requires a durable
                 // pending gate/process ref for those block types. Auth gates use
-                // the blocked turn state itself as the product-visible pending ref,
-                // so verifying the pre-block checkpoint is enough to let the
-                // applier persist that state.
+                // the blocked turn state itself as the product-visible pending
+                // ref; external-tool gates use the parked call recorded in the
+                // external-tool catalog as the pending ref. For both, verifying
+                // the pre-block checkpoint is enough to let the applier persist
+                // the blocked state.
                 return Ok(false);
             }
             // `LoopBlockedKind` is `#[non_exhaustive]` in a sibling crate, so

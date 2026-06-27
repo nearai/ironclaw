@@ -245,6 +245,11 @@ pub enum ExternalToolCatalogError {
     /// A register request exceeded the per-run tool cap or contained duplicate
     /// tool names.
     InvalidRegistration { reason: &'static str },
+    /// A submitted output referenced a call id that is not currently parked.
+    CallNotPending,
+    /// A submitted output conflicts with a different output already stored for
+    /// the same parked call id.
+    OutputAlreadySubmitted,
 }
 
 impl std::fmt::Display for ExternalToolCatalogError {
@@ -252,6 +257,8 @@ impl std::fmt::Display for ExternalToolCatalogError {
         match self {
             Self::Unavailable => f.write_str("external tool catalog unavailable"),
             Self::InvalidRegistration { reason } => f.write_str(reason),
+            Self::CallNotPending => f.write_str("external tool call_id is not pending"),
+            Self::OutputAlreadySubmitted => f.write_str("external tool output already submitted"),
         }
     }
 }
@@ -538,17 +545,13 @@ impl ExternalToolCatalog for InMemoryExternalToolCatalog {
             .iter()
             .any(|call| call.call_id() == call_id)
         {
-            return Err(ExternalToolCatalogError::InvalidRegistration {
-                reason: "external tool call_id is not pending",
-            });
+            return Err(ExternalToolCatalogError::CallNotPending);
         }
         if let Some(existing) = entry.outputs.get(&call_id) {
             if existing == &output {
                 return Ok(());
             }
-            return Err(ExternalToolCatalogError::InvalidRegistration {
-                reason: "external tool output already submitted",
-            });
+            return Err(ExternalToolCatalogError::OutputAlreadySubmitted);
         }
         entry.outputs.insert(call_id, output);
         Ok(())
@@ -839,22 +842,12 @@ mod tests {
             .submit_output_for_pending_call(run, "call_1".to_string(), serde_json::json!("70F"))
             .await
             .expect_err("different output for same call is rejected");
-        assert_eq!(
-            duplicate,
-            ExternalToolCatalogError::InvalidRegistration {
-                reason: "external tool output already submitted",
-            }
-        );
+        assert_eq!(duplicate, ExternalToolCatalogError::OutputAlreadySubmitted);
         let wrong_call = catalog
             .submit_output_for_pending_call(run, "call_2".to_string(), serde_json::json!("ok"))
             .await
             .expect_err("non-pending call is rejected");
-        assert_eq!(
-            wrong_call,
-            ExternalToolCatalogError::InvalidRegistration {
-                reason: "external tool call_id is not pending",
-            }
-        );
+        assert_eq!(wrong_call, ExternalToolCatalogError::CallNotPending);
     }
 
     #[tokio::test]

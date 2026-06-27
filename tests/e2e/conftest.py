@@ -596,23 +596,27 @@ async def reset_mock_llm_state(mock_llm_server):
     """
     yield
     async with httpx.AsyncClient() as client:
-        await client.post(
+        response = await client.post(
             f"{mock_llm_server}/__mock/set_github_api_url",
             json={"url": "https://api.github.com"},
             timeout=10,
         )
-        await client.post(
+        response.raise_for_status()
+        response = await client.post(
             f"{mock_llm_server}/__mock/oauth/reset",
             timeout=10,
         )
-        await client.post(
+        response.raise_for_status()
+        response = await client.post(
             f"{mock_llm_server}/__mock/chat_requests/reset",
             timeout=10,
         )
-        await client.post(
+        response.raise_for_status()
+        response = await client.post(
             f"{mock_llm_server}/__mock/capability_policy/reset",
             timeout=10,
         )
+        response.raise_for_status()
 
 
 @pytest.fixture(autouse=True)

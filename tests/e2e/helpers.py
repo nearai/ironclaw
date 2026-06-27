@@ -231,6 +231,7 @@ SEL_V2 = {
     "login_token":    "#v2-token",         # token input on the login/connect view
     "sidebar":        "#gateway-sidebar",  # app navigation sidebar
     "sidebar_toggle": "button[aria-label='Toggle sidebar']",
+    "new_chat":       "[data-testid='new-chat']",  # "+ New" client-side new-chat button
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
     "typing_indicator": "[data-testid='typing-indicator']",
     "msg_user":       "[data-testid='msg-user']",       # user message bubble
@@ -363,9 +364,11 @@ async def sse_stream(
     base_url: str,
     path: str = "/api/chat/events",
     *,
+    method: str = "GET",
     token: str = AUTH_TOKEN,
     params: dict[str, str] | None = None,
     headers: dict[str, str] | None = None,
+    json: object | None = None,
     timeout: float = 45,
 ):
     """Open an authenticated SSE stream and yield the aiohttp response."""
@@ -377,10 +380,12 @@ async def sse_stream(
         request_headers.update(headers)
     client_timeout = aiohttp.ClientTimeout(total=timeout, sock_read=timeout)
     async with aiohttp.ClientSession(timeout=client_timeout) as session:
-        async with session.get(
+        async with session.request(
+            method,
             f"{base_url}{path}",
             params=params,
             headers=request_headers,
+            json=json,
         ) as response:
             yield response
 

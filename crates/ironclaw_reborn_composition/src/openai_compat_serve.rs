@@ -725,14 +725,15 @@ impl OpenAiResponsesThreadProjectionReader {
             })
             .await?;
         let next_cursor = events.last().map(|event| event.projection_cursor().clone());
+        let blocked_external_tool = if self.turn_coordinator.is_some() {
+            self.run_blocked_external_tool_from_state(request, actor_scope, submitted_run_id)
+                .await?
+        } else {
+            run_blocked_external_tool_from_projection_events(&events, submitted_run_id)
+        };
         Ok(ProjectedResponseStatusRead {
             status: response_status_from_projection_events(&events, submitted_run_id),
-            blocked_external_tool: run_blocked_external_tool_from_projection_events(
-                &events,
-                submitted_run_id,
-            ) || self
-                .run_blocked_external_tool_from_state(request, actor_scope, submitted_run_id)
-                .await?,
+            blocked_external_tool,
             next_cursor,
         })
     }
@@ -1164,6 +1165,12 @@ fn map_catalog_error(error: ExternalToolCatalogError) -> OpenAiCompatHttpError {
         ExternalToolCatalogError::InvalidRegistration { .. } => {
             OpenAiCompatHttpError::invalid_request(Some("tools".to_string()))
         }
+        ExternalToolCatalogError::CallNotPending => {
+            OpenAiCompatHttpError::invalid_request(Some("input.call_id".to_string()))
+        }
+        ExternalToolCatalogError::OutputAlreadySubmitted => {
+            OpenAiCompatHttpError::conflict(Some("input.call_id".to_string()))
+        }
         ExternalToolCatalogError::Unavailable => OpenAiCompatHttpError::from_kind(
             503,
             true,
@@ -1175,14 +1182,10 @@ fn map_catalog_error(error: ExternalToolCatalogError) -> OpenAiCompatHttpError {
 
 fn map_catalog_submit_output_error(error: ExternalToolCatalogError) -> OpenAiCompatHttpError {
     match error {
-        ExternalToolCatalogError::InvalidRegistration { reason }
-            if reason == "external tool call_id is not pending" =>
-        {
+        ExternalToolCatalogError::CallNotPending => {
             OpenAiCompatHttpError::invalid_request(Some("input.call_id".to_string()))
         }
-        ExternalToolCatalogError::InvalidRegistration { reason }
-            if reason == "external tool output already submitted" =>
-        {
+        ExternalToolCatalogError::OutputAlreadySubmitted => {
             OpenAiCompatHttpError::conflict(Some("input.call_id".to_string()))
         }
         other => map_catalog_error(other),

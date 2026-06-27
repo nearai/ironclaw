@@ -145,7 +145,7 @@ async def reborn_responses_server(
             await wait_for_ready(f"{base_url}/api/health", timeout=60)
             await _enable_reborn_global_auto_approve(base_url)
             break
-        except TimeoutError:
+        except (TimeoutError, httpx.HTTPError):
             if proc.returncode is None:
                 await _stop_process(proc, timeout=2)
             last_stderr = _read_log(stderr_path)

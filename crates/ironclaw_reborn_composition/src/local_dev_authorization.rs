@@ -606,10 +606,28 @@ mod tests {
         let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
         let authorizer = local_dev_authorizer(None, policy, settings);
 
+        // Global auto-approve now defaults ON, so explicitly disable it first to
+        // establish the gating baseline this test reads back across dispatches.
+        {
+            let scope = ironclaw_host_api::ResourceScope::local_default(
+                user_id.clone(),
+                ironclaw_host_api::InvocationId::new(),
+            )
+            .expect("local resource scope");
+            auto_approve
+                .set(AutoApproveSettingInput {
+                    scope,
+                    enabled: false,
+                    updated_by: Principal::User(user_id.clone()),
+                })
+                .await
+                .expect("auto-approve setting update");
+        }
+
         let before = local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
         assert!(
             matches!(before, ironclaw_host_api::Decision::RequireApproval { .. }),
-            "default local-dev shell dispatch should gate before a settings update, got {before:?}"
+            "local-dev shell dispatch should gate when global auto-approve is off, got {before:?}"
         );
 
         let scope = ironclaw_host_api::ResourceScope::local_default(

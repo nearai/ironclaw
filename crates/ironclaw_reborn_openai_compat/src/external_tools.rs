@@ -10,6 +10,7 @@
 //! never touches the engine directly (see the crate boundary in `CLAUDE.md`).
 
 use async_trait::async_trait;
+use ironclaw_host_api::CapabilityId;
 use serde::Deserialize;
 use std::collections::HashSet;
 
@@ -160,6 +161,7 @@ fn validate_external_tool_name(name: &str) -> Result<(), OpenAiCompatHttpError> 
     {
         return Err(invalid_tools());
     }
+    CapabilityId::new(format!("external_tool.{name}")).map_err(|_| invalid_tools())?;
     Ok(())
 }
 
@@ -219,8 +221,12 @@ mod tests {
                 .is_err()
         );
         assert!(
+            parse_external_tools(&[serde_json::json!({"type": "function", "name": "ToolName"})])
+                .is_err()
+        );
+        assert!(
             parse_external_tools(&[
-                serde_json::json!({"type": "function", "name": "Search"}),
+                serde_json::json!({"type": "function", "name": "search"}),
                 serde_json::json!({"type": "function", "name": "search"}),
             ])
             .is_err()
