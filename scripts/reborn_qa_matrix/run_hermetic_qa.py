@@ -333,6 +333,32 @@ WEBUI_V2_AUTOMATIONS_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_EXTENSIONS_CLIENT_COMMAND = CommandSpec(
+    name="webui_v2_extensions_client_contracts",
+    description=(
+        "Focused WebUI v2 extensions/channel-pairing client contracts for "
+        "extension registry/list/lifecycle/setup/OAuth API routes, registry "
+        "presentation, lifecycle actions, channel and MCP tabs, Slack setup "
+        "and allowed-channel helpers, pairing redemption, and user-safe "
+        "pairing error mapping."
+    ),
+    argv=[
+        "bash",
+        "-lc",
+        (
+            "node --test "
+            "crates/ironclaw_webui_v2_static/static/js/components/slack-channel-picker.test.mjs "
+            "crates/ironclaw_webui_v2_static/static/js/components/slack-setup-panel.test.mjs "
+            "crates/ironclaw_webui_v2_static/static/js/lib/channel-connect.test.mjs "
+            "crates/ironclaw_webui_v2_static/static/js/lib/slack-channels-api.test.mjs "
+            "crates/ironclaw_webui_v2_static/static/js/lib/slack-pairing-api.test.mjs "
+            "crates/ironclaw_webui_v2_static/static/js/lib/slack-setup-api.test.mjs "
+            "$(find crates/ironclaw_webui_v2_static/static/js/pages/extensions "
+            "-type f -name '*test.mjs' | sort)"
+        ),
+    ],
+)
+
 WEBUI_V2_SEND_MULTILINE_COMMAND = CommandSpec(
     name="webui_v2_send_multiline_contract",
     description="Focused send-message route contract for preserving multiline content.",
@@ -1380,6 +1406,31 @@ CASES: dict[str, CaseSpec] = {
             "filter/summary/recent-run presentation, empty-state copy/start "
             "actions, refresh cadence bounds, and outbound preference/target "
             "API payloads including clear-to-null."
+        ),
+    ),
+    "webui_v2_extensions_client_regression": CaseSpec(
+        name="webui_v2_extensions_client_regression",
+        feature="WebUI v2 extensions and channel pairing screens",
+        category="Hermetic Extensions Client Contract Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-068-TC-01",
+            "REBCLI-068-TC-02",
+            "REBCLI-068-TC-03",
+            "REBCLI-068-TC-04",
+            "REBCLI-068-TC-05",
+            "REBCLI-068-TC-06",
+        ],
+        commands=[WEBUI_V2_EXTENSIONS_CLIENT_COMMAND],
+        notes=(
+            "Covers the generated WebUI v2 extensions/channel-pairing rows "
+            "at the static client contract layer without duplicating PR #5348 "
+            "browser legacy Playwright scenarios: extension registry/list/"
+            "install/activate/remove/setup/OAuth API routes, registry and card "
+            "presentation, lifecycle action selection/toasts, configure modal "
+            "behavior, channel and MCP tab wiring, Slack setup and allowed "
+            "channel helpers, proof-code pairing redemption, and user-safe "
+            "pairing error mapping. Browser-smoke TC-16 stays guarded by "
+            "PR #5348/live coverage."
         ),
     ),
     "webui_v2_filesystem_api_regression": CaseSpec(
