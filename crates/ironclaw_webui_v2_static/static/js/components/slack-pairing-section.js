@@ -26,7 +26,10 @@ export function SlackPairingSection({ action }) {
   };
 
   return html`
-    <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+    <div
+      data-testid="slack-pairing-section"
+      className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4"
+    >
       <h4 className="mb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
         ${copy.title}
       </h4>
@@ -36,6 +39,7 @@ export function SlackPairingSection({ action }) {
 
       <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
         <input
+          data-testid="slack-pairing-code-input"
           type="text"
           value=${manualCode}
           onChange=${(event) => setManualCode(event.target.value)}
@@ -44,6 +48,7 @@ export function SlackPairingSection({ action }) {
           className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
         />
         <${Button}
+          data-testid="slack-pairing-submit"
           variant="secondary"
           className="h-9 shrink-0 px-3 text-xs"
           onClick=${submit}
@@ -54,11 +59,11 @@ export function SlackPairingSection({ action }) {
       </div>
 
       ${redeemMutation.isSuccess &&
-      html`<p className="text-xs text-emerald-300">
+      html`<p data-testid="slack-pairing-success" className="text-xs text-emerald-300">
         ${redeemMutation.data?.message || copy.successMessage}
       </p>`}
       ${redeemMutation.isError &&
-      html`<p className="text-xs text-red-300">
+      html`<p data-testid="slack-pairing-error" className="text-xs text-red-300">
         ${slackPairingError(redeemMutation.error, copy.errorMessage)}
       </p>`}
     </div>

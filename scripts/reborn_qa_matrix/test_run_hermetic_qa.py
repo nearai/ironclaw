@@ -1564,17 +1564,30 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-091-TC-04",
                     "REBCLI-091-TC-05",
                     "REBCLI-091-TC-06",
+                    "REBCLI-091-TC-07",
+                    "REBCLI-091-TC-08",
+                    "REBCLI-091-TC-09",
+                    "REBCLI-091-TC-10",
                 ],
             )
             commands = results["results"][0]["details"]["commands"]
             self.assertEqual(
                 [command["name"] for command in commands],
-                ["webui_v2_slack_pairing_ui_contracts"],
+                [
+                    "reborn_cli_webui_v2_binary",
+                    "webui_v2_slack_pairing_ui_contracts",
+                    "webui_v2_slack_pairing_browser_smoke",
+                ],
             )
-            self.assertIn("slack-pairing-section.test.mjs", commands[0]["command"])
-            self.assertIn("slack-pairing-api.test.mjs", commands[0]["command"])
-            self.assertIn("channel-connect-card.test.mjs", commands[0]["command"])
-            self.assertIn("channels-tab.test.mjs", commands[0]["command"])
+            self.assertIn("ironclaw-reborn", commands[0]["command"])
+            self.assertIn("slack-pairing-section.test.mjs", commands[1]["command"])
+            self.assertIn("slack-pairing-api.test.mjs", commands[1]["command"])
+            self.assertIn("channel-connect-card.test.mjs", commands[1]["command"])
+            self.assertIn("channels-tab.test.mjs", commands[1]["command"])
+            self.assertIn(
+                "test_reborn_v2_slack_pairing_browser_success_error_and_keyboard_submit",
+                commands[2]["command"],
+            )
 
     def test_webui_settings_onboarding_case_dry_run_maps_client_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:

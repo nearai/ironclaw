@@ -1033,6 +1033,168 @@ async def test_reborn_v2_workspace_text_file_preview_uses_v2_fs_api(
         await context.close()
 
 
+async def test_reborn_v2_slack_pairing_browser_success_error_and_keyboard_submit(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Slack proof-code pairing works from the browser without legacy v1 pairing calls."""
+    redeem_requests: list[dict] = []
+    legacy_requests: list[str] = []
+
+    async def setup_page(page, *, redeem_status: int, redeem_body: dict):
+        async def fulfill_json(route, body, status=200):
+            await route.fulfill(
+                status=status,
+                content_type="application/json",
+                body=json.dumps(body),
+            )
+
+        async def handle_session(route):
+            await fulfill_json(
+                route,
+                {
+                    "tenant_id": "reborn-v2-e2e",
+                    "user_id": USER_ID,
+                    "capabilities": {},
+                    "features": {"reborn_projects": False},
+                    "attachments": {
+                        "accept": ["text/plain"],
+                        "max_files_per_message": 4,
+                        "max_bytes_per_file": 1048576,
+                        "max_bytes_per_message": 4194304,
+                    },
+                },
+            )
+
+        async def handle_extensions(route):
+            await fulfill_json(route, {"extensions": []})
+
+        async def handle_registry(route):
+            await fulfill_json(route, {"entries": []})
+
+        async def handle_connectable_channels(route):
+            await fulfill_json(
+                route,
+                {
+                    "channels": [
+                        {
+                            "channel": "slack",
+                            "display_name": "Slack",
+                            "strategy": "inbound_proof_code",
+                            "command_aliases": ["slack", "connect slack"],
+                            "action": {
+                                "title": "Pair Slack",
+                                "instructions": "Paste the proof code from Slack.",
+                                "input_placeholder": "SLACK-CODE",
+                                "submit_label": "Connect Slack",
+                                "success_message": "Slack connected.",
+                                "error_message": "Invalid or expired Slack pairing code.",
+                            },
+                        }
+                    ]
+                },
+            )
+
+        async def handle_redeem(route):
+            redeem_requests.append(
+                {
+                    "authorization": route.request.headers.get("authorization", ""),
+                    "body": json.loads(route.request.post_data or "{}"),
+                }
+            )
+            await fulfill_json(route, redeem_body, status=redeem_status)
+
+        async def fail_legacy_pairing(route):
+            legacy_requests.append(route.request.url)
+            await route.fulfill(
+                status=599,
+                content_type="application/json",
+                body=json.dumps({"error": "legacy pairing route must not be called"}),
+            )
+
+        await page.route("**/api/pairing/**", fail_legacy_pairing)
+        await page.route("**/api/webchat/v2/session", handle_session)
+        await page.route("**/api/webchat/v2/extensions", handle_extensions)
+        await page.route("**/api/webchat/v2/extensions/registry", handle_registry)
+        await page.route(
+            "**/api/webchat/v2/channels/connectable",
+            handle_connectable_channels,
+        )
+        await page.route("**/api/webchat/v2/extensions/pairing/redeem", handle_redeem)
+
+    success_context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 720}
+    )
+    success_page = await success_context.new_page()
+    try:
+        await setup_page(
+            success_page,
+            redeem_status=200,
+            redeem_body={"provider": "slack", "provider_user_id": "U123"},
+        )
+        await success_page.goto(
+            f"{reborn_v2_server}/v2/extensions/channels?token={REBORN_V2_AUTH_TOKEN}",
+            wait_until="domcontentloaded",
+        )
+        await expect(
+            success_page.locator(SEL_V2["slack_pairing_section"])
+        ).to_be_visible(timeout=15000)
+        await expect(success_page.locator("body")).to_contain_text("Paste the proof code from Slack.")
+
+        await success_page.locator(SEL_V2["slack_pairing_code_input"]).fill(
+            "  SLACK-SUCCESS  "
+        )
+        await success_page.locator(SEL_V2["slack_pairing_submit"]).click()
+        await expect(
+            success_page.locator(SEL_V2["slack_pairing_success"])
+        ).to_contain_text("Slack account connected.", timeout=10000)
+    finally:
+        await success_context.close()
+
+    error_context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 720}
+    )
+    error_page = await error_context.new_page()
+    try:
+        await setup_page(
+            error_page,
+            redeem_status=400,
+            redeem_body={
+                "error": "invalid_pairing_code",
+                "kind": "validation_error",
+                "message": "Invalid or expired Slack pairing code.",
+            },
+        )
+        await error_page.goto(
+            f"{reborn_v2_server}/v2/extensions/channels?token={REBORN_V2_AUTH_TOKEN}",
+            wait_until="domcontentloaded",
+        )
+        await expect(
+            error_page.locator(SEL_V2["slack_pairing_section"])
+        ).to_be_visible(timeout=15000)
+
+        await error_page.locator(SEL_V2["slack_pairing_code_input"]).fill(
+            "  SLACK-INVALID  "
+        )
+        await error_page.locator(SEL_V2["slack_pairing_code_input"]).press("Enter")
+        await expect(
+            error_page.locator(SEL_V2["slack_pairing_error"])
+        ).to_contain_text("invalid_pairing_code", timeout=10000)
+    finally:
+        await error_context.close()
+
+    assert redeem_requests == [
+        {
+            "authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}",
+            "body": {"channel": "slack", "code": "SLACK-SUCCESS"},
+        },
+        {
+            "authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}",
+            "body": {"channel": "slack", "code": "SLACK-INVALID"},
+        },
+    ]
+    assert legacy_requests == []
+
+
 async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
     """Threads are listed for the caller and deletion removes the thread and transcript."""
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}

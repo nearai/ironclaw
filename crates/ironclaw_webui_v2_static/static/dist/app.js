@@ -1022,7 +1022,10 @@ Please change the parent <Route path="${$}"> to <Route path="${$==="/"?"*":`${$}
       </form>
     <//>
   `}var L4="/api/webchat/v2/extensions/pairing/redeem";function Y1(e){return K(L4,{method:"POST",body:JSON.stringify({channel:"slack",code:e})}).then(t=>({success:!0,provider:t.provider,provider_user_id:t.provider_user_id,message:"Slack account connected."}))}function Fc({action:e}){let t=C(),a=W(),n=V({mutationFn:({code:l})=>Y1(l),onSuccess:()=>{a.invalidateQueries({queryKey:["extensions"]}),a.invalidateQueries({queryKey:["connectable-channels"]}),a.invalidateQueries({queryKey:["pairing","slack"]})}}),[r,s]=p.default.useState(""),i=P4(e,t),o=()=>{let l=r.trim();l&&(n.mutate({code:l}),s(""))};return u`
-    <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+    <div
+      data-testid="slack-pairing-section"
+      className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4"
+    >
       <h4 className="mb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
         ${i.title}
       </h4>
@@ -1032,6 +1035,7 @@ Please change the parent <Route path="${$}"> to <Route path="${$==="/"?"*":`${$}
 
       <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
         <input
+          data-testid="slack-pairing-code-input"
           type="text"
           value=${r}
           onChange=${l=>s(l.target.value)}
@@ -1040,6 +1044,7 @@ Please change the parent <Route path="${$}"> to <Route path="${$==="/"?"*":`${$}
           className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
         />
         <${A}
+          data-testid="slack-pairing-submit"
           variant="secondary"
           className="h-9 shrink-0 px-3 text-xs"
           onClick=${o}
@@ -1049,10 +1054,10 @@ Please change the parent <Route path="${$}"> to <Route path="${$==="/"?"*":`${$}
         <//>
       </div>
 
-      ${n.isSuccess&&u`<p className="text-xs text-emerald-300">
+      ${n.isSuccess&&u`<p data-testid="slack-pairing-success" className="text-xs text-emerald-300">
         ${n.data?.message||i.successMessage}
       </p>`}
-      ${n.isError&&u`<p className="text-xs text-red-300">
+      ${n.isError&&u`<p data-testid="slack-pairing-error" className="text-xs text-red-300">
         ${j4(n.error,i.errorMessage)}
       </p>`}
     </div>

@@ -1348,6 +1348,42 @@ WEBUI_V2_SLACK_PAIRING_UI_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SLACK_PAIRING_BROWSER_COMMAND = CommandSpec(
+    name="webui_v2_slack_pairing_browser_smoke",
+    description=(
+        "Playwright smoke for WebUI v2 Slack proof-code pairing through the "
+        "real ironclaw-reborn serve binary: built-in Slack connect action "
+        "rendering, trimmed button submit, Enter-key submit, success/error "
+        "messages, bearer-authenticated v2 redeem POSTs, and no legacy v1 "
+        "pairing browser calls."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py::test_reborn_v2_slack_pairing_browser_success_error_and_keyboard_submit",
+        "-q",
+    ],
+)
+
 WEBUI_V2_SETTINGS_ONBOARDING_CLIENT_COMMAND = CommandSpec(
     name="webui_v2_settings_onboarding_client_contracts",
     description=(
@@ -3961,18 +3997,26 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-091-TC-04",
             "REBCLI-091-TC-05",
             "REBCLI-091-TC-06",
+            "REBCLI-091-TC-07",
+            "REBCLI-091-TC-08",
+            "REBCLI-091-TC-09",
+            "REBCLI-091-TC-10",
         ],
-        commands=[WEBUI_V2_SLACK_PAIRING_UI_COMMAND],
+        commands=[
+            REBORN_CLI_WEBUI_V2_BINARY_COMMAND,
+            WEBUI_V2_SLACK_PAIRING_UI_COMMAND,
+            WEBUI_V2_SLACK_PAIRING_BROWSER_COMMAND,
+        ],
         notes=(
             "Covers the generated WebUI v2 Slack proof-code pairing rows at "
-            "the static client contract layer without duplicating PR #5348 "
-            "legacy browser scenarios: custom/default copy, blank and pending "
-            "disabled states, trimmed button and Enter submissions, input "
-            "clearing, query invalidation, success and structured error "
+            "the static client and browser layers without duplicating PR "
+            "#5348 legacy browser scenarios: custom/default copy, blank and "
+            "pending disabled states, trimmed button and Enter submissions, "
+            "input clearing, query invalidation, success and structured error "
             "messages, Slack-only inbound_proof_code renderer gating, Slack "
-            "connect intent routing, and authenticated pairing redeem POST "
-            "body shape. Browser-smoke rows TC-07 through TC-10 stay guarded "
-            "by PR #5348/live coverage."
+            "connect intent routing, authenticated pairing redeem POST body "
+            "shape, bearer propagation, and no legacy v1 pairing browser "
+            "calls."
         ),
     ),
     "webui_v2_settings_onboarding_client_regression": CaseSpec(
