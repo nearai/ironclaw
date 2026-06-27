@@ -1008,6 +1008,39 @@ WEBUI_V2_WORKSPACE_PROJECT_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_WORKSPACE_BROWSER_COMMAND = CommandSpec(
+    name="webui_v2_workspace_browser_smoke",
+    description=(
+        "Playwright smoke for the WebUI v2 workspace file preview route "
+        "through the real ironclaw-reborn serve binary with v2 filesystem "
+        "mount/stat/content API responses."
+    ),
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py::test_reborn_v2_workspace_text_file_preview_uses_v2_fs_api",
+        "-q",
+    ],
+)
+
 WEBUI_V2_AUTOMATIONS_RUNTIME_TOOL_SUBSTRATE_COMMAND = CommandSpec(
     name="webui_v2_automations_runtime_tool_substrate_contracts",
     description=(
@@ -3789,20 +3822,25 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-084-TC-04",
             "REBCLI-084-TC-05",
             "REBCLI-084-TC-06",
+            "REBCLI-084-TC-07",
         ],
-        commands=[WEBUI_V2_WORKSPACE_PROJECT_CLIENT_COMMAND],
+        commands=[
+            REBORN_CLI_WEBUI_V2_BINARY_COMMAND,
+            WEBUI_V2_WORKSPACE_PROJECT_CLIENT_COMMAND,
+            WEBUI_V2_WORKSPACE_BROWSER_COMMAND,
+        ],
         notes=(
             "Covers the generated WebUI v2 workspace/project rows at the "
-            "static client contract layer without duplicating PR #5348 "
-            "browser project/workspace smoke coverage: root mount browsing, "
-            "mount-qualified directory entries, mount-root directory handling, "
-            "bounded text and image preview via authed bytes, oversized "
-            "text/image download-only behavior, unknown MIME UTF-8 versus "
-            "binary sniffing, known-binary download-only behavior, project "
+            "static client contract layer plus a Reborn WebUI v2 browser "
+            "workspace preview smoke: root mount browsing, mount-qualified "
+            "directory entries, mount-root directory handling, bounded text "
+            "and image preview via authed bytes, oversized text/image "
+            "download-only behavior, unknown MIME UTF-8 versus binary "
+            "sniffing, known-binary download-only behavior, Chromium text-file "
+            "preview rendering through v2 fs mount/stat/content calls, project "
             "overview/detail mapping, project create/update payloads, "
             "membership route encoding, and TODO subresource stubs that must "
-            "not call unsupported v1 APIs. Browser-smoke rows stay guarded by "
-            "PR #5348/live coverage."
+            "not call unsupported v1 APIs."
         ),
     ),
     "webui_v2_automations_client_regression": CaseSpec(

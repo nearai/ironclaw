@@ -471,6 +471,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-084-TC-07",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-084-TC-08",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -1345,15 +1349,25 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-084-TC-04",
                     "REBCLI-084-TC-05",
                     "REBCLI-084-TC-06",
+                    "REBCLI-084-TC-07",
                 ],
             )
             commands = results["results"][0]["details"]["commands"]
             self.assertEqual(
                 [command["name"] for command in commands],
-                ["webui_v2_workspace_project_client_contracts"],
+                [
+                    "reborn_cli_webui_v2_binary",
+                    "webui_v2_workspace_project_client_contracts",
+                    "webui_v2_workspace_browser_smoke",
+                ],
             )
-            self.assertIn("workspace-api.test.mjs", commands[0]["command"])
-            self.assertIn("projects-api.test.mjs", commands[0]["command"])
+            self.assertIn("cargo build -p ironclaw_reborn_cli", commands[0]["command"])
+            self.assertIn("workspace-api.test.mjs", commands[1]["command"])
+            self.assertIn("projects-api.test.mjs", commands[1]["command"])
+            self.assertIn(
+                "test_reborn_v2_workspace_text_file_preview_uses_v2_fs_api",
+                commands[2]["command"],
+            )
 
     def test_webui_automations_case_dry_run_maps_client_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -959,6 +959,80 @@ async def test_reborn_v2_admin_hidden_route_redirects_by_capability(
         await admin_context.close()
 
 
+async def test_reborn_v2_workspace_text_file_preview_uses_v2_fs_api(
+    reborn_v2_server, reborn_v2_browser
+):
+    """The workspace route renders a text preview through authenticated v2 FS calls."""
+    requests: list[tuple[str, str]] = []
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    async def handle_mounts(route):
+        requests.append((route.request.url, route.request.headers.get("authorization", "")))
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"mounts": [{"mount": "workspace", "label": "Workspace"}]}),
+        )
+
+    async def handle_stat(route):
+        requests.append((route.request.url, route.request.headers.get("authorization", "")))
+        parsed = urlparse(route.request.url)
+        assert parse_qs(parsed.query) == {
+            "mount": ["workspace"],
+            "path": ["notes/plan.txt"],
+        }
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "stat": {
+                        "kind": "file",
+                        "mime_type": "text/plain",
+                        "size_bytes": 42,
+                    }
+                }
+            ),
+        )
+
+    async def handle_content(route):
+        requests.append((route.request.url, route.request.headers.get("authorization", "")))
+        parsed = urlparse(route.request.url)
+        assert parse_qs(parsed.query) == {
+            "mount": ["workspace"],
+            "path": ["notes/plan.txt"],
+        }
+        await route.fulfill(
+            status=200,
+            content_type="text/plain",
+            body="workspace preview from v2 fs\nsecond line",
+        )
+
+    await page.route("**/api/webchat/v2/fs/mounts", handle_mounts)
+    await page.route("**/api/webchat/v2/fs/stat**", handle_stat)
+    await page.route("**/api/webchat/v2/fs/content**", handle_content)
+
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/v2/workspace/workspace/notes/plan.txt"
+            f"?token={REBORN_V2_AUTH_TOKEN}",
+            wait_until="domcontentloaded",
+        )
+        await expect(page).to_have_url(
+            re.compile(r"/v2/workspace/workspace/notes/plan\.txt"), timeout=15000
+        )
+        await expect(page.get_by_text("workspace preview from v2 fs")).to_be_visible(
+            timeout=15000
+        )
+        await expect(page.get_by_text("second line")).to_be_visible(timeout=15000)
+        assert any("/api/webchat/v2/fs/stat" in url for url, _ in requests), requests
+        assert any("/api/webchat/v2/fs/content" in url for url, _ in requests), requests
+        assert all(auth == f"Bearer {REBORN_V2_AUTH_TOKEN}" for _, auth in requests), requests
+    finally:
+        await context.close()
+
+
 async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
     """Threads are listed for the caller and deletion removes the thread and transcript."""
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
