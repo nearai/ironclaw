@@ -5697,7 +5697,36 @@ def _case_existing_ci_only(case: CaseSpec) -> bool:
     return bool(case.commands) and not _case_has_matrix_only_command(case)
 
 
-def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
+def _commands_for_case(
+    case: CaseSpec, *, run_existing_ci_coverage: bool
+) -> list[CommandSpec]:
+    if run_existing_ci_coverage:
+        return case.commands
+    return [
+        command for command in case.commands if _command_ci_coverage(command) is None
+    ]
+
+
+def _removed_existing_ci_commands(case: CaseSpec) -> list[dict[str, str | None]]:
+    return [
+        {
+            "name": command.name,
+            "description": command.description,
+            "command": render_command(command),
+            "coverage_source": "existing_ci_coverage",
+            "existing_ci_coverage": _command_ci_coverage(command),
+        }
+        for command in case.commands
+        if _command_ci_coverage(command) is not None
+    ]
+
+
+def write_case_manifest(
+    output_dir: Path,
+    selected_cases: list[str],
+    *,
+    run_existing_ci_coverage: bool = False,
+) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     selected_specs = [CASES[name] for name in selected_cases]
     all_specs = list(CASES.values())
@@ -5736,15 +5765,18 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
                         "name": command.name,
                         "description": command.description,
                         "command": render_command(command),
-                        "coverage_source": (
-                            "existing_ci_coverage"
-                            if _command_ci_coverage(command)
-                            else "matrix_only_or_new"
-                        ),
-                        "existing_ci_coverage": _command_ci_coverage(command),
+                        "coverage_source": "matrix_only_or_new",
+                        "existing_ci_coverage": None,
                     }
-                    for command in spec.commands
+                    for command in _commands_for_case(
+                        spec, run_existing_ci_coverage=run_existing_ci_coverage
+                    )
                 ],
+                "removed_existing_ci_commands": (
+                    []
+                    if run_existing_ci_coverage
+                    else _removed_existing_ci_commands(spec)
+                ),
             }
             for name, spec in CASES.items()
         ],
@@ -5840,14 +5872,8 @@ def run_case(
     started = time.monotonic()
     command_results: list[dict[str, Any]] = []
     failed = False
-    commands = (
-        case.commands
-        if dry_run or run_existing_ci_coverage
-        else [
-            command
-            for command in case.commands
-            if _command_ci_coverage(command) is None
-        ]
+    commands = _commands_for_case(
+        case, run_existing_ci_coverage=run_existing_ci_coverage
     )
     for command in commands:
         if failed:
@@ -5874,19 +5900,11 @@ def run_case(
         failed = not bool(result["success"])
 
     success = all(bool(result.get("success")) for result in command_results)
-    removed_existing_ci_commands = [
-        {
-            "name": command.name,
-            "description": command.description,
-            "command": render_command(command),
-            "coverage_source": "existing_ci_coverage",
-            "existing_ci_coverage": _command_ci_coverage(command),
-        }
-        for command in case.commands
-        if _command_ci_coverage(command) is not None
-        and not run_existing_ci_coverage
-        and not dry_run
-    ]
+    removed_existing_ci_commands = (
+        []
+        if run_existing_ci_coverage
+        else _removed_existing_ci_commands(case)
+    )
     return {
         "provider": PROVIDER,
         "mode": MODE,
@@ -5979,7 +5997,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "also execute commands marked as already covered by existing GitHub "
-            "Actions CI; by default they are recorded as skipped traceability"
+            "Actions CI; by default they are removed from the active QA plan"
         ),
     )
     parser.add_argument(
@@ -6001,7 +6019,11 @@ def main(argv: list[str] | None = None) -> int:
     timeout_seconds = parse_duration_seconds(args.timeout)
     selected_cases = _selected_case_names(args)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    write_case_manifest(args.output_dir, selected_cases)
+    write_case_manifest(
+        args.output_dir,
+        selected_cases,
+        run_existing_ci_coverage=args.run_existing_ci_coverage,
+    )
     results = [
         run_case(
             CASES[name],

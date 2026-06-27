@@ -713,6 +713,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "support_substrate_product_workflow_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -748,6 +749,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_session_thread_message_api_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -797,6 +799,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_streaming_run_control_api_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -835,6 +838,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_automations_trace_outbound_channel_api_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -886,6 +890,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_route_contract_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -922,6 +927,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_composition_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -950,6 +956,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_gateway_middleware_serve_foundation_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1022,6 +1029,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_serve_listener_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1061,6 +1069,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_serve_security_config_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1109,6 +1118,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_sso_login_startup_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1153,6 +1163,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_sso_user_admission_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1192,6 +1203,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_auth_surface_composition_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1231,6 +1243,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_chat_client_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1269,6 +1282,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_workspace_project_client_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1327,6 +1341,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_automations_client_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1373,6 +1388,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_extensions_client_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1422,6 +1438,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_extension_lifecycle_api_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1471,6 +1488,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_skill_management_api_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1515,6 +1533,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_slack_pairing_ui_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1566,6 +1585,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_settings_onboarding_client_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1617,6 +1637,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_hidden_stubbed_routes_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1674,6 +1695,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "reborn_cli_trigger_poller_settings_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1715,6 +1737,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "reborn_cli_credential_refresh_settings_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1756,6 +1779,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "reborn_cli_docker_railway_entrypoint_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1802,6 +1826,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_hidden_workflow_direct_routes_browser_smoke",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1844,6 +1869,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_hidden_workflow_presenters_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1881,6 +1907,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "slack_personal_pairing_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1926,6 +1953,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "slack_personal_oauth_binding_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -1967,6 +1995,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "slack_events_ingress_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2016,6 +2045,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "slack_shared_channel_admin_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2063,6 +2093,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "slack_host_beta_serve_mount_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2115,6 +2146,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "slack_outbound_delivery_rendering_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2162,6 +2194,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_logs_screen_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2216,6 +2249,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_shell_navigation_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2267,6 +2301,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_frontend_bundle_supply_chain_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2314,6 +2349,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_i18n_language_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2350,6 +2386,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_settings_shell_role_gating_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2385,6 +2422,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_settings_restart_banner_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2427,6 +2465,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_settings_toolbar_search_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2471,6 +2510,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_settings_direct_tabs_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2511,6 +2551,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_admin_console_usage_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2553,6 +2594,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_toast_query_defaults_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2589,6 +2631,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_tee_attestation_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2626,6 +2669,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_sidebar_trace_credits_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2671,6 +2715,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_wallet_connect_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2723,6 +2768,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "reborn_operator_logs_service_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2776,6 +2822,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "openai_compat_beta_routes_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2822,6 +2869,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "openai_responses_api_workflow_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2873,6 +2921,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_static_js_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2898,6 +2947,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_client_persistence_static_discovery_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2934,6 +2984,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_spa_static_serving_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -2975,6 +3026,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_login_session_state_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -3043,6 +3095,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "openai_chat_completions_workflow_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -3088,6 +3141,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "openai_models_list_api_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -3134,6 +3188,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_provider_login_api_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -3188,6 +3243,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_operator_config_api_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -3239,6 +3295,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_project_files_api_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -3283,6 +3340,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_project_membership_api_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -3340,6 +3398,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_public_sso_session_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -3397,6 +3456,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_product_auth_oauth_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -3446,6 +3506,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_extension_oauth_setup_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -3492,6 +3553,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_manual_token_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -3544,6 +3606,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "--case",
                     "webui_v2_product_auth_account_lifecycle_regression",
                     "--dry-run",
+                    "--run-existing-ci-coverage",
                 ]
             )
 
@@ -3632,6 +3695,39 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertGreater(len(removed), 0)
             self.assertEqual(removed[-1]["coverage_source"], "existing_ci_coverage")
             self.assertIn("reborn-tests.yml", removed[-1]["existing_ci_coverage"])
+
+    def test_dry_run_removes_existing_ci_coverage_commands_by_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "webui_v2_route_contract_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(results["results"][0]["details"]["commands"], [])
+            removed = results["results"][0]["details"]["removed_existing_ci_commands"]
+            self.assertGreater(len(removed), 0)
+            self.assertEqual(removed[0]["coverage_source"], "existing_ci_coverage")
+
+            manifest = json.loads(
+                (output_dir / "case-manifest.json").read_text(encoding="utf-8")
+            )
+            case_manifest = next(
+                case
+                for case in manifest["cases"]
+                if case["case"] == "webui_v2_route_contract_regression"
+            )
+            self.assertEqual(case_manifest["commands"], [])
+            self.assertGreater(len(case_manifest["removed_existing_ci_commands"]), 0)
 
     def test_default_selection_omits_existing_ci_only_cases(self):
         parser = run_hermetic_qa.build_parser()
