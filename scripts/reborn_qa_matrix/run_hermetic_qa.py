@@ -463,6 +463,26 @@ WEBUI_V2_EXTENSIONS_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SLACK_PAIRING_UI_COMMAND = CommandSpec(
+    name="webui_v2_slack_pairing_ui_contracts",
+    description=(
+        "Focused WebUI v2 Slack proof-code pairing UI contracts for custom "
+        "and localized copy, blank/pending submit disabling, trimmed button "
+        "and Enter-key redemption, success/error messaging, query "
+        "invalidation, route selection, and Slack-only inbound proof-code "
+        "renderer gating."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/components/slack-pairing-section.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/lib/slack-pairing-api.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/lib/channel-connect.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/pages/chat/components/channel-connect-card.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/pages/extensions/components/channels-tab.test.mjs",
+    ],
+)
+
 WEBUI_V2_SETTINGS_ONBOARDING_CLIENT_COMMAND = CommandSpec(
     name="webui_v2_settings_onboarding_client_contracts",
     description=(
@@ -2036,6 +2056,31 @@ CASES: dict[str, CaseSpec] = {
             "channel helpers, proof-code pairing redemption, and user-safe "
             "pairing error mapping. Browser-smoke TC-16 stays guarded by "
             "PR #5348/live coverage."
+        ),
+    ),
+    "webui_v2_slack_pairing_ui_regression": CaseSpec(
+        name="webui_v2_slack_pairing_ui_regression",
+        feature="WebUI v2 Slack proof-code pairing UI",
+        category="Hermetic Slack Pairing UI Contract Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-091-TC-01",
+            "REBCLI-091-TC-02",
+            "REBCLI-091-TC-03",
+            "REBCLI-091-TC-04",
+            "REBCLI-091-TC-05",
+            "REBCLI-091-TC-06",
+        ],
+        commands=[WEBUI_V2_SLACK_PAIRING_UI_COMMAND],
+        notes=(
+            "Covers the generated WebUI v2 Slack proof-code pairing rows at "
+            "the static client contract layer without duplicating PR #5348 "
+            "legacy browser scenarios: custom/default copy, blank and pending "
+            "disabled states, trimmed button and Enter submissions, input "
+            "clearing, query invalidation, success and structured error "
+            "messages, Slack-only inbound_proof_code renderer gating, Slack "
+            "connect intent routing, and authenticated pairing redeem POST "
+            "body shape. Browser-smoke rows TC-07 through TC-10 stay guarded "
+            "by PR #5348/live coverage."
         ),
     ),
     "webui_v2_settings_onboarding_client_regression": CaseSpec(
