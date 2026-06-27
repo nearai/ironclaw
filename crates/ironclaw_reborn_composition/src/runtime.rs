@@ -2436,7 +2436,8 @@ impl RebornRuntime {
 ///
 /// **Currently supported profiles:** `RebornCompositionProfile::LocalDev`,
 /// `RebornCompositionProfile::LocalDevYolo`,
-/// `RebornCompositionProfile::HostedSingleTenant`, and
+/// `RebornCompositionProfile::HostedSingleTenant`,
+/// `RebornCompositionProfile::HostedSingleTenantVolume`, and
 /// `RebornCompositionProfile::Production` are wired end-to-end here. Production
 /// starts only after readiness diagnostics validate that live traffic can be
 /// exposed without a partial cutover.
@@ -2574,7 +2575,8 @@ pub async fn build_reborn_runtime(
     let runtime_parts = match profile {
         RebornCompositionProfile::LocalDev
         | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenant => {
+        | RebornCompositionProfile::HostedSingleTenant
+        | RebornCompositionProfile::HostedSingleTenantVolume => {
             let local_runtime =
                 services
                     .local_runtime
