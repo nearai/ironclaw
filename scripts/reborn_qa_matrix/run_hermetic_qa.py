@@ -1621,6 +1621,40 @@ WEBUI_V2_LOGS_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_LOGS_BROWSER_COMMAND = CommandSpec(
+    name="webui_v2_logs_browser_smoke",
+    description=(
+        "Focused Playwright smoke for the Reborn WebUI v2 logs route, "
+        "verifying scoped URL filters are passed to /api/webchat/v2/operator/"
+        "logs and rendered log context expands in Chromium."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py::test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context",
+        "-q",
+    ],
+)
+
 WEBUI_V2_SHELL_CLIENT_COMMAND = CommandSpec(
     name="webui_v2_shell_client_contracts",
     description=(
@@ -4234,19 +4268,23 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-073-TC-04",
             "REBCLI-073-TC-05",
             "REBCLI-073-TC-06",
+            "REBCLI-073-TC-07",
         ],
         commands=[
+            REBORN_CLI_WEBUI_V2_BINARY_COMMAND,
             WEBUI_V2_LOGS_CLIENT_COMMAND,
             WEBUI_V2_OPERATOR_LOGS_HANDLER_COMMAND,
+            WEBUI_V2_LOGS_BROWSER_COMMAND,
         ],
         notes=(
-            "Covers the non-browser-smoke WebUI v2 logs rows without duplicating "
-            "PR #5348 scoped logs browser coverage: scoped query normalization, "
+            "Covers the WebUI v2 logs rows, including the browser-visible "
+            "scoped logs smoke, without duplicating legacy v1 routes: scoped "
+            "query normalization, "
             "public/operator log fallback behavior, paused scope reloads, stale "
             "entry suppression, unsupported operator-route handling, empty/error "
             "states, scroll layout, chat duplicate-log-bar suppression, "
-            "automation recent-run log links, and operator logs capability "
-            "enforcement."
+            "automation recent-run log links, operator logs capability "
+            "enforcement, and Chromium rendering of scoped log context."
         ),
     ),
     "webui_v2_shell_navigation_regression": CaseSpec(

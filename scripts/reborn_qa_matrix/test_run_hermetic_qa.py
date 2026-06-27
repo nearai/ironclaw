@@ -391,6 +391,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-073-TC-07",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-074-TC-01",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -2156,24 +2160,32 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-073-TC-04",
                     "REBCLI-073-TC-05",
                     "REBCLI-073-TC-06",
+                    "REBCLI-073-TC-07",
                 ],
             )
             commands = results["results"][0]["details"]["commands"]
             self.assertEqual(
                 [command["name"] for command in commands],
                 [
+                    "reborn_cli_webui_v2_binary",
                     "webui_v2_logs_client_contracts",
                     "webui_v2_operator_logs_handler_contract",
+                    "webui_v2_logs_browser_smoke",
                 ],
             )
-            self.assertIn("logs-data.test.mjs", commands[0]["command"])
-            self.assertIn("useLogs.test.mjs", commands[0]["command"])
-            self.assertIn("logs-page.test.mjs", commands[0]["command"])
-            self.assertIn("automation-recent-runs.test.mjs", commands[0]["command"])
-            self.assertIn("chat.test.mjs", commands[0]["command"])
+            self.assertIn("cargo build -p ironclaw_reborn_cli", commands[0]["command"])
+            self.assertIn("logs-data.test.mjs", commands[1]["command"])
+            self.assertIn("useLogs.test.mjs", commands[1]["command"])
+            self.assertIn("logs-page.test.mjs", commands[1]["command"])
+            self.assertIn("automation-recent-runs.test.mjs", commands[1]["command"])
+            self.assertIn("chat.test.mjs", commands[1]["command"])
             self.assertIn(
                 "operator_logs_require_operator_capability",
-                commands[1]["command"],
+                commands[2]["command"],
+            )
+            self.assertIn(
+                "test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context",
+                commands[3]["command"],
             )
 
     def test_webui_v2_shell_navigation_case_dry_run_maps_matrix_ids(self):
