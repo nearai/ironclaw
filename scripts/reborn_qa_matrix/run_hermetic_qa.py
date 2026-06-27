@@ -394,6 +394,53 @@ WEBUI_V2_HIDDEN_STUBBED_ROUTE_COMMAND = CommandSpec(
     ],
 )
 
+SLACK_PERSONAL_BINDING_ROUTE_COMMAND = CommandSpec(
+    name="slack_personal_binding_oauth_route_contracts",
+    description=(
+        "Focused Slack personal-binding OAuth route contracts for "
+        "bearer-protected start, sanitized redirect handling, single-use "
+        "callback state, denied/missing-code/provider-failure paths, binding "
+        "mismatch, store failure, expiry, and per-user pending-state eviction."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "slack-v2-host-beta",
+        "slack_personal_binding_serve",
+        "--lib",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+SLACK_PERSONAL_BINDING_SERVICE_COMMAND = CommandSpec(
+    name="slack_personal_binding_service_contracts",
+    description=(
+        "Focused Slack personal-binding service contracts for tenant/app/team/"
+        "installation validation, app-scoped installation enforcement, invalid "
+        "Slack id rejection, and binding-store error propagation."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "slack-v2-host-beta",
+        "slack_personal_binding::tests",
+        "--lib",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_SEND_MULTILINE_COMMAND = CommandSpec(
     name="webui_v2_send_multiline_contract",
     description="Focused send-message route contract for preserving multiline content.",
@@ -1514,6 +1561,34 @@ CASES: dict[str, CaseSpec] = {
             "adapters return empty TODO shapes without calling fetch or "
             "unsupported v1 gateway endpoints. Browser rows TC-10/11 remain "
             "separate browser/live coverage."
+        ),
+    ),
+    "slack_personal_oauth_binding_regression": CaseSpec(
+        name="slack_personal_oauth_binding_regression",
+        feature="Slack personal OAuth binding workflow",
+        category="Hermetic Slack Personal Binding Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-071-TC-01",
+            "REBCLI-071-TC-02",
+            "REBCLI-071-TC-03",
+            "REBCLI-071-TC-04",
+            "REBCLI-071-TC-05",
+            "REBCLI-071-TC-06",
+        ],
+        commands=[
+            SLACK_PERSONAL_BINDING_ROUTE_COMMAND,
+            SLACK_PERSONAL_BINDING_SERVICE_COMMAND,
+        ],
+        notes=(
+            "Covers Slack personal OAuth binding rows without live Slack "
+            "network calls: protected start descriptor/handler behavior, "
+            "Slack authorization URL and callback exchange through mocked "
+            "OAuth, sanitized redirect_after handling, single-use/expired "
+            "state, denied/missing-code/exchange-failure callback redirects, "
+            "binding mismatch/store failure handling, pending-state eviction, "
+            "tenant/app/team/installation validation, tenant-app-scope "
+            "enforcement, invalid Slack id rejection, and binding-store error "
+            "propagation."
         ),
     ),
     "webui_v2_filesystem_api_regression": CaseSpec(
