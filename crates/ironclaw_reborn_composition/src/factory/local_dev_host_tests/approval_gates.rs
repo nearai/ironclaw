@@ -27,20 +27,7 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
 use super::*;
 use crate::local_dev_capability_policy::local_dev_one_shot_lease_approval;
 
-async fn disable_global_auto_approve(
-    local_runtime: &RebornLocalRuntimeServices,
-    context: &ExecutionContext,
-) {
-    local_runtime
-        .auto_approve_settings
-        .set(AutoApproveSettingInput {
-            scope: context.resource_scope.clone(),
-            enabled: false,
-            updated_by: Principal::User(context.user_id.clone()),
-        })
-        .await
-        .expect("disable global auto-approve"); // safety: test-only gating precondition
-}
+use crate::approval_test_support::disable_global_auto_approve;
 
 #[tokio::test]
 async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one_shot_lease() {

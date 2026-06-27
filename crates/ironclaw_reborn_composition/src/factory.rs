@@ -4880,7 +4880,7 @@ mod tests {
             .await
             .expect("create Google account");
 
-        disable_global_auto_approve_for_context(local_runtime, &gmail_context).await;
+        disable_global_auto_approve(local_runtime, &gmail_context).await;
         let failure = invoke_json(
             &services,
             "gmail.send_message",
@@ -4901,7 +4901,7 @@ mod tests {
         assert_eq!(gmail_leases[0].status, CapabilityLeaseStatus::Revoked);
 
         let calendar_context = gsuite_context("google-calendar.create_event");
-        disable_global_auto_approve_for_context(local_runtime, &calendar_context).await;
+        disable_global_auto_approve(local_runtime, &calendar_context).await;
         let failure = invoke_json(
             &services,
             "google-calendar.create_event",
@@ -6193,24 +6193,7 @@ mod tests {
             .expect("enabling global auto-approve should succeed");
     }
 
-    /// Turn off the global auto-approve switch for `context`'s actor scope.
-    /// Global auto-approve now defaults ON, so a test that needs to exercise the
-    /// per-tool approval gate (and its resume/one-shot-lease path) must flip the
-    /// switch off explicitly as a precondition.
-    async fn disable_global_auto_approve_for_context(
-        local_runtime: &RebornLocalRuntimeServices,
-        context: &ExecutionContext,
-    ) {
-        local_runtime
-            .auto_approve_settings
-            .set(AutoApproveSettingInput {
-                updated_by: Principal::User(context.resource_scope.user_id.clone()),
-                scope: context.resource_scope.clone(),
-                enabled: false,
-            })
-            .await
-            .expect("disabling global auto-approve should succeed");
-    }
+    use crate::approval_test_support::disable_global_auto_approve;
 
     fn notion_mcp_context(capability_id: &str) -> ExecutionContext {
         let extension_id = ExtensionId::new("caller").expect("valid extension id");
