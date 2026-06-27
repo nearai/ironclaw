@@ -43,6 +43,18 @@ pub const TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS: u64 = 5_000;
 pub const TRACE_REMOTE_REQUEST_DEFAULT_TIMEOUT_MS: u64 = 30_000;
 pub const TRACE_REMOTE_REQUEST_TIMEOUT_ENV: &str = "IRONCLAW_TRACE_REMOTE_REQUEST_TIMEOUT_MS";
 pub const TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES: usize = 64 * 1024;
+
+/// Default page size for an account-traces fetch when the caller passes no
+/// explicit limit. Bounds the initial WebUI/facade slice so `None` never
+/// requests unbounded history; full history is a future paginated flow.
+const ACCOUNT_TRACES_DEFAULT_LIMIT: usize = 200;
+/// Hard ceiling on the account-traces page size; larger requests are clamped so
+/// a caller can never ask the server for an unbounded slice.
+const ACCOUNT_TRACES_MAX_LIMIT: usize = 500;
+/// Maximum accepted account-traces response body (256 KiB). A list response is
+/// larger than a single claim but must still be bounded so the direct path
+/// cannot buffer an unbounded body.
+const ACCOUNT_TRACES_MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const TRACE_UPLOAD_CLAIM_REFRESH_SKEW_SECONDS: i64 = 60;
 const TRACE_CREDIT_NOTICE_OUTBOX_MAX_ATTEMPTS_STORED: usize = 10;
 
@@ -5510,6 +5522,30 @@ async fn read_bounded_trace_upload_claim_response(
     })
 }
 
+/// Read an account-traces list response body with a hard byte ceiling so the
+/// direct path cannot buffer an unbounded body even when the server omits a
+/// `Content-Length` (chunked transfer). Mirrors
+/// [`read_bounded_trace_upload_claim_response`] with the larger
+/// [`ACCOUNT_TRACES_MAX_RESPONSE_BYTES`] cap.
+async fn read_bounded_account_traces_response(
+    mut response: reqwest::Response,
+) -> anyhow::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to read account traces response body: {e}"))?
+    {
+        bytes.extend_from_slice(&chunk);
+        anyhow::ensure!(
+            bytes.len() <= ACCOUNT_TRACES_MAX_RESPONSE_BYTES,
+            "account traces response exceeded {} bytes",
+            ACCOUNT_TRACES_MAX_RESPONSE_BYTES
+        );
+    }
+    Ok(bytes)
+}
+
 /// Parse the issuer's typed error label out of an error response body.
 /// The issuer returns `{"error": "<Label>"}` for refusals (see
 /// trace-commons-server `IssuerError::into_response`). Returns `None`
@@ -6120,10 +6156,13 @@ fn account_traces_url(
     limit: Option<usize>,
 ) -> anyhow::Result<String> {
     let base = account_api_base_url(policy)?;
-    match limit {
-        Some(n) => Ok(format!("{base}/v1/account/traces?limit={n}")),
-        None => Ok(format!("{base}/v1/account/traces")),
-    }
+    // Always send a bounded limit: `None` defaults to ACCOUNT_TRACES_DEFAULT_LIMIT
+    // and any explicit value is clamped to [1, ACCOUNT_TRACES_MAX_LIMIT], so no
+    // caller can trigger an unbounded server-side history fetch.
+    let effective = limit
+        .unwrap_or(ACCOUNT_TRACES_DEFAULT_LIMIT)
+        .clamp(1, ACCOUNT_TRACES_MAX_LIMIT);
+    Ok(format!("{base}/v1/account/traces?limit={effective}"))
 }
 
 /// Mint a one-time account login link for the given `(tenant_id, user_id)`.
@@ -6330,13 +6369,20 @@ async fn fetch_account_traces_direct(
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("account traces request failed: {e}"))?;
-    if !response.status().is_success() {
+    let status = response.status();
+    // 404 means this enrolled principal has no account/traces yet — a legitimate
+    // empty state. Any OTHER non-2xx (401/403/429/5xx) is a real failure and must
+    // surface as an error so the WebUI boundary renders a sanitized unavailable
+    // state rather than a misleading "no traces".
+    if status == reqwest::StatusCode::NOT_FOUND {
         return Ok(vec![]);
     }
-    let body = response
-        .bytes()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to read account traces response body: {e}"))?;
+    anyhow::ensure!(
+        status.is_success(),
+        "account traces request returned status {}",
+        status.as_u16()
+    );
+    let body = read_bounded_account_traces_response(response).await?;
     let items: Vec<AccountTraceItem> = serde_json::from_slice(&body)
         .context("account traces response was not a valid JSON array")?;
     Ok(items)
@@ -6380,9 +6426,17 @@ async fn fetch_account_traces_inner(
         })
         .await
         .map_err(|e| anyhow::anyhow!("account traces request failed: {e}"))?;
-    if !(200..300).contains(&response.status) {
+    // 404 = no account/traces yet for this enrolled principal (legitimate empty);
+    // any other non-2xx is a real failure and propagates as an error. The host
+    // egress already bounded the body via `response_body_limit` above.
+    if response.status == 404 {
         return Ok(vec![]);
     }
+    anyhow::ensure!(
+        (200..300).contains(&response.status),
+        "account traces request returned status {}",
+        response.status
+    );
     let items: Vec<AccountTraceItem> = serde_json::from_slice(&response.body)
         .context("account traces response was not a valid JSON array")?;
     Ok(items)
@@ -15481,12 +15535,29 @@ mod tests {
             ),
             ..Default::default()
         };
+        // None defaults to the bounded page size (never an unbounded fetch).
         let url_no_limit = account_traces_url(&policy, None).expect("no-limit must succeed");
-        assert_eq!(url_no_limit, "https://api.example.com/v1/account/traces");
+        assert_eq!(
+            url_no_limit,
+            format!(
+                "https://api.example.com/v1/account/traces?limit={}",
+                ACCOUNT_TRACES_DEFAULT_LIMIT
+            )
+        );
         let url_with_limit = account_traces_url(&policy, Some(50)).expect("limit=50 must succeed");
         assert_eq!(
             url_with_limit,
             "https://api.example.com/v1/account/traces?limit=50"
+        );
+        // An over-large limit is clamped to the hard ceiling.
+        let url_clamped =
+            account_traces_url(&policy, Some(100_000)).expect("large limit must succeed");
+        assert_eq!(
+            url_clamped,
+            format!(
+                "https://api.example.com/v1/account/traces?limit={}",
+                ACCOUNT_TRACES_MAX_LIMIT
+            )
         );
     }
 
@@ -15597,5 +15668,87 @@ mod tests {
             .await
             .unwrap();
         assert!(items.is_empty(), "unenrolled user must return empty list");
+    }
+
+    /// Helper: enroll an instance scope at `base` against a mock that serves the
+    /// claim issuer plus `/v1/account/traces` returning `status`/`body`. Returns
+    /// the result of `fetch_account_traces_inner`.
+    async fn fetch_account_traces_with_status(
+        status: axum::http::StatusCode,
+        body: serde_json::Value,
+    ) -> anyhow::Result<Vec<AccountTraceItem>> {
+        let claim_jwt = test_jwt_with_header(serde_json::json!({"alg": "EdDSA", "kid": "k1"}));
+        let claim_jwt_for_mock = claim_jwt.clone();
+        let app = axum::Router::new()
+            .route(
+                "/v1/trace-upload-claim",
+                axum::routing::post(move || {
+                    let jwt = claim_jwt_for_mock.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "access_token": jwt, "token_type": "Bearer", "expires_in": 300
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/v1/account/traces",
+                axum::routing::get(move || {
+                    let body = body.clone();
+                    async move { (status, axum::Json(body)) }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let base = tempfile::tempdir().unwrap();
+        let policy = StandingTraceContributionPolicy {
+            enabled: true,
+            auth_mode: TraceUploadAuthMode::DeviceKey,
+            upload_token_issuer_url: Some(format!("http://{addr}/v1/trace-upload-claim")),
+            upload_token_issuer_allowed_hosts: std::collections::BTreeSet::from([
+                "127.0.0.1".to_string()
+            ]),
+            upload_token_tenant_id: Some("tenant-dev".to_string()),
+            upload_token_audience: Some("trace-commons-ingest".to_string()),
+            ..Default::default()
+        };
+        write_trace_policy_for_scope_at(base.path(), None, &policy).unwrap();
+        let instance_dir = trace_contribution_dir_for_scope_at(base.path(), None);
+        crate::onboarding::DeviceKeypair::load_or_generate_pending(&instance_dir, "h")
+            .unwrap()
+            .promote(&instance_dir, "tenant-dev")
+            .unwrap();
+
+        let sink = ReqwestContributionSink;
+        fetch_account_traces_inner(base.path(), "tenant-dev", "alice", None, &sink).await
+    }
+
+    #[tokio::test]
+    async fn fetch_account_traces_errors_on_server_error() {
+        // A 5xx must NOT be swallowed as an empty list — it surfaces as Err so
+        // the WebUI boundary renders a sanitized unavailable state.
+        let result = fetch_account_traces_with_status(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": "boom"}),
+        )
+        .await;
+        assert!(result.is_err(), "5xx must surface as an error, not empty");
+    }
+
+    #[tokio::test]
+    async fn fetch_account_traces_404_is_empty() {
+        // 404 = no account/traces yet for this enrolled principal → legitimate
+        // empty state, not an error.
+        let items = fetch_account_traces_with_status(
+            axum::http::StatusCode::NOT_FOUND,
+            serde_json::json!({"error": "no account"}),
+        )
+        .await
+        .expect("404 must be the empty zero-state");
+        assert!(items.is_empty());
     }
 }

@@ -39,7 +39,7 @@ function StatRow({ label, value, description }) {
 export function TraceCommonsTab({ searchQuery = "" }) {
   const t = useT();
   const { credits, query, authorize } = useTraceCredits();
-  const { traces, enrolled: tracesEnrolled } = useAccountTraces();
+  const { traces, enrolled: tracesEnrolled, query: tracesQuery } = useAccountTraces();
 
   if (
     !matchesSearch(searchQuery, [
@@ -180,7 +180,7 @@ export function TraceCommonsTab({ searchQuery = "" }) {
           </ul>
         </div>
       `}
-      ${tracesEnrolled && traces.length > 0 &&
+      ${(tracesQuery.isError || (tracesEnrolled && traces.length > 0)) &&
       html`
         <div className="mt-5">
           <h4
@@ -188,6 +188,15 @@ export function TraceCommonsTab({ searchQuery = "" }) {
           >
             ${t("traceCommons.submittedTracesTitle")}
           </h4>
+          ${tracesQuery.isError
+            ? html`
+                <div
+                  className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+                >
+                  ${t("traceCommons.tracesLoadFailed")}
+                </div>
+              `
+            : html`
           <ul className="space-y-2">
             ${traces.map(
               (trace) => html`
@@ -213,7 +222,9 @@ export function TraceCommonsTab({ searchQuery = "" }) {
                     <span>
                       ${t("traceCommons.traceFinalCredit")}:${" "}
                       <span className="font-mono text-[var(--v2-text-strong)]">
-                        ${formatCredit(trace.final_credit)}
+                        ${trace.final_credit != null
+                          ? formatCredit(trace.final_credit)
+                          : "—"}
                       </span>
                     </span>
                     <span className="ml-auto shrink-0">
@@ -224,6 +235,7 @@ export function TraceCommonsTab({ searchQuery = "" }) {
               `
             )}
           </ul>
+              `}
         </div>
       `}
     `;

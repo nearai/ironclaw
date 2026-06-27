@@ -248,6 +248,10 @@ struct StubServices {
     pause_automation_calls: Mutex<Vec<String>>,
     resume_automation_calls: Mutex<Vec<String>>,
     delete_automation_calls: Mutex<Vec<String>>,
+    /// Captures the authenticated caller's user id for each
+    /// `trace_account_traces` call, so the contract test can assert the handler
+    /// forwards the caller (the route is caller-scoped).
+    trace_account_traces_callers: Mutex<Vec<String>>,
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
     next_delete_automation_error: Mutex<Option<RebornServicesError>>,
     get_outbound_preferences_calls: Mutex<usize>,
@@ -1308,8 +1312,14 @@ impl RebornServicesApi for StubServices {
 
     async fn trace_account_traces(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornAccountTracesResponse, RebornServicesError> {
+        // Capture the forwarded caller so the contract test can verify the
+        // caller-scoped route actually threads the authenticated identity.
+        self.trace_account_traces_callers
+            .lock()
+            .expect("lock")
+            .push(caller.actor().user_id.as_str().to_string());
         // Hermetic zero-state stub — no filesystem or network access.
         // Mirrors the unenrolled branch of the real `account_traces_for_user`
         // so the contract test for `GET /traces/account` is fully self-contained.
@@ -2184,8 +2194,9 @@ async fn trace_account_traces_returns_caller_scoped_unenrolled_zero_state() {
         None,
         None,
     );
+    let services = Arc::new(StubServices::default());
     let router = webui_v2_router(WebUiV2State::new(
-        Arc::new(StubServices::default()),
+        services.clone(),
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
     .layer(axum::Extension(unique_caller))
@@ -2206,6 +2217,17 @@ async fn trace_account_traces_returns_caller_scoped_unenrolled_zero_state() {
     let body = read_json(response).await;
     assert_eq!(body["enrolled"], false);
     assert_eq!(body["traces"].as_array().expect("traces array").len(), 0);
+
+    // The route is caller-scoped: the handler must forward the authenticated
+    // caller's user id to the facade (fails if it stops threading the caller).
+    assert_eq!(
+        services
+            .trace_account_traces_callers
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec![user_id],
+    );
 }
 
 #[tokio::test]

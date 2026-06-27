@@ -232,6 +232,7 @@ registerPack("en", {
   "traceCommons.note":
     "Local view as of last sync — the authoritative credit ledger is server-side. Final credit can change after privacy review, replay/eval, duplicate checks, and downstream utility scoring.",
   "traceCommons.submittedTracesTitle": "Submitted traces",
+  "traceCommons.tracesLoadFailed": "Could not load your submitted traces.",
   "traceCommons.traceStatus": "Status",
   "traceCommons.tracePendingCredit": "Pending credit",
   "traceCommons.traceFinalCredit": "Final credit",

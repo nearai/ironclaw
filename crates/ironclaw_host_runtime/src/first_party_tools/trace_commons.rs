@@ -194,7 +194,13 @@ pub(super) fn account_login_link_manifest() -> Result<CapabilityManifest, Extens
         "Mint a one-time Trace Commons browser login link so the user can manage their \
          contributor account/profile in the web UI. Consent-gated: only call with \
          confirmed=true after the user explicitly asks. Routes through host network egress.",
-        vec![EffectKind::Network, EffectKind::ExternalWrite],
+        // ReadFilesystem: the dispatch reads local enrollment/policy/device-key
+        // state before egress (mirrors profile_token's effect set).
+        vec![
+            EffectKind::ReadFilesystem,
+            EffectKind::Network,
+            EffectKind::ExternalWrite,
+        ],
         PermissionMode::Ask,
         resource_profile(),
     )
