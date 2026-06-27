@@ -523,6 +523,13 @@ mod tests {
             .await
             .expect("oneshot");
         assert_eq!(wallet.status(), StatusCode::OK);
+        assert_eq!(
+            wallet
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .expect("cache-control on wallet popup"),
+            "no-store"
+        );
         let wallet_csp = wallet
             .headers()
             .get(axum::http::header::CONTENT_SECURITY_POLICY)

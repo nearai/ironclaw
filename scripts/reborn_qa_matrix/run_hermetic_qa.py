@@ -264,6 +264,43 @@ WEBUI_V2_STATIC_ROUTER_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_WALLET_CONNECT_CLIENT_COMMAND = CommandSpec(
+    name="webui_v2_wallet_connect_client_contracts",
+    description=(
+        "Focused WebUI v2 NEAR wallet connect popup contracts for the fixed "
+        "NEAR AI login message/recipient, epoch-millis nonce layout, random "
+        "nonce tail, BroadcastChannel success/failure payloads, isolated popup "
+        "HTML/importmap, and authenticated app relay to the protected wallet "
+        "completion route."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/lib/wallet-connect-core.test.mjs",
+    ],
+)
+
+WEBUI_V2_WALLET_CONNECT_ROUTER_COMMAND = CommandSpec(
+    name="webui_v2_wallet_connect_static_route",
+    description=(
+        "Focused WebUI v2 static route contract for the isolated wallet "
+        "connect popup's relaxed CSP, no-store cache policy, and strict SPA "
+        "shell CSP isolation."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2_static",
+        "--all-features",
+        "wallet_connect_popup_gets_relaxed_csp_and_spa_shell_stays_strict",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_STATIC_AUTH_JS_COMMAND = CommandSpec(
     name="webui_v2_static_auth_js_contract",
     description=(
@@ -1972,6 +2009,33 @@ CASES: dict[str, CaseSpec] = {
             "settings/traces navigation, shared trace-credits react-query key, "
             "and display-only sidebar placement. Live Trace Commons ledger/API "
             "behavior remains outside this hermetic lane."
+        ),
+    ),
+    "webui_v2_wallet_connect_regression": CaseSpec(
+        name="webui_v2_wallet_connect_regression",
+        feature="WebUI v2 NEAR wallet connect popup",
+        category="Hermetic Wallet Connect Popup Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-078-TC-01",
+            "REBCLI-078-TC-02",
+            "REBCLI-078-TC-03",
+            "REBCLI-078-TC-04",
+            "REBCLI-078-TC-05",
+            "REBCLI-078-TC-06",
+        ],
+        commands=[
+            WEBUI_V2_WALLET_CONNECT_CLIENT_COMMAND,
+            WEBUI_V2_WALLET_CONNECT_ROUTER_COMMAND,
+            WEBUI_V2_LLM_PROVIDER_ROUTE_COMMAND,
+        ],
+        notes=(
+            "Covers the WebUI v2 NEAR wallet connect popup without live wallet "
+            "interaction: static popup route, missing channel/BroadcastChannel "
+            "fail-closed source path, epoch-millis plus random nonce layout, "
+            "fixed NEAR AI message/recipient, BroadcastChannel success/failure "
+            "payloads, no-store and wallet-scoped relaxed CSP, strict SPA CSP "
+            "isolation, and protected backend wallet completion route gating. "
+            "Live wallet-provider behavior remains external/canary scope."
         ),
     ),
     "webui_v2_filesystem_api_regression": CaseSpec(
