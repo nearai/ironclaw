@@ -87,6 +87,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-048-TC-07",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-049-TC-01",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -2171,6 +2175,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-048-TC-04",
                     "REBCLI-048-TC-05",
                     "REBCLI-048-TC-06",
+                    "REBCLI-048-TC-07",
                 ],
             )
             self.assertEqual(
@@ -2181,6 +2186,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 [
                     "webui_v2_descriptor_policy_surface",
                     "webui_v2_llm_provider_routes",
+                    "ironclaw_llm_provider_substrate_contracts",
                     "webui_v2_operator_handler_contracts",
                     "webui_v2_operator_mount_policy",
                     "webui_v2_operator_llm_config_persistence",
@@ -2189,8 +2195,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             commands = results["results"][0]["details"]["commands"]
             self.assertIn("--test webui_v2_descriptors_contract", commands[0]["command"])
             self.assertIn("--test webui_v2_handlers_contract", commands[1]["command"])
-            self.assertIn("operator_", commands[2]["command"])
-            self.assertIn("operator_llm_config", commands[4]["command"])
+            self.assertIn("-p ironclaw_llm", commands[2]["command"])
+            self.assertIn("-p ironclaw_embeddings", commands[2]["command"])
+            self.assertIn("operator_", commands[3]["command"])
+            self.assertIn("operator_llm_config", commands[5]["command"])
 
     def test_project_files_case_dry_run_maps_api_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:

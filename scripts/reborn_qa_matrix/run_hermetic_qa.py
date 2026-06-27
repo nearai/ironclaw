@@ -2039,6 +2039,31 @@ WEBUI_V2_LLM_PROVIDER_ROUTE_COMMAND = CommandSpec(
     ],
 )
 
+IRONCLAW_LLM_PROVIDER_SUBSTRATE_COMMAND = CommandSpec(
+    name="ironclaw_llm_provider_substrate_contracts",
+    description=(
+        "Focused LLM owner-crate substrate contracts for provider request and "
+        "response conversion, auth parsing, model classification, costs, "
+        "retry, failover, circuit-breaker, embedding provider, URL safety, "
+        "and embedding-cache behavior used by WebUI v2 operator/provider "
+        "configuration and memory/search flows."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_llm",
+        "-p",
+        "ironclaw_embeddings",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_NEARAI_LOGIN_STATE_COMMAND = CommandSpec(
     name="webui_v2_nearai_login_state_contracts",
     description=(
@@ -3273,10 +3298,12 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-048-TC-04",
             "REBCLI-048-TC-05",
             "REBCLI-048-TC-06",
+            "REBCLI-048-TC-07",
         ],
         commands=[
             WEBUI_V2_DESCRIPTOR_POLICY_COMMAND,
             WEBUI_V2_LLM_PROVIDER_ROUTE_COMMAND,
+            IRONCLAW_LLM_PROVIDER_SUBSTRATE_COMMAND,
             WEBUI_V2_OPERATOR_HANDLER_COMMAND,
             WEBUI_V2_OPERATOR_MOUNT_COMMAND,
             WEBUI_V2_OPERATOR_LLM_CONFIG_COMMAND,
@@ -3284,6 +3311,7 @@ CASES: dict[str, CaseSpec] = {
         notes=(
             "Covers non-browser WebUI v2 operator/LLM configuration rows: "
             "descriptor policy, provider CRUD and active/test/model routes, "
+            "LLM provider substrate contracts, "
             "operator setup/config/diagnostics/status/logs/lifecycle handlers, "
             "operator capability/mount gating, redacted secret/error handling, "
             "and composed provider key persistence."
