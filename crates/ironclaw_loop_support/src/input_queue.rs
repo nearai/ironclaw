@@ -85,17 +85,37 @@ pub enum HostInputQueueError {
 
 #[async_trait]
 pub trait HostInputEnqueuePort: Send + Sync {
-    async fn enqueue_input(
-        &self,
-        run_id: TurnRunId,
-        input: LoopInput,
-    ) -> Result<HostInputEnvelope, HostInputQueueError>;
-
+    /// Enqueue a user message as steering/followup input for an active run.
+    ///
+    /// The request carries the originating thread message identity so the queue
+    /// can transition that message to `submitted` once the input is consumed.
+    /// There is deliberately no metadata-free variant: every enqueued input is
+    /// backed by a thread message, so the status transition can never be
+    /// silently dropped.
     async fn enqueue_queued_message(
         &self,
         request: EnqueueQueuedMessageRequest,
+    ) -> Result<HostInputEnvelope, HostInputQueueError>;
+}
+
+/// Null-object enqueue port used as the default when a host has not wired a
+/// real input queue. Every enqueue fails closed with `Unavailable` rather than
+/// silently dropping the message. Production runtimes always replace this with
+/// the host-owned queue; it exists so callers can hold a non-optional
+/// `Arc<dyn HostInputEnqueuePort>` instead of an `Option` that production never
+/// leaves unset.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RejectingInputEnqueue;
+
+#[async_trait]
+impl HostInputEnqueuePort for RejectingInputEnqueue {
+    async fn enqueue_queued_message(
+        &self,
+        _request: EnqueueQueuedMessageRequest,
     ) -> Result<HostInputEnvelope, HostInputQueueError> {
-        self.enqueue_input(request.run_id, request.input).await
+        Err(HostInputQueueError::Unavailable {
+            reason: "input queue is not wired for this runtime".to_string(),
+        })
     }
 }
 
@@ -117,10 +137,9 @@ struct QueuedMessageStatusUpdate {
     message_id: ThreadMessageId,
 }
 
-#[derive(Default)]
 pub struct InMemoryHostInputQueue {
     state: Arc<Mutex<InMemoryHostInputQueueState>>,
-    thread_service: Option<Arc<dyn SessionThreadService>>,
+    thread_service: Arc<dyn SessionThreadService>,
 }
 
 impl std::fmt::Debug for InMemoryHostInputQueue {
@@ -128,7 +147,6 @@ impl std::fmt::Debug for InMemoryHostInputQueue {
         formatter
             .debug_struct("InMemoryHostInputQueue")
             .field("state", &self.state)
-            .field("thread_service", &self.thread_service.is_some())
             .finish()
     }
 }
@@ -161,24 +179,22 @@ struct InMemoryInputEntry {
 }
 
 impl InMemoryHostInputQueue {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_thread_service(thread_service: Arc<dyn SessionThreadService>) -> Self {
+    pub fn new(thread_service: Arc<dyn SessionThreadService>) -> Self {
         Self {
             state: Arc::new(Mutex::new(InMemoryHostInputQueueState::default())),
-            thread_service: Some(thread_service),
+            thread_service,
         }
     }
-}
 
-#[async_trait]
-impl HostInputEnqueuePort for InMemoryHostInputQueue {
-    async fn enqueue_input(
+    /// Enqueue `input` for `run_id`, attaching `queued_message` status metadata.
+    ///
+    /// Identical inputs already queued for the run are deduplicated; the first
+    /// status binding for an entry wins.
+    fn enqueue_with(
         &self,
         run_id: TurnRunId,
         input: LoopInput,
+        queued_message: QueuedMessageStatusUpdate,
     ) -> Result<HostInputEnvelope, HostInputQueueError> {
         let mut state = self
             .state
@@ -187,9 +203,10 @@ impl HostInputEnqueuePort for InMemoryHostInputQueue {
         let queue = state.runs.entry(run_id).or_default();
         if let Some(existing) = queue
             .entries
-            .iter()
+            .iter_mut()
             .find(|entry| entry.envelope.input == input)
         {
+            existing.queued_message.get_or_insert(queued_message);
             return Ok(existing.envelope.clone());
         }
         let sequence = queue.next_sequence;
@@ -202,11 +219,14 @@ impl HostInputEnqueuePort for InMemoryHostInputQueue {
         queue.entries.push(InMemoryInputEntry {
             sequence,
             envelope: envelope.clone(),
-            queued_message: None,
+            queued_message: Some(queued_message),
         });
         Ok(envelope)
     }
+}
 
+#[async_trait]
+impl HostInputEnqueuePort for InMemoryHostInputQueue {
     async fn enqueue_queued_message(
         &self,
         request: EnqueueQueuedMessageRequest,
@@ -219,44 +239,16 @@ impl HostInputEnqueuePort for InMemoryHostInputQueue {
             message_id,
             input,
         } = request;
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| HostInputQueueError::Internal)?;
-        let queue = state.runs.entry(run_id).or_default();
-        if let Some(existing) = queue
-            .entries
-            .iter_mut()
-            .find(|entry| entry.envelope.input == input)
-        {
-            if existing.queued_message.is_none() {
-                existing.queued_message = Some(QueuedMessageStatusUpdate {
-                    turn_id,
-                    scope,
-                    thread_id,
-                    message_id,
-                });
-            }
-            return Ok(existing.envelope.clone());
-        }
-        let sequence = queue.next_sequence;
-        queue.next_sequence = queue.next_sequence.saturating_add(1);
-        let envelope = HostInputEnvelope {
+        self.enqueue_with(
+            run_id,
             input,
-            cursor: cursor_token(sequence)?,
-            ack_token: ack_token(sequence)?,
-        };
-        queue.entries.push(InMemoryInputEntry {
-            sequence,
-            envelope: envelope.clone(),
-            queued_message: Some(QueuedMessageStatusUpdate {
+            QueuedMessageStatusUpdate {
                 turn_id,
                 scope,
                 thread_id,
                 message_id,
-            }),
-        });
-        Ok(envelope)
+            },
+        )
     }
 }
 
@@ -338,19 +330,17 @@ impl HostInputQueue for InMemoryHostInputQueue {
             }
             (tokens_to_ack, updates)
         };
-        if let Some(thread_service) = &self.thread_service {
-            for update in updates {
-                thread_service
-                    .mark_message_submitted(
-                        &update.scope,
-                        &update.thread_id,
-                        update.message_id,
-                        update.turn_id.to_string(),
-                        run_id.to_string(),
-                    )
-                    .await
-                    .map_err(|source| HostInputQueueError::ThreadStatusUpdate { source })?;
-            }
+        for update in updates {
+            self.thread_service
+                .mark_message_submitted(
+                    &update.scope,
+                    &update.thread_id,
+                    update.message_id,
+                    update.turn_id.to_string(),
+                    run_id.to_string(),
+                )
+                .await
+                .map_err(|source| HostInputQueueError::ThreadStatusUpdate { source })?;
         }
         let mut state = self
             .state
@@ -365,7 +355,7 @@ impl HostInputQueue for InMemoryHostInputQueue {
 }
 
 fn cursor_sequence(token: &LoopInputCursorToken) -> Result<u64, HostInputQueueError> {
-    if token.as_str() == "input-cursor:origin" {
+    if token.is_origin() {
         return Ok(0);
     }
     token

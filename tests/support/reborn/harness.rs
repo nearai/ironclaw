@@ -857,11 +857,9 @@ impl RebornBinaryE2EHarness {
             accept_harness_blocked_evidence,
         });
         let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
-        let host_input_queue = Arc::new(
-            ironclaw_loop_support::InMemoryHostInputQueue::with_thread_service(
-                thread_harness.service.clone() as Arc<dyn ironclaw_threads::SessionThreadService>,
-            ),
-        );
+        let host_input_queue = Arc::new(ironclaw_loop_support::InMemoryHostInputQueue::new(
+            thread_harness.service.clone() as Arc<dyn ironclaw_threads::SessionThreadService>,
+        ));
         let host_input_queue_reader: Arc<dyn ironclaw_loop_support::HostInputQueue> =
             host_input_queue.clone();
         let host_input_enqueue: Arc<dyn ironclaw_loop_support::HostInputEnqueuePort> =

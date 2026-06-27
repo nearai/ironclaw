@@ -44,12 +44,12 @@ use ironclaw_threads::{
     ThreadScope,
 };
 use ironclaw_turns::{
-    CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor, GetRunStateRequest,
-    IdempotencyKey, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    InMemoryTurnStateStore, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
-    SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnRunWake,
-    TurnScope, TurnStateStore, TurnStatus,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor,
+    GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
+    InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
+    RunProfileId, RunProfileVersion, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, ThreadBusy, TurnActor, TurnCoordinator, TurnError, TurnId, TurnOriginKind,
+    TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopCancelReasonKind, LoopCapabilityPort, LoopInput, LoopInputAckToken,
@@ -176,8 +176,32 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
         panic!("cancel_run is not used by inbound turn contract tests")
     }
 
-    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        panic!("get_run_state is not used by inbound turn contract tests")
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        // The busy-steering gateway resolves the active run's turn id before
+        // enqueuing. Return a minimal running-state for the requested run so the
+        // no-queue rejection path can exercise the full gateway.
+        Ok(TurnRunState {
+            scope: request.scope,
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id: request.run_id,
+            status: TurnStatus::Running,
+            accepted_message_ref: AcceptedMessageRef::new("msg:scripted").expect("valid"),
+            source_binding_ref: SourceBindingRef::new("src:scripted").expect("valid"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:scripted").expect("valid"),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            resolved_model_route: None,
+            received_at: Utc::now(),
+            checkpoint_id: None,
+            gate_ref: None,
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: EventCursor::default(),
+            product_context: None,
+            resume_disposition: None,
+        })
     }
 }
 
@@ -1104,10 +1128,9 @@ async fn busy_thread_with_input_queue_defers_second_message_until_queue_ack() {
     let thread_service = InMemorySessionThreadService::default();
     let store = Arc::new(InMemoryTurnStateStore::default());
     let coordinator = DefaultTurnCoordinator::new(store);
-    let input_queue = Arc::new(InMemoryHostInputQueue::with_thread_service(Arc::new(
-        thread_service.clone(),
-    )
-        as Arc<dyn SessionThreadService>));
+    let input_queue = Arc::new(InMemoryHostInputQueue::new(
+        Arc::new(thread_service.clone()) as Arc<dyn SessionThreadService>,
+    ));
     let input_enqueue: Arc<dyn HostInputEnqueuePort> = input_queue.clone();
     let service =
         DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator)
@@ -1190,21 +1213,13 @@ struct AckingInputEnqueue {
 impl AckingInputEnqueue {
     fn new(thread_service: Arc<dyn SessionThreadService>) -> Self {
         Self {
-            inner: InMemoryHostInputQueue::with_thread_service(thread_service),
+            inner: InMemoryHostInputQueue::new(thread_service),
         }
     }
 }
 
 #[async_trait]
 impl HostInputEnqueuePort for AckingInputEnqueue {
-    async fn enqueue_input(
-        &self,
-        run_id: TurnRunId,
-        input: LoopInput,
-    ) -> Result<HostInputEnvelope, HostInputQueueError> {
-        self.inner.enqueue_input(run_id, input).await
-    }
-
     async fn enqueue_queued_message(
         &self,
         request: ironclaw_loop_support::EnqueueQueuedMessageRequest,

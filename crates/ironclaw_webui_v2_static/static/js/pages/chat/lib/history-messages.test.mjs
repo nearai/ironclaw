@@ -130,7 +130,11 @@ test("messagesFromTimeline: rejected_busy user record maps to error status with 
   );
 });
 
-test("messagesFromTimeline: deferred_busy user record maps to error status with durable resend copy", () => {
+test("messagesFromTimeline: deferred_busy user record stays queued (matches the live optimistic path)", () => {
+  // Live, useChat.send maps a `deferred_busy` outcome to a "queued" bubble.
+  // The reload path MUST agree: a deferred (accepted-and-queued) message is
+  // not an error and carries no resend copy. Regression guard for the
+  // live-vs-reload divergence.
   const messages = messagesFromTimeline([
     {
       message_id: "msg-db",
@@ -144,11 +148,8 @@ test("messagesFromTimeline: deferred_busy user record maps to error status with 
   assert.equal(messages.length, 1);
   assert.equal(messages[0].id, "msg-msg-db");
   assert.equal(messages[0].role, "user");
-  assert.equal(messages[0].status, "error");
-  assert.equal(
-    messages[0].error,
-    "This message wasn't sent because Ironclaw was busy. Resend it to try again.",
-  );
+  assert.equal(messages[0].status, "queued");
+  assert.equal(messages[0].error, undefined);
 });
 
 test("messagesFromTimeline: queued user record stays queued", () => {

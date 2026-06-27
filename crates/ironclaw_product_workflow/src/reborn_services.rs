@@ -22,11 +22,12 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, InvocationId, PermissionMode,
     Principal, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
-use ironclaw_loop_support::{EnqueueQueuedMessageRequest, HostInputEnqueuePort};
+use ironclaw_loop_support::{HostInputEnqueuePort, HostInputQueueError, RejectingInputEnqueue};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
     ProjectionSubscriptionRequest,
 };
+use ironclaw_resources::BudgetGateId;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, AttachmentRef, EnsureThreadRequest,
     MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError,
@@ -34,10 +35,9 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, LoopMessageRef,
-    ResumeTurnPrecondition, ResumeTurnRequest, SanitizedCancelReason, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
-    run_profile::LoopInput,
+    AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
+    ResumeTurnRequest, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize};
@@ -734,7 +734,9 @@ impl GateResolutionRoute {
                 )?;
                 Ok(Self::Auth)
             }
-            TurnStatus::BlockedResource if is_budget_gate_ref(requested_gate_ref.as_str()) => {
+            TurnStatus::BlockedResource
+                if BudgetGateId::is_budget_gate_ref(requested_gate_ref.as_str()) =>
+            {
                 validate_current_gate_ref(
                     parked_gate_ref,
                     requested_gate_ref,
@@ -760,16 +762,10 @@ impl GateResolutionRoute {
         ) {
             (true, _, _) => Self::Approval,
             (_, true, _) | (_, _, true) => Self::Auth,
-            _ if is_budget_gate_ref(gate_ref.as_str()) => Self::Resource,
+            _ if BudgetGateId::is_budget_gate_ref(gate_ref.as_str()) => Self::Resource,
             _ => Self::Generic,
         }
     }
-}
-
-fn is_budget_gate_ref(gate_ref: &str) -> bool {
-    gate_ref
-        .strip_prefix("gate:budget-")
-        .is_some_and(|value| Uuid::parse_str(value).is_ok())
 }
 
 fn operator_setup_validation_error(field: &str) -> RebornServicesError {
@@ -2369,6 +2365,9 @@ pub trait InboundAttachmentReader: Send + Sync {
     ) -> Result<Vec<u8>, RebornServicesError>;
 }
 
+// arch-exempt: large_file, budget resolution service + settings DTOs belong in a
+// `reborn_services/budget.rs` submodule; extraction tracked in
+// docs/plans/2026-06-27-reborn-budget-module-decomposition.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceGateResolutionDecision {
     Approve,
@@ -2458,7 +2457,7 @@ impl BudgetSettingsService for RejectingBudgetSettingsService {
 pub struct RebornServices {
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
-    input_enqueue: Option<Arc<dyn HostInputEnqueuePort>>,
+    input_enqueue: Arc<dyn HostInputEnqueuePort>,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
     project_filesystem: Option<Arc<dyn ProjectFilesystemReader>>,
     filesystem_browser: Option<Arc<dyn FilesystemBrowseReader>>,
@@ -2493,7 +2492,7 @@ impl RebornServices {
         Self {
             thread_service,
             turn_coordinator,
-            input_enqueue: None,
+            input_enqueue: Arc::new(RejectingInputEnqueue),
             inbound_attachments: None,
             project_filesystem: None,
             filesystem_browser: None,
@@ -2531,7 +2530,7 @@ impl RebornServices {
     }
 
     pub fn with_input_enqueue(mut self, input_enqueue: Arc<dyn HostInputEnqueuePort>) -> Self {
-        self.input_enqueue = Some(input_enqueue);
+        self.input_enqueue = input_enqueue;
         self
     }
 
@@ -3227,62 +3226,74 @@ impl RebornServicesApi for RebornServices {
             }
             Err(TurnError::ThreadBusy(busy)) => {
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
-                let Some(input_enqueue) = &self.input_enqueue else {
-                    mark_message_rejected_busy_or_replay(
-                        &*self.thread_service,
-                        &thread_scope,
-                        &handoff,
-                        &client_action_id,
-                    )
-                    .await?;
-                    let notice = rejected_busy_notice(busy.status);
-                    return Ok(RebornSubmitTurnResponse::RejectedBusy {
-                        thread_id: handoff.thread_id,
-                        accepted_message_ref,
-                        active_run_id: Some(busy.active_run_id),
-                        status: Some(busy.status),
-                        event_cursor: Some(busy.event_cursor),
-                        notice,
-                    });
-                };
-                let active_run = self
-                    .turn_coordinator
-                    .get_run_state(GetRunStateRequest {
-                        scope: scope.clone(),
-                        run_id: busy.active_run_id,
-                    })
-                    .await
-                    .map_err(map_turn_error)?;
-                let message_ref = LoopMessageRef::new(accepted_message_ref.as_str().to_string())
-                    .map_err(|_| RebornServicesError::internal_invariant())?;
-                input_enqueue
-                    .enqueue_queued_message(EnqueueQueuedMessageRequest {
-                        run_id: busy.active_run_id,
-                        turn_id: active_run.turn_id,
-                        scope: thread_scope.clone(),
-                        thread_id: handoff.thread_id.clone(),
-                        message_id: handoff.message_id,
-                        input: LoopInput::Steering { message_ref },
-                    })
-                    .await
-                    .map_err(|_| RebornServicesError::service_unavailable(false))?;
-                mark_message_queued_or_replay(
-                    &*self.thread_service,
-                    &thread_scope,
-                    &handoff,
-                    &client_action_id,
-                    busy.active_run_id.to_string(),
+                match crate::steering::enqueue_busy_steering(
+                    &*self.turn_coordinator,
+                    self.input_enqueue.as_ref(),
+                    scope.clone(),
+                    thread_scope.clone(),
+                    handoff.thread_id.clone(),
+                    handoff.message_id,
+                    &accepted_message_ref,
+                    busy.active_run_id,
                 )
-                .await?;
-                let notice = rejected_busy_notice(busy.status);
-                Ok(RebornSubmitTurnResponse::DeferredBusy {
-                    thread_id: handoff.thread_id,
-                    accepted_message_ref,
-                    active_run_id: busy.active_run_id,
-                    status: busy.status,
-                    event_cursor: busy.event_cursor,
-                    notice,
-                })
+                .await
+                {
+                    Ok(()) => {
+                        mark_message_queued_or_replay(
+                            &*self.thread_service,
+                            &thread_scope,
+                            &handoff,
+                            &client_action_id,
+                            busy.active_run_id.to_string(),
+                        )
+                        .await?;
+                        let notice = rejected_busy_notice(busy.status);
+                        Ok(RebornSubmitTurnResponse::DeferredBusy {
+                            thread_id: handoff.thread_id,
+                            accepted_message_ref,
+                            active_run_id: busy.active_run_id,
+                            status: busy.status,
+                            event_cursor: busy.event_cursor,
+                            notice,
+                        })
+                    }
+                    // No input queue wired for this runtime: queueing is
+                    // disabled, so reject the message as busy instead of
+                    // deferring it. This is the single mapped fallback for the
+                    // "no steering" mode (see RejectingInputEnqueue).
+                    Err(crate::steering::SteeringEnqueueError::Enqueue(
+                        HostInputQueueError::Unavailable { .. },
+                    )) => {
+                        mark_message_rejected_busy_or_replay(
+                            &*self.thread_service,
+                            &thread_scope,
+                            &handoff,
+                            &client_action_id,
+                        )
+                        .await?;
+                        let notice = rejected_busy_notice(busy.status);
+                        Ok(RebornSubmitTurnResponse::RejectedBusy {
+                            thread_id: handoff.thread_id,
+                            accepted_message_ref,
+                            active_run_id: Some(busy.active_run_id),
+                            status: Some(busy.status),
+                            event_cursor: Some(busy.event_cursor),
+                            notice,
+                        })
+                    }
+                    Err(crate::steering::SteeringEnqueueError::InvalidMessageRef(_)) => {
+                        Err(RebornServicesError::internal_invariant())
+                    }
+                    Err(crate::steering::SteeringEnqueueError::RunState(error)) => {
+                        Err(map_turn_error(error))
+                    }
+                    Err(crate::steering::SteeringEnqueueError::Enqueue(error)) => {
+                        // Carry the cause to the server log; the user-facing
+                        // surface stays the sanitized 503 (error-handling.md).
+                        tracing::warn!(%error, "failed to enqueue steering input for busy run");
+                        Err(RebornServicesError::service_unavailable(false))
+                    }
+                }
             }
             Err(error) => {
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;

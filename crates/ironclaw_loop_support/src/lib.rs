@@ -81,7 +81,7 @@ pub use identity_context::{
 pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{
     EnqueueQueuedMessageRequest, HostInputBatch, HostInputEnqueuePort, HostInputEnvelope,
-    HostInputQueue, HostInputQueueError, InMemoryHostInputQueue,
+    HostInputQueue, HostInputQueueError, InMemoryHostInputQueue, RejectingInputEnqueue,
 };
 pub use ironclaw_turns::run_profile::PromptContextTokenBudget;
 pub use skill_bundle_context_source::SkillBundleContextSource;
@@ -1239,7 +1239,7 @@ where
                     image_parts,
                 });
             }
-            return Ok(merge_consecutive_text_user_messages(messages));
+            return merge_consecutive_text_user_messages(messages);
         }
 
         let mut messages_by_ref = context_messages_by_ref(context.messages);
@@ -1402,7 +1402,7 @@ where
                 image_parts,
             });
         }
-        Ok(merge_consecutive_text_user_messages(resolved))
+        merge_consecutive_text_user_messages(resolved)
     }
 
     async fn load_model_context_window(
@@ -1462,9 +1462,19 @@ where
     }
 }
 
+/// Coalesce runs of consecutive plain-text user messages into a single provider
+/// turn (some providers reject consecutive same-role turns). This is the final
+/// provider-API shaping step before the request leaves for the gateway.
+///
+/// A coalesced turn no longer corresponds to a single thread message, so it must
+/// not inherit the first contributor's `content_ref` — that would let downstream
+/// code mis-map the merged turn back to one transcript row. Instead the merged
+/// message gets a synthetic `msg:coalesced.*` ref. The durable transcript keeps
+/// the original rows separate; the only consumer past this point is the provider
+/// gateway, which reads role/content, not `content_ref`.
 fn merge_consecutive_text_user_messages(
     messages: Vec<HostManagedModelMessage>,
-) -> Vec<HostManagedModelMessage> {
+) -> Result<Vec<HostManagedModelMessage>, AgentLoopHostError> {
     let mut merged: Vec<HostManagedModelMessage> = Vec::with_capacity(messages.len());
     for message in messages {
         if can_merge_text_user_message(&message)
@@ -1473,11 +1483,34 @@ fn merge_consecutive_text_user_messages(
         {
             previous.content.push('\n');
             previous.content.push_str(&message.content);
+            previous.content_ref =
+                coalesced_user_message_ref(&previous.content_ref, &message.content_ref)?;
             continue;
         }
         merged.push(message);
     }
-    merged
+    Ok(merged)
+}
+
+/// Build the synthetic content ref for a coalesced user turn. Deterministic in a
+/// turn and intentionally not a real `msg:<id>` ref so it cannot be parsed back
+/// into a transcript message identity. The ref is transient (never persisted),
+/// so non-cryptographic hashing is sufficient.
+fn coalesced_user_message_ref(
+    first: &LoopMessageRef,
+    next: &LoopMessageRef,
+) -> Result<LoopMessageRef, AgentLoopHostError> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    first.as_str().hash(&mut hasher);
+    next.as_str().hash(&mut hasher);
+    let hash = hasher.finish();
+    LoopMessageRef::new(format!("msg:coalesced.{hash:016x}")).map_err(|_| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            "coalesced user message reference could not be represented",
+        )
+    })
 }
 
 fn can_merge_text_user_message(message: &HostManagedModelMessage) -> bool {

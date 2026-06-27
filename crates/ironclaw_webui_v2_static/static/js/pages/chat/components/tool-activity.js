@@ -1,6 +1,7 @@
 import { Icon } from "../../../design-system/icons.js";
 import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
+import { localizedToolError } from "../lib/history-messages.js";
 
 /* Status dot colour by tool status. Running shows the breathing dot (a no-op
    under the static motion policy, matching the Badge component's approach). */
@@ -116,6 +117,7 @@ function ToolActivityCard({ activity, nested = false }) {
     toolStatus,
     toolDetail,
     toolError,
+    toolErrorKey,
     toolDurationMs,
     toolParameters,
     toolResultPreview,
@@ -182,6 +184,7 @@ function ToolActivityCard({ activity, nested = false }) {
           toolParameters=${toolParameters}
           toolResultPreview=${toolResultPreview}
           toolError=${toolError}
+          toolErrorKey=${toolErrorKey}
           toolStatus=${toolStatus}
           toolDurationMs=${hasDuration ? toolDurationMs : null}
         />`}
@@ -205,10 +208,14 @@ function ToolDetailPanel({
   toolParameters,
   toolResultPreview,
   toolError,
+  toolErrorKey,
   toolStatus,
   toolDurationMs,
 }) {
   const t = useT();
+  // Localize the error when the builder mapped a known error kind to an i18n
+  // key; concrete summaries (no key) render verbatim.
+  const errorText = localizedToolError(toolError, toolErrorKey, t);
   const tabs = React.useMemo(() => {
     const next = [];
     if (toolError) {
@@ -287,7 +294,7 @@ function ToolDetailPanel({
             "overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono",
             active === "declined" ? "text-iron-300" : "text-[var(--v2-danger-text)]",
           ].join(" ")}
-        >${toolError}</pre>`}
+        >${errorText}</pre>`}
       </div>
     </div>
   `;

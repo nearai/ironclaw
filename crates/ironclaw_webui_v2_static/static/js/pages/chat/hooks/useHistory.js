@@ -1,7 +1,7 @@
 import { React } from "../../../lib/html.js";
 import { fetchTimeline } from "../../../lib/api.js";
 import { authScope } from "../../../lib/auth-scope.js";
-import { messagesFromTimeline } from "../lib/history-messages.js";
+import { coalesceToolFields, messagesFromTimeline } from "../lib/history-messages.js";
 
 const PAGE_SIZE = 50;
 
@@ -375,17 +375,13 @@ function hydrateToolActivityDetails(message, currentMessage) {
   if (message?.role !== "tool_activity" || currentMessage?.role !== "tool_activity") {
     return message;
   }
-  let hydrated = message;
-  for (const field of ["toolDetail", "toolParameters", "toolResultPreview"]) {
-    if (!hasDisplayValue(hydrated[field]) && hasDisplayValue(currentMessage[field])) {
-      hydrated = { ...hydrated, [field]: currentMessage[field] };
-    }
-  }
-  return hydrated;
-}
-
-function hasDisplayValue(value) {
-  return typeof value === "string" ? value.trim().length > 0 : value != null;
+  // Fill display fields the refreshed record left empty from the live card,
+  // using the same coalescing predicate as the live merge.
+  return coalesceToolFields(message, currentMessage, [
+    "toolDetail",
+    "toolParameters",
+    "toolResultPreview",
+  ]);
 }
 
 function isRuntimeActivityMessage(message) {

@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
+import { GATE_KIND } from "../lib/gate-kinds.js";
+
 function approvalCardSourceForTest() {
   const source = readFileSync(new URL("./approval-card.js", import.meta.url), "utf8");
   const lines = [];
@@ -29,6 +31,7 @@ function renderApprovalCard({ expandedPayload = false, gate = defaultApprovalGat
   const expandedPayloadUpdates = [];
   const context = {
     globalThis: {},
+    GATE_KIND,
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     React: {
       useCallback: (fn) => fn,

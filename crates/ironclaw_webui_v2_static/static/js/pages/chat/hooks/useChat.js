@@ -25,6 +25,11 @@ import {
   resetToolActivityState,
 } from "../lib/tool-activity-state.js";
 import { toRenderAttachment, toWireAttachment } from "../lib/attachments.js";
+import {
+  RECORD_STATUS,
+  uiStatusFromRecordStatus,
+} from "../lib/message-status.js";
+import { buildOptimisticMessage } from "../lib/optimistic-message.js";
 import { useHistory } from "./useHistory.js";
 import { useSSE } from "./useSSE.js";
 
@@ -81,7 +86,9 @@ function submitResponseResumedTurnGate(response) {
 function resolveGateOutcome(response) {
   if (response?.outcome) return response.outcome;
   const status = String(response?.status || "").toLowerCase();
-  if (status === "queued" || status === "running") return "resumed";
+  if (status === RECORD_STATUS.QUEUED || status === RECORD_STATUS.RUNNING) {
+    return "resumed";
+  }
   if (status === "cancelled" || response?.already_terminal === true) {
     return "cancelled";
   }
@@ -211,11 +218,6 @@ export function useChat(threadId) {
   const [stateThreadId, setStateThreadId] = React.useState(threadId);
   const toolActivityStateRef = React.useRef(createToolActivityState());
   const locallyResolvedGatesRef = React.useRef(new Map());
-  const authTokenSubmitRef = React.useRef({
-    gateKey: null,
-    credentialRef: null,
-    inFlight: false,
-  });
   const submitBusyRef = React.useRef(false);
 
   // Per-thread transient state must not leak across thread switches.
@@ -289,56 +291,15 @@ export function useChat(threadId) {
     return () => clearInterval(timer);
   }, [cooldownUntil]);
 
-  React.useEffect(() => {
-    if (authTokenSubmitRef.current.gateKey !== pendingAuthGateKey) {
-      authTokenSubmitRef.current = {
-        gateKey: pendingAuthGateKey,
-        credentialRef: null,
-        inFlight: false,
-      };
-    }
-  }, [pendingAuthGateKey]);
+  const submitAuthToken = useAuthTokenSubmit({
+    pendingGate,
+    pendingAuthGateKey,
+    threadId,
+    setPendingGate,
+    setIsProcessing,
+  });
 
-  React.useEffect(() => {
-    if (!isPendingOAuthGate(pendingGate)) return;
-    const listeningSince = Date.now();
-
-    const handleCompletion = (payload) => {
-      if (!oauthCompletionMatchesGate(payload, pendingGate, listeningSince)) return;
-      setPendingGate((current) => (isPendingOAuthGate(current) ? null : current));
-      setIsProcessing(true);
-    };
-
-    let channel = null;
-    if (typeof window.BroadcastChannel === "function") {
-      channel = new window.BroadcastChannel(OAUTH_CALLBACK_CHANNEL);
-      channel.onmessage = (event) => handleCompletion(event.data);
-    }
-
-    const onStorage = (event) => {
-      if (event.key !== OAUTH_CALLBACK_STORAGE_KEY) return;
-      handleCompletion(parseOAuthCallbackStoragePayload(event.newValue));
-    };
-
-    window.addEventListener("storage", onStorage);
-    handleCompletion(
-      parseOAuthCallbackStoragePayload(
-        window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
-      ),
-    );
-    const timer = window.setInterval(() => {
-      handleCompletion(
-        parseOAuthCallbackStoragePayload(
-          window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
-        ),
-      );
-    }, 500);
-    return () => {
-      window.clearInterval(timer);
-      if (channel) channel.close();
-      window.removeEventListener("storage", onStorage);
-    };
-  }, [pendingGate]);
+  useOAuthCallbackResume({ pendingGate, setPendingGate, setIsProcessing });
 
   const handleEvent = useChatEvents({
     threadId,
@@ -430,25 +391,14 @@ export function useChat(threadId) {
       }
 
       const pendingKey = sendThreadId;
-      const pendingRecord = {
+      const optimisticMessage = buildOptimisticMessage({
         id: `pending-${pendingSeqRef.current++}`,
-        role: "user",
         content,
         attachments: renderAttachments,
-        timestamp: new Date().toISOString(),
-        isOptimistic: true,
-      };
-      const pendingRenderMessage = {
-        id: pendingRecord.id,
-        role: "user",
-        content,
-        attachments: renderAttachments,
-        timestamp: pendingRecord.timestamp,
-        isOptimistic: true,
-      };
-      addPending(pendingMessagesRef.current, pendingKey, pendingRecord);
+      });
+      addPending(pendingMessagesRef.current, pendingKey, optimisticMessage);
 
-      const optimisticId = pendingRecord.id;
+      const optimisticId = optimisticMessage.id;
       const shouldRenderInCurrentThread = !threadId || sendThreadId === threadId;
       const updateCurrentThread = (updater) => {
         if (shouldRenderInCurrentThread) setMessages(updater);
@@ -461,8 +411,8 @@ export function useChat(threadId) {
       };
 
       submitBusyRef.current = true;
-      updateCurrentThread((prev) => [...prev, pendingRenderMessage]);
-      updateSeededTarget((prev) => [...prev, pendingRenderMessage]);
+      updateCurrentThread((prev) => [...prev, optimisticMessage]);
+      updateSeededTarget((prev) => [...prev, optimisticMessage]);
 
       updateCurrentRunState(() => {
         setIsProcessing(true);
@@ -506,26 +456,21 @@ export function useChat(threadId) {
           updateCurrentThread(markAccepted);
           updateSeededTarget(markAccepted);
         }
-        if (response?.outcome === "deferred_busy") {
-          const markQueued = (prev) =>
+        const busyOutcome = BUSY_OUTCOME[response?.outcome];
+        if (busyOutcome) {
+          // One mapper drives the UI status for both busy outcomes so the
+          // optimistic bubble matches what `messagesFromTimeline` renders
+          // after a reload (deferred -> queued, rejected -> error).
+          const uiStatus = uiStatusFromRecordStatus(response.outcome);
+          const markBusy = (prev) =>
             prev.map((m) =>
               m.id === optimisticId
-                ? { ...m, isOptimistic: false, status: "queued" }
+                ? { ...m, isOptimistic: false, status: uiStatus }
                 : m,
             );
-          updateCurrentThread(markQueued);
-          updateSeededTarget(markQueued);
-          submitBusyRef.current = false;
-        } else if (response?.outcome === "rejected_busy") {
-          const markRejected = (prev) =>
-            prev.map((m) =>
-              m.id === optimisticId
-                ? { ...m, isOptimistic: false, status: "error" }
-                : m,
-            );
-          updateCurrentThread(markRejected);
-          updateSeededTarget(markRejected);
-          if (response?.notice) {
+          updateCurrentThread(markBusy);
+          updateSeededTarget(markBusy);
+          if (busyOutcome.withNotice && response?.notice) {
             const appendSystemNotice = (renderCurrent = shouldRenderInCurrentThread) => {
               const noticeMessage = {
                 id: `system-rejected-${pendingSeqRef.current++}`,
@@ -559,9 +504,14 @@ export function useChat(threadId) {
               appendSystemNotice(false);
             }
           }
-          updateCurrentRunState(() => setIsProcessing(false));
+          // A rejected message frees the run (it never entered the queue); a
+          // deferred message stays queued behind the active run, so its
+          // processing state must be preserved.
+          if (busyOutcome.stopProcessing) {
+            updateCurrentRunState(() => setIsProcessing(false));
+          }
         }
-        submitBusyRef.current = false;
+        // submitBusyRef is released in `finally` (single source) — see below.
         return response;
       } catch (err) {
         if (err.status === 429) {
@@ -581,7 +531,6 @@ export function useChat(threadId) {
         updateCurrentThread(markFailed);
         updateSeededTarget(markFailed);
         updateCurrentRunState(() => setIsProcessing(false));
-        submitBusyRef.current = false;
         throw err;
       } finally {
         // Release the re-entrancy guard once the send POST settles — that is
@@ -649,7 +598,7 @@ export function useChat(threadId) {
         setActiveRun({
           runId: response?.run_id || runId,
           threadId: response?.thread_id || threadId,
-          status: response?.status || "queued",
+          status: response?.status || RECORD_STATUS.QUEUED,
         });
         return;
       }
@@ -659,7 +608,106 @@ export function useChat(threadId) {
     [pendingGate, threadId, setMessages, setActiveRun],
   );
 
-  const submitAuthToken = React.useCallback(
+
+  const cancelRun = React.useCallback(
+    async (reason) => {
+      const runId = activeRun?.runId;
+      if (!runId || !threadId) return;
+      setPendingGate(null);
+      setIsProcessing(false);
+      setActiveRun(null);
+      submitBusyRef.current = false;
+      await cancelRunRequest({ threadId, runId, reason });
+    },
+    [activeRun, threadId],
+  );
+
+  const loadMore = React.useCallback(() => {
+    if (hasMore && nextCursor) loadHistory(nextCursor);
+  }, [hasMore, nextCursor, loadHistory]);
+
+  // Fork-shape compatibility: `approve(requestId, action, kind)` from
+  // chat.js. `requestId` and `kind` are v1 concepts the v2 stream
+  // doesn't surface; the live `pendingGate` already carries
+  // `runId` + `gateRef`, so the args are intentionally ignored and
+  // the call is rerouted to v2 resolveGate.
+  const approve = React.useCallback(
+    async (_requestId, action, _kind) => {
+      let resolution = "approved";
+      let always = false;
+      if (action === "deny") resolution = "denied";
+      else if (action === "cancel") resolution = "cancelled";
+      else if (action === "always") {
+        resolution = "approved";
+        always = true;
+      }
+      await resolveGate(resolution, { always });
+    },
+    [resolveGate],
+  );
+
+  // Fork chat.js expects these as stubs: v2 stream is deterministic
+  // enough that retry / suggestions / recovery are not necessary in
+  // local-dev. Wire them as no-ops so the chat UI renders without
+  // additional branches.
+  const noop = React.useCallback(() => {}, []);
+
+  return {
+    // v2-native
+    messages,
+    isProcessing,
+    pendingGate,
+    busyGateNotice,
+    channelConnectAction,
+    activeRun,
+    sseStatus,
+    historyLoading,
+    historyLoadError,
+    hasMore,
+    cooldownSeconds,
+    send,
+    resolveGate,
+    submitAuthToken,
+    cancelRun,
+    loadMore,
+    dismissChannelConnectAction: () => setChannelConnectAction(null),
+    // fork-shape compatibility — see comments above
+    suggestions: [],
+    setSuggestions: noop,
+    retryMessage: noop,
+    approve,
+    recoverHistory: noop,
+    recoveryNotice: null,
+  };
+}
+
+// Owns the manual auth-token submission flow: a per-gate ref tracking the
+// stored credential + in-flight guard, the reset when the pending gate
+// changes, and the `submitAuthToken` callback. Returns the callback.
+function useAuthTokenSubmit({
+  pendingGate,
+  pendingAuthGateKey,
+  threadId,
+  setPendingGate,
+  setIsProcessing,
+}) {
+  const authTokenSubmitRef = React.useRef({
+    gateKey: null,
+    credentialRef: null,
+    inFlight: false,
+  });
+
+  React.useEffect(() => {
+    if (authTokenSubmitRef.current.gateKey !== pendingAuthGateKey) {
+      authTokenSubmitRef.current = {
+        gateKey: pendingAuthGateKey,
+        credentialRef: null,
+        inFlight: false,
+      };
+    }
+  }, [pendingAuthGateKey]);
+
+  return React.useCallback(
     async (token) => {
       if (!pendingGate) {
         throw new Error("auth gate is no longer pending");
@@ -738,80 +786,66 @@ export function useChat(threadId) {
         throw err;
       }
     },
-    [pendingGate, threadId],
+    [pendingGate, threadId, setPendingGate, setIsProcessing],
   );
-
-  const cancelRun = React.useCallback(
-    async (reason) => {
-      const runId = activeRun?.runId;
-      if (!runId || !threadId) return;
-      setPendingGate(null);
-      setIsProcessing(false);
-      setActiveRun(null);
-      submitBusyRef.current = false;
-      await cancelRunRequest({ threadId, runId, reason });
-    },
-    [activeRun, threadId],
-  );
-
-  const loadMore = React.useCallback(() => {
-    if (hasMore && nextCursor) loadHistory(nextCursor);
-  }, [hasMore, nextCursor, loadHistory]);
-
-  // Fork-shape compatibility: `approve(requestId, action, kind)` from
-  // chat.js. `requestId` and `kind` are v1 concepts the v2 stream
-  // doesn't surface; the live `pendingGate` already carries
-  // `runId` + `gateRef`, so the args are intentionally ignored and
-  // the call is rerouted to v2 resolveGate.
-  const approve = React.useCallback(
-    async (_requestId, action, _kind) => {
-      let resolution = "approved";
-      let always = false;
-      if (action === "deny") resolution = "denied";
-      else if (action === "cancel") resolution = "cancelled";
-      else if (action === "always") {
-        resolution = "approved";
-        always = true;
-      }
-      await resolveGate(resolution, { always });
-    },
-    [resolveGate],
-  );
-
-  // Fork chat.js expects these as stubs: v2 stream is deterministic
-  // enough that retry / suggestions / recovery are not necessary in
-  // local-dev. Wire them as no-ops so the chat UI renders without
-  // additional branches.
-  const noop = React.useCallback(() => {}, []);
-
-  return {
-    // v2-native
-    messages,
-    isProcessing,
-    pendingGate,
-    busyGateNotice,
-    channelConnectAction,
-    activeRun,
-    sseStatus,
-    historyLoading,
-    historyLoadError,
-    hasMore,
-    cooldownSeconds,
-    send,
-    resolveGate,
-    submitAuthToken,
-    cancelRun,
-    loadMore,
-    dismissChannelConnectAction: () => setChannelConnectAction(null),
-    // fork-shape compatibility — see comments above
-    suggestions: [],
-    setSuggestions: noop,
-    retryMessage: noop,
-    approve,
-    recoverHistory: noop,
-    recoveryNotice: null,
-  };
 }
+
+// Watches for an OAuth popup completion (BroadcastChannel + localStorage
+// fallback) while an oauth_url gate is pending, and resumes the run when the
+// callback for that gate lands. Extracted from the useChat body so the
+// cross-tab completion plumbing stays self-contained.
+function useOAuthCallbackResume({ pendingGate, setPendingGate, setIsProcessing }) {
+  React.useEffect(() => {
+    if (!isPendingOAuthGate(pendingGate)) return;
+    const listeningSince = Date.now();
+
+    const handleCompletion = (payload) => {
+      if (!oauthCompletionMatchesGate(payload, pendingGate, listeningSince)) return;
+      setPendingGate((current) => (isPendingOAuthGate(current) ? null : current));
+      setIsProcessing(true);
+    };
+
+    let channel = null;
+    if (typeof window.BroadcastChannel === "function") {
+      channel = new window.BroadcastChannel(OAUTH_CALLBACK_CHANNEL);
+      channel.onmessage = (event) => handleCompletion(event.data);
+    }
+
+    const onStorage = (event) => {
+      if (event.key !== OAUTH_CALLBACK_STORAGE_KEY) return;
+      handleCompletion(parseOAuthCallbackStoragePayload(event.newValue));
+    };
+
+    window.addEventListener("storage", onStorage);
+    handleCompletion(
+      parseOAuthCallbackStoragePayload(
+        window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
+      ),
+    );
+    const timer = window.setInterval(() => {
+      handleCompletion(
+        parseOAuthCallbackStoragePayload(
+          window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
+        ),
+      );
+    }, 500);
+    return () => {
+      window.clearInterval(timer);
+      if (channel) channel.close();
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [pendingGate]);
+}
+
+// Per-outcome behavior for a busy send response. The UI status itself comes
+// from `uiStatusFromRecordStatus` (shared with the reload path); this table
+// only carries what diverges between the two outcomes.
+const BUSY_OUTCOME = {
+  // Accepted-and-queued behind the active run: keep processing, no notice.
+  [RECORD_STATUS.DEFERRED_BUSY]: { stopProcessing: false, withNotice: false },
+  // Rejected (never queued): free the run and surface the busy notice.
+  [RECORD_STATUS.REJECTED_BUSY]: { stopProcessing: true, withNotice: true },
+};
 
 function isDeclinedGateResolution(resolution) {
   return resolution === "denied" || resolution === "cancelled";

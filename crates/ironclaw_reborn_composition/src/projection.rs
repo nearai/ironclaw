@@ -34,6 +34,7 @@ use ironclaw_turns::{
     TurnEventProjectionSource, TurnRunId, TurnScope, run_profile::LoopHostMilestoneSink,
 };
 
+mod budget_gate_details;
 mod display_preview;
 mod live_progress;
 mod runtime_replay;

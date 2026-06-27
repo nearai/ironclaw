@@ -1,7 +1,9 @@
 import {
+  coalesceToolFields,
   isTerminalToolStatus,
   toolDisplayName,
 } from "./history-messages.js";
+import { gateDisplayParameters } from "./gates.js";
 
 export function createToolActivityState() {
   return {
@@ -83,7 +85,7 @@ function toolCardFromGate(gate, overrides = {}) {
     toolName: toolDisplayName(displaySource) || displaySource,
     toolStatus: overrides.toolStatus || "running",
     toolDetail: gate.actionLabel || null,
-    toolParameters: approvalGateParameters(gate),
+    toolParameters: gateDisplayParameters(gate),
     toolResultPreview: null,
     toolError: overrides.toolError || null,
     toolErrorKind: overrides.toolErrorKind || null,
@@ -97,19 +99,6 @@ function toolCardFromGate(gate, overrides = {}) {
     gateRef: gate.gateRef,
     gateActivity: true,
   };
-}
-
-function approvalGateParameters(gate) {
-  if (typeof gate?.parameters === "string" && gate.parameters.trim()) {
-    return gate.parameters.trim();
-  }
-  if (!Array.isArray(gate?.approvalDetails) || gate.approvalDetails.length === 0) {
-    return null;
-  }
-  const lines = gate.approvalDetails
-    .filter((detail) => detail?.label && detail.value != null)
-    .map((detail) => `${detail.label}: ${detail.value}`);
-  return lines.length > 0 ? lines.join("\n") : null;
 }
 
 function fallbackGateInvocationId(gate) {
@@ -160,9 +149,9 @@ function mergeToolActivity(current, incoming) {
       ? current.toolName
       : incoming.toolName || current.toolName,
     toolStatus: keepCurrentTerminal ? current.toolStatus : incoming.toolStatus,
-    toolDetail: incoming.toolDetail || current.toolDetail || null,
-    toolParameters: incoming.toolParameters || current.toolParameters || null,
-    toolResultPreview: incoming.toolResultPreview || current.toolResultPreview || null,
+    // toolDetail / toolParameters / toolResultPreview are coalesced below via
+    // the shared `coalesceToolFields` predicate so a later sparse frame never
+    // erases a populated value.
     toolError: incoming.toolError || current.toolError,
     toolErrorKind: incoming.toolErrorKind || current.toolErrorKind || null,
     updatedAt: keepCurrentTerminal
@@ -177,11 +166,19 @@ function mergeToolActivity(current, incoming) {
     activityOrder: mergedActivityOrder(current, incoming),
     activityOrderSource: incoming.activityOrderSource || current.activityOrderSource || null,
   };
+  // Prefer the incoming display fields (already spread above), but fall back
+  // to the current value when the incoming frame is sparse — one predicate,
+  // shared with useHistory's refresh hydration.
+  const coalesced = coalesceToolFields(merged, current, [
+    "toolDetail",
+    "toolParameters",
+    "toolResultPreview",
+  ]);
   if (current.gateActivity && !incoming.gateActivity) {
-    merged.id = toolMessageId(incoming);
-    merged.gateActivity = false;
+    coalesced.id = toolMessageId(incoming);
+    coalesced.gateActivity = false;
   }
-  return merged;
+  return coalesced;
 }
 
 function mergedActivityOrder(current, incoming) {

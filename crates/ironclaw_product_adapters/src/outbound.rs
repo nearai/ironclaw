@@ -1126,7 +1126,10 @@ pub enum ProductGateKind {
 }
 
 fn default_product_gate_kind() -> ProductGateKind {
-    ProductGateKind::Approval
+    // An omitted `gate_kind` on the wire defaults to the inert `Generic`, never
+    // the most-privileged `Approval`. A producer that fails to set the kind (or
+    // a legacy/replay shape) must not be silently upgraded to an approval gate.
+    ProductGateKind::Generic
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

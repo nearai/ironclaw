@@ -3,15 +3,23 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
+import { GATE_KIND } from "./gate-kinds.js";
+
 function loadGates() {
+  // Strip ES `import` lines (the vm context has no module loader) and
+  // inject the imported symbols as context globals — gates.js imports
+  // `GATE_KIND` from ./gate-kinds.js.
   const source = readFileSync(new URL("./gates.js", import.meta.url), "utf8")
+    .split("\n")
+    .filter((line) => !line.startsWith("import "))
+    .join("\n")
     .replace(
-      /export function (gateFromEvent|gateFromProjectionGate)/g,
+      /export function (gateFromEvent|gateFromProjectionGate|gateDisplayParameters)/g,
       "function $1",
     );
-  const context = { globalThis: {} };
+  const context = { globalThis: {}, GATE_KIND };
   vm.runInNewContext(
-    `${source}\nglobalThis.__testExports = { gateFromEvent, gateFromProjectionGate };`,
+    `${source}\nglobalThis.__testExports = { gateFromEvent, gateFromProjectionGate, gateDisplayParameters };`,
     context,
   );
   return context.globalThis.__testExports;
@@ -260,4 +268,37 @@ test("gateFromEvent preserves legacy auth prompts as manual token prompts", () =
     }).challengeKind,
     "manual_token",
   );
+});
+
+test("gateDisplayParameters joins approval details as label: value lines", () => {
+  const { gateDisplayParameters } = loadGates();
+
+  assert.equal(
+    gateDisplayParameters({
+      approvalDetails: [
+        { label: "Method", value: "GET" },
+        { label: "Destination", value: "https://example.com" },
+      ],
+    }),
+    "Method: GET\nDestination: https://example.com",
+  );
+});
+
+test("gateDisplayParameters prefers an explicit parameters string", () => {
+  const { gateDisplayParameters } = loadGates();
+
+  assert.equal(
+    gateDisplayParameters({
+      parameters: "query: deploy status",
+      approvalDetails: [{ label: "Method", value: "GET" }],
+    }),
+    "query: deploy status",
+  );
+});
+
+test("gateDisplayParameters returns null when there is nothing to show", () => {
+  const { gateDisplayParameters } = loadGates();
+
+  assert.equal(gateDisplayParameters({ approvalDetails: [] }), null);
+  assert.equal(gateDisplayParameters(null), null);
 });

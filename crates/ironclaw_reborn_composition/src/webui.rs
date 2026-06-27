@@ -25,7 +25,7 @@ use ironclaw_resources::{
     ResourceGovernor, ResourceLimits, ResourceTally, ResourceValue,
 };
 use rust_decimal::Decimal;
-use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use rust_decimal::prelude::ToPrimitive;
 
 use ironclaw_triggers::TriggerRepository;
 
@@ -85,6 +85,9 @@ impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
     }
 }
 
+// arch-exempt: large_file, budget services + helpers belong in a sibling
+// `webui_budget.rs`; extraction tracked in
+// docs/plans/2026-06-27-reborn-budget-module-decomposition.md
 #[derive(Clone)]
 struct BudgetResourceGateResolutionService {
     gates: Arc<dyn BudgetGateStore>,
@@ -325,18 +328,14 @@ fn runtime_budget_handles(
 }
 
 fn budget_gate_id_from_ref(gate_ref: &str) -> Result<BudgetGateId, RebornServicesError> {
-    gate_ref
-        .strip_prefix("gate:budget-")
-        .and_then(|value| uuid::Uuid::parse_str(value).ok())
-        .map(BudgetGateId::from_uuid)
-        .ok_or_else(|| RebornServicesError {
-            code: RebornServicesErrorCode::InvalidRequest,
-            kind: RebornServicesErrorKind::Validation,
-            status_code: 400,
-            retryable: false,
-            field: Some("gate_ref".to_string()),
-            validation_code: None,
-        })
+    BudgetGateId::from_gate_ref(gate_ref).ok_or_else(|| RebornServicesError {
+        code: RebornServicesErrorCode::InvalidRequest,
+        kind: RebornServicesErrorKind::Validation,
+        status_code: 400,
+        retryable: false,
+        field: Some("gate_ref".to_string()),
+        validation_code: None,
+    })
 }
 
 fn resource_total(
@@ -489,29 +488,27 @@ fn raise_dimension_limit(
 }
 
 fn decimal_budget_target(current: Option<Decimal>, total: Decimal, pause_at: f64) -> Decimal {
-    let mut target = current
-        .map(|value| value + (value * Decimal::new(20, 2)))
-        .unwrap_or(total);
-    if pause_at.is_finite() && pause_at > 0.0 && pause_at < 1.0 {
-        if let Some(pause_at_decimal) = Decimal::from_f64(pause_at) {
-            target = target.max(total / pause_at_decimal + Decimal::new(1, 4));
-        }
+    match ironclaw_resources::raised_budget_limit(
+        current.map(ResourceValue::Decimal),
+        ResourceValue::Decimal(total),
+        pause_at,
+    ) {
+        Some(ResourceValue::Decimal(value)) => value,
+        // Unreachable: a Decimal `current`/`total` always yields a Decimal.
+        _ => current.unwrap_or(total).round_dp(4),
     }
-    target.round_dp(4)
 }
 
 fn integer_budget_target(current: Option<u64>, total: u64, pause_at: f64) -> u64 {
-    let mut target = current
-        .map(|value| {
-            value
-                .saturating_add(value / 5)
-                .saturating_add(u64::from(value % 5 != 0))
-        })
-        .unwrap_or(total);
-    if pause_at.is_finite() && pause_at > 0.0 && pause_at < 1.0 {
-        target = target.max((((total as f64) / pause_at).ceil() as u64).saturating_add(1));
+    match ironclaw_resources::raised_budget_limit(
+        current.map(ResourceValue::Integer),
+        ResourceValue::Integer(total),
+        pause_at,
+    ) {
+        Some(ResourceValue::Integer(value)) => value,
+        // Unreachable: an Integer `current`/`total` always yields an Integer.
+        _ => current.unwrap_or(total),
     }
-    target
 }
 
 fn max_decimal_limit(current: Option<Decimal>, target: Decimal) -> Decimal {
@@ -548,62 +545,47 @@ fn map_budget_gate_error(error: BudgetGateError) -> RebornServicesError {
         BudgetGateError::AlreadyResolved { .. } => budget_gate_conflict(),
         BudgetGateError::Storage { .. } => {
             tracing::warn!(%error, "budget gate store failed while resolving WebUI gate");
-            RebornServicesError {
-                code: RebornServicesErrorCode::Unavailable,
-                kind: RebornServicesErrorKind::BlockedResource,
-                status_code: 503,
-                retryable: true,
-                field: None,
-                validation_code: None,
-            }
+            RebornServicesError::from_status_kind(
+                RebornServicesErrorCode::Unavailable,
+                RebornServicesErrorKind::BlockedResource,
+                503,
+                true,
+            )
         }
     }
 }
 
 fn map_resource_error(error: ResourceError) -> RebornServicesError {
     tracing::warn!(%error, "resource governor failed while resolving WebUI budget gate");
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::BlockedResource,
-        status_code: 503,
-        retryable: true,
-        field: None,
-        validation_code: None,
-    }
+    RebornServicesError::from_status_kind(
+        RebornServicesErrorCode::Unavailable,
+        RebornServicesErrorKind::BlockedResource,
+        503,
+        true,
+    )
 }
 
 fn map_budget_settings_resource_error(error: ResourceError) -> RebornServicesError {
     tracing::warn!(%error, "resource governor failed while reading WebUI budget settings");
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
-        status_code: 503,
-        retryable: true,
-        field: None,
-        validation_code: None,
-    }
+    RebornServicesError::service_unavailable(true)
 }
 
 fn budget_gate_not_found() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::NotFound,
-        kind: RebornServicesErrorKind::BlockedResource,
-        status_code: 404,
-        retryable: false,
-        field: None,
-        validation_code: None,
-    }
+    RebornServicesError::from_status_kind(
+        RebornServicesErrorCode::NotFound,
+        RebornServicesErrorKind::BlockedResource,
+        404,
+        false,
+    )
 }
 
 fn budget_gate_conflict() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Conflict,
-        kind: RebornServicesErrorKind::BlockedResource,
-        status_code: 409,
-        retryable: false,
-        field: None,
-        validation_code: None,
-    }
+    RebornServicesError::from_status_kind(
+        RebornServicesErrorCode::Conflict,
+        RebornServicesErrorKind::BlockedResource,
+        409,
+        false,
+    )
 }
 
 /// WebUI-facing Reborn service bundle for host composition.
@@ -1600,7 +1582,7 @@ mod tests {
             .resolve_resource_gate(ResourceGateResolutionRequest {
                 scope,
                 actor: TurnActor::new(user_id.clone()),
-                gate_ref: GateRef::new(format!("gate:budget-{gate_id}")).expect("gate ref"),
+                gate_ref: GateRef::new(gate_id.to_gate_ref()).expect("gate ref"),
                 decision: ResourceGateResolutionDecision::Approve,
             })
             .await

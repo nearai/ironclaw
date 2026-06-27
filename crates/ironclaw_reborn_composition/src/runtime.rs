@@ -845,7 +845,14 @@ impl ResourceGateEvidenceStore for LocalDevResourceGateEvidence {
 fn budget_gate_id_from_gate_ref(
     gate_ref: &LoopGateRef,
 ) -> Result<Option<ironclaw_resources::BudgetGateId>, TurnError> {
-    let Some(value) = gate_ref.as_str().strip_prefix("gate:budget-") else {
+    // A non-budget gate ref is `Ok(None)`; a budget-prefixed ref with an
+    // invalid uuid is an error (not silently skipped), so this consumer needs
+    // finer semantics than `BudgetGateId::from_gate_ref` and parses the uuid
+    // itself after matching the canonical prefix.
+    let Some(value) = gate_ref
+        .as_str()
+        .strip_prefix(ironclaw_resources::BudgetGateId::GATE_REF_PREFIX)
+    else {
         return Ok(None);
     };
     let id = uuid::Uuid::parse_str(value).map_err(|error| TurnError::InvalidRequest {
@@ -3080,11 +3087,9 @@ pub async fn build_reborn_runtime(
         _ => None,
     };
 
-    let host_input_queue = Arc::new(
-        ironclaw_loop_support::InMemoryHostInputQueue::with_thread_service(Arc::clone(
-            &thread_service,
-        )),
-    );
+    let host_input_queue = Arc::new(ironclaw_loop_support::InMemoryHostInputQueue::new(
+        Arc::clone(&thread_service),
+    ));
     let host_input_queue_reader: Arc<dyn ironclaw_loop_support::HostInputQueue> =
         host_input_queue.clone();
     let host_input_enqueue: Arc<dyn ironclaw_loop_support::HostInputEnqueuePort> =

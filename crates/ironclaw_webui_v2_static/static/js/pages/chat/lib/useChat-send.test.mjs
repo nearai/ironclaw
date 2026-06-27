@@ -20,6 +20,11 @@ import {
   failGateToolActivity,
   resetToolActivityState,
 } from "./tool-activity-state.js";
+import {
+  RECORD_STATUS,
+  uiStatusFromRecordStatus,
+} from "./message-status.js";
+import { buildOptimisticMessage } from "./optimistic-message.js";
 
 function useChatSourceForTest() {
   const source = readFileSync(
@@ -48,6 +53,9 @@ function runUseChatSource(context) {
     failGateToolActivity,
     resetToolActivityState,
     timelineMessageIdFromAcceptedRef,
+    RECORD_STATUS,
+    uiStatusFromRecordStatus,
+    buildOptimisticMessage,
   });
   vm.runInNewContext(useChatSourceForTest(), context);
 }

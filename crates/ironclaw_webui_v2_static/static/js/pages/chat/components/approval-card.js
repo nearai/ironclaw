@@ -16,6 +16,7 @@ import { Button } from "../../../design-system/button.js";
 import { Badge } from "../../../design-system/badge.js";
 import { Icon } from "../../../design-system/icons.js";
 import { classifyRisk } from "../lib/approval-risk.js";
+import { GATE_KIND } from "../lib/gate-kinds.js";
 
 const APPROVAL_PAYLOAD_PREVIEW_LIMIT = 480;
 
@@ -58,9 +59,12 @@ export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
     [toolName, description, parameters]
   );
   const toolLabel = toolName || t("approval.thisTool");
-  const title = gateKind && gateKind !== "approval" && headline ? headline : t("approval.title");
+  const title =
+    gateKind && gateKind !== GATE_KIND.APPROVAL && headline
+      ? headline
+      : t("approval.title");
   const longPayload = approvalPayloadIsLong(parameters, approvalDetails);
-  const compactDetails = gateKind === "resource";
+  const compactDetails = gateKind === GATE_KIND.RESOURCE;
   const payloadMaxHeight = compactDetails
     ? "max-h-none"
     : expandedPayload

@@ -3,6 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
+// chat.js now imports the gate-argument join from ./lib/gate-arguments.js; the
+// vm harness strips imports, so the real helper is injected into the context.
+import { enrichApprovalGateWithActivityArguments } from "./gate-arguments.js";
+
 function chatSourceForTest() {
   const source = readFileSync(new URL("../chat.js", import.meta.url), "utf8");
   const lines = [];
@@ -16,18 +20,9 @@ function chatSourceForTest() {
       skippingImport = !line.trimEnd().endsWith(";");
       continue;
     }
-    lines.push(
-      line
-        .replace("export function Chat", "function Chat")
-        .replace(
-          "export function enrichApprovalGateWithActivityArguments",
-          "function enrichApprovalGateWithActivityArguments",
-        ),
-    );
+    lines.push(line.replace("export function Chat", "function Chat"));
   }
-  return `${lines.join(
-    "\n",
-  )}\nglobalThis.__testExports = { Chat, enrichApprovalGateWithActivityArguments };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { Chat };`;
 }
 
 function findComponent(node, component) {
@@ -103,6 +98,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     },
     buildRuntimeContext: () => ({}),
     clearThreadState: () => {},
+    enrichApprovalGateWithActivityArguments,
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     setThreadState: () => {},
@@ -461,7 +457,10 @@ test("Chat approval card includes matching tool activity arguments", () => {
   assert.equal(props.gate.parameters, "query: deploy status");
 });
 
-test("Chat approval card falls back to same-run tool arguments for nested approval gates", () => {
+test("Chat approval card does not borrow another invocation's arguments (strict join)", () => {
+  // The gated invocation (invocation-http) has no arguments yet; a different
+  // tool in the same run does. The strict invocationId join must NOT attribute
+  // that other tool's arguments to this gate.
   const pendingGate = {
     kind: "gate",
     requestId: "request-1",
@@ -517,84 +516,5 @@ test("Chat approval card falls back to same-run tool arguments for nested approv
 
   assert.deepEqual(JSON.parse(JSON.stringify(props.gate.approvalDetails)), [
     { label: "Method", value: "GET" },
-    { label: "Arguments", value: "query: deploy status" },
   ]);
-});
-
-test("approval argument enrichment uses same-run arguments when gate has no invocation id", () => {
-  const context = { globalThis: {} };
-  vm.runInNewContext(chatSourceForTest(), {
-    ...context,
-    React: {},
-    THREAD_STATE: {},
-    buildScopedLogsPath: () => "",
-    buildRuntimeContext: () => ({}),
-    clearThreadState: () => {},
-    html: () => ({}),
-    setThreadState: () => {},
-    useChat: () => ({}),
-    useT: () => () => "",
-  });
-  const { enrichApprovalGateWithActivityArguments } = context.globalThis.__testExports;
-  const gate = {
-    kind: "gate",
-    runId: "run-1",
-    description: "capability requires approval",
-    approvalDetails: [],
-  };
-
-  const enriched = enrichApprovalGateWithActivityArguments(gate, [
-    {
-      role: "tool_activity",
-      turnRunId: "run-1",
-      invocationId: "invocation-search",
-      toolParameters: "query: total market cap of companies that IPOed in 2025",
-    },
-  ]);
-
-  assert.deepEqual(JSON.parse(JSON.stringify(enriched.approvalDetails)), [
-    {
-      label: "Arguments",
-      value: "query: total market cap of companies that IPOed in 2025",
-    },
-  ]);
-  assert.equal(
-    enriched.parameters,
-    "query: total market cap of companies that IPOed in 2025",
-  );
-});
-
-test("approval argument enrichment does not duplicate existing argument details", () => {
-  const context = { globalThis: {} };
-  vm.runInNewContext(chatSourceForTest(), {
-    ...context,
-    React: {},
-    THREAD_STATE: {},
-    buildScopedLogsPath: () => "",
-    buildRuntimeContext: () => ({}),
-    clearThreadState: () => {},
-    html: () => ({}),
-    setThreadState: () => {},
-    useChat: () => ({}),
-    useT: () => () => "",
-  });
-  const { enrichApprovalGateWithActivityArguments } = context.globalThis.__testExports;
-  const gate = {
-    kind: "gate",
-    invocationId: "invocation-search",
-    approvalDetails: [{ label: "Parameters", value: "query: existing" }],
-  };
-
-  const enriched = enrichApprovalGateWithActivityArguments(gate, [
-    {
-      role: "tool_activity",
-      invocationId: "invocation-search",
-      toolParameters: "query: deploy status",
-    },
-  ]);
-
-  assert.deepEqual(enriched.approvalDetails, [
-    { label: "Parameters", value: "query: existing" },
-  ]);
-  assert.equal(enriched.parameters, "query: deploy status");
 });
