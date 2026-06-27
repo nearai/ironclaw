@@ -227,6 +227,15 @@ async def _close_public_browser(playwright, browser, context) -> None:
     await playwright.stop()
 
 
+async def _wait_for_opened_urls(page, expected: list[str]) -> list[str]:
+    await page.wait_for_function(
+        "(expected) => JSON.stringify(window.__providerLoginOpenedUrls) === JSON.stringify(expected)",
+        arg=expected,
+        timeout=10000,
+    )
+    return await page.evaluate("window.__providerLoginOpenedUrls")
+
+
 async def test_settings_provider_login_browser_starts_nearai_and_codex_flows(
     reborn_v2_server,
 ):
@@ -246,7 +255,10 @@ async def test_settings_provider_login_browser_starts_nearai_and_codex_flows(
                 "body": {"provider": "github", "origin": public_base},
             }
         ]
-        opened = await page.evaluate("window.__providerLoginOpenedUrls")
+        opened = await _wait_for_opened_urls(
+            page,
+            ["about:blank", "https://private.near.ai/login"],
+        )
         assert opened == ["about:blank", "https://private.near.ai/login"]
     finally:
         await _close_public_browser(playwright, browser, context)
@@ -271,7 +283,10 @@ async def test_settings_provider_login_browser_starts_nearai_and_codex_flows(
                 "body": "",
             }
         ]
-        opened = await page.evaluate("window.__providerLoginOpenedUrls")
+        opened = await _wait_for_opened_urls(
+            page,
+            ["about:blank", "https://chatgpt.com/activate"],
+        )
         assert opened == ["about:blank", "https://chatgpt.com/activate"]
     finally:
         await _close_public_browser(playwright, browser, context)
