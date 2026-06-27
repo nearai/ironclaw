@@ -485,6 +485,21 @@ WEBUI_V2_I18N_LANGUAGE_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SETTINGS_SHELL_COMMAND = CommandSpec(
+    name="webui_v2_settings_shell_role_gating_contracts",
+    description=(
+        "Focused WebUI v2 Settings shell contracts for admin/member default "
+        "tabs, unknown-tab redirects, non-admin operator-tab redirects, "
+        "desktop role filtering, mobile hidden-active fallback, and tab-change "
+        "callbacks."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/pages/settings/settings-shell.test.mjs",
+    ],
+)
+
 WEBUI_V2_HIDDEN_STUBBED_ROUTE_COMMAND = CommandSpec(
     name="webui_v2_hidden_stubbed_route_contracts",
     description=(
@@ -2131,6 +2146,27 @@ CASES: dict[str, CaseSpec] = {
             "translation fallback, locale pack key presence, current-language "
             "display, search filtering, setLang routing, and empty-search "
             "rendering."
+        ),
+    ),
+    "webui_v2_settings_shell_role_gating_regression": CaseSpec(
+        name="webui_v2_settings_shell_role_gating_regression",
+        feature="WebUI v2 settings shell navigation and role gating",
+        category="Hermetic Settings Shell Role-Gating Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-088-TC-01",
+            "REBCLI-088-TC-02",
+            "REBCLI-088-TC-03",
+            "REBCLI-088-TC-04",
+            "REBCLI-088-TC-05",
+            "REBCLI-088-TC-06",
+        ],
+        commands=[WEBUI_V2_SETTINGS_SHELL_COMMAND],
+        notes=(
+            "Covers WebUI v2 Settings shell/navigation rows without "
+            "duplicating PR #5348 browser settings coverage: admin/member "
+            "default tabs, unknown-tab redirects, non-admin operator-tab "
+            "redirects, desktop role filtering, admin tab exposure, mobile "
+            "hidden-active fallback, and tab-click callbacks."
         ),
     ),
     "webui_v2_tee_attestation_regression": CaseSpec(
