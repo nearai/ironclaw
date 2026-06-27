@@ -154,6 +154,24 @@ There is **no single outbound chokepoint** — production has four distinct seam
 
 **No shared generic is built now.** The existing `Recording*` structs are deliberately concrete. *If* a future port produces a third near-identical recorder, extract a shared generic (`Recording<P>` with `type Req`/`type Resp` + a `respond(&req)` match-and-record core) from the concrete code that then exists — a genuine rule-of-three lift from real duplication, not a speculative type written ahead of need. Write each new recorder in that extractable shape (scripted-responses + captured-calls, no bespoke control flow) so the eventual lift is mechanical. No derive/attribute macro unless the port count grows far enough to justify a proc-macro crate.
 
+### 3.8 Persisted-state coverage: real stores, no granular interceptors
+
+Stateful subsystems that persist to the database — **auth flows + credential accounts, the five approval/permission/lease stores, extension installations, skills, and secrets** — are tested against the **real stores on the ephemeral `RootFilesystem` backend** (`StorageMode::InMemory` default, `LibSql` for SQL fidelity). **No store/repository-level interceptor or fake is added for persistence.**
+
+This is not an extra mechanism — each subsystem's durable impl already persists through the *same* `RootFilesystem` that §3.2 controls (via `ScopedFilesystem<F>` or `RootFilesystem::write_file`; e.g. auth records under `/secrets/product-auth/`, installs at `/system/extensions/.installations/state.json`, skills under `/user-skills/`). Each store trait ships a `Filesystem*` impl (rides `RootFilesystem`) alongside an `InMemory*` impl, and the harness's `StorageMode` selects between them: under `LibSql` every subsystem rides the one `LibSqlRootFilesystem` (real CAS, JSON serialization, and migrations for all of them at once); under `InMemory` they use their `InMemory*` counterparts — not a shared backing store, but equally interceptor-free. Either way, persisting them for real is **free** — no per-store fake to write.
+
+**Why not granular store fakes** (the rule): a per-store fake would (a) duplicate the persistence seam that already exists, (b) bypass the real CAS / gate-resolution / credential-selection / serialization logic that *is* the thing worth testing, and (c) drift from the real store (accept what real rejects → green tests, broken prod). This is the industry consensus for write-then-read-back state ("don't mock what you don't own"; mock only the external I/O — OAuth HTTP, approval delivery, artifact/skill download — which already ride `RuntimeHttpEgress` / `OutboundDeliverySink`, §3.6).
+
+**Guardrail:** to assert write-then-read-back persistence *correctness*, use `StorageMode::LibSql` (real SQL/CAS/serialization) — don't manually wire an `InMemory*` store outside `StorageMode` to skip the persistence path; that reintroduces the fake-drift this rule exists to avoid. (`StorageMode::InMemory`, the default, legitimately uses the `InMemory*` impls — it's interceptor-free and fine for behavior tests, just not the place to prove SQL/serialization fidelity.)
+
+**Two wiring exceptions** (gaps to close in the relevant slice — not reasons to add a fake):
+- The base `RebornBinaryE2EHarness` does not wire product-auth; full auth-gate → credential-account → selection flows must route through the `build_reborn_services()` path, which wires the real `FilesystemAuthProductServices`.
+- Some capability-harness variants (`core_builtin_tools*`, `github_issue_tools`) use `StaticSecretStore` (no-op writes); testing a secret **write + read-back** requires the `build_reborn_services()` path with the real `FilesystemSecretStore`.
+
+(`BoundedSubagentGateResolutionStore` staying in-memory is intentional — intra-run coordination, no `Filesystem*` impl exists or is appropriate.)
+
+This makes `StorageMode::LibSql` the highest-leverage next slice (see §9): it unlocks real persistence coverage for auth/approvals/installs/skills/secrets at once, after which an auth/approval/install coverage slice is mostly *wiring* (route through `build_reborn_services()`, drive the real flow, assert read-back), not new persistence machinery.
+
 ---
 
 ## 4. Test-Authoring Ergonomics (the anti-verbosity contract)
