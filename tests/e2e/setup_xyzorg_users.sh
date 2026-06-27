@@ -13,14 +13,14 @@
 # What it does:
 #   * create officer (member -> promoted admin), alice/bob/carl (member)
 #     (director, the env owner, is the bootstrap admin that creates them)
-#   * grant per-user capabilities (steps 6-8 of the xyzorg test):
+#   * GRANT per-user capabilities (steps 6-8 of the xyzorg test) — this script
+#     only ADDS capabilities (sets availability=available); it never hides/removes:
 #       6. alice: grant builtin.shell + nearai.web_search
 #       7. bob:   grant the live google-drive.* (+ github.*) cap-ids
-#       8. carl:  grant nothing (deny-all = the essential baseline only)
-#     Members default-DENY to an essential allowlist (extension_search,
+#       8. carl:  grant nothing extra (keeps just the essential baseline)
+#     Every member already comes with the essential baseline (extension_search,
 #     extension_activate, echo, time, json, memory_read/search) + capability_info;
-#     mechanism: PUT {"availability":"available"} on each cap IN the member's
-#     allow-set (grant the allowed, rather than hide the rest).
+#     mechanism: PUT {"availability":"available"} on each cap to grant.
 #
 # The login bearer is shown ONCE at creation (stored only as a hash), so this
 # script's output is your only copy.
@@ -58,16 +58,16 @@ if [ -z "${OPERATOR_TOKEN}" ]; then
   exit 1
 fi
 
-# Per-user allow-lists (steps 6-8). Space-separated cap-ids; everything else hidden.
-# Members already DEFAULT to the essential allowlist (extension_search,
-# extension_activate, echo, time, json, memory_read, memory_search) — so we only
-# GRANT the EXTRA capabilities each member needs on top of that baseline; no need
-# to re-grant essentials. Extension caps (nearai.*, google-drive.*) are reached
-# by the agent via extension_search (already essential), so granting them just
-# makes them available for that discovery path.
+# Per-user capability GRANTS (steps 6-8). Space-separated cap-ids to GRANT to
+# each member (set availability=available). This script only ever SETS/ADDS
+# capabilities — it never hides or removes any. Members already come with the
+# essential baseline (extension_search, extension_activate, echo, time, json,
+# memory_read, memory_search), so we grant only the EXTRA caps each one needs.
+# Extension caps (nearai.*, google-drive.*) are reached by the agent via
+# extension_search, so granting them just makes them available to discover.
 ALICE_ALLOW="builtin.shell nearai.web_search"
 BOB_ALLOW=""   # filled with the live google-drive.* cap-ids in step [3/3]
-CARL_ALLOW=""  # deny-all: the essential baseline only — nothing extra granted
+CARL_ALLOW=""  # nothing extra granted (just the essential baseline)
 
 # REST-created users (director is the env owner, NOT created here).
 ORDER="officer alice bob carl"
@@ -134,11 +134,11 @@ set_role() {
   else printf '  ✗ promote %-10s -> HTTP %s: %s\n' "$uid" "$code" "$(printf '%s' "$body" | sed '$d')" >&2; fi
 }
 
-# grant_capability <admin> <user> <cap> ; retries on 429 (rate limit 60/60s).
-# New model: members default-DENY, so we GRANT the allowed caps (an `available`
-# delta) rather than hiding the rest. Only a few writes per member, so no
-# rate-limit fan-out is needed; the backoff (14 attempts, capped 12s) is a safety
-# net that can wait a full 60s window out.
+# grant_capability <admin> <user> <cap> ; SETS a capability available for the
+# user (an `available` per-user delta) — it adds, never hides/removes. Retries on
+# 429 (the per-user-caps route is rate-limited 60/60s); only a few writes per
+# member, so the backoff (14 attempts, capped 12s, > one 60s window) is just a
+# safety net.
 grant_capability() {
   admin="$1"; uid="$2"; cap="$3"; attempt=0
   while [ "$attempt" -lt 14 ]; do
@@ -178,11 +178,11 @@ echo "[2/3] Promoting officer -> admin..."
 set_role "${admin_bearer}" officer admin
 
 # --- per-user grants (steps 6-8) -------------------------------------------
-# New model: members default-DENY to an essential allowlist, so we GRANT each
-# member's EXTRA capabilities (an `available` delta) on top of that baseline,
-# rather than hiding the rest. Only a few writes per member.
+# GRANT each member's extra capabilities (an `available` delta) on top of the
+# essential baseline they already have. Adds only — nothing is hidden or removed.
+# Only a few writes per member.
 echo
-echo "[3/3] Granting per-user capabilities (members default-DENY; grant the extras)..."
+echo "[3/3] Granting per-user capabilities (set available; never removed)..."
 # Resolve bob's Google Drive grants to the REAL google-drive.* cap-ids from the
 # live catalog (the per-user-caps route rejects unknown ids with 400, so package
 # labels like "gdrive" would fail). If Drive isn't installed, bob simply gets the
