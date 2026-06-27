@@ -38,7 +38,7 @@ def _count_blocking_gaps(
         gap_count += int(execution["blocked_test_count"])
     gap_count += int(defects["undocumented_non_passing_test_count"])
     gap_count += int(defects["missing_defect_field_count"])
-    gap_count += int(defects["open_high_critical_defect_count"])
+    gap_count += int(defects["open_defect_count"])
     return gap_count
 
 
@@ -71,7 +71,7 @@ def build_status(
         for row in execution["blocked_tests"]
     ]
     defects_found = (
-        int(defects["scoped_non_passing_test_count"])
+        int(defects["scoped_defect_count"])
         + int(surface["uncovered_surface_count"])
         + int(completeness["missing_feature_field_count"])
         + int(completeness["missing_test_suite_count"])
@@ -105,16 +105,15 @@ def build_status(
             ],
         },
         "defects_found": defects_found,
-        "defects_fixed": 0,
-        "defects_documented_or_waived": defects[
-            "documented_non_passing_test_count"
-        ],
+        "defects_fixed": defects["resolved_defect_count"],
+        "defects_documented_or_waived": defects["waived_defect_count"],
         "remaining_risks": {
             "blocked_test_count": execution["blocked_test_count"],
             "blocked_tests": blocked_tests,
             "undocumented_non_passing_test_count": defects[
                 "undocumented_non_passing_test_count"
             ],
+            "open_defect_count": defects["open_defect_count"],
             "open_high_critical_defect_count": defects[
                 "open_high_critical_defect_count"
             ],
@@ -157,6 +156,7 @@ def print_report(report: dict[str, object]) -> None:
         "Remaining Risks: "
         f"{risks['blocked_test_count']} blocked tests, "
         f"{risks['undocumented_non_passing_test_count']} undocumented non-passing rows, "
+        f"{risks['open_defect_count']} open defects, "
         f"{risks['open_high_critical_defect_count']} open high/critical defects"
     )
     for blocked in risks["blocked_tests"]:

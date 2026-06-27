@@ -95,6 +95,10 @@ def _execution_report(**overrides):
 def _defect_report(**overrides):
     report = {
         "workbook": "matrix.xlsx",
+        "scoped_defect_count": 3,
+        "resolved_defect_count": 1,
+        "waived_defect_count": 2,
+        "open_defect_count": 0,
         "scoped_non_passing_test_count": 2,
         "documented_non_passing_test_count": 2,
         "undocumented_non_passing_test_count": 0,
@@ -102,6 +106,7 @@ def _defect_report(**overrides):
         "open_high_critical_defect_count": 0,
         "undocumented_non_passing_tests": [],
         "missing_defect_fields": [],
+        "open_defects": [],
         "open_high_critical_defects": [],
     }
     report.update(overrides)
@@ -147,8 +152,9 @@ class AuditQualityLoopStatusTests(unittest.TestCase):
             self.assertTrue(report["loop_gate_passed"])
             self.assertEqual(report["blocking_gap_count"], 0)
             self.assertEqual(report["remaining_risks"]["blocked_test_count"], 2)
-            self.assertEqual(report["defects_found"], 2)
-            self.assertEqual(report["defects_fixed"], 0)
+            self.assertEqual(report["remaining_risks"]["open_defect_count"], 0)
+            self.assertEqual(report["defects_found"], 3)
+            self.assertEqual(report["defects_fixed"], 1)
             self.assertEqual(report["defects_documented_or_waived"], 2)
             self.assertEqual(report["confidence_score"], "95.0%")
 
@@ -180,6 +186,16 @@ class AuditQualityLoopStatusTests(unittest.TestCase):
             defects=_defect_report(
                 undocumented_non_passing_test_count=1,
                 missing_defect_field_count=1,
+                open_defect_count=1,
+                open_defects=[
+                    {
+                        "defect_id": "DEF-999",
+                        "feature_id": "REBCLI-055",
+                        "severity": "Low",
+                        "status": "Open",
+                        "title": "Open defect",
+                    }
+                ],
                 open_high_critical_defect_count=1,
             ),
         ):

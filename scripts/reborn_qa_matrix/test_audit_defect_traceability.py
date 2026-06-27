@@ -165,6 +165,10 @@ class AuditDefectTraceabilityTests(unittest.TestCase):
 
             report = audit_defect_traceability.build_audit(workbook_path)
 
+            self.assertEqual(report["scoped_defect_count"], 0)
+            self.assertEqual(report["resolved_defect_count"], 0)
+            self.assertEqual(report["waived_defect_count"], 0)
+            self.assertEqual(report["open_defect_count"], 0)
             self.assertEqual(report["scoped_non_passing_test_count"], 1)
             self.assertEqual(report["undocumented_non_passing_test_count"], 1)
             self.assertEqual(
@@ -193,6 +197,10 @@ class AuditDefectTraceabilityTests(unittest.TestCase):
 
             report = audit_defect_traceability.build_audit(workbook_path)
 
+            self.assertEqual(report["scoped_defect_count"], 1)
+            self.assertEqual(report["resolved_defect_count"], 0)
+            self.assertEqual(report["waived_defect_count"], 1)
+            self.assertEqual(report["open_defect_count"], 0)
             self.assertEqual(report["documented_non_passing_test_count"], 1)
             self.assertEqual(report["undocumented_non_passing_test_count"], 0)
             self.assertEqual(report["open_high_critical_defect_count"], 0)
@@ -228,6 +236,10 @@ class AuditDefectTraceabilityTests(unittest.TestCase):
 
             report = audit_defect_traceability.build_audit(workbook_path)
 
+            self.assertEqual(report["scoped_defect_count"], 1)
+            self.assertEqual(report["resolved_defect_count"], 0)
+            self.assertEqual(report["waived_defect_count"], 0)
+            self.assertEqual(report["open_defect_count"], 1)
             self.assertEqual(report["missing_defect_field_count"], 1)
             self.assertEqual(
                 report["missing_defect_fields"][0]["column"],
@@ -239,6 +251,46 @@ class AuditDefectTraceabilityTests(unittest.TestCase):
                     ["--workbook", str(workbook_path), "--strict-no-open-high"]
                 ),
                 1,
+            )
+
+    def test_resolved_defect_counts_as_fixed_and_closes_gap(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "matrix.xlsx"
+            _write_workbook(
+                workbook_path,
+                feature_rows=[
+                    list(audit_workbook_completeness.REQUIRED_FEATURE_COLUMNS),
+                    _feature("REBCLI-097"),
+                ],
+                test_rows=[
+                    TEST_COLUMNS,
+                    _test_row(
+                        "REBCLI-097-TC-01",
+                        "REBCLI-097",
+                        status="Passed",
+                    ),
+                ],
+                defect_rows=[
+                    DEFECT_COLUMNS,
+                    _defect(
+                        "DEF-055",
+                        "REBCLI-097",
+                        "REBCLI-097-TC-01",
+                        severity="Low",
+                        status="Resolved",
+                    ),
+                ],
+            )
+
+            report = audit_defect_traceability.build_audit(workbook_path)
+
+            self.assertEqual(report["scoped_defect_count"], 1)
+            self.assertEqual(report["resolved_defect_count"], 1)
+            self.assertEqual(report["waived_defect_count"], 0)
+            self.assertEqual(report["open_defect_count"], 0)
+            self.assertEqual(
+                audit_defect_traceability.main(["--workbook", str(workbook_path)]),
+                0,
             )
 
 

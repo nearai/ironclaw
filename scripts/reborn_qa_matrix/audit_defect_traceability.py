@@ -25,21 +25,47 @@ REQUIRED_DEFECT_COLUMNS = (
 )
 
 HIGH_SEVERITIES = {"critical", "high"}
-CLOSED_STATUS_PREFIXES = (
-    "resolved",
+RESOLVED_STATUS_PREFIXES = ("resolved",)
+WAIVED_STATUS_PREFIXES = (
     "waived",
     "external-existing",
     "duplicate",
 )
+CLOSED_STATUS_PREFIXES = RESOLVED_STATUS_PREFIXES + WAIVED_STATUS_PREFIXES
+
+
+def _normalized_status(row: dict[str, str]) -> str:
+    return row.get("Status", "").strip().lower()
+
+
+def _status_starts_with(row: dict[str, str], prefixes: tuple[str, ...]) -> bool:
+    return _normalized_status(row).startswith(prefixes)
+
+
+def _defect_summary(row: dict[str, str]) -> dict[str, str]:
+    return {
+        "defect_id": row.get("Defect ID", ""),
+        "feature_id": row.get("Feature ID", ""),
+        "severity": row.get("Severity", ""),
+        "status": row.get("Status", ""),
+        "title": row.get("Title", ""),
+    }
+
+
+def _is_resolved(row: dict[str, str]) -> bool:
+    return _status_starts_with(row, RESOLVED_STATUS_PREFIXES)
+
+
+def _is_waived(row: dict[str, str]) -> bool:
+    return _status_starts_with(row, WAIVED_STATUS_PREFIXES)
+
+
+def _is_closed_or_waived(row: dict[str, str]) -> bool:
+    return _status_starts_with(row, CLOSED_STATUS_PREFIXES)
 
 
 def _row_text(row: dict[str, str]) -> str:
     return " ".join(str(value or "") for value in row.values())
-
-
-def _is_closed_or_waived(status: str) -> bool:
-    normalized = status.strip().lower()
-    return normalized.startswith(CLOSED_STATUS_PREFIXES)
 
 
 def build_audit(
@@ -56,6 +82,9 @@ def build_audit(
         if audit_workbook_completeness._in_scope(feature, scope_tokens)
     }
     scoped_tests = [test for test in tests if test.get("Feature ID", "") in scoped_ids]
+    scoped_defects = [
+        defect for defect in defects if defect.get("Feature ID", "") in scoped_ids
+    ]
     non_passing_tests = [
         test
         for test in scoped_tests
@@ -64,7 +93,7 @@ def build_audit(
     ]
 
     missing_defect_fields: list[dict[str, str]] = []
-    for defect in defects:
+    for defect in scoped_defects:
         for column in REQUIRED_DEFECT_COLUMNS:
             if not (defect.get(column) or "").strip():
                 missing_defect_fields.append(
@@ -96,23 +125,28 @@ def build_audit(
         if not defect_rows_by_test_id[test.get("Test ID", "")]
     ]
 
+    resolved_defects = [defect for defect in scoped_defects if _is_resolved(defect)]
+    waived_defects = [defect for defect in scoped_defects if _is_waived(defect)]
+    open_defects = [
+        _defect_summary(defect)
+        for defect in scoped_defects
+        if not _is_closed_or_waived(defect)
+    ]
+
     open_high_critical_defects = [
-        {
-            "defect_id": defect.get("Defect ID", ""),
-            "feature_id": defect.get("Feature ID", ""),
-            "severity": defect.get("Severity", ""),
-            "status": defect.get("Status", ""),
-            "title": defect.get("Title", ""),
-        }
-        for defect in defects
-        if defect.get("Feature ID", "") in scoped_ids
-        and defect.get("Severity", "").strip().lower() in HIGH_SEVERITIES
-        and not _is_closed_or_waived(defect.get("Status", ""))
+        _defect_summary(defect)
+        for defect in scoped_defects
+        if defect.get("Severity", "").strip().lower() in HIGH_SEVERITIES
+        and not _is_closed_or_waived(defect)
     ]
 
     return {
         "workbook": str(workbook_path),
         "scope_tokens": list(scope_tokens),
+        "scoped_defect_count": len(scoped_defects),
+        "resolved_defect_count": len(resolved_defects),
+        "waived_defect_count": len(waived_defects),
+        "open_defect_count": len(open_defects),
         "scoped_non_passing_test_count": len(non_passing_tests),
         "documented_non_passing_test_count": sum(
             1
@@ -124,6 +158,7 @@ def build_audit(
         "open_high_critical_defect_count": len(open_high_critical_defects),
         "undocumented_non_passing_tests": undocumented_non_passing_tests,
         "missing_defect_fields": missing_defect_fields,
+        "open_defects": open_defects,
         "open_high_critical_defects": open_high_critical_defects,
     }
 
@@ -132,18 +167,23 @@ def _gap_count(report: dict[str, object], *, strict_no_open_high: bool) -> int:
     gap_count = int(report["undocumented_non_passing_test_count"]) + int(
         report["missing_defect_field_count"]
     )
-    if strict_no_open_high:
-        gap_count += int(report["open_high_critical_defect_count"])
+    gap_count += int(report["open_defect_count"])
     return gap_count
 
 
 def print_report(report: dict[str, object]) -> None:
     print(f"Workbook: {report['workbook']}")
+    print(f"Scoped defects: {report['scoped_defect_count']}")
+    print(f"Resolved defects: {report['resolved_defect_count']}")
+    print(f"Waived defects: {report['waived_defect_count']}")
+    print(f"Open defects: {report['open_defect_count']}")
     print(f"Scoped non-passing tests: {report['scoped_non_passing_test_count']}")
     print(f"Documented non-passing tests: {report['documented_non_passing_test_count']}")
     print(f"Undocumented non-passing tests: {report['undocumented_non_passing_test_count']}")
     print(f"Missing defect fields: {report['missing_defect_field_count']}")
     print(f"Open high/critical defects: {report['open_high_critical_defect_count']}")
+    for gap in report["open_defects"]:
+        print(f"- open defect {gap['defect_id']} {gap['severity']} {gap['status']}")
     for gap in report["undocumented_non_passing_tests"]:
         print(f"- undocumented {gap['test_id']} {gap['status']}")
     for gap in report["missing_defect_fields"]:
@@ -164,7 +204,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--strict-no-open-high",
         action="store_true",
-        help="return nonzero when scoped high/critical defects are not closed or waived",
+        help=(
+            "compatibility flag; all scoped open defects now return nonzero "
+            "because Phase 4 requires every defect resolved or explicitly waived"
+        ),
     )
     parser.add_argument("--json", action="store_true")
     return parser
