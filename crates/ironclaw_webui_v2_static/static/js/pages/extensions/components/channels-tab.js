@@ -57,7 +57,7 @@ export function connectActionsForChannel(connectableChannels, channel) {
     ),
   ].filter(Boolean);
   if (actions.length > 0) return actions;
-  const fallback = channels.find((connectAction) => connectAction.channel === channel);
+  const fallback = channels.find((connectAction) => connectAction?.channel === channel);
   return fallback ? [fallback] : [];
 }
 

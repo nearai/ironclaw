@@ -879,7 +879,7 @@ export function useChat(threadId) {
         });
         return response;
       }
-      if (onboarding.requestId) {
+      if (onboarding.requestId && threadForResume) {
         setIsProcessing(true);
       }
       return response;

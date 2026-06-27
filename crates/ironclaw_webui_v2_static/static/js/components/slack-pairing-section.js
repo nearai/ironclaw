@@ -11,7 +11,14 @@ export function SlackPairingSection({ action }) {
   const redeemMutation = useMutation({
     mutationFn: async ({ code }) => {
       const result = await redeemSlackPairingCode(code);
-      await activateExtension({ id: "slack" });
+      // Redemption already connected the account; activation is best-effort so
+      // a post-redeem activation hiccup is not surfaced as a redemption
+      // failure. A stale "installed" status reconciles on the next refresh.
+      try {
+        await activateExtension({ id: "slack" });
+      } catch (activationError) {
+        console.error("Slack activation after pairing failed:", activationError);
+      }
       return result;
     },
     onSuccess: () => {
