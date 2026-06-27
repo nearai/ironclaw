@@ -12,7 +12,7 @@ Adopt the hermes-agent test philosophy for the Reborn stack: **run all internal 
 
 IronClaw already has the building blocks, but the current Reborn harness has two gaps relative to this goal:
 
-1. **LLM is mocked too high.** `RebornTraceReplayModelGateway` swaps the entire `HostManagedModelGateway`, bypassing *all* of `ironclaw_llm` (model-profile resolution, `CompletionRequest` build, retry/routing/circuit-breaker/safety decorators, and rig-core request shaping). Tests therefore never exercise the provider chain.
+1. **LLM is mocked too high.** `RebornTraceReplayModelGateway` swaps the entire `HostManagedModelGateway`, bypassing *all* of `ironclaw_llm` (model-profile resolution, `CompletionRequest` build, retry/smart-routing/failover/circuit-breaker/response-cache decorators, and rig-core request shaping). Tests therefore never exercise the provider chain.
 2. **No real SQL persistence.** The harness hardcodes `LocalFilesystem`(TempDir) for product/thread state and `InMemoryBackend` for turn state. The production `RootFilesystem` SQL backends (`LibSqlRootFilesystem`, `PostgresRootFilesystem`) are never touched in tests.
 
 This design closes both gaps **without** increasing per-test verbosity.
@@ -58,7 +58,7 @@ HostManagedModelGateway
    │  ── real LlmProviderModelGateway (profile resolve, CompletionRequest build, tool-def assembly)
    ▼
 LlmProvider decorator chain          built by the NEW extracted apply_decorator_chain():
-   │  (retry → routing → circuit → safety → cache)   runs for real
+   │  (Retry → SmartRouting → Failover → CircuitBreaker → ResponseCache)   runs for real
    ▼
 raw provider (rig-core "SDK")        ◄── scripted fake injected HERE
    │                                      (TraceLlm fed an in-memory LlmTrace,
@@ -66,7 +66,7 @@ raw provider (rig-core "SDK")        ◄── scripted fake injected HERE
 vendor HTTP                          (never reached)
 ```
 
-IronClaw's vendor SDK is the rig-core `Client` inside each `RigAdapter`. The faithful interception point that still runs every internal layer is **the raw provider at the bottom of the decorator chain**. Profile policy, retry, routing, circuit-breaker, safety sanitization, and `CompletionRequest`/tool-definition assembly all execute; only the vendor call returns scripted output.
+IronClaw's vendor SDK is the rig-core `Client` inside each `RigAdapter`. The faithful interception point that still runs every internal layer is **the raw provider at the bottom of the decorator chain**. Profile policy, retry, smart-routing, failover, circuit-breaker, response-cache, and `CompletionRequest`/tool-definition assembly all execute; only the vendor call returns scripted output. (Safety sanitization is not a decorator in this chain — it runs upstream in `LlmProviderModelGateway`/rig-core, not inside `apply_decorator_chain`.)
 
 **Why a single seam (no `GatewaySwap`):** the chain above the raw provider is a handful of in-memory state checks — its cost is negligible, so a "fast gateway-swap mode" is not justified, and keeping it would (a) contradict the locked "mock at the SDK seam" requirement and (b) let any chain bug be silently bypassed. Orchestration-only tests that genuinely want to skip `ironclaw_llm` already have a home: the existing `RebornBinaryE2EHarness::with_model_gateway` static constructors, which are untouched by this work.
 
@@ -261,7 +261,7 @@ A framework self-test (or a doc check) asserts the libSQL-backed case builds and
 
 **Inbound (synthetic):** `h.submit_turn(conv, text)` → `RebornTestIngress` → `RebornTestProductAdapter` → `DefaultProductWorkflow` → `DefaultInboundTurnService` → `DefaultTurnCoordinator` → `TurnRunScheduler` → planned agent loop. No HTTP server.
 
-**Model call:** agent loop → real `LlmProviderModelGateway` → real decorator chain (via the extracted `apply_decorator_chain`) → scripted raw provider pops the next `RebornScriptedReply` → returns a scripted provider response. Retry/routing/safety/tool-def assembly all execute.
+**Model call:** agent loop → real `LlmProviderModelGateway` → real decorator chain (via the extracted `apply_decorator_chain`) → scripted raw provider pops the next `RebornScriptedReply` → returns a scripted provider response. Retry/smart-routing/failover/circuit-breaker/response-cache and tool-def assembly all execute.
 
 **Persistence (`LibSql`):** turn/thread/product `put`/`get`/`append`/`query` → `CompositeRootFilesystem` → single `LibSqlRootFilesystem` → real SQLite file in `TempDir` (migrations run at build). `TempDir` dropped at test end.
 
@@ -297,7 +297,7 @@ A framework self-test (or a doc check) asserts the libSQL-backed case builds and
 
 ## 9. Build Order (for the implementation plan)
 
-0. **(Prerequisite, production crate)** Extract `apply_decorator_chain(raw: Arc<dyn LlmProvider>, config: &LlmConfig, session: Arc<SessionManager>) -> Arc<dyn LlmProvider>` from `build_provider_chain_components_with_options` in `crates/ironclaw_llm/src/lib.rs` (the decorator stack at lines 1004–1118). **Minimal approach (preferred):** `build_provider_chain_components_with_options` internally calls `apply_decorator_chain` over the raw provider it already builds (lines 997–1001); `build_static_provider_chain` is **unchanged** (still calls the wrapper). The new `apply_decorator_chain` becomes `pub` so the test harness can call it directly with the scripted provider. Behavior-preserving — no change to any production call path. Ship as its own reviewable PR. Verified necessary: no injection seam exists today (the raw provider is built internally at lib.rs:997–1001).
+0. **(Prerequisite, production crate)** Extract `apply_decorator_chain(raw: Arc<dyn LlmProvider>, config: &LlmConfig, session: Arc<SessionManager>) -> Arc<dyn LlmProvider>` from `build_provider_chain_components_with_options` in `crates/ironclaw_llm/src/lib.rs` (the decorator stack at lines 1004–1118). **Minimal approach (preferred):** `build_provider_chain_components_with_options` internally calls `apply_decorator_chain` over the raw provider it already builds (lines 997–1001); `build_static_provider_chain` is **unchanged** (still calls the wrapper). The new `apply_decorator_chain` is narrowed to `pub(crate)` — production-crate-internal only, not directly callable cross-crate. The test harness reaches it through `ironclaw_llm::testing::provider_chain_over`, a test-only `pub fn` wrapper gated to the `testing` feature (or `cfg(test)`) that forwards across the visibility boundary. (A `pub use` re-export of a `pub(crate)` item fails E0364 — so a forwarding wrapper function is used instead of a re-export.) Behavior-preserving — no change to any production call path. Ship as its own reviewable PR. Verified necessary: no injection seam exists today (the raw provider is built internally at lib.rs:997–1001).
 1. Scripted-provider adapter (`scripted_provider.rs`) + unit tests. Wraps `TraceLlm`'s engine (decision locked, §3.3.1) — no new replay provider. Build an in-memory `LlmTrace` from the façade's replies and hand a `TraceLlm` to the chain. Include the §3.4 name mapping.
 2. `RebornScriptedReply` constructors (`reply.rs`) — the mandatory façade (§3.3.1, §4.2): each reply maps to one `TraceStep`, auto-filling `id` / tokens / `request_hint` / `expected_tool_results`.
 3. `RebornIntegrationHarness` + `::builder()`/`::test_default()` (`builder.rs`): wire the real `apply_decorator_chain` + `LlmProviderModelGateway` over the scripted provider; bake hermetic env into `build()`; `.script()` at builder time.
@@ -333,6 +333,6 @@ Each step is independently landable. Step 0 is a standalone production-crate PR 
 
 - **Hermetic env must include `LLM_MAX_RETRIES=0`** (§2/§4.1): without it `apply_decorator_chain` wraps the scripted provider in `RetryProvider(max_retries=3)` (lib.rs:1004–1017), which is not passthrough and would re-invoke an exhausted script 3× on error-path tests. (cold thermo round-5 F3 — a real functional fix.)
 - **§3.3.1 evidence corrected** (cold round-5 F1/F2): the TraceLlm-reuse decision is unchanged and correct on its merits, but the supporting data was wrong — recorded JSON fixtures are the *majority* (113 files), in-memory `from_trace` is used by 7 v1 files, and the Reborn tier had no prior `TraceLlm` use (`reborn_qa_recorded_behavior.rs` uses the gateway-level mock, not `TraceLlm`).
-- **Step 0 scope pinned** (round-5 F6): `build_static_provider_chain` stays unchanged; `apply_decorator_chain` is extracted as a `pub` fn the harness calls directly. **Pre-commit readability check** is a separate test-style script, not a safety-hook check (round-5 F5).
+- **Step 0 scope pinned** (round-5 F6): `build_static_provider_chain` stays unchanged; `apply_decorator_chain` is extracted as a `pub(crate)` fn; the test harness reaches it via `ironclaw_llm::testing::provider_chain_over`, a test-only forwarding wrapper gated to the `testing` feature. **Pre-commit readability check** is a separate test-style script, not a safety-hook check (round-5 F5).
 
 No open implementation-time questions remain.

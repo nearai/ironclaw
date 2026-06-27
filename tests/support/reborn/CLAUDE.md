@@ -24,7 +24,7 @@ assert_* reads the persisted reply / state
 ```
 
 The fake sits beneath the real chain (`apply_decorator_chain`), so
-retry/routing/safety/`CompletionRequest`+tool-def assembly all execute. Mocking
+retry/smart-routing/failover/circuit-breaker/response-cache and `CompletionRequest`+tool-def assembly all execute. Mocking
 higher (at the gateway) is wrong — it skips `ironclaw_llm`.
 
 ## Writing a test (the shape — always)
@@ -81,9 +81,9 @@ Design: `docs/superpowers/specs/2026-06-26-reborn-integration-test-framework-des
 
 ## Implemented now vs planned
 
-Slice 1 ships the spine + one text-reply test. **Planned (do not assume present;
-add behind a test that exercises it — no dead code):**
-`RebornScriptedReply::tool_call(..)` + the CapabilityId→ProviderToolName mapping;
+Slice 1 ships the spine + one text-reply test. Slice 2 (this PR) ships
+`RebornScriptedReply::tool_call(..)` + the CapabilityId→ProviderToolName mapping.
+**Planned (do not assume present; add behind a test that exercises it — no dead code):**
 `StorageMode::LibSql` (real SQLite on tmp) and the InMemory-vs-libSQL backend
 matrix; inert process port + `.with_live_shell()` / `.with_live_http_egress()`
 opt-ins; outbound/HTTP/secrets/MCP capture wiring; a dedicated `assertions.rs`

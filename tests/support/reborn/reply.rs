@@ -30,15 +30,24 @@ impl RebornScriptedReply {
         }
     }
 
-    /// Scripts one model tool-call turn. Accepts a CapabilityId (e.g. `"builtin.http"`);
-    /// the name is realized in ProviderToolName format via the simple `'.' -> "__"` mapping.
+    /// Scripts one model tool-call turn. Accepts a CapabilityId (e.g. `"builtin.http"`).
+    ///
+    /// **Why the encoding lives here:** `TraceToolCall.name` flows through `TraceLlm` into
+    /// `LlmProviderModelGateway::provider_tool_call_from_llm`, which calls
+    /// `ProviderToolName::new(tool_call.name)` with no intermediate conversion.
+    /// `ProviderToolName` rejects dots, so the `'.' → "__"` encoding must be applied before
+    /// storing into `TraceToolCall`. This is distinct from the `RebornTraceReplayModelGateway`
+    /// JSON-fixture-replay path, which has its own identical encoding in `trace_provider_tool_name`
+    /// (`model_replay.rs`) at that seam. The two encoders serve different paths and are not
+    /// redundant; if the mapping ever needs to change (e.g. collision-safety or truncation),
+    /// update both sites together.
     ///
     /// **Collision caveat:** this mapping is NOT collision-safe — two distinct capability IDs
-    /// that differ only by `.` vs `__` would produce the same `ProviderToolName`, and
-    /// long names are not truncated. It is valid for the single-capability tests in the
-    /// current slice. Any future slice that scripts colliding or long capability IDs must
-    /// instead resolve the name against the advertised `ProviderToolName` from the tool list
-    /// rather than applying this heuristic mapping.
+    /// that differ only by `.` vs `__` would produce the same `ProviderToolName`, and long
+    /// names are not truncated to `ProviderToolName::MAX_BYTES`. It is valid for the
+    /// single-capability tests in the current slice. Any future slice that scripts colliding
+    /// or long capability IDs must instead resolve the name against the advertised
+    /// `ProviderToolName` from the tool list rather than applying this heuristic mapping.
     ///
     /// The tool-call `id` is auto-filled from a process-scoped counter (`call-N`),
     /// so it is unique within a run but not stable across parallel test processes.

@@ -154,7 +154,11 @@ impl RebornIntegrationHarnessBuilder {
 
         // --- real model gateway over the scripted raw provider --------------
         let raw: Arc<dyn LlmProvider> = Arc::new(scripted_trace_llm(self.replies));
-        let session = create_session_manager(SessionConfig::default()).await;
+        let session = create_session_manager(SessionConfig {
+            session_path: turn_root.path().join("session.json"),
+            ..SessionConfig::default()
+        })
+        .await;
         let llm_config = ironclaw_llm::testing::nearai_test_config(SCRIPTED_MODEL_NAME);
         let provider = provider_chain_over(raw, &llm_config, session).await?;
         let model_profile_id = ModelProfileId::new(INTERACTIVE_MODEL_PROFILE)
@@ -422,21 +426,23 @@ impl Drop for RebornIntegrationHarness {
 fn apply_hermetic_env() {
     static HERMETIC_ENV: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     HERMETIC_ENV.get_or_init(|| {
+        // Serialize against all other env-mutating tests in this binary.
+        let _env_guard = ironclaw_common::env_helpers::lock_env();
         // SAFETY: Edition 2024 requires `unsafe` for `std::env::set_var` /
-        // `remove_var`. These values are constants set exactly once before any
-        // harness `build()` call reads them (enforced by `get_or_init`).
-        // Integration test binaries are separate OS processes, so cross-binary
-        // env interference is bounded at the process boundary. This does NOT
-        // eliminate all possible env races within a single test binary if other
-        // code concurrently reads environment variables.
+        // `remove_var`. The `lock_env()` guard serializes against all other
+        // env-mutating tests in this binary; values are constants set once.
         unsafe {
             std::env::set_var("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
             std::env::set_var("TZ", "UTC");
             std::env::set_var("LLM_MAX_RETRIES", "0");
             std::env::remove_var("NEARAI_CHEAP_MODEL");
             std::env::remove_var("NEARAI_FALLBACK_MODEL");
+            std::env::remove_var("LLM_CHEAP_MODEL");
             std::env::remove_var("LLM_CIRCUIT_BREAKER_THRESHOLD");
+            std::env::remove_var("CIRCUIT_BREAKER_THRESHOLD");
             std::env::remove_var("LLM_RESPONSE_CACHE_ENABLED");
+            std::env::remove_var("RESPONSE_CACHE_ENABLED");
+            std::env::remove_var("NEARAI_SESSION_TOKEN");
         }
     });
 }
