@@ -525,11 +525,15 @@ async fn approval_gate_prompt(
     let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
     let lookup =
         approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, &event.scope).await;
+    let allow_always = lookup
+        .context
+        .as_ref()
+        .is_some_and(|context| context.scope.reusable);
     gate_prompt_with_context(
         event,
         gate_ref_string,
         "Approval required",
-        is_approval_gate_ref(gate_ref.as_str()),
+        is_approval_gate_ref(gate_ref.as_str()) && allow_always,
         lookup.context,
         lookup.invocation_id,
     )

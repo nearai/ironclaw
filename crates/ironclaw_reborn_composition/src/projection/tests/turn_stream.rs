@@ -632,7 +632,7 @@ async fn webui_event_stream_keeps_approval_prompt_when_request_lookup_fails() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_fails_closed_for_projection_allow_always_without_prompt() {
+async fn webui_event_stream_fails_closed_for_projection_allow_always_without_context() {
     let tenant_id = TenantId::new("webui-events-approval-no-prompt-tenant").unwrap();
     let user_id = UserId::new("webui-events-approval-no-prompt-user").unwrap();
     let agent_id = AgentId::new("webui-events-approval-no-prompt-agent").unwrap();
@@ -675,9 +675,10 @@ async fn webui_event_stream_fails_closed_for_projection_allow_always_without_pro
             state: TurnRunState {
                 status: TurnStatus::BlockedApproval,
                 gate_ref: Some(gate_ref.clone()),
-                // Cursor mismatch suppresses the transient prompt payload; the
-                // durable projection still needs to fail closed on affordances.
-                ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(2))
+                // No approval store is wired for this test, so the parsed
+                // approval gate has no contextual approval request. The prompt
+                // and projection must still fail closed on affordances.
+                ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
             },
         }),
     );
@@ -692,11 +693,14 @@ async fn webui_event_stream_fails_closed_for_projection_allow_always_without_pro
         .await
         .unwrap();
 
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event.payload(), ProductOutboundPayload::GatePrompt(_)))
-    );
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        ProductOutboundPayload::GatePrompt(prompt)
+            if prompt.turn_run_id == turn_run
+                && prompt.gate_ref == gate_ref.as_str()
+                && prompt.approval_context.is_none()
+                && !prompt.allow_always
+    )));
     assert!(events.iter().any(|event| matches!(
         event.payload(),
         ProductOutboundPayload::ProjectionUpdate { state }
