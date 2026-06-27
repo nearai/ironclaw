@@ -366,6 +366,30 @@ OPENAI_MODELS_LIST_COMMAND = CommandSpec(
     ],
 )
 
+OPENAI_MODELS_HOST_CATALOG_COMMAND = CommandSpec(
+    name="openai_models_host_catalog_contracts",
+    description=(
+        "Focused host-composition catalog contracts proving configured LLM "
+        "providers feed the OpenAI-compatible model listing with active-first "
+        "ordering, owner attribution, and model-id de-duplication."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,openai-compat-beta,test-support,root-llm-provider",
+        "model_entries_",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 OPENAI_COMPAT_ROUTE_MOUNT_COMMAND = CommandSpec(
     name="openai_compat_beta_route_mount_contracts",
     description=(
@@ -4016,12 +4040,14 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-099-TC-05",
             "REBCLI-099-TC-06",
         ],
-        commands=[OPENAI_MODELS_LIST_COMMAND],
+        commands=[OPENAI_MODELS_LIST_COMMAND, OPENAI_MODELS_HOST_CATALOG_COMMAND],
         notes=(
             "Focused Models API contract coverage for the discovered /v1/models "
             "and /api/v1/models OpenAI-compatible feature: descriptor metadata, "
             "authenticated model-list projection, auth-before-catalog rejection, "
-            "and fail-closed 501 behavior when the host does not wire a catalog."
+            "fail-closed 501 behavior when the host does not wire a catalog, "
+            "empty-catalog envelope handling, and host LLM-config catalog "
+            "ordering/de-duplication."
         ),
     ),
     "support_substrate_product_workflow_regression": CaseSpec(

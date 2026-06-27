@@ -3163,11 +3163,22 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 ],
             )
             commands = results["results"][0]["details"]["commands"]
-            self.assertEqual(commands[0]["name"], "openai_models_list_api_contracts")
+            self.assertEqual(
+                [command["name"] for command in commands],
+                [
+                    "openai_models_list_api_contracts",
+                    "openai_models_host_catalog_contracts",
+                ],
+            )
             self.assertIn("--features openai-compat-beta", commands[0]["command"])
             self.assertIn("--test models_handlers_contract", commands[0]["command"])
             self.assertIn("--test descriptors_contract", commands[0]["command"])
             self.assertIn("--test stub_handlers_contract", commands[0]["command"])
+            self.assertIn(
+                "webui-v2-beta,openai-compat-beta,test-support,root-llm-provider",
+                commands[1]["command"],
+            )
+            self.assertIn("model_entries_", commands[1]["command"])
 
     def test_provider_login_case_dry_run_maps_api_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
