@@ -1177,6 +1177,31 @@ WEBUI_V2_CANCEL_ERROR_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SESSION_THREAD_MESSAGE_HANDLER_COMMAND = CommandSpec(
+    name="webui_v2_session_thread_message_handler_contract",
+    description=(
+        "Focused WebUI v2 session/thread/message route-family contract for "
+        "session identity, thread create/list/delete, message submission, "
+        "timeline pagination, and attachment download plumbing."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_webui_v2",
+        "--features",
+        "webui-v2-beta",
+        "--test",
+        "webui_v2_handlers_contract",
+        "session_thread_message_routes_dispatch_to_facade_methods",
+        "--",
+        "--exact",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_FS_HANDLER_COMMAND = CommandSpec(
     name="webui_v2_filesystem_handler_slice",
     description="Focused WebUI v2 filesystem handler negative-path contract slice.",
@@ -2087,6 +2112,27 @@ CASES: dict[str, CaseSpec] = {
         notes=(
             "Runs the focused durable ledger contract first, then the broad "
             "iteration-182 support-substrate command referenced by the QA matrix."
+        ),
+    ),
+    "webui_v2_session_thread_message_api_regression": CaseSpec(
+        name="webui_v2_session_thread_message_api_regression",
+        feature="WebUI v2 session, thread, and message APIs",
+        category="Hermetic WebUI v2 API Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-043-TC-01",
+            "REBCLI-043-TC-02",
+            "REBCLI-043-TC-03",
+            "REBCLI-043-TC-04",
+            "REBCLI-043-TC-05",
+            "REBCLI-043-TC-06",
+            "REBCLI-043-TC-09",
+        ],
+        commands=[WEBUI_V2_SESSION_THREAD_MESSAGE_HANDLER_COMMAND],
+        notes=(
+            "Runs a focused caller-level WebUI v2 router contract for the "
+            "session/thread/message API family. This is hermetic Rust route "
+            "coverage and intentionally does not duplicate PR #5348 browser "
+            "Playwright ports."
         ),
     ),
     "webui_v2_route_contract_regression": CaseSpec(

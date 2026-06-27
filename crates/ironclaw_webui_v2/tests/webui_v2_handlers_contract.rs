@@ -238,6 +238,7 @@ struct StubServices {
     delete_thread_calls: Mutex<Vec<RebornDeleteThreadRequest>>,
     submit_turn_calls: Mutex<Vec<WebUiSendMessageRequest>>,
     get_timeline_calls: Mutex<Vec<RebornTimelineRequest>>,
+    list_threads_calls: Mutex<Vec<WebUiListThreadsRequest>>,
     read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
     read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
@@ -708,11 +709,27 @@ impl RebornServicesApi for StubServices {
     async fn list_threads(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListThreadsRequest,
+        request: WebUiListThreadsRequest,
     ) -> Result<RebornListThreadsResponse, RebornServicesError> {
+        self.list_threads_calls.lock().expect("lock").push(request);
         Ok(RebornListThreadsResponse {
-            threads: Vec::new(),
-            next_cursor: None,
+            threads: vec![SessionThreadRecord {
+                thread_id: ironclaw_host_api::ThreadId::new("thread:list-1").expect("thread id"),
+                scope: ironclaw_threads::ThreadScope {
+                    tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+                    agent_id: AgentId::new("agent-alpha").expect("agent"),
+                    project_id: Some(ProjectId::new("project-alpha").expect("project")),
+                    owner_user_id: Some(UserId::new("user-alpha").expect("user")),
+                    mission_id: None,
+                },
+                created_by_actor_id: "user-alpha".to_string(),
+                title: Some("Listed thread".to_string()),
+                metadata_json: None,
+                goal: None,
+                created_at: None,
+                updated_at: None,
+            }],
+            next_cursor: Some("next-page".to_string()),
         })
     }
 
@@ -1805,6 +1822,183 @@ async fn skill_routes_dispatch_to_facade_methods() {
         vec!["qa-skill".to_string()],
         "DELETE /skills/{{name}} must forward the path skill name"
     );
+}
+
+// Test-through-the-caller: REBCLI-043 is a route family, not one helper.
+// Drive the real router across the browser-facing session, thread, message,
+// timeline, attachment, and delete paths so path/query/body extraction and
+// facade dispatch remain locked without duplicating PR #5348 browser ports.
+#[tokio::test]
+async fn session_thread_message_routes_dispatch_to_facade_methods() {
+    let services = Arc::new(StubServices::default());
+    services.set_attachment(RebornAttachmentBytes {
+        mime_type: "text/plain".to_string(),
+        filename: Some("note.txt".to_string()),
+        bytes: b"hello attachment".to_vec(),
+    });
+    let router = router_with(services.clone());
+
+    let session_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(session_response.status(), StatusCode::OK);
+    let session_body = read_json(session_response).await;
+    assert_eq!(session_body["tenant_id"], "tenant-alpha");
+    assert_eq!(session_body["user_id"], "user-alpha");
+    assert!(
+        session_body["attachments"]["max_count"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "session must advertise server-side attachment limits"
+    );
+
+    let create_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"client_action_id":"act-family"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(create_response.status(), StatusCode::OK);
+    assert_eq!(
+        read_json(create_response).await["thread"]["metadata_json"],
+        r#"{"client_action_id":"act-family"}"#
+    );
+
+    let list_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads?limit=25&cursor=page%3A1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_body = read_json(list_response).await;
+    assert_eq!(list_body["threads"][0]["thread_id"], "thread:list-1");
+    assert_eq!(list_body["next_cursor"], "next-page");
+
+    let send_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-from-path/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"client_action_id":"send-1","thread_id":"thread-from-body","content":"hello"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(send_response.status(), StatusCode::OK);
+
+    let timeline_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-from-path/timeline?limit=42&cursor=timeline%3A1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(timeline_response.status(), StatusCode::OK);
+    assert_eq!(
+        read_json(timeline_response).await["thread"]["thread_id"],
+        "thread-from-path"
+    );
+
+    let attachment_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-from-path/messages/msg-1/attachments/att-1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(attachment_response.status(), StatusCode::OK);
+    assert_eq!(
+        attachment_response
+            .headers()
+            .get("x-content-type-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
+    let attachment_body = to_bytes(attachment_response.into_body(), 64 * 1024)
+        .await
+        .expect("body bytes");
+    assert_eq!(attachment_body.as_ref(), b"hello attachment");
+
+    let delete_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/threads/thread-from-path")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(delete_response.status(), StatusCode::OK);
+
+    assert_eq!(
+        services.create_thread_calls.lock().expect("lock").len(),
+        1,
+        "thread creation must call the facade once"
+    );
+
+    let list_calls = services.list_threads_calls.lock().expect("lock").clone();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(list_calls[0].limit, Some(25));
+    assert_eq!(list_calls[0].cursor.as_deref(), Some("page:1"));
+
+    let send_calls = services.submit_turn_calls.lock().expect("lock").clone();
+    assert_eq!(send_calls.len(), 1);
+    assert_eq!(
+        send_calls[0].thread_id.as_deref(),
+        Some("thread-from-path"),
+        "path thread id must override any body thread_id"
+    );
+    assert_eq!(send_calls[0].content.as_deref(), Some("hello"));
+
+    let timeline_calls = services.get_timeline_calls.lock().expect("lock").clone();
+    assert_eq!(timeline_calls.len(), 1);
+    assert_eq!(timeline_calls[0].thread_id, "thread-from-path");
+    assert_eq!(timeline_calls[0].limit, Some(42));
+    assert_eq!(timeline_calls[0].cursor.as_deref(), Some("timeline:1"));
+
+    let attachment_calls = services.read_attachment_calls.lock().expect("lock").clone();
+    assert_eq!(attachment_calls.len(), 1);
+    assert_eq!(attachment_calls[0].thread_id, "thread-from-path");
+    assert_eq!(attachment_calls[0].message_id, "msg-1");
+    assert_eq!(attachment_calls[0].attachment_id, "att-1");
+
+    let delete_calls = services.delete_thread_calls.lock().expect("lock").clone();
+    assert_eq!(delete_calls.len(), 1);
+    assert_eq!(delete_calls[0].thread_id, "thread-from-path");
 }
 
 // Replay-path variant: run metadata is None — wire must omit active_run_id, status,

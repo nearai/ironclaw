@@ -43,6 +43,14 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-043-TC-01",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "REBCLI-043-TC-09",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-056-TC-01",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -447,6 +455,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 {case["case"] for case in manifest["cases"]},
             )
             self.assertIn(
+                "webui_v2_session_thread_message_api_regression",
+                {case["case"] for case in manifest["cases"]},
+            )
+            self.assertIn(
                 "webui_v2_slack_pairing_ui_regression",
                 {case["case"] for case in manifest["cases"]},
             )
@@ -581,6 +593,45 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             for command in commands:
                 self.assertTrue(Path(command["stdout_log"]).exists())
                 self.assertTrue(Path(command["stderr_log"]).exists())
+
+    def test_webui_session_thread_message_case_dry_run_maps_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "webui_v2_session_thread_message_api_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-043-TC-01",
+                    "REBCLI-043-TC-02",
+                    "REBCLI-043-TC-03",
+                    "REBCLI-043-TC-04",
+                    "REBCLI-043-TC-05",
+                    "REBCLI-043-TC-06",
+                    "REBCLI-043-TC-09",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                [command["name"] for command in commands],
+                ["webui_v2_session_thread_message_handler_contract"],
+            )
+            self.assertIn(
+                "session_thread_message_routes_dispatch_to_facade_methods",
+                commands[0]["command"],
+            )
 
     def test_webui_route_contract_case_dry_run_maps_focused_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
