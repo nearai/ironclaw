@@ -723,6 +723,43 @@ WEBUI_V2_LOGIN_OAUTH_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_LOGIN_BROWSER_MATRIX_COMMAND = CommandSpec(
+    name="webui_v2_login_browser_matrix_contracts",
+    description=(
+        "Focused Playwright browser matrix for the committed Reborn WebUI v2 "
+        "login/session bundle with stubbed public auth/session APIs: manual "
+        "token trim and rejection, mobile layout, OAuth provider links, "
+        "login-ticket exchange success/failure, sign-out local clear, stored "
+        "token overwrite protection, fragment token precedence, and "
+        "login_error callback banners."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_login_browser_matrix.py",
+        "-q",
+    ],
+)
+
 WEBUI_V2_CHAT_CLIENT_COMMAND = CommandSpec(
     name="webui_v2_chat_client_contracts",
     description=(
@@ -4467,6 +4504,18 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-064-TC-04",
             "REBCLI-064-TC-05",
             "REBCLI-064-TC-06",
+            "REBCLI-064-TC-07",
+            "REBCLI-064-TC-08",
+            "REBCLI-064-TC-09",
+            "REBCLI-064-TC-10",
+            "REBCLI-064-TC-11",
+            "REBCLI-064-TC-12",
+            "REBCLI-064-TC-13",
+            "REBCLI-064-TC-14",
+            "REBCLI-064-TC-15",
+            "REBCLI-064-TC-16",
+            "REBCLI-064-TC-17",
+            "REBCLI-064-TC-18",
             "REBCLI-085-TC-01",
             "REBCLI-085-TC-02",
             "REBCLI-085-TC-03",
@@ -4484,6 +4533,7 @@ CASES: dict[str, CaseSpec] = {
             WEBUI_V2_STATIC_AUTH_JS_COMMAND,
             WEBUI_V2_STATIC_API_AUTH_COMMAND,
             WEBUI_V2_LOGIN_OAUTH_CLIENT_COMMAND,
+            WEBUI_V2_LOGIN_BROWSER_MATRIX_COMMAND,
             WEBUI_V2_INGRESS_SESSION_AUTH_COMMAND,
         ],
         notes=(
@@ -4496,7 +4546,10 @@ CASES: dict[str, CaseSpec] = {
             "tickets, revoked-session denial, tenant isolation, signed "
             "session round-trips, protected-route authentication, public OAuth "
             "provider discovery, provider ordering/filtering, discovery "
-            "failure behavior, and encoded login button href construction."
+            "failure behavior, encoded login button href construction, and "
+            "browser-visible manual-token, OAuth-ticket, sign-out, mobile, "
+            "token-scrubbing, stored-token, fragment-precedence, and "
+            "login_error workflows."
         ),
     ),
     "webui_v2_product_auth_oauth_regression": CaseSpec(
