@@ -47,6 +47,10 @@
 - Blocked run-state approval/auth gate rendering and resume belongs to #3094;
   keep this crate's #3811 auth seam reusable by that layer without implementing
   a second gate-resolution path.
+- Turn-event blocked gate projection must only emit gate rows or prompt payloads
+  when the authoritative run state has the same status, event cursor, and gate
+  identity as the blocked event. Stale blocked events may still project run
+  status, but not pending gate rows or prompts.
 - Local-dev/WebUI capability result plumbing may stage results in memory, but any
   durable thread append keyed by `LoopRunContext` (for example capability display
   preview timeline messages) must resolve the thread scope through

@@ -402,7 +402,7 @@ async fn current_blocked_gate_projection(
             });
         }
     };
-    if state.status != event.status || state.event_cursor < event.cursor {
+    if state.status != event.status || state.event_cursor != event.cursor {
         return Ok(None);
     }
     let invocation_id = event
@@ -502,9 +502,9 @@ async fn blocked_gate_prompt(
         TurnStatus::Queued
         | TurnStatus::Running
         | TurnStatus::BlockedDependentRun
-        // External-tool gates are not user-clickable prompts; the OpenAI
-        // Responses surface reads them via its own projection path. No generic
-        // gate-prompt payload here.
+        // External-tool gates have no user-clickable prompt payload here. The
+        // generic projection may still emit a gate row, while the OpenAI
+        // Responses surface may project them through its own path.
         | TurnStatus::BlockedExternalTool
         | TurnStatus::RecoveryRequired
         | TurnStatus::CancelRequested

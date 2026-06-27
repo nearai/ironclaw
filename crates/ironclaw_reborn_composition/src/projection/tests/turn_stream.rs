@@ -1279,9 +1279,10 @@ async fn webui_event_stream_does_not_project_gate_for_stale_blocked_event() {
     let run_id = TurnRunId::new();
     let blocked_activity_id = ironclaw_turns::CapabilityActivityId::new();
     let mut state = turn_run_state(&scope, &user_id, run_id, TurnEventCursor(1));
-    state.status = TurnStatus::Running;
+    state.status = TurnStatus::BlockedAuth;
     state.event_cursor = TurnEventCursor(2);
-    state.gate_ref = None;
+    state.gate_ref = Some(GateRef::new("gate:auth-required").unwrap());
+    state.blocked_activity_id = Some(blocked_activity_id);
     let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let services = build_reborn_projection_services(
         event_log,
