@@ -43,7 +43,9 @@ export function truncateJobId(id, length = 8) {
 
 export function formatJobDate(iso, options = {}) {
   if (!iso) return "Not available";
-  return new Date(iso).toLocaleString([], {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "Not available";
+  return date.toLocaleString([], {
     month: "short",
     day: "numeric",
     hour: "2-digit",

@@ -2034,6 +2034,28 @@ CASES: dict[str, CaseSpec] = {
             "browser/live coverage."
         ),
     ),
+    "webui_v2_hidden_workflow_presenters_regression": CaseSpec(
+        name="webui_v2_hidden_workflow_presenters_regression",
+        feature="WebUI v2 hidden workflow screen presenters",
+        category="Hermetic Hidden Workflow Presenter Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-095-TC-01",
+            "REBCLI-095-TC-02",
+            "REBCLI-095-TC-03",
+            "REBCLI-095-TC-04",
+            "REBCLI-095-TC-05",
+            "REBCLI-095-TC-06",
+        ],
+        commands=[WEBUI_V2_HIDDEN_STUBBED_ROUTE_COMMAND],
+        notes=(
+            "Covers hidden Jobs/Missions/Routines presenter rows without "
+            "duplicating PR #5348 browser legacy coverage: registered hidden "
+            "direct routes, fail-closed TODO adapters with no v1 fetches, "
+            "job tab/state/action/date/duration/meta formatting, mission "
+            "summary/tone/sort/date fallback behavior, and routine status/"
+            "verification/sort/action/date fallback behavior."
+        ),
+    ),
     "slack_personal_oauth_binding_regression": CaseSpec(
         name="slack_personal_oauth_binding_regression",
         feature="Slack personal OAuth binding workflow",
