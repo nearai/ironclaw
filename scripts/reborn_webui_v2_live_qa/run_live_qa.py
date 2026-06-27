@@ -1376,16 +1376,16 @@ def _google_runtime_access_token(
         ],
         extra_env,
     )
-    if env_access_token:
-        return env_access_token[1], {
-            "source": env_access_token[0],
-            "refreshed": False,
-            "account_id": None,
-        }
 
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     master_key_path = reborn_home / "local-dev" / ".reborn-local-dev-secrets-master-key"
     if not db_path.exists() or not master_key_path.exists():
+        if env_access_token:
+            return env_access_token[1], {
+                "source": env_access_token[0],
+                "refreshed": False,
+                "account_id": None,
+            }
         raise LiveQaError("Google runtime token unavailable: Reborn DB or secret key missing")
 
     account_pattern = (
@@ -1478,6 +1478,13 @@ def _google_runtime_access_token(
             f"{account_id or '<unknown>'} refresh failed with "
             f"{payload.get('error') or response.status_code}"
         )
+
+    if env_access_token and not errors:
+        return env_access_token[1], {
+            "source": env_access_token[0],
+            "refreshed": False,
+            "account_id": None,
+        }
 
     raise LiveQaError(
         "Google runtime token unavailable: "

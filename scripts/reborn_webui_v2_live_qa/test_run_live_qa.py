@@ -71,6 +71,57 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "fake-refresh-token",
             )
 
+    def test_google_runtime_token_refreshes_before_env_access_fallback(self):
+        if importlib.util.find_spec("cryptography") is None:
+            self.skipTest("cryptography is installed in the e2e venv, not system Python")
+
+        class FakeResponse:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {
+                    "access_token": "fresh-access-token",
+                    "expires_in": 3600,
+                    "scope": "gmail.modify spreadsheets",
+                }
+
+        class FakeHttpx:
+            calls: list[dict[str, object]] = []
+
+            @classmethod
+            def post(cls, url, *, data, timeout):
+                cls.calls.append({"url": url, "data": data, "timeout": timeout})
+                return FakeResponse()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "reborn-home"
+            env = {
+                "AUTH_LIVE_GOOGLE_ACCESS_TOKEN": "stale-env-access-token",
+                "AUTH_LIVE_GOOGLE_REFRESH_TOKEN": "fake-refresh-token",
+                "IRONCLAW_REBORN_GOOGLE_CLIENT_ID": "fake-client-id",
+                "IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET": "fake-client-secret",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                run_live_qa._seed_generated_google_product_auth_if_configured(
+                    home,
+                    "qa-user",
+                )
+                with patch.dict(sys.modules, {"httpx": FakeHttpx}):
+                    token, meta = run_live_qa._google_runtime_access_token(
+                        home,
+                        "qa-user",
+                    )
+
+            self.assertEqual(token, "fresh-access-token")
+            self.assertEqual(meta["source"], "reborn_product_auth_refresh_secret")
+            self.assertTrue(meta["refreshed"])
+            self.assertEqual(len(FakeHttpx.calls), 1)
+            self.assertEqual(
+                FakeHttpx.calls[0]["data"]["refresh_token"],
+                "fake-refresh-token",
+            )
+
     def test_generated_github_seed_creates_manual_token_product_auth_account(self):
         if importlib.util.find_spec("cryptography") is None:
             self.skipTest("cryptography is installed in the e2e venv, not system Python")
