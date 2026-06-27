@@ -187,6 +187,29 @@ test("SettingsPage redirects non-admin operator tabs to language", () => {
   }
 });
 
+test("SettingsPage accepts direct settings tab routes and passes search query to panels", () => {
+  const cases = [
+    ["inference", "InferenceTab"],
+    ["agent", "AgentTab"],
+    ["channels", "ChannelsTab"],
+    ["networking", "NetworkingTab"],
+    ["tools", "ToolsTab"],
+    ["skills", "SkillsTab"],
+    ["traces", "TraceCommonsTab"],
+    ["users", "UsersTab"],
+    ["language", "LanguageTab"],
+  ];
+
+  for (const [requestedTab, componentName] of cases) {
+    const result = renderSettingsPage({ requestedTab, isAdmin: true });
+    const component = result[componentName];
+    const nodes = findComponentNodes(result.rendered, component);
+
+    assert.equal(nodes.length, 1, `expected ${requestedTab} to render ${componentName}`);
+    assert.equal(componentProps(nodes[0], component).searchQuery, "");
+  }
+});
+
 test("SettingsPage renders SettingsToolbar with search and import wiring", () => {
   const result = renderSettingsPage({ requestedTab: "agent", isAdmin: true });
   const toolbar = findComponentNodes(result.rendered, result.SettingsToolbar)[0];

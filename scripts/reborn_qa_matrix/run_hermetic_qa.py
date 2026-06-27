@@ -530,6 +530,25 @@ WEBUI_V2_SETTINGS_TOOLBAR_SEARCH_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SETTINGS_DIRECT_TABS_COMMAND = CommandSpec(
+    name="webui_v2_settings_direct_tabs_contracts",
+    description=(
+        "Focused WebUI v2 Settings direct-tab and configuration-panel "
+        "contracts for direct route dispatch, role gating, schema-backed "
+        "settings panels, restart affordance, channels, tools, and users."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/pages/settings/settings-shell.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/pages/settings/settings-restart.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/pages/settings/components/settings-direct-tabs.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/pages/settings/components/tools-tab.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/pages/settings/lib/settings-api.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/pages/settings/lib/settings-schema.test.mjs",
+    ],
+)
+
 WEBUI_V2_ADMIN_CLIENT_COMMAND = CommandSpec(
     name="webui_v2_admin_client_contracts",
     description=(
@@ -2291,6 +2310,29 @@ CASES: dict[str, CaseSpec] = {
             "shape, valid import dispatch, invalid import rejection, empty "
             "file handling, settings search matching, and v2 settings API "
             "route selection."
+        ),
+    ),
+    "webui_v2_settings_direct_tabs_regression": CaseSpec(
+        name="webui_v2_settings_direct_tabs_regression",
+        feature="WebUI v2 settings direct tabs and configuration panels",
+        category="Hermetic Settings Direct Tabs/Configuration Panel Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-096-TC-01",
+            "REBCLI-096-TC-02",
+            "REBCLI-096-TC-03",
+            "REBCLI-096-TC-04",
+            "REBCLI-096-TC-05",
+            "REBCLI-096-TC-06",
+        ],
+        commands=[WEBUI_V2_SETTINGS_DIRECT_TABS_COMMAND],
+        notes=(
+            "Covers WebUI v2 Settings direct-tab/configuration panel rows "
+            "without duplicating PR #5348 browser settings/tool-permission "
+            "coverage: direct /settings/:tab dispatch, role-based redirects, "
+            "desktop/mobile tab visibility, toolbar and restart wiring, "
+            "schema restart rules, channel grouping/search/empty states, "
+            "tool permission controls, users forbidden/error/list/search "
+            "states, and v2 settings API route selection."
         ),
     ),
     "webui_v2_admin_console_usage_regression": CaseSpec(
