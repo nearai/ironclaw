@@ -525,15 +525,11 @@ async fn approval_gate_prompt(
     let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
     let lookup =
         approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, &event.scope).await;
-    let allow_always = lookup
-        .context
-        .as_ref()
-        .is_some_and(|context| context.scope.reusable);
     gate_prompt_with_context(
         event,
         gate_ref_string,
         "Approval required",
-        is_approval_gate_ref(gate_ref.as_str()) && allow_always,
+        is_approval_gate_ref(gate_ref.as_str()),
         lookup.context,
         lookup.invocation_id,
     )
@@ -806,7 +802,7 @@ fn gate_projection_prompt_context(
             invocation_id: prompt.invocation_id,
             headline: Some(prompt.headline.clone()),
             body: Some(prompt.body.clone()),
-            allow_always: Some(prompt.allow_always),
+            allow_always: Some(prompt.allow_always && prompt.approval_context.is_some()),
             auth_context: None,
         },
         Some(ProductOutboundPayload::AuthPrompt(prompt)) => GateProjectionPromptContext {

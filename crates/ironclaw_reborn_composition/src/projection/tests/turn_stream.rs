@@ -676,8 +676,9 @@ async fn webui_event_stream_fails_closed_for_projection_allow_always_without_con
                 status: TurnStatus::BlockedApproval,
                 gate_ref: Some(gate_ref.clone()),
                 // No approval store is wired for this test, so the parsed
-                // approval gate has no contextual approval request. The prompt
-                // and projection must still fail closed on affordances.
+                // approval gate has no contextual approval request. Prompt
+                // fallback stays actionable, while projection fails closed on
+                // affordances.
                 ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
             },
         }),
@@ -699,7 +700,7 @@ async fn webui_event_stream_fails_closed_for_projection_allow_always_without_con
             if prompt.turn_run_id == turn_run
                 && prompt.gate_ref == gate_ref.as_str()
                 && prompt.approval_context.is_none()
-                && !prompt.allow_always
+                && prompt.allow_always
     )));
     assert!(events.iter().any(|event| matches!(
         event.payload(),
