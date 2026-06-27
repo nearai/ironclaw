@@ -468,6 +468,23 @@ WEBUI_V2_SETTINGS_ONBOARDING_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_I18N_LANGUAGE_COMMAND = CommandSpec(
+    name="webui_v2_i18n_language_contracts",
+    description=(
+        "Focused WebUI v2 i18n and language-selection contracts for saved/"
+        "navigator/default language detection, lazy locale-pack loading, "
+        "concurrent import memoization, failed import retryability, stale-load "
+        "protection, translation fallback, language search, current-language "
+        "display, setLang routing, and empty-search rendering."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/lib/i18n.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/pages/settings/components/language-tab.test.mjs",
+    ],
+)
+
 WEBUI_V2_HIDDEN_STUBBED_ROUTE_COMMAND = CommandSpec(
     name="webui_v2_hidden_stubbed_route_contracts",
     description=(
@@ -2091,6 +2108,29 @@ CASES: dict[str, CaseSpec] = {
             "shape, static JS suite, embedded static asset/router tests, and "
             "composition static route contracts. This is not browser/live "
             "coverage and does not duplicate PR #5348."
+        ),
+    ),
+    "webui_v2_i18n_language_regression": CaseSpec(
+        name="webui_v2_i18n_language_regression",
+        feature="WebUI v2 internationalization and language selection",
+        category="Hermetic I18n/Language Client Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-087-TC-01",
+            "REBCLI-087-TC-02",
+            "REBCLI-087-TC-03",
+            "REBCLI-087-TC-04",
+            "REBCLI-087-TC-05",
+            "REBCLI-087-TC-06",
+        ],
+        commands=[WEBUI_V2_I18N_LANGUAGE_COMMAND],
+        notes=(
+            "Covers WebUI v2 i18n/language-selection rows without duplicating "
+            "PR #5348 browser settings coverage: saved/navigator/default "
+            "language detection, lazy pack success, concurrent import "
+            "memoization, failed import retryability, stale-load protection, "
+            "translation fallback, locale pack key presence, current-language "
+            "display, search filtering, setLang routing, and empty-search "
+            "rendering."
         ),
     ),
     "webui_v2_tee_attestation_regression": CaseSpec(
