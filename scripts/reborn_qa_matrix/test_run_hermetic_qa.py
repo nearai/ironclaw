@@ -2785,6 +2785,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "reborn_operator_logs_service_contracts",
                     "webui_v2_operator_logs_handler_contract",
                     "webui_v2_operator_logs_route_dispatch_contract",
+                    "webui_v2_operator_logs_browser_smoke",
                 ],
             )
             self.assertIn("ironclaw_reborn_composition", commands[0]["command"])
@@ -2796,6 +2797,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn(
                 "operator_routes_dispatch_to_facade_with_body_and_query_inputs",
                 commands[2]["command"],
+            )
+            self.assertIn(
+                "test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context",
+                commands[3]["command"],
             )
 
     def test_openai_compat_beta_routes_case_dry_run_maps_route_matrix_ids(self):

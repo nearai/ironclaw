@@ -2055,6 +2055,39 @@ WEBUI_V2_OPERATOR_LOGS_ROUTE_DISPATCH_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_OPERATOR_LOGS_BROWSER_COMMAND = CommandSpec(
+    name="webui_v2_operator_logs_browser_smoke",
+    description=(
+        "Served WebUI v2 browser smoke for the operator logs page: URL "
+        "scope query propagation to the API, scoped entry rendering, context "
+        "expansion, and correlation chips."
+    ),
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py::test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context",
+        "-q",
+    ],
+)
+
 SLACK_PERSONAL_BINDING_ROUTE_COMMAND = CommandSpec(
     name="slack_personal_binding_oauth_route_contracts",
     description=(
@@ -4983,16 +5016,18 @@ CASES: dict[str, CaseSpec] = {
             REBORN_OPERATOR_LOGS_SERVICE_COMMAND,
             WEBUI_V2_OPERATOR_LOGS_HANDLER_COMMAND,
             WEBUI_V2_OPERATOR_LOGS_ROUTE_DISPATCH_COMMAND,
+            WEBUI_V2_OPERATOR_LOGS_BROWSER_COMMAND,
         ],
         notes=(
             "Covers the Reborn/WebUI v2 operator log buffer rows without "
-            "duplicating PR #5348 browser log-screen coverage: in-memory ring "
-            "buffer retention, newest-first and before-cursor pagination, "
+            "duplicating the existing browser log-screen scenario: in-memory "
+            "ring buffer retention, newest-first and before-cursor pagination, "
             "invalid cursor behavior, level/target/correlation filtering, "
             "alias precedence, tracing span/event capture, arbitrary-field "
             "exclusion from stored correlation, secret/path redaction, UTF-8 "
-            "message truncation, response byte caps, tail/follow cursors, and "
-            "operator route capability plus dispatch contracts."
+            "message truncation, response byte caps, tail/follow cursors, "
+            "operator route capability plus dispatch contracts, and served "
+            "WebUIv2 logs-page scope propagation/context rendering."
         ),
     ),
     "webui_v2_filesystem_api_regression": CaseSpec(
