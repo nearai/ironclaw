@@ -35,6 +35,8 @@ class CommandSpec:
     env: dict[str, str] = field(default_factory=dict)
     unset_env: list[str] = field(default_factory=list)
     description: str = ""
+    existing_ci_coverage: str | None = None
+    external_coverage_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -1008,38 +1010,17 @@ WEBUI_V2_LOGIN_OAUTH_CLIENT_COMMAND = CommandSpec(
 WEBUI_V2_LOGIN_BROWSER_MATRIX_COMMAND = CommandSpec(
     name="webui_v2_login_browser_matrix_contracts",
     description=(
-        "Focused Playwright browser matrix for the committed Reborn WebUI v2 "
-        "login/session bundle with stubbed public auth/session APIs: manual "
-        "token trim and rejection, mobile layout, OAuth provider links, "
-        "login-ticket exchange success/failure, sign-out local clear, stored "
-        "token overwrite protection, fragment token precedence, and "
-        "login_error callback banners."
+        "External Playwright coverage from PR #5348 for the Reborn WebUI v2 "
+        "login/session bundle: manual-token, auth prompt, OAuth callback, "
+        "session isolation, sign-out, token retention, and browser-visible "
+        "auth error behavior."
     ),
-    env={"CARGO_INCREMENTAL": "0"},
-    argv=[
-        "uv",
-        "run",
-        "--no-project",
-        "--with",
-        "pytest",
-        "--with",
-        "pytest-asyncio",
-        "--with",
-        "pytest-playwright",
-        "--with",
-        "pytest-timeout",
-        "--with",
-        "playwright",
-        "--with",
-        "aiohttp",
-        "--with",
-        "httpx",
-        "--with",
-        "cryptography",
-        "pytest",
-        "tests/e2e/scenarios/test_reborn_webui_v2_login_browser_matrix.py",
-        "-q",
-    ],
+    argv=[],
+    existing_ci_coverage=(
+        "already covered by ilblackdragon PR #5348 Playwright legacy auth-flow "
+        "and core auth/session browser tests"
+    ),
+    external_coverage_only=True,
 )
 
 WEBUI_V2_CHAT_CLIENT_COMMAND = CommandSpec(
@@ -1064,37 +1045,18 @@ WEBUI_V2_CHAT_CLIENT_COMMAND = CommandSpec(
 WEBUI_V2_CHAT_BROWSER_MATRIX_COMMAND = CommandSpec(
     name="webui_v2_chat_browser_matrix_contracts",
     description=(
-        "Focused Playwright browser matrix for the committed Reborn WebUI v2 "
-        "chat bundle with stubbed WebChat v2 APIs: first-message starter and "
-        "typed sends, existing-thread follow-up, text/image attachments, "
-        "picker/drop/paste validation, busy and failure recovery, retry, "
-        "cancellation, keyboard, accessibility, focus, and mobile overflow."
+        "External Playwright coverage from PR #5348 for the Reborn WebUI v2 "
+        "chat bundle: first conversation, multi-message send/receive, "
+        "attachments, pending messages, SSE/history behavior, cancellation, "
+        "retry, rendering, and shell navigation."
     ),
-    env={"CARGO_INCREMENTAL": "0"},
-    argv=[
-        "uv",
-        "run",
-        "--no-project",
-        "--with",
-        "pytest",
-        "--with",
-        "pytest-asyncio",
-        "--with",
-        "pytest-playwright",
-        "--with",
-        "pytest-timeout",
-        "--with",
-        "playwright",
-        "--with",
-        "aiohttp",
-        "--with",
-        "httpx",
-        "--with",
-        "cryptography",
-        "pytest",
-        "tests/e2e/scenarios/test_reborn_webui_v2_chat_browser_matrix.py",
-        "-q",
-    ],
+    argv=[],
+    existing_ci_coverage=(
+        "already covered by ilblackdragon PR #5348 Playwright legacy core, "
+        "chat actions, attachments, pending messages, SSE/history, rendering, "
+        "and message persistence tests"
+    ),
+    external_coverage_only=True,
 )
 
 WEBUI_V2_WORKSPACE_PROJECT_CLIENT_COMMAND = CommandSpec(
@@ -1799,34 +1761,16 @@ WEBUI_V2_SETTINGS_DIRECT_TABS_COMMAND = CommandSpec(
 WEBUI_V2_SETTINGS_DIRECT_TABS_BROWSER_COMMAND = CommandSpec(
     name="webui_v2_settings_direct_tabs_browser_smoke",
     description=(
-        "Focused WebUI v2 Settings direct-tabs browser smoke for member "
-        "operator-tab redirects, admin /settings/tools rendering, search "
-        "filtering, and v2 settings tools save calls."
+        "External Playwright coverage from PR #5348 for browser-visible "
+        "Settings tools search, auto-approve, and tool-permission behavior. "
+        "Local direct-tab and role-gating coverage stays in static node tests."
     ),
-    argv=[
-        "uv",
-        "run",
-        "--no-project",
-        "--with",
-        "pytest",
-        "--with",
-        "pytest-asyncio",
-        "--with",
-        "pytest-playwright",
-        "--with",
-        "pytest-timeout",
-        "--with",
-        "playwright",
-        "--with",
-        "aiohttp",
-        "--with",
-        "httpx",
-        "--with",
-        "cryptography",
-        "pytest",
-        "tests/e2e/scenarios/test_reborn_webui_v2_settings_direct_tabs_browser.py",
-        "-q",
-    ],
+    argv=[],
+    existing_ci_coverage=(
+        "already covered by ilblackdragon PR #5348 Playwright settings-search "
+        "and tool-permissions browser tests"
+    ),
+    external_coverage_only=True,
 )
 
 WEBUI_V2_ADMIN_CLIENT_COMMAND = CommandSpec(
@@ -5726,6 +5670,8 @@ def parse_duration_seconds(raw: str | None) -> int:
 
 
 def render_command(command: CommandSpec) -> str:
+    if command.external_coverage_only:
+        return f"external coverage only: {command.existing_ci_coverage or command.name}"
     unset_prefix = " ".join(f"unset {shlex.quote(name)};" for name in command.unset_env)
     env_prefix = " ".join(
         f"{name}={shlex.quote(value)}" for name, value in sorted(command.env.items())
@@ -5747,7 +5693,12 @@ def _safe_log_name(name: str) -> str:
 
 def _selected_case_names(args: argparse.Namespace) -> list[str]:
     if not args.case:
-        return [name for name, spec in CASES.items() if spec.default_enabled]
+        return [
+            name
+            for name, spec in CASES.items()
+            if spec.default_enabled
+            and (args.run_existing_ci_coverage or _case_has_matrix_only_command(spec))
+        ]
     names: list[str] = []
     for name in args.case:
         if name not in CASES:
@@ -5759,6 +5710,51 @@ def _selected_case_names(args: argparse.Namespace) -> list[str]:
 
 def _test_ids_for(cases: list[CaseSpec]) -> list[str]:
     return sorted({test_id for case in cases for test_id in case.qa_matrix_test_ids})
+
+
+def _command_ci_coverage(command: CommandSpec) -> str | None:
+    if command.existing_ci_coverage:
+        return command.existing_ci_coverage
+
+    rendered = render_command(command)
+    if command.argv[:2] == ["cargo", "test"] and "-p" in command.argv:
+        package = command.argv[command.argv.index("-p") + 1]
+        if package == "ironclaw_reborn_cli":
+            return (
+                "already covered by .github/workflows/reborn-tests.yml crate-tests "
+                "for ironclaw_reborn_cli with webui-v2-beta,slack-v2-host-beta"
+            )
+        if package in {"ironclaw_webui_v2", "ironclaw_webui_v2_static"}:
+            return (
+                "already covered by .github/workflows/reborn-tests.yml crate-tests "
+                f"for {package} with webui-v2-beta"
+            )
+        if package == "ironclaw_reborn_composition" and "openai-compat-beta" not in rendered:
+            return (
+                "already covered by .github/workflows/reborn-tests.yml crate-tests "
+                "for ironclaw_reborn_composition with test-support,webui-v2-beta,"
+                "slack-v2-host-beta,libsql"
+            )
+
+    if "scripts/reborn-e2e-rust.sh" in rendered:
+        return "already covered by .github/workflows/reborn-e2e.yml Rust Reborn matrix"
+    if "test_reborn_webui_v2_smoke.py" in rendered:
+        return "already covered by .github/workflows/reborn-e2e.yml Reborn WebUI v2 smoke"
+    if (
+        "node --test" in rendered
+        and "crates/ironclaw_webui_v2_static/static/js/pages/settings" in rendered
+        and "find crates/ironclaw_webui_v2_static/static/js/pages/settings" in rendered
+    ):
+        return "already covered by .github/workflows/reborn-tests.yml Reborn settings JS tests"
+    return None
+
+
+def _case_has_matrix_only_command(case: CaseSpec) -> bool:
+    return any(_command_ci_coverage(command) is None for command in case.commands)
+
+
+def _case_existing_ci_only(case: CaseSpec) -> bool:
+    return bool(case.commands) and not _case_has_matrix_only_command(case)
 
 
 def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
@@ -5779,6 +5775,12 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
             "represented_test_id_count": len(_test_ids_for(all_specs)),
             "selected_represented_test_ids": _test_ids_for(selected_specs),
             "selected_represented_test_id_count": len(_test_ids_for(selected_specs)),
+            "matrix_only_or_new_test_ids": _test_ids_for(
+                [spec for spec in all_specs if _case_has_matrix_only_command(spec)]
+            ),
+            "existing_ci_only_test_ids": _test_ids_for(
+                [spec for spec in all_specs if _case_existing_ci_only(spec)]
+            ),
         },
         "cases": [
             {
@@ -5794,6 +5796,12 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
                         "name": command.name,
                         "description": command.description,
                         "command": render_command(command),
+                        "coverage_source": (
+                            "existing_ci_coverage"
+                            if _command_ci_coverage(command)
+                            else "matrix_only_or_new"
+                        ),
+                        "existing_ci_coverage": _command_ci_coverage(command),
                     }
                     for command in spec.commands
                 ],
@@ -5813,6 +5821,7 @@ def run_command(
     case_name: str,
     timeout_seconds: int,
     dry_run: bool,
+    run_existing_ci_coverage: bool = False,
 ) -> dict[str, Any]:
     log_base = f"{_safe_log_name(case_name)}.{_safe_log_name(command.name)}"
     stdout_log = output_dir / f"{log_base}.stdout.log"
@@ -5824,11 +5833,35 @@ def run_command(
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
         "dry_run": dry_run,
+        "coverage_source": (
+            "existing_ci_coverage"
+            if _command_ci_coverage(command)
+            else "matrix_only_or_new"
+        ),
+        "existing_ci_coverage": _command_ci_coverage(command),
     }
+    existing_ci_coverage = _command_ci_coverage(command)
     if dry_run:
         stdout_log.write_text("", encoding="utf-8")
         stderr_log.write_text("", encoding="utf-8")
         details.update({"success": True, "returncode": None, "latency_ms": 0})
+        return details
+
+    if command.external_coverage_only:
+        stdout_log.write_text(
+            f"{command.name} is external coverage only: {existing_ci_coverage}\n",
+            encoding="utf-8",
+        )
+        stderr_log.write_text("", encoding="utf-8")
+        details.update(
+            {
+                "success": True,
+                "returncode": None,
+                "latency_ms": 0,
+                "skipped": True,
+                "reason": "external coverage only",
+            }
+        )
         return details
 
     env = os.environ.copy()
@@ -5879,11 +5912,21 @@ def run_case(
     output_dir: Path,
     timeout_seconds: int,
     dry_run: bool,
+    run_existing_ci_coverage: bool = False,
 ) -> dict[str, Any]:
     started = time.monotonic()
     command_results: list[dict[str, Any]] = []
     failed = False
-    for command in case.commands:
+    commands = (
+        case.commands
+        if dry_run or run_existing_ci_coverage
+        else [
+            command
+            for command in case.commands
+            if _command_ci_coverage(command) is None
+        ]
+    )
+    for command in commands:
         if failed:
             command_results.append(
                 {
@@ -5902,11 +5945,25 @@ def run_case(
             case_name=case.name,
             timeout_seconds=timeout_seconds,
             dry_run=dry_run,
+            run_existing_ci_coverage=run_existing_ci_coverage,
         )
         command_results.append(result)
         failed = not bool(result["success"])
 
     success = all(bool(result.get("success")) for result in command_results)
+    removed_existing_ci_commands = [
+        {
+            "name": command.name,
+            "description": command.description,
+            "command": render_command(command),
+            "coverage_source": "existing_ci_coverage",
+            "existing_ci_coverage": _command_ci_coverage(command),
+        }
+        for command in case.commands
+        if _command_ci_coverage(command) is not None
+        and not run_existing_ci_coverage
+        and not dry_run
+    ]
     return {
         "provider": PROVIDER,
         "mode": MODE,
@@ -5918,6 +5975,7 @@ def run_case(
         "details": {
             "qa_matrix_test_ids": case.qa_matrix_test_ids,
             "commands": command_results,
+            "removed_existing_ci_commands": removed_existing_ci_commands,
             "notes": case.notes,
         },
     }
@@ -5929,6 +5987,7 @@ def write_results(
     selected_cases: list[str],
     timeout_seconds: int,
     dry_run: bool,
+    run_existing_ci_coverage: bool,
     results: list[dict[str, Any]],
 ) -> Path:
     passed = sum(1 for result in results if result["success"])
@@ -5939,6 +5998,7 @@ def write_results(
         "generated_at": _now_iso(),
         "success": failed == 0,
         "dry_run": dry_run,
+        "run_existing_ci_coverage": run_existing_ci_coverage,
         "selected_cases": selected_cases,
         "timeout_seconds": timeout_seconds,
         "summary": {
@@ -5946,6 +6006,20 @@ def write_results(
             "failed": failed,
             "total": len(results),
             "qa_matrix_test_ids": _test_ids_for([CASES[name] for name in selected_cases]),
+            "matrix_only_or_new_qa_matrix_test_ids": _test_ids_for(
+                [
+                    CASES[name]
+                    for name in selected_cases
+                    if _case_has_matrix_only_command(CASES[name])
+                ]
+            ),
+            "existing_ci_only_qa_matrix_test_ids": _test_ids_for(
+                [
+                    CASES[name]
+                    for name in selected_cases
+                    if _case_existing_ci_only(CASES[name])
+                ]
+            ),
         },
         "results": results,
     }
@@ -5978,6 +6052,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="write manifest/results without executing cargo commands",
     )
     parser.add_argument(
+        "--run-existing-ci-coverage",
+        action="store_true",
+        help=(
+            "also execute commands marked as already covered by existing GitHub "
+            "Actions CI; by default they are recorded as skipped traceability"
+        ),
+    )
+    parser.add_argument(
         "--list-cases",
         action="store_true",
         help="print available cases and exit",
@@ -6003,6 +6085,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.output_dir,
             timeout_seconds=timeout_seconds,
             dry_run=args.dry_run,
+            run_existing_ci_coverage=args.run_existing_ci_coverage,
         )
         for name in selected_cases
     ]
@@ -6011,6 +6094,7 @@ def main(argv: list[str] | None = None) -> int:
         selected_cases=selected_cases,
         timeout_seconds=timeout_seconds,
         dry_run=args.dry_run,
+        run_existing_ci_coverage=args.run_existing_ci_coverage,
         results=results,
     )
     print(str(results_path))

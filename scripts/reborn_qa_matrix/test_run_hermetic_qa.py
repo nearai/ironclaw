@@ -1311,11 +1311,9 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 [command["name"] for command in commands],
                 ["webui_v2_chat_browser_matrix_contracts"],
             )
-            self.assertIn("pytest", commands[0]["command"])
-            self.assertIn(
-                "test_reborn_webui_v2_chat_browser_matrix.py",
-                commands[0]["command"],
-            )
+            self.assertEqual(commands[0]["coverage_source"], "existing_ci_coverage")
+            self.assertIn("PR #5348", commands[0]["existing_ci_coverage"])
+            self.assertIn("external coverage only", commands[0]["command"])
 
     def test_webui_workspace_project_case_dry_run_maps_client_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2561,10 +2559,9 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn("tools-tab.test.mjs", commands[0]["command"])
             self.assertIn("settings-api.test.mjs", commands[0]["command"])
             self.assertIn("settings-schema.test.mjs", commands[0]["command"])
-            self.assertIn(
-                "test_reborn_webui_v2_settings_direct_tabs_browser.py",
-                commands[1]["command"],
-            )
+            self.assertEqual(commands[1]["coverage_source"], "existing_ci_coverage")
+            self.assertIn("PR #5348", commands[1]["existing_ci_coverage"])
+            self.assertIn("external coverage only", commands[1]["command"])
 
     def test_webui_v2_admin_console_usage_case_dry_run_maps_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3096,10 +3093,9 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn("auth_js_carries_login_ticket_contract", commands[0]["command"])
             self.assertIn("api.test.mjs", commands[1]["command"])
             self.assertIn("login-oauth.test.mjs", commands[2]["command"])
-            self.assertIn(
-                "test_reborn_webui_v2_login_browser_matrix.py",
-                commands[3]["command"],
-            )
+            self.assertEqual(commands[3]["coverage_source"], "existing_ci_coverage")
+            self.assertIn("PR #5348", commands[3]["existing_ci_coverage"])
+            self.assertIn("external coverage only", commands[3]["command"])
             self.assertIn("ironclaw_reborn_webui_ingress", commands[4]["command"])
             self.assertIn("session", commands[4]["command"])
 
@@ -3685,6 +3681,54 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             commands = result["details"]["commands"]
             self.assertEqual(commands[0]["returncode"], 7)
             self.assertTrue(commands[1]["skipped"])
+
+    def test_existing_ci_coverage_commands_are_removed_by_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = run_hermetic_qa.run_case(
+                run_hermetic_qa.CASES["webui_v2_route_contract_regression"],
+                output_dir=Path(tmpdir),
+                timeout_seconds=30,
+                dry_run=False,
+                run_existing_ci_coverage=False,
+            )
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["details"]["commands"], [])
+            removed = result["details"]["removed_existing_ci_commands"]
+            self.assertGreater(len(removed), 0)
+            self.assertEqual(removed[-1]["coverage_source"], "existing_ci_coverage")
+            self.assertIn("reborn-tests.yml", removed[-1]["existing_ci_coverage"])
+
+    def test_default_selection_omits_existing_ci_only_cases(self):
+        parser = run_hermetic_qa.build_parser()
+        args = parser.parse_args([])
+
+        selected = run_hermetic_qa._selected_case_names(args)
+
+        self.assertNotIn("webui_v2_route_contract_regression", selected)
+        self.assertIn("openai_models_list_api_regression", selected)
+
+    def test_existing_ci_coverage_can_be_opted_back_into_execution(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = run_hermetic_qa.run_command(
+                run_hermetic_qa.CommandSpec(
+                    name="synthetic_existing_ci",
+                    argv=[
+                        sys.executable,
+                        "-c",
+                        "print('executed')",
+                    ],
+                    existing_ci_coverage="already covered by synthetic CI",
+                ),
+                output_dir=Path(tmpdir),
+                case_name="synthetic",
+                timeout_seconds=30,
+                dry_run=False,
+                run_existing_ci_coverage=True,
+            )
+
+            self.assertTrue(result["success"])
+            self.assertFalse(result.get("skipped", False))
 
 
 if __name__ == "__main__":

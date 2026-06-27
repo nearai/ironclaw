@@ -117,6 +117,26 @@ def hermetic_runner_ids(default_only: bool = False) -> set[str]:
     return ids
 
 
+def matrix_only_runner_ids(default_only: bool = False) -> set[str]:
+    ids: set[str] = set()
+    for case in run_hermetic_qa.CASES.values():
+        if default_only and not case.default_enabled:
+            continue
+        if run_hermetic_qa._case_has_matrix_only_command(case):
+            ids.update(case.qa_matrix_test_ids)
+    return ids
+
+
+def existing_ci_only_ids(default_only: bool = False) -> set[str]:
+    ids: set[str] = set()
+    for case in run_hermetic_qa.CASES.values():
+        if default_only and not case.default_enabled:
+            continue
+        if run_hermetic_qa._case_existing_ci_only(case):
+            ids.update(case.qa_matrix_test_ids)
+    return ids
+
+
 def live_runner_ids(repo_root: Path = ROOT) -> set[str]:
     live_runner = repo_root / "scripts/reborn_webui_v2_live_qa/run_live_qa.py"
     if not live_runner.exists():
@@ -132,10 +152,15 @@ def build_report(workbook_path: Path, repo_root: Path = ROOT) -> dict[str, objec
     feature_ids, matrix_ids = workbook_ids(workbook_path)
     hermetic_ids = hermetic_runner_ids()
     default_hermetic_ids = hermetic_runner_ids(default_only=True)
+    matrix_only_ids = matrix_only_runner_ids(default_only=True)
+    existing_ci_ids = existing_ci_only_ids(default_only=True)
     live_ids = live_runner_ids(repo_root)
     combined_ids = hermetic_ids | live_ids
+    matrix_only_combined_ids = matrix_only_ids | live_ids
     covered_matrix_ids = matrix_ids & combined_ids
+    matrix_only_covered_ids = matrix_ids & matrix_only_combined_ids
     covered_features = {test_id[:10] for test_id in covered_matrix_ids}
+    matrix_only_covered_features = {test_id[:10] for test_id in matrix_only_covered_ids}
     return {
         "workbook": str(workbook_path),
         "feature_count": len(feature_ids),
@@ -144,10 +169,23 @@ def build_report(workbook_path: Path, repo_root: Path = ROOT) -> dict[str, objec
         "default_hermetic_runner_test_count": len(matrix_ids & default_hermetic_ids),
         "live_runner_test_count": len(matrix_ids & live_ids),
         "combined_runner_test_count": len(covered_matrix_ids),
+        "matrix_only_or_new_runner_test_count": len(matrix_ids & matrix_only_ids),
+        "existing_ci_only_test_count": len(matrix_ids & existing_ci_ids),
+        "matrix_only_or_new_combined_test_count": len(matrix_only_covered_ids),
         "hermetic_runner_coverage_pct": _pct(len(matrix_ids & hermetic_ids), len(matrix_ids)),
         "combined_runner_coverage_pct": _pct(len(covered_matrix_ids), len(matrix_ids)),
+        "matrix_only_or_new_runner_coverage_pct": _pct(
+            len(matrix_ids & matrix_only_ids), len(matrix_ids)
+        ),
+        "matrix_only_or_new_combined_coverage_pct": _pct(
+            len(matrix_only_covered_ids), len(matrix_ids)
+        ),
         "covered_feature_count": len(covered_features),
         "covered_feature_pct": _pct(len(covered_features), len(feature_ids)),
+        "matrix_only_or_new_feature_count": len(matrix_only_covered_features),
+        "matrix_only_or_new_feature_pct": _pct(
+            len(matrix_only_covered_features), len(feature_ids)
+        ),
         "runner_ids_not_in_workbook": sorted(combined_ids - matrix_ids),
         "workbook_ids_not_in_hermetic_runner": sorted(matrix_ids - hermetic_ids),
         "workbook_ids_not_in_combined_runner": sorted(matrix_ids - combined_ids),
@@ -164,14 +202,35 @@ def _print_text(report: dict[str, object], include_missing: bool) -> None:
         f"= {report['hermetic_runner_coverage_pct']}%"
     )
     print(
+        "Matrix-only/new hermetic coverage: "
+        f"{report['matrix_only_or_new_runner_test_count']} / "
+        f"{report['matrix_test_count']} = "
+        f"{report['matrix_only_or_new_runner_coverage_pct']}%"
+    )
+    print(
+        "Already-existing CI-only traceability: "
+        f"{report['existing_ci_only_test_count']} / {report['matrix_test_count']}"
+    )
+    print(
         "Hermetic + live runner coverage: "
         f"{report['combined_runner_test_count']} / {report['matrix_test_count']} "
         f"= {report['combined_runner_coverage_pct']}%"
     )
     print(
+        "Matrix-only/new + live runner coverage: "
+        f"{report['matrix_only_or_new_combined_test_count']} / "
+        f"{report['matrix_test_count']} = "
+        f"{report['matrix_only_or_new_combined_coverage_pct']}%"
+    )
+    print(
         "Executable feature coverage: "
         f"{report['covered_feature_count']} / {report['feature_count']} "
         f"= {report['covered_feature_pct']}%"
+    )
+    print(
+        "Matrix-only/new feature coverage: "
+        f"{report['matrix_only_or_new_feature_count']} / {report['feature_count']} "
+        f"= {report['matrix_only_or_new_feature_pct']}%"
     )
     if report["runner_ids_not_in_workbook"]:
         print("Runner IDs not in workbook:")

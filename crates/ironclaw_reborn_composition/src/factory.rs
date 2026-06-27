@@ -1201,7 +1201,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     Arc::clone(&durable_services),
                     provider_client.clone(),
                 )
-                .with_provider_client(provider_client)
+                .with_provider_client(provider_client.clone())
                 .into_services(
                     auth_continuation_dispatcher(turn_coordinator.clone()),
                     Arc::clone(&secret_store),

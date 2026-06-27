@@ -1189,10 +1189,9 @@ mod tests {
     #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
-        MAX_WORKER_COUNT, RuntimeInputCaller, RuntimeInputOptions,
-        apply_credential_refresh_override, block_on_cli, build_runtime_input,
-        build_runtime_input_with_options, no_assistant_text_message, protect_reborn_log_filter,
-        resolve_google_oauth_config, runner_settings,
+        RuntimeInputCaller, RuntimeInputOptions, apply_credential_refresh_override, block_on_cli,
+        build_runtime_input, build_runtime_input_with_options, no_assistant_text_message,
+        protect_reborn_log_filter, resolve_google_oauth_config, runner_settings,
     };
     // Only the `#[cfg(feature = "libsql")]` hosted-volume test consumes this.
     #[cfg(feature = "libsql")]
