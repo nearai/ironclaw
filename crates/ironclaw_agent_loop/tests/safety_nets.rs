@@ -424,6 +424,49 @@ async fn chaos_repeated_model_service_drops_report_model_error() {
 }
 
 #[tokio::test]
+async fn invalid_model_output_is_retried_before_accepting_next_valid_reply() {
+    let script = ScenarioScript {
+        model_responses: VecDeque::from([
+            ScriptedModelResponse::ErrorWithSummary {
+                kind: AgentLoopHostErrorKind::Unavailable,
+                safe_summary: "model output was structurally invalid".to_string(),
+            },
+            ScriptedModelResponse::Reply {
+                text: "recovered after invalid model output".to_string(),
+            },
+        ]),
+        capability_outcomes: VecDeque::new(),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    };
+    let (host, _) = MockAgentLoopDriverHost::builder().script(script).build();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should recover from retryable invalid model output");
+
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs.len(), 1);
+            assert!(completed.final_checkpoint_id.is_some());
+        }
+        other => panic!("expected completion after retrying invalid model output, got {other:?}"),
+    }
+    assert_eq!(host.model_call_count(), 2);
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["recovered after invalid model output"]
+    );
+    assert_eq!(
+        host.prompt_requests().len(),
+        2,
+        "model recovery must rebuild the prompt before retrying"
+    );
+}
+
+#[tokio::test]
 async fn recovery_budget_exhaustion_uses_single_call_retry() {
     let script = ScenarioScript::same_failure_repeated("demo.echo", "transient", 1)
         .with_single_call_retry_outcomes(vec![
