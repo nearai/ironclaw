@@ -449,6 +449,96 @@ SUPPORT_SUBSTRATE_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SESSION_SERVICE_SUBSTRATE_COMMAND = CommandSpec(
+    name="webui_v2_session_service_substrate_contracts",
+    description=(
+        "Product workflow and conversation service substrate contracts below "
+        "WebUI v2 thread creation, message submission, replay, gates, inbound "
+        "adapters, outbound delivery, triggers, projects, and attachment "
+        "handling."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_auth",
+        "-p",
+        "ironclaw_oauth",
+        "-p",
+        "ironclaw_product_workflow",
+        "-p",
+        "ironclaw_product_adapters",
+        "-p",
+        "ironclaw_outbound",
+        "-p",
+        "ironclaw_triggers",
+        "-p",
+        "ironclaw_projects",
+        "-p",
+        "ironclaw_conversations",
+        "--all-features",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_SESSION_EXECUTION_SUBSTRATE_COMMAND = CommandSpec(
+    name="webui_v2_session_execution_substrate_contracts",
+    description=(
+        "Shared execution substrate contracts for WebUI v2 admitted callers: "
+        "agent loop, turns, capabilities, approvals, run state, resources, "
+        "secrets, memory, filesystem, extensions, MCP, hooks, host API, and "
+        "host runtime."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_agent_loop",
+        "-p",
+        "ironclaw_turns",
+        "-p",
+        "ironclaw_capabilities",
+        "-p",
+        "ironclaw_approvals",
+        "-p",
+        "ironclaw_run_state",
+        "-p",
+        "ironclaw_resources",
+        "-p",
+        "ironclaw_secrets",
+        "-p",
+        "ironclaw_memory",
+        "-p",
+        "ironclaw_memory_native",
+        "-p",
+        "ironclaw_filesystem",
+        "-p",
+        "ironclaw_extensions",
+        "-p",
+        "ironclaw_mcp",
+        "-p",
+        "ironclaw_hooks",
+        "-p",
+        "ironclaw_hooks_libsql",
+        "-p",
+        "ironclaw_host_api",
+        "-p",
+        "ironclaw_host_runtime",
+        "--all-features",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_ROUTE_CONTRACT_COMMAND = CommandSpec(
     name="webui_v2_route_contracts",
     description=(
@@ -2862,13 +2952,22 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-043-TC-05",
             "REBCLI-043-TC-06",
             "REBCLI-043-TC-09",
+            "REBCLI-043-TC-10",
+            "REBCLI-043-TC-11",
         ],
-        commands=[WEBUI_V2_SESSION_THREAD_MESSAGE_HANDLER_COMMAND],
+        commands=[
+            WEBUI_V2_SESSION_THREAD_MESSAGE_HANDLER_COMMAND,
+            WEBUI_V2_SESSION_SERVICE_SUBSTRATE_COMMAND,
+            WEBUI_V2_SESSION_EXECUTION_SUBSTRATE_COMMAND,
+        ],
         notes=(
             "Runs a focused caller-level WebUI v2 router contract for the "
-            "session/thread/message API family. This is hermetic Rust route "
-            "coverage and intentionally does not duplicate PR #5348 browser "
-            "Playwright ports."
+            "session/thread/message API family, then the service and "
+            "execution substrate sweeps that preserve caller scope, turn "
+            "state, persistence, gates, capabilities, and host runtime "
+            "contracts after route admission. This is hermetic Rust coverage "
+            "and intentionally does not duplicate PR #5348 browser Playwright "
+            "ports."
         ),
     ),
     "webui_v2_streaming_run_control_api_regression": CaseSpec(

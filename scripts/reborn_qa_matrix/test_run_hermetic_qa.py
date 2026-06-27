@@ -75,6 +75,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-043-TC-11",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-039-TC-01",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -729,17 +733,27 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-043-TC-05",
                     "REBCLI-043-TC-06",
                     "REBCLI-043-TC-09",
+                    "REBCLI-043-TC-10",
+                    "REBCLI-043-TC-11",
                 ],
             )
             commands = results["results"][0]["details"]["commands"]
             self.assertEqual(
                 [command["name"] for command in commands],
-                ["webui_v2_session_thread_message_handler_contract"],
+                [
+                    "webui_v2_session_thread_message_handler_contract",
+                    "webui_v2_session_service_substrate_contracts",
+                    "webui_v2_session_execution_substrate_contracts",
+                ],
             )
             self.assertIn(
                 "session_thread_message_routes_dispatch_to_facade_methods",
                 commands[0]["command"],
             )
+            self.assertIn("ironclaw_product_workflow", commands[1]["command"])
+            self.assertIn("ironclaw_conversations", commands[1]["command"])
+            self.assertIn("ironclaw_agent_loop", commands[2]["command"])
+            self.assertIn("ironclaw_host_runtime", commands[2]["command"])
 
     def test_webui_streaming_run_control_case_dry_run_maps_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
