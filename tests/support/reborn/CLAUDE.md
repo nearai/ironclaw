@@ -46,24 +46,25 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
 
 ## Requirements & expectations (non-negotiable)
 
-1. **Test-first.** Write/update the test before the code; it must fail for the
-   right reason first. (Root `CLAUDE.md` → Testing Discipline; `.claude/rules/testing.md`.)
-2. **Consolidate.** Extend the existing test that covers a path; add a new test
-   only for a genuinely distinct scenario, and say why.
-3. **Readability contract.** ~3–12 lines, `build → submit_turn → assert`, no
+1. **Test-first & consolidate.** Per root `CLAUDE.md` → Testing Discipline (and
+   `.claude/rules/testing.md`): write/update the test first and watch it fail for
+   the right reason; extend an existing test rather than standing up a redundant
+   one, and say why if you add a new one.
+2. **Readability contract.** ~3–12 lines, `build → submit_turn → assert`, no
    nested structs in the body. **Never** hand-build raw `TraceStep` /
    `LlmTrace::new` in a Reborn test — that is the verbosity the `RebornScriptedReply`
    façade removes.
-4. **Mock only at the SDK seam.** Use `RebornScriptedReply`; do not swap the
+3. **Mock only at the SDK seam.** Use `RebornScriptedReply`; do not swap the
    gateway or stub internals.
-5. **Zero setup.** Must pass offline via a plain `cargo test --test reborn_<name>`
+4. **Zero setup.** Must pass offline via a plain `cargo test --test reborn_<name>`
    — no services, no API keys, no `integration` feature, no Docker, no special
    linker. Hermetic env (keychain off, `TZ=UTC`, passthrough LLM config) is baked
    into `build()`.
-6. **Edges captured/inert by default.** No real network/process/channel.
-7. **Minimal setup.** Wire only the boundaries the scenario crosses. Don't stand
-   up DB/HTTP/process capture for a text-only turn.
-8. **Test through the real path**, asserting on the persisted reply / recorded
+5. **Minimal, inert edges.** The harness defaults every network/IO boundary to
+   captured or inert — no real network, process, or channel. Wire only the
+   boundaries your scenario actually crosses; a text-only turn needs no
+   DB/HTTP/process setup.
+6. **Test through the real path**, asserting on the persisted reply / recorded
    boundary calls / state — not on internals.
 
 ## Files
@@ -73,6 +74,8 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
 - `builder.rs` — `RebornIntegrationHarness` + builder, hermetic env, the
   `assert_reply_contains` assertion (co-located with the harness fields).
 - Tests live as flat `tests/reborn_*.rs` (Cargo requires top-level test files).
+
+Module paths: each `tests/reborn_*.rs` declares both `#[path = "support/reborn/mod.rs"] mod reborn_support;` and `mod support;`, then `use reborn_support::builder::RebornIntegrationHarness;` / `use reborn_support::reply::RebornScriptedReply;`. Inside the support tree, siblings reference each other via `super::` and `trace_llm` via `crate::support::trace_llm` (there is no `crate::support::reborn` path). Copy the includes from `tests/reborn_integration_greeting.rs`.
 
 Design: `docs/superpowers/specs/2026-06-26-reborn-integration-test-framework-design.md`.
 
@@ -84,6 +87,4 @@ add behind a test that exercises it — no dead code):**
 `StorageMode::LibSql` (real SQLite on tmp) and the InMemory-vs-libSQL backend
 matrix; inert process port + `.with_live_shell()` / `.with_live_http_egress()`
 opt-ins; outbound/HTTP/secrets/MCP capture wiring; a dedicated `assertions.rs`
-once the `assert_*` family grows; the pre-commit test-style check. A
-divergence between InMemory and libSQL, once the matrix lands, is a real
-persistence bug — not test flake.
+once the `assert_*` family grows; the pre-commit test-style check.

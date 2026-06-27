@@ -226,7 +226,13 @@ gateway and only the parts the greeting needs):
 - Poll `turn_store.get_run_state(..)` until `TurnStatus::Completed` (or terminal/timeout):
   10ms poll, ~10s deadline. Return on Completed; error with last status on timeout.
 
-### 5. Assertions — `tests/support/reborn/assertions.rs` (NEW, ~12 lines)
+### 5. Assertions — `assert_reply_contains`
+
+**As-built (commit 0364c72a8):** with a single assertion in slice 1, this method
+was co-located in `builder.rs` (on the `impl RebornIntegrationHarness` block,
+beside the fields it reads) rather than in a separate `assertions.rs`. A dedicated
+`assertions.rs` is deferred until the `assert_*` family grows (see *Explicitly
+deferred*). The method body below is exactly what shipped:
 
 ```rust
 impl RebornIntegrationHarness {
@@ -260,8 +266,9 @@ reached only through `scoped_turns_fs`.) Visibility-only: zero line growth.
 
 ### 7. mod.rs — register new submodules
 
-Add `pub mod builder;`, `pub mod reply;`, `pub mod scripted_provider;`, and
-`pub mod assertions;` to `tests/support/reborn/mod.rs`.
+Add `pub mod builder;`, `pub mod reply;`, and `pub mod scripted_provider;` to
+`tests/support/reborn/mod.rs`. (No `pub mod assertions;` — see §5 as-built note:
+`assert_reply_contains` lives in `builder.rs`.)
 
 ### 8. THE ONE TEST — `tests/reborn_integration_greeting.rs` (NEW, ~12 lines)
 
