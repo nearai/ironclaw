@@ -13,6 +13,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -176,6 +177,90 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 True,
             )
         )
+
+    def test_slack_side_effect_setup_prompts_avoid_connect_action_trigger(self):
+        captured_prompts: dict[str, str] = {}
+        spreadsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
+
+        async def fake_live_chat_with_extensions_case(_ctx, **kwargs):
+            case_name = kwargs["case_name"]
+            captured_prompts[case_name] = kwargs["prompt"]
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{case_name}",
+                success=True,
+                latency_ms=1,
+                details={
+                    "text_excerpt": (
+                        f"Created https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+                    )
+                },
+            )
+
+        async def fake_post_signed_slack_dm_event(*_args, **_kwargs):
+            return {"ok": True}
+
+        async def fake_slack_history_contains_marker(*_args, **_kwargs):
+            return {"found": True}
+
+        async def fake_wait_for_google_sheet_marker(*_args, **_kwargs):
+            return {"found": True}
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_with_extensions_case",
+                side_effect=fake_live_chat_with_extensions_case,
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_preflight",
+                return_value={"legacy_actor_user_id": "U0REBORNQA"},
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_delivery_channel_id",
+                return_value="D0REBORNQA",
+            ),
+            patch.object(
+                run_live_qa,
+                "_post_signed_slack_dm_event",
+                side_effect=fake_post_signed_slack_dm_event,
+            ),
+            patch.object(
+                run_live_qa,
+                "_slack_history_contains_marker",
+                side_effect=fake_slack_history_contains_marker,
+            ),
+            patch.object(
+                run_live_qa,
+                "_google_runtime_access_token",
+                return_value=("fresh-access-token", {"source": "test"}),
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_google_sheet_marker",
+                side_effect=fake_wait_for_google_sheet_marker,
+            ),
+        ):
+            ctx = self._dummy_ctx()
+            self.assertTrue(
+                asyncio.run(run_live_qa.case_qa_5d_slack_strategy_doc_answer(ctx)).success
+            )
+            self.assertTrue(
+                asyncio.run(run_live_qa.case_qa_7e_slack_bug_sheet_delivery(ctx)).success
+            )
+
+        trigger = re.compile(r"(^|\s)(connect|link|pair|setup|set up)(\s|$)")
+        for case_name in (
+            "qa_5d_slack_strategy_doc_answer",
+            "qa_7e_slack_bug_sheet_delivery",
+        ):
+            prompt = captured_prompts[case_name].lower()
+            self.assertIsNone(
+                trigger.search(prompt),
+                f"{case_name} prompt should not trigger WebUI connect action: {prompt}",
+            )
 
     def test_generated_google_seed_creates_refreshable_product_auth_account(self):
         if importlib.util.find_spec("cryptography") is None:

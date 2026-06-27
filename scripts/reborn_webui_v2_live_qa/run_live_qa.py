@@ -3830,7 +3830,7 @@ async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResul
             },
         ],
         prompt=(
-            "QA case 5D setup: create a new Google Docs document titled "
+            "QA case 5D document preparation: create a new Google Docs document titled "
             f"`{doc_marker}`. Put this exact strategy sentence in the body: "
             f"{strategy_phrase} Read the document content back through Google "
             "Docs. In the final answer include the exact marker "
@@ -4532,7 +4532,7 @@ async def case_qa_7e_slack_bug_sheet_delivery(ctx: LiveQaContext) -> ProbeResult
             },
         ],
         prompt=(
-            "QA case 7E setup: create a new Google Sheet named "
+            "QA case 7E sheet preparation: create a new Google Sheet named "
             f"`{sheet_marker}` with exactly one header row and no bug data rows. "
             "The header columns must be Summary, Reporter, Slack Timestamp, "
             "Status, and QA Marker. In the final answer include the exact marker "
