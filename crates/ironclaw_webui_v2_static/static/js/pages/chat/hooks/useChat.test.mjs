@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+// The harness strips useChat.js's imports, so its collaborators are injected
+// as context globals below. retry eligibility is one of them — inject the real
+// predicate so the test exercises the same guard the production code uses.
+import { isRetryableMessage } from "../lib/retry-eligibility.js";
 
 // Load useChat.js into a fresh VM context with its imports stripped, the same
 // harness pattern useThreads.test.mjs uses. The hook's many collaborators
@@ -69,6 +73,8 @@ function instantiate({
   }),
 } = {}) {
   const sendCalls = [];
+  const loadHistoryCalls = [];
+  let chatEventsConfig = null;
   let messagesState = [...initialMessages];
   const refs = [];
 
@@ -106,12 +112,19 @@ function instantiate({
       nextCursor: null,
       isLoading: false,
       loadError: null,
-      loadHistory: () => {},
+      loadHistory: (cursor, opts) => {
+        loadHistoryCalls.push({ cursor, opts });
+      },
       seedThreadMessages: () => {},
       setMessages,
     }),
     useSSE: () => ({ status: "open" }),
-    useChatEvents: () => () => {},
+    // Capture the config passed to useChatEvents so a test can invoke the
+    // onRunSettled callback that fires the post-run history reload.
+    useChatEvents: (cfg) => {
+      chatEventsConfig = cfg;
+      return () => {};
+    },
     // pending-message helpers
     addPending: () => {},
     recordAcceptedMessageRef: () => null,
@@ -124,13 +137,22 @@ function instantiate({
     // attachment helpers
     toRenderAttachment: (a) => a,
     toWireAttachment: (a) => a,
+    // retry eligibility predicate (shared with message-bubble's render guard)
+    isRetryableMessage,
     globalThis: {},
     window: {},
   };
 
   vm.runInNewContext(useChatSourceForTest(), context);
   const hook = context.globalThis.__testExports.useChat(threadId);
-  return { hook, sendCalls, refs, getMessages: () => messagesState };
+  return {
+    hook,
+    sendCalls,
+    refs,
+    loadHistoryCalls,
+    getChatEventsConfig: () => chatEventsConfig,
+    getMessages: () => messagesState,
+  };
 }
 
 function erroredUserMessage(overrides = {}) {
@@ -224,5 +246,68 @@ test("retryMessage keeps the failed bubble when send() throws", async () => {
   assert.ok(
     getMessages().some((m) => m.id === failed.id),
     "the original failed bubble is retained when the re-send throws",
+  );
+});
+
+test("retryMessage returns the send() response so callers can route to a new thread", async () => {
+  // chat.js handleRetry routes a landing-screen retry to the thread send()
+  // creates implicitly; that only works if retryMessage hands the response
+  // (carrying thread_id) back to the caller.
+  const failed = erroredUserMessage();
+  const { hook } = instantiate({
+    initialMessages: [failed],
+    sendImpl: () => ({ run_id: "run-x", thread_id: "thread-new", status: "queued" }),
+  });
+
+  const response = await hook.retryMessage(failed);
+
+  assert.ok(response, "retryMessage must return the send() response");
+  assert.equal(response.thread_id, "thread-new");
+});
+
+test("retryMessage suppresses a retried msg-* timeline row on the post-run reload", async () => {
+  // A persisted rejected_busy row rehydrates as { id: "msg-*", status: "error" }.
+  // After a successful retry, onRunSettled reloads history; without suppression
+  // the server re-emits that row and the old failed bubble reappears as a
+  // duplicate next to the retried message.
+  const failed = erroredUserMessage({ id: "msg-abc123" });
+  const { hook, getChatEventsConfig, loadHistoryCalls } = instantiate({
+    initialMessages: [failed],
+  });
+
+  await hook.retryMessage(failed);
+  // Fire the run-settled callback the way useChatEvents would on a terminal run.
+  getChatEventsConfig().onRunSettled("run-retry-1", { success: true });
+
+  const reload = loadHistoryCalls.at(-1);
+  assert.ok(reload, "onRunSettled must trigger a history reload");
+  // The Set is constructed inside the vm realm, so duck-type rather than
+  // `instanceof Set` (which compares against this realm's constructor).
+  assert.equal(
+    typeof reload.opts.suppressIds?.has,
+    "function",
+    "reload carries a suppressIds set",
+  );
+  assert.ok(
+    reload.opts.suppressIds.has("msg-abc123"),
+    "the retried timeline row id is suppressed across the reload",
+  );
+});
+
+test("retryMessage does not suppress client-only pending-* bubbles", async () => {
+  // pending-* bubbles are never re-emitted by loadHistory, so they must not be
+  // added to the suppression set (which would be dead weight at best).
+  const failed = erroredUserMessage({ id: "pending-7" });
+  const { hook, getChatEventsConfig, loadHistoryCalls } = instantiate({
+    initialMessages: [failed],
+  });
+
+  await hook.retryMessage(failed);
+  getChatEventsConfig().onRunSettled("run-retry-1", { success: true });
+
+  const reload = loadHistoryCalls.at(-1);
+  assert.ok(
+    !reload.opts.suppressIds.has("pending-7"),
+    "client-only pending-* ids are not added to suppression",
   );
 });

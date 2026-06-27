@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { isRetryableMessage } from "../lib/retry-eligibility.js";
+
 const messageBubbleSource = readFileSync(
   new URL("./message-bubble.js", import.meta.url),
   "utf8",
@@ -70,15 +72,20 @@ test("message timestamp and actions share a hover-only meta row", () => {
   );
 });
 
-test("retry button is gated on a real onRetry handler and invokes it on click", () => {
-  // The button must only render when `onRetry` is truthy — so callers that
-  // have no retry handler pass null/undefined and the control hides. A
-  // truthy no-op handler would satisfy this guard yet do nothing on click
-  // (the dead-button regression this test exists to prevent).
+test("retry button uses shared isRetryableMessage predicate and a truthy onRetry handler", () => {
+  // message-bubble.js must delegate to the canonical eligibility module so
+  // the render guard and the hook (useChat.js) can never diverge.
   assert.match(
     messageBubbleSource,
-    /const showRetryAction = status === "error" && onRetry;/,
-    "retry button must be gated on a truthy onRetry handler, not rendered unconditionally",
+    /import \{ isRetryableMessage \} from "\.\.\/lib\/retry-eligibility\.js";/,
+    "message-bubble must import isRetryableMessage from the canonical eligibility module",
+  );
+  // The guard must require BOTH a truthy handler AND the predicate.
+  // `onRetry` first short-circuits when no handler is wired (hides button).
+  assert.match(
+    messageBubbleSource,
+    /const showRetryAction = onRetry && isRetryableMessage\(message\);/,
+    "retry guard must check onRetry handler AND isRetryableMessage predicate",
   );
   // Clicking the button must actually call the handler with the message.
   assert.match(
@@ -86,4 +93,28 @@ test("retry button is gated on a real onRetry handler and invokes it on click", 
     /onClick=\$\{\(\)\s*=>\s*onRetry\(message\)\}/,
     "retry button click must invoke onRetry(message)",
   );
+
+  // Behavioral: retryable case — button should show when onRetry is provided.
+  assert.ok(
+    isRetryableMessage({ role: "user", status: "error", content: "try again" }),
+    "user + error + text content → retryable",
+  );
+
+  // Behavioral: non-user errored message → not retryable (Finding C:
+  // hook only retries user messages, so the button must not appear on assistant errors).
+  assert.ok(
+    !isRetryableMessage({ role: "assistant", status: "error", content: "sorry" }),
+    "non-user errored message must not be retryable",
+  );
+
+  // Behavioral: errored user message WITH attachments → not retryable (Finding D:
+  // file blobs are gone after the first send; retry would silently drop them).
+  assert.ok(
+    !isRetryableMessage({ role: "user", status: "error", content: "with file", attachments: [{ id: "x" }] }),
+    "user message with attachments must not be retryable — blobs are unrecoverable after first send",
+  );
+
+  // Behavioral: falsy onRetry — even a fully-eligible message must not show
+  // the button when the caller passes no handler. This is enforced by the
+  // `onRetry &&` prefix in the showRetryAction expression verified above.
 });

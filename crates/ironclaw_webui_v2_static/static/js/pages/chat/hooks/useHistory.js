@@ -80,6 +80,7 @@ export function useHistory(threadId, options = {}) {
       const {
         preserveClientOnly = false,
         finalReplyTimestampByRun = null,
+        suppressIds = null,
       } = loadOptions;
       if (!threadId) {
         setState({ messages: [], nextCursor: null, isLoading: false, loadError: null });
@@ -122,6 +123,7 @@ export function useHistory(threadId, options = {}) {
           const cachedMessages = historyCache.get(key)?.messages || [];
           const cacheMerged = mergeFullRefresh(renderable, cachedMessages, {
             preserveClientOnly,
+            suppressIds,
             finalReplyTimestampByRun,
           });
           putCache(key, { messages: cacheMerged, nextCursor });
@@ -137,6 +139,7 @@ export function useHistory(threadId, options = {}) {
           } else {
             merged = mergeFullRefresh(renderable, prev.messages, {
               preserveClientOnly,
+              suppressIds,
               finalReplyTimestampByRun,
             });
           }
@@ -233,11 +236,17 @@ function mergePage(older, current) {
 }
 
 function mergeFullRefresh(fresh, current, options = {}) {
-  const { preserveClientOnly = false, finalReplyTimestampByRun = null } = options;
+  const { preserveClientOnly = false, finalReplyTimestampByRun = null, suppressIds = null } = options;
   const hydratedFresh = hydrateFreshMessages(fresh, current, {
     finalReplyTimestampByRun,
   });
-  const ids = new Set(hydratedFresh.map((m) => m?.id).filter(Boolean));
+  // Drop rows the caller has already retried so a post-run history reload
+  // can't resurrect the persisted rejected_busy bubble alongside its
+  // replacement. suppressIds is a Set of msg-* ids populated by retryMessage.
+  const filteredFresh = suppressIds?.size
+    ? hydratedFresh.filter((m) => !suppressIds.has(m?.id))
+    : hydratedFresh;
+  const ids = new Set(filteredFresh.map((m) => m?.id).filter(Boolean));
   const preserved = current.filter((message) => {
     if (!message || typeof message.id !== "string" || ids.has(message.id)) {
       return false;
@@ -252,7 +261,7 @@ function mergeFullRefresh(fresh, current, options = {}) {
     if (isSeededOptimisticMessage(message)) return true;
     return preserveClientOnly && message.id.startsWith("err-");
   });
-  return mergePreservedMessages(hydratedFresh, preserved);
+  return mergePreservedMessages(filteredFresh, preserved);
 }
 
 function mergePreservedMessages(fresh, preserved) {

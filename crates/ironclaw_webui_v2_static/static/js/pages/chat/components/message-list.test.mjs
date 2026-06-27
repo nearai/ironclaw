@@ -65,6 +65,18 @@ test("MessageList keeps scroll helpers exported", () => {
   }
 });
 
+test("MessageList forwards onRetryMessage down to each MessageBubble as onRetry", () => {
+  // Closes the prop-threading seam between chat.js (which passes
+  // onRetryMessage={handleRetry}) and MessageBubble (whose click calls
+  // onRetry(message)). If this forwarding is dropped, the Retry button goes
+  // back to being a dead control even though both ends are wired correctly.
+  assert.match(
+    messageListSource,
+    /onRetry=\$\{onRetryMessage\}/,
+    "MessageList must pass its onRetryMessage prop to MessageBubble's onRetry",
+  );
+});
+
 test("MessageList follows streamed content only while near the bottom", () => {
   const { isNearBottom } = loadHelpers();
   const viewport = {

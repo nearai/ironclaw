@@ -6,6 +6,7 @@ import { toast } from "../../../lib/toast.js";
 import { ProjectFileChips } from "./project-file-chips.js";
 import { AttachmentChip } from "./attachment-chip.js";
 import { AttachmentPreviewModal } from "./attachment-preview.js";
+import { isRetryableMessage } from "../lib/retry-eligibility.js";
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
    system / error stay as centered tinted notices. Reasoning ("thinking")
@@ -117,7 +118,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
   const isNotice = role === "system" || role === "error";
   const bubbleWidthClass = isUser ? "max-w-[85%]" : isNotice ? "mx-auto max-w-[85%]" : "w-full max-w-[85%]";
   const contentWidthClass = isUser ? "" : "w-full min-w-0 max-w-full";
-  const showRetryAction = status === "error" && onRetry;
+  const showRetryAction = onRetry && isRetryableMessage(message);
   const showMetaRow = showActions || showRetryAction || timeLabel;
 
   return html`
