@@ -9,6 +9,7 @@ import { redeemSlackPairingCode } from "../../../lib/slack-pairing-api.js";
 import { queryClient } from "../../../lib/query-client.js";
 import { React } from "../../../lib/html.js";
 import { approvePairingCode } from "../../extensions/lib/extensions-api.js";
+import { onboardingFromToolMessages } from "../lib/extension-onboarding.js";
 import { useChatEvents } from "../lib/useChatEvents.js";
 import {
   addPending,
@@ -300,6 +301,21 @@ export function useChat(threadId) {
       };
     }
   }, [pendingAuthGateKey]);
+
+  React.useEffect(() => {
+    const onboarding = onboardingFromToolMessages(messages, threadId);
+    if (!onboarding) return;
+    setPendingOnboarding((current) => {
+      if (
+        current?.extensionName === onboarding.extensionName &&
+        current?.threadId === onboarding.threadId
+      ) {
+        return current;
+      }
+      return onboarding;
+    });
+    setIsProcessing(false);
+  }, [messages, threadId, setPendingOnboarding, setIsProcessing]);
 
   React.useEffect(() => {
     if (!isPendingOAuthGate(pendingGate)) return;

@@ -8,6 +8,7 @@ import {
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages.js";
+import { onboardingFromExtensionActivatePreview } from "./extension-onboarding.js";
 import { gateFromProjectionGate } from "./gates.js";
 import {
   createToolActivityState,
@@ -65,6 +66,7 @@ function createUseChatEventsHarness({
     globalThis: {},
     ensureGateToolActivity,
     isTerminalToolStatus,
+    onboardingFromExtensionActivatePreview,
     toolCardFromActivity,
     toolCardFromPreview,
     upsertToolActivityMessage,
