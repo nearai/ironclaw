@@ -1691,6 +1691,39 @@ WEBUI_V2_SETTINGS_DIRECT_TABS_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SETTINGS_DIRECT_TABS_BROWSER_COMMAND = CommandSpec(
+    name="webui_v2_settings_direct_tabs_browser_smoke",
+    description=(
+        "Focused WebUI v2 Settings direct-tabs browser smoke for member "
+        "operator-tab redirects, admin /settings/tools rendering, search "
+        "filtering, and v2 settings tools save calls."
+    ),
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_settings_direct_tabs_browser.py",
+        "-q",
+    ],
+)
+
 WEBUI_V2_ADMIN_CLIENT_COMMAND = CommandSpec(
     name="webui_v2_admin_client_contracts",
     description=(
@@ -4936,15 +4969,18 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-096-TC-05",
             "REBCLI-096-TC-06",
         ],
-        commands=[WEBUI_V2_SETTINGS_DIRECT_TABS_COMMAND],
+        commands=[
+            WEBUI_V2_SETTINGS_DIRECT_TABS_COMMAND,
+            WEBUI_V2_SETTINGS_DIRECT_TABS_BROWSER_COMMAND,
+        ],
         notes=(
             "Covers WebUI v2 Settings direct-tab/configuration panel rows "
-            "without duplicating PR #5348 browser settings/tool-permission "
-            "coverage: direct /settings/:tab dispatch, role-based redirects, "
-            "desktop/mobile tab visibility, toolbar and restart wiring, "
-            "schema restart rules, channel grouping/search/empty states, "
-            "tool permission controls, users forbidden/error/list/search "
-            "states, and v2 settings API route selection."
+            "through static contracts and a served browser smoke: direct "
+            "/settings/:tab dispatch, role-based redirects, desktop/mobile "
+            "tab visibility, toolbar and restart wiring, schema restart "
+            "rules, channel grouping/search/empty states, tool permission "
+            "controls, users forbidden/error/list/search states, v2 settings "
+            "API route selection, and browser-level Tools panel save calls."
         ),
     ),
     "webui_v2_admin_console_usage_regression": CaseSpec(
