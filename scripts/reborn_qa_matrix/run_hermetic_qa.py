@@ -298,6 +298,22 @@ WEBUI_V2_CHAT_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_WORKSPACE_PROJECT_CLIENT_COMMAND = CommandSpec(
+    name="webui_v2_workspace_project_client_contracts",
+    description=(
+        "Focused WebUI v2 workspace/projects client contracts for read-only "
+        "filesystem mount browsing, safe file preview/download decisions, "
+        "project overview/detail mapping, project mutation and membership "
+        "route encoding, and still-stubbed mission/thread/widget helpers."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/pages/workspace/lib/workspace-api.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/pages/projects/lib/projects-api.test.mjs",
+    ],
+)
+
 WEBUI_V2_SEND_MULTILINE_COMMAND = CommandSpec(
     name="webui_v2_send_multiline_contract",
     description="Focused send-message route contract for preserving multiline content.",
@@ -1297,6 +1313,31 @@ CASES: dict[str, CaseSpec] = {
             "reconciliation, approvals, auth gates, SSE timeline projection, "
             "history merge, markdown/readability, attachment staging, message "
             "grouping, cancellation, and thread isolation."
+        ),
+    ),
+    "webui_v2_workspace_project_client_regression": CaseSpec(
+        name="webui_v2_workspace_project_client_regression",
+        feature="WebUI v2 workspace and project browser screens",
+        category="Hermetic Workspace/Project Client Contract Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-066-TC-01",
+            "REBCLI-066-TC-02",
+            "REBCLI-066-TC-03",
+            "REBCLI-066-TC-04",
+            "REBCLI-066-TC-05",
+            "REBCLI-066-TC-06",
+        ],
+        commands=[WEBUI_V2_WORKSPACE_PROJECT_CLIENT_COMMAND],
+        notes=(
+            "Covers the generated WebUI v2 workspace/project rows at the "
+            "static client contract layer without duplicating PR #5348 "
+            "browser project/workspace smoke coverage: root mount browsing, "
+            "mount-qualified directory entries, mount-root directory handling, "
+            "bounded text preview via authed bytes, known-binary download-only "
+            "behavior, project overview/detail mapping, project create/update "
+            "payloads, membership route encoding, and TODO subresource stubs "
+            "that must not call unsupported v1 APIs. Browser-smoke TC-20 "
+            "stays guarded by PR #5348/live coverage."
         ),
     ),
     "webui_v2_filesystem_api_regression": CaseSpec(
