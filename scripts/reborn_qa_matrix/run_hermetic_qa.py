@@ -379,6 +379,21 @@ WEBUI_V2_SETTINGS_ONBOARDING_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_HIDDEN_STUBBED_ROUTE_COMMAND = CommandSpec(
+    name="webui_v2_hidden_stubbed_route_contracts",
+    description=(
+        "Focused WebUI v2 hidden/stubbed direct-route contracts for hidden "
+        "route metadata, registered direct routes, and jobs/routines/missions/"
+        "admin TODO API adapters that must not call unsupported v1 endpoints."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/app/routes.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/app/hidden-stub-apis.test.mjs",
+    ],
+)
+
 WEBUI_V2_SEND_MULTILINE_COMMAND = CommandSpec(
     name="webui_v2_send_multiline_contract",
     description="Focused send-message route contract for preserving multiline content.",
@@ -1476,6 +1491,29 @@ CASES: dict[str, CaseSpec] = {
             "propagation, users-tab stubs, and onboarding-gate redirect "
             "policy. Browser rows TC-07/08/09 stay guarded by #5348/live "
             "coverage."
+        ),
+    ),
+    "webui_v2_hidden_stubbed_routes_regression": CaseSpec(
+        name="webui_v2_hidden_stubbed_routes_regression",
+        feature="WebUI v2 hidden and stubbed direct routes",
+        category="Hermetic Hidden/Stubbed Route Contract Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-070-TC-01",
+            "REBCLI-070-TC-02",
+            "REBCLI-070-TC-03",
+            "REBCLI-070-TC-04",
+            "REBCLI-070-TC-05",
+            "REBCLI-070-TC-06",
+        ],
+        commands=[WEBUI_V2_HIDDEN_STUBBED_ROUTE_COMMAND],
+        notes=(
+            "Covers the generated WebUI v2 hidden/stubbed direct-route rows "
+            "at the static client contract layer: jobs/routines/missions/admin "
+            "route metadata stays registered but hidden, routeForId direct "
+            "lookup remains available, and jobs/routines/missions/admin API "
+            "adapters return empty TODO shapes without calling fetch or "
+            "unsupported v1 gateway endpoints. Browser rows TC-10/11 remain "
+            "separate browser/live coverage."
         ),
     ),
     "webui_v2_filesystem_api_regression": CaseSpec(
