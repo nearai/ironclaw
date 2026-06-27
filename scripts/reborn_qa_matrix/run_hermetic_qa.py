@@ -2345,6 +2345,43 @@ WEBUI_V2_PRODUCT_AUTH_CALLBACK_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_PRODUCT_AUTH_SERVICE_SUBSTRATE_COMMAND = CommandSpec(
+    name="webui_v2_product_auth_service_substrate_contracts",
+    description=(
+        "Product-auth service substrate contracts behind WebUI v2 OAuth, "
+        "manual-token, and account routes: auth/OAuth flow state, provider "
+        "exchange/refresh boundaries, product workflow auth gates, adapters, "
+        "outbound target resolution, triggers, projects, and conversations."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_auth",
+        "-p",
+        "ironclaw_oauth",
+        "-p",
+        "ironclaw_product_workflow",
+        "-p",
+        "ironclaw_product_adapters",
+        "-p",
+        "ironclaw_outbound",
+        "-p",
+        "ironclaw_triggers",
+        "-p",
+        "ironclaw_projects",
+        "-p",
+        "ironclaw_conversations",
+        "--all-features",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_EXTENSION_OAUTH_ROUTE_COMMAND = CommandSpec(
     name="webui_v2_extension_oauth_route_contract",
     description=(
@@ -4116,11 +4153,13 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-059-TC-04",
             "REBCLI-059-TC-05",
             "REBCLI-059-TC-06",
+            "REBCLI-059-TC-07",
         ],
         commands=[
             WEBUI_V2_PRODUCT_AUTH_OAUTH_COMMAND,
             WEBUI_V2_PRODUCT_AUTH_GOOGLE_OAUTH_COMMAND,
             WEBUI_V2_PRODUCT_AUTH_CALLBACK_COMMAND,
+            WEBUI_V2_PRODUCT_AUTH_SERVICE_SUBSTRATE_COMMAND,
         ],
         notes=(
             "Covers WebUI v2 product-auth OAuth API/runtime rows without "
@@ -4129,7 +4168,11 @@ CASES: dict[str, CaseSpec] = {
             "secret leakage, provider denial/exchange failure, malformed and "
             "unknown callback state, invalid scope/expiry rejection, "
             "cross-scope rejection, bearer/no-body enforcement, and "
-            "per-caller/per-IP rate limits."
+            "per-caller/per-IP rate limits. Also runs the product-auth "
+            "service-substrate sweep for auth/OAuth flow state, provider "
+            "exchange and refresh boundaries, workflow gates, adapters, "
+            "outbound, triggers, projects, and conversations without live "
+            "provider credentials."
         ),
     ),
     "webui_v2_extension_oauth_setup_regression": CaseSpec(

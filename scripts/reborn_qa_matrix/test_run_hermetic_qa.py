@@ -2963,6 +2963,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-059-TC-04",
                     "REBCLI-059-TC-05",
                     "REBCLI-059-TC-06",
+                    "REBCLI-059-TC-07",
                 ],
             )
             self.assertEqual(
@@ -2974,12 +2975,16 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "webui_v2_product_auth_oauth_routes",
                     "webui_v2_product_auth_google_oauth_routes",
                     "webui_v2_product_auth_callback_routes",
+                    "webui_v2_product_auth_service_substrate_contracts",
                 ],
             )
             commands = results["results"][0]["details"]["commands"]
             self.assertIn("product_auth_oauth", commands[0]["command"])
             self.assertIn("product_auth_google_oauth", commands[1]["command"])
             self.assertIn("product_auth_callback", commands[2]["command"])
+            self.assertIn("ironclaw_auth", commands[3]["command"])
+            self.assertIn("ironclaw_oauth", commands[3]["command"])
+            self.assertIn("ironclaw_product_workflow", commands[3]["command"])
 
     def test_extension_oauth_setup_case_dry_run_maps_api_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
