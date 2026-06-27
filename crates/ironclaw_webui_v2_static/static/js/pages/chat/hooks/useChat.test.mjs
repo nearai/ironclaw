@@ -228,6 +228,26 @@ test("retryMessage ignores non-error, non-user, and non-string-content messages"
   assert.equal(sendCalls.length, 0, "only non-empty failed user messages retry");
 });
 
+test("retryMessage ignores an attachment-bearing failed message", async () => {
+  // Retry is content-only: a failed bubble's attachments are render-shape and
+  // the File blobs are gone, so attachment-bearing failures are not retryable
+  // (the Retry button is hidden for them). Prove the hook itself short-circuits
+  // — no send(), no bubble removal — not just the shared predicate in isolation.
+  const failed = erroredUserMessage({
+    id: "msg-withfiles",
+    attachments: [{ id: "att-1", name: "photo.png" }],
+  });
+  const { hook, sendCalls, getMessages } = instantiate({ initialMessages: [failed] });
+
+  await hook.retryMessage(failed);
+
+  assert.equal(sendCalls.length, 0, "an attachment-bearing message must not re-send");
+  assert.ok(
+    getMessages().some((m) => m.id === failed.id),
+    "the failed bubble is retained (retry is suppressed, not silently dropped)",
+  );
+});
+
 test("retryMessage keeps the failed bubble when send() throws", async () => {
   const failed = erroredUserMessage();
   const { hook, sendCalls, getMessages } = instantiate({
