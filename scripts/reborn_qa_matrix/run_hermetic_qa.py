@@ -823,6 +823,56 @@ WEBUI_V2_MANUAL_TOKEN_FACADE_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_ACCOUNT_ROUTE_COMMAND = CommandSpec(
+    name="webui_v2_product_auth_account_routes",
+    description=(
+        "Product-auth account route contracts for listing configured accounts, "
+        "selecting redacted projections, recovery/setup status, credential "
+        "refresh, malformed account ids, wrong-provider or foreign-scope "
+        "accounts, unknown accounts, missing invocation ids, and the tighter "
+        "refresh rate limit."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "--test",
+        "webui_v2_product_auth_4201",
+        "account",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_LIFECYCLE_CLEANUP_COMMAND = CommandSpec(
+    name="webui_v2_product_auth_lifecycle_cleanup_routes",
+    description=(
+        "Product-auth lifecycle cleanup route contracts for redacted cleanup "
+        "reports, service dispatch, invalid extension id rejection, and "
+        "secret-free responses."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "--test",
+        "webui_v2_product_auth_4201",
+        "lifecycle",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_DESCRIPTOR_POLICY_COMMAND = CommandSpec(
     name="webui_v2_descriptor_policy_surface",
     description=(
@@ -1302,6 +1352,32 @@ CASES: dict[str, CaseSpec] = {
             "invocation enforcement, bearer/body/rate-limit enforcement, "
             "facade retry/cross-scope/fail-closed behavior, and sanitized "
             "backend failures."
+        ),
+    ),
+    "webui_v2_product_auth_account_lifecycle_regression": CaseSpec(
+        name="webui_v2_product_auth_account_lifecycle_regression",
+        feature="WebUI v2 product-auth account and lifecycle routes",
+        category="Hermetic Product Auth Account/Lifecycle Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-062-TC-01",
+            "REBCLI-062-TC-02",
+            "REBCLI-062-TC-03",
+            "REBCLI-062-TC-04",
+            "REBCLI-062-TC-05",
+            "REBCLI-062-TC-06",
+        ],
+        commands=[
+            WEBUI_V2_ACCOUNT_ROUTE_COMMAND,
+            WEBUI_V2_LIFECYCLE_CLEANUP_COMMAND,
+        ],
+        notes=(
+            "Covers WebUI v2 product-auth account/lifecycle API/runtime rows "
+            "without duplicating PR #5348 browser auth-flow coverage: account "
+            "listing, selection, recovery projections, refresh behavior, "
+            "redacted projections, malformed and unknown account ids, "
+            "wrong-provider, foreign-scope, and unconfigured account handling, "
+            "missing invocation ids, refresh rate limits, lifecycle cleanup "
+            "dispatch, invalid extension rejection, and secret-free responses."
         ),
     ),
     "webui_v2_operator_config_api_regression": CaseSpec(
