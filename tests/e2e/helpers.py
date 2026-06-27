@@ -295,6 +295,14 @@ SEL_V2 = {
     "logs_entry_message": "[data-testid='logs-entry-message']",
     "logs_entry_context": "[data-testid='logs-entry-context']",
     "logs_context_chip": "[data-testid='logs-context-chip'][data-context-key='{key}']",
+    "automation_delivery_defaults": "[data-testid='automation-delivery-defaults']",
+    "automation_delivery_current_default": (
+        "[data-testid='automation-delivery-current-default']"
+    ),
+    "automation_delivery_target_for": (
+        "[data-testid='automation-delivery-target'][data-target-id='{id}']"
+    ),
+    "automation_delivery_save": "[data-testid='automation-delivery-save']",
 }
 
 

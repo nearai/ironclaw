@@ -1143,6 +1143,41 @@ WEBUI_V2_AUTOMATIONS_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_AUTOMATIONS_BROWSER_COMMAND = CommandSpec(
+    name="webui_v2_automations_browser_smoke",
+    description=(
+        "Playwright smoke for the WebUI v2 automations route through the "
+        "real ironclaw-reborn serve binary: automation list query shape, "
+        "outbound delivery target rendering, Slack final-reply target save "
+        "payload, bearer propagation, and current-default UI state."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py::test_reborn_v2_automations_delivery_default_browser_smoke",
+        "-q",
+    ],
+)
+
 WEBUI_V2_EXTENSIONS_CLIENT_COMMAND = CommandSpec(
     name="webui_v2_extensions_client_contracts",
     description=(
@@ -3930,16 +3965,23 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-067-TC-04",
             "REBCLI-067-TC-05",
             "REBCLI-067-TC-06",
+            "REBCLI-067-TC-07",
         ],
-        commands=[WEBUI_V2_AUTOMATIONS_CLIENT_COMMAND],
+        commands=[
+            REBORN_CLI_WEBUI_V2_BINARY_COMMAND,
+            WEBUI_V2_AUTOMATIONS_CLIENT_COMMAND,
+            WEBUI_V2_AUTOMATIONS_BROWSER_COMMAND,
+        ],
         notes=(
             "Covers the generated WebUI v2 automations/outbound-default rows "
-            "at the static client contract layer without duplicating PR #5348 "
-            "browser legacy Playwright scenarios: automation list/mutation "
+            "at the static client and browser layers without duplicating PR "
+            "#5348 browser legacy Playwright scenarios: automation list/mutation "
             "routes, completed-row query toggles, schedule labels/timezones, "
             "filter/summary/recent-run presentation, empty-state copy/start "
             "actions, refresh cadence bounds, and outbound preference/target "
-            "API payloads including clear-to-null."
+            "API payloads including clear-to-null, plus browser Slack "
+            "final-reply target selection, save body, bearer propagation, and "
+            "current-default UI state."
         ),
     ),
     "webui_v2_extensions_client_regression": CaseSpec(

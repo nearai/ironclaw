@@ -3986,7 +3986,7 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
       >
         approve &lt;code&gt;
       </code>`});return u`
-    <${q} className="p-5 sm:p-6">
+    <${q} data-testid="automation-delivery-defaults" className="p-5 sm:p-6">
       <div className="flex flex-col gap-5">
 
         <!-- ── Header ──────────────────────────────────────────────── -->
@@ -4011,6 +4011,7 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
               ${t("automations.delivery.currentDefault")}
             </span>
             <div
+              data-testid="automation-delivery-current-default"
               className="flex items-center gap-3 rounded-xl border px-4 py-3 bg-[var(--v2-positive-soft)] border-[color-mix(in_srgb,var(--v2-positive-text)_25%,var(--v2-panel-border))]"
             >
               <span className="flex-1 min-w-0 text-sm font-semibold text-[var(--v2-text-strong)] truncate">
@@ -4036,9 +4037,12 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
             ${e.finalReplyTargets.map(L=>{let O=L?.target?.target_id??"",P=L?.target?.display_name||L?.target?.target_id||"",k=L?.target?.description||"",U=L?.target?.status??"available",Y=n===O;return u`
                 <label
                   key=${O}
+                  data-testid="automation-delivery-target"
+                  data-target-id=${O}
                   className=${G("flex items-start gap-3.5 rounded-xl border px-4 py-3.5 cursor-pointer","transition-colors duration-100","bg-[var(--v2-surface-soft)] border-[var(--v2-panel-border)]","hover:bg-[var(--v2-surface-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]",Y&&"border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)]")}
                 >
                   <input
+                    data-testid="automation-delivery-target-radio"
                     type="radio"
                     name="delivery-target"
                     value=${O}
@@ -4088,9 +4092,11 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
 
             <!-- Web app only / fallback row -->
             <label
+              data-testid="automation-delivery-web-target"
               className=${G("flex items-start gap-3.5 rounded-xl border px-4 py-3.5","transition-colors duration-100","bg-[var(--v2-surface-soft)] border-[var(--v2-panel-border)]",f?"cursor-pointer hover:bg-[var(--v2-surface-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]":"cursor-default",n===""&&"border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)]")}
             >
               <input
+                data-testid="automation-delivery-target-radio"
                 type="radio"
                 name="delivery-target"
                 value=""
@@ -4120,6 +4126,7 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
         <!-- ── Save row ─────────────────────────────────────────────── -->
         <div className="flex flex-wrap items-center gap-3">
           <${A}
+            data-testid="automation-delivery-save"
             variant="primary"
             size="sm"
             disabled=${!d}

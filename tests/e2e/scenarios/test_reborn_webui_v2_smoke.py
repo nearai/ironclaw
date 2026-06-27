@@ -1156,6 +1156,152 @@ async def test_reborn_v2_projects_overview_filter_and_detail_browser_smoke(
         await context.close()
 
 
+async def test_reborn_v2_automations_delivery_default_browser_smoke(
+    reborn_v2_server, reborn_v2_browser
+):
+    """The Automations page saves a Slack final-reply target through v2 APIs."""
+    requests: list[tuple[str, str, str | None]] = []
+    saved_requests: list[dict] = []
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    slack_target = {
+        "target_id": "slack:personal-dm:T-SMOKE:U123",
+        "display_name": "Slack DM - Ada Operator",
+        "description": "Direct message Ada Operator in Slack",
+        "status": "available",
+    }
+
+    async def fulfill_json(route, body, status=200):
+        await route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route):
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route):
+        await fulfill_json(route, {"threads": [], "next_cursor": None})
+
+    async def handle_automations(route):
+        parsed = urlparse(route.request.url)
+        requests.append((route.request.url, route.request.headers.get("authorization", ""), None))
+        assert parse_qs(parsed.query) == {"limit": ["50"], "run_limit": ["25"]}, parsed.query
+        await fulfill_json(
+            route,
+            {
+                "scheduler_enabled": True,
+                "automations": [
+                    {
+                        "automation_id": "automation-daily-summary",
+                        "name": "Daily summary",
+                        "state": "scheduled",
+                        "source": {
+                            "type": "schedule",
+                            "cron": "0 9 * * *",
+                            "timezone": "UTC",
+                        },
+                        "next_run_at": "2026-06-28T09:00:00Z",
+                        "recent_runs": [],
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_preferences(route):
+        body = route.request.post_data
+        requests.append((route.request.url, route.request.headers.get("authorization", ""), body))
+        if route.request.method == "POST":
+            parsed_body = json.loads(body or "{}")
+            saved_requests.append(parsed_body)
+            await fulfill_json(
+                route,
+                {
+                    "final_reply_target": slack_target,
+                    "final_reply_target_status": "available",
+                },
+            )
+            return
+        await fulfill_json(
+            route,
+            {
+                "final_reply_target": None,
+                "final_reply_target_status": "none_configured",
+            },
+        )
+
+    async def handle_targets(route):
+        requests.append((route.request.url, route.request.headers.get("authorization", ""), None))
+        await fulfill_json(
+            route,
+            {
+                "targets": [
+                    {
+                        "target": slack_target,
+                        "capabilities": {"final_replies": True},
+                    }
+                ]
+            },
+        )
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads**", handle_threads)
+    await page.route("**/api/webchat/v2/automations**", handle_automations)
+    await page.route("**/api/webchat/v2/outbound/preferences", handle_preferences)
+    await page.route("**/api/webchat/v2/outbound/targets", handle_targets)
+
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/v2/automations?token={REBORN_V2_AUTH_TOKEN}",
+            wait_until="domcontentloaded",
+        )
+        await expect(page).to_have_url(re.compile(r"/v2/automations/?$"), timeout=15000)
+        await expect(page.locator(SEL_V2["automation_delivery_defaults"])).to_be_visible(
+            timeout=15000
+        )
+        await expect(page.locator("body")).to_contain_text("Daily summary", timeout=15000)
+        await expect(page.locator("body")).to_contain_text(
+            "Slack DM - Ada Operator", timeout=15000
+        )
+
+        target = page.locator(
+            SEL_V2["automation_delivery_target_for"].format(
+                id="slack:personal-dm:T-SMOKE:U123"
+            )
+        )
+        await target.click()
+        await page.locator(SEL_V2["automation_delivery_save"]).click()
+
+        await expect(
+            page.locator(SEL_V2["automation_delivery_current_default"])
+        ).to_contain_text("Slack DM - Ada Operator", timeout=10000)
+        assert saved_requests == [
+            {"final_reply_target_id": "slack:personal-dm:T-SMOKE:U123"}
+        ]
+        assert any("/api/webchat/v2/automations?limit=50&run_limit=25" in url for url, _, _ in requests), requests
+        assert any("/api/webchat/v2/outbound/preferences" in url for url, _, _ in requests), requests
+        assert all(auth == f"Bearer {REBORN_V2_AUTH_TOKEN}" for _, auth, _ in requests), requests
+    finally:
+        await context.close()
+
+
 async def test_reborn_v2_slack_pairing_browser_success_error_and_keyboard_submit(
     reborn_v2_server, reborn_v2_browser
 ):

@@ -139,7 +139,7 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
   );
 
   return html`
-    <${Panel} className="p-5 sm:p-6">
+    <${Panel} data-testid="automation-delivery-defaults" className="p-5 sm:p-6">
       <div className="flex flex-col gap-5">
 
         <!-- ── Header ──────────────────────────────────────────────── -->
@@ -165,6 +165,7 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
               ${t("automations.delivery.currentDefault")}
             </span>
             <div
+              data-testid="automation-delivery-current-default"
               className="flex items-center gap-3 rounded-xl border px-4 py-3 bg-[var(--v2-positive-soft)] border-[color-mix(in_srgb,var(--v2-positive-text)_25%,var(--v2-panel-border))]"
             >
               <span className="flex-1 min-w-0 text-sm font-semibold text-[var(--v2-text-strong)] truncate">
@@ -197,6 +198,8 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
               return html`
                 <label
                   key=${tid}
+                  data-testid="automation-delivery-target"
+                  data-target-id=${tid}
                   className=${cn(
                     "flex items-start gap-3.5 rounded-xl border px-4 py-3.5 cursor-pointer",
                     "transition-colors duration-100",
@@ -207,6 +210,7 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
                   )}
                 >
                   <input
+                    data-testid="automation-delivery-target-radio"
                     type="radio"
                     name="delivery-target"
                     value=${tid}
@@ -261,6 +265,7 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
 
             <!-- Web app only / fallback row -->
             <label
+              data-testid="automation-delivery-web-target"
               className=${cn(
                 "flex items-start gap-3.5 rounded-xl border px-4 py-3.5",
                 "transition-colors duration-100",
@@ -273,6 +278,7 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
               )}
             >
               <input
+                data-testid="automation-delivery-target-radio"
                 type="radio"
                 name="delivery-target"
                 value=""
@@ -302,6 +308,7 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
         <!-- ── Save row ─────────────────────────────────────────────── -->
         <div className="flex flex-wrap items-center gap-3">
           <${Button}
+            data-testid="automation-delivery-save"
             variant="primary"
             size="sm"
             disabled=${!canSave}
