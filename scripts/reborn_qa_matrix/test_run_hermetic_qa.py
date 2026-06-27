@@ -2684,9 +2684,18 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             commands = results["results"][0]["details"]["commands"]
             self.assertEqual(
                 [command["name"] for command in commands],
-                ["webui_v2_trace_credits_client_contracts"],
+                [
+                    "reborn_cli_webui_v2_binary",
+                    "webui_v2_trace_credits_client_contracts",
+                    "webui_v2_trace_credits_browser_smoke",
+                ],
             )
-            self.assertIn("trace-credits-card.test.mjs", commands[0]["command"])
+            self.assertIn("ironclaw-reborn", commands[0]["command"])
+            self.assertIn("trace-credits-card.test.mjs", commands[1]["command"])
+            self.assertIn(
+                "test_reborn_webui_v2_trace_credits_browser.py",
+                commands[2]["command"],
+            )
             self.assertNotIn("REBCLI-077-TC-07", results["summary"]["qa_matrix_test_ids"])
 
     def test_webui_v2_wallet_connect_case_dry_run_maps_matrix_ids(self):

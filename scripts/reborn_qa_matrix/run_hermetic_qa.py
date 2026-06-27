@@ -1951,6 +1951,40 @@ WEBUI_V2_TRACE_CREDITS_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_TRACE_CREDITS_BROWSER_COMMAND = CommandSpec(
+    name="webui_v2_trace_credits_browser_smoke",
+    description=(
+        "Served WebUI v2 browser smoke for the Trace Commons sidebar card: "
+        "enrolled credit summary rendering, accepted/submitted and held-count "
+        "copy, bearer-backed credit fetch, settings/traces navigation, and "
+        "not-enrolled hidden state."
+    ),
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_trace_credits_browser.py",
+        "-q",
+    ],
+)
+
 WEBUI_V2_OPERATOR_LOGS_HANDLER_COMMAND = CommandSpec(
     name="webui_v2_operator_logs_handler_contract",
     description=(
@@ -4886,14 +4920,19 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-077-TC-05",
             "REBCLI-077-TC-06",
         ],
-        commands=[WEBUI_V2_TRACE_CREDITS_CLIENT_COMMAND],
+        commands=[
+            REBORN_CLI_WEBUI_V2_BINARY_COMMAND,
+            WEBUI_V2_TRACE_CREDITS_CLIENT_COMMAND,
+            WEBUI_V2_TRACE_CREDITS_BROWSER_COMMAND,
+        ],
         notes=(
             "Covers the WebUI v2 sidebar Trace Commons credits card at the "
-            "static client contract layer: hidden loading/error/not-enrolled "
-            "states, signed two-decimal final-credit formatting, accepted and "
-            "submitted defaults, positive held-count visibility, "
-            "settings/traces navigation, shared trace-credits react-query key, "
-            "and display-only sidebar placement. Live Trace Commons ledger/API "
+            "static client contract and served browser layers: hidden "
+            "loading/error/not-enrolled states, signed two-decimal final-credit "
+            "formatting, accepted and submitted defaults, positive held-count "
+            "visibility, settings/traces navigation, shared trace-credits "
+            "react-query key, display-only sidebar placement, bearer-backed "
+            "credit fetch, and real SPA routing. Live Trace Commons ledger/API "
             "behavior remains outside this hermetic lane."
         ),
     ),

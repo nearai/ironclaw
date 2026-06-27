@@ -340,6 +340,10 @@ SEL_V2 = {
         "[data-testid='automation-delivery-target'][data-target-id='{id}']"
     ),
     "automation_delivery_save": "[data-testid='automation-delivery-save']",
+    "trace_credits_card": "[data-testid='sidebar-trace-credits']",
+    "trace_credits_final": "[data-testid='sidebar-trace-credits-final']",
+    "trace_credits_counts": "[data-testid='sidebar-trace-credits-counts']",
+    "trace_credits_held": "[data-testid='sidebar-trace-credits-held']",
 }
 
 

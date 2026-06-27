@@ -28,6 +28,7 @@ export function SidebarTraceCredits() {
     <div className="px-3 pb-1">
       <${Link}
         to="/settings/traces"
+        data-testid="sidebar-trace-credits"
         className="block rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2.5 transition-colors hover:border-[var(--v2-accent-soft)] hover:bg-[var(--v2-surface-muted)]"
       >
         <div className="flex items-center gap-2 text-[var(--v2-accent-text)]">
@@ -38,14 +39,22 @@ export function SidebarTraceCredits() {
         </div>
         <div className="mt-2 flex items-center justify-between gap-2">
           <span className="text-xs text-[var(--v2-text-muted)]">${t("traceCommons.finalCredit")}</span>
-          <span className="shrink-0 font-mono text-sm text-[var(--v2-text-strong)]">${final}</span>
+          <span
+            data-testid="sidebar-trace-credits-final"
+            className="shrink-0 font-mono text-sm text-[var(--v2-text-strong)]"
+          >
+            ${final}
+          </span>
         </div>
-        <div className="mt-0.5 text-[11px] text-[var(--v2-text-muted)]">
+        <div data-testid="sidebar-trace-credits-counts" className="mt-0.5 text-[11px] text-[var(--v2-text-muted)]">
           ${t("traceCommons.cardAccepted", { accepted, submitted })}
         </div>
         ${heldCount > 0 &&
         html`
-          <div className="mt-1 text-[11px] font-medium text-[var(--v2-accent-text)]">
+          <div
+            data-testid="sidebar-trace-credits-held"
+            className="mt-1 text-[11px] font-medium text-[var(--v2-accent-text)]"
+          >
             ${t("traceCommons.cardHeld", { count: heldCount })}
           </div>
         `}
