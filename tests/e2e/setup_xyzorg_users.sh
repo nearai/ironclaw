@@ -15,7 +15,7 @@
 #     (director, the env owner, is the bootstrap admin that creates them)
 #   * grant per-user capabilities (steps 6-8 of the xyzorg test):
 #       6. alice: grant builtin.shell + nearai.web_search
-#       7. bob:   grant gdrive + github
+#       7. bob:   grant the live google-drive.* (+ github.*) cap-ids
 #       8. carl:  grant nothing (deny-all = the essential baseline only)
 #     Members default-DENY to an essential allowlist (extension_search,
 #     extension_activate, echo, time, json, memory_read/search) + capability_info;
@@ -59,14 +59,15 @@ if [ -z "${OPERATOR_TOKEN}" ]; then
 fi
 
 # Per-user allow-lists (steps 6-8). Space-separated cap-ids; everything else hidden.
-# builtin.extension_search is granted to every limited user: extension caps
-# (nearai.*, google-drive.*) are NOT in the static model surface — the agent
-# discovers them via extension_search — so without it their granted extension
-# tools are unreachable. (Note: bob's "gdrive"/"github" are package-ish labels,
-# not the real cap-ids `google-drive.*`; left as-is here per the spec wording.)
-ALICE_ALLOW="builtin.shell nearai.web_search builtin.extension_search"
-BOB_ALLOW="gdrive github builtin.extension_search"
-CARL_ALLOW="builtin.extension_search"
+# Members already DEFAULT to the essential allowlist (extension_search,
+# extension_activate, echo, time, json, memory_read, memory_search) — so we only
+# GRANT the EXTRA capabilities each member needs on top of that baseline; no need
+# to re-grant essentials. Extension caps (nearai.*, google-drive.*) are reached
+# by the agent via extension_search (already essential), so granting them just
+# makes them available for that discovery path.
+ALICE_ALLOW="builtin.shell nearai.web_search"
+BOB_ALLOW=""   # filled with the live google-drive.* cap-ids in step [3/3]
+CARL_ALLOW=""  # deny-all: the essential baseline only — nothing extra granted
 
 # REST-created users (director is the env owner, NOT created here).
 ORDER="officer alice bob carl"
@@ -178,13 +179,16 @@ set_role "${admin_bearer}" officer admin
 
 # --- per-user grants (steps 6-8) -------------------------------------------
 # New model: members default-DENY to an essential allowlist, so we GRANT each
-# member's allow-set (an `available` delta) on top of the baseline rather than
-# hiding the rest. Only a few writes per member, so no hide-admin fan-out is
-# needed. (Note: bob's "gdrive"/"github" labels are not the real cap-ids
-# `google-drive.*`; granting them is a harmless no-op here — kept per the spec
-# wording.)
+# member's EXTRA capabilities (an `available` delta) on top of that baseline,
+# rather than hiding the rest. Only a few writes per member.
 echo
-echo "[3/3] Granting per-user capabilities (members default-DENY; grant the allow-set)..."
+echo "[3/3] Granting per-user capabilities (members default-DENY; grant the extras)..."
+# Resolve bob's Google Drive grants to the REAL google-drive.* cap-ids from the
+# live catalog (the per-user-caps route rejects unknown ids with 400, so package
+# labels like "gdrive" would fail). If Drive isn't installed, bob simply gets the
+# essential baseline only.
+tools_json="$(curl -sS -m 15 "${API}/settings/tools" -H "Authorization: Bearer ${OPERATOR_TOKEN}")"
+BOB_ALLOW="$(parse_caps "$tools_json" | grep -E '^(google-drive|github)\.' | tr '\n' ' ')"
 for member in alice bob carl; do
   allow="$(allow_for "$member")"
   granted=0
