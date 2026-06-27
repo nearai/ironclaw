@@ -41,6 +41,7 @@ export function useChatEvents({
   setActiveRun,
   activeRunRef,
   locallyResolvedGatesRef,
+  dismissedOnboardingIdsRef,
   toolActivityStateRef,
   onRunSettled,
 }) {
@@ -120,7 +121,11 @@ export function useChatEvents({
           if (!preview || !preview.invocation_id) return;
           const card = toolCardFromPreview(preview);
           upsertToolActivityMessage(setMessages, card, toolActivityStateRef);
-          const onboarding = onboardingFromExtensionActivatePreview(preview, threadId);
+          const onboarding = onboardingFromExtensionActivatePreview(
+            preview,
+            threadId,
+            dismissedOnboardingIdsRef?.current,
+          );
           if (onboarding) {
             setPendingOnboarding?.(onboarding);
             setIsProcessing(false);
@@ -239,6 +244,7 @@ export function useChatEvents({
       setActiveRun,
       activeRunRef,
       locallyResolvedGatesRef,
+      dismissedOnboardingIdsRef,
       toolActivityStateRef,
       onRunSettled,
     ],

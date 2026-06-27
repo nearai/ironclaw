@@ -74,3 +74,58 @@ test("onboardingFromToolMessages: suppresses stale Slack panel after continuatio
 
   assert.equal(onboarding, null);
 });
+
+test("onboardingFromToolMessages: tags the source tool id and suppresses dismissed activations", () => {
+  const messages = [
+    {
+      id: "tool-extension-activate",
+      role: "tool_activity",
+      capabilityId: "builtin.extension_activate",
+      toolStatus: "success",
+      toolResultPreview: JSON.stringify(slackActivationOutput),
+    },
+  ];
+
+  const open = onboardingFromToolMessages(messages, "thread-1", new Set());
+  assert.equal(open?.state, "pairing_required");
+  assert.equal(
+    open?.sourceMessageId,
+    "tool-extension-activate",
+    "onboarding must carry the source tool-message id so a dismissal can be recorded",
+  );
+
+  const suppressed = onboardingFromToolMessages(
+    messages,
+    "thread-1",
+    new Set(["tool-extension-activate"]),
+  );
+  assert.equal(
+    suppressed,
+    null,
+    "a dismissed activation must not re-open the pairing panel on the next render",
+  );
+});
+
+test("onboardingFromExtensionActivatePreview: tags the source tool id and suppresses dismissed activations", () => {
+  const preview = {
+    capability_id: "builtin.extension_activate",
+    invocation_id: "inv-1",
+    thread_id: "thread-1",
+    output_preview: JSON.stringify(slackActivationOutput),
+  };
+
+  const open = onboardingFromExtensionActivatePreview(preview, "thread-1", new Set());
+  assert.equal(open?.state, "pairing_required");
+  assert.equal(
+    open?.sourceMessageId,
+    "tool-inv-1",
+    "preview onboarding id must match the reloaded tool-message id (tool-<invocation_id>)",
+  );
+
+  const suppressed = onboardingFromExtensionActivatePreview(
+    preview,
+    "thread-1",
+    new Set(["tool-inv-1"]),
+  );
+  assert.equal(suppressed, null);
+});

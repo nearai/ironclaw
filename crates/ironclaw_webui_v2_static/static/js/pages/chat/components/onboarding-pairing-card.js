@@ -25,10 +25,10 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onCancel }) {
   return html`
     <div
       data-testid="onboarding-pairing-card"
-      className="mx-auto mt-4 w-full max-w-xl rounded-lg border border-signal/25 bg-signal/5 p-4 shadow-sm"
+      className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-signal/25 bg-signal/5 p-4"
     >
       <div className="mb-3">
-        <h3 className="text-sm font-semibold text-iron-50">${copy.title}</h3>
+        <h3 className="text-sm font-semibold text-iron-100">${copy.title}</h3>
         <p className="mt-1 text-sm leading-6 text-iron-300">${copy.instructions}</p>
       </div>
 
@@ -40,11 +40,11 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onCancel }) {
           onKeyDown=${(event) => event.key === "Enter" && submit()}
           placeholder=${copy.placeholder}
           aria-label=${copy.placeholder}
-          className="h-10 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+          className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
         />
         <${Button}
           variant="secondary"
-          className="h-10 shrink-0 px-3 text-xs"
+          className="h-9 shrink-0 px-3 text-xs"
           onClick=${submit}
           disabled=${isSubmitting || !code.trim()}
         >
@@ -54,7 +54,7 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onCancel }) {
         html`
           <${Button}
             variant="ghost"
-            className="h-10 shrink-0 px-3 text-xs"
+            className="h-9 shrink-0 px-3 text-xs"
             onClick=${onCancel}
             disabled=${isSubmitting}
           >
@@ -64,7 +64,7 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onCancel }) {
       </div>
 
       ${error &&
-      html`<p className="mt-3 text-xs leading-5 text-red-300">${error}</p>`}
+      html`<p role="alert" className="mt-3 text-xs leading-5 text-red-300">${error}</p>`}
     </div>
   `;
 }

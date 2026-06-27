@@ -182,6 +182,11 @@ export function useChat(threadId) {
   const pendingGateRef = React.useRef(pendingGate);
   const [pendingOnboarding, setPendingOnboardingState] = React.useState(null);
   const pendingOnboardingRef = React.useRef(pendingOnboarding);
+  // Source tool-message ids whose pairing panel the user dismissed. Keyed by
+  // the durable `tool-<invocation_id>`, so a dismissal survives re-renders and
+  // timeline reloads and the still-present activation tool-result does not
+  // re-derive a panel the user already closed.
+  const dismissedOnboardingIdsRef = React.useRef(new Set());
   const [busyGateNotice, setBusyGateNotice] = React.useState(null);
   const setPendingGate = React.useCallback((next) => {
     const current = pendingGateRef.current;
@@ -278,6 +283,7 @@ export function useChat(threadId) {
   React.useEffect(() => {
     resetToolActivityState(toolActivityStateRef);
     locallyResolvedGatesRef.current.clear();
+    dismissedOnboardingIdsRef.current.clear();
   }, [threadId]);
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
@@ -303,7 +309,11 @@ export function useChat(threadId) {
   }, [pendingAuthGateKey]);
 
   React.useEffect(() => {
-    const onboarding = onboardingFromToolMessages(messages, threadId);
+    const onboarding = onboardingFromToolMessages(
+      messages,
+      threadId,
+      dismissedOnboardingIdsRef.current,
+    );
     if (!onboarding) return;
     setPendingOnboarding((current) => {
       if (
@@ -367,6 +377,7 @@ export function useChat(threadId) {
     setActiveRun,
     activeRunRef,
     locallyResolvedGatesRef,
+    dismissedOnboardingIdsRef,
     toolActivityStateRef,
     // Reborn's projection bridge does not yet emit `Text` items for
     // assistant replies, and never emits `capability_display_preview`
@@ -857,6 +868,9 @@ export function useChat(threadId) {
       if (response?.success === false) {
         throw new Error(response.message || "Pairing failed");
       }
+      if (onboarding.sourceMessageId) {
+        dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
+      }
       setPendingOnboarding(null);
       if (isSlackPairing && threadForResume && !onboarding.requestId) {
         await send("Slack is connected. Continue the previous request.", {
@@ -873,10 +887,13 @@ export function useChat(threadId) {
     [threadId, send, setPendingOnboarding, setIsProcessing],
   );
 
-  const dismissOnboardingPairing = React.useCallback(
-    () => setPendingOnboarding(null),
-    [setPendingOnboarding],
-  );
+  const dismissOnboardingPairing = React.useCallback(() => {
+    const onboarding = pendingOnboardingRef.current;
+    if (onboarding?.sourceMessageId) {
+      dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
+    }
+    setPendingOnboarding(null);
+  }, [setPendingOnboarding]);
 
   const cancelRun = React.useCallback(
     async (reason) => {

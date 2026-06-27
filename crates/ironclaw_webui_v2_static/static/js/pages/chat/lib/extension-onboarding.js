@@ -1,7 +1,11 @@
 const EXTENSION_ACTIVATE_CAPABILITY_ID = "builtin.extension_activate";
 const SLACK_CONNECTED_CONTINUATION = "Slack is connected. Continue the previous request.";
 
-export function onboardingFromExtensionActivatePreview(preview, currentThreadId) {
+export function onboardingFromExtensionActivatePreview(
+  preview,
+  currentThreadId,
+  dismissedSourceIds,
+) {
   if (!preview || preview.capability_id !== EXTENSION_ACTIVATE_CAPABILITY_ID) {
     return null;
   }
@@ -9,13 +13,24 @@ export function onboardingFromExtensionActivatePreview(preview, currentThreadId)
   if (previewThreadId && currentThreadId && previewThreadId !== currentThreadId) {
     return null;
   }
+  const sourceMessageId = preview.invocation_id
+    ? `tool-${preview.invocation_id}`
+    : null;
+  if (sourceMessageId && dismissedSourceIds?.has?.(sourceMessageId)) {
+    return null;
+  }
   return onboardingFromExtensionActivateOutput(
     parseJsonObject(preview.output_preview),
     previewThreadId || currentThreadId || null,
+    sourceMessageId,
   );
 }
 
-export function onboardingFromToolMessages(messages, currentThreadId) {
+export function onboardingFromToolMessages(
+  messages,
+  currentThreadId,
+  dismissedSourceIds,
+) {
   let sawSlackContinuation = false;
   for (let index = (messages || []).length - 1; index >= 0; index -= 1) {
     const message = messages[index];
@@ -30,11 +45,18 @@ export function onboardingFromToolMessages(messages, currentThreadId) {
     }
     if (message.capabilityId !== EXTENSION_ACTIVATE_CAPABILITY_ID) continue;
     if (message.toolStatus && message.toolStatus !== "success") continue;
+    const sourceMessageId = message.id || null;
     const onboarding = onboardingFromExtensionActivateOutput(
       parseJsonObject(message.toolResultPreview),
       currentThreadId,
+      sourceMessageId,
     );
     if (!onboarding) continue;
+    // The user dismissed this specific activation's pairing panel; don't
+    // re-derive it from the persistent tool-result card on the next render.
+    if (sourceMessageId && dismissedSourceIds?.has?.(sourceMessageId)) {
+      return null;
+    }
     if (
       sawSlackContinuation &&
       String(onboarding.extensionName || "").toLowerCase() === "slack"
@@ -46,7 +68,7 @@ export function onboardingFromToolMessages(messages, currentThreadId) {
   return null;
 }
 
-function onboardingFromExtensionActivateOutput(output, threadId) {
+function onboardingFromExtensionActivateOutput(output, threadId, sourceMessageId) {
   const payload = output?.payload;
   if (payload?.kind !== "extension_activate" || payload.activated !== true) {
     return null;
@@ -62,6 +84,7 @@ function onboardingFromExtensionActivateOutput(output, threadId) {
     extensionName,
     requestId: null,
     threadId,
+    sourceMessageId: sourceMessageId || null,
     message,
     instructions: activationPairingInstructions(extensionName),
     setupUrl: null,
