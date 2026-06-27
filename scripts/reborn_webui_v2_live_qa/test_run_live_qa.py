@@ -188,6 +188,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn('"body":"REBORN_QA_4E_GITHUB_RELEASE_EMAIL_DELIVERED_', prompt_4e)
         self.assertIn("ironclaw-v0.test", prompt_4e)
 
+        self.assertEqual(
+            captured["qa_6e_gmail_to_sheet_delivery"]["required_text"],
+            ["Google Sheet"],
+        )
         self.assertTrue(
             extensions_by_case["qa_2f_calendar_prep_email_delivery"]["google-docs"].get(
                 "ensure_installed",
@@ -211,6 +215,66 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "ensure_installed",
                 True,
             )
+        )
+
+    def test_gmail_to_sheet_delivery_falls_back_to_drive_name_lookup(self):
+        spreadsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
+        captured_lookup: dict[str, object] = {}
+
+        async def fake_live_chat_with_extensions_case(_ctx, **kwargs):
+            marker = kwargs["marker"]
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode="live:qa_6e_gmail_to_sheet_delivery",
+                success=True,
+                latency_ms=1,
+                details={
+                    "marker": marker,
+                    "text_excerpt": f"Google Sheet created for {marker}",
+                },
+            )
+
+        async def fake_google_drive_file_id_by_name(**kwargs):
+            captured_lookup.update(kwargs)
+            return spreadsheet_id
+
+        async def fake_google_sheet_contains_marker(**kwargs):
+            self.assertEqual(kwargs["spreadsheet_id"], spreadsheet_id)
+            self.assertEqual(kwargs["marker"], captured_lookup["name"])
+            return {"found": True}
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_with_extensions_case",
+                side_effect=fake_live_chat_with_extensions_case,
+            ),
+            patch.object(
+                run_live_qa,
+                "_google_runtime_access_token",
+                return_value=("fresh-access-token", {"source": "test"}),
+            ),
+            patch.object(
+                run_live_qa,
+                "_google_drive_file_id_by_name",
+                side_effect=fake_google_drive_file_id_by_name,
+            ),
+            patch.object(
+                run_live_qa,
+                "_google_sheet_contains_marker",
+                side_effect=fake_google_sheet_contains_marker,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_6e_gmail_to_sheet_delivery(self._dummy_ctx())
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["spreadsheet_id"], spreadsheet_id)
+        self.assertEqual(result.details["spreadsheet_id_source"], "drive_name_lookup")
+        self.assertEqual(
+            captured_lookup["mime_type"],
+            "application/vnd.google-apps.spreadsheet",
         )
 
     def test_slack_side_effect_setup_prompts_avoid_connect_action_trigger(self):

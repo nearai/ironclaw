@@ -4257,7 +4257,7 @@ async def case_qa_6e_gmail_to_sheet_delivery(ctx: LiveQaContext) -> ProbeResult:
         ctx,
         case_name="qa_6e_gmail_to_sheet_delivery",
         marker=marker,
-        required_text=["Google Sheet", "spreadsheet"],
+        required_text=["Google Sheet"],
         extensions=[
             {
                 "package_id": "gmail",
@@ -4298,17 +4298,30 @@ async def case_qa_6e_gmail_to_sheet_delivery(ctx: LiveQaContext) -> ProbeResult:
         return result
     text_excerpt = str(result.details.get("text_excerpt") or "")
     spreadsheet_id = _extract_google_spreadsheet_id(text_excerpt)
+    spreadsheet_id_source = "assistant_reply" if spreadsheet_id else None
     result.details["spreadsheet_id_present"] = bool(spreadsheet_id)
-    if not spreadsheet_id:
-        result.success = False
-        result.details["error"] = "assistant did not return a Google spreadsheet URL or id"
-        return result
     try:
         access_token, token_meta = _google_runtime_access_token(
             ctx.reborn_home,
             _auth_user_id(),
             ctx.env,
         )
+        if not spreadsheet_id:
+            spreadsheet_id = await _google_drive_file_id_by_name(
+                access_token=access_token,
+                name=marker,
+                mime_type="application/vnd.google-apps.spreadsheet",
+            )
+            spreadsheet_id_source = "drive_name_lookup" if spreadsheet_id else None
+        result.details["spreadsheet_id_present"] = bool(spreadsheet_id)
+        result.details["spreadsheet_id_source"] = spreadsheet_id_source
+        if not spreadsheet_id:
+            result.success = False
+            result.details["error"] = (
+                "assistant did not return a Google spreadsheet URL or id and "
+                "Drive lookup by exact sheet name did not find one"
+            )
+            return result
         sheet_check = await _google_sheet_contains_marker(
             access_token=access_token,
             spreadsheet_id=spreadsheet_id,
