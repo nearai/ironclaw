@@ -2492,14 +2492,27 @@ async def _live_chat_case(
             f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
+        if await _dismiss_visible_connect_action(page):
+            observed["connect_action_dismissed_before_submit"] = True
         composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
         await expect(composer).to_be_visible(timeout=15000)
         await composer.fill(prompt)
         await composer.press("Enter")
-        await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
-            prompt[:80],
-            timeout=15000,
-        )
+        try:
+            await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
+                prompt[:80],
+                timeout=15000,
+            )
+        except Exception:
+            if not await _dismiss_visible_connect_action(page):
+                raise
+            observed["connect_action_dismissed_after_submit"] = True
+            await composer.fill(prompt)
+            await composer.press("Enter")
+            await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
+                prompt[:80],
+                timeout=15000,
+            )
         observed["text_excerpt"] = await _wait_for_assistant_reply(
             page,
             marker=marker,
@@ -2587,14 +2600,27 @@ async def _live_chat_with_extensions_case(
             f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
+        if await _dismiss_visible_connect_action(page):
+            observed["connect_action_dismissed_before_submit"] = True
         composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
         await expect(composer).to_be_visible(timeout=15000)
         await composer.fill(prompt)
         await composer.press("Enter")
-        await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
-            prompt[:80],
-            timeout=15000,
-        )
+        try:
+            await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
+                prompt[:80],
+                timeout=15000,
+            )
+        except Exception:
+            if not await _dismiss_visible_connect_action(page):
+                raise
+            observed["connect_action_dismissed_after_submit"] = True
+            await composer.fill(prompt)
+            await composer.press("Enter")
+            await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
+                prompt[:80],
+                timeout=15000,
+            )
         observed["text_excerpt"] = await _wait_for_assistant_reply(
             page,
             marker=marker,
@@ -2607,6 +2633,20 @@ async def _live_chat_with_extensions_case(
         return _result(case_name, True, started, observed)
     except Exception as exc:
         return _result(case_name, False, started, {"error": str(exc), **observed})
+
+
+async def _dismiss_visible_connect_action(page: object) -> bool:
+    dismiss = page.locator("[aria-label='Dismiss connect action']")  # type: ignore[attr-defined]
+    try:
+        if await dismiss.count() <= 0:
+            return False
+        first = dismiss.first
+        if not await first.is_visible():
+            return False
+        await first.click()
+        return True
+    except Exception:
+        return False
 
 
 async def _wait_for_assistant_reply(
@@ -3613,13 +3653,11 @@ async def case_qa_2f_calendar_prep_email_delivery(ctx: LiveQaContext) -> ProbeRe
                 "package_id": "google-docs",
                 "display_name": "Google Docs",
                 "required_tools": ["google-docs.read_content"],
-                "ensure_installed": False,
             },
             {
                 "package_id": "web-access",
                 "display_name": "Web Access",
                 "required_tools": ["web-access.search"],
-                "ensure_installed": False,
             },
         ],
         prompt=(
@@ -3889,7 +3927,6 @@ async def case_qa_6c_gmail_to_sheet_live_chat(ctx: LiveQaContext) -> ProbeResult
                 "package_id": "gmail",
                 "display_name": "Gmail",
                 "required_tools": ["gmail.list_messages"],
-                "ensure_installed": False,
             },
             {
                 "package_id": "google-sheets",
@@ -3948,7 +3985,6 @@ async def case_qa_6e_gmail_to_sheet_delivery(ctx: LiveQaContext) -> ProbeResult:
                 "package_id": "gmail",
                 "display_name": "Gmail",
                 "required_tools": ["gmail.list_messages"],
-                "ensure_installed": False,
             },
             {
                 "package_id": "google-sheets",

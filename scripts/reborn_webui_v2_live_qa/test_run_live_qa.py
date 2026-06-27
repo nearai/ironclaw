@@ -24,6 +24,159 @@ import run_live_qa
 
 
 class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
+    def _dummy_ctx(self) -> run_live_qa.LiveQaContext:
+        return run_live_qa.LiveQaContext(
+            base_url="http://127.0.0.1:9",
+            output_dir=Path("/tmp"),
+            reborn_home=Path("/tmp/reborn-home"),
+            env={},
+        )
+
+    def test_dismiss_visible_connect_action_clicks_only_visible_card(self):
+        class FakeDismiss:
+            def __init__(self, *, count: int, visible: bool) -> None:
+                self._count = count
+                self._visible = visible
+                self.clicked = False
+
+            @property
+            def first(self):
+                return self
+
+            async def count(self):
+                return self._count
+
+            async def is_visible(self):
+                return self._visible
+
+            async def click(self):
+                self.clicked = True
+
+        class FakePage:
+            def __init__(self, dismiss: FakeDismiss) -> None:
+                self.dismiss = dismiss
+
+            def locator(self, selector: str):
+                self.selector = selector
+                return self.dismiss
+
+        visible = FakeDismiss(count=1, visible=True)
+        visible_result = asyncio.run(
+            run_live_qa._dismiss_visible_connect_action(FakePage(visible))
+        )
+        self.assertTrue(visible_result)
+        self.assertTrue(visible.clicked)
+
+        hidden = FakeDismiss(count=1, visible=False)
+        hidden_result = asyncio.run(
+            run_live_qa._dismiss_visible_connect_action(FakePage(hidden))
+        )
+        self.assertFalse(hidden_result)
+        self.assertFalse(hidden.clicked)
+
+        absent = FakeDismiss(count=0, visible=True)
+        absent_result = asyncio.run(
+            run_live_qa._dismiss_visible_connect_action(FakePage(absent))
+        )
+        self.assertFalse(absent_result)
+        self.assertFalse(absent.clicked)
+
+    def test_live_google_side_effect_cases_install_required_extensions(self):
+        captured: dict[str, list[dict[str, object]]] = {}
+        spreadsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
+
+        async def fake_live_chat_with_extensions_case(_ctx, **kwargs):
+            case_name = kwargs["case_name"]
+            captured[case_name] = kwargs["extensions"]
+            details = {
+                "text_excerpt": (
+                    f"Created https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+                )
+            }
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{case_name}",
+                success=True,
+                latency_ms=1,
+                details=details,
+            )
+
+        async def fake_gmail_delivery_target_email(**_kwargs):
+            return "qa@example.test"
+
+        async def fake_wait_for_gmail_marker(**_kwargs):
+            return {"found": True}
+
+        async def fake_google_sheet_contains_marker(**_kwargs):
+            return {"found": True}
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_with_extensions_case",
+                side_effect=fake_live_chat_with_extensions_case,
+            ),
+            patch.object(
+                run_live_qa,
+                "_google_runtime_access_token",
+                return_value=("fresh-access-token", {"source": "test"}),
+            ),
+            patch.object(
+                run_live_qa,
+                "_gmail_delivery_target_email",
+                side_effect=fake_gmail_delivery_target_email,
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_gmail_marker",
+                side_effect=fake_wait_for_gmail_marker,
+            ),
+            patch.object(
+                run_live_qa,
+                "_google_sheet_contains_marker",
+                side_effect=fake_google_sheet_contains_marker,
+            ),
+        ):
+            ctx = self._dummy_ctx()
+            self.assertTrue(
+                asyncio.run(run_live_qa.case_qa_2f_calendar_prep_email_delivery(ctx)).success
+            )
+            self.assertTrue(
+                asyncio.run(run_live_qa.case_qa_6c_gmail_to_sheet_live_chat(ctx)).success
+            )
+            self.assertTrue(
+                asyncio.run(run_live_qa.case_qa_6e_gmail_to_sheet_delivery(ctx)).success
+            )
+
+        extensions_by_case = {
+            case: {extension["package_id"]: extension for extension in extensions}
+            for case, extensions in captured.items()
+        }
+        self.assertTrue(
+            extensions_by_case["qa_2f_calendar_prep_email_delivery"]["google-docs"].get(
+                "ensure_installed",
+                True,
+            )
+        )
+        self.assertTrue(
+            extensions_by_case["qa_2f_calendar_prep_email_delivery"]["web-access"].get(
+                "ensure_installed",
+                True,
+            )
+        )
+        self.assertTrue(
+            extensions_by_case["qa_6c_gmail_to_sheet_live_chat"]["gmail"].get(
+                "ensure_installed",
+                True,
+            )
+        )
+        self.assertTrue(
+            extensions_by_case["qa_6e_gmail_to_sheet_delivery"]["gmail"].get(
+                "ensure_installed",
+                True,
+            )
+        )
+
     def test_generated_google_seed_creates_refreshable_product_auth_account(self):
         if importlib.util.find_spec("cryptography") is None:
             self.skipTest("cryptography is installed in the e2e venv, not system Python")
