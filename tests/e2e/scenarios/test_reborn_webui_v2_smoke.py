@@ -490,7 +490,7 @@ async def test_reborn_v2_new_chat_sends_while_a_run_is_active(reborn_v2_page):
     """
     composer = reborn_v2_page.locator(SEL_V2["chat_composer"])
 
-    # Thread 1: a slow response keeps the run in flight (mock delays ~5s) so the
+    # Thread 1: a slow response keeps the run in flight long enough that the
     # new chat is started before thread 1 settles — the deadlock window.
     await composer.fill("editable composer slow response")
     await composer.press("Enter")

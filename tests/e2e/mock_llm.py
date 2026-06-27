@@ -1053,7 +1053,7 @@ def _conversation_slow_response_delay(messages: list[dict]) -> float:
         messages,
         re.compile(r"editable composer slow response", re.IGNORECASE),
     ):
-        return 5.0
+        return 15.0
     if _conversation_has_user_trigger(
         messages,
         re.compile(r"refresh-mid-response|slow response|slowly", re.IGNORECASE),
