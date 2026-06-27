@@ -3240,6 +3240,8 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-065-TC-04",
             "REBCLI-065-TC-05",
             "REBCLI-065-TC-06",
+            "REBCLI-065-TC-26",
+            "REBCLI-065-TC-28",
         ],
         commands=[WEBUI_V2_CHAT_CLIENT_COMMAND],
         notes=(
@@ -3248,7 +3250,9 @@ CASES: dict[str, CaseSpec] = {
             "legacy Playwright scenarios: send/retry state, pending-message "
             "reconciliation, approvals, auth gates, SSE timeline projection, "
             "history merge, markdown/readability, attachment staging, message "
-            "grouping, cancellation, and thread isolation."
+            "grouping, cancellation, thread isolation, failed first-message "
+            "retry metadata preservation, and explicit localized composer "
+            "aria-label coverage."
         ),
     ),
     "webui_v2_workspace_project_client_regression": CaseSpec(

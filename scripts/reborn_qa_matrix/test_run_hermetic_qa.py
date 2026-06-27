@@ -1147,6 +1147,8 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-065-TC-04",
                     "REBCLI-065-TC-05",
                     "REBCLI-065-TC-06",
+                    "REBCLI-065-TC-26",
+                    "REBCLI-065-TC-28",
                 ],
             )
             commands = results["results"][0]["details"]["commands"]
