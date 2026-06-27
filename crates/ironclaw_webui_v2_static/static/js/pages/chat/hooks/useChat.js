@@ -258,6 +258,14 @@ export function useChat(threadId) {
   React.useEffect(() => {
     threadIdRef.current = threadId;
   }, [threadId]);
+  React.useEffect(
+    () => () => {
+      if (localRunAdmissionRef.current?.threadId === threadId) {
+        localRunAdmissionRef.current = null;
+      }
+    },
+    [threadId],
+  );
 
   React.useEffect(() => {
     pendingGateRef.current = pendingGate;
