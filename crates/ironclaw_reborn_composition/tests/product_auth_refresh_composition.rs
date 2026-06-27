@@ -29,8 +29,8 @@
 //! performs an account lookup first and returns `CredentialMissing` for an
 //! unknown account, whereas the raw stub ignores the request and returns
 //! `BackendUnavailable` unconditionally. Asserting `CredentialMissing` therefore
-//! proves the account service was wrapped, regardless of which storage backend
-//! (libsql durable vs. in-memory) the build compiled in.
+//! proves the durable account service was wrapped, regardless of whether the
+//! durable backend is libsql or postgres.
 
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId,
