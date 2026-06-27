@@ -262,6 +262,46 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 f"{case_name} prompt should not trigger WebUI connect action: {prompt}",
             )
 
+    def test_signed_slack_event_cases_configure_legacy_actor(self):
+        for case_name in (
+            "qa_5d_slack_strategy_doc_answer",
+            "qa_7d_slack_bug_message_trigger",
+            "qa_7e_slack_bug_sheet_delivery",
+        ):
+            with self.subTest(case=case_name), tempfile.TemporaryDirectory() as tmpdir:
+                config_path = Path(tmpdir) / "config.toml"
+                config_path.write_text("[slack]\n", encoding="utf-8")
+                with patch.dict(
+                    os.environ,
+                    {"REBORN_WEBUI_V2_LIVE_QA_SLACK_INBOUND_USER_ID": "U0REBORNQA"},
+                    clear=False,
+                ):
+                    changed, user_id = run_live_qa._configure_slack_legacy_actor_if_needed(
+                        config_path,
+                        [case_name],
+                    )
+
+                self.assertTrue(changed)
+                self.assertEqual(user_id, "U0REBORNQA")
+                self.assertIn(
+                    'slack_user_id = "U0REBORNQA"',
+                    config_path.read_text(encoding="utf-8"),
+                )
+
+    def test_non_signed_slack_cases_do_not_configure_legacy_actor(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.toml"
+            config_path.write_text("[slack]\n", encoding="utf-8")
+
+            changed, user_id = run_live_qa._configure_slack_legacy_actor_if_needed(
+                config_path,
+                ["qa_3a_slack_connect"],
+            )
+
+            self.assertFalse(changed)
+            self.assertIsNone(user_id)
+            self.assertNotIn("slack_user_id", config_path.read_text(encoding="utf-8"))
+
     def test_generated_google_seed_creates_refreshable_product_auth_account(self):
         if importlib.util.find_spec("cryptography") is None:
             self.skipTest("cryptography is installed in the e2e venv, not system Python")
@@ -577,6 +617,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 f"spreadsheet id: {spreadsheet_id}"
             ),
             spreadsheet_id,
+        )
+        self.assertIsNone(
+            run_live_qa._extract_google_spreadsheet_id(
+                "Spreadsheet created: REBORN_QA_6E_GMAIL_TO_SHEET_DELIVERY_1782593757000"
+            )
         )
         self.assertIsNone(run_live_qa._extract_google_spreadsheet_id("no sheet here"))
 

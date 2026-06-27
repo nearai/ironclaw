@@ -588,7 +588,12 @@ def _set_slack_section_key(config_path: Path, key: str, value: str) -> bool:
 def _configure_slack_legacy_actor_if_needed(
     config_path: Path, selected_cases: list[str]
 ) -> tuple[bool, str | None]:
-    if "qa_7d_slack_bug_message_trigger" not in selected_cases:
+    signed_slack_event_cases = {
+        "qa_5d_slack_strategy_doc_answer",
+        "qa_7d_slack_bug_message_trigger",
+        "qa_7e_slack_bug_sheet_delivery",
+    }
+    if not signed_slack_event_cases.intersection(selected_cases):
         return False, None
     slack_user_id = os.environ.get(
         "REBORN_WEBUI_V2_LIVE_QA_SLACK_INBOUND_USER_ID",
@@ -2773,7 +2778,6 @@ def _extract_google_spreadsheet_id(text: str) -> str | None:
     patterns = [
         r"https://docs\.google\.com/spreadsheets/d/([A-Za-z0-9_-]+)",
         r"\bspreadsheet(?:\s+id)?\s*[:=]\s*([A-Za-z0-9_-]{20,})",
-        r"\b([A-Za-z0-9_-]{30,})\b",
     ]
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
