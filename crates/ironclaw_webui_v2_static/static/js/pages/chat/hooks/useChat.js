@@ -374,7 +374,11 @@ export function useChat(threadId) {
         preserveClientOnly: true,
         // Suppress retried msg-* rows so the reload doesn't resurrect the
         // old rejected_busy bubble alongside the replacement message.
-        suppressIds: retriedTimelineIdsRef.current,
+        // Snapshot the set: loadHistory is async and the per-thread reset
+        // clears retriedTimelineIdsRef on a threadId change, so passing the
+        // live ref would let a mid-refresh thread switch empty it before
+        // mergeFullRefresh reads it (the row would slip back into the cache).
+        suppressIds: new Set(retriedTimelineIdsRef.current),
         finalReplyTimestampByRun:
           _runId && success ? { [_runId]: new Date().toISOString() } : null,
       });

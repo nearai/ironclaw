@@ -314,6 +314,34 @@ test("retryMessage suppresses a retried msg-* timeline row on the post-run reloa
   );
 });
 
+test("the suppressIds passed to loadHistory is a snapshot, immune to a mid-refresh thread reset", async () => {
+  // loadHistory is async; the per-thread reset clears retriedTimelineIdsRef on
+  // a threadId change. If onRunSettled passed the LIVE ref, a thread switch
+  // before the refetch resolved would empty the set and resurrect the row.
+  // Passing `new Set(...)` snapshots it, so clearing the live set afterward
+  // (what the reset does) must NOT affect the captured value.
+  const failed = erroredUserMessage({ id: "msg-snap1" });
+  const { hook, getChatEventsConfig, loadHistoryCalls, refs } = instantiate({
+    initialMessages: [failed],
+  });
+
+  await hook.retryMessage(failed);
+  getChatEventsConfig().onRunSettled("run-retry-1", { success: true });
+
+  // Simulate the per-thread reset clearing every Set-typed ref (the live
+  // retriedTimelineIdsRef). The captured snapshot lives in loadHistoryCalls,
+  // not in refs, so this must not touch it.
+  refs
+    .filter((r) => r.current && typeof r.current.clear === "function" && typeof r.current.has === "function")
+    .forEach((r) => r.current.clear());
+
+  const reload = loadHistoryCalls.at(-1);
+  assert.ok(
+    reload.opts.suppressIds.has("msg-snap1"),
+    "captured suppressIds must still hold the retried id after the live set is cleared",
+  );
+});
+
 test("retryMessage does not suppress client-only pending-* bubbles", async () => {
   // pending-* bubbles are never re-emitted by loadHistory, so they must not be
   // added to the suppression set (which would be dead weight at best).
