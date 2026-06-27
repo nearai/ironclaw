@@ -731,6 +731,42 @@ where
             .map_err(|error| RebornUserIdentityLookupError::InvalidUserId(error.to_string()))?;
         Ok(Some(user_id))
     }
+
+    async fn user_has_provider_binding(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+    ) -> Result<bool, RebornUserIdentityLookupError> {
+        let provider_dir = scoped_path(&format!("{IDENTITY_ROOT}/{}", path_segment(provider)))
+            .map_err(map_lookup_fs_error)?;
+        let entries = match self.filesystem.list_dir(&self.scope, &provider_dir).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(false),
+            Err(error) => return Err(map_lookup_fs_error(error)),
+        };
+        for entry in entries {
+            if !entry.name.ends_with(".json") {
+                continue;
+            }
+            let path = scoped_path(&format!(
+                "{IDENTITY_ROOT}/{}/{}",
+                path_segment(provider),
+                entry.name
+            ))
+            .map_err(map_lookup_fs_error)?;
+            let Some((record, _)) = self
+                .read_record::<StoredSlackUserIdentity>(&path)
+                .await
+                .map_err(map_lookup_fs_error)?
+            else {
+                continue;
+            };
+            if record.user_id == user_id.as_str() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 #[async_trait::async_trait]
@@ -1743,6 +1779,42 @@ mod tests {
         assert_eq!(resolved, Some(user("user:alice")));
         let stored = read_identity(&state, "slack", "install-alpha:U123").await;
         assert_eq!(stored.binding(), Some(binding));
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_user_has_provider_binding() {
+        let state = state();
+        assert!(
+            !state
+                .user_has_provider_binding("slack", &user("user:alice"))
+                .await
+                .expect("lookup succeeds"),
+            "no binding yet -> not connected"
+        );
+
+        state
+            .bind_user_identity(RebornUserIdentityBinding {
+                provider: RebornIdentityProviderId::new("slack").unwrap(),
+                provider_user_id: RebornIdentityProviderUserId::new("install-alpha:U123").unwrap(),
+                user_id: user("user:alice"),
+            })
+            .await
+            .expect("bind succeeds");
+
+        assert!(
+            state
+                .user_has_provider_binding("slack", &user("user:alice"))
+                .await
+                .expect("lookup succeeds"),
+            "bound user reports connected"
+        );
+        assert!(
+            !state
+                .user_has_provider_binding("slack", &user("user:bob"))
+                .await
+                .expect("lookup succeeds"),
+            "different user reports not connected"
+        );
     }
 
     #[tokio::test]

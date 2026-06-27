@@ -1,14 +1,18 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use futures::{StreamExt, TryStreamExt, stream};
 use ironclaw_host_api::ExtensionId;
 
 use crate::{
-    LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary,
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleProductSurfaceContext, RebornExtensionActionResponse, RebornExtensionInfo,
-    RebornExtensionListResponse, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
+    ChannelConnectionFacade, LifecycleExtensionSummary, LifecycleExtensionSurfaceKind,
+    LifecycleInstalledExtensionSummary, LifecyclePackageRef, LifecyclePhase,
+    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
+    RebornExtensionActionResponse, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
     RebornServicesError, WebUiAuthenticatedCaller,
 };
 
@@ -26,6 +30,7 @@ const EXTENSION_READINESS_CONCURRENCY: usize = 8;
 pub(super) async fn list_extensions(
     facade: Arc<dyn LifecycleProductFacade>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
+    channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
     caller: WebUiAuthenticatedCaller,
 ) -> Result<RebornExtensionListResponse, RebornServicesError> {
     let context = lifecycle_surface_context(caller.clone());
@@ -36,8 +41,17 @@ pub(super) async fn list_extensions(
     )
     .await?;
     let installed = lifecycle_installed_extensions(&lifecycle);
+    let connections = channel_connection_facade
+        .caller_channel_connections(caller.clone())
+        .await?;
     Ok(RebornExtensionListResponse {
-        extensions: lifecycle_extension_infos(installed, extension_credentials, caller).await?,
+        extensions: lifecycle_extension_infos(
+            installed,
+            extension_credentials,
+            caller,
+            connections,
+        )
+        .await?,
     })
 }
 
@@ -193,6 +207,7 @@ async fn lifecycle_extension_infos(
     installed: Vec<LifecycleInstalledExtensionSummary>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     caller: WebUiAuthenticatedCaller,
+    connections: HashMap<String, bool>,
 ) -> Result<Vec<RebornExtensionInfo>, RebornServicesError> {
     let resolved = stream::iter(installed)
         .map(|installed| {
@@ -213,7 +228,7 @@ async fn lifecycle_extension_infos(
         .await?;
     Ok(resolved
         .into_iter()
-        .map(|(installed, readiness)| extension_info(installed, readiness))
+        .map(|(installed, readiness)| extension_info(installed, readiness, &connections))
         .collect())
 }
 
@@ -254,6 +269,7 @@ async fn credential_readiness_for_extension(
 fn extension_info(
     installed: LifecycleInstalledExtensionSummary,
     readiness: ExtensionCredentialReadiness,
+    connections: &HashMap<String, bool>,
 ) -> RebornExtensionInfo {
     let phase = installed.phase;
     let has_auth = !installed.summary.credential_requirements.is_empty();
@@ -271,6 +287,18 @@ fn extension_info(
         extension_onboarding::for_installed_with_credential_status(&installed, readiness);
     let summary = installed.summary;
     let kind = extension_kind(&summary).to_string();
+    // A channel extension the calling user has not personally connected (e.g.
+    // Slack pairing) surfaces as `setup_required` so the WebUI shows the same
+    // Configure affordance as a credential-gated extension. The per-user
+    // connections map only contains channels with that concept; a connected
+    // channel (value `true`) keeps its normal onboarding state, and this is
+    // intentionally distinct from the admin Channels tab's `pairing_required`.
+    let onboarding_state =
+        if kind == "channel" && connections.get(summary.package_ref.id.as_str()) == Some(&false) {
+            Some(RebornExtensionOnboardingState::SetupRequired)
+        } else {
+            onboarding.state
+        };
     RebornExtensionInfo {
         package_ref: summary.package_ref,
         display_name: summary.name,
@@ -288,7 +316,7 @@ fn extension_info(
         activation_status: Some(phase_status(phase).to_string()),
         activation_error: None,
         version: Some(summary.version),
-        onboarding_state: onboarding.state,
+        onboarding_state,
         onboarding: onboarding.onboarding,
     }
 }
@@ -365,13 +393,39 @@ mod tests {
 
     use super::*;
     use crate::{
-        ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest,
-        LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-        LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-        LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-        LifecycleSearchExtensionSummary, ProductWorkflowError, RebornExtensionOnboardingState,
-        RebornServicesErrorCode, RebornServicesErrorKind,
+        ChannelConnectionFacade, ExtensionCredentialStatusRequest,
+        ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
+        LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding,
+        LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSurfaceKind,
+        LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecycleSearchExtensionSummary,
+        ProductWorkflowError, RebornExtensionOnboardingState, RebornServicesError,
+        RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
     };
+
+    struct TestConnections(std::collections::HashMap<String, bool>);
+
+    #[async_trait]
+    impl ChannelConnectionFacade for TestConnections {
+        async fn caller_channel_connections(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn no_channel_connections() -> Arc<dyn ChannelConnectionFacade> {
+        Arc::new(TestConnections(std::collections::HashMap::new()))
+    }
+
+    fn channel_connections(entries: &[(&str, bool)]) -> Arc<dyn ChannelConnectionFacade> {
+        Arc::new(TestConnections(
+            entries
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), *value))
+                .collect(),
+        ))
+    }
 
     #[tokio::test]
     async fn install_action_projects_lifecycle_onboarding_when_available() {
@@ -430,9 +484,14 @@ mod tests {
         let caller = caller();
 
         let credentials_service: Arc<dyn ExtensionCredentialSetupService> = credentials.clone();
-        let response = list_extensions(Arc::new(facade), Some(credentials_service), caller.clone())
-            .await
-            .expect("list extensions");
+        let response = list_extensions(
+            Arc::new(facade),
+            Some(credentials_service),
+            no_channel_connections(),
+            caller.clone(),
+        )
+        .await
+        .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
 
         assert!(extension.active, "lifecycle activation remains visible");
@@ -467,9 +526,14 @@ mod tests {
         };
         let credentials = UnavailableCredentials;
 
-        let response = list_extensions(Arc::new(facade), Some(Arc::new(credentials)), caller())
-            .await
-            .expect("list extensions");
+        let response = list_extensions(
+            Arc::new(facade),
+            Some(Arc::new(credentials)),
+            no_channel_connections(),
+            caller(),
+        )
+        .await
+        .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
 
         assert!(extension.active);
@@ -492,9 +556,14 @@ mod tests {
         let credentials = Arc::new(RecordingCredentials::default());
         let credentials_service: Arc<dyn ExtensionCredentialSetupService> = credentials.clone();
 
-        let response = list_extensions(Arc::new(facade), Some(credentials_service), caller())
-            .await
-            .expect("list extensions");
+        let response = list_extensions(
+            Arc::new(facade),
+            Some(credentials_service),
+            no_channel_connections(),
+            caller(),
+        )
+        .await
+        .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
 
         assert!(extension.active);
@@ -522,9 +591,14 @@ mod tests {
         let credentials = Arc::new(ConcurrentCredentials::default());
         let credentials_service: Arc<dyn ExtensionCredentialSetupService> = credentials.clone();
 
-        let response = list_extensions(Arc::new(facade), Some(credentials_service), caller())
-            .await
-            .expect("list extensions");
+        let response = list_extensions(
+            Arc::new(facade),
+            Some(credentials_service),
+            no_channel_connections(),
+            caller(),
+        )
+        .await
+        .expect("list extensions");
 
         assert_eq!(
             response.extensions.len(),
@@ -597,12 +671,39 @@ mod tests {
             },
         };
 
-        let response = list_extensions(Arc::new(facade), None, caller())
+        let response = list_extensions(Arc::new(facade), None, no_channel_connections(), caller())
             .await
             .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
 
         assert_eq!(extension.kind, "channel");
+
+        let mut unconnected_summary = summary_with_onboarding();
+        unconnected_summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
+        unconnected_summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+        unconnected_summary.credential_requirements = Vec::new();
+        let unconnected = list_extensions(
+            Arc::new(ListingFacade {
+                extension: LifecycleInstalledExtensionSummary {
+                    summary: unconnected_summary,
+                    phase: LifecyclePhase::Active,
+                },
+            }),
+            None,
+            channel_connections(&[("fixture", false)]),
+            caller(),
+        )
+        .await
+        .expect("list extensions");
+        assert_eq!(
+            unconnected
+                .extensions
+                .first()
+                .expect("one")
+                .onboarding_state,
+            Some(RebornExtensionOnboardingState::SetupRequired),
+            "an unconnected channel must surface as setup_required for the Configure flow",
+        );
     }
 
     #[tokio::test]

@@ -976,6 +976,14 @@ mod tests {
         ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
             Ok(None)
         }
+
+        async fn user_has_provider_binding(
+            &self,
+            _provider: &str,
+            _user_id: &UserId,
+        ) -> Result<bool, RebornUserIdentityLookupError> {
+            Ok(false)
+        }
     }
 
     struct StaticLookup {
@@ -997,6 +1005,14 @@ mod tests {
         ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
             Ok(self.user_id.clone())
         }
+
+        async fn user_has_provider_binding(
+            &self,
+            _provider: &str,
+            user_id: &UserId,
+        ) -> Result<bool, RebornUserIdentityLookupError> {
+            Ok(self.user_id.as_ref() == Some(user_id))
+        }
     }
 
     struct FailingLookup;
@@ -1008,6 +1024,14 @@ mod tests {
             _provider: &str,
             _provider_user_id: &str,
         ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
+            Err(RebornUserIdentityLookupError::Backend("lookup down".into()))
+        }
+
+        async fn user_has_provider_binding(
+            &self,
+            _provider: &str,
+            _user_id: &UserId,
+        ) -> Result<bool, RebornUserIdentityLookupError> {
             Err(RebornUserIdentityLookupError::Backend("lookup down".into()))
         }
     }

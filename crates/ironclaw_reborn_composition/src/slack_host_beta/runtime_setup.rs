@@ -90,6 +90,7 @@ pub(super) async fn build_runtime_mounts(
     ));
     let token_handle = slack_bot_token_handle()?;
     let binding_store: Arc<dyn RebornUserIdentityBindingStore> = state.clone();
+    let user_identity_lookup: Arc<dyn RebornUserIdentityLookup> = state.clone();
     let channel_route_store: Arc<dyn SlackChannelRouteStore> = state.clone();
     let personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore> = state.clone();
     let dynamic_binding_service: Arc<dyn SlackPersonalUserBinder> = Arc::new(
@@ -198,6 +199,7 @@ pub(super) async fn build_runtime_mounts(
         events: slack_events_route_mount(SlackEventsRouteState::from_resolver(Arc::new(resolver))),
         personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
         channel_routes,
+        user_identity_lookup,
         outbound_delivery_target_provider,
         outbound_delivery_target_provider_registered: true,
     })

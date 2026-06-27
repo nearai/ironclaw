@@ -1,15 +1,16 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
-    ConnectableChannelsProductFacade, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornServicesError,
-    WebUiAuthenticatedCaller,
+    ChannelConnectionFacade, ConnectableChannelsProductFacade, RebornChannelConnectAction,
+    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
+    RebornConnectableChannelListResponse, RebornServicesError, WebUiAuthenticatedCaller,
 };
 
 use crate::{
     RebornBuildError, RebornRuntime, RebornWebuiBundle, SlackHostBetaMounts,
+    slack_actor_identity::{RebornUserIdentityLookup, SLACK_IDENTITY_PROVIDER},
     webui::build_webui_services_with_connectable_channels,
 };
 
@@ -57,10 +58,13 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
             reason: "outbound delivery target providers require local runtime services".to_string(),
         });
     }
+    let channel_connection = slack_mounts
+        .map(|mounts| slack_channel_connection_facade(mounts.user_identity_lookup.clone()));
     build_webui_services_with_connectable_channels(
         runtime,
         event_stream,
         connectable_channels,
+        channel_connection,
         outbound_delivery_target_providers,
     )
 }
@@ -79,6 +83,7 @@ fn build_webui_services_with_slack_connectable_channel(
             TenantId::new("tenant:test").expect("tenant"),
             UserId::new("user:operator").expect("operator"),
         ),
+        None,
         Vec::new(),
     )
 }
@@ -121,6 +126,37 @@ impl ConnectableChannelsProductFacade for SlackConnectableChannelsProductFacade 
         }
         Ok(RebornConnectableChannelListResponse { channels })
     }
+}
+
+/// Per-user channel connection facade backed by the Slack personal-binding
+/// identity store. Reports whether the calling WebUI user has connected their
+/// own Slack account, so the extensions surface can show a "setup needed"
+/// Configure affordance until they pair.
+struct SlackChannelConnectionFacade {
+    user_identity_lookup: Arc<dyn RebornUserIdentityLookup>,
+}
+
+#[async_trait::async_trait]
+impl ChannelConnectionFacade for SlackChannelConnectionFacade {
+    async fn caller_channel_connections(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<HashMap<String, bool>, RebornServicesError> {
+        let connected = self
+            .user_identity_lookup
+            .user_has_provider_binding(SLACK_IDENTITY_PROVIDER, &caller.user_id)
+            .await
+            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+        Ok(HashMap::from([("slack".to_string(), connected)]))
+    }
+}
+
+fn slack_channel_connection_facade(
+    user_identity_lookup: Arc<dyn RebornUserIdentityLookup>,
+) -> Arc<dyn ChannelConnectionFacade> {
+    Arc::new(SlackChannelConnectionFacade {
+        user_identity_lookup,
+    })
 }
 
 fn slack_inbound_proof_code_connectable_channel() -> RebornConnectableChannelInfo {

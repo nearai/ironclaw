@@ -46,7 +46,7 @@ use crate::RebornRuntime;
 use crate::outbound_preferences::{
     OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome,
 };
-use crate::slack_actor_identity::SlackUserIdentityActorResolver;
+use crate::slack_actor_identity::{RebornUserIdentityLookup, SlackUserIdentityActorResolver};
 use crate::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
 };
@@ -406,6 +406,9 @@ pub struct SlackHostBetaMounts {
     pub events: PublicRouteMount,
     pub personal_binding_pairing: SlackPersonalBindingPairingRouteConfig,
     pub channel_routes: SlackChannelRouteAdminRouteConfig,
+    /// Reverse identity lookup: tells whether the calling WebUI user has
+    /// personally connected this channel (Slack personal pairing).
+    pub(crate) user_identity_lookup: Arc<dyn RebornUserIdentityLookup>,
     /// Internal target-authority handle consumed only by WebUI product-facade composition.
     pub(crate) outbound_delivery_target_provider: Arc<dyn OutboundDeliveryTargetProvider>,
     pub(crate) outbound_delivery_target_provider_registered: bool,
@@ -550,6 +553,7 @@ pub fn build_slack_host_beta_mounts(
         config.project_id.clone(),
     ));
     let binding_store: Arc<dyn RebornUserIdentityBindingStore> = state.clone();
+    let user_identity_lookup: Arc<dyn RebornUserIdentityLookup> = state.clone();
     let binding_service = SlackPersonalUserBindingService::new(
         [SlackPersonalBindingInstallation {
             tenant_id: config.tenant_id.clone(),
@@ -683,6 +687,7 @@ pub fn build_slack_host_beta_mounts(
             events,
             personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
             channel_routes,
+            user_identity_lookup: user_identity_lookup.clone(),
             outbound_delivery_target_provider,
             outbound_delivery_target_provider_registered: true,
         });
@@ -708,6 +713,7 @@ pub fn build_slack_host_beta_mounts(
         events,
         personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
         channel_routes,
+        user_identity_lookup: user_identity_lookup.clone(),
         outbound_delivery_target_provider,
         outbound_delivery_target_provider_registered: true,
     })
