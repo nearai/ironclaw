@@ -3465,6 +3465,41 @@ WEBUI_V2_PROVIDER_LOGIN_MOUNT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_PROVIDER_LOGIN_BROWSER_COMMAND = CommandSpec(
+    name="webui_v2_provider_login_browser_smoke",
+    description=(
+        "Playwright smoke for WebUI v2 Settings provider-login controls "
+        "through the real ironclaw-reborn serve binary: NEAR AI hosted-login "
+        "request origin/body, Codex device-login request and visible user "
+        "code, and browser-visible NEAR AI/Codex start-failure errors."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_provider_login_browser.py",
+        "-q",
+    ],
+)
+
 CASES: dict[str, CaseSpec] = {
     "webui_v2_serve_listener_regression": CaseSpec(
         name="webui_v2_serve_listener_regression",
@@ -5220,18 +5255,25 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-097-TC-04",
             "REBCLI-097-TC-05",
             "REBCLI-097-TC-06",
+            "REBCLI-097-TC-07",
+            "REBCLI-097-TC-08",
+            "REBCLI-097-TC-09",
         ],
         commands=[
+            REBORN_CLI_WEBUI_V2_BINARY_COMMAND,
             WEBUI_V2_LLM_PROVIDER_ROUTE_COMMAND,
             WEBUI_V2_NEARAI_LOGIN_STATE_COMMAND,
             WEBUI_V2_PROVIDER_LOGIN_MOUNT_COMMAND,
+            WEBUI_V2_PROVIDER_LOGIN_BROWSER_COMMAND,
         ],
         notes=(
-            "Covers the API/runtime provider-login rows without duplicating "
-            "PR #5348 browser settings coverage: route dispatch, operator "
+            "Covers the API/runtime and browser provider-login rows without "
+            "duplicating PR #5348 browser settings coverage: route dispatch, operator "
             "authorization, NEAR AI login origin/state/callback policy, Codex "
             "login route protection, wallet route protection, and multi-user "
-            "route suppression."
+            "route suppression, plus committed Settings browser coverage for "
+            "NEAR AI hosted-login body/origin, Codex device-code UI, and "
+            "browser-visible NEAR AI/Codex start-failure errors."
         ),
     ),
 }

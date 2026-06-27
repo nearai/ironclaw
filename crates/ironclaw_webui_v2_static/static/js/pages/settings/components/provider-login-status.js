@@ -11,14 +11,18 @@ export function ProviderLoginStatus({ login }) {
 
   return html`
     ${nearaiBusy &&
-    html`<div className="text-center text-xs text-[var(--v2-text-muted)]">
+    html`<div
+      data-testid="llm-provider-nearai-waiting"
+      className="text-center text-xs text-[var(--v2-text-muted)]"
+    >
       ${t("onboarding.nearaiWaiting")}
     </div>`}
     ${nearaiError &&
-    html`<div className="text-center text-xs text-red-300">${nearaiError}</div>`}
+    html`<div data-testid="llm-provider-nearai-error" className="text-center text-xs text-red-300">${nearaiError}</div>`}
 
     ${codexCode &&
     html`<div
+      data-testid="llm-provider-codex-code"
       className="mx-auto max-w-md rounded-lg border border-[var(--v2-border)] bg-[var(--v2-surface-raised)] p-4 text-center"
     >
       <div className="text-xs text-[var(--v2-text-muted)]">
@@ -37,10 +41,13 @@ export function ProviderLoginStatus({ login }) {
       </a>
     </div>`}
     ${codexBusy &&
-    html`<div className="text-center text-xs text-[var(--v2-text-muted)]">
+    html`<div
+      data-testid="llm-provider-codex-waiting"
+      className="text-center text-xs text-[var(--v2-text-muted)]"
+    >
       ${t("onboarding.codexWaiting")}
     </div>`}
     ${codexError &&
-    html`<div className="text-center text-xs text-red-300">${codexError}</div>`}
+    html`<div data-testid="llm-provider-codex-error" className="text-center text-xs text-red-300">${codexError}</div>`}
   `;
 }

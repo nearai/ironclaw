@@ -302,6 +302,21 @@ SEL_V2 = {
         "[data-testid='project-file-chip'][data-file-path='{path}'] "
         "+ [data-testid='project-file-download']"
     ),
+    "llm_provider_card_for": (
+        "[data-testid='llm-provider-card'][data-provider-id='{id}']"
+    ),
+    "llm_provider_nearai_github_login": (
+        "[data-testid='llm-provider-nearai-github-login']"
+    ),
+    "llm_provider_nearai_google_login": (
+        "[data-testid='llm-provider-nearai-google-login']"
+    ),
+    "llm_provider_codex_login": "[data-testid='llm-provider-codex-login']",
+    "llm_provider_nearai_waiting": "[data-testid='llm-provider-nearai-waiting']",
+    "llm_provider_nearai_error": "[data-testid='llm-provider-nearai-error']",
+    "llm_provider_codex_code": "[data-testid='llm-provider-codex-code']",
+    "llm_provider_codex_waiting": "[data-testid='llm-provider-codex-waiting']",
+    "llm_provider_codex_error": "[data-testid='llm-provider-codex-error']",
     # Download action inside the shared attachment preview modal.
     "attachment_download": "[data-testid='attachment-download']",
     "logs_scope_toolbar": "[data-testid='logs-scope-toolbar']",

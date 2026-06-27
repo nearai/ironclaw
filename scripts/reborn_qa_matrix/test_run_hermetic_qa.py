@@ -3099,23 +3099,32 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-097-TC-04",
                     "REBCLI-097-TC-05",
                     "REBCLI-097-TC-06",
+                    "REBCLI-097-TC-07",
+                    "REBCLI-097-TC-08",
+                    "REBCLI-097-TC-09",
                 ],
             )
             self.assertEqual(
                 [command["name"] for command in results["results"][0]["details"]["commands"]],
                 [
+                    "reborn_cli_webui_v2_binary",
                     "webui_v2_llm_provider_routes",
                     "webui_v2_nearai_login_state_contracts",
                     "webui_v2_provider_login_multi_user_mount_policy",
+                    "webui_v2_provider_login_browser_smoke",
                 ],
             )
             self.assertIn(
                 "--test webui_v2_handlers_contract",
-                results["results"][0]["details"]["commands"][0]["command"],
+                results["results"][0]["details"]["commands"][1]["command"],
             )
             self.assertIn(
                 "operator_routes_are_not_mounted_for_multi_user_authenticator",
-                results["results"][0]["details"]["commands"][2]["command"],
+                results["results"][0]["details"]["commands"][3]["command"],
+            )
+            self.assertIn(
+                "test_reborn_webui_v2_provider_login_browser.py",
+                results["results"][0]["details"]["commands"][4]["command"],
             )
 
     def test_operator_config_case_dry_run_maps_api_matrix_ids(self):
