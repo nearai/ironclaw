@@ -314,6 +314,25 @@ WEBUI_V2_WORKSPACE_PROJECT_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_AUTOMATIONS_CLIENT_COMMAND = CommandSpec(
+    name="webui_v2_automations_client_contracts",
+    description=(
+        "Focused WebUI v2 automations/outbound-defaults client contracts for "
+        "automation list/mutation routes, completed-row query toggles, "
+        "schedule/summary/recent-run presenters, empty-state affordances, "
+        "refresh cadence decisions, and outbound preference/target API payloads."
+    ),
+    argv=[
+        "bash",
+        "-lc",
+        (
+            "node --test crates/ironclaw_webui_v2_static/static/js/lib/api.test.mjs "
+            "$(find crates/ironclaw_webui_v2_static/static/js/pages/automations "
+            "-type f -name '*test.mjs' | sort)"
+        ),
+    ],
+)
+
 WEBUI_V2_SEND_MULTILINE_COMMAND = CommandSpec(
     name="webui_v2_send_multiline_contract",
     description="Focused send-message route contract for preserving multiline content.",
@@ -1338,6 +1357,29 @@ CASES: dict[str, CaseSpec] = {
             "payloads, membership route encoding, and TODO subresource stubs "
             "that must not call unsupported v1 APIs. Browser-smoke TC-20 "
             "stays guarded by PR #5348/live coverage."
+        ),
+    ),
+    "webui_v2_automations_client_regression": CaseSpec(
+        name="webui_v2_automations_client_regression",
+        feature="WebUI v2 automations and outbound delivery defaults screen",
+        category="Hermetic Automations Client Contract Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-067-TC-01",
+            "REBCLI-067-TC-02",
+            "REBCLI-067-TC-03",
+            "REBCLI-067-TC-04",
+            "REBCLI-067-TC-05",
+            "REBCLI-067-TC-06",
+        ],
+        commands=[WEBUI_V2_AUTOMATIONS_CLIENT_COMMAND],
+        notes=(
+            "Covers the generated WebUI v2 automations/outbound-default rows "
+            "at the static client contract layer without duplicating PR #5348 "
+            "browser legacy Playwright scenarios: automation list/mutation "
+            "routes, completed-row query toggles, schedule labels/timezones, "
+            "filter/summary/recent-run presentation, empty-state copy/start "
+            "actions, refresh cadence bounds, and outbound preference/target "
+            "API payloads including clear-to-null."
         ),
     ),
     "webui_v2_filesystem_api_regression": CaseSpec(

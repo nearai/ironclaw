@@ -7,9 +7,12 @@ import {
   deleteThread,
   fetchAttachmentBlob,
   fetchAttachmentDataUrl,
+  getOutboundPreferences,
+  listOutboundDeliveryTargets,
   listAutomations,
   pauseAutomation,
   resumeAutomation,
+  setOutboundPreferences,
 } from "./api.js";
 
 test("listAutomations reads through the v2 automations route", async () => {
@@ -27,11 +30,18 @@ test("listAutomations reads through the v2 automations route", async () => {
     });
   };
 
-  const response = await listAutomations({ limit: 50, runLimit: 25 });
+  const response = await listAutomations({
+    limit: 50,
+    runLimit: 25,
+    includeCompleted: true,
+  });
 
   assert.deepEqual(response, { automations: [] });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].path, "/api/webchat/v2/automations?limit=50&run_limit=25");
+  assert.equal(
+    calls[0].path,
+    "/api/webchat/v2/automations?limit=50&run_limit=25&include_completed=true",
+  );
   assert.equal(calls[0].options.credentials, "same-origin");
   assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
 });
@@ -112,6 +122,80 @@ test("automation state mutations reject before fetch when automation id is missi
   await assert.rejects(resumeAutomation({}), /automationId is required/);
   await assert.rejects(deleteAutomation({ automationId: "" }), /automationId is required/);
   assert.equal(fetchCalled, false);
+});
+
+test("outbound preferences and targets read through v2 outbound routes", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "token-1",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    const body = path.endsWith("/targets")
+      ? { targets: [{ target: { target_id: "slack:dm" } }] }
+      : {
+          final_reply_target: null,
+          final_reply_target_status: "none_configured",
+        };
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  const preferences = await getOutboundPreferences();
+  const targets = await listOutboundDeliveryTargets();
+
+  assert.deepEqual(preferences, {
+    final_reply_target: null,
+    final_reply_target_status: "none_configured",
+  });
+  assert.deepEqual(targets, { targets: [{ target: { target_id: "slack:dm" } }] });
+  assert.deepEqual(
+    calls.map((call) => call.path),
+    ["/api/webchat/v2/outbound/preferences", "/api/webchat/v2/outbound/targets"],
+  );
+  assert.equal(calls[0].options.credentials, "same-origin");
+  assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
+  assert.equal(calls[1].options.headers.get("Authorization"), "Bearer token-1");
+});
+
+test("setOutboundPreferences posts final reply target ids and clears with null", async () => {
+  const calls = [];
+  globalThis.sessionStorage = {
+    getItem: () => "token-1",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options, body: JSON.parse(options.body) });
+    return new Response(
+      JSON.stringify({
+        final_reply_target: { target_id: calls.at(-1).body.final_reply_target_id },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    );
+  };
+
+  await setOutboundPreferences({
+    finalReplyTargetId: "slack:personal-dm:T1:U1",
+  });
+  await setOutboundPreferences();
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].path, "/api/webchat/v2/outbound/preferences");
+  assert.equal(calls[0].options.method, "POST");
+  assert.equal(calls[0].options.credentials, "same-origin");
+  assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
+  assert.deepEqual(calls[0].body, {
+    final_reply_target_id: "slack:personal-dm:T1:U1",
+  });
+  assert.deepEqual(calls[1].body, { final_reply_target_id: null });
 });
 
 test("deleteThread sends DELETE to the encoded thread route", async () => {
