@@ -826,7 +826,7 @@ impl ResourceGateEvidenceStore for LocalDevResourceGateEvidence {
         scope: &TurnScope,
         gate_ref: &LoopGateRef,
     ) -> Result<bool, TurnError> {
-        let Some(gate_id) = budget_gate_id_from_gate_ref(gate_ref) else {
+        let Some(gate_id) = budget_gate_id_from_gate_ref(gate_ref)? else {
             return Ok(false);
         };
         let record = self
@@ -843,12 +843,14 @@ impl ResourceGateEvidenceStore for LocalDevResourceGateEvidence {
 
 fn budget_gate_id_from_gate_ref(
     gate_ref: &LoopGateRef,
-) -> Option<ironclaw_resources::BudgetGateId> {
-    gate_ref
-        .as_str()
-        .strip_prefix("gate:budget-")
-        .and_then(|value| uuid::Uuid::parse_str(value).ok())
-        .map(ironclaw_resources::BudgetGateId::from_uuid)
+) -> Result<Option<ironclaw_resources::BudgetGateId>, TurnError> {
+    let Some(value) = gate_ref.as_str().strip_prefix("gate:budget-") else {
+        return Ok(None);
+    };
+    let id = uuid::Uuid::parse_str(value).map_err(|error| TurnError::InvalidRequest {
+        reason: format!("invalid budget gate ref `{}`: {error}", gate_ref.as_str()),
+    })?;
+    Ok(Some(ironclaw_resources::BudgetGateId::from_uuid(id)))
 }
 
 #[async_trait::async_trait]
@@ -4010,6 +4012,21 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
+
+    #[test]
+    fn budget_gate_ref_parser_rejects_malformed_budget_ref() {
+        let gate_ref =
+            ironclaw_turns::LoopGateRef::new("gate:budget-not-a-uuid").expect("gate ref");
+        let error = super::budget_gate_id_from_gate_ref(&gate_ref)
+            .expect_err("malformed budget gate refs should fail loudly");
+
+        assert!(matches!(
+            error,
+            ironclaw_turns::TurnError::InvalidRequest { reason }
+                if reason.contains("invalid budget gate ref")
+                    && reason.contains("gate:budget-not-a-uuid")
+        ));
+    }
 
     #[test]
     fn persistent_grantee_resolver_maps_outbound_delivery_target_set_to_synthetic_provider() {

@@ -528,6 +528,14 @@ mod tests {
                 "test input resolver does not resolve inputs",
             ))
         }
+
+        async fn register_provider_tool_call_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _tool_call: &ProviderToolCall,
+        ) -> Result<CapabilityInputRef, AgentLoopHostError> {
+            Ok(CapabilityInputRef::new("input:external-tool-bind").expect("test input ref"))
+        }
     }
 
     struct TestResultWriter;
@@ -602,6 +610,66 @@ mod tests {
 
         async fn clear(&self, _run_id: TurnRunId) -> Result<(), ExternalToolCatalogError> {
             Err(self.error.clone())
+        }
+    }
+
+    struct BindFailingExternalToolCatalog {
+        error: ExternalToolCatalogError,
+    }
+
+    #[async_trait]
+    impl ExternalToolCatalog for BindFailingExternalToolCatalog {
+        async fn register(
+            &self,
+            _run_id: TurnRunId,
+            _specs: Vec<ExternalToolSpec>,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Ok(())
+        }
+
+        async fn specs(
+            &self,
+            _run_id: TurnRunId,
+        ) -> Result<Vec<ExternalToolSpec>, ExternalToolCatalogError> {
+            Ok(vec![external_tool_spec("ClientTool")])
+        }
+
+        async fn bind_call(
+            &self,
+            _run_id: TurnRunId,
+            _input_ref: String,
+            _call_id: String,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Err(self.error.clone())
+        }
+
+        async fn call_id_for_input_ref(
+            &self,
+            _run_id: TurnRunId,
+            _input_ref: &str,
+        ) -> Result<Option<String>, ExternalToolCatalogError> {
+            Ok(None)
+        }
+
+        async fn submit_output(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: String,
+            _output: serde_json::Value,
+        ) -> Result<(), ExternalToolCatalogError> {
+            Ok(())
+        }
+
+        async fn take_output(
+            &self,
+            _run_id: TurnRunId,
+            _call_id: &str,
+        ) -> Result<Option<serde_json::Value>, ExternalToolCatalogError> {
+            Ok(None)
+        }
+
+        async fn clear(&self, _run_id: TurnRunId) -> Result<(), ExternalToolCatalogError> {
+            Ok(())
         }
     }
 
@@ -726,6 +794,43 @@ mod tests {
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
         assert!(error.safe_summary.contains("duplicate external tool name"));
+    }
+
+    #[tokio::test]
+    async fn invalid_catalog_bind_surfaces_as_invalid_invocation() {
+        let (port, _run_context) =
+            wrapped_port_with_catalog(Arc::new(BindFailingExternalToolCatalog {
+                error: ExternalToolCatalogError::InvalidRegistration {
+                    reason: "bind rejected external tool call",
+                },
+            }))
+            .await;
+
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible capabilities");
+
+        let error = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                id: "call-1".to_string(),
+                name: ProviderToolName::new("clienttool").expect("provider tool name"),
+                arguments: serde_json::json!({}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .expect_err("invalid bind registration should fail provider tool-call registration");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(
+            error
+                .safe_summary
+                .contains("bind rejected external tool call")
+        );
     }
 
     #[tokio::test]

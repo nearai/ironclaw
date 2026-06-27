@@ -70,10 +70,13 @@ fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-fn assert_budget_blocked_outcome(outcome: RebornTurnDriveOutcome) {
+fn assert_budget_blocked_outcome(
+    outcome: RebornTurnDriveOutcome,
+) -> ironclaw_resources::BudgetGateId {
     match outcome {
         RebornTurnDriveOutcome::BlockedOnGate {
             status,
+            gate_ref,
             partial_text,
             ..
         } => {
@@ -83,6 +86,13 @@ fn assert_budget_blocked_outcome(outcome: RebornTurnDriveOutcome) {
                 "unexpected budget approval status"
             );
             assert_eq!(partial_text, None);
+            let raw_id = gate_ref
+                .as_str()
+                .strip_prefix("gate:budget-")
+                .expect("budget approval should block on a budget gate ref");
+            ironclaw_resources::BudgetGateId::from_uuid(
+                uuid::Uuid::parse_str(raw_id).expect("budget gate ref should contain a UUID"),
+            )
         }
         RebornTurnDriveOutcome::Terminal(reply) => {
             panic!("budget approval should block instead of terminal reply: {reply:?}");
@@ -173,7 +183,7 @@ async fn pump_until_pending_gate(
     .await
     .expect("send finishes")
     .expect("budget approval should return a blocked gate outcome");
-    assert_budget_blocked_outcome(reply);
+    let blocked_gate_id = assert_budget_blocked_outcome(reply);
     assert_eq!(
         gateway.call_count(),
         0,
@@ -188,6 +198,10 @@ async fn pump_until_pending_gate(
         "exactly one pending gate expected after pause",
     )
     .await;
+    assert_eq!(
+        pending[0].id, blocked_gate_id,
+        "blocked outcome should cite the pending budget gate"
+    );
     (pending[0].id, scope)
 }
 
