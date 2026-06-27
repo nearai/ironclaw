@@ -328,13 +328,28 @@ WEBUI_V2_STATIC_API_AUTH_COMMAND = CommandSpec(
     description=(
         "Static JS API-client contracts for reading bearer tokens from "
         "sessionStorage, attaching Authorization on same-origin requests, "
-        "failing fast on missing ids, and rejecting off-origin attachment URLs "
-        "before a bearer can be sent."
+        "failing fast on missing ids, rejecting off-origin attachment URLs "
+        "before a bearer can be sent, and discovering public OAuth providers "
+        "with fail-safe empty-list behavior."
     ),
     argv=[
         "node",
         "--test",
         "crates/ironclaw_webui_v2_static/static/js/lib/api.test.mjs",
+    ],
+)
+
+WEBUI_V2_LOGIN_OAUTH_CLIENT_COMMAND = CommandSpec(
+    name="webui_v2_login_oauth_client_contracts",
+    description=(
+        "Static login-page OAuth provider contracts for provider ordering, "
+        "unknown-provider filtering, discovery failure behavior, empty-list "
+        "rendering, URL-encoded /auth/login links, and known provider labels."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/pages/login/login-oauth.test.mjs",
     ],
 )
 
@@ -2344,10 +2359,23 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-064-TC-04",
             "REBCLI-064-TC-05",
             "REBCLI-064-TC-06",
+            "REBCLI-085-TC-01",
+            "REBCLI-085-TC-02",
+            "REBCLI-085-TC-03",
+            "REBCLI-085-TC-04",
+            "REBCLI-085-TC-05",
+            "REBCLI-085-TC-06",
+            "REBCLI-086-TC-01",
+            "REBCLI-086-TC-02",
+            "REBCLI-086-TC-03",
+            "REBCLI-086-TC-04",
+            "REBCLI-086-TC-05",
+            "REBCLI-086-TC-06",
         ],
         commands=[
             WEBUI_V2_STATIC_AUTH_JS_COMMAND,
             WEBUI_V2_STATIC_API_AUTH_COMMAND,
+            WEBUI_V2_LOGIN_OAUTH_CLIENT_COMMAND,
             WEBUI_V2_INGRESS_SESSION_AUTH_COMMAND,
         ],
         notes=(
@@ -2358,7 +2386,9 @@ CASES: dict[str, CaseSpec] = {
             "same-origin API calls, off-origin bearer-send prevention, env "
             "bearer matching, session creation/lookup/expiry, one-time "
             "tickets, revoked-session denial, tenant isolation, signed "
-            "session round-trips, and protected-route authentication."
+            "session round-trips, protected-route authentication, public OAuth "
+            "provider discovery, provider ordering/filtering, discovery "
+            "failure behavior, and encoded login button href construction."
         ),
     ),
     "webui_v2_product_auth_oauth_regression": CaseSpec(

@@ -5,6 +5,7 @@ import {
   attachmentUrl,
   deleteAutomation,
   deleteThread,
+  fetchAuthProviders,
   fetchAttachmentBlob,
   fetchAttachmentDataUrl,
   getOutboundPreferences,
@@ -14,6 +15,52 @@ import {
   resumeAutomation,
   setOutboundPreferences,
 } from "./api.js";
+
+test("fetchAuthProviders reads the public same-origin auth provider route", async () => {
+  const calls = [];
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(
+      JSON.stringify({ providers: ["github", "unknown", "google"] }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    );
+  };
+
+  const response = await fetchAuthProviders();
+
+  assert.deepEqual(response, { providers: ["github", "unknown", "google"] });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/auth/providers");
+  assert.equal(calls[0].options.credentials, "same-origin");
+  assert.equal(calls[0].options.headers.Accept, "application/json");
+});
+
+test("fetchAuthProviders hides unavailable or malformed discovery responses", async () => {
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ error: "unavailable" }), {
+      status: 503,
+      headers: { "content-type": "application/json" },
+    });
+
+  assert.deepEqual(await fetchAuthProviders(), { providers: [] });
+
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ providers: "google" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+  assert.deepEqual(await fetchAuthProviders(), { providers: [] });
+
+  globalThis.fetch = async () => {
+    throw new Error("network down");
+  };
+
+  assert.deepEqual(await fetchAuthProviders(), { providers: [] });
+});
 
 test("listAutomations reads through the v2 automations route", async () => {
   const calls = [];
