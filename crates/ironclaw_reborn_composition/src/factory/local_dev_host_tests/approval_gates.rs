@@ -39,7 +39,7 @@ async fn disable_global_auto_approve(
             updated_by: Principal::User(context.user_id.clone()),
         })
         .await
-        .expect("disable global auto-approve");
+        .expect("disable global auto-approve"); // safety: test-only gating precondition
 }
 
 #[tokio::test]
