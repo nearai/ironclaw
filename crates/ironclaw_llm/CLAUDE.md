@@ -230,7 +230,7 @@ Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT
 
 ## Provider Chain Construction
 
-`build_provider_chain()` in `lib.rs` is the entry point for chain construction: it creates the base provider (dispatching to `create_openai_codex_provider()` for codex, `create_llm_provider()` for everything else), then delegates the decorator stack to `pub async fn apply_decorator_chain(raw, config, session)` — the single source of truth for decorator assembly. Assemble the chain only through `apply_decorator_chain` (the integration-test harness calls it directly to wrap a scripted raw provider); never apply these decorators inline or at a higher seam. The decorators `apply_decorator_chain` assembles, in order (`RecordingLlm` is appended afterward by `build_provider_chain`, not by `apply_decorator_chain`):
+`build_provider_chain()` in `lib.rs` is the entry point for chain construction: it creates the base provider (dispatching to `create_openai_codex_provider()` for codex, `create_llm_provider()` for everything else), then delegates the decorator stack to `pub(crate) async fn apply_decorator_chain(raw, config, session)` — the single source of truth for decorator assembly. Assemble the chain only through `apply_decorator_chain`; never apply these decorators inline or at a higher seam. It is crate-internal; the integration-test harness wraps a scripted raw provider beneath the real chain via the test-only `testing::provider_chain_over` re-export (gated by the `testing` feature), so the production API is not widened. The decorators `apply_decorator_chain` assembles, in order (`RecordingLlm` is appended afterward by `build_provider_chain`, not by `apply_decorator_chain`):
 
 ```
 Raw provider

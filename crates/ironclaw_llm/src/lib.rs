@@ -995,7 +995,11 @@ pub(crate) async fn build_provider_chain_components(
 /// returns its inner provider unchanged. This is the single source of truth for
 /// decorator-chain assembly — assemble the chain only through this function, not
 /// inline or at a higher seam.
-pub async fn apply_decorator_chain(
+///
+/// Crate-internal: production assembles the chain here, and the only
+/// cross-crate access is the test-only `testing::provider_chain_over` door
+/// (gated by the `testing` feature), so the production API is not widened.
+pub(crate) async fn apply_decorator_chain(
     raw: Arc<dyn LlmProvider>,
     config: &LlmConfig,
     session: Arc<SessionManager>,

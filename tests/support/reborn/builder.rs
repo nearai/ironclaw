@@ -19,7 +19,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_llm::{LlmProvider, SessionConfig, apply_decorator_chain, create_session_manager};
+use ironclaw_llm::testing::provider_chain_over;
+use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_support::{
     EmptyUserProfileSource, HostManagedModelGateway, JsonSpawnSubagentInputCodec,
     SubagentSpawnLimits,
@@ -155,7 +156,7 @@ impl RebornIntegrationHarnessBuilder {
         let raw: Arc<dyn LlmProvider> = Arc::new(scripted_trace_llm(self.replies));
         let session = create_session_manager(SessionConfig::default()).await;
         let llm_config = ironclaw_llm::testing::nearai_test_config(SCRIPTED_MODEL_NAME);
-        let provider = apply_decorator_chain(raw, &llm_config, session).await?;
+        let provider = provider_chain_over(raw, &llm_config, session).await?;
         let model_profile_id = ModelProfileId::new(INTERACTIVE_MODEL_PROFILE)
             .map_err(|reason| format!("invalid model profile id: {reason}"))?;
         let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, None);
