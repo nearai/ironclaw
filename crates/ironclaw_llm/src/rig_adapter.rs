@@ -3206,6 +3206,59 @@ mod tests {
         assert_eq!(replayed_reasoning.content, typed_reasoning.content);
     }
 
+    /// Regression: a Text block with empty text but a non-empty signature must
+    /// survive `with_reasoning_details` and reach `convert_messages` unchanged.
+    /// Gemini 2.5+ emits `thought_signature` blocks this way; dropping them
+    /// breaks the next turn with HTTP 400 (#3201, #3225).
+    #[test]
+    fn signature_only_text_block_survives_round_trip() {
+        let signature_only = IronReasoningDetail::Text {
+            text: String::new(),
+            signature: Some("thought-sig-xyz".to_string()),
+        };
+        let details = IronReasoningDetails {
+            id: Some("rsn_sig".to_string()),
+            content: vec![signature_only],
+        };
+        // Must not be filtered by with_reasoning_details.
+        let assistant = ChatMessage::assistant("ok").with_reasoning_details(Some(details.clone()));
+        assert!(
+            assistant.reasoning_details.is_some(),
+            "with_reasoning_details must preserve a signature-only Text block"
+        );
+
+        let (_preamble, history) = convert_messages(&[ChatMessage::user("ping"), assistant]);
+        let assistant_msg = history
+            .iter()
+            .find(|m| matches!(m, RigMessage::Assistant { .. }))
+            .expect("history must include the assistant message");
+        let RigMessage::Assistant { content, .. } = assistant_msg else {
+            unreachable!()
+        };
+        let replayed = content
+            .iter()
+            .find_map(|c| match c {
+                AssistantContent::Reasoning(r) => Some(r),
+                _ => None,
+            })
+            .expect(
+                "convert_messages must emit AssistantContent::Reasoning for signature-only block",
+            );
+        assert_eq!(replayed.id.as_deref(), Some("rsn_sig"));
+        assert_eq!(replayed.content.len(), 1);
+        match &replayed.content[0] {
+            rig::message::ReasoningContent::Text { text, signature } => {
+                assert!(text.is_empty(), "text must remain empty");
+                assert_eq!(
+                    signature.as_deref(),
+                    Some("thought-sig-xyz"),
+                    "signature must be preserved through the round-trip"
+                );
+            }
+            other => panic!("expected ReasoningContent::Text, got {other:?}"),
+        }
+    }
+
     /// `with_reasoning` must drop empty/whitespace-only strings rather than
     /// echoing `reasoning_content: ""` (some strict-mode providers reject
     /// empty reasoning fields, and an empty echo carries no signal anyway).

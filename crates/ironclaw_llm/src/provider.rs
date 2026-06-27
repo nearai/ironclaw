@@ -116,9 +116,17 @@ impl ReasoningDetails {
     pub fn is_empty(&self) -> bool {
         self.content.is_empty()
             || self.content.iter().all(|detail| match detail {
-                ReasoningDetail::Text { text, .. }
-                | ReasoningDetail::Encrypted(text)
-                | ReasoningDetail::Summary(text) => text.trim().is_empty(),
+                // A Text block is non-empty when EITHER its text OR its
+                // signature carries content. Gemini 2.5+ emits
+                // `thought_signature` as a Text block with empty text but a
+                // populated signature; dropping it causes the next turn to
+                // 400 because the replay artifact is missing (#3201, #3225).
+                ReasoningDetail::Text { text, signature } => {
+                    text.trim().is_empty() && signature.as_ref().is_none_or(|s| s.trim().is_empty())
+                }
+                ReasoningDetail::Encrypted(text) | ReasoningDetail::Summary(text) => {
+                    text.trim().is_empty()
+                }
                 ReasoningDetail::Redacted { data } => data.trim().is_empty(),
             })
     }
@@ -1192,5 +1200,49 @@ mod tests {
         strip_unsupported_tool_params(&unsupported, &mut req);
 
         assert!(req.stop_sequences.is_none()); // safety: test assertion for explicit strip behavior
+    }
+
+    /// Regression: a Text block with empty text but a non-empty signature must
+    /// NOT be treated as empty. Gemini 2.5+ emits `thought_signature` as a Text
+    /// block with blank text and a populated signature; the old `..` wildcard
+    /// ignored the signature, causing it to be filtered out by
+    /// `with_reasoning_details` and `rig_reasoning_to_iron`, breaking the next
+    /// turn with HTTP 400 (#3201, #3225).
+    #[test]
+    fn reasoning_details_is_empty_false_for_signature_only_text_block() {
+        let details = ReasoningDetails {
+            id: None,
+            content: vec![ReasoningDetail::Text {
+                text: String::new(),
+                signature: Some("sig-abc".to_string()),
+            }],
+        };
+        assert!(
+            !details.is_empty(),
+            "Text block with non-empty signature must not be treated as empty"
+        );
+    }
+
+    #[test]
+    fn reasoning_details_is_empty_true_for_blank_text_and_absent_signature() {
+        // Empty text + no signature → empty.
+        let no_sig = ReasoningDetails {
+            id: None,
+            content: vec![ReasoningDetail::Text {
+                text: String::new(),
+                signature: None,
+            }],
+        };
+        assert!(no_sig.is_empty());
+
+        // Empty text + whitespace-only signature → still empty.
+        let whitespace_sig = ReasoningDetails {
+            id: None,
+            content: vec![ReasoningDetail::Text {
+                text: String::new(),
+                signature: Some("   ".to_string()),
+            }],
+        };
+        assert!(whitespace_sig.is_empty());
     }
 }
