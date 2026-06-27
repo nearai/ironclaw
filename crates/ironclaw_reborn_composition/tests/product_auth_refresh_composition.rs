@@ -1,3 +1,13 @@
+//! Gated to the durable storage features: the fix and the bug both live in
+//! `build_local_runtime`'s `#[cfg(any(feature = "libsql", feature = "postgres"))]`
+//! branch. Without those features the in-memory branch runs instead, whose
+//! unwrapped `InMemoryAuthProductServices::refresh_account` *also* returns
+//! `CredentialMissing` for an unknown account — so the assertion below would pass
+//! pre- and post-fix and guard nothing. Skipping (not falsely passing) under the
+//! in-memory feature set keeps this an honest regression guard. CI runs the crate
+//! with `--features libsql,postgres`.
+#![cfg(any(feature = "libsql", feature = "postgres"))]
+
 //! Regression (issue #5378): the local-dev / hosted-single-tenant product-auth
 //! composition must wrap the credential-account service in
 //! `ProviderBackedCredentialAccountService` so the runtime token-refresh path is
