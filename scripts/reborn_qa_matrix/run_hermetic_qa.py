@@ -872,6 +872,40 @@ WEBUI_V2_HIDDEN_STUBBED_ROUTE_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_HIDDEN_WORKFLOW_BROWSER_COMMAND = CommandSpec(
+    name="webui_v2_hidden_workflow_direct_routes_browser_smoke",
+    description=(
+        "Focused Playwright smoke for Reborn WebUI v2 hidden Jobs, Missions, "
+        "and Routines direct routes, verifying they render in Chromium without "
+        "legacy v1-shaped browser API calls."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py::test_reborn_v2_hidden_workflow_direct_routes_render_without_legacy_v1_calls",
+        "-q",
+    ],
+)
+
 WEBUI_V2_LOGS_CLIENT_COMMAND = CommandSpec(
     name="webui_v2_logs_client_contracts",
     description=(
@@ -2678,8 +2712,24 @@ CASES: dict[str, CaseSpec] = {
             "unsupported v1 gateway endpoints. Jobs/routines/missions shell "
             "presenters keep deterministic state labels, action visibility, "
             "sorting, summarization, and duration/id formatting while the "
-            "routes remain stubbed. Browser rows TC-10/11 remain separate "
-            "browser/live coverage."
+            "routes remain stubbed. Browser row TC-10 is covered by the "
+            "focused Reborn v2 Playwright smoke; browser row TC-11 remains "
+            "separate browser/live coverage."
+        ),
+    ),
+    "webui_v2_hidden_workflow_direct_routes_browser_smoke": CaseSpec(
+        name="webui_v2_hidden_workflow_direct_routes_browser_smoke",
+        feature="WebUI v2 hidden and stubbed direct routes",
+        category="Hermetic Reborn v2 Browser Smoke",
+        qa_matrix_test_ids=["REBCLI-070-TC-10"],
+        commands=[WEBUI_V2_HIDDEN_WORKFLOW_BROWSER_COMMAND],
+        notes=(
+            "Covers the non-duplicate browser-visible hidden workflow route "
+            "row: starts the Reborn WebUI v2 server against the mock LLM, "
+            "drives Chromium to /v2/jobs, /v2/missions, and /v2/routines, "
+            "asserts each route renders its empty/TODO shell, and fails if "
+            "the browser calls legacy /api/jobs, /api/routines, or "
+            "/api/engine/missions endpoints."
         ),
     ),
     "webui_v2_hidden_workflow_presenters_regression": CaseSpec(

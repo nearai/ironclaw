@@ -819,6 +819,50 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
     ).to_contain_text("slack")
 
 
+async def test_reborn_v2_hidden_workflow_direct_routes_render_without_legacy_v1_calls(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Hidden Jobs, Missions, and Routines routes render without legacy v1 fetches."""
+    legacy_requests: list[str] = []
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    async def fail_legacy_route(route):
+        legacy_requests.append(route.request.url)
+        await route.fulfill(
+            status=599,
+            content_type="application/json",
+            body=json.dumps({"error": "legacy v1 route must not be called"}),
+        )
+
+    for pattern in (
+        "**/api/jobs**",
+        "**/api/routines**",
+        "**/api/engine/missions**",
+    ):
+        await page.route(pattern, fail_legacy_route)
+
+    try:
+        for route_path, expected_texts in (
+            ("jobs", ("Total jobs", "No jobs yet")),
+            ("missions", ("Total missions", "Execution loops", "No missions match")),
+            ("routines", ("Total routines", "No routines yet")),
+        ):
+            await page.goto(
+                f"{reborn_v2_server}/v2/{route_path}?token={REBORN_V2_AUTH_TOKEN}",
+                wait_until="domcontentloaded",
+            )
+            await expect(page).to_have_url(re.compile(rf"/v2/{route_path}"))
+            for expected_text in expected_texts:
+                await expect(page.locator("body")).to_contain_text(
+                    expected_text, timeout=15000
+                )
+
+        assert legacy_requests == []
+    finally:
+        await context.close()
+
+
 async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
     """Threads are listed for the caller and deletion removes the thread and transcript."""
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
