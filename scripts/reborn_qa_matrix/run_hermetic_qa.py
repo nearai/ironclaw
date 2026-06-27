@@ -747,6 +747,82 @@ WEBUI_V2_DCR_OAUTH_CALLBACK_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_MANUAL_TOKEN_LEGACY_COMMAND = CommandSpec(
+    name="webui_v2_manual_token_legacy_submit_routes",
+    description=(
+        "Legacy product-auth manual-token submit route contracts for bearer "
+        "auth, redacted credential refs, invalid-secret handling, abandoned "
+        "interactions on submit failure, setup errors, body limits, "
+        "per-caller rate limits, and sanitized invalid fields."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "--test",
+        "webui_v2_product_auth",
+        "product_auth_manual_token",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_MANUAL_TOKEN_SPLIT_COMMAND = CommandSpec(
+    name="webui_v2_manual_token_split_routes",
+    description=(
+        "Split manual-token setup/secret-submit route contracts for redacted "
+        "projection, partial continuation rejection, invalid interaction "
+        "sanitization, invocation-id enforcement, empty provider/label "
+        "validation, and seeded gate challenge projection."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "--test",
+        "webui_v2_product_auth_4201",
+        "manual_token",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+WEBUI_V2_MANUAL_TOKEN_FACADE_COMMAND = CommandSpec(
+    name="webui_v2_manual_token_facade_contracts",
+    description=(
+        "Product-auth manual-token facade contracts for secret redaction, "
+        "auth-flow tracking, completed-flow retry after continuation "
+        "failure, cross-scope denial, stale/duplicate/malformed submit "
+        "fail-closed behavior, sanitized backend failures, and cleanup on "
+        "flow creation/completion failure."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,test-support",
+        "--test",
+        "manual_tokens",
+        "manual_token_facade",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 WEBUI_V2_DESCRIPTOR_POLICY_COMMAND = CommandSpec(
     name="webui_v2_descriptor_policy_surface",
     description=(
@@ -1198,6 +1274,34 @@ CASES: dict[str, CaseSpec] = {
             "cross-owner binding rejection, missing DCR registry fail-closed "
             "behavior, binding lookup fallback, DCR callback state/PKCE "
             "fallback, and blocked-turn gate resume."
+        ),
+    ),
+    "webui_v2_manual_token_regression": CaseSpec(
+        name="webui_v2_manual_token_regression",
+        feature="WebUI v2 product-auth manual-token routes",
+        category="Hermetic Manual Token Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-061-TC-01",
+            "REBCLI-061-TC-02",
+            "REBCLI-061-TC-03",
+            "REBCLI-061-TC-04",
+            "REBCLI-061-TC-05",
+            "REBCLI-061-TC-06",
+        ],
+        commands=[
+            WEBUI_V2_MANUAL_TOKEN_LEGACY_COMMAND,
+            WEBUI_V2_MANUAL_TOKEN_SPLIT_COMMAND,
+            WEBUI_V2_MANUAL_TOKEN_FACADE_COMMAND,
+        ],
+        notes=(
+            "Covers WebUI v2 manual-token API/runtime rows without "
+            "duplicating PR #5348 browser auth-card coverage: legacy submit "
+            "success and redaction, split setup/secret-submit success, seeded "
+            "gate projection, invalid secret redaction, abandoned interactions "
+            "on submit failure, partial continuation rejection, missing "
+            "invocation enforcement, bearer/body/rate-limit enforcement, "
+            "facade retry/cross-scope/fail-closed behavior, and sanitized "
+            "backend failures."
         ),
     ),
     "webui_v2_operator_config_api_regression": CaseSpec(

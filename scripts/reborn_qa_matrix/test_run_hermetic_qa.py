@@ -115,6 +115,14 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-061-TC-01",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "REBCLI-061-TC-06",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-065-TC-25",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -160,6 +168,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             )
             self.assertIn(
                 "webui_v2_extension_oauth_setup_regression",
+                {case["case"] for case in manifest["cases"]},
+            )
+            self.assertIn(
+                "webui_v2_manual_token_regression",
                 {case["case"] for case in manifest["cases"]},
             )
             self.assertIn(
@@ -706,6 +718,51 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn("extension_oauth_start", commands[1]["command"])
             self.assertIn("extension_google_oauth_start", commands[2]["command"])
             self.assertIn("dcr_oauth_callback", commands[3]["command"])
+
+    def test_manual_token_case_dry_run_maps_api_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "webui_v2_manual_token_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-061-TC-01",
+                    "REBCLI-061-TC-02",
+                    "REBCLI-061-TC-03",
+                    "REBCLI-061-TC-04",
+                    "REBCLI-061-TC-05",
+                    "REBCLI-061-TC-06",
+                ],
+            )
+            self.assertEqual(
+                [
+                    command["name"]
+                    for command in results["results"][0]["details"]["commands"]
+                ],
+                [
+                    "webui_v2_manual_token_legacy_submit_routes",
+                    "webui_v2_manual_token_split_routes",
+                    "webui_v2_manual_token_facade_contracts",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertIn("product_auth_manual_token", commands[0]["command"])
+            self.assertIn("webui_v2_product_auth_4201", commands[1]["command"])
+            self.assertIn("manual_tokens", commands[2]["command"])
+            self.assertIn("manual_token_facade", commands[2]["command"])
 
     def test_failed_command_stops_later_commands_in_case(self):
         case = run_hermetic_qa.CaseSpec(
