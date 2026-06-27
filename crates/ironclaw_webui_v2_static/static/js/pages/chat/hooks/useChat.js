@@ -217,6 +217,8 @@ export function useChat(threadId) {
     inFlight: false,
   });
   const submitBusyRef = React.useRef(false);
+  const locallyRunningThreadIdsRef = React.useRef(new Set());
+  const locallyRunningThreadByRunIdRef = React.useRef(new Map());
 
   // Per-thread transient state must not leak across thread switches.
   // Without this reset, clicking "+ New" while the previous thread is
@@ -361,6 +363,11 @@ export function useChat(threadId) {
     // user message from the server doesn't render alongside its
     // pre-submit optimistic twin.
     onRunSettled: (_runId, { success }) => {
+      const settledThreadId = locallyRunningThreadByRunIdRef.current.get(_runId);
+      if (settledThreadId) {
+        locallyRunningThreadByRunIdRef.current.delete(_runId);
+        locallyRunningThreadIdsRef.current.delete(settledThreadId);
+      }
       // submitBusyRef is released by send()'s `finally` when the POST settles —
       // it is NOT this callback's to clear. Releasing the POST re-entrancy guard
       // on run settlement is the wrong layer (and was the deadlock #5256 fixed).
@@ -422,10 +429,14 @@ export function useChat(threadId) {
         isProcessingRef.current &&
         Boolean(sendTargetThreadId) &&
         sendTargetThreadId === threadId;
+      const localRunBlocksSend =
+        Boolean(sendTargetThreadId) &&
+        locallyRunningThreadIdsRef.current.has(sendTargetThreadId);
       if (
         submitBusyRef.current ||
         processingBlocksSend ||
-        activeRunBlocksSend
+        activeRunBlocksSend ||
+        localRunBlocksSend
       ) {
         return null;
       }
@@ -483,7 +494,12 @@ export function useChat(threadId) {
       const updateCurrentRunState = (updater) => {
         if (shouldRenderInCurrentThread) updater();
       };
-
+      // Only the rendered thread has an SSE settle path in this hook. Background
+      // target sends are left to the server's rejected_busy response instead.
+      const shouldTrackLocalRun = shouldRenderInCurrentThread;
+      if (shouldTrackLocalRun) {
+        locallyRunningThreadIdsRef.current.add(sendThreadId);
+      }
       submitBusyRef.current = true;
       updateCurrentThread((prev) => [...prev, pendingRenderMessage]);
       updateSeededTarget((prev) => [...prev, pendingRenderMessage]);
@@ -506,6 +522,12 @@ export function useChat(threadId) {
         // repeated sends do not need to refetch the whole thread list.
         if (threadNeedsSidebarRefresh(sendThreadId)) {
           queryClient.invalidateQueries({ queryKey: ["threads"] });
+        }
+        if (response?.run_id && shouldTrackLocalRun) {
+          locallyRunningThreadByRunIdRef.current.set(
+            response.run_id,
+            sendThreadId,
+          );
         }
         if (response?.run_id && shouldRenderInCurrentThread) {
           setActiveRun({
@@ -535,6 +557,12 @@ export function useChat(threadId) {
         // server's notice (if present) as a system message so the user
         // knows to resend.
         if (response?.outcome === "rejected_busy") {
+          if (response?.run_id && shouldTrackLocalRun) {
+            locallyRunningThreadByRunIdRef.current.delete(response.run_id);
+          }
+          if (shouldTrackLocalRun) {
+            locallyRunningThreadIdsRef.current.delete(sendThreadId);
+          }
           const markRejected = (prev) =>
             prev.map((m) =>
               m.id === optimisticId
@@ -580,10 +608,16 @@ export function useChat(threadId) {
           updateCurrentRunState(() => setIsProcessing(false));
           submitBusyRef.current = false;
         } else if (!response?.run_id) {
+          if (shouldTrackLocalRun) {
+            locallyRunningThreadIdsRef.current.delete(sendThreadId);
+          }
           submitBusyRef.current = false;
         }
         return response;
       } catch (err) {
+        if (shouldTrackLocalRun) {
+          locallyRunningThreadIdsRef.current.delete(sendThreadId);
+        }
         if (err.status === 429) {
           setCooldownUntil(Date.now() + retryAfterMs(err));
         }
@@ -612,7 +646,7 @@ export function useChat(threadId) {
         // flight — that thread's SSE is torn down, its settle event never
         // arrives, the guard stays `true`, and every later send is silently
         // dropped. Blocking a resubmit into a still-running thread is the job
-        // of the per-destination `activeRunBlocksSend` guard above, not this.
+        // of the per-destination run guards above, not this.
         submitBusyRef.current = false;
         // Drop the optimistic from the pending ref unconditionally:
         // on success the confirmed row arrives via /timeline, and on
@@ -769,6 +803,14 @@ export function useChat(threadId) {
       setIsProcessing(false);
       setActiveRun(null);
       submitBusyRef.current = false;
+      const runThreadId =
+        locallyRunningThreadByRunIdRef.current.get(runId) ||
+        activeRun?.threadId ||
+        threadId;
+      locallyRunningThreadByRunIdRef.current.delete(runId);
+      if (runThreadId) {
+        locallyRunningThreadIdsRef.current.delete(runThreadId);
+      }
       await cancelRunRequest({ threadId, runId, reason });
     },
     [activeRun, threadId],

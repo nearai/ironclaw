@@ -2308,6 +2308,109 @@ test("useChat.send: accepted run blocks another submit until settlement", async 
   assert.equal(sendCalls, 2);
 });
 
+test("useChat.send: created thread stays blocked until accepted run settles", async () => {
+  const createdThreadId = "thread-created";
+  let renderedMessages = [];
+  let createThreadCalls = 0;
+  let sendCalls = 0;
+  const seededByThread = new Map();
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      createThreadCalls += 1;
+      return { thread: { thread_id: createdThreadId } };
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async ({ content, threadId }) => {
+      sendCalls += 1;
+      return {
+        accepted_message_ref: `msg:created-${sendCalls}`,
+        run_id: `run-${sendCalls}`,
+        status: "queued",
+        thread_id: threadId,
+        content,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: (args) => {
+      context.chatEventsArgs = args;
+      return () => {};
+    },
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: (threadId, updater) => {
+        const prev = seededByThread.get(threadId) || [];
+        seededByThread.set(
+          threadId,
+          typeof updater === "function" ? updater(prev) : updater,
+        );
+      },
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(null);
+  const first = await chat.send("first message creates the thread");
+  assert.equal(createThreadCalls, 1);
+  assert.equal(first.run_id, "run-1");
+  assert.equal(first.thread_id, createdThreadId);
+
+  context.chatEventsArgs.setIsProcessing(false);
+  context.chatEventsArgs.setActiveRun(null);
+
+  const second = await chat.send("draft while the reply is still running", {
+    threadId: createdThreadId,
+  });
+  assert.equal(second, null);
+  assert.equal(sendCalls, 1);
+
+  context.chatEventsArgs.onRunSettled("run-1", { success: true });
+
+  const third = await chat.send("message after settlement", {
+    threadId: createdThreadId,
+  });
+  assert.equal(third.run_id, "run-2");
+  assert.equal(sendCalls, 2);
+});
+
 test("useChat.send: a send to another thread is not blocked by an unsettled run (submitBusyRef deadlock #5256)", async () => {
   // The deadlock that hand-rolled unit fixtures missed: `submitBusyRef` is set
   // on send and was only released in `onRunSettled` (delivered over the *open*
