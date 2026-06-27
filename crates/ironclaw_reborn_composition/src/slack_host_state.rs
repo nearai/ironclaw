@@ -944,63 +944,40 @@ where
             self.cleanup_actor_pairing_code_record(actor_record).await;
         }
 
-        let expires_at = Utc::now()
-            + chrono::Duration::from_std(self.pairing_ttl).map_err(|_| {
-                SlackPersonalBindingPairingError::Backend(
-                    "Slack pairing TTL could not be represented".into(),
-                )
-            })?;
-        for _ in 0..PAIRING_CODE_RETRIES {
-            let code = SlackPersonalBindingPairingCode::new(random_pairing_code())?;
-            let path = Self::pairing_code_path(&code).map_err(map_pairing_fs_error)?;
-            let record = StoredSlackPairingChallenge::pending(&code, &challenge, expires_at);
-            match self
-                .write_record(&path, &record, CasExpectation::Absent)
-                .await
-            {
-                Ok(_) => {
-                    let actor_record =
-                        StoredSlackPairingActorChallenge::pending(&code, &challenge, expires_at);
-                    let actor_cas = existing_actor
-                        .as_ref()
-                        .map(|(_, version)| CasExpectation::Version(*version))
-                        .unwrap_or(CasExpectation::Absent);
-                    match self
-                        .write_record(&actor_path, &actor_record, actor_cas)
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(FilesystemError::VersionMismatch { .. }) => {
-                            self.cleanup_pairing_code_record(&path).await;
-                            let Some((winner, _)) = self
-                                .read_record::<StoredSlackPairingActorChallenge>(&actor_path)
-                                .await
-                                .map_err(map_pairing_fs_error)?
-                            else {
-                                continue;
-                            };
-                            if let Some(issued) = self
-                                .active_actor_pairing_challenge(&winner, &challenge)
-                                .await?
-                            {
-                                return Ok(issued);
-                            }
-                            continue;
-                        }
-                        Err(error) => {
-                            self.cleanup_pairing_code_record(&path).await;
-                            return Err(map_pairing_fs_error(error));
-                        }
-                    }
-                    return Ok(IssuedSlackPersonalBindingPairingChallenge { code, challenge });
-                }
-                Err(FilesystemError::VersionMismatch { .. }) => continue,
-                Err(error) => return Err(map_pairing_fs_error(error)),
-            }
+        self.mint_fresh_challenge(
+            challenge,
+            &actor_path,
+            existing_actor.as_ref().map(|(_, version)| *version),
+        )
+        .await
+    }
+
+    async fn reissue_challenge(
+        &self,
+        challenge: SlackPersonalBindingPairingChallenge,
+    ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError> {
+        let actor_path = Self::pairing_actor_path(&challenge).map_err(map_pairing_fs_error)?;
+        let actor_lock = self.lock_for(format!(
+            "pairing-actor:{}:{}",
+            challenge.installation_id.as_str(),
+            challenge.slack_user_id.as_str()
+        ));
+        let _actor_guard = actor_lock.lock().await;
+        let existing_actor = self
+            .read_record::<StoredSlackPairingActorChallenge>(&actor_path)
+            .await
+            .map_err(map_pairing_fs_error)?;
+        // Explicit recovery always invalidates any outstanding code (even one
+        // still active) so the user is handed a guaranteed-fresh code.
+        if let Some((actor_record, _)) = existing_actor.as_ref() {
+            self.cleanup_actor_pairing_code_record(actor_record).await;
         }
-        Err(SlackPersonalBindingPairingError::Backend(
-            "could not allocate a unique Slack pairing code".into(),
-        ))
+        self.mint_fresh_challenge(
+            challenge,
+            &actor_path,
+            existing_actor.as_ref().map(|(_, version)| *version),
+        )
+        .await
     }
 
     async fn get_challenge(
@@ -1242,6 +1219,84 @@ impl<F> FilesystemSlackHostState<F>
 where
     F: RootFilesystem + 'static,
 {
+    /// Allocate a brand-new pairing code + actor record for `challenge`,
+    /// overwriting the actor record at `actor_path` (CAS against
+    /// `existing_actor_version`, or expecting absence when `None`). Shared by
+    /// [`Self::issue_challenge`] and the force-fresh
+    /// [`Self::reissue_challenge`]; callers hold the per-actor lock and have
+    /// already cleaned up any code record they intend to invalidate.
+    async fn mint_fresh_challenge(
+        &self,
+        challenge: SlackPersonalBindingPairingChallenge,
+        actor_path: &ScopedPath,
+        existing_actor_version: Option<RecordVersion>,
+    ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError> {
+        let expires_at = Utc::now()
+            + chrono::Duration::from_std(self.pairing_ttl).map_err(|_| {
+                SlackPersonalBindingPairingError::Backend(
+                    "Slack pairing TTL could not be represented".into(),
+                )
+            })?;
+        for _ in 0..PAIRING_CODE_RETRIES {
+            let code = SlackPersonalBindingPairingCode::new(random_pairing_code())?;
+            let path = Self::pairing_code_path(&code).map_err(map_pairing_fs_error)?;
+            let record = StoredSlackPairingChallenge::pending(&code, &challenge, expires_at);
+            match self
+                .write_record(&path, &record, CasExpectation::Absent)
+                .await
+            {
+                Ok(_) => {
+                    let actor_record =
+                        StoredSlackPairingActorChallenge::pending(&code, &challenge, expires_at);
+                    let actor_cas = existing_actor_version
+                        .map(CasExpectation::Version)
+                        .unwrap_or(CasExpectation::Absent);
+                    match self
+                        .write_record(actor_path, &actor_record, actor_cas)
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(FilesystemError::VersionMismatch { .. }) => {
+                            self.cleanup_pairing_code_record(&path).await;
+                            let Some((winner, _)) = self
+                                .read_record::<StoredSlackPairingActorChallenge>(actor_path)
+                                .await
+                                .map_err(map_pairing_fs_error)?
+                            else {
+                                continue;
+                            };
+                            if let Some(issued) = self
+                                .active_actor_pairing_challenge(&winner, &challenge)
+                                .await?
+                            {
+                                return Ok(issued);
+                            }
+                            continue;
+                        }
+                        Err(error) => {
+                            self.cleanup_pairing_code_record(&path).await;
+                            return Err(map_pairing_fs_error(error));
+                        }
+                    }
+                    return Ok(IssuedSlackPersonalBindingPairingChallenge { code, challenge });
+                }
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                // security: this FS error is from writing the code record, whose
+                // path (`pairing/code/<code>.json`) the error's Display embeds.
+                // Map to a code-free error so the pairing code can never reach an
+                // error string or log line (the handler logs the cause at debug).
+                Err(_) => {
+                    return Err(SlackPersonalBindingPairingError::Backend(
+                        "Slack pairing code could not be persisted".into(),
+                    ));
+                }
+            }
+        }
+        Err(SlackPersonalBindingPairingError::Backend(
+            "could not allocate a unique Slack pairing code".into(),
+        ))
+    }
+
     async fn active_actor_pairing_challenge(
         &self,
         actor_record: &StoredSlackPairingActorChallenge,
@@ -2096,6 +2151,59 @@ mod tests {
                 .await
                 .expect("reissued code remains active"),
             challenge()
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_reissue_mints_fresh_and_invalidates_prior() {
+        let state = state();
+        let first = state
+            .issue_challenge(challenge())
+            .await
+            .expect("issue succeeds");
+        // A normal re-issue would reuse the still-active code; reissue must mint fresh.
+        let reissued = state
+            .reissue_challenge(challenge())
+            .await
+            .expect("reissue succeeds");
+
+        assert_ne!(reissued.code, first.code);
+        assert_eq!(reissued.challenge, challenge());
+        assert!(matches!(
+            state.get_challenge(&first.code).await,
+            Err(SlackPersonalBindingPairingError::ChallengeNotFound)
+        ));
+        assert_eq!(
+            state
+                .get_challenge(&reissued.code)
+                .await
+                .expect("reissued code is active"),
+            challenge()
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_concurrent_reissue_keeps_single_active_code() {
+        let state = Arc::new(state());
+        state
+            .issue_challenge(challenge())
+            .await
+            .expect("issue succeeds");
+        let first_state = Arc::clone(&state);
+        let second_state = Arc::clone(&state);
+
+        let (first, second) = tokio::join!(
+            first_state.reissue_challenge(challenge()),
+            second_state.reissue_challenge(challenge())
+        );
+        let first = first.expect("first reissue succeeds");
+        let second = second.expect("second reissue succeeds");
+
+        let first_active = state.get_challenge(&first.code).await.is_ok();
+        let second_active = state.get_challenge(&second.code).await.is_ok();
+        assert!(
+            first_active ^ second_active,
+            "exactly one reissued code should remain active (first={first_active}, second={second_active})"
         );
     }
 

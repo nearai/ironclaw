@@ -848,11 +848,11 @@ registerPack("hi", {
   "pairing.error": "पेयरिंग विफल.",
   "pairing.none": "कोई लंबित युग्मन अनुरोध नहीं।",
   "pairing.slackTitle": "Slack खाता कनेक्शन",
-  "pairing.slackInstructions": "Slack ऐप को संदेश भेजें, फिर यहां कोड दर्ज करें।",
+  "pairing.slackInstructions": "कोड पाने के लिए Slack में /pair चलाएं, फिर उसे यहां पेस्ट करें। कोड 10 मिनट में समाप्त हो जाते हैं।",
   "pairing.slackPlaceholder": "Slack पेयरिंग कोड दर्ज करें…",
   "pairing.connect": "कनेक्ट",
   "pairing.slackSuccess": "Slack खाता कनेक्ट किया गया।",
-  "pairing.slackError": "अमान्य या समाप्त हो चुका Slack युग्मन कोड।",
+  "pairing.slackError": "अमान्य या समाप्त हो चुका Slack युग्मन कोड। नया कोड पाने के लिए Slack में /pair चलाएं।",
 
   // Admin — tabs
   "admin.tab.dashboard": "डैशबोर्ड",

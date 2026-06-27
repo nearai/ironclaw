@@ -72,8 +72,9 @@ use crate::slack_personal_binding_pairing::{
 };
 use crate::slack_personal_binding_pairing_serve::SlackPersonalBindingPairingRouteConfig;
 use crate::slack_serve::{
-    SlackEventsRouteState, SlackInstallationRecord, SlackInstallationSelector, SlackTeamId,
-    StaticSlackInstallationResolver, slack_events_route_mount,
+    SlackCommandsRouteState, SlackEventsRouteState, SlackIngressService, SlackInstallationRecord,
+    SlackInstallationResolver, SlackInstallationSelector, SlackTeamId,
+    StaticSlackInstallationResolver, slack_commands_route_mount, slack_events_route_mount,
 };
 use crate::webui_serve::PublicRouteMount;
 
@@ -404,6 +405,10 @@ pub enum SlackHostBetaBuildError {
 #[non_exhaustive]
 pub struct SlackHostBetaMounts {
     pub events: PublicRouteMount,
+    /// The signed `/pair` slash-command route. Shares the events installation
+    /// resolver so both verify against the same Slack signing identity; the
+    /// shared resolver's drain lives on `events`, so this mount carries none.
+    pub commands: PublicRouteMount,
     pub personal_binding_pairing: SlackPersonalBindingPairingRouteConfig,
     pub channel_routes: SlackChannelRouteAdminRouteConfig,
     /// Internal target-authority handle consumed only by WebUI product-facade composition.
@@ -594,12 +599,23 @@ pub fn build_slack_host_beta_mounts(
             config.installation_id.clone(),
             Arc::clone(&channel_route_store),
         ));
-    let events = build_slack_events_route_mount_with_resolvers(
-        runtime,
-        config.clone(),
-        actor_user_resolver,
-        Some(subject_route_resolver),
-    )?;
+    // Build the installation resolver once and share it across the events and
+    // `/pair` commands routes: a single source of truth for the Slack signing
+    // identity, and the events drain covers the shared resolver.
+    let resolver: Arc<dyn SlackInstallationResolver> =
+        build_slack_installation_resolver_with_resolvers(
+            runtime,
+            config.clone(),
+            actor_user_resolver,
+            Some(subject_route_resolver),
+        )?;
+    let events =
+        slack_events_route_mount(SlackEventsRouteState::from_resolver(Arc::clone(&resolver)));
+    let commands = slack_commands_route_mount(SlackCommandsRouteState::new(
+        SlackIngressService::new(Arc::clone(&resolver)),
+        pairing.clone(),
+        state.clone(),
+    ));
     let allowed_route_subjects = std::iter::once(config.user_id.clone())
         .chain(config.shared_subject_user_id.clone())
         .chain(
@@ -681,6 +697,7 @@ pub fn build_slack_host_beta_mounts(
     if outbound_delivery_provider_already_registered {
         return Ok(SlackHostBetaMounts {
             events,
+            commands,
             personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
             channel_routes,
             outbound_delivery_target_provider,
@@ -706,6 +723,7 @@ pub fn build_slack_host_beta_mounts(
     }
     Ok(SlackHostBetaMounts {
         events,
+        commands,
         personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
         channel_routes,
         outbound_delivery_target_provider,
@@ -734,6 +752,26 @@ fn build_slack_events_route_mount_with_resolvers(
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
     subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
 ) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
+    let resolver = build_slack_installation_resolver_with_resolvers(
+        runtime,
+        config,
+        actor_user_resolver,
+        subject_route_resolver,
+    )?;
+    Ok(slack_events_route_mount(
+        SlackEventsRouteState::from_resolver(resolver),
+    ))
+}
+
+/// Build the static installation resolver shared by the events and `/pair`
+/// commands routes. Both mounts verify against the same signing identity, so
+/// the resolver is constructed once and cloned into each route state.
+fn build_slack_installation_resolver_with_resolvers(
+    runtime: &RebornRuntime,
+    config: SlackHostBetaConfig,
+    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+    subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
+) -> Result<Arc<StaticSlackInstallationResolver>, SlackHostBetaBuildError> {
     let parts = SlackHostBetaRuntimeParts::from_runtime(runtime)?;
     let record = build_slack_installation_record_with_resolvers(
         &parts,
@@ -741,11 +779,7 @@ fn build_slack_events_route_mount_with_resolvers(
         actor_user_resolver,
         subject_route_resolver,
     )?;
-    Ok(slack_events_route_mount(
-        SlackEventsRouteState::from_resolver(Arc::new(StaticSlackInstallationResolver::new([
-            record,
-        ]))),
-    ))
+    Ok(Arc::new(StaticSlackInstallationResolver::new([record])))
 }
 
 fn build_slack_installation_record_with_resolvers(
@@ -1078,7 +1112,7 @@ mod tests {
     use crate::slack_personal_binding_pairing_serve::{
         WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH, slack_personal_binding_pairing_route_mount,
     };
-    use crate::slack_serve::SlackUserId;
+    use crate::slack_serve::{SLACK_COMMANDS_PATH, SlackUserId};
     use crate::{
         RebornBuildError, RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput,
         SLACK_EVENTS_PATH, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
@@ -1439,7 +1473,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_slack_host_beta_mounts_exposes_events_and_pairing_redeem_route() {
+    async fn build_slack_host_beta_mounts_exposes_events_pairing_and_command_routes() {
         let root = tempfile::tempdir().expect("tempdir");
         let runtime = build_reborn_runtime(
             RebornRuntimeInput::from_services(
@@ -1469,6 +1503,51 @@ mod tests {
                 .iter()
                 .any(|descriptor| descriptor.route_pattern().as_str()
                     == WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
+        );
+        assert_eq!(mounts.commands.descriptors.len(), 1);
+        assert!(
+            mounts
+                .commands
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.route_pattern().as_str() == SLACK_COMMANDS_PATH),
+            "static host-beta mounts must expose the /pair commands route"
+        );
+        assert!(
+            mounts.commands.drain.is_none(),
+            "the commands route shares the events resolver and carries no drain of its own"
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn build_slack_host_beta_runtime_mounts_mounts_pair_command_route() {
+        // The dynamic builder is the production path `serve` uses
+        // (`build_slack_host_beta_runtime_mounts`). It must expose the `/pair`
+        // commands route alongside events so the slash command is reachable in
+        // production, not only in the legacy static composition.
+        let (runtime, _root) = runtime().await;
+
+        let mounts = build_slack_host_beta_runtime_mounts(
+            &runtime,
+            dynamic_runtime_config_without_legacy_actor(),
+        )
+        .await
+        .expect("dynamic mounts build");
+
+        assert_eq!(mounts.commands.descriptors.len(), 1);
+        assert!(
+            mounts
+                .commands
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.route_pattern().as_str() == SLACK_COMMANDS_PATH),
+            "dynamic (production) host-beta mounts must expose the /pair commands route"
+        );
+        assert!(
+            mounts.commands.drain.is_none(),
+            "the commands route shares the events resolver and carries no drain of its own"
         );
 
         runtime.shutdown().await.expect("runtime shuts down");

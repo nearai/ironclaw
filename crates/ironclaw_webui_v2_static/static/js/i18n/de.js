@@ -848,11 +848,11 @@ registerPack("de", {
   "pairing.error": "Kopplung fehlgeschlagen.",
   "pairing.none": "Keine ausstehenden Pairing‑Anfragen.",
   "pairing.slackTitle": "Slack-Kontoverbindung",
-  "pairing.slackInstructions": "Nachricht an die Slack-App, dann geben Sie hier den Code ein.",
+  "pairing.slackInstructions": "Führen Sie /pair in Slack aus, um einen Code zu erhalten, und fügen Sie ihn hier ein. Codes laufen nach 10 Minuten ab.",
   "pairing.slackPlaceholder": "Geben Sie den Slack-Kopplungscode ein…",
   "pairing.connect": "Verbinden",
   "pairing.slackSuccess": "Slack-Konto verbunden.",
-  "pairing.slackError": "Ungültiger oder abgelaufener Slack-Kopplungscode.",
+  "pairing.slackError": "Ungültiger oder abgelaufener Slack-Kopplungscode. Führen Sie /pair in Slack aus, um einen neuen zu erhalten.",
 
   // Admin — tabs
   "admin.tab.dashboard": "Dashboard",

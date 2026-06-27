@@ -936,11 +936,11 @@ registerPack("en", {
   "pairing.error": "Pairing failed.",
   "pairing.none": "No pending pairing requests.",
   "pairing.slackTitle": "Slack account connection",
-  "pairing.slackInstructions": "Message the Slack app, then enter the code here.",
+  "pairing.slackInstructions": "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes.",
   "pairing.slackPlaceholder": "Enter Slack pairing code…",
   "pairing.connect": "Connect",
   "pairing.slackSuccess": "Slack account connected.",
-  "pairing.slackError": "Invalid or expired Slack pairing code.",
+  "pairing.slackError": "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.",
 
   // Admin — tabs
   "admin.tab.dashboard": "Dashboard",

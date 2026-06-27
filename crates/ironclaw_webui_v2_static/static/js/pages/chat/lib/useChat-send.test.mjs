@@ -1872,7 +1872,7 @@ test("useChat.send: channel connect requests return an action without submitting
           command_aliases: ["slack", "slack account"],
           action: {
             title: "Slack account connection",
-            instructions: "Message the Slack app, then enter the code here.",
+            instructions: "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes.",
           },
         },
       ],
@@ -1947,7 +1947,7 @@ test("useChat.send: unmatched channel connect requests submit the prompt", async
           command_aliases: ["slack", "slack account"],
           action: {
             title: "Slack account connection",
-            instructions: "Message the Slack app, then enter the code here.",
+            instructions: "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes.",
           },
         },
       ],
