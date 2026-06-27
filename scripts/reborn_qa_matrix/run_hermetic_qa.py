@@ -1541,6 +1541,53 @@ SLACK_PERSONAL_BINDING_SERVICE_COMMAND = CommandSpec(
     ],
 )
 
+SLACK_PERSONAL_PAIRING_ROUTE_COMMAND = CommandSpec(
+    name="slack_personal_pairing_redeem_route_contracts",
+    description=(
+        "Focused Slack personal pairing WebUI route contracts for bearer-bound "
+        "code redemption, invalid/unknown/foreign-tenant code handling, "
+        "unsupported-channel rejection, and binding-store failure mapping."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "slack-v2-host-beta",
+        "slack_personal_binding_pairing_serve",
+        "--lib",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+SLACK_PERSONAL_PAIRING_SERVICE_COMMAND = CommandSpec(
+    name="slack_personal_pairing_service_contracts",
+    description=(
+        "Focused Slack personal pairing service contracts for code validation, "
+        "tenant-scoped challenge consumption, foreign/unknown code rejection, "
+        "challenge issue failures, resolver challenge issuance, cooldown, "
+        "non-Slack shapes, and lookup/issue error propagation."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "slack-v2-host-beta",
+        "slack_personal_binding_pairing::tests",
+        "--lib",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 SLACK_HOST_BETA_WEBUI_ONLY_CLI_COMMAND = CommandSpec(
     name="slack_host_beta_webui_only_cli_contracts",
     description=(
@@ -3598,6 +3645,34 @@ CASES: dict[str, CaseSpec] = {
             "job tab/state/action/date/duration/meta formatting, mission "
             "summary/tone/sort/date fallback behavior, and routine status/"
             "verification/sort/action/date fallback behavior."
+        ),
+    ),
+    "slack_personal_pairing_regression": CaseSpec(
+        name="slack_personal_pairing_regression",
+        feature="Slack personal pairing workflow",
+        category="Hermetic Slack Personal Pairing Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-053-TC-01",
+            "REBCLI-053-TC-02",
+            "REBCLI-053-TC-03",
+            "REBCLI-053-TC-04",
+            "REBCLI-053-TC-05",
+            "REBCLI-053-TC-06",
+        ],
+        commands=[
+            SLACK_PERSONAL_PAIRING_ROUTE_COMMAND,
+            SLACK_PERSONAL_PAIRING_SERVICE_COMMAND,
+        ],
+        notes=(
+            "Covers Slack personal pairing rows without live Slack network "
+            "calls: bearer-bound WebUI proof-code redemption, accepted Slack "
+            "channel aliases, invalid/unknown/foreign-tenant/unsupported-code "
+            "failures, binding-store unavailable mapping, tenant-scoped "
+            "challenge consumption, code validation, pairing challenge issue "
+            "failure propagation, resolver challenge issuance, duplicate "
+            "cooldown, non-Slack shape skipping, and lookup/issue error "
+            "propagation. Browser proof-code button/Enter coverage remains "
+            "separate browser/live coverage."
         ),
     ),
     "slack_personal_oauth_binding_regression": CaseSpec(
