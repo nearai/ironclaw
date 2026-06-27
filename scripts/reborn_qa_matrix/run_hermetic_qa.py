@@ -896,6 +896,52 @@ REBORN_CLI_CREDENTIAL_REFRESH_SETTINGS_COMMAND = CommandSpec(
     ],
 )
 
+REBORN_CLI_DOCKERFILE_COMMAND = CommandSpec(
+    name="reborn_cli_dockerfile_contracts",
+    description=(
+        "Focused Reborn CLI Dockerfile contracts for WebUI v2, Slack host, "
+        "libSQL/Postgres feature builds, shipped seed configs, migration "
+        "copying, Railway-safe volume handling, and absent Docker VOLUME "
+        "instructions."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_cli",
+        "--test",
+        "smoke",
+        "dockerfile_reborn",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+REBORN_CLI_DOCKER_RAILWAY_ENTRYPOINT_COMMAND = CommandSpec(
+    name="reborn_cli_docker_railway_entrypoint_contracts",
+    description=(
+        "Focused Reborn CLI Docker/Railway entrypoint contracts for local "
+        "and production seed configs, Railway volume home selection, "
+        "ephemeral local-dev rejection, stale-config rejection, and default "
+        "config path safety."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_cli",
+        "--test",
+        "smoke",
+        "docker_reborn",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 REBORN_CLI_WEBUI_V2_BINARY_COMMAND = CommandSpec(
     name="reborn_cli_webui_v2_binary",
     description=(
@@ -2819,6 +2865,32 @@ CASES: dict[str, CaseSpec] = {
             "by default, env force-on and kill-switch values propagate into "
             "RuntimeInput, blank env preserves the caller default, and "
             "invalid/non-UTF-8 env values fail closed before runtime startup."
+        ),
+    ),
+    "reborn_cli_docker_railway_entrypoint_regression": CaseSpec(
+        name="reborn_cli_docker_railway_entrypoint_regression",
+        feature="Docker image and Railway entrypoint",
+        category="Hermetic Reborn CLI Deployment Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-042-TC-01",
+            "REBCLI-042-TC-02",
+            "REBCLI-042-TC-03",
+            "REBCLI-042-TC-04",
+            "REBCLI-042-TC-05",
+            "REBCLI-042-TC-06",
+        ],
+        commands=[
+            REBORN_CLI_DOCKERFILE_COMMAND,
+            REBORN_CLI_DOCKER_RAILWAY_ENTRYPOINT_COMMAND,
+        ],
+        notes=(
+            "Covers the non-duplicate Reborn CLI deployment row: "
+            "Dockerfile.reborn builds the WebUI v2/Slack/libSQL/Postgres "
+            "feature binary and ships required configs, and docker/reborn/"
+            "entrypoint.sh selects Railway volume homes, rejects unsafe "
+            "local-dev Railway storage, accepts production without a volume, "
+            "rejects stale local-dev production config, and enforces default "
+            "config path safety."
         ),
     ),
     "webui_v2_hidden_workflow_direct_routes_browser_smoke": CaseSpec(

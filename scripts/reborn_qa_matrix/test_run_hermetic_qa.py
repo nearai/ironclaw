@@ -59,6 +59,14 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-042-TC-01",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "REBCLI-042-TC-06",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-043-TC-01",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -1298,6 +1306,53 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn(
                 "cargo test -p ironclaw_reborn_cli credential_refresh",
                 commands[0]["command"],
+            )
+
+    def test_reborn_cli_docker_railway_entrypoint_case_dry_run_maps_matrix_ids(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "reborn_cli_docker_railway_entrypoint_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-042-TC-01",
+                    "REBCLI-042-TC-02",
+                    "REBCLI-042-TC-03",
+                    "REBCLI-042-TC-04",
+                    "REBCLI-042-TC-05",
+                    "REBCLI-042-TC-06",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                [command["name"] for command in commands],
+                [
+                    "reborn_cli_dockerfile_contracts",
+                    "reborn_cli_docker_railway_entrypoint_contracts",
+                ],
+            )
+            self.assertIn(
+                "cargo test -p ironclaw_reborn_cli --test smoke dockerfile_reborn",
+                commands[0]["command"],
+            )
+            self.assertIn(
+                "cargo test -p ironclaw_reborn_cli --test smoke docker_reborn",
+                commands[1]["command"],
             )
 
     def test_webui_hidden_workflow_browser_case_dry_run_maps_matrix_id(self):
