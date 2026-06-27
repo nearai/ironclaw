@@ -227,7 +227,15 @@ export function ChatInput({
       sendBlockedRef.current = submitDisabledRef.current;
       setIsSending(false);
     }
-  }, [text, attachments, onSend, draftKey, cancelPendingDraft]);
+  }, [
+    text,
+    attachments,
+    onSend,
+    draftKey,
+    cancelPendingDraft,
+    disabled,
+    sendDisabled,
+  ]);
 
   const handleChange = React.useCallback(
     (e) => {

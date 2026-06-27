@@ -1382,6 +1382,9 @@ impl ProviderToolDefinition {
         ))
     }
 
+    /// Builds a definition from a provider-safe name that has already passed
+    /// [`ProviderToolName`] validation. Use [`Self::from_parts`] for raw
+    /// provider names that still need validation.
     pub fn from_typed_parts(
         capability_id: CapabilityId,
         name: ProviderToolName,
@@ -1453,11 +1456,7 @@ impl ProviderToolCall {
 
 fn provider_tool_name_error(error: HostApiError) -> AgentLoopHostError {
     let detail = match error {
-        HostApiError::InvalidId {
-            kind: "provider_tool_name",
-            reason,
-            ..
-        } => reason,
+        HostApiError::InvalidId { reason, .. } => reason,
         other => other.to_string(),
     };
     AgentLoopHostError::new(
