@@ -119,6 +119,14 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-051-TC-07",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "REBCLI-051-TC-08",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-055-TC-12",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -2327,6 +2335,8 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-051-TC-04",
                     "REBCLI-051-TC-05",
                     "REBCLI-051-TC-06",
+                    "REBCLI-051-TC-07",
+                    "REBCLI-051-TC-08",
                 ],
             )
             self.assertEqual(
@@ -2341,6 +2351,8 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "webui_v2_sso_session_round_trip",
                     "webui_v2_sso_network_limits",
                     "webui_v2_sso_public_mount_policy",
+                    "webui_v2_public_sso_owner_crate_contracts",
+                    "reborn_identity_foundation_contracts",
                 ],
             )
             commands = results["results"][0]["details"]["commands"]
@@ -2350,6 +2362,9 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertIn("--test session_round_trip", commands[3]["command"])
             self.assertIn("--test network_limits_contract", commands[4]["command"])
             self.assertIn("public_route_mount_is_merged", commands[5]["command"])
+            self.assertIn("-p ironclaw_reborn_webui_ingress", commands[6]["command"])
+            self.assertIn("--all-features", commands[6]["command"])
+            self.assertIn("-p ironclaw_reborn_identity", commands[7]["command"])
 
     def test_product_auth_oauth_case_dry_run_maps_api_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:

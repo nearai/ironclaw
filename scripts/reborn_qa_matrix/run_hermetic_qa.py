@@ -1513,6 +1513,45 @@ WEBUI_V2_SSO_PUBLIC_MOUNT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_PUBLIC_SSO_OWNER_CRATE_COMMAND = CommandSpec(
+    name="webui_v2_public_sso_owner_crate_contracts",
+    description=(
+        "Full WebUI ingress owner-crate regression for public SSO/session: "
+        "auth routes, Google/GitHub provider routes, OIDC, signed sessions, "
+        "headers/errors, network limits, serve loop, and session round trips."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_webui_ingress",
+        "--all-features",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+REBORN_IDENTITY_FOUNDATION_COMMAND = CommandSpec(
+    name="reborn_identity_foundation_contracts",
+    description=(
+        "Reborn identity foundation contracts for stable provider identity to "
+        "user mapping, tenant scoping, verified email linking, concurrent "
+        "first-login convergence, migration adoption, and key validation."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_identity",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 COMPOSITION_PROJECT_FS_COMMAND = CommandSpec(
     name="composition_project_filesystem_reader",
     description=(
@@ -3068,6 +3107,8 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-051-TC-04",
             "REBCLI-051-TC-05",
             "REBCLI-051-TC-06",
+            "REBCLI-051-TC-07",
+            "REBCLI-051-TC-08",
         ],
         commands=[
             WEBUI_V2_SSO_AUTH_ROUTE_COMMAND,
@@ -3076,6 +3117,8 @@ CASES: dict[str, CaseSpec] = {
             WEBUI_V2_SESSION_ROUND_TRIP_COMMAND,
             WEBUI_V2_SSO_NETWORK_LIMITS_COMMAND,
             WEBUI_V2_SSO_PUBLIC_MOUNT_COMMAND,
+            WEBUI_V2_PUBLIC_SSO_OWNER_CRATE_COMMAND,
+            REBORN_IDENTITY_FOUNDATION_COMMAND,
         ],
         notes=(
             "Covers WebUI v2 public SSO session rows without live provider "
@@ -3083,7 +3126,9 @@ CASES: dict[str, CaseSpec] = {
             "callback success/failure, one-time state/ticket replay guards, "
             "session bearer use on protected WebUI v2 routes, logout "
             "revocation, public route mount policy, open-redirect defense, "
-            "body/rate limits, CORS fail-closed behavior, and sanitized errors."
+            "body/rate limits, CORS fail-closed behavior, sanitized errors, "
+            "the full WebUI ingress owner-crate SSO/session regression, and "
+            "the Reborn identity foundation mapping layer."
         ),
     ),
     "webui_v2_rust_static_regression": CaseSpec(
