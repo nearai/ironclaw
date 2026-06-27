@@ -1640,17 +1640,29 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                     "REBCLI-069-TC-04",
                     "REBCLI-069-TC-05",
                     "REBCLI-069-TC-06",
+                    "REBCLI-069-TC-07",
+                    "REBCLI-069-TC-08",
+                    "REBCLI-069-TC-09",
                 ],
             )
             commands = results["results"][0]["details"]["commands"]
             self.assertEqual(
                 [command["name"] for command in commands],
-                ["webui_v2_settings_onboarding_client_contracts"],
+                [
+                    "reborn_cli_webui_v2_binary",
+                    "webui_v2_settings_onboarding_client_contracts",
+                    "webui_v2_onboarding_provider_browser_smoke",
+                ],
             )
-            self.assertIn("static/js/lib/onboarding-gate.test.js", commands[0]["command"])
+            self.assertIn("ironclaw-reborn", commands[0]["command"])
+            self.assertIn("static/js/lib/onboarding-gate.test.js", commands[1]["command"])
             self.assertIn(
                 "find crates/ironclaw_webui_v2_static/static/js/pages/settings",
-                commands[0]["command"],
+                commands[1]["command"],
+            )
+            self.assertIn(
+                "test_reborn_webui_v2_onboarding_provider_login_browser.py",
+                commands[2]["command"],
             )
 
     def test_webui_hidden_stubbed_routes_case_dry_run_maps_matrix_ids(self):

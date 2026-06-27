@@ -82,6 +82,8 @@ function NearAiSetupMenu({ provider, isBusy, login, t, onSetUp }) {
         variant="primary"
         size="sm"
         className="gap-1.5"
+        data-testid="llm-provider-nearai-setup-menu"
+        data-provider-id=${provider.id}
         aria-haspopup="true"
         aria-expanded=${open ? "true" : "false"}
         disabled=${setupBusy}
@@ -94,7 +96,9 @@ function NearAiSetupMenu({ provider, isBusy, login, t, onSetUp }) {
       html`
         <div
           role="menu"
-          className="absolute right-0 top-10 z-20 min-w-[176px] rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-1 shadow-[0_20px_40px_-20px_rgba(0,0,0,0.7)]"
+          data-testid="llm-provider-nearai-setup-menu-items"
+          data-provider-id=${provider.id}
+          className="absolute left-0 top-10 z-20 min-w-[176px] rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-1 shadow-[0_20px_40px_-20px_rgba(0,0,0,0.7)] sm:left-auto sm:right-0"
         >
           ${menuItems.map(
             (item) => html`
@@ -102,6 +106,8 @@ function NearAiSetupMenu({ provider, isBusy, login, t, onSetUp }) {
                 key=${item.id}
                 type="button"
                 role="menuitem"
+                data-testid=${`llm-provider-nearai-${item.id}-login`}
+                data-provider-id=${provider.id}
                 disabled=${item.disabled}
                 onClick=${() => {
                   setOpen(false);
@@ -132,7 +138,15 @@ function FeaturedProviderRow({ entry, provider, configured, isBusy, login, t, on
     actions = html`<${NearAiSetupMenu} provider=${provider} isBusy=${isBusy} login=${login} t=${t} onSetUp=${onSetUp} />`;
   } else if (entry.auth === "codex") {
     actions = html`
-      <${Button} type="button" variant="secondary" size="sm" disabled=${login.codexBusy} onClick=${login.startCodex}>
+      <${Button}
+        type="button"
+        variant="secondary"
+        size="sm"
+        disabled=${login.codexBusy}
+        onClick=${login.startCodex}
+        data-testid="llm-provider-codex-login"
+        data-provider-id=${entry.id}
+      >
         ${t("onboarding.signIn")}
       <//>
     `;
@@ -147,7 +161,11 @@ function FeaturedProviderRow({ entry, provider, configured, isBusy, login, t, on
   }
 
   return html`
-    <${Card} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:gap-4">
+    <${Card}
+      data-testid="llm-provider-card"
+      data-provider-id=${entry.id}
+      className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:gap-4"
+    >
       <div className="flex min-w-0 flex-1 items-center gap-3">
         <${ProviderLogo} id=${entry.id} name=${name} />
         <div className="min-w-0">

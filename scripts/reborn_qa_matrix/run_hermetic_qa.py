@@ -1509,6 +1509,41 @@ WEBUI_V2_SETTINGS_ONBOARDING_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_ONBOARDING_PROVIDER_BROWSER_COMMAND = CommandSpec(
+    name="webui_v2_onboarding_provider_browser_smoke",
+    description=(
+        "Playwright smoke for WebUI v2 first-run /welcome provider-login "
+        "controls through the real ironclaw-reborn serve binary: NEAR AI "
+        "Google hosted-login request origin/body, Codex device-login request "
+        "and visible user code, and mobile setup-menu viewport containment."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "playwright",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_onboarding_provider_login_browser.py",
+        "-q",
+    ],
+)
+
 WEBUI_V2_I18N_LANGUAGE_COMMAND = CommandSpec(
     name="webui_v2_i18n_language_contracts",
     description=(
@@ -4188,18 +4223,26 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-069-TC-04",
             "REBCLI-069-TC-05",
             "REBCLI-069-TC-06",
+            "REBCLI-069-TC-07",
+            "REBCLI-069-TC-08",
+            "REBCLI-069-TC-09",
         ],
-        commands=[WEBUI_V2_SETTINGS_ONBOARDING_CLIENT_COMMAND],
+        commands=[
+            REBORN_CLI_WEBUI_V2_BINARY_COMMAND,
+            WEBUI_V2_SETTINGS_ONBOARDING_CLIENT_COMMAND,
+            WEBUI_V2_ONBOARDING_PROVIDER_BROWSER_COMMAND,
+        ],
         notes=(
             "Covers the generated WebUI v2 provider settings/onboarding rows "
-            "at the static client contract layer without duplicating PR #5348 "
-            "browser settings-search/provider-management scenarios: provider "
-            "classification and grouping, setup/dropdown actions, NEAR AI "
-            "hosted-SSO localhost guard, wallet and Codex login recovery, "
-            "settings v2 LLM/skills/traces/tools API routes, bearer "
-            "propagation, users-tab stubs, and onboarding-gate redirect "
-            "policy. Browser rows TC-07/08/09 stay guarded by #5348/live "
-            "coverage."
+            "at the static client and committed browser layers without "
+            "duplicating PR #5348 settings-search/provider-management "
+            "scenarios: provider classification and grouping, setup/dropdown "
+            "actions, NEAR AI hosted-SSO localhost guard, wallet and Codex "
+            "login recovery, settings v2 LLM/skills/traces/tools API routes, "
+            "bearer propagation, users-tab stubs, onboarding-gate redirect "
+            "policy, first-run /welcome NEAR AI Google hosted-login "
+            "body/origin, Codex device-code UI, and mobile setup-menu "
+            "viewport containment."
         ),
     ),
     "webui_v2_hidden_stubbed_routes_regression": CaseSpec(

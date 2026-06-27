@@ -2143,6 +2143,8 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
         variant="primary"
         size="sm"
         className="gap-1.5"
+        data-testid="llm-provider-nearai-setup-menu"
+        data-provider-id=${e.id}
         aria-haspopup="true"
         aria-expanded=${s?"true":"false"}
         disabled=${l}
@@ -2154,13 +2156,17 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
       ${s&&u`
         <div
           role="menu"
-          className="absolute right-0 top-10 z-20 min-w-[176px] rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-1 shadow-[0_20px_40px_-20px_rgba(0,0,0,0.7)]"
+          data-testid="llm-provider-nearai-setup-menu-items"
+          data-provider-id=${e.id}
+          className="absolute left-0 top-10 z-20 min-w-[176px] rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-1 shadow-[0_20px_40px_-20px_rgba(0,0,0,0.7)] sm:left-auto sm:right-0"
         >
           ${c.map(d=>u`
               <button
                 key=${d.id}
                 type="button"
                 role="menuitem"
+                data-testid=${`llm-provider-nearai-${d.id}-login`}
+                data-provider-id=${e.id}
                 disabled=${d.disabled}
                 onClick=${()=>{i(!1),d.run()}}
                 className="flex w-full items-center rounded-[7px] px-2.5 py-1.5 text-left text-[13px] text-[var(--v2-text)] hover:bg-[var(--v2-surface-soft)] disabled:cursor-not-allowed disabled:opacity-50"
@@ -2172,7 +2178,15 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
       `}
     </div>
   `}function gD({entry:e,provider:t,configured:a,isBusy:n,login:r,t:s,onUse:i,onSetUp:o}){let l=s(e.nameKey),c;return e.auth==="nearai"?c=u`<${vD} provider=${t} isBusy=${n} login=${r} t=${s} onSetUp=${o} />`:e.auth==="codex"?c=u`
-      <${A} type="button" variant="secondary" size="sm" disabled=${r.codexBusy} onClick=${r.startCodex}>
+      <${A}
+        type="button"
+        variant="secondary"
+        size="sm"
+        disabled=${r.codexBusy}
+        onClick=${r.startCodex}
+        data-testid="llm-provider-codex-login"
+        data-provider-id=${e.id}
+      >
         ${s("onboarding.signIn")}
       <//>
     `:a?c=u`<${A} type="button" variant="primary" size="sm" disabled=${n} onClick=${()=>i(t)}>
@@ -2180,7 +2194,11 @@ ${Se}`;if(Fe.current.gateKey!==R&&(Fe.current={gateKey:R,credentialRef:null,inFl
     <//>`:c=u`<${A} type="button" variant="primary" size="sm" disabled=${n} onClick=${()=>o(t)}>
       ${s("onboarding.setUp")}
     <//>`,u`
-    <${te} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:gap-4">
+    <${te}
+      data-testid="llm-provider-card"
+      data-provider-id=${e.id}
+      className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:gap-4"
+    >
       <div className="flex min-w-0 flex-1 items-center gap-3">
         <${cS} id=${e.id} name=${l} />
         <div className="min-w-0">

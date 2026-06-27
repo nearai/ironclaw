@@ -311,6 +311,12 @@ SEL_V2 = {
     "llm_provider_nearai_google_login": (
         "[data-testid='llm-provider-nearai-google-login']"
     ),
+    "llm_provider_nearai_setup_menu": (
+        "[data-testid='llm-provider-nearai-setup-menu']"
+    ),
+    "llm_provider_nearai_setup_menu_items": (
+        "[data-testid='llm-provider-nearai-setup-menu-items']"
+    ),
     "llm_provider_codex_login": "[data-testid='llm-provider-codex-login']",
     "llm_provider_nearai_waiting": "[data-testid='llm-provider-nearai-waiting']",
     "llm_provider_nearai_error": "[data-testid='llm-provider-nearai-error']",
