@@ -528,6 +528,21 @@ WEBUI_V2_ADMIN_CLIENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_TOAST_QUERY_CLIENT_COMMAND = CommandSpec(
+    name="webui_v2_toast_query_client_contracts",
+    description=(
+        "Focused WebUI v2 toast bus, ToastViewport, and shared QueryClient "
+        "default contracts for notification delivery, cleanup, tone fallback, "
+        "and bounded query-cache behavior."
+    ),
+    argv=[
+        "node",
+        "--test",
+        "crates/ironclaw_webui_v2_static/static/js/lib/toast-query.test.mjs",
+        "crates/ironclaw_webui_v2_static/static/js/layout/shell-static-contracts.test.mjs",
+    ],
+)
+
 WEBUI_V2_HIDDEN_STUBBED_ROUTE_COMMAND = CommandSpec(
     name="webui_v2_hidden_stubbed_route_contracts",
     description=(
@@ -2238,6 +2253,28 @@ CASES: dict[str, CaseSpec] = {
             "closed v2 TODO API stubs with no legacy v1 fetches, and usage/"
             "user presenter formatting, filtering, summarization, and cost-"
             "sorted aggregation."
+        ),
+    ),
+    "webui_v2_toast_query_defaults_regression": CaseSpec(
+        name="webui_v2_toast_query_defaults_regression",
+        feature="WebUI v2 toast notifications and query cache defaults",
+        category="Hermetic Toast/Query Client Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-094-TC-01",
+            "REBCLI-094-TC-02",
+            "REBCLI-094-TC-03",
+            "REBCLI-094-TC-04",
+            "REBCLI-094-TC-05",
+            "REBCLI-094-TC-06",
+        ],
+        commands=[WEBUI_V2_TOAST_QUERY_CLIENT_COMMAND],
+        notes=(
+            "Covers WebUI v2 toast/query-cache rows without duplicating PR "
+            "#5348 browser legacy coverage: toast publication defaults and "
+            "overrides, multi-subscriber delivery, unsubscribe behavior, "
+            "ToastViewport status rendering, auto-removal, unknown-tone "
+            "fallbacks, GatewayLayout mounting, and QueryClient retry/"
+            "staleTime/refetchOnWindowFocus defaults."
         ),
     ),
     "webui_v2_tee_attestation_regression": CaseSpec(
