@@ -119,6 +119,54 @@ OPENAI_CHAT_WORKFLOW_COMMAND = CommandSpec(
     ],
 )
 
+OPENAI_COMPAT_ROUTE_MOUNT_COMMAND = CommandSpec(
+    name="openai_compat_beta_route_mount_contracts",
+    description=(
+        "Focused WebUI v2 composition contracts for OpenAI-compatible beta "
+        "protected route mounts, bearer-auth gating, chat/responses ProductWorkflow "
+        "submission, and shared turn-admission retention."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,openai-compat-beta,test-support",
+        "--test",
+        "webui_v2_serve",
+        "openai_compat_mount_tests",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
+OPENAI_COMPAT_ALL_FEATURE_COMPOSITION_COMMAND = CommandSpec(
+    name="openai_compat_all_feature_composition_contracts",
+    description=(
+        "All-feature Reborn composition OpenAI-compatible regression under "
+        "WebUI v2, OpenAI-compatible, Slack host-beta, and test-support feature "
+        "flags."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "cargo",
+        "test",
+        "-p",
+        "ironclaw_reborn_composition",
+        "--features",
+        "webui-v2-beta,openai-compat-beta,slack-v2-host-beta,test-support",
+        "openai_compat",
+        "--jobs",
+        "2",
+        "--",
+        "--format",
+        "terse",
+    ],
+)
+
 PRODUCT_WORKFLOW_LEDGER_COMMAND = CommandSpec(
     name="product_workflow_storage_durable_ledger",
     description=(
@@ -2150,6 +2198,32 @@ WEBUI_V2_PROVIDER_LOGIN_MOUNT_COMMAND = CommandSpec(
 )
 
 CASES: dict[str, CaseSpec] = {
+    "openai_compat_beta_routes_regression": CaseSpec(
+        name="openai_compat_beta_routes_regression",
+        feature="OpenAI-Compatible Beta Routes",
+        category="Hermetic WebUI v2/OpenAI-Compatible Route Mount Regression",
+        qa_matrix_test_ids=[
+            "REBCLI-039-TC-01",
+            "REBCLI-039-TC-02",
+            "REBCLI-039-TC-03",
+            "REBCLI-039-TC-04",
+            "REBCLI-039-TC-05",
+            "REBCLI-039-TC-06",
+            "REBCLI-039-TC-07",
+            "REBCLI-039-TC-08",
+        ],
+        commands=[
+            OPENAI_COMPAT_ROUTE_MOUNT_COMMAND,
+            OPENAI_COMPAT_ALL_FEATURE_COMPOSITION_COMMAND,
+        ],
+        notes=(
+            "Hermetic coverage for the Reborn serve/composition boundary that "
+            "PR #5348's browser canary work does not own: OpenAI-compatible "
+            "protected route mounts, WebUI bearer-auth gating, ProductWorkflow "
+            "submission/readback, feature-gated all-feature composition, and "
+            "shared turn-admission behavior without live OpenAI traffic."
+        ),
+    ),
     "openai_compat_owner_crate_regression": CaseSpec(
         name="openai_compat_owner_crate_regression",
         feature="OpenAI-compatible Chat Completions and Responses API",

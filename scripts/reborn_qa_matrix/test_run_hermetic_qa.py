@@ -51,6 +51,14 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_ids"],
             )
             self.assertIn(
+                "REBCLI-039-TC-01",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
+                "REBCLI-039-TC-08",
+                manifest["qa_matrix"]["represented_test_ids"],
+            )
+            self.assertIn(
                 "REBCLI-056-TC-01",
                 manifest["qa_matrix"]["represented_test_ids"],
             )
@@ -1871,6 +1879,52 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 "operator_routes_dispatch_to_facade_with_body_and_query_inputs",
                 commands[2]["command"],
             )
+
+    def test_openai_compat_beta_routes_case_dry_run_maps_route_matrix_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "openai_compat_beta_routes_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                results["summary"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-039-TC-01",
+                    "REBCLI-039-TC-02",
+                    "REBCLI-039-TC-03",
+                    "REBCLI-039-TC-04",
+                    "REBCLI-039-TC-05",
+                    "REBCLI-039-TC-06",
+                    "REBCLI-039-TC-07",
+                    "REBCLI-039-TC-08",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                [command["name"] for command in commands],
+                [
+                    "openai_compat_beta_route_mount_contracts",
+                    "openai_compat_all_feature_composition_contracts",
+                ],
+            )
+            self.assertIn("openai_compat_mount_tests", commands[0]["command"])
+            self.assertIn("webui-v2-beta,openai-compat-beta", commands[0]["command"])
+            self.assertIn(
+                "webui-v2-beta,openai-compat-beta,slack-v2-host-beta,test-support",
+                commands[1]["command"],
+            )
+            self.assertIn("openai_compat", commands[1]["command"])
 
     def test_responses_api_case_dry_run_maps_create_retrieve_cancel_matrix_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
