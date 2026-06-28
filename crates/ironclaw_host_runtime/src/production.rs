@@ -2214,13 +2214,20 @@ impl From<DispatchFailureKind> for RuntimeFailureKind {
             DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed) => {
                 RuntimeFailureKind::OperationFailed
             }
+            // A method or capability the model named that does not exist is a
+            // model-fixable request error, not an infra fault: classify it as
+            // InvalidInput so it surfaces as an immediate model-visible tool
+            // error instead of burning the retry budget on a call that can
+            // never resolve by retrying.
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::MethodMissing)
+            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability) => {
+                RuntimeFailureKind::InvalidInput
+            }
             DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::MethodMissing)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UnsupportedRunner) => {
                 RuntimeFailureKind::Backend
             }
@@ -2412,7 +2419,7 @@ output_schema_ref = "schemas/test.output.json"
             ),
             (
                 RuntimeDispatchErrorKind::MethodMissing,
-                RuntimeFailureKind::Backend,
+                RuntimeFailureKind::InvalidInput,
             ),
             (
                 RuntimeDispatchErrorKind::NetworkDenied,
@@ -2444,7 +2451,7 @@ output_schema_ref = "schemas/test.output.json"
             ),
             (
                 RuntimeDispatchErrorKind::UndeclaredCapability,
-                RuntimeFailureKind::Backend,
+                RuntimeFailureKind::InvalidInput,
             ),
             (
                 RuntimeDispatchErrorKind::UnsupportedRunner,
