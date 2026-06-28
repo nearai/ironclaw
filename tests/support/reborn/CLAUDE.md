@@ -74,9 +74,11 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
 - `builder.rs` — `RebornIntegrationHarness` + builder, hermetic env, the
   slice-1/2 asserts (`assert_reply_contains` / `assert_tool_invoked` /
   `assert_egress_request_matching`, co-located with the harness fields) plus the
-  slice-5 asserts (`assert_shell_command_recorded` / `assert_no_real_process_executed`)
+  slice-5 asserts (`assert_shell_command_recorded` / `assert_shell_ran_through_inert_port`)
   and the `pub(super)` capture accessors (`captured_egress_requests` /
   `captured_capability_results`) the assertion file reads.
+- **`harness.rs` split follow-up** — the MCP/process-port wiring block (`LoopbackMcpRuntimeHttpEgress`, `mock_mcp_extension_package`, `local_dev_host_runtime_with_registry_egress_and_mcp`) is a tracked follow-up to extract into a `harness_mcp.rs` sub-module (the file exceeds 4000 lines; see arch-exempt annotation near `LoopbackMcpRuntime`).
+
 - `process.rs` — `RecordingProcessPort`, the inert process port (slice 5): records
   every `CommandExecutionRequest.command` and returns exit 0 / empty output without
   spawning any OS process. Injected by default when `with_builtin_http_tools()` is
@@ -182,6 +184,28 @@ Slice 7 ships the **real OAuth connect-flow against real product-auth stores** (
   with correct `id`/`provider` and exactly one token-exchange call captured) +
   `oauth_callback_without_prior_flow_fails` (guard: missing flow → `UnknownOrExpiredFlow`,
   zero egress calls).
+
+Slice 8 ships **OAuth credential-refresh sweep + clock injection** (design spec §9, step 8):
+- `sweep_once` in `credential_refresh_worker.rs` now accepts `now: DateTime<Utc>` so callers
+  can inject a frozen instant. `tick_once` (production caller) still passes `Utc::now()`.
+- `ScriptedOAuthTokenEgress::with_access_and_refresh_token()`: variant that includes a
+  `refresh_token` field in the scripted response so the initial exchange stores a refresh
+  secret handle the keepalive worker can load later.
+- `FixedCandidateSource` (crate-private): `CredentialRefreshCandidateSource` impl that
+  returns a caller-supplied `Vec<CredentialAccount>`, bypassing the filesystem tenant-path
+  walk so tests inject accounts directly into `sweep_once`.
+- `OAuthProductAuthTestBundle::sweep_for_refresh(candidates, settings, now)`: drives one
+  sweep tick with the always-leader lock and a frozen clock, exercising the full
+  `sweep_once` → `ProviderBackedCredentialAccountService::refresh_account` →
+  `HostOAuthProviderClient::refresh_token` → scripted egress path.
+- `build_google_oauth_product_auth_for_test()`: Google-flavoured bundle
+  (`provider_id = "google"`, refresh_token in egress body, `.with_provider_client()`
+  so `refresh_credential_account` does not short-circuit to `BackendUnavailable`).
+- All slice-8 test-support items gated on `any(feature = "libsql", feature = "postgres")`.
+- `reborn_integration_oauth_refresh.rs` (requires `--features libsql`):
+  `credential_refresh_sweep_refreshes_idle_google_account` (positive: frozen clock 3 days
+  ahead → egress.captured_count() == 2) +
+  `credential_refresh_sweep_skips_fresh_google_account` (guard: real clock → count stays 1).
 
 **Planned (do not assume present; add behind a test that exercises it — no dead code):**
 `StorageMode::Postgres` (CI container lane); approval/install/skill/secret

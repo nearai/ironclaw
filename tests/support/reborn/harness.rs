@@ -2798,6 +2798,7 @@ fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     Ok(Arc::new(services.host_runtime_for_local_testing()))
 }
 
+// arch-exempt: large_file, reborn itest process-port/MCP harness wiring; harness_mcp.rs split tracked as follow-up, plan docs/superpowers/plans/2026-06-27-reborn-itest-slice3-impl-plan.md
 /// Slice 6: variant of `local_dev_host_runtime_with_registry_and_runtime_http_egress`
 /// that also wires a loopback MCP runtime for the mock-MCP integration test.
 ///
