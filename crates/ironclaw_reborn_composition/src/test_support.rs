@@ -193,6 +193,209 @@ impl HostManagedModelGateway for FailingTestGateway {
     }
 }
 
+// ─── Slice 7: OAuth connect-flow test support ─────────────────────────────────
+//
+// Constructs a real `FilesystemAuthProductServices<InMemoryBackend>` + a real
+// `HostOAuthProviderClient` wired to a scripted token-exchange egress. The
+// resulting `RebornProductAuthServices` bundle exercises the full OAuth
+// claim→exchange→complete→credential-account path with no network.
+
+/// Scripted [`ironclaw_host_api::RuntimeHttpEgress`] for OAuth token-exchange
+/// tests.
+///
+/// Returns a fixed `200` JSON body on every call, records every request so the
+/// test can assert the exchange happened, and ignores the URL so the
+/// `HostOAuthProviderClient`'s HTTPS guard can use a fake-but-valid URL.
+pub struct ScriptedOAuthTokenEgress {
+    body: Vec<u8>,
+    captured: Arc<Mutex<Vec<ironclaw_host_api::RuntimeHttpEgressRequest>>>,
+}
+
+impl ScriptedOAuthTokenEgress {
+    /// Build a scripted egress that returns `200` with a minimal
+    /// `{access_token, token_type, expires_in}` body.
+    pub fn with_access_token(access_token: &str) -> Self {
+        let body = serde_json::json!({
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": 3600
+        })
+        .to_string()
+        .into_bytes();
+        Self {
+            body,
+            captured: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Number of token-exchange HTTP calls captured so far.
+    pub fn captured_count(&self) -> usize {
+        self.captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+}
+
+impl std::fmt::Debug for ScriptedOAuthTokenEgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScriptedOAuthTokenEgress")
+            .field("body_len", &self.body.len())
+            .finish()
+    }
+}
+
+#[async_trait]
+impl ironclaw_host_api::RuntimeHttpEgress for ScriptedOAuthTokenEgress {
+    async fn execute(
+        &self,
+        request: ironclaw_host_api::RuntimeHttpEgressRequest,
+    ) -> Result<
+        ironclaw_host_api::RuntimeHttpEgressResponse,
+        ironclaw_host_api::RuntimeHttpEgressError,
+    > {
+        let request_bytes = request.body.len() as u64;
+        self.captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request);
+        let body = self.body.clone();
+        let response_bytes = body.len() as u64;
+        Ok(ironclaw_host_api::RuntimeHttpEgressResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body,
+            saved_body: None,
+            request_bytes,
+            response_bytes,
+            redaction_applied: false,
+        })
+    }
+}
+
+/// Noop capability-obligation handler: permits every OAuth egress obligation.
+#[derive(Debug)]
+struct TestNoopObligationHandler;
+
+#[async_trait]
+impl ironclaw_capabilities::CapabilityObligationHandler for TestNoopObligationHandler {
+    async fn satisfy(
+        &self,
+        _request: ironclaw_capabilities::CapabilityObligationRequest<'_>,
+    ) -> Result<(), ironclaw_capabilities::CapabilityObligationError> {
+        Ok(())
+    }
+}
+
+/// Noop continuation dispatcher: swallows every auth-continuation event.
+#[derive(Debug)]
+struct TestNoopContinuationDispatcher;
+
+#[async_trait]
+impl crate::auth::RebornAuthContinuationDispatcher for TestNoopContinuationDispatcher {
+    async fn dispatch_auth_continuation(
+        &self,
+        _event: ironclaw_auth::AuthContinuationEvent,
+    ) -> Result<(), ironclaw_auth::AuthProductError> {
+        Ok(())
+    }
+}
+
+/// Bundle returned by [`build_oauth_product_auth_for_test`].
+///
+/// The `services` arc exposes `flow_manager()` and `credential_account_service()`
+/// for creating flows and reading back persisted accounts.  The `egress` arc
+/// lets the test assert how many token-exchange calls were made.
+pub struct OAuthProductAuthTestBundle {
+    /// Fully-wired product-auth services (real stores, scripted token egress).
+    pub services: Arc<crate::RebornProductAuthServices>,
+    /// Scripted egress — inspect after `handle_oauth_callback` to verify
+    /// the token-exchange HTTP call happened.
+    pub egress: Arc<ScriptedOAuthTokenEgress>,
+}
+
+/// Construct a self-contained [`OAuthProductAuthTestBundle`] for OAuth
+/// connect-flow tests.
+///
+/// Uses:
+/// - `InMemoryBackend` with a fixed `MountView` scoped to
+///   `/tenants/test-tenant/users/test-user/secrets` (no `libsql`/`postgres`
+///   feature dependency).
+/// - `InMemorySecretStore` for access/refresh token handles.
+/// - `ScriptedOAuthTokenEgress` intercepting the provider token endpoint.
+/// - Real `FilesystemAuthProductServices<InMemoryBackend>` for flow + account
+///   persistence — zero mocks on the storage layer.
+/// - Noop continuation dispatcher and noop obligation handler.
+///
+/// Calling this multiple times produces independent, isolated bundles.
+pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_secrets::InMemorySecretStore;
+
+    // Fixed-view scoped filesystem: the product-auth durable layer writes
+    // flow/account JSON under /secrets/agents/…/product-auth/… so we only
+    // need the /secrets mount to be writable.
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/secrets").unwrap(),
+        VirtualPath::new("/tenants/test-tenant/users/test-user/secrets").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped_fs: Arc<ScopedFilesystem<InMemoryBackend>> =
+        Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
+
+    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> =
+        Arc::new(InMemorySecretStore::new());
+
+    // Real durable product-auth services over the in-memory scoped filesystem.
+    let durable = Arc::new(
+        crate::product_auth_durable::FilesystemAuthProductServices::new(
+            scoped_fs,
+            Arc::clone(&secret_store),
+        ),
+    );
+
+    // Scripted egress: returns a valid access-token JSON body, records calls.
+    let egress = Arc::new(ScriptedOAuthTokenEgress::with_access_token(
+        "test-access-token-abc123",
+    ));
+
+    // Real OAuth provider client wired to the scripted egress.
+    // token_endpoint must be HTTPS to pass HostOAuthProviderClient's guard;
+    // ScriptedOAuthTokenEgress ignores the actual URL.
+    let spec = crate::oauth_provider_client::HostOAuthProviderSpec {
+        provider_id: "test-oauth-provider",
+        capability_id: "builtin.oauth.test",
+        token_endpoint: "https://oauth.test.example.com/token",
+        secret_handle_prefix: "test-oauth",
+        resource: None,
+        exchange_scope_policy: crate::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+    };
+    let provider_client = crate::oauth_provider_client::HostOAuthProviderClient::new(
+        spec,
+        Arc::clone(&egress) as Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
+        Arc::clone(&secret_store),
+        Arc::new(TestNoopObligationHandler),
+        ironclaw_auth::OAuthClientId::new("test-client-id").unwrap(),
+        ironclaw_auth::OAuthRedirectUri::new("https://localhost/oauth/callback").unwrap(),
+    )
+    .expect("test OAuth provider client must build");
+
+    let services = Arc::new(crate::RebornProductAuthServices::new(
+        durable.clone() as Arc<dyn ironclaw_auth::AuthFlowManager>,
+        durable.clone() as Arc<dyn ironclaw_auth::AuthInteractionService>,
+        durable.clone() as Arc<dyn ironclaw_auth::CredentialSetupService>,
+        durable.clone() as Arc<dyn ironclaw_auth::CredentialAccountService>,
+        Arc::new(provider_client) as Arc<dyn ironclaw_auth::AuthProviderClient>,
+        durable as Arc<dyn ironclaw_auth::SecretCleanupService>,
+        Arc::new(TestNoopContinuationDispatcher),
+    ));
+
+    OAuthProductAuthTestBundle { services, egress }
+}
+
 /// Test-only accessor mirroring the full local-dev database-roots boot path
 /// (`build_local_dev_root_filesystem` → `build_default_local_dev_database_roots`).
 ///
