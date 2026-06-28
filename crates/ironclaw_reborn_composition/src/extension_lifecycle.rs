@@ -14,9 +14,10 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
-    LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary,
-    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleSearchExtensionSummary, ProductWorkflowError,
+    ChannelConnectionRequirement, LifecycleExtensionSummary, LifecycleExtensionSurfaceKind,
+    LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleSearchExtensionSummary,
+    ProductWorkflowError,
 };
 use tokio::sync::Mutex;
 
@@ -566,6 +567,17 @@ impl RebornLocalExtensionManagementPort {
         let visible_capability_ids = package_visible_capability_ids(&active_package);
         let message =
             activation_success_message(&package_ref, &active_package, &visible_capability_ids);
+        // For an inbound-channel extension, attach the structured connect
+        // requirement so WebChat can render the in-chat pairing panel from
+        // structured state (the activation message is model guidance only).
+        let connection_required = if package_declares_inbound_product_adapter(&active_package) {
+            Some(channel_connection_requirement(
+                package_ref.id.as_str(),
+                active_package.manifest.name.as_str(),
+            ))
+        } else {
+            None
+        };
 
         let mut response = response_with_payload(
             Some(package_ref),
@@ -573,6 +585,7 @@ impl RebornLocalExtensionManagementPort {
             LifecycleProductPayload::ExtensionActivate {
                 activated: true,
                 visible_capability_ids,
+                connection_required,
             },
         );
         response.message = Some(message);
@@ -1183,6 +1196,39 @@ fn activation_success_message(
     "Extension activation succeeded and its tools are now available. No additional authorization or configuration is needed, including for write-capable tools, unless a later tool call reports auth_required. Do not ask the user for a token, OAuth, authorization, or configuration after activated=true.".to_string()
 }
 
+// Build the structured connect requirement for an inbound channel. Slack carries
+// the exact copy the connectable-channels descriptor uses (so the in-chat panel
+// and the Settings panel read identically); any other inbound channel gets a
+// generic proof-code prompt. Kept beside `activation_success_message` so the two
+// channel branches stay in lockstep.
+fn channel_connection_requirement(
+    channel_id: &str,
+    display_name: &str,
+) -> ChannelConnectionRequirement {
+    if channel_id == "slack" {
+        ChannelConnectionRequirement {
+            channel: "slack".to_string(),
+            strategy: "inbound_proof_code".to_string(),
+            instructions: "Message the IronClaw Reborn app in Slack to get a pairing code, then paste it here. Codes expire in 10 minutes. If a code is invalid or expired, run /pair in Slack for a fresh one.".to_string(),
+            input_placeholder: "Enter Slack pairing code".to_string(),
+            submit_label: "Connect".to_string(),
+            error_message: "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.".to_string(),
+        }
+    } else {
+        ChannelConnectionRequirement {
+            channel: channel_id.to_string(),
+            strategy: "inbound_proof_code".to_string(),
+            instructions: format!(
+                "Open {}'s app or bot, get the pairing code, and paste it here.",
+                display_name
+            ),
+            input_placeholder: "Enter pairing code".to_string(),
+            submit_label: "Connect".to_string(),
+            error_message: "Pairing failed. Check the code and try again.".to_string(),
+        }
+    }
+}
+
 fn package_declares_inbound_product_adapter(package: &ExtensionPackage) -> bool {
     package.manifest.host_apis.iter().any(|host_api| {
         host_api.id.as_str() == PRODUCT_ADAPTER_HOST_API_ID
@@ -1544,6 +1590,7 @@ mod tests {
         );
         let Some(LifecycleProductPayload::ExtensionActivate {
             visible_capability_ids,
+            connection_required,
             ..
         }) = activate.payload.as_ref()
         else {
@@ -1552,6 +1599,19 @@ mod tests {
         assert!(
             visible_capability_ids.is_empty(),
             "Slack channel activation must not imply model-visible Slack read tools"
+        );
+        // The structured connect requirement is what drives the in-chat pairing
+        // panel; the prose message above is model guidance only.
+        let requirement = connection_required
+            .as_ref()
+            .expect("slack channel activation must carry a structured connection requirement");
+        assert_eq!(requirement.channel, "slack");
+        assert_eq!(requirement.strategy, "inbound_proof_code");
+        assert_eq!(requirement.input_placeholder, "Enter Slack pairing code");
+        assert!(
+            requirement.error_message.contains("/pair"),
+            "invalid-code copy must point the user at /pair: {}",
+            requirement.error_message
         );
     }
 
@@ -1596,6 +1656,23 @@ mod tests {
                 && message.contains("already connected")
                 && message.contains("until connection is confirmed"),
             "external channel activation should guide the model into generic pairing UI, got: {message}"
+        );
+        let Some(LifecycleProductPayload::ExtensionActivate {
+            connection_required,
+            ..
+        }) = activate.payload.as_ref()
+        else {
+            panic!("expected extension activate payload");
+        };
+        let requirement = connection_required
+            .as_ref()
+            .expect("external channel activation must carry a structured connection requirement");
+        assert_eq!(requirement.channel, "telegram");
+        assert_eq!(requirement.strategy, "inbound_proof_code");
+        assert!(
+            requirement.instructions.contains("Telegram"),
+            "generic channel copy should name the channel: {}",
+            requirement.instructions
         );
     }
 

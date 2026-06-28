@@ -61,7 +61,7 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
             reason: "outbound delivery target providers require local runtime services".to_string(),
         });
     }
-    let channel_connection = slack_mounts.map(|mounts| slack_channel_connection_facade(mounts));
+    let channel_connection = slack_mounts.map(slack_channel_connection_facade);
     build_webui_services_with_connectable_channels(
         runtime,
         event_stream,

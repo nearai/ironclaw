@@ -5,14 +5,18 @@ use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, CredentialStageError, EffectKind, HostApiError,
-    PermissionMode, ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
+    CapabilityDisplayOutputPreview, CapabilityId, CapabilityProfileSchemaRef, CredentialStageError,
+    EffectKind, HostApiError, PermissionMode, ResourceEstimate, ResourceProfile, ResourceUsage,
+    RuntimeDispatchErrorKind,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
-use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError};
+use ironclaw_product_workflow::{
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
+    ProductWorkflowError,
+};
 use serde::Deserialize;
 
 use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
@@ -204,12 +208,55 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
         }
         .map_err(lifecycle_error)?;
 
+        // An inbound-channel activation carries a structured connect requirement;
+        // surface it as a display preview so WebChat opens the in-chat pairing
+        // panel from structured state (never by parsing the activation message).
+        let connection_preview = channel_connection_display_preview(&response);
         let output = serde_json::to_value(response)
             .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode))?;
-        Ok(FirstPartyCapabilityResult::new(
-            output,
-            resource_usage(started),
-        ))
+        Ok(
+            FirstPartyCapabilityResult::new(output, resource_usage(started))
+                .with_display_preview(connection_preview),
+        )
+    }
+}
+
+/// Output-kind discriminator the WebChat frontend matches to open the in-chat
+/// channel pairing panel. Must stay in sync with `CHANNEL_CONNECTION_REQUIRED_OUTPUT_KIND`
+/// in `static/js/pages/chat/hooks/useChat.js`.
+const CHANNEL_CONNECTION_REQUIRED_OUTPUT_KIND: &str = "channel_connection_required";
+
+fn channel_connection_display_preview(
+    response: &LifecycleProductResponse,
+) -> Option<CapabilityDisplayOutputPreview> {
+    let Some(LifecycleProductPayload::ExtensionActivate {
+        connection_required: Some(requirement),
+        ..
+    }) = response.payload.as_ref()
+    else {
+        return None;
+    };
+    // The frontend parses this JSON to render the pairing panel. If it somehow
+    // can't be serialized, emit no preview rather than an empty-bodied one the
+    // frontend would fail to parse into a panel.
+    let output_preview = serde_json::to_string(requirement).ok()?;
+    Some(CapabilityDisplayOutputPreview {
+        output_summary: Some(format!(
+            "Connect {} to continue.",
+            display_channel_name(&requirement.channel)
+        )),
+        output_preview,
+        output_kind: CHANNEL_CONNECTION_REQUIRED_OUTPUT_KIND.to_string(),
+        subtitle: None,
+        truncated: false,
+    })
+}
+
+fn display_channel_name(channel: &str) -> String {
+    let mut chars = channel.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => channel.to_string(),
     }
 }
 
@@ -277,6 +324,58 @@ mod tests {
 
     use super::*;
     use crate::{RebornBuildInput, RebornServices, build_reborn_services};
+    use ironclaw_product_workflow::{ChannelConnectionRequirement, LifecyclePhase};
+
+    #[test]
+    fn channel_connection_display_preview_marks_inbound_channel_activations() {
+        // The in-chat pairing panel is opened from this structured display preview,
+        // never from the activation prose. Guard the exact seam: the output_kind
+        // const the frontend matches, and the JSON body it parses. A renamed const
+        // or a broken match arm would otherwise be invisible to Rust tests.
+        let requirement = ChannelConnectionRequirement {
+            channel: "slack".to_string(),
+            strategy: "inbound_proof_code".to_string(),
+            instructions: "Message the IronClaw Reborn app in Slack to get a pairing code."
+                .to_string(),
+            input_placeholder: "Enter Slack pairing code".to_string(),
+            submit_label: "Connect".to_string(),
+            error_message:
+                "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
+                    .to_string(),
+        };
+        let channel_activation = LifecycleProductResponse {
+            package_ref: None,
+            phase: LifecyclePhase::Active,
+            blockers: Vec::new(),
+            message: Some("activation guidance".to_string()),
+            payload: Some(LifecycleProductPayload::ExtensionActivate {
+                activated: true,
+                visible_capability_ids: Vec::new(),
+                connection_required: Some(requirement.clone()),
+            }),
+        };
+
+        let preview = channel_connection_display_preview(&channel_activation)
+            .expect("an inbound-channel activation must carry the connect display preview");
+        assert_eq!(preview.output_kind, "channel_connection_required");
+        let parsed: ChannelConnectionRequirement =
+            serde_json::from_str(&preview.output_preview).expect("preview body is the requirement");
+        assert_eq!(parsed, requirement);
+
+        // A tool-extension activation (no connection requirement) must NOT carry it.
+        let tool_activation = LifecycleProductResponse {
+            package_ref: None,
+            phase: LifecyclePhase::Active,
+            blockers: Vec::new(),
+            message: None,
+            payload: Some(LifecycleProductPayload::ExtensionActivate {
+                activated: true,
+                visible_capability_ids: vec!["github.search_issues".to_string()],
+                connection_required: None,
+            }),
+        };
+        assert!(channel_connection_display_preview(&tool_activation).is_none());
+    }
 
     #[tokio::test]
     async fn local_dev_agent_surface_exposes_extension_lifecycle_tools() {

@@ -6,7 +6,6 @@ import {
   submitManualToken,
 } from "../../../lib/api.js";
 import { redeemSlackPairingCode } from "../../../lib/slack-pairing-api.js";
-import { listConnectableChannels } from "../../../lib/channel-connect.js";
 import {
   channelConnectionContinuationMessage,
   connectionEventMatchesOnboarding,
@@ -46,7 +45,6 @@ const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
 const DISMISSED_ONBOARDING_STORAGE_PREFIX =
   "ironclaw.chat.dismissedOnboarding.v1:";
 const DISMISSED_ONBOARDING_STORAGE_LIMIT = 100;
-const SLACK_STARTUP_ONBOARDING_SOURCE_ID = "connectable-channel:slack";
 
 async function withAuthTokenTimeout(task) {
   const controller = new AbortController();
@@ -89,7 +87,10 @@ function busyNoticeKey(threadId, gate) {
 function onboardingBelongsToThread(onboarding, threadId) {
   if (!onboarding) return false;
   const onboardingThreadId = String(onboarding.threadId || "").trim();
-  if (!onboardingThreadId) return true;
+  // A pairing panel is per-thread. An onboarding with no thread id belongs to no
+  // thread, so it must not leak onto every chat the user opens — the live derive
+  // path always stamps the current thread, so this only guards a malformed writer.
+  if (!onboardingThreadId) return false;
   const currentThreadId = String(threadId || "").trim();
   return Boolean(currentThreadId) && onboardingThreadId === currentThreadId;
 }
@@ -134,85 +135,73 @@ function persistDismissedOnboardingId(threadId, sourceMessageId) {
   }
 }
 
-function packageRefId(item) {
-  return item?.package_ref?.id || item?.packageRef?.id || item?.id || "";
-}
+// The backend marks an `extension_activate` result for a connectable channel
+// with this `output_kind`; the structured connect action rides on the card's
+// `toolResultPreview` JSON. This is the structured replacement for the deleted
+// prose regex — the panel is derived from typed fields, never from message text.
+const CHANNEL_CONNECTION_REQUIRED_OUTPUT_KIND = "channel_connection_required";
 
-function extensionLifecycleState(item) {
-  return (
-    item?.onboarding_state ||
-    item?.onboardingState ||
-    item?.activation_status ||
-    item?.activationStatus ||
-    (item?.active ? "active" : "installed")
-  );
-}
-
-function slackStartupPairingOnboarding({
-  extensions,
-  connectableChannels,
-  threadId,
-  dismissedIds,
-}) {
-  if (!threadId || dismissedIds?.has(SLACK_STARTUP_ONBOARDING_SOURCE_ID)) {
+function channelConnectionRequirementFromCard(card) {
+  if (!card || card.outputKind !== CHANNEL_CONNECTION_REQUIRED_OUTPUT_KIND) return null;
+  if (card.toolStatus && card.toolStatus !== "success") return null;
+  if (typeof card.toolResultPreview !== "string" || !card.toolResultPreview.trim()) {
     return null;
   }
-  const slack = (extensions || []).find((item) => packageRefId(item) === "slack");
-  if (!slack || slack.kind !== "channel") return null;
-  const state = extensionLifecycleState(slack);
-  if (!["setup_required", "pairing_required", "pairing"].includes(state)) {
+  let parsed;
+  try {
+    parsed = JSON.parse(card.toolResultPreview);
+  } catch (_) {
     return null;
   }
-  const connectAction = (connectableChannels || []).find(
-    (channel) =>
-      channel?.channel === "slack" && channel?.strategy === "inbound_proof_code",
-  );
-  if (!connectAction) return null;
-  const action = connectAction.action || {};
+  const channel = String(parsed?.channel || "").trim();
+  if (!channel) return null;
   return {
-    extensionName: "slack",
-    state: "pairing_required",
-    threadId,
-    sourceMessageId: SLACK_STARTUP_ONBOARDING_SOURCE_ID,
-    instructions:
-      action.instructions ||
-      "Message the IronClaw Reborn app in Slack to get a pairing code, then paste it here. If a code is invalid or expired, run /pair in Slack for a fresh one.",
+    sourceMessageId: card.id || null,
+    extensionName: channel,
+    instructions: typeof parsed.instructions === "string" ? parsed.instructions : null,
     inputPlaceholder:
-      action.input_placeholder ||
-      action.code_placeholder ||
-      "Enter Slack pairing code",
-    submitLabel: action.submit_label || "Connect",
-    errorMessage:
-      action.error_message ||
-      "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.",
+      typeof parsed.input_placeholder === "string" ? parsed.input_placeholder : null,
+    submitLabel: typeof parsed.submit_label === "string" ? parsed.submit_label : null,
+    errorMessage: typeof parsed.error_message === "string" ? parsed.error_message : null,
   };
 }
 
-function extensionRequiresPairing(extensionName, extensions) {
-  const expected = String(extensionName || "").toLowerCase();
+// The most recent channel-connection-required card in the timeline, unless the
+// user already dismissed it (the dismissal is keyed by the durable tool id, so a
+// closed panel does not re-derive from the still-present card on reload).
+function latestChannelConnectionRequirement(messages, dismissedIds) {
+  if (!Array.isArray(messages)) return null;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const requirement = channelConnectionRequirementFromCard(messages[index]);
+    if (!requirement) continue;
+    if (requirement.sourceMessageId && dismissedIds?.has?.(requirement.sourceMessageId)) {
+      return null;
+    }
+    return requirement;
+  }
+  return null;
+}
+
+// True when the caller's account for `channel` is already connected, per the
+// per-user extensions snapshot. The card is gated on this so a durable
+// activation card can never re-open the panel for an already-connected account.
+function channelConnectionIsSatisfied(extensions, channel) {
+  const expected = String(channel || "").toLowerCase();
   const extension = (extensions || []).find(
-    (item) => packageRefId(item).toLowerCase() === expected,
+    (item) =>
+      String(
+        item?.package_ref?.id || item?.packageRef?.id || item?.id || "",
+      ).toLowerCase() === expected,
   );
-  if (!extension || extension.kind !== "channel") return true;
-  if (extension.authenticated === true && extension.needs_setup !== true) {
-    return false;
-  }
-  if (extension.authenticated === false || extension.needs_setup === true) {
-    return true;
-  }
-  const state = extensionLifecycleState(extension);
-  return ["setup_required", "pairing_required", "pairing"].includes(state);
-}
-
-function slackExtensionRequiresPairing(extensions) {
-  return extensionRequiresPairing("slack", extensions);
-}
-
-function fetchWithQueryCache(queryKey, queryFn) {
-  if (typeof queryClient.fetchQuery === "function") {
-    return queryClient.fetchQuery({ queryKey, queryFn });
-  }
-  return queryFn();
+  if (!extension) return false;
+  if (extension.authenticated === true && extension.needs_setup !== true) return true;
+  if (extension.authenticated === false || extension.needs_setup === true) return false;
+  const state =
+    extension.onboarding_state ||
+    extension.onboardingState ||
+    extension.activation_status ||
+    extension.activationStatus;
+  return !["setup_required", "pairing_required", "pairing"].includes(state);
 }
 
 function submitResponseResumedTurnGate(response) {
@@ -471,41 +460,50 @@ export function useChat(threadId) {
     pendingOnboarding?.sourceMessageId,
   ]);
 
+  // Derive the in-chat pairing panel from the durable, structured
+  // channel-connection-required tool card the backend attaches to an
+  // `extension_activate` result for a connectable channel. The trigger is a
+  // concrete per-thread card (present only after the agent engaged the channel
+  // here), so — unlike the removed global poll — it never fires on an empty or
+  // unrelated chat and never races history loading. It is gated on the live
+  // per-user connection state so a card that outlived the user's connect can
+  // never re-open the panel for an already-connected account.
   React.useEffect(() => {
-    if (!threadId || visiblePendingOnboarding || pendingGate || historyLoading) return;
-    if (Array.isArray(messages) && messages.length > 0) return;
+    if (!threadId || pendingGate || pendingOnboardingRef.current) return;
+    const requirement = latestChannelConnectionRequirement(
+      messages,
+      dismissedOnboardingIdsRef.current,
+    );
+    if (!requirement) return;
     let cancelled = false;
-    Promise.all([
-      fetchWithQueryCache(["extensions"], fetchExtensions),
-      fetchWithQueryCache(["connectable-channels"], listConnectableChannels),
-    ])
-      .then(([extensionData, connectableData]) => {
+    Promise.resolve(
+      typeof queryClient.fetchQuery === "function"
+        ? queryClient.fetchQuery({ queryKey: ["extensions"], queryFn: fetchExtensions })
+        : fetchExtensions(),
+    )
+      .then((data) => {
         if (cancelled || pendingOnboardingRef.current) return;
-        const onboarding = slackStartupPairingOnboarding({
-          extensions: extensionData?.extensions || [],
-          connectableChannels: connectableData?.channels || [],
+        if (channelConnectionIsSatisfied(data?.extensions || [], requirement.extensionName)) {
+          return;
+        }
+        setPendingOnboarding({
+          extensionName: requirement.extensionName,
+          state: "pairing_required",
           threadId,
-          dismissedIds: dismissedOnboardingIdsRef.current,
+          sourceMessageId: requirement.sourceMessageId,
+          instructions: requirement.instructions,
+          inputPlaceholder: requirement.inputPlaceholder,
+          submitLabel: requirement.submitLabel,
+          errorMessage: requirement.errorMessage,
         });
-        if (!onboarding) return;
-        setPendingOnboarding(onboarding);
-        setIsProcessing(false);
       })
       .catch(() => {
-        // Best-effort startup affordance; normal chat remains usable.
+        // Best-effort affordance; chat stays usable if the lookup fails.
       });
     return () => {
       cancelled = true;
     };
-  }, [
-    historyLoading,
-    messages,
-    pendingGate,
-    visiblePendingOnboarding,
-    threadId,
-    setPendingOnboarding,
-    setIsProcessing,
-  ]);
+  }, [messages, threadId, pendingGate, setPendingOnboarding]);
 
   React.useEffect(() => {
     if (!isPendingOAuthGate(pendingGate)) return;
@@ -553,7 +551,6 @@ export function useChat(threadId) {
     setMessages,
     setIsProcessing,
     setPendingGate,
-    setPendingOnboarding,
     setActiveRun,
     activeRunRef,
     locallyResolvedGatesRef,
@@ -927,6 +924,13 @@ export function useChat(threadId) {
 
   React.useEffect(() => {
     return subscribeChannelConnected((event) => {
+      // A channel connected — here, in another tab, or on the extensions page.
+      // Refresh the per-user connection snapshot so every chat's panel gate
+      // (and the extensions UI) sees "connected" instead of the stale
+      // "needs setup" cache; without this a freshly connected account can
+      // still surface a "Connect" panel for up to the query staleTime.
+      queryClient.invalidateQueries?.({ queryKey: ["extensions"] });
+      queryClient.invalidateQueries?.({ queryKey: ["connectable-channels"] });
       const onboarding = pendingOnboardingRef.current;
       if (!connectionEventMatchesOnboarding(event, onboarding)) return;
       resumeOnboardingAfterChannelConnected(onboarding, event).catch((error) => {
@@ -1129,6 +1133,23 @@ export function useChat(threadId) {
       const runId = activeRun?.runId;
       if (!runId || !threadId) return;
       setPendingGate(null);
+      // Cancelling abandons any pairing panel for this thread: forget its waiter
+      // and remember the dismissal so a later channel connect can't blast a
+      // "Continue the previous request" into a chat the user explicitly cancelled,
+      // and the durable activation card can't re-derive the panel.
+      const onboarding = pendingOnboardingRef.current;
+      if (onboarding) {
+        const threadForCancel = onboarding.threadId || threadId;
+        if (onboarding.sourceMessageId) {
+          dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
+          persistDismissedOnboardingId(threadForCancel, onboarding.sourceMessageId);
+        }
+        forgetChannelConnectionWaiter({
+          channel: onboarding.extensionName,
+          threadId: threadForCancel,
+          sourceMessageId: onboarding.sourceMessageId || null,
+        });
+      }
       setPendingOnboarding(null);
       setIsProcessing(false);
       setActiveRun(null);

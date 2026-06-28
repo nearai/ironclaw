@@ -294,6 +294,20 @@ impl LifecycleProductAction {
     }
 }
 
+/// Structured "the caller must connect this channel" affordance attached to a
+/// channel-extension activation result. Carried verbatim (snake_case) to the
+/// WebChat as a capability display preview so the in-chat pairing panel is
+/// driven by structured state, never by parsing the activation message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelConnectionRequirement {
+    pub channel: String,
+    pub strategy: String,
+    pub instructions: String,
+    pub input_placeholder: String,
+    pub submit_label: String,
+    pub error_message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LifecycleProductPayload {
@@ -315,6 +329,8 @@ pub enum LifecycleProductPayload {
         activated: bool,
         #[serde(default)]
         visible_capability_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connection_required: Option<ChannelConnectionRequirement>,
     },
     ExtensionRemove {
         removed: bool,

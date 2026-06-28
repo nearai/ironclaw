@@ -4,13 +4,12 @@ import test from "node:test";
 import {
   channelConnectionContinuationMessage,
   connectionEventMatchesOnboarding,
-  messageIsConnectionContinuationFor,
   notifyChannelConnected,
   rememberChannelConnectionWaiter,
   subscribeChannelConnected,
 } from "./channel-connection-events.js";
 
-test("channel connection continuation text is generic and matchable", () => {
+test("channel connection continuation text is generic and channel-matchable", () => {
   assert.equal(
     channelConnectionContinuationMessage("slack"),
     "Slack is connected. Continue the previous request.",
@@ -18,13 +17,6 @@ test("channel connection continuation text is generic and matchable", () => {
   assert.equal(
     channelConnectionContinuationMessage("telegram-bot"),
     "Telegram Bot is connected. Continue the previous request.",
-  );
-  assert.equal(
-    messageIsConnectionContinuationFor(
-      "Telegram Bot is connected. Continue the previous request.",
-      "telegram_bot",
-    ),
-    true,
   );
   assert.equal(
     connectionEventMatchesOnboarding(
@@ -172,6 +164,82 @@ test("notifyChannelConnected resumes persisted waiting threads and skips the sou
       remaining.map((waiter) => waiter.threadId),
       ["thread-source"],
       "source waiter is skipped so the submitting chat can do its own continuation cleanup",
+    );
+  } finally {
+    globalThis.window = originalWindow;
+    globalThis.fetch = originalFetch;
+    globalThis.sessionStorage = originalSessionStorage;
+  }
+});
+
+test("waiters older than the TTL are purged and never resumed", async () => {
+  const originalWindow = globalThis.window;
+  const originalFetch = globalThis.fetch;
+  const originalSessionStorage = globalThis.sessionStorage;
+  const storage = new Map();
+  const fetches = [];
+
+  globalThis.sessionStorage = {
+    getItem: () => "token-1",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async (path, options) => {
+    fetches.push({ path, options });
+    return new Response(JSON.stringify({ run_id: "run-1" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  globalThis.window = {
+    localStorage: {
+      getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+      setItem: (key, value) => storage.set(key, String(value)),
+      removeItem: (key) => storage.delete(key),
+    },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  try {
+    const dayMs = 24 * 60 * 60 * 1000;
+    // A waiter that has been parked far longer than any plausible
+    // connect-and-return window is stale: the chat that registered it is no
+    // longer meaningfully "waiting", so connecting Slack must NOT blast a
+    // continuation into it, and it must be evicted so waiters can't pile up
+    // unbounded in localStorage.
+    storage.set(
+      "ironclaw:channel-connection:waiting:v1",
+      JSON.stringify([
+        {
+          channel: "slack",
+          threadId: "thread-stale",
+          sourceMessageId: null,
+          createdAt: Date.now() - dayMs - 60_000,
+        },
+        {
+          channel: "slack",
+          threadId: "thread-fresh",
+          sourceMessageId: null,
+          createdAt: Date.now(),
+        },
+      ]),
+    );
+
+    await notifyChannelConnected({ channel: "slack", source: "extensions" });
+
+    assert.deepEqual(
+      fetches.map((fetchCall) => fetchCall.path),
+      ["/api/webchat/v2/threads/thread-fresh/messages"],
+      "the stale waiter must not be resumed",
+    );
+    const remaining = JSON.parse(
+      storage.get("ironclaw:channel-connection:waiting:v1") || "[]",
+    );
+    assert.deepEqual(
+      remaining.map((waiter) => waiter.threadId),
+      [],
+      "the stale waiter is purged and the fresh waiter is consumed",
     );
   } finally {
     globalThis.window = originalWindow;
