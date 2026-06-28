@@ -390,6 +390,12 @@ def _print_text(report: dict[str, object], include_missing: bool) -> None:
         print("Workbook IDs not in hermetic runner:")
         for test_id in report["workbook_ids_not_in_hermetic_runner"]:
             print(f"  {test_id}")
+        print("Workbook external-existing IDs:")
+        for test_id in report["workbook_external_existing_ids"]:
+            print(f"  {test_id}")
+        print("Workbook existing-evidence IDs not in runner:")
+        for test_id in report["workbook_existing_evidence_not_in_runner_ids"]:
+            print(f"  {test_id}")
         print("Actionable gap IDs:")
         for test_id in report["actionable_gap_ids"]:
             print(f"  {test_id}")

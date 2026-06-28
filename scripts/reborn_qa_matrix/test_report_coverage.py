@@ -6,6 +6,8 @@ from __future__ import annotations
 import tempfile
 import unittest
 import zipfile
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -170,6 +172,57 @@ class ReportCoverageTests(unittest.TestCase):
             self.assertEqual(report["matrix_test_count"], 1)
             self.assertIn("REBCLI-100-TC-02", report["runner_ids_not_in_workbook"])
             self.assertGreater(report["hermetic_runner_test_count"], 0)
+
+    def test_text_report_lists_non_actionable_missing_ids_when_requested(self):
+        report = {
+            "workbook": "matrix.xlsx",
+            "scope_tokens": ["webui v2"],
+            "feature_count": 1,
+            "all_feature_count": 1,
+            "matrix_test_count": 3,
+            "all_matrix_test_count": 3,
+            "hermetic_runner_test_count": 0,
+            "hermetic_runner_coverage_pct": 0.0,
+            "matrix_only_or_new_runner_test_count": 0,
+            "matrix_only_or_new_runner_coverage_pct": 0.0,
+            "existing_ci_only_test_count": 0,
+            "workbook_external_existing_test_count": 1,
+            "workbook_existing_evidence_not_in_runner_count": 1,
+            "actionable_gap_test_count": 1,
+            "combined_runner_test_count": 0,
+            "combined_runner_coverage_pct": 0.0,
+            "traceable_runner_test_count": 0,
+            "traceable_runner_coverage_pct": 0.0,
+            "matrix_only_or_new_combined_test_count": 0,
+            "matrix_only_or_new_combined_coverage_pct": 0.0,
+            "covered_feature_count": 0,
+            "covered_feature_pct": 0.0,
+            "traceable_feature_count": 0,
+            "traceable_feature_pct": 0.0,
+            "matrix_only_or_new_feature_count": 0,
+            "matrix_only_or_new_feature_pct": 0.0,
+            "runner_ids_not_in_workbook": [],
+            "workbook_ids_not_in_hermetic_runner": [
+                "REBCLI-777-TC-01",
+                "REBCLI-777-TC-02",
+                "REBCLI-777-TC-03",
+            ],
+            "workbook_external_existing_ids": ["REBCLI-777-TC-01"],
+            "workbook_existing_evidence_not_in_runner_ids": ["REBCLI-777-TC-02"],
+            "actionable_gap_ids": ["REBCLI-777-TC-03"],
+        }
+        output = StringIO()
+
+        with redirect_stdout(output):
+            report_coverage._print_text(report, include_missing=True)
+
+        text = output.getvalue()
+        self.assertIn("Workbook external-existing IDs:\n  REBCLI-777-TC-01", text)
+        self.assertIn(
+            "Workbook existing-evidence IDs not in runner:\n  REBCLI-777-TC-02",
+            text,
+        )
+        self.assertIn("Actionable gap IDs:\n  REBCLI-777-TC-03", text)
 
 
 if __name__ == "__main__":
