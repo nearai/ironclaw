@@ -14,6 +14,11 @@
 //! Uses async I/O throughout to avoid blocking the tokio runtime.
 
 use std::collections::HashSet;
+// `io`/`Read` are used only by the `#[cfg(unix)]` permission-check helpers
+// (`identity_matches`, `read_file_bytes_limited`); gate the import to match so
+// the non-unix build doesn't see them as unused (`std::io::ErrorKind` elsewhere
+// uses the full path and needs no import).
+#[cfg(unix)]
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
@@ -335,7 +340,7 @@ impl SkillRegistry {
         hasher.update(tenant_id.as_bytes());
         hasher.update([0]);
         hasher.update(user_id.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     /// Discover and load skills from all configured directories.
@@ -1134,8 +1139,7 @@ async fn checked_file_content_hash(
 fn compute_hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    let result = hasher.finalize();
-    format!("sha256:{:x}", result)
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 // All call sites read file handles inside `#[cfg(unix)]` permission-check

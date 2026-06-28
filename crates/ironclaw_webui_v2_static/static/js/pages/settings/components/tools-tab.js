@@ -50,8 +50,9 @@ function Switch({ checked, disabled = false, label, onChange }) {
 function AutoApproveCard({ settings, onSave, savedKeys, isLoading }) {
   const t = useT();
   const label = t("settings.field.autoApproveEligibleTools");
-  const checked =
-    settings?.[AUTO_APPROVE_KEY] === true || settings?.[AUTO_APPROVE_KEY] === "true";
+  // Absent → default ON (mirrors backend AUTO_APPROVE_DEFAULT_ENABLED).
+  const raw = settings?.[AUTO_APPROVE_KEY];
+  const checked = raw == null ? true : raw === true || raw === "true";
 
   return html`
     <${Card} padding="md" className="flex items-center justify-between gap-6">

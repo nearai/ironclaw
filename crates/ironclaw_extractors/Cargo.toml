@@ -14,4 +14,4 @@ publish = false
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 pdf-extract = "0.12"
 thiserror = "2"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }

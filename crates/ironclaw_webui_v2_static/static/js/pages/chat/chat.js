@@ -74,29 +74,33 @@ export function Chat({
     () => threads.find((thread) => thread.id === activeThreadId) || null,
     [threads, activeThreadId]
   );
-  const isActiveThreadProcessing = Boolean(
-    isProcessing &&
-      (!activeRun?.threadId || activeRun.threadId === activeThreadId)
-  );
   const runtimeContext = React.useMemo(
     () => buildRuntimeContext({ gatewayStatus, activeThread }),
     [gatewayStatus, activeThread]
   );
+  const activeRunBelongsToActiveThread =
+    !activeRun?.threadId || activeRun.threadId === activeThreadId;
+  const activeThreadHasGate = Boolean(
+    activeThreadId && pendingGate && activeRunBelongsToActiveThread
+  );
+  const activeThreadIsProcessing = Boolean(
+    activeThreadId && isProcessing && activeRunBelongsToActiveThread
+  );
   const hasMessages =
     messages.length > 0 ||
-    isActiveThreadProcessing ||
-    Boolean(pendingGate) ||
+    activeThreadIsProcessing ||
+    activeThreadHasGate ||
     Boolean(channelConnectAction);
   // Don't show the landing composer when history failed to load — show the
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
   const showLanding = !historyLoading && !hasMessages && !historyLoadError;
-  const approvalSubmitWarning = pendingGate
+  const approvalSubmitWarning = activeThreadHasGate
     ? "Resolve the approval request before sending another message."
     : "";
   const composerSendDisabled =
-    Boolean(pendingGate) ||
-    (isActiveThreadProcessing && !pendingGate) ||
+    activeThreadHasGate ||
+    (activeThreadIsProcessing && !activeThreadHasGate) ||
     cooldownSeconds > 0;
   const composerSendBlockedRef = React.useRef(composerSendDisabled);
   composerSendBlockedRef.current = composerSendDisabled;
@@ -110,12 +114,12 @@ export function Chat({
     activeThreadId &&
       activeRun?.runId &&
       activeRun.threadId === activeThreadId &&
-      isActiveThreadProcessing &&
-      !pendingGate
+      activeThreadIsProcessing &&
+      !activeThreadHasGate
   );
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [] } = {}) => {
-      if (pendingGate) {
+      if (activeThreadHasGate) {
         throw new Error(approvalSubmitWarning);
       }
       if (composerSendBlockedRef.current) return null;
@@ -132,10 +136,10 @@ export function Chat({
     },
     [
       activeThreadId,
+      activeThreadHasGate,
       approvalSubmitWarning,
       composerSendDisabled,
       onSelectThread,
-      pendingGate,
       send,
     ]
   );
@@ -190,7 +194,7 @@ export function Chat({
       setThreadState(activeThreadId, THREAD_STATE.NEEDS_ATTENTION);
       return undefined;
     }
-    if (isActiveThreadProcessing) {
+    if (activeThreadIsProcessing) {
       setThreadState(activeThreadId, THREAD_STATE.RUNNING);
       return undefined;
     }
@@ -199,7 +203,7 @@ export function Chat({
       THREAD_STATE_CLEAR_GRACE_MS
     );
     return () => clearTimeout(timer);
-  }, [activeThreadId, pendingGate, isActiveThreadProcessing]);
+  }, [activeThreadId, pendingGate, activeThreadIsProcessing]);
 
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
   React.useEffect(() => {
@@ -259,7 +263,7 @@ export function Chat({
             onLoadMore=${loadMore}
             onRetryMessage=${retryMessage}
             threadId=${activeThreadId}
-            pending=${isActiveThreadProcessing}
+            pending=${activeThreadIsProcessing}
           >
             ${recoveryNotice &&
             html`
@@ -268,7 +272,7 @@ export function Chat({
                 onRecover=${recoverHistory}
               />
             `}
-            ${isActiveThreadProcessing && !pendingGate && html`<${TypingIndicator} />`}
+            ${activeThreadIsProcessing && !activeThreadHasGate && html`<${TypingIndicator} />`}
             ${channelConnectAction &&
             html`
               <${ChannelConnectCard}
@@ -276,7 +280,7 @@ export function Chat({
                 onDismiss=${dismissChannelConnectAction}
               />
             `}
-            ${pendingGate &&
+            ${activeThreadHasGate &&
             (pendingGate.kind === "auth_required"
               ? (pendingGate.challengeKind === "oauth_url"
                 ? html`

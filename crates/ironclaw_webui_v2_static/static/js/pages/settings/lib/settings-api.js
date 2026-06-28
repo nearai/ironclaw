@@ -61,7 +61,8 @@ export async function fetchSettingsExport() {
 export async function fetchSetting(key) {
   if (key === AUTO_APPROVE_KEY) {
     const data = await fetchSettingsExport();
-    return data.settings[AUTO_APPROVE_KEY] ?? false;
+    // Default ON when unset, mirroring backend AUTO_APPROVE_DEFAULT_ENABLED.
+    return data.settings[AUTO_APPROVE_KEY] ?? true;
   }
   const data = await apiFetch(`${OPERATOR_CONFIG_BASE}/${encodeURIComponent(key)}`);
   return data.entry?.value ?? null;
