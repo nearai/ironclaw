@@ -154,10 +154,13 @@ class ReportCoverageTests(unittest.TestCase):
             workbook_path = Path(tmpdir) / "matrix.xlsx"
             _write_workbook(
                 workbook_path,
-                feature_rows=[["Feature ID", "Feature Name"], ["REBCLI-099", "Models API"]],
+                feature_rows=[
+                    ["Feature ID", "Feature Name"],
+                    ["REBCLI-100", "OpenAI-Compatible Responses External Tools"],
+                ],
                 test_rows=[
                     ["Test ID", "Feature ID"],
-                    ["REBCLI-099-TC-01", "REBCLI-099"],
+                    ["REBCLI-100-TC-01", "REBCLI-100"],
                 ],
             )
 
@@ -165,7 +168,7 @@ class ReportCoverageTests(unittest.TestCase):
 
             self.assertEqual(report["feature_count"], 1)
             self.assertEqual(report["matrix_test_count"], 1)
-            self.assertIn("REBCLI-099-TC-02", report["runner_ids_not_in_workbook"])
+            self.assertIn("REBCLI-100-TC-02", report["runner_ids_not_in_workbook"])
             self.assertGreater(report["hermetic_runner_test_count"], 0)
 
 

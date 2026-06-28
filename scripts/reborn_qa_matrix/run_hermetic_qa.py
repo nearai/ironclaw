@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Hermetic QA matrix runner for Reborn WebUI v2 and OpenAI-compatible rows.
 
-This lane executes local cargo regressions that correspond to QA matrix test
-case IDs. It intentionally does not start ``ironclaw-reborn serve`` and does
-not call live providers; browser/live coverage belongs in
-``scripts/reborn_webui_v2_live_qa``.
+This lane executes QA matrix rows that are not already covered by the normal
+Reborn CI contract suite. Package-level Rust ``cargo test`` contracts are kept
+as traceability-only coverage; the executable lane is for ResponsesAPI served
+checks plus WebUI v2 static, node, and browser-facing behavior.
 """
 
 from __future__ import annotations
@@ -56,9 +56,14 @@ CI_OWNED_CONTRACT_COMMANDS = {
 }
 
 CI_OWNED_CONTRACT_COVERAGE = (
+    "already covered by the normal Reborn CI Rust contract suite; keep the "
+    "QA matrix runner focused on ResponsesAPI served checks and WebUI v2 "
+    "UI/API deltas"
+)
+
+CI_OWNED_PACKAGE_TEST_COVERAGE = (
     "already covered by .github/workflows/reborn-tests.yml package-matrix "
-    "crate/root contract coverage; keep the QA matrix runner focused on "
-    "ResponsesAPI/OpenAI-specific and WebUI v2 UI/API deltas"
+    "cargo test -p <package> --all-targets contract coverage"
 )
 
 
@@ -5720,22 +5725,8 @@ def _command_ci_coverage(command: CommandSpec) -> str | None:
     rendered = render_command(command)
     if command.argv[:2] == ["cargo", "test"] and "-p" in command.argv:
         package = command.argv[command.argv.index("-p") + 1]
-        if package == "ironclaw_reborn_cli":
-            return (
-                "already covered by .github/workflows/reborn-tests.yml crate-tests "
-                "for ironclaw_reborn_cli with webui-v2-beta,slack-v2-host-beta"
-            )
-        if package in {"ironclaw_webui_v2", "ironclaw_webui_v2_static"}:
-            return (
-                "already covered by .github/workflows/reborn-tests.yml crate-tests "
-                f"for {package} with webui-v2-beta"
-            )
-        if package == "ironclaw_reborn_composition" and "openai-compat-beta" not in rendered:
-            return (
-                "already covered by .github/workflows/reborn-tests.yml crate-tests "
-                "for ironclaw_reborn_composition with test-support,webui-v2-beta,"
-                "slack-v2-host-beta,libsql"
-            )
+        if package.startswith("ironclaw_"):
+            return CI_OWNED_PACKAGE_TEST_COVERAGE
 
     if "scripts/reborn-e2e-rust.sh" in rendered:
         return "already covered by .github/workflows/reborn-e2e.yml Rust Reborn matrix"

@@ -34,11 +34,11 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
 
         selected = run_hermetic_qa._selected_case_names(args)
 
-        self.assertIn("openai_responses_api_workflow_regression", selected)
         self.assertIn("openai_responses_external_tools_e2e_regression", selected)
-        self.assertIn("openai_chat_completions_workflow_regression", selected)
         self.assertIn("webui_v2_chat_client_regression", selected)
         self.assertIn("webui_v2_workspace_project_client_regression", selected)
+        self.assertNotIn("openai_responses_api_workflow_regression", selected)
+        self.assertNotIn("openai_chat_completions_workflow_regression", selected)
         self.assertNotIn("openai_compat_owner_crate_regression", selected)
         self.assertNotIn("support_substrate_product_workflow_regression", selected)
         self.assertNotIn("webui_v2_route_contract_regression", selected)
@@ -60,10 +60,31 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             run_hermetic_qa._selected_case_names(args)
 
+    def test_rust_responses_contract_case_cannot_be_selected_for_execution(self):
+        parser = run_hermetic_qa.build_parser()
+        args = parser.parse_args(["--case", "openai_responses_api_workflow_regression"])
+
+        with self.assertRaises(SystemExit):
+            run_hermetic_qa._selected_case_names(args)
+
+    def test_default_executable_lane_has_no_package_level_cargo_contracts(self):
+        parser = run_hermetic_qa.build_parser()
+        args = parser.parse_args([])
+        selected = run_hermetic_qa._selected_case_names(args)
+
+        cargo_contracts = [
+            command.name
+            for name in selected
+            for command in run_hermetic_qa._commands_for_case(run_hermetic_qa.CASES[name])
+            if command.argv[:2] == ["cargo", "test"] and "-p" in command.argv
+        ]
+
+        self.assertEqual(cargo_contracts, [])
+
     def test_manifest_emits_only_active_cases(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
-            selected = ["openai_responses_api_workflow_regression"]
+            selected = ["openai_responses_external_tools_e2e_regression"]
 
             manifest_path = run_hermetic_qa.write_case_manifest(output_dir, selected)
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -72,24 +93,18 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertEqual(
                 manifest["qa_matrix"]["selected_represented_test_ids"],
                 [
-                    "REBCLI-057-TC-01",
-                    "REBCLI-057-TC-02",
-                    "REBCLI-057-TC-03",
-                    "REBCLI-057-TC-04",
-                    "REBCLI-057-TC-05",
-                    "REBCLI-057-TC-06",
-                    "REBCLI-058-TC-01",
-                    "REBCLI-058-TC-02",
-                    "REBCLI-058-TC-03",
-                    "REBCLI-058-TC-04",
-                    "REBCLI-058-TC-05",
-                    "REBCLI-058-TC-06",
+                    "REBCLI-100-TC-01",
+                    "REBCLI-100-TC-02",
+                    "REBCLI-100-TC-03",
+                    "REBCLI-100-TC-04",
+                    "REBCLI-100-TC-05",
+                    "REBCLI-100-TC-06",
                 ],
             )
             case_names = {case["case"] for case in manifest["cases"]}
-            self.assertIn("openai_responses_api_workflow_regression", case_names)
             self.assertIn("openai_responses_external_tools_e2e_regression", case_names)
             self.assertIn("webui_v2_chat_client_regression", case_names)
+            self.assertNotIn("openai_responses_api_workflow_regression", case_names)
             self.assertNotIn("support_substrate_product_workflow_regression", case_names)
             self.assertNotIn("webui_v2_route_contract_regression", case_names)
             self.assertNotIn("openai_compat_owner_crate_regression", case_names)
@@ -97,7 +112,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
     def test_manifest_does_not_represent_existing_ci_only_cases(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
-            selected = ["openai_responses_api_workflow_regression"]
+            selected = ["openai_responses_external_tools_e2e_regression"]
 
             manifest_path = run_hermetic_qa.write_case_manifest(output_dir, selected)
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -111,37 +126,6 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
                 manifest["qa_matrix"]["represented_test_id_count"],
                 len(represented_ids),
             )
-
-    def test_responses_api_dry_run_writes_results_and_logs(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output_dir = Path(tmpdir)
-            exit_code = run_hermetic_qa.main(
-                [
-                    "--output-dir",
-                    str(output_dir),
-                    "--case",
-                    "openai_responses_api_workflow_regression",
-                    "--dry-run",
-                ]
-            )
-
-            self.assertEqual(exit_code, 0)
-            results = json.loads(
-                (output_dir / "results.json").read_text(encoding="utf-8")
-            )
-            self.assertTrue(results["success"])
-            self.assertFalse(results["run_existing_ci_coverage"])
-            commands = results["results"][0]["details"]["commands"]
-            self.assertEqual(
-                [command["name"] for command in commands],
-                [
-                    "openai_responses_workflow_handlers_contract",
-                    "openai_responses_streaming_handlers_contract",
-                ],
-            )
-            for command in commands:
-                self.assertTrue(Path(command["stdout_log"]).exists())
-                self.assertTrue(Path(command["stderr_log"]).exists())
 
     def test_responses_external_tools_e2e_dry_run_writes_results_and_logs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
