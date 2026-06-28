@@ -78,6 +78,14 @@ async fn assertions_fail_when_tool_present_but_requested_tool_or_url_does_not_ma
         .await
         .expect("harness builds");
     h.submit_turn("fetch items").await.expect("turn completes");
+    // Prove the capture lists are NON-empty first, so the negative checks below
+    // exercise the mismatch branch rather than passing vacuously on empty lists.
+    h.assert_tool_invoked("builtin.http")
+        .await
+        .expect("http tool ran before mismatch assertions");
+    h.assert_egress_request_matching("api.example.test")
+        .await
+        .expect("http egress captured before mismatch assertions");
     // Non-empty invocation list — wrong capability id must fail.
     assert!(
         h.assert_tool_invoked("some.other.capability")
@@ -120,6 +128,11 @@ async fn runs_http_save_tool_call_through_recorded_egress() {
     h.assert_tool_invoked("builtin.http.save")
         .await
         .expect("http.save tool ran");
+    // The save path must reach the real `RuntimeHttpEgress`; assert the recorded
+    // egress so a regression that bypasses it cannot pass this test.
+    h.assert_egress_request_matching("api.example.test")
+        .await
+        .expect("http.save egress captured");
     h.assert_reply_contains("saved")
         .await
         .expect("final reply finalized");
