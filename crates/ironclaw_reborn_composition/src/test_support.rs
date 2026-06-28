@@ -368,8 +368,7 @@ fn build_oauth_product_auth_infra() -> (
     let backend = Arc::new(InMemoryBackend::new());
     let scoped_fs: Arc<ScopedFilesystem<InMemoryBackend>> =
         Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
-    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> =
-        Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = Arc::new(InMemorySecretStore::new());
     // Real durable product-auth services over the in-memory scoped filesystem.
     let durable = Arc::new(
         crate::product_auth_durable::FilesystemAuthProductServices::new(
