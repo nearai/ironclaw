@@ -580,7 +580,7 @@ jobs:
           set -euo pipefail
           cases="$(echo "${REQUESTED_CASES:-}" | xargs)"
           if [[ "${cases}" == "all" ]]; then
-            echo "CASES=" >> "${GITHUB_ENV}"
+            echo "CASES=all" >> "${GITHUB_ENV}"
             echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=promoted-non-telegram" >> "${GITHUB_ENV}"
             echo "CASES=all requested; running the promoted non-Telegram Reborn QA suite."
           else
