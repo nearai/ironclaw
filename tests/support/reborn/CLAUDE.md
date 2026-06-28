@@ -164,7 +164,26 @@ Slice 6 ships the **real MCP runtime wired to a loopback mock MCP server** (desi
 - `reborn_integration_mcp.rs`: `mcp_tool_call_reaches_mock_server` (positive) +
   `assert_mcp_tool_called_fails_when_no_mcp_call_ran` (guard).
 
+Slice 7 ships the **real OAuth connect-flow against real product-auth stores** (design spec §3.8):
+- `ScriptedOAuthTokenEgress` (`ironclaw_reborn_composition::test_support`, `#[cfg(feature = "test-support")]`):
+  `RuntimeHttpEgress` impl returning a fixed token-exchange JSON body (`access_token` /
+  `token_type` / `expires_in`) and recording all calls; injected into `HostOAuthProviderClient`
+  so the token-exchange HTTP is captured without any network.
+- `OAuthProductAuthTestBundle` (same module): bundles `Arc<RebornProductAuthServices>` wired over
+  real `FilesystemAuthProductServices<InMemoryBackend>` with a fixed-view `ScopedFilesystem`
+  (via `ScopedFilesystem::with_fixed_view` — bypasses `invocation_mount_view` which requires
+  libsql/postgres features) alongside the `ScriptedOAuthTokenEgress`.
+- `build_oauth_product_auth_for_test()` (same module): public factory constructing the full
+  `RebornProductAuthServices` — `FilesystemAuthProductServices<InMemoryBackend>` as the durable
+  store, `HostOAuthProviderClient` with a real HTTPS `token_endpoint` + the scripted egress,
+  `TestNoopObligationHandler`, `TestNoopContinuationDispatcher`. No production code was changed.
+- `reborn_integration_oauth_connect.rs`: `oauth_connect_flow_persists_credential_account` (drives
+  `create_flow` → `handle_oauth_callback` → `get_account`, asserts `CredentialAccount` persisted
+  with correct `id`/`provider` and exactly one token-exchange call captured) +
+  `oauth_callback_without_prior_flow_fails` (guard: missing flow → `UnknownOrExpiredFlow`,
+  zero egress calls).
+
 **Planned (do not assume present; add behind a test that exercises it — no dead code):**
-`StorageMode::Postgres` (CI container lane); product/auth/approval/install/skill/secret
+`StorageMode::Postgres` (CI container lane); approval/install/skill/secret
 stores on the composite; `.with_live_http_egress()` opt-in; outbound/secrets capture wiring;
 the pre-commit test-style check.
