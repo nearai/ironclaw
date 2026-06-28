@@ -1334,6 +1334,7 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
             },
             Gate {
                 run_id: TurnRunId,
+                #[serde(default = "default_product_gate_kind")]
                 gate_kind: ProductGateKind,
                 gate_ref: String,
                 #[serde(default)]
@@ -1773,6 +1774,44 @@ mod tests {
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize gate projection");
         assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn gate_projection_without_gate_kind_defaults_to_generic() {
+        // Older stored/replayed gate projections may omit `gate_kind`. It must
+        // deserialize to the inert `Generic` (matching `GatePromptView`) rather
+        // than failing or defaulting to the privileged `Approval`.
+        let run_id = TurnRunId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::Gate {
+                run_id,
+                gate_kind: ProductGateKind::Resource,
+                gate_ref: "gate:legacy".to_string(),
+                invocation_id: None,
+                headline: "Legacy gate".to_string(),
+                body: None,
+                allow_always: false,
+                details: Vec::new(),
+                approval_context: None,
+                auth_context: None,
+            }],
+        )
+        .expect("valid gate projection");
+        let mut value = serde_json::to_value(&state).expect("serialize");
+        value["items"][0]["gate"]
+            .as_object_mut()
+            .expect("gate object")
+            .remove("gate_kind");
+
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize gate projection without gate_kind");
+        match &decoded.items[0] {
+            ProductProjectionItem::Gate { gate_kind, .. } => {
+                assert_eq!(*gate_kind, ProductGateKind::Generic);
+            }
+            other => panic!("expected gate item, got {other:?}"),
+        }
     }
 
     #[test]

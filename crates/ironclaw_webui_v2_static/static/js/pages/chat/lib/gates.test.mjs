@@ -172,6 +172,33 @@ test("gateFromEvent maps approval context into readable approval card props", ()
   assert.equal(gate.parameters, null);
 });
 
+test("gateFromEvent merges top-level details with approval context details", () => {
+  const { gateFromEvent } = loadGates();
+
+  // The event carries top-level `details` AND an approval_context. Both
+  // sources must reach the approval card; the top-level rows must not be
+  // dropped when an approval context is present.
+  const gate = plain(gateFromEvent("gate", {
+    turn_run_id: "run-1",
+    gate_ref: "gate:approval-1",
+    headline: "Approval required",
+    allow_always: false,
+    details: [{ label: "Estimated cost", value: "$0.02" }],
+    approval_context: {
+      tool_name: "builtin.http",
+      action: { label: "Run tool" },
+      scope: { label: "This request only", reusable: false },
+      reason: "approval required",
+    },
+  }));
+
+  assert.deepEqual(gate.approvalDetails, [
+    { label: "Action", value: "Run tool" },
+    { label: "Scope", value: "This request only" },
+    { label: "Estimated cost", value: "$0.02" },
+  ]);
+});
+
 test("gateFromProjectionGate maps approval context from durable projection", () => {
   const { gateFromProjectionGate } = loadGates();
 

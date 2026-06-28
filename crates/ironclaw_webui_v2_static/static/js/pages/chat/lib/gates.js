@@ -99,7 +99,9 @@ function gateWithApprovalContext(gate, approvalContext, fallbackDescription, det
     const withDetails = details.length ? { ...gate, approvalDetails: details } : gate;
     return description ? { ...withDetails, description } : withDetails;
   }
-  const approvalDetails = approvalDetailsFromContext(approvalContext);
+  // Merge the structured projection/event `details` with the rows derived
+  // from the approval context so neither source is dropped from the card.
+  const approvalDetails = [...approvalDetailsFromContext(approvalContext), ...details];
   return {
     ...gate,
     toolName: approvalContext.tool_name || null,
