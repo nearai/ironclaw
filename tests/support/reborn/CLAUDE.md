@@ -93,7 +93,7 @@ Design: `docs/superpowers/specs/2026-06-26-reborn-integration-test-framework-des
 Slice 1 ships the spine + one text-reply test. Slice 2 ships
 `RebornScriptedReply::tool_call(..)` + the CapabilityId→ProviderToolName mapping
 + `RecordingRuntimeHttpEgress` (FIFO body) + `assert_tool_invoked` /
-`assert_egress_request_matching` (substring). Slice 4 (this PR) ships the §3.6
+`assert_egress_request_matching` (substring). Slice 4 ships the §3.6
 P1-ergonomics **URL/method/capability-keyed HTTP matcher**
 (`ScriptedHttpResponse` + `.with_keyed_http_responses([..])` — different scripted
 body per URL for a multi-step tool-HTTP flow) and the richer **egress assertion
@@ -101,8 +101,25 @@ API** in the now-extracted `assertions.rs` (count / URL order / method order /
 per-URL body / surfaced tool result). The keyed matcher is the canonical
 HTTP-matcher API; an MCP/OAuth interceptor with per-URL response needs folds
 into `ScriptedHttpResponse` rather than adding a parallel matcher.
+
+Slice 3 ships `StorageMode { InMemory, LibSql }` (design spec §3.2, §3.8):
+- `RebornIntegrationHarness::builder(..).storage(mode)` selects the backend.
+- Both modes ride **one** `CompositeRootFilesystem` at the production path layout
+  `/tenants/<tenant>/users/<user>/...` — the only difference is the `RootFilesystem`
+  mounted under `/tenants`, `/memory`, and `/events`.
+- Integration tier: threads at `/tenants/.../threads`; turns at `/tenants/.../turns`.
+  **Binary-E2E tier is unchanged**: `RebornThreadHarness<LocalFilesystem>` still uses
+  `/engine/tenants/...`; `scoped_turns_fs` in `harness.rs` keeps `/engine` prefix.
+- `assert_reply_persists_after_reopen(text)` reopens the thread service over the same
+  composite backend and asserts the reply survives (SQLite durability for LibSql;
+  in-process re-instantiation for InMemory).
+- `reborn_integration_backend_matrix.rs`: `backend_parity_replies_to_greeting`
+  (`#[rstest] #[case(InMemory)] #[case(LibSql)]`) + `libsql_persists_reply_across_reopen`.
+- Product / auth / approval / install / skill / secret stores join the same composite in
+  their own §3.8 coverage slices; this slice covers thread + turn only.
+
 **Planned (do not assume present; add behind a test that exercises it — no dead code):**
-`StorageMode::LibSql` (real SQLite on tmp) and the InMemory-vs-libSQL backend
-matrix; inert process port + `.with_live_shell()` / `.with_live_http_egress()`
-opt-ins; outbound/secrets/MCP capture wiring + `.with_mock_mcp(..)`; the
-pre-commit test-style check.
+`StorageMode::Postgres` (CI container lane); product/auth/approval/install/skill/secret
+stores on the composite; inert process port + `.with_live_shell()` /
+`.with_live_http_egress()` opt-ins; outbound/secrets/MCP capture wiring +
+`.with_mock_mcp(..)`; the pre-commit test-style check.
