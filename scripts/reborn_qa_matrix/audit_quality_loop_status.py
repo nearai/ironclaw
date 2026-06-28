@@ -80,6 +80,14 @@ def build_status(
         + int(execution["missing_execution_field_count"])
         + int(execution["unknown_status_test_count"])
     )
+    traceable_runner_coverage_pct = coverage.get(
+        "traceable_runner_coverage_pct",
+        coverage["combined_runner_coverage_pct"],
+    )
+    traceable_feature_count = coverage.get(
+        "traceable_feature_count",
+        coverage["covered_feature_count"],
+    )
     return {
         "workbook": str(workbook_path),
         "strict_no_blocked": strict_no_blocked,
@@ -92,6 +100,7 @@ def build_status(
             "total_tests": coverage["all_matrix_test_count"],
             "hermetic_runner_coverage_pct": coverage["hermetic_runner_coverage_pct"],
             "combined_runner_coverage_pct": coverage["combined_runner_coverage_pct"],
+            "traceable_runner_coverage_pct": traceable_runner_coverage_pct,
             "matrix_only_or_new_combined_coverage_pct": coverage[
                 "matrix_only_or_new_combined_coverage_pct"
             ],
@@ -99,6 +108,7 @@ def build_status(
         },
         "features_tested": {
             "executable_feature_count": coverage["covered_feature_count"],
+            "traceable_feature_count": traceable_feature_count,
             "scoped_feature_count": coverage["feature_count"],
             "matrix_only_or_new_feature_count": coverage[
                 "matrix_only_or_new_feature_count"
@@ -121,7 +131,7 @@ def build_status(
             "missing_test_suite_count": completeness["missing_test_suite_count"],
             "unknown_status_test_count": execution["unknown_status_test_count"],
         },
-        "confidence_score": f"{coverage['combined_runner_coverage_pct']}%",
+        "confidence_score": f"{traceable_runner_coverage_pct}%",
         "surface": surface,
         "completeness": completeness,
         "coverage": coverage,
@@ -141,13 +151,15 @@ def print_report(report: dict[str, object]) -> None:
         "Coverage Summary: "
         f"{coverage['scoped_features']} scoped features, "
         f"{coverage['scoped_tests']} scoped tests, "
-        f"{coverage['combined_runner_coverage_pct']}% hermetic+live traceability, "
+        f"{coverage['traceable_runner_coverage_pct']}% traceable coverage, "
+        f"{coverage['combined_runner_coverage_pct']}% executable hermetic+live coverage, "
         f"{coverage['actionable_gap_test_count']} actionable gaps"
     )
     print(
         "Features Tested: "
-        f"{features['executable_feature_count']} / {features['scoped_feature_count']} "
-        "scoped features have runner/live traceability"
+        f"{features['traceable_feature_count']} / {features['scoped_feature_count']} "
+        "scoped features have runner/live/existing-CI traceability "
+        f"({features['executable_feature_count']} executable)"
     )
     print(f"Defects Found: {report['defects_found']}")
     print(f"Defects Fixed: {report['defects_fixed']}")

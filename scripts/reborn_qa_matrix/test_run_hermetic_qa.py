@@ -92,26 +92,23 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertNotIn("webui_v2_route_contract_regression", case_names)
             self.assertNotIn("openai_compat_owner_crate_regression", case_names)
 
-    def test_ci_owned_case_runs_no_commands(self):
+    def test_manifest_does_not_represent_existing_ci_only_cases(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            result = run_hermetic_qa.run_case(
-                run_hermetic_qa.CASES["support_substrate_product_workflow_regression"],
-                output_dir=Path(tmpdir),
-                timeout_seconds=30,
-                dry_run=True,
-            )
+            output_dir = Path(tmpdir)
+            selected = ["openai_responses_api_workflow_regression"]
 
-            self.assertTrue(result["success"])
-            self.assertEqual(result["details"]["commands"], [])
-            removed = result["details"]["removed_existing_ci_commands"]
+            manifest_path = run_hermetic_qa.write_case_manifest(output_dir, selected)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(manifest["qa_matrix"]["existing_ci_only_test_ids"], [])
+            represented_ids = set(manifest["qa_matrix"]["represented_test_ids"])
+            self.assertNotIn("REBCLI-043-TC-12", represented_ids)
+            cases = {case["case"] for case in manifest["cases"]}
+            self.assertNotIn("support_substrate_product_workflow_regression", cases)
             self.assertEqual(
-                [command["name"] for command in removed],
-                [
-                    "product_workflow_storage_durable_ledger",
-                    "support_substrate_regression",
-                ],
+                manifest["qa_matrix"]["represented_test_id_count"],
+                len(represented_ids),
             )
-            self.assertIn("reborn-tests.yml", removed[0]["existing_ci_coverage"])
 
     def test_responses_api_dry_run_writes_results_and_logs(self):
         with tempfile.TemporaryDirectory() as tmpdir:

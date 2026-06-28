@@ -5630,23 +5630,21 @@ def _safe_log_name(name: str) -> str:
 
 
 def _selected_case_names(args: argparse.Namespace) -> list[str]:
+    active_names = [name for name, _ in _active_case_items()]
+    active_name_set = set(active_names)
     if not args.case:
-        return [
-            name
-            for name, spec in CASES.items()
-            if spec.default_enabled and _case_has_matrix_only_command(spec)
-        ]
-    active_names = {
-        name for name, spec in CASES.items() if _case_has_matrix_only_command(spec)
-    }
+        return [name for name in active_names if CASES[name].default_enabled]
     names: list[str] = []
     for name in args.case:
-        if name not in CASES:
-            raise SystemExit(f"unknown case {name!r}; valid cases: {', '.join(CASES)}")
-        if name not in active_names:
+        if name not in active_name_set:
+            if name in CASES:
+                raise SystemExit(
+                    f"case {name!r} is existing-CI coverage and has been "
+                    "removed from the executable QA lane"
+                )
             raise SystemExit(
-                f"case {name!r} has only existing-CI coverage and is not "
-                "runnable in this QA lane"
+                f"unknown case {name!r}; valid executable cases: "
+                f"{', '.join(active_names)}"
             )
         if name not in names:
             names.append(name)
@@ -5710,6 +5708,14 @@ def _commands_for_case(case: CaseSpec) -> list[CommandSpec]:
     ]
 
 
+def _active_case_items() -> list[tuple[str, CaseSpec]]:
+    return [
+        (name, spec)
+        for name, spec in CASES.items()
+        if _case_has_matrix_only_command(spec)
+    ]
+
+
 def _removed_existing_ci_commands(case: CaseSpec) -> list[dict[str, str | None]]:
     return [
         {
@@ -5730,12 +5736,8 @@ def write_case_manifest(
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     selected_specs = [CASES[name] for name in selected_cases]
-    all_specs = list(CASES.values())
-    active_case_items = [
-        (name, spec)
-        for name, spec in CASES.items()
-        if _case_has_matrix_only_command(spec)
-    ]
+    active_case_items = _active_case_items()
+    active_specs = [spec for _, spec in active_case_items]
     matrix_path = os.environ.get("REBORN_QA_MATRIX_PATH", "").strip()
     manifest = {
         "generated_at": _now_iso(),
@@ -5748,16 +5750,12 @@ def write_case_manifest(
         "qa_matrix": {
             "source": "local_xlsx",
             "path": matrix_path or None,
-            "represented_test_ids": _test_ids_for(all_specs),
-            "represented_test_id_count": len(_test_ids_for(all_specs)),
+            "represented_test_ids": _test_ids_for(active_specs),
+            "represented_test_id_count": len(_test_ids_for(active_specs)),
             "selected_represented_test_ids": _test_ids_for(selected_specs),
             "selected_represented_test_id_count": len(_test_ids_for(selected_specs)),
-            "matrix_only_or_new_test_ids": _test_ids_for(
-                [spec for spec in all_specs if _case_has_matrix_only_command(spec)]
-            ),
-            "existing_ci_only_test_ids": _test_ids_for(
-                [spec for spec in all_specs if _case_existing_ci_only(spec)]
-            ),
+            "matrix_only_or_new_test_ids": _test_ids_for(active_specs),
+            "existing_ci_only_test_ids": [],
         },
         "cases": [
             {
@@ -5996,9 +5994,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.list_cases:
-        for name, spec in CASES.items():
-            if not _case_has_matrix_only_command(spec):
-                continue
+        for name, spec in _active_case_items():
             default = "default" if spec.default_enabled else "targeted"
             print(f"{name}\t{default}\t{','.join(spec.qa_matrix_test_ids)}")
         return 0

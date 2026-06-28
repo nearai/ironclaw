@@ -184,6 +184,8 @@ def hermetic_runner_ids(default_only: bool = False) -> set[str]:
     for case in run_hermetic_qa.CASES.values():
         if default_only and not case.default_enabled:
             continue
+        if not run_hermetic_qa._case_has_matrix_only_command(case):
+            continue
         ids.update(case.qa_matrix_test_ids)
     return ids
 
@@ -246,12 +248,15 @@ def build_report(
     existing_ci_ids = existing_ci_only_ids(default_only=True)
     live_ids = live_runner_ids(repo_root)
     combined_ids = hermetic_ids | live_ids
+    traceable_ids = combined_ids | existing_ci_ids
     matrix_only_combined_ids = matrix_only_ids | live_ids
-    covered_matrix_ids = matrix_ids & combined_ids
+    covered_matrix_ids = matrix_ids & traceable_ids
+    executable_matrix_ids = matrix_ids & combined_ids
     matrix_only_covered_ids = matrix_ids & matrix_only_combined_ids
     covered_features = {test_id[:10] for test_id in covered_matrix_ids}
+    executable_features = {test_id[:10] for test_id in executable_matrix_ids}
     matrix_only_covered_features = {test_id[:10] for test_id in matrix_only_covered_ids}
-    raw_missing_ids = matrix_ids - combined_ids
+    raw_missing_ids = matrix_ids - traceable_ids
     actionable_gap_ids = raw_missing_ids - workbook_external_existing_ids - workbook_existing_evidence_ids
     return {
         "workbook": str(workbook_path),
@@ -263,7 +268,8 @@ def build_report(
         "hermetic_runner_test_count": len(matrix_ids & hermetic_ids),
         "default_hermetic_runner_test_count": len(matrix_ids & default_hermetic_ids),
         "live_runner_test_count": len(matrix_ids & live_ids),
-        "combined_runner_test_count": len(covered_matrix_ids),
+        "combined_runner_test_count": len(executable_matrix_ids),
+        "traceable_runner_test_count": len(covered_matrix_ids),
         "matrix_only_or_new_runner_test_count": len(matrix_ids & matrix_only_ids),
         "existing_ci_only_test_count": len(matrix_ids & existing_ci_ids),
         "matrix_only_or_new_combined_test_count": len(matrix_only_covered_ids),
@@ -274,15 +280,18 @@ def build_report(
         ),
         "actionable_gap_test_count": len(actionable_gap_ids),
         "hermetic_runner_coverage_pct": _pct(len(matrix_ids & hermetic_ids), len(matrix_ids)),
-        "combined_runner_coverage_pct": _pct(len(covered_matrix_ids), len(matrix_ids)),
+        "combined_runner_coverage_pct": _pct(len(executable_matrix_ids), len(matrix_ids)),
+        "traceable_runner_coverage_pct": _pct(len(covered_matrix_ids), len(matrix_ids)),
         "matrix_only_or_new_runner_coverage_pct": _pct(
             len(matrix_ids & matrix_only_ids), len(matrix_ids)
         ),
         "matrix_only_or_new_combined_coverage_pct": _pct(
             len(matrix_only_covered_ids), len(matrix_ids)
         ),
-        "covered_feature_count": len(covered_features),
-        "covered_feature_pct": _pct(len(covered_features), len(feature_ids)),
+        "covered_feature_count": len(executable_features),
+        "covered_feature_pct": _pct(len(executable_features), len(feature_ids)),
+        "traceable_feature_count": len(covered_features),
+        "traceable_feature_pct": _pct(len(covered_features), len(feature_ids)),
         "matrix_only_or_new_feature_count": len(matrix_only_covered_features),
         "matrix_only_or_new_feature_pct": _pct(
             len(matrix_only_covered_features), len(feature_ids)
@@ -314,7 +323,7 @@ def _print_text(report: dict[str, object], include_missing: bool) -> None:
         print(f"Features: {report['feature_count']}")
         print(f"Matrix test cases: {report['matrix_test_count']}")
     print(
-        "Hermetic runner coverage: "
+        "Executable hermetic runner coverage: "
         f"{report['hermetic_runner_test_count']} / {report['matrix_test_count']} "
         f"= {report['hermetic_runner_coverage_pct']}%"
     )
@@ -343,9 +352,14 @@ def _print_text(report: dict[str, object], include_missing: bool) -> None:
         f"{report['actionable_gap_test_count']} / {report['matrix_test_count']}"
     )
     print(
-        "Hermetic + live runner coverage: "
+        "Executable hermetic + live runner coverage: "
         f"{report['combined_runner_test_count']} / {report['matrix_test_count']} "
         f"= {report['combined_runner_coverage_pct']}%"
+    )
+    print(
+        "Traceable hermetic/live/existing-CI coverage: "
+        f"{report['traceable_runner_test_count']} / {report['matrix_test_count']} "
+        f"= {report['traceable_runner_coverage_pct']}%"
     )
     print(
         "Matrix-only/new + live runner coverage: "
@@ -357,6 +371,11 @@ def _print_text(report: dict[str, object], include_missing: bool) -> None:
         "Executable feature coverage: "
         f"{report['covered_feature_count']} / {report['feature_count']} "
         f"= {report['covered_feature_pct']}%"
+    )
+    print(
+        "Traceable feature coverage: "
+        f"{report['traceable_feature_count']} / {report['feature_count']} "
+        f"= {report['traceable_feature_pct']}%"
     )
     print(
         "Matrix-only/new feature coverage: "
