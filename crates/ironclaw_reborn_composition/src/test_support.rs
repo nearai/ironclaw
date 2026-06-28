@@ -335,21 +335,23 @@ pub struct OAuthProductAuthTestBundle {
     pub egress: Arc<ScriptedOAuthTokenEgress>,
 }
 
-/// Construct a self-contained [`OAuthProductAuthTestBundle`] for OAuth
-/// connect-flow tests.
+/// Shared infrastructure preamble for OAuth product-auth test bundles.
 ///
-/// Uses:
-/// - `InMemoryBackend` with a fixed `MountView` scoped to
-///   `/tenants/test-tenant/users/test-user/secrets` (no `libsql`/`postgres`
-///   feature dependency).
-/// - `InMemorySecretStore` for access/refresh token handles.
-/// - `ScriptedOAuthTokenEgress` intercepting the provider token endpoint.
-/// - Real `FilesystemAuthProductServices<InMemoryBackend>` for flow + account
-///   persistence — zero mocks on the storage layer.
-/// - Noop continuation dispatcher and noop obligation handler.
-///
-/// Calling this multiple times produces independent, isolated bundles.
-pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
+/// Builds the fixed-view in-memory secrets filesystem, the secret store, and
+/// the durable `FilesystemAuthProductServices`. The two callers
+/// (`build_oauth_product_auth_for_test` and
+/// `build_google_oauth_product_auth_for_test`) differ only in the egress
+/// constructor, the `HostOAuthProviderSpec` fields, and the optional
+/// `.with_provider_client()` call.
+fn build_oauth_product_auth_infra() -> (
+    Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::InMemoryBackend>>,
+    Arc<dyn ironclaw_secrets::SecretStore>,
+    Arc<
+        crate::product_auth_durable::FilesystemAuthProductServices<
+            ironclaw_filesystem::InMemoryBackend,
+        >,
+    >,
+) {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
     use ironclaw_secrets::InMemorySecretStore;
@@ -366,16 +368,34 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped_fs: Arc<ScopedFilesystem<InMemoryBackend>> =
         Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
-
-    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = Arc::new(InMemorySecretStore::new());
-
+    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> =
+        Arc::new(InMemorySecretStore::new());
     // Real durable product-auth services over the in-memory scoped filesystem.
     let durable = Arc::new(
         crate::product_auth_durable::FilesystemAuthProductServices::new(
-            scoped_fs,
+            Arc::clone(&scoped_fs),
             Arc::clone(&secret_store),
         ),
     );
+    (scoped_fs, secret_store, durable)
+}
+
+/// Construct a self-contained [`OAuthProductAuthTestBundle`] for OAuth
+/// connect-flow tests.
+///
+/// Uses:
+/// - `InMemoryBackend` with a fixed `MountView` scoped to
+///   `/tenants/test-tenant/users/test-user/secrets` (no `libsql`/`postgres`
+///   feature dependency).
+/// - `InMemorySecretStore` for access/refresh token handles.
+/// - `ScriptedOAuthTokenEgress` intercepting the provider token endpoint.
+/// - Real `FilesystemAuthProductServices<InMemoryBackend>` for flow + account
+///   persistence — zero mocks on the storage layer.
+/// - Noop continuation dispatcher and noop obligation handler.
+///
+/// Calling this multiple times produces independent, isolated bundles.
+pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
+    let (_scoped_fs, secret_store, durable) = build_oauth_product_auth_infra();
 
     // Scripted egress: returns a valid access-token JSON body, records calls.
     let egress = Arc::new(ScriptedOAuthTokenEgress::with_access_token(
@@ -529,29 +549,7 @@ impl OAuthProductAuthTestBundle {
 /// Calling this multiple times produces independent, isolated bundles.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub fn build_google_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
-    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
-    use ironclaw_secrets::InMemorySecretStore;
-
-    // Same fixed-view mount layout as build_oauth_product_auth_for_test.
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/secrets").unwrap(),
-        VirtualPath::new("/tenants/test-tenant/users/test-user/secrets").unwrap(),
-        MountPermissions::read_write_list_delete(),
-    )])
-    .unwrap();
-    let backend = Arc::new(InMemoryBackend::new());
-    let scoped_fs: Arc<ScopedFilesystem<InMemoryBackend>> =
-        Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
-
-    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = Arc::new(InMemorySecretStore::new());
-
-    let durable = Arc::new(
-        crate::product_auth_durable::FilesystemAuthProductServices::new(
-            scoped_fs,
-            Arc::clone(&secret_store),
-        ),
-    );
+    let (_scoped_fs, secret_store, durable) = build_oauth_product_auth_infra();
 
     // Include a refresh_token in the scripted response so the token exchange
     // stores a refresh secret handle (needed for the keepalive sweep to call
