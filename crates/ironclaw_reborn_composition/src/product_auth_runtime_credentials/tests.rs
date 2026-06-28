@@ -608,7 +608,17 @@ async fn resolver_stages_oauth_access_secret_when_proactive_refresh_backend_is_u
         .create(&accounts)
         .await;
     accounts.fail_next_refresh_backend_for_tests(account.id);
-    let resolver = resolver_with_refresh(accounts.clone());
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    secret_store
+        .put(
+            scope.clone(),
+            access_secret.clone(),
+            ironclaw_secrets::SecretMaterial::from("[placeholder]".to_string()),
+            Some(Utc::now() + chrono::Duration::hours(1)),
+        )
+        .await
+        .expect("seed fresh access-token metadata");
+    let resolver = resolver_with_refresh_and_store(accounts.clone(), secret_store);
 
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
