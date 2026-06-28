@@ -25,6 +25,7 @@ import {
   resetToolActivityState,
 } from "../lib/tool-activity-state.js";
 import { toRenderAttachment, toWireAttachment } from "../lib/attachments.js";
+import { isRetryableMessage } from "../lib/retry-eligibility.js";
 import { useHistory } from "./useHistory.js";
 import { useSSE } from "./useSSE.js";
 
@@ -211,6 +212,9 @@ export function useChat(threadId) {
   const [stateThreadId, setStateThreadId] = React.useState(threadId);
   const toolActivityStateRef = React.useRef(createToolActivityState());
   const locallyResolvedGatesRef = React.useRef(new Map());
+  // Tracks msg-* ids the user has retried so post-run history reloads can
+  // suppress the persisted rejected_busy row — see retryMessage below.
+  const retriedTimelineIdsRef = React.useRef(new Set());
   const authTokenSubmitRef = React.useRef({
     gateKey: null,
     credentialRef: null,
@@ -275,6 +279,7 @@ export function useChat(threadId) {
   React.useEffect(() => {
     resetToolActivityState(toolActivityStateRef);
     locallyResolvedGatesRef.current.clear();
+    retriedTimelineIdsRef.current.clear();
   }, [threadId]);
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
@@ -367,6 +372,13 @@ export function useChat(threadId) {
       if (success) setPendingMessages([]);
       loadHistory(undefined, {
         preserveClientOnly: true,
+        // Suppress retried msg-* rows so the reload doesn't resurrect the
+        // old rejected_busy bubble alongside the replacement message.
+        // Snapshot the set: loadHistory is async and the per-thread reset
+        // clears retriedTimelineIdsRef on a threadId change, so passing the
+        // live ref would let a mid-refresh thread switch empty it before
+        // mergeFullRefresh reads it (the row would slip back into the cache).
+        suppressIds: new Set(retriedTimelineIdsRef.current),
         finalReplyTimestampByRun:
           _runId && success ? { [_runId]: new Date().toISOString() } : null,
       });
@@ -798,8 +810,56 @@ export function useChat(threadId) {
     [resolveGate],
   );
 
+  // Retry a message that failed to send. The action bar renders a Retry
+  // button only when `isRetryableMessage(message)` holds (a failed user text
+  // message — a network/API failure or a server `rejected_busy`), so this
+  // re-dispatches the send.
+  const retryMessage = React.useCallback(
+    async (message) => {
+      // isRetryableMessage is the single source of truth shared with the
+      // render guard in message-bubble.js, so a rendered Retry button and
+      // this handler can never disagree (no dead/misleading buttons). It also
+      // excludes attachment-bearing failures: re-send is CONTENT-ONLY because
+      // a failed bubble's `attachments` are render-shape (the File blobs are
+      // gone after the first send) and can't be reconstructed into wire
+      // attachments — so those bubbles show no Retry button rather than
+      // silently resending text and dropping the files.
+      if (!isRetryableMessage(message)) {
+        return;
+      }
+      let response;
+      try {
+        // Reuse send(): it owns the optimistic bubble, the
+        // busy/processing/pendingGate guards, the SSE wiring, and the
+        // failure handling. Don't reimplement the network path here.
+        response = await send(message.content, { threadId });
+      } catch {
+        // send() already marked the fresh optimistic bubble as error; there
+        // is nothing else to do — keep the original failed bubble too.
+        return;
+      }
+      // send() returns null when the thread is still busy. Only drop the old
+      // failed bubble AFTER the re-send is actually accepted — deleting it on
+      // a blocked send would make the message vanish with no feedback.
+      if (response) {
+        // Record this id BEFORE removing from state so the post-run
+        // loadHistory refetch can suppress the persisted rejected_busy row.
+        // Only msg-* ids are timeline rows; client-only pending-* bubbles
+        // are never re-emitted by loadHistory and don't need suppression.
+        if (typeof message.id === "string" && message.id.startsWith("msg-")) {
+          retriedTimelineIdsRef.current.add(message.id);
+        }
+        setMessages((prev) => prev.filter((m) => m.id !== message.id));
+      }
+      // Return the response so callers can route to the new thread when
+      // the retry triggered an implicit thread creation (landing-screen case).
+      return response;
+    },
+    [send, threadId, setMessages],
+  );
+
   // Fork chat.js expects these as stubs: v2 stream is deterministic
-  // enough that retry / suggestions / recovery are not necessary in
+  // enough that suggestions / recovery are not necessary in
   // local-dev. Wire them as no-ops so the chat UI renders without
   // additional branches.
   const noop = React.useCallback(() => {}, []);
@@ -826,7 +886,7 @@ export function useChat(threadId) {
     // fork-shape compatibility — see comments above
     suggestions: [],
     setSuggestions: noop,
-    retryMessage: noop,
+    retryMessage,
     approve,
     recoverHistory: noop,
     recoveryNotice: null,

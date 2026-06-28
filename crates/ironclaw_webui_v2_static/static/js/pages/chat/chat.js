@@ -138,6 +138,23 @@ export function Chat({
     ]
   );
 
+  // Retry replays a failed message through retryMessage, then applies the
+  // same new-thread routing handleSend uses. A failed first message on the
+  // landing screen creates a thread implicitly on retry; without this the
+  // user stays on the no-thread view where the SSE stream is disabled
+  // (useSSE `enabled: Boolean(threadId)`) and the new run never attaches.
+  const handleRetry = React.useCallback(
+    async (message) => {
+      const response = await retryMessage(message);
+      const responseThreadId = response?.thread_id || activeThreadId;
+      if (!activeThreadId && responseThreadId && onSelectThread) {
+        onSelectThread(responseThreadId, { replace: true });
+      }
+      return response;
+    },
+    [activeThreadId, onSelectThread, retryMessage]
+  );
+
   const handleSuggestion = React.useCallback(
     async (text) => {
       if (composerSendDisabled) return;
@@ -255,7 +272,7 @@ export function Chat({
             isLoading=${historyLoading}
             hasMore=${hasMore}
             onLoadMore=${loadMore}
-            onRetryMessage=${retryMessage}
+            onRetryMessage=${handleRetry}
             threadId=${activeThreadId}
             pending=${activeThreadIsProcessing}
           >
