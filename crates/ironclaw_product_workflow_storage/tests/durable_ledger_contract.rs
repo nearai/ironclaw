@@ -1,6 +1,5 @@
 #![cfg(any(feature = "libsql", feature = "postgres"))]
 
-use std::future::Future;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 #[cfg(feature = "postgres")]
@@ -19,18 +18,6 @@ use ironclaw_product_workflow_storage::RebornPostgresIdempotencyLedger;
 mod support;
 
 use support::*;
-
-#[cfg(feature = "libsql")]
-static LIBSQL_LEDGER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-#[cfg(feature = "libsql")]
-async fn run_libsql_ledger_test<Fut>(test: impl FnOnce() -> Fut)
-where
-    Fut: Future<Output = ()>,
-{
-    let _guard = LIBSQL_LEDGER_TEST_LOCK.lock().await;
-    test().await;
-}
 
 #[cfg(feature = "postgres")]
 fn unique_suffix(name: &str) -> String {
@@ -60,173 +47,136 @@ async fn libsql_filesystem(path: &str) -> Arc<LibSqlRootFilesystem> {
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_settled_action_survives_reopen_and_replays() {
-    run_libsql_ledger_test(|| async {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("workflow-ledger.db");
-        let db_path = db_path.display().to_string();
-        let ledger = RebornLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path).await);
-        let reopened = RebornLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path).await);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("workflow-ledger.db");
+    let db_path = db_path.display().to_string();
+    let ledger = RebornLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path).await);
+    let reopened = RebornLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path).await);
 
-        assert_settled_action_survives_reopen_and_replays(
-            &ledger,
-            &reopened,
-            "libsql-settled-replay",
-        )
+    assert_settled_action_survives_reopen_and_replays(&ledger, &reopened, "libsql-settled-replay")
         .await;
-    })
-    .await;
 }
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_in_flight_action_blocks_until_lease_expires() {
-    run_libsql_ledger_test(|| async {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("workflow-ledger.db");
-        let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
-            libsql_filesystem(&db_path.display().to_string()).await,
-            Duration::seconds(10),
-        );
-        assert_in_flight_action_blocks_until_lease_expires(&ledger, "libsql-lease").await;
-    })
-    .await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("workflow-ledger.db");
+    let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
+        libsql_filesystem(&db_path.display().to_string()).await,
+        Duration::seconds(10),
+    );
+    assert_in_flight_action_blocks_until_lease_expires(&ledger, "libsql-lease").await;
 }
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_release_allows_retry_without_waiting_for_lease() {
-    run_libsql_ledger_test(|| async {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("workflow-ledger.db");
-        let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
-            libsql_filesystem(&db_path.display().to_string()).await,
-            Duration::seconds(60),
-        );
-        assert_release_allows_retry_without_waiting_for_lease(&ledger, "libsql-release").await;
-    })
-    .await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("workflow-ledger.db");
+    let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
+        libsql_filesystem(&db_path.display().to_string()).await,
+        Duration::seconds(60),
+    );
+    assert_release_allows_retry_without_waiting_for_lease(&ledger, "libsql-release").await;
 }
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_duplicate_reservation_contention_serializes() {
-    run_libsql_ledger_test(|| async {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("workflow-ledger.db");
-        let db_path = db_path.display().to_string();
-        let first = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
-            libsql_filesystem(&db_path).await,
-            Duration::seconds(10),
-        );
-        let second = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
-            libsql_filesystem(&db_path).await,
-            Duration::seconds(10),
-        );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("workflow-ledger.db");
+    let db_path = db_path.display().to_string();
+    let first = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
+        libsql_filesystem(&db_path).await,
+        Duration::seconds(10),
+    );
+    let second = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
+        libsql_filesystem(&db_path).await,
+        Duration::seconds(10),
+    );
 
-        assert_duplicate_reservation_contention_serializes(&first, &second, "libsql-contention")
-            .await;
-    })
-    .await;
+    assert_duplicate_reservation_contention_serializes(&first, &second, "libsql-contention").await;
 }
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_settled_entry_limit_prunes_oldest() {
-    run_libsql_ledger_test(|| async {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("workflow-ledger.db");
-        let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
-            libsql_filesystem(&db_path.display().to_string()).await,
-            Duration::seconds(10),
-        )
-        .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("workflow-ledger.db");
+    let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
+        libsql_filesystem(&db_path.display().to_string()).await,
+        Duration::seconds(10),
+    )
+    .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"));
 
-        assert_settled_entry_limit_prunes_oldest(&ledger, "libsql-retention").await;
-    })
-    .await;
+    assert_settled_entry_limit_prunes_oldest(&ledger, "libsql-retention").await;
 }
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_settled_prune_interval_defers_until_interval() {
-    run_libsql_ledger_test(|| async {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("workflow-ledger.db");
-        let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
-            libsql_filesystem(&db_path.display().to_string()).await,
-            Duration::seconds(10),
-        )
-        .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"))
-        .with_settled_prune_interval(NonZeroUsize::new(3).expect("non-zero interval"));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("workflow-ledger.db");
+    let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
+        libsql_filesystem(&db_path.display().to_string()).await,
+        Duration::seconds(10),
+    )
+    .with_settled_entry_limit(NonZeroUsize::new(1).expect("non-zero limit"))
+    .with_settled_prune_interval(NonZeroUsize::new(3).expect("non-zero interval"));
 
-        assert_settled_prune_interval_defers_until_interval(&ledger, "libsql-prune-interval").await;
-    })
-    .await;
+    assert_settled_prune_interval_defers_until_interval(&ledger, "libsql-prune-interval").await;
 }
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_superseded_reservation_cannot_settle() {
-    run_libsql_ledger_test(|| async {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("workflow-ledger.db");
-        let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
-            libsql_filesystem(&db_path.display().to_string()).await,
-            Duration::seconds(10),
-        );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("workflow-ledger.db");
+    let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
+        libsql_filesystem(&db_path.display().to_string()).await,
+        Duration::seconds(10),
+    );
 
-        assert_superseded_reservation_cannot_settle(&ledger, "libsql-superseded").await;
-    })
-    .await;
+    assert_superseded_reservation_cannot_settle(&ledger, "libsql-superseded").await;
 }
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_settle_missing_reservation_returns_transient() {
-    run_libsql_ledger_test(|| async {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("workflow-ledger.db");
-        let ledger = RebornLibSqlIdempotencyLedger::new(
-            libsql_filesystem(&db_path.display().to_string()).await,
-        );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("workflow-ledger.db");
+    let ledger =
+        RebornLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path.display().to_string()).await);
 
-        assert_settle_missing_reservation_returns_transient(&ledger, "libsql-missing-settle").await;
-    })
-    .await;
+    assert_settle_missing_reservation_returns_transient(&ledger, "libsql-missing-settle").await;
 }
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_custom_root_isolated_from_default_root() {
-    run_libsql_ledger_test(|| async {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("workflow-ledger.db");
-        let filesystem = libsql_filesystem(&db_path.display().to_string()).await;
-        let custom = RebornLibSqlIdempotencyLedger::with_root(
-            Arc::clone(&filesystem),
-            custom_root("libsql"),
-            Duration::seconds(60),
-        );
-        let default = RebornLibSqlIdempotencyLedger::new(filesystem);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("workflow-ledger.db");
+    let filesystem = libsql_filesystem(&db_path.display().to_string()).await;
+    let custom = RebornLibSqlIdempotencyLedger::with_root(
+        Arc::clone(&filesystem),
+        custom_root("libsql"),
+        Duration::seconds(60),
+    );
+    let default = RebornLibSqlIdempotencyLedger::new(filesystem);
 
-        assert_custom_root_isolated_from_default_root(&custom, &default, "libsql-custom-root")
-            .await;
-    })
-    .await;
+    assert_custom_root_isolated_from_default_root(&custom, &default, "libsql-custom-root").await;
 }
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_actor_identity_is_part_of_fingerprint_path() {
-    run_libsql_ledger_test(|| async {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("workflow-ledger.db");
-        let db_path = db_path.display().to_string();
-        let ledger = RebornLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path).await);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("workflow-ledger.db");
+    let db_path = db_path.display().to_string();
+    let ledger = RebornLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path).await);
 
-        assert_actor_identity_is_part_of_fingerprint_path(&ledger, "libsql-actor-isolation").await;
-    })
-    .await;
+    assert_actor_identity_is_part_of_fingerprint_path(&ledger, "libsql-actor-isolation").await;
 }
 
 #[cfg(feature = "postgres")]

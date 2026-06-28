@@ -131,9 +131,9 @@ class ReportCoverageTests(unittest.TestCase):
             self.assertEqual(report["matrix_test_count"], 3)
             self.assertEqual(report["workbook_external_existing_test_count"], 1)
             self.assertIn("REBCLI-777-TC-01", report["workbook_external_existing_ids"])
-            self.assertIn(
+            self.assertNotIn(
                 "REBCLI-777-TC-02",
-                report["workbook_existing_evidence_not_in_runner_ids"],
+                report["workbook_ids_not_in_combined_runner"],
             )
             self.assertEqual(report["actionable_gap_ids"], ["REBCLI-777-TC-03"])
             self.assertEqual(report["actionable_gap_test_count"], 1)

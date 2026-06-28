@@ -335,7 +335,6 @@ async fn libsql_query_page_offset_overflow_surfaces_typed_error() {
 struct TestLibSqlRootFilesystem {
     filesystem: LibSqlRootFilesystem,
     _dir: tempfile::TempDir,
-    _serial: tokio::sync::MutexGuard<'static, ()>,
 }
 
 #[cfg(feature = "libsql")]
@@ -345,15 +344,6 @@ impl std::ops::Deref for TestLibSqlRootFilesystem {
     fn deref(&self) -> &Self::Target {
         &self.filesystem
     }
-}
-
-#[cfg(feature = "libsql")]
-fn libsql_serial_guard() -> &'static tokio::sync::Mutex<()> {
-    // The embedded libSQL driver can return SQLITE_MISUSE when independent
-    // local Database handles run these contract tests concurrently in one
-    // process. Other libSQL contract suites serialize the same driver shape.
-    static GUARD: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    GUARD.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 #[cfg(feature = "libsql")]
@@ -1344,7 +1334,6 @@ async fn libsql_capabilities_advertise_events() {
 
 #[cfg(feature = "libsql")]
 async fn libsql_root() -> TestLibSqlRootFilesystem {
-    let serial = libsql_serial_guard().lock().await;
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("root-filesystem.db");
     let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
@@ -1353,7 +1342,6 @@ async fn libsql_root() -> TestLibSqlRootFilesystem {
     TestLibSqlRootFilesystem {
         filesystem,
         _dir: db_dir,
-        _serial: serial,
     }
 }
 

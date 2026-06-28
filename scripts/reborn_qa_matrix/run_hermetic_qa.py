@@ -2,9 +2,10 @@
 """Hermetic QA matrix runner for Reborn WebUI v2 and OpenAI-compatible rows.
 
 This lane executes QA matrix rows that are not already covered by the normal
-Reborn CI contract suite. Package-level Rust ``cargo test`` contracts are kept
-as traceability-only coverage; the executable lane is for ResponsesAPI served
-checks plus WebUI v2 static, node, and browser-facing behavior.
+Reborn CI contract suite. Existing Rust contract coverage belongs in CI and in
+the workbook's external-existing evidence; the executable lane is for
+ResponsesAPI served checks plus WebUI v2 static, node, and browser-facing
+behavior.
 """
 
 from __future__ import annotations
@@ -4059,18 +4060,13 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-058-TC-05",
             "REBCLI-058-TC-06",
         ],
-        commands=[
-            OPENAI_RESPONSES_WORKFLOW_COMMAND,
-            OPENAI_RESPONSES_STREAMING_COMMAND,
-            OPENAI_RESPONSES_SERVED_E2E_COMMAND,
-        ],
+        commands=[OPENAI_RESPONSES_SERVED_E2E_COMMAND],
         notes=(
             "Focused ResponsesAPI coverage that PR #5348 does not duplicate. "
-            "The Rust handler contracts are existing CI traceability; this "
-            "case remains executable through served ironclaw-reborn e2e "
-            "coverage for create on /api/v1 and /v1, retrieve, missing "
-            "cancel, auth, invalid input, x_context, and stream=true SSE "
-            "behavior."
+            "Rust handler contracts stay in the normal CI contract suite; "
+            "this case remains executable through served ironclaw-reborn e2e "
+            "coverage for create on /api/v1 and /v1, retrieve, missing cancel, "
+            "auth, invalid input, x_context, and stream=true SSE behavior."
         ),
     ),
     "openai_responses_external_tools_e2e_regression": CaseSpec(

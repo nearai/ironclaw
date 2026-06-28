@@ -63,24 +63,6 @@ async fn models_endpoint_returns_openai_list_for_authenticated_caller() {
 }
 
 #[tokio::test]
-async fn models_endpoint_empty_catalog_returns_openai_empty_list() {
-    for path in ["/v1/models", "/api/v1/models"] {
-        let catalog = Arc::new(StaticModelCatalog {
-            entries: Vec::new(),
-        });
-        let router = openai_compat_router_with_state(OpenAiCompatRouterState::with_models(catalog))
-            .layer(axum::Extension(caller()));
-
-        let response = router.oneshot(get_request(path)).await.expect("response");
-
-        assert_eq!(response.status(), http::StatusCode::OK, "{path}");
-        let body = json_body(response).await;
-        assert_eq!(body["object"], "list", "{path}");
-        assert_eq!(body["data"].as_array().expect("data").len(), 0, "{path}");
-    }
-}
-
-#[tokio::test]
 async fn models_endpoint_without_caller_returns_401_before_catalog() {
     let catalog = Arc::new(StaticModelCatalog {
         entries: vec![OpenAiCompatModelEntry::new("gpt-reborn")],

@@ -201,6 +201,12 @@ def matrix_only_runner_ids(default_only: bool = False) -> set[str]:
 
 
 def existing_ci_only_ids(default_only: bool = False) -> set[str]:
+    if default_only:
+        # The default QA lane is intentionally executable-only. CI-owned Rust
+        # contract coverage is represented by workbook external-existing rows,
+        # not by disabled/skipped runner commands.
+        return set()
+
     ids: set[str] = set()
     for case in run_hermetic_qa.CASES.values():
         if default_only and not case.default_enabled:
@@ -248,7 +254,12 @@ def build_report(
     existing_ci_ids = existing_ci_only_ids(default_only=True)
     live_ids = live_runner_ids(repo_root)
     combined_ids = hermetic_ids | live_ids
-    traceable_ids = combined_ids | existing_ci_ids
+    traceable_ids = (
+        combined_ids
+        | existing_ci_ids
+        | workbook_external_existing_ids
+        | workbook_existing_evidence_ids
+    )
     matrix_only_combined_ids = matrix_only_ids | live_ids
     covered_matrix_ids = matrix_ids & traceable_ids
     executable_matrix_ids = matrix_ids & combined_ids
@@ -257,7 +268,7 @@ def build_report(
     executable_features = {test_id[:10] for test_id in executable_matrix_ids}
     matrix_only_covered_features = {test_id[:10] for test_id in matrix_only_covered_ids}
     raw_missing_ids = matrix_ids - traceable_ids
-    actionable_gap_ids = raw_missing_ids - workbook_external_existing_ids - workbook_existing_evidence_ids
+    actionable_gap_ids = raw_missing_ids
     return {
         "workbook": str(workbook_path),
         "scope_tokens": list(scope_tokens) if scope_tokens is not None else [],

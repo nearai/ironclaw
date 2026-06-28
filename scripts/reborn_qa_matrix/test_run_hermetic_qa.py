@@ -75,10 +75,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             [command["name"] for command in run_hermetic_qa._removed_existing_ci_commands(case)],
-            [
-                "openai_responses_workflow_handlers_contract",
-                "openai_responses_streaming_handlers_contract",
-            ],
+            [],
         )
 
     def test_default_executable_lane_has_no_package_level_cargo_contracts(self):

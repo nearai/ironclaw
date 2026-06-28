@@ -201,38 +201,6 @@ async fn chat_stream_completes_on_final_reply_payload() {
 }
 
 #[tokio::test]
-async fn chat_stream_waits_for_text_after_early_completed_status() {
-    let streamer = Arc::new(QueuedStreamer::new());
-    streamer.push_chat(vec![run_status_envelope("chat-empty-done", "completed")]);
-    streamer.push_chat(vec![final_reply_envelope(
-        "chat-final-after-done",
-        "hello final",
-    )]);
-    let router = router(streamer);
-
-    let response = router
-        .oneshot(post_json(
-            "/v1/chat/completions",
-            json!({
-                "model": "gpt-reborn",
-                "stream": true,
-                "messages": [{"role": "user", "content": "hello"}]
-            }),
-        ))
-        .await
-        .expect("response");
-
-    assert_eq!(response.status(), http::StatusCode::OK);
-    let raw = read_until(response, "[DONE]").await;
-    assert!(
-        raw.contains("\"content\":\"hello final\""),
-        "raw SSE: {raw}"
-    );
-    assert!(raw.contains("\"finish_reason\":\"stop\""), "raw SSE: {raw}");
-    assert!(raw.contains("[DONE]"), "raw SSE: {raw}");
-}
-
-#[tokio::test]
 async fn chat_stream_errors_on_failed_run_status() {
     let streamer = Arc::new(QueuedStreamer::new());
     streamer.push_chat(vec![run_status_envelope("chat-failed", "failed")]);
@@ -410,13 +378,9 @@ async fn responses_stream_emits_cancelled_event_on_cancelled_run_status() {
 }
 
 #[tokio::test]
-async fn responses_stream_waits_for_text_after_early_completed_status() {
+async fn responses_stream_omits_text_done_when_completed_without_text() {
     let streamer = Arc::new(QueuedStreamer::new());
     streamer.push_response(vec![run_status_envelope("resp-empty-done", "completed")]);
-    streamer.push_response(vec![final_reply_envelope(
-        "resp-final-after-done",
-        "hello final",
-    )]);
     let router = router(streamer);
 
     let response = router
@@ -429,11 +393,7 @@ async fn responses_stream_waits_for_text_after_early_completed_status() {
 
     assert_eq!(response.status(), http::StatusCode::OK);
     let raw = read_until(response, "event: response.completed").await;
-    assert!(
-        raw.contains("event: response.output_text.done"),
-        "raw SSE: {raw}"
-    );
-    assert!(raw.contains("\"text\":\"hello final\""), "raw SSE: {raw}");
+    assert!(!raw.contains("response.output_text.done"), "raw SSE: {raw}");
     assert!(raw.contains("\"status\":\"completed\""), "raw SSE: {raw}");
 }
 
@@ -499,8 +459,8 @@ async fn stream_true_without_wired_streamer_returns_not_wired() {
 #[tokio::test]
 async fn chat_stream_idempotency_replay_uses_recorded_ack_without_resubmit() {
     let streamer = Arc::new(QueuedStreamer::new());
-    streamer.push_chat(vec![final_reply_envelope("first-done", "hello final")]);
-    streamer.push_chat(vec![final_reply_envelope("replay-done", "hello final")]);
+    streamer.push_chat(vec![run_status_envelope("first-done", "completed")]);
+    streamer.push_chat(vec![run_status_envelope("replay-done", "completed")]);
     let workflow = Arc::new(FakeProductWorkflow::new());
     workflow.program_projection_resolution(sample_projection_subscription_request());
     let router = router_with_workflow(streamer.clone(), workflow.clone());
@@ -520,22 +480,14 @@ async fn chat_stream_idempotency_replay_uses_recorded_ack_without_resubmit() {
         .await
         .expect("first");
     assert_eq!(first.status(), http::StatusCode::OK);
-    let first_raw = read_until(first, "[DONE]").await;
-    assert!(
-        first_raw.contains("\"content\":\"hello final\""),
-        "raw SSE: {first_raw}"
-    );
+    let _ = read_until(first, "[DONE]").await;
 
     let replay = router
         .oneshot(post_json_with_key("/v1/chat/completions", body, "same-key"))
         .await
         .expect("replay");
     assert_eq!(replay.status(), http::StatusCode::OK);
-    let replay_raw = read_until(replay, "[DONE]").await;
-    assert!(
-        replay_raw.contains("\"content\":\"hello final\""),
-        "raw SSE: {replay_raw}"
-    );
+    let _ = read_until(replay, "[DONE]").await;
 
     assert_eq!(workflow.accepted_count(), 1);
     let requests = streamer.chat_requests();

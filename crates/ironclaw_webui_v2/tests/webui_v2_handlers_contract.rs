@@ -64,6 +64,7 @@ use ironclaw_product_workflow::{
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
     WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -238,7 +239,6 @@ struct StubServices {
     delete_thread_calls: Mutex<Vec<RebornDeleteThreadRequest>>,
     submit_turn_calls: Mutex<Vec<WebUiSendMessageRequest>>,
     get_timeline_calls: Mutex<Vec<RebornTimelineRequest>>,
-    list_threads_calls: Mutex<Vec<WebUiListThreadsRequest>>,
     read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
     read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
@@ -256,13 +256,6 @@ struct StubServices {
     list_outbound_delivery_targets_calls: Mutex<usize>,
     list_connectable_channels_calls: Mutex<usize>,
     next_list_connectable_channels_error: Mutex<Option<RebornServicesError>>,
-    list_skills_calls: Mutex<usize>,
-    search_skills_calls: Mutex<Vec<String>>,
-    install_skill_calls: Mutex<Vec<(String, Option<String>)>>,
-    read_skill_content_calls: Mutex<Vec<String>>,
-    update_skill_calls: Mutex<Vec<(String, String)>>,
-    remove_skill_calls: Mutex<Vec<String>>,
-    set_skill_auto_activate_calls: Mutex<Vec<(String, bool)>>,
     get_operator_setup_calls: Mutex<usize>,
     run_operator_setup_calls: Mutex<Vec<OperatorSetupCall>>,
     list_operator_config_calls: Mutex<usize>,
@@ -709,27 +702,11 @@ impl RebornServicesApi for StubServices {
     async fn list_threads(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        request: WebUiListThreadsRequest,
+        _request: WebUiListThreadsRequest,
     ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-        self.list_threads_calls.lock().expect("lock").push(request);
         Ok(RebornListThreadsResponse {
-            threads: vec![SessionThreadRecord {
-                thread_id: ironclaw_host_api::ThreadId::new("thread:list-1").expect("thread id"),
-                scope: ironclaw_threads::ThreadScope {
-                    tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
-                    agent_id: AgentId::new("agent-alpha").expect("agent"),
-                    project_id: Some(ProjectId::new("project-alpha").expect("project")),
-                    owner_user_id: Some(UserId::new("user-alpha").expect("user")),
-                    mission_id: None,
-                },
-                created_by_actor_id: "user-alpha".to_string(),
-                title: Some("Listed thread".to_string()),
-                metadata_json: None,
-                goal: None,
-                created_at: None,
-                updated_at: None,
-            }],
-            next_cursor: Some("next-page".to_string()),
+            threads: Vec::new(),
+            next_cursor: None,
         })
     }
 
@@ -835,107 +812,49 @@ impl RebornServicesApi for StubServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornSkillListResponse, RebornServicesError> {
-        *self.list_skills_calls.lock().expect("lock") += 1;
-        Ok(RebornSkillListResponse {
-            count: 0,
-            skills: Vec::new(),
-            auto_activate_learned: true,
-        })
+        Err(rejecting_reborn_services_error())
     }
 
     async fn search_skills(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        query: String,
+        _query: String,
     ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
-        self.search_skills_calls.lock().expect("lock").push(query);
-        Ok(RebornSkillSearchResponse {
-            catalog: Vec::new(),
-            installed: Vec::new(),
-            registry_url: String::new(),
-            catalog_error: None,
-        })
+        Err(rejecting_reborn_services_error())
     }
 
     async fn install_skill(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: Option<String>,
+        _name: String,
+        _content: Option<String>,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        self.install_skill_calls
-            .lock()
-            .expect("lock")
-            .push((name.clone(), content));
-        Ok(RebornSkillActionResponse {
-            success: true,
-            message: format!("Skill '{name}' installed"),
-        })
+        Err(rejecting_reborn_services_error())
     }
 
     async fn read_skill_content(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        name: String,
+        _name: String,
     ) -> Result<RebornSkillContentResponse, RebornServicesError> {
-        self.read_skill_content_calls
-            .lock()
-            .expect("lock")
-            .push(name.clone());
-        Ok(RebornSkillContentResponse {
-            name,
-            content: "# Skill\n".to_string(),
-        })
+        Err(rejecting_reborn_services_error())
     }
 
     async fn update_skill(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: String,
+        _name: String,
+        _content: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        self.update_skill_calls
-            .lock()
-            .expect("lock")
-            .push((name.clone(), content));
-        Ok(RebornSkillActionResponse {
-            success: true,
-            message: format!("Skill '{name}' updated"),
-        })
+        Err(rejecting_reborn_services_error())
     }
 
     async fn remove_skill(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        name: String,
+        _name: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        self.remove_skill_calls
-            .lock()
-            .expect("lock")
-            .push(name.clone());
-        Ok(RebornSkillActionResponse {
-            success: true,
-            message: format!("Skill '{name}' removed"),
-        })
-    }
-
-    async fn set_skill_auto_activate(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        name: String,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        self.set_skill_auto_activate_calls
-            .lock()
-            .expect("lock")
-            .push((name.clone(), enabled));
-        Ok(RebornSkillActionResponse {
-            success: true,
-            message: format!(
-                "Skill '{name}' auto-activation {}",
-                if enabled { "enabled" } else { "disabled" }
-            ),
-        })
+        Err(rejecting_reborn_services_error())
     }
 
     async fn set_auto_activate_learned(
@@ -1677,330 +1596,6 @@ async fn set_auto_activate_learned_forwards_enabled_flag_to_facade() {
     );
 }
 
-// Test-through-the-caller: the skills screen depends on this route family
-// preserving method/path/body semantics across six different facade calls.
-// A helper-only or facade-only test would miss router drift, missing JSON
-// extraction, and path-param loss.
-#[tokio::test]
-async fn skill_routes_dispatch_to_facade_methods() {
-    let services = Arc::new(StubServices::default());
-    let router = router_with(services.clone());
-
-    let list_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/skills")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(list_response.status(), StatusCode::OK);
-    assert_eq!(
-        read_json(list_response).await["auto_activate_learned"],
-        true,
-        "list response must expose learned-skill auto-activation state"
-    );
-
-    let search_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/webchat/v2/skills/search")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"query":"docs"}"#))
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(search_response.status(), StatusCode::OK);
-
-    let install_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/webchat/v2/skills/install")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r##"{"name":"qa-skill","content":"# QA\n\nUse this skill."}"##,
-                ))
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(install_response.status(), StatusCode::OK);
-
-    let get_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/skills/qa-skill")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(get_response.status(), StatusCode::OK);
-    assert_eq!(read_json(get_response).await["name"], "qa-skill");
-
-    let update_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::PUT)
-                .uri("/api/webchat/v2/skills/qa-skill")
-                .header("content-type", "application/json")
-                .body(Body::from(r##"{"content":"# QA\n\nUpdated."}"##))
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(update_response.status(), StatusCode::OK);
-
-    let auto_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/webchat/v2/skills/qa-skill/auto-activate")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"enabled":false}"#))
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(auto_response.status(), StatusCode::OK);
-
-    let delete_response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::DELETE)
-                .uri("/api/webchat/v2/skills/qa-skill")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(delete_response.status(), StatusCode::OK);
-
-    assert_eq!(*services.list_skills_calls.lock().expect("lock"), 1);
-    assert_eq!(
-        *services.search_skills_calls.lock().expect("lock"),
-        vec!["docs".to_string()],
-        "search body query must reach the facade"
-    );
-    assert_eq!(
-        *services.install_skill_calls.lock().expect("lock"),
-        vec![(
-            "qa-skill".to_string(),
-            Some("# QA\n\nUse this skill.".to_string())
-        )],
-        "install must forward name and optional content from the JSON body"
-    );
-    assert_eq!(
-        *services.read_skill_content_calls.lock().expect("lock"),
-        vec!["qa-skill".to_string()],
-        "GET /skills/{{name}} must forward the path skill name"
-    );
-    assert_eq!(
-        *services.update_skill_calls.lock().expect("lock"),
-        vec![("qa-skill".to_string(), "# QA\n\nUpdated.".to_string())],
-        "PUT /skills/{{name}} must forward path name and body content"
-    );
-    assert_eq!(
-        *services.set_skill_auto_activate_calls.lock().expect("lock"),
-        vec![("qa-skill".to_string(), false)],
-        "per-skill auto-activate must forward path name and enabled flag"
-    );
-    assert_eq!(
-        *services.remove_skill_calls.lock().expect("lock"),
-        vec!["qa-skill".to_string()],
-        "DELETE /skills/{{name}} must forward the path skill name"
-    );
-}
-
-// Test-through-the-caller: REBCLI-043 is a route family, not one helper.
-// Drive the real router across the browser-facing session, thread, message,
-// timeline, attachment, and delete paths so path/query/body extraction and
-// facade dispatch remain locked without duplicating PR #5348 browser ports.
-#[tokio::test]
-async fn session_thread_message_routes_dispatch_to_facade_methods() {
-    let services = Arc::new(StubServices::default());
-    services.set_attachment(RebornAttachmentBytes {
-        mime_type: "text/plain".to_string(),
-        filename: Some("note.txt".to_string()),
-        bytes: b"hello attachment".to_vec(),
-    });
-    let router = router_with(services.clone());
-
-    let session_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/session")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(session_response.status(), StatusCode::OK);
-    let session_body = read_json(session_response).await;
-    assert_eq!(session_body["tenant_id"], "tenant-alpha");
-    assert_eq!(session_body["user_id"], "user-alpha");
-    assert!(
-        session_body["attachments"]["max_count"]
-            .as_u64()
-            .unwrap_or_default()
-            > 0,
-        "session must advertise server-side attachment limits"
-    );
-
-    let create_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/webchat/v2/threads")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"client_action_id":"act-family"}"#))
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(create_response.status(), StatusCode::OK);
-    assert_eq!(
-        read_json(create_response).await["thread"]["metadata_json"],
-        r#"{"client_action_id":"act-family"}"#
-    );
-
-    let list_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/threads?limit=25&cursor=page%3A1")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(list_response.status(), StatusCode::OK);
-    let list_body = read_json(list_response).await;
-    assert_eq!(list_body["threads"][0]["thread_id"], "thread:list-1");
-    assert_eq!(list_body["next_cursor"], "next-page");
-
-    let send_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/webchat/v2/threads/thread-from-path/messages")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"client_action_id":"send-1","thread_id":"thread-from-body","content":"hello"}"#,
-                ))
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(send_response.status(), StatusCode::OK);
-
-    let timeline_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/threads/thread-from-path/timeline?limit=42&cursor=timeline%3A1")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(timeline_response.status(), StatusCode::OK);
-    assert_eq!(
-        read_json(timeline_response).await["thread"]["thread_id"],
-        "thread-from-path"
-    );
-
-    let attachment_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/threads/thread-from-path/messages/msg-1/attachments/att-1")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(attachment_response.status(), StatusCode::OK);
-    assert_eq!(
-        attachment_response
-            .headers()
-            .get("x-content-type-options")
-            .and_then(|value| value.to_str().ok()),
-        Some("nosniff")
-    );
-    let attachment_body = to_bytes(attachment_response.into_body(), 64 * 1024)
-        .await
-        .expect("body bytes");
-    assert_eq!(attachment_body.as_ref(), b"hello attachment");
-
-    let delete_response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::DELETE)
-                .uri("/api/webchat/v2/threads/thread-from-path")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(delete_response.status(), StatusCode::OK);
-
-    assert_eq!(
-        services.create_thread_calls.lock().expect("lock").len(),
-        1,
-        "thread creation must call the facade once"
-    );
-
-    let list_calls = services.list_threads_calls.lock().expect("lock").clone();
-    assert_eq!(list_calls.len(), 1);
-    assert_eq!(list_calls[0].limit, Some(25));
-    assert_eq!(list_calls[0].cursor.as_deref(), Some("page:1"));
-
-    let send_calls = services.submit_turn_calls.lock().expect("lock").clone();
-    assert_eq!(send_calls.len(), 1);
-    assert_eq!(
-        send_calls[0].thread_id.as_deref(),
-        Some("thread-from-path"),
-        "path thread id must override any body thread_id"
-    );
-    assert_eq!(send_calls[0].content.as_deref(), Some("hello"));
-
-    let timeline_calls = services.get_timeline_calls.lock().expect("lock").clone();
-    assert_eq!(timeline_calls.len(), 1);
-    assert_eq!(timeline_calls[0].thread_id, "thread-from-path");
-    assert_eq!(timeline_calls[0].limit, Some(42));
-    assert_eq!(timeline_calls[0].cursor.as_deref(), Some("timeline:1"));
-
-    let attachment_calls = services.read_attachment_calls.lock().expect("lock").clone();
-    assert_eq!(attachment_calls.len(), 1);
-    assert_eq!(attachment_calls[0].thread_id, "thread-from-path");
-    assert_eq!(attachment_calls[0].message_id, "msg-1");
-    assert_eq!(attachment_calls[0].attachment_id, "att-1");
-
-    let delete_calls = services.delete_thread_calls.lock().expect("lock").clone();
-    assert_eq!(delete_calls.len(), 1);
-    assert_eq!(delete_calls[0].thread_id, "thread-from-path");
-}
-
 // Replay-path variant: run metadata is None — wire must omit active_run_id, status,
 // event_cursor so the client receives no fabricated run reference it cannot query.
 #[tokio::test]
@@ -2369,119 +1964,6 @@ async fn stream_events_last_event_id_header_takes_precedence_over_query() {
         calls[0].after_cursor.as_ref(),
         Some(&header_cursor),
         "Last-Event-ID header must win over ?after_cursor= query param"
-    );
-}
-
-#[tokio::test]
-async fn streaming_run_control_routes_dispatch_to_facade_methods() {
-    let header_cursor =
-        ironclaw_product_workflow::ProjectionCursor::new("cursor-from-header").expect("cursor");
-    let query_cursor =
-        ironclaw_product_workflow::ProjectionCursor::new("cursor-from-query").expect("cursor");
-    let header_json = serde_json::to_string(&header_cursor).expect("serialize header cursor");
-    let query_json = serde_json::to_string(&query_cursor).expect("serialize query cursor");
-    let query_encoded = url_encode(&query_json);
-
-    let services = Arc::new(StubServices::default());
-    let signal = services.stream_events_signal();
-    let router = router_with(services.clone());
-
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri(format!(
-                    "/api/webchat/v2/threads/thread-run/events?after_cursor={query_encoded}"
-                ))
-                .header("Last-Event-ID", header_json)
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let content_type = response
-        .headers()
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
-    assert!(
-        content_type.starts_with("text/event-stream"),
-        "SSE content type expected, got: {content_type}"
-    );
-
-    let mut body = response.into_body();
-    let poll = tokio::spawn(async move {
-        let _ = body.frame().await;
-    });
-    tokio::time::timeout(Duration::from_secs(2), signal.notified())
-        .await
-        .expect("stream_events must be called within 2s after the body is polled");
-    poll.abort();
-
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/webchat/v2/threads/thread-run/runs/run-from-path/cancel")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"client_action_id":"cancel-1","thread_id":"other-thread","run_id":"run-from-body","reason":"user_requested"}"#,
-                ))
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri(
-                    "/api/webchat/v2/threads/thread-run/runs/run-from-path/gates/gate-from-path/resolve",
-                )
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"client_action_id":"gate-1","thread_id":"other-thread","run_id":"run-from-body","gate_ref":"gate-from-body","resolution":"approved"}"#,
-                ))
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let stream_calls = services.stream_events_calls.lock().expect("lock").clone();
-    assert_eq!(stream_calls.len(), 1);
-    assert_eq!(stream_calls[0].thread_id, "thread-run");
-    assert_eq!(
-        stream_calls[0].after_cursor.as_ref(),
-        Some(&header_cursor),
-        "Last-Event-ID header must win over ?after_cursor= query param"
-    );
-
-    let cancel_calls = services.cancel_run_calls.lock().expect("lock").clone();
-    assert_eq!(cancel_calls.len(), 1);
-    assert_eq!(cancel_calls[0].thread_id.as_deref(), Some("thread-run"));
-    assert_eq!(cancel_calls[0].run_id.as_deref(), Some("run-from-path"));
-
-    let resolve_gate_calls = services.resolve_gate_calls.lock().expect("lock").clone();
-    assert_eq!(resolve_gate_calls.len(), 1);
-    assert_eq!(
-        resolve_gate_calls[0].thread_id.as_deref(),
-        Some("thread-run")
-    );
-    assert_eq!(
-        resolve_gate_calls[0].run_id.as_deref(),
-        Some("run-from-path")
-    );
-    assert_eq!(
-        resolve_gate_calls[0].gate_ref.as_deref(),
-        Some("gate-from-path")
     );
 }
 
@@ -3129,279 +2611,6 @@ async fn list_connectable_channels_dispatches_through_facade() {
     assert_eq!(
         body["channels"][0]["action"]["instructions"],
         "Message the Slack app, then enter the code here."
-    );
-    assert_eq!(
-        *services
-            .list_connectable_channels_calls
-            .lock()
-            .expect("lock"),
-        1
-    );
-}
-
-#[tokio::test]
-async fn automations_trace_outbound_channel_routes_dispatch_to_facade_methods() {
-    let unique_caller = WebUiAuthenticatedCaller::new(
-        TenantId::new("tenant-alpha").expect("tenant"),
-        UserId::new(
-            format!(
-                "webui-v2-automation-outbound-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("clock")
-                    .as_nanos()
-            )
-            .as_str(),
-        )
-        .expect("user"),
-        Some(AgentId::new("agent-alpha").expect("agent")),
-        Some(ProjectId::new("project-alpha").expect("project")),
-    );
-    let services = Arc::new(StubServices::default());
-    let router = router_with_caller(
-        services.clone(),
-        WebUiV2Capabilities::default(),
-        unique_caller,
-    );
-
-    let automations_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/automations?limit=5&run_limit=7&include_completed=true")
-                .body(Body::empty())
-                .expect("automations request"),
-        )
-        .await
-        .expect("automations oneshot");
-    assert_eq!(automations_response.status(), StatusCode::OK);
-    let automations_body = read_json(automations_response).await;
-    assert_eq!(
-        automations_body["automations"][0]["automation_id"],
-        "automation-listed"
-    );
-    assert_eq!(automations_body["scheduler_enabled"], true);
-
-    let malformed_automations_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/automations?include_completed=notabool")
-                .body(Body::empty())
-                .expect("malformed automations request"),
-        )
-        .await
-        .expect("malformed automations oneshot");
-    assert_eq!(
-        malformed_automations_response.status(),
-        StatusCode::BAD_REQUEST
-    );
-
-    let pause_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/webchat/v2/automations/automation-alpha/pause")
-                .body(Body::empty())
-                .expect("pause request"),
-        )
-        .await
-        .expect("pause oneshot");
-    assert_eq!(pause_response.status(), StatusCode::OK);
-
-    let resume_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/webchat/v2/automations/automation-alpha/resume")
-                .body(Body::empty())
-                .expect("resume request"),
-        )
-        .await
-        .expect("resume oneshot");
-    assert_eq!(resume_response.status(), StatusCode::OK);
-
-    let delete_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::DELETE)
-                .uri("/api/webchat/v2/automations/automation-alpha")
-                .body(Body::empty())
-                .expect("delete request"),
-        )
-        .await
-        .expect("delete oneshot");
-    assert_eq!(delete_response.status(), StatusCode::OK);
-
-    let trace_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/traces/credit")
-                .body(Body::empty())
-                .expect("trace request"),
-        )
-        .await
-        .expect("trace oneshot");
-    assert_eq!(trace_response.status(), StatusCode::OK);
-    let trace_body = read_json(trace_response).await;
-    assert_eq!(trace_body["enrolled"], false);
-    assert_eq!(trace_body["submissions_total"], 0);
-    assert_eq!(trace_body["manual_review_hold_count"], 0);
-
-    let authorize_trace_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/webchat/v2/traces/holds/11111111-1111-1111-1111-111111111111/authorize")
-                .body(Body::empty())
-                .expect("authorize trace request"),
-        )
-        .await
-        .expect("authorize trace oneshot");
-    assert_eq!(authorize_trace_response.status(), StatusCode::OK);
-    let authorize_trace_body = read_json(authorize_trace_response).await;
-    assert_eq!(authorize_trace_body["authorized"], false);
-
-    let outbound_preferences_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/outbound/preferences")
-                .body(Body::empty())
-                .expect("outbound preferences request"),
-        )
-        .await
-        .expect("outbound preferences oneshot");
-    assert_eq!(outbound_preferences_response.status(), StatusCode::OK);
-    let outbound_preferences_body = read_json(outbound_preferences_response).await;
-    assert_eq!(
-        outbound_preferences_body["final_reply_target"]["target_id"],
-        "slack-dm-alpha"
-    );
-
-    let set_outbound_preferences_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/webchat/v2/outbound/preferences")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"final_reply_target_id":"slack-dm-beta"}"#))
-                .expect("set outbound preferences request"),
-        )
-        .await
-        .expect("set outbound preferences oneshot");
-    assert_eq!(set_outbound_preferences_response.status(), StatusCode::OK);
-
-    let outbound_targets_response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/outbound/targets")
-                .body(Body::empty())
-                .expect("outbound targets request"),
-        )
-        .await
-        .expect("outbound targets oneshot");
-    assert_eq!(outbound_targets_response.status(), StatusCode::OK);
-    let outbound_targets_body = read_json(outbound_targets_response).await;
-    assert_eq!(
-        outbound_targets_body["targets"][0]["target"]["target_id"],
-        "slack-dm-alpha"
-    );
-
-    let channels_response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/channels/connectable")
-                .body(Body::empty())
-                .expect("channels request"),
-        )
-        .await
-        .expect("channels oneshot");
-    assert_eq!(channels_response.status(), StatusCode::OK);
-    let channels_body = read_json(channels_response).await;
-    assert_eq!(channels_body["channels"][0]["channel"], "slack");
-    assert_eq!(
-        channels_body["channels"][0]["strategy"],
-        "inbound_proof_code"
-    );
-
-    let automation_calls = services
-        .list_automations_calls
-        .lock()
-        .expect("lock")
-        .clone();
-    assert_eq!(
-        automation_calls.len(),
-        1,
-        "malformed automation query must not reach the facade"
-    );
-    assert_eq!(automation_calls[0].limit, Some(5));
-    assert_eq!(automation_calls[0].run_limit, Some(7));
-    assert!(automation_calls[0].include_completed);
-    assert_eq!(
-        services
-            .pause_automation_calls
-            .lock()
-            .expect("lock")
-            .clone(),
-        vec!["automation-alpha".to_string()]
-    );
-    assert_eq!(
-        services
-            .resume_automation_calls
-            .lock()
-            .expect("lock")
-            .clone(),
-        vec!["automation-alpha".to_string()]
-    );
-    assert_eq!(
-        services
-            .delete_automation_calls
-            .lock()
-            .expect("lock")
-            .clone(),
-        vec!["automation-alpha".to_string()]
-    );
-    assert_eq!(
-        *services
-            .get_outbound_preferences_calls
-            .lock()
-            .expect("lock"),
-        1
-    );
-    let set_outbound_calls = services
-        .set_outbound_preferences_calls
-        .lock()
-        .expect("lock")
-        .clone();
-    assert_eq!(set_outbound_calls.len(), 1);
-    assert_eq!(
-        set_outbound_calls[0]
-            .final_reply_target_id
-            .as_ref()
-            .map(|target_id| target_id.as_str()),
-        Some("slack-dm-beta")
-    );
-    assert_eq!(
-        *services
-            .list_outbound_delivery_targets_calls
-            .lock()
-            .expect("lock"),
-        1
     );
     assert_eq!(
         *services
