@@ -57,13 +57,14 @@ use ironclaw_host_runtime::{
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeCredentialAccessSecret,
-    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, RuntimeStatusRequest,
-    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, RuntimeProcessPort,
+    RuntimeStatusRequest, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
+    SurfaceKind, TIME_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
     VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
     VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface, WRITE_FILE_CAPABILITY_ID,
     builtin_first_party_handlers, builtin_first_party_package,
@@ -277,6 +278,15 @@ impl HarnessCapabilityRecorder {
         match self {
             Self::Recording(_) => Vec::new(),
             Self::HostRuntime(harness) => harness.runtime_http_requests(),
+        }
+    }
+
+    /// Snapshot of every command string recorded by the inert process port
+    /// (slice 5). Empty on the echo recording backend or the live-shell path.
+    pub(crate) fn recorded_process_commands(&self) -> Vec<String> {
+        match self {
+            Self::Recording(_) => Vec::new(),
+            Self::HostRuntime(harness) => harness.process_commands(),
         }
     }
 
@@ -1514,6 +1524,10 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
     http_egress: Option<Arc<RecordingRuntimeHttpEgress>>,
     network_egress: Option<Arc<RecordingNetworkHttpEgress>>,
+    /// Inert recording process port (slice 5). `Some` when the harness injected
+    /// a `RecordingProcessPort`; `None` when the live `LocalHostProcessPort` was
+    /// used (`.with_live_shell()` path) or the harness predates slice 5.
+    process_port: Option<Arc<super::process::RecordingProcessPort>>,
 }
 
 struct HostRuntimeHarnessOptions {
@@ -1651,6 +1665,9 @@ impl HostRuntimeCapabilityHarness {
             Arc::new(RecordingRuntimeHttpEgress::with_body(
                 br#"{"accepted":true,"source":"qa-smoke"}"#.to_vec(),
             )),
+            // qa_smoke_tools exercises real process execution (SpawnProcess effect);
+            // leave the default LocalHostProcessPort in place.
+            None,
         )?;
         let mounts = qa_smoke_mounts()?;
         let memory_mounts = memory_mounts(MountPermissions::read_write_list_delete())?;
@@ -1721,6 +1738,7 @@ impl HostRuntimeCapabilityHarness {
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: None,
             network_egress: None,
+            process_port: None,
         })
     }
 
@@ -2011,6 +2029,7 @@ impl HostRuntimeCapabilityHarness {
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: None,
             network_egress: None,
+            process_port: None,
         })
     }
 
@@ -2021,13 +2040,41 @@ impl HostRuntimeCapabilityHarness {
     async fn core_builtin_tools_with_network_policy(
         network_policy: NetworkPolicy,
     ) -> HarnessResult<Self> {
+        Self::core_builtin_tools_with_network_policy_and_process_port(network_policy, true).await
+    }
+
+    /// Variant used by `.with_live_shell()`: same as `core_builtin_tools_with_network_policy`
+    /// but opts out of the recording process port so the real `LocalHostProcessPort`
+    /// executes shell commands on the host.
+    pub(crate) async fn core_builtin_tools_with_live_shell() -> HarnessResult<Self> {
+        Self::core_builtin_tools_with_network_policy_and_process_port(http_test_policy(), false)
+            .await
+    }
+
+    async fn core_builtin_tools_with_network_policy_and_process_port(
+        network_policy: NetworkPolicy,
+        recording_process: bool,
+    ) -> HarnessResult<Self> {
         let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
         let runtime_http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
             br#"{"accepted":true}"#.to_vec(),
         ));
+        // Slice 5: inject the inert recording port by default so `builtin.shell`
+        // invocations in tests never spawn a real OS process. The `.with_live_shell()`
+        // opt-in passes `recording_process = false`, which skips injection and lets
+        // `HostRuntimeServices` default to the real `LocalHostProcessPort`.
+        let recording_process_port = if recording_process {
+            Some(Arc::new(super::process::RecordingProcessPort::new()))
+        } else {
+            None
+        };
+        let process_port_dyn: Option<Arc<dyn RuntimeProcessPort>> = recording_process_port
+            .as_ref()
+            .map(|p| Arc::clone(p) as Arc<dyn RuntimeProcessPort>);
         let runtime = local_dev_host_runtime_with_http_egress(
             storage_root.clone(),
             Arc::clone(&runtime_http_egress),
+            process_port_dyn,
         )?;
         let mut harness = Self::core_builtin_tools_from_runtime(
             root,
@@ -2037,6 +2084,7 @@ impl HostRuntimeCapabilityHarness {
             UserId::new("reborn-e2e-core-builtins-user")?,
         )?;
         harness.http_egress = Some(runtime_http_egress);
+        harness.process_port = recording_process_port;
         Ok(harness)
     }
 
@@ -2099,6 +2147,10 @@ impl HostRuntimeCapabilityHarness {
                 CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
                 CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
                 CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
+                // slice 5: `builtin.shell` on the surface so scripted shell calls
+                // route through the process port (recording by default, live via
+                // `.with_live_shell()`).
+                CapabilityId::new(SHELL_CAPABILITY_ID)?,
             ],
             runtime_kind: RuntimeKind::FirstParty,
             effect_kinds: vec![
@@ -2106,6 +2158,7 @@ impl HostRuntimeCapabilityHarness {
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
                 EffectKind::Network,
+                EffectKind::SpawnProcess,
             ],
             network_policy,
             secrets: Vec::new(),
@@ -2116,6 +2169,7 @@ impl HostRuntimeCapabilityHarness {
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: None,
             network_egress: None,
+            process_port: None,
         })
     }
 
@@ -2161,6 +2215,7 @@ impl HostRuntimeCapabilityHarness {
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: Some(runtime_http_egress),
             network_egress: Some(network_egress),
+            process_port: None,
         })
     }
 
@@ -2193,6 +2248,16 @@ impl HostRuntimeCapabilityHarness {
         self.http_egress
             .as_ref()
             .map(|egress| egress.requests())
+            .unwrap_or_default()
+    }
+
+    /// Snapshot of every command string recorded by the inert process port
+    /// (slice 5). Empty when the harness uses the live `LocalHostProcessPort`
+    /// (`.with_live_shell()` path) or predates slice 5.
+    fn process_commands(&self) -> Vec<String> {
+        self.process_port
+            .as_ref()
+            .map(|port| port.commands())
             .unwrap_or_default()
     }
 
@@ -2599,10 +2664,16 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
 fn local_dev_host_runtime_with_http_egress(
     storage_root: PathBuf,
     egress: Arc<RecordingRuntimeHttpEgress>,
+    process_port: Option<Arc<dyn RuntimeProcessPort>>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let mut registry = ExtensionRegistry::new();
     registry.insert(builtin_first_party_package()?)?;
-    local_dev_host_runtime_with_registry_and_runtime_http_egress(storage_root, registry, egress)
+    local_dev_host_runtime_with_registry_and_runtime_http_egress(
+        storage_root,
+        registry,
+        egress,
+        process_port,
+    )
 }
 
 fn host_runtime_storage_roots() -> HarnessResult<(Arc<tempfile::TempDir>, PathBuf, PathBuf)> {
@@ -2617,8 +2688,9 @@ fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     storage_root: PathBuf,
     registry: ExtensionRegistry,
     egress: Arc<RecordingRuntimeHttpEgress>,
+    process_port: Option<Arc<dyn RuntimeProcessPort>>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
-    let services = HostRuntimeServices::new(
+    let mut services = HostRuntimeServices::new(
         Arc::new(registry),
         local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
         Arc::new(InMemoryResourceGovernor::new()),
@@ -2638,6 +2710,11 @@ fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     ))?))
     .with_first_party_http_egress(egress)
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
+    // Inject the recording process port when provided (slice 5). When `None`,
+    // `HostRuntimeServices` defaults to `LocalHostProcessPort` (real execution).
+    if let Some(port) = process_port {
+        services = services.with_runtime_process_port_dyn(port);
+    }
 
     Ok(Arc::new(services.host_runtime_for_local_testing()))
 }
