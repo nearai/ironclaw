@@ -3975,6 +3975,43 @@ WEBUI_V2_LIFECYCLE_CLEANUP_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_PRODUCT_AUTH_SERVED_E2E_COMMAND = CommandSpec(
+    name="webui_v2_product_auth_served_e2e",
+    description=(
+        "Served WebUI v2 product-auth API tests through a real "
+        "ironclaw-reborn process: product-auth route bearer gating, "
+        "manual-token setup projection, sanitized manual-token submit "
+        "failure, account list/recovery empty-state projections, malformed "
+        "invocation/account ids, empty provider validation, lifecycle cleanup "
+        "input validation, and secret-free responses."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_product_auth_api.py",
+        "-q",
+    ],
+)
+
 WEBUI_V2_DESCRIPTOR_POLICY_COMMAND = CommandSpec(
     name="webui_v2_descriptor_policy_surface",
     description=(
@@ -5932,6 +5969,28 @@ CASES: dict[str, CaseSpec] = {
             "wrong-provider, foreign-scope, and unconfigured account handling, "
             "missing invocation ids, refresh rate limits, lifecycle cleanup "
             "dispatch, invalid extension rejection, and secret-free responses."
+        ),
+    ),
+    "webui_v2_product_auth_served_api_regression": CaseSpec(
+        name="webui_v2_product_auth_served_api_regression",
+        feature="WebUI v2 product-auth served API route gates",
+        category="Served WebUI v2 Product-Auth API E2E",
+        qa_matrix_test_ids=[
+            "REBCLI-059-TC-08",
+            "REBCLI-061-TC-09",
+            "REBCLI-062-TC-07",
+            "REBCLI-062-TC-08",
+        ],
+        commands=[WEBUI_V2_PRODUCT_AUTH_SERVED_E2E_COMMAND],
+        notes=(
+            "Runs served WebUI v2 product-auth route-gate coverage through a "
+            "real ironclaw-reborn process without live OAuth providers: "
+            "bearer gating across product-auth routes, manual-token setup "
+            "projection, sanitized manual-token submit failure, account "
+            "list/recovery empty states, malformed invocation/account ids, "
+            "empty provider rejection, invalid lifecycle cleanup input, and "
+            "secret-free responses. CI-owned Rust product-auth contract and "
+            "service-substrate rows remain external-existing coverage."
         ),
     ),
     "webui_v2_operator_config_api_regression": CaseSpec(
