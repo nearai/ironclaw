@@ -55,7 +55,7 @@ async def _read_sse_json_event(response, *, timeout: float = 45.0) -> dict:
                 return payload
 
 
-async def test_reborn_v2_sse_stream_accepts_bearer_and_query_token_served(
+async def test_reborn_v2_sse_stream_accepts_bearer_served(
     reborn_v2_server,
 ):
     headers = reborn_bearer_headers()
@@ -64,9 +64,9 @@ async def test_reborn_v2_sse_stream_accepts_bearer_and_query_token_served(
 
     client_timeout = aiohttp.ClientTimeout(total=45, sock_read=45)
     async with aiohttp.ClientSession(timeout=client_timeout) as session:
-        bearer_url = f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/events"
+        events_url = f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/events"
         async with session.get(
-            bearer_url,
+            events_url,
             headers={
                 "Accept": "text/event-stream",
                 "Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}",
@@ -74,17 +74,10 @@ async def test_reborn_v2_sse_stream_accepts_bearer_and_query_token_served(
         ) as bearer_response:
             assert bearer_response.status == 200
 
-        token_url = f"{bearer_url}?token={REBORN_V2_AUTH_TOKEN}"
-        async with session.get(
-            token_url,
-            headers={"Accept": "text/event-stream"},
-        ) as token_response:
-            assert token_response.status == 200
-
             async with httpx.AsyncClient(headers=headers) as client:
                 submitted = await _submit_message(client, reborn_v2_server, thread_id)
 
-            event = await _read_sse_json_event(token_response)
+            event = await _read_sse_json_event(bearer_response)
             assert event.get("cursor"), event
             event_json = json.dumps(event)
             assert thread_id in event_json

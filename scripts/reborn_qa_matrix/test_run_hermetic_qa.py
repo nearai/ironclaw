@@ -35,7 +35,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
         selected = run_hermetic_qa._selected_case_names(args)
 
         self.assertIn("openai_compat_beta_routes_regression", selected)
-        self.assertIn("openai_responses_api_workflow_regression", selected)
+        self.assertIn("openai_responses_missing_cancel_shape_regression", selected)
         self.assertIn("openai_responses_external_tools_e2e_regression", selected)
         self.assertIn("openai_chat_completions_workflow_regression", selected)
         self.assertIn("openai_models_list_api_regression", selected)
@@ -82,18 +82,23 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             },
         )
 
-    def test_responses_workflow_case_executes_only_served_e2e_command(self):
+    def test_responses_missing_cancel_case_executes_only_served_e2e_command(self):
         parser = run_hermetic_qa.build_parser()
-        args = parser.parse_args(["--case", "openai_responses_api_workflow_regression"])
+        args = parser.parse_args(
+            ["--case", "openai_responses_missing_cancel_shape_regression"]
+        )
 
         self.assertEqual(
             run_hermetic_qa._selected_case_names(args),
-            ["openai_responses_api_workflow_regression"],
+            ["openai_responses_missing_cancel_shape_regression"],
         )
-        case = run_hermetic_qa.CASES["openai_responses_api_workflow_regression"]
+        case = run_hermetic_qa.CASES[
+            "openai_responses_missing_cancel_shape_regression"
+        ]
+        self.assertEqual(case.qa_matrix_test_ids, ["REBCLI-058-TC-02"])
         self.assertEqual(
             [command.name for command in run_hermetic_qa._commands_for_case(case)],
-            ["openai_responses_served_e2e"],
+            ["openai_responses_missing_cancel_shape_served_e2e"],
         )
         self.assertEqual(
             [command["name"] for command in run_hermetic_qa._removed_existing_ci_commands(case)],
@@ -300,7 +305,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             )
             case_names = {case["case"] for case in manifest["cases"]}
             self.assertIn("openai_responses_external_tools_e2e_regression", case_names)
-            self.assertIn("openai_responses_api_workflow_regression", case_names)
+            self.assertIn(
+                "openai_responses_missing_cancel_shape_regression",
+                case_names,
+            )
             self.assertNotIn("webui_v2_chat_client_regression", case_names)
             self.assertNotIn("webui_v2_settings_toolbar_search_regression", case_names)
             self.assertNotIn("webui_v2_provider_login_api_regression", case_names)

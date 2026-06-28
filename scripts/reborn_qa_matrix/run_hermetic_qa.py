@@ -81,8 +81,6 @@ def _pytest_command(
     name: str,
     description: str,
     tests: list[str],
-    *,
-    playwright: bool = False,
 ) -> CommandSpec:
     packages = [
         "pytest",
@@ -92,9 +90,6 @@ def _pytest_command(
         "httpx",
         "cryptography",
     ]
-    if playwright:
-        packages.insert(3, "pytest-playwright")
-        packages.insert(4, "playwright")
 
     argv = ["uv", "run", "--no-project"]
     for package in packages:
@@ -148,30 +143,19 @@ CASES = dict(
             "Rust route/composition contracts remain normal CI coverage.",
         ),
         _case(
-            "openai_responses_api_workflow_regression",
-            "OpenAI-compatible Responses create, retrieve, and cancel APIs",
-            "Served Responses API E2E",
-            [f"REBCLI-057-TC-{index:02d}" for index in range(1, 7)]
-            + [f"REBCLI-058-TC-{index:02d}" for index in range(1, 7)],
+            "openai_responses_missing_cancel_shape_regression",
+            "OpenAI-compatible Responses retrieve and cancel APIs",
+            "Served Responses Retrieve/Cancel API E2E",
+            ["REBCLI-058-TC-02"],
             _pytest_command(
-                "openai_responses_served_e2e",
-                "Served ResponsesAPI coverage for create, retrieve, stream, "
-                "auth, validation, /api/v1 alias, x_context, and cancel miss.",
+                "openai_responses_missing_cancel_shape_served_e2e",
+                "Served ResponsesAPI coverage for consistent missing retrieve "
+                "and cancel not-found response shape.",
                 [
-                    "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_non_streaming_text_input",
-                    "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_non_streaming_messages_input",
-                    "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_api_v1_alias_accepts_untyped_message_input",
-                    "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_continue_conversation",
-                    "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_get_response_by_id",
-                    "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_streaming_raw_sse",
-                    "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_context_injection_approval_and_rejection",
-                    "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_error_no_auth",
-                    "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_rejects_empty_input_items",
-                    "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_rejects_empty_text_input",
                     "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_lookup_and_cancel_missing_id_match_not_found_shape",
                 ],
             ),
-            "Handler contracts stay in normal CI; this case owns served behavior.",
+            "Existing legacy Responses E2E owns create/retrieve/stream/auth/validation coverage.",
         ),
         _case(
             "openai_responses_external_tools_e2e_regression",
@@ -237,7 +221,6 @@ CASES = dict(
                 "Served session/thread/message API coverage for session "
                 "projection, thread lifecycle, messages, auth, and errors.",
                 ["tests/e2e/scenarios/test_reborn_webui_v2_session_api.py"],
-                playwright=True,
             ),
             "Rust route/service/execution substrate contracts remain normal CI coverage.",
         ),
@@ -250,7 +233,6 @@ CASES = dict(
                 "webui_v2_streaming_run_control_served_e2e",
                 "Served SSE, token-shim, cancel, and gate-resolution API coverage.",
                 ["tests/e2e/scenarios/test_reborn_webui_v2_streaming_run_control_api.py"],
-                playwright=True,
             ),
             "Support-substrate cargo coverage remains normal CI coverage.",
         ),
@@ -266,7 +248,6 @@ CASES = dict(
                 [
                     "tests/e2e/scenarios/test_reborn_webui_v2_automation_trace_outbound_api.py"
                 ],
-                playwright=True,
             ),
             "Runtime/tool substrate contracts and live side effects remain outside this lane.",
         ),
@@ -279,7 +260,6 @@ CASES = dict(
                 "webui_v2_extension_lifecycle_served_e2e",
                 "Served extension registry/list/install/setup/activate/remove coverage.",
                 ["tests/e2e/scenarios/test_reborn_webui_v2_extensions_api.py"],
-                playwright=True,
             ),
             "Browser extension workflows remain external-existing coverage.",
         ),
@@ -293,7 +273,6 @@ CASES = dict(
                 "Served skill list/install/read/update/delete/search and "
                 "auto-activation coverage.",
                 ["tests/e2e/scenarios/test_reborn_webui_v2_skills_api.py"],
-                playwright=True,
             ),
             "Rust skill-management contracts remain normal CI coverage.",
         ),
@@ -306,7 +285,6 @@ CASES = dict(
                 "webui_v2_project_files_served_e2e",
                 "Served project-file and filesystem-browser API coverage.",
                 ["tests/e2e/scenarios/test_reborn_webui_v2_filesystem_api.py"],
-                playwright=True,
             ),
             "Project UI browser journeys remain external-existing coverage.",
         ),
@@ -325,7 +303,6 @@ CASES = dict(
                 "Served product-auth bearer gates, manual-token setup, "
                 "account projections, validation, and sanitized failures.",
                 ["tests/e2e/scenarios/test_reborn_webui_v2_product_auth_api.py"],
-                playwright=True,
             ),
             "Live OAuth providers and browser auth-card workflows remain outside this lane.",
         ),
@@ -339,7 +316,6 @@ CASES = dict(
                 "Served operator/LLM provider CRUD, active selection, "
                 "diagnostics, logs, status, and secret-redaction coverage.",
                 ["tests/e2e/scenarios/test_reborn_webui_v2_operator_api.py"],
-                playwright=True,
             ),
             "LLM/embedding substrate cargo coverage remains normal CI coverage.",
         ),
