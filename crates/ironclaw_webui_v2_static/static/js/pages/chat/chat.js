@@ -21,6 +21,8 @@ import { TypingIndicator } from "./components/typing-indicator.js";
 import { useChat } from "./hooks/useChat.js";
 import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
+import { enrichApprovalGateWithActivityArguments } from "./lib/gate-arguments.js";
+import { buildScopedLogsPath } from "../logs/lib/logs-data.js";
 
 /* Grace window before an active thread's sidebar state is cleared to idle.
  * Long enough for SSE to rehydrate a gate/run after a thread switch (so a
@@ -93,9 +95,7 @@ export function Chat({
     ? "Resolve the approval request before sending another message."
     : "";
   const composerSendDisabled =
-    activeThreadHasGate ||
-    (activeThreadIsProcessing && !activeThreadHasGate) ||
-    cooldownSeconds > 0;
+    Boolean(pendingGate) || cooldownSeconds > 0;
   const composerSendBlockedRef = React.useRef(composerSendDisabled);
   composerSendBlockedRef.current = composerSendDisabled;
   const composerStatusText =
@@ -103,6 +103,8 @@ export function Chat({
     (cooldownSeconds > 0 ? `Retry in ${cooldownSeconds}s` : undefined);
   // Scope the persisted composer draft to the open thread (or the
   // shared new-conversation slot when there's no active thread yet).
+  // The draft scope and the autofocus reset key are the same per-thread value;
+  // keep one source so they cannot drift.
   const composerDraftKey = activeThreadId || NEW_DRAFT_KEY;
   const canCancelRun = Boolean(
     activeThreadId &&
@@ -111,6 +113,19 @@ export function Chat({
       activeThreadIsProcessing &&
       !activeThreadHasGate
   );
+  const pendingGateForDisplay = React.useMemo(
+    () => enrichApprovalGateWithActivityArguments(pendingGate, messages),
+    [pendingGate, messages],
+  );
+  const activeRunLogsPath =
+    activeThreadId &&
+    activeRun?.runId &&
+    activeRun.threadId === activeThreadId
+      ? buildScopedLogsPath(
+          { threadId: activeThreadId, runId: activeRun.runId },
+          { absolute: true },
+        )
+      : null;
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [] } = {}) => {
       if (activeThreadHasGate) {
@@ -242,6 +257,7 @@ export function Chat({
             initialText=${composerDraft}
             resetKey=${composerResetKey}
             draftKey=${composerDraftKey}
+            autoFocusKey=${composerDraftKey}
             context=${runtimeContext}
             statusText=${composerStatusText}
             canCancel=${canCancelRun}
@@ -302,7 +318,7 @@ export function Chat({
                 `)
               : html`
               <${ApprovalCard}
-                gate=${pendingGate}
+                gate=${pendingGateForDisplay}
                 onApprove=${() =>
                   approve(pendingGate.requestId, "approve", pendingGate.kind)}
                 onDeny=${() =>
@@ -336,6 +352,7 @@ export function Chat({
             initialText=${composerDraft}
             resetKey=${composerResetKey}
             draftKey=${composerDraftKey}
+            autoFocusKey=${composerDraftKey}
             context=${runtimeContext}
             statusText=${composerStatusText}
             canCancel=${canCancelRun}

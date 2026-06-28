@@ -1,8 +1,13 @@
 //! Host-owned input queue contract for Reborn loop input ports.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+
 use async_trait::async_trait;
+use ironclaw_host_api::ThreadId;
+use ironclaw_threads::{SessionThreadError, SessionThreadService, ThreadMessageId, ThreadScope};
 use ironclaw_turns::{
-    TurnRunId,
+    TurnId, TurnRunId,
     run_profile::{LoopInput, LoopInputAckToken, LoopInputCursorToken},
 };
 use thiserror::Error;
@@ -69,6 +74,305 @@ pub enum HostInputQueueError {
     Unavailable { reason: String },
     #[error("cursor invalid for run: {reason}")]
     InvalidCursor { reason: String },
+    #[error("failed to update queued message status: {source}")]
+    ThreadStatusUpdate {
+        #[source]
+        source: SessionThreadError,
+    },
     #[error("input queue internal error")]
     Internal,
+}
+
+#[async_trait]
+pub trait HostInputEnqueuePort: Send + Sync {
+    /// Enqueue a user message as steering/followup input for an active run.
+    ///
+    /// The request carries the originating thread message identity so the queue
+    /// can transition that message to `submitted` once the input is consumed.
+    /// There is deliberately no metadata-free variant: every enqueued input is
+    /// backed by a thread message, so the status transition can never be
+    /// silently dropped.
+    async fn enqueue_queued_message(
+        &self,
+        request: EnqueueQueuedMessageRequest,
+    ) -> Result<HostInputEnvelope, HostInputQueueError>;
+}
+
+/// Null-object enqueue port used as the default when a host has not wired a
+/// real input queue. Every enqueue fails closed with `Unavailable` rather than
+/// silently dropping the message. Production runtimes always replace this with
+/// the host-owned queue; it exists so callers can hold a non-optional
+/// `Arc<dyn HostInputEnqueuePort>` instead of an `Option` that production never
+/// leaves unset.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RejectingInputEnqueue;
+
+#[async_trait]
+impl HostInputEnqueuePort for RejectingInputEnqueue {
+    async fn enqueue_queued_message(
+        &self,
+        _request: EnqueueQueuedMessageRequest,
+    ) -> Result<HostInputEnvelope, HostInputQueueError> {
+        Err(HostInputQueueError::Unavailable {
+            reason: "input queue is not wired for this runtime".to_string(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EnqueueQueuedMessageRequest {
+    pub run_id: TurnRunId,
+    pub turn_id: TurnId,
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub message_id: ThreadMessageId,
+    pub input: LoopInput,
+}
+
+#[derive(Clone)]
+struct QueuedMessageStatusUpdate {
+    turn_id: TurnId,
+    scope: ThreadScope,
+    thread_id: ThreadId,
+    message_id: ThreadMessageId,
+}
+
+pub struct InMemoryHostInputQueue {
+    state: Arc<Mutex<InMemoryHostInputQueueState>>,
+    thread_service: Arc<dyn SessionThreadService>,
+}
+
+impl std::fmt::Debug for InMemoryHostInputQueue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InMemoryHostInputQueue")
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
+#[derive(Default)]
+struct InMemoryHostInputQueueState {
+    runs: HashMap<TurnRunId, InMemoryRunInputQueue>,
+}
+
+impl std::fmt::Debug for InMemoryHostInputQueueState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InMemoryHostInputQueueState")
+            .finish()
+    }
+}
+
+#[derive(Default)]
+struct InMemoryRunInputQueue {
+    entries: Vec<InMemoryInputEntry>,
+    acked: HashSet<LoopInputAckToken>,
+    next_sequence: u64,
+}
+
+#[derive(Clone)]
+struct InMemoryInputEntry {
+    sequence: u64,
+    envelope: HostInputEnvelope,
+    queued_message: Option<QueuedMessageStatusUpdate>,
+}
+
+impl InMemoryHostInputQueue {
+    pub fn new(thread_service: Arc<dyn SessionThreadService>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(InMemoryHostInputQueueState::default())),
+            thread_service,
+        }
+    }
+
+    /// Enqueue `input` for `run_id`, attaching `queued_message` status metadata.
+    ///
+    /// Identical inputs already queued for the run are deduplicated; the first
+    /// status binding for an entry wins.
+    fn enqueue_with(
+        &self,
+        run_id: TurnRunId,
+        input: LoopInput,
+        queued_message: QueuedMessageStatusUpdate,
+    ) -> Result<HostInputEnvelope, HostInputQueueError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| HostInputQueueError::Internal)?;
+        let queue = state.runs.entry(run_id).or_default();
+        if let Some(existing) = queue
+            .entries
+            .iter_mut()
+            .find(|entry| entry.envelope.input == input)
+        {
+            existing.queued_message.get_or_insert(queued_message);
+            return Ok(existing.envelope.clone());
+        }
+        let sequence = queue.next_sequence;
+        queue.next_sequence = queue.next_sequence.saturating_add(1);
+        let envelope = HostInputEnvelope {
+            input,
+            cursor: cursor_token(sequence)?,
+            ack_token: ack_token(sequence)?,
+        };
+        queue.entries.push(InMemoryInputEntry {
+            sequence,
+            envelope: envelope.clone(),
+            queued_message: Some(queued_message),
+        });
+        Ok(envelope)
+    }
+}
+
+#[async_trait]
+impl HostInputEnqueuePort for InMemoryHostInputQueue {
+    async fn enqueue_queued_message(
+        &self,
+        request: EnqueueQueuedMessageRequest,
+    ) -> Result<HostInputEnvelope, HostInputQueueError> {
+        let EnqueueQueuedMessageRequest {
+            run_id,
+            turn_id,
+            scope,
+            thread_id,
+            message_id,
+            input,
+        } = request;
+        self.enqueue_with(
+            run_id,
+            input,
+            QueuedMessageStatusUpdate {
+                turn_id,
+                scope,
+                thread_id,
+                message_id,
+            },
+        )
+    }
+}
+
+#[async_trait]
+impl HostInputQueue for InMemoryHostInputQueue {
+    async fn next_after(
+        &self,
+        run_id: TurnRunId,
+        after: LoopInputCursorToken,
+        limit: usize,
+    ) -> Result<HostInputBatch, HostInputQueueError> {
+        let after_sequence = cursor_sequence(&after)?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| HostInputQueueError::Internal)?;
+        let Some(queue) = state.runs.get(&run_id) else {
+            return Ok(HostInputBatch {
+                inputs: Vec::new(),
+                next_cursor: after,
+            });
+        };
+        if after_sequence > queue.next_sequence {
+            return Err(HostInputQueueError::InvalidCursor {
+                reason: "input cursor is ahead of the run input queue".to_string(),
+            });
+        }
+        let mut inputs = Vec::new();
+        let mut next_sequence = after_sequence;
+        for entry in queue
+            .entries
+            .iter()
+            .filter(|entry| entry.sequence >= after_sequence)
+        {
+            next_sequence = entry.sequence.saturating_add(1);
+            if queue.acked.contains(&entry.envelope.ack_token) {
+                continue;
+            }
+            if inputs.len() >= limit {
+                next_sequence = entry.sequence;
+                break;
+            }
+            inputs.push(entry.envelope.clone());
+        }
+        Ok(HostInputBatch {
+            inputs,
+            next_cursor: cursor_token(next_sequence)?,
+        })
+    }
+
+    async fn ack_consumed(
+        &self,
+        run_id: TurnRunId,
+        tokens: Vec<LoopInputAckToken>,
+    ) -> Result<(), HostInputQueueError> {
+        let (tokens_to_ack, updates) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| HostInputQueueError::Internal)?;
+            let Some(queue) = state.runs.get(&run_id) else {
+                return Ok(());
+            };
+            let mut tokens_to_ack = Vec::new();
+            let mut updates = Vec::new();
+            for token in tokens {
+                if queue.acked.contains(&token) {
+                    continue;
+                }
+                if let Some(entry) = queue
+                    .entries
+                    .iter()
+                    .find(|entry| entry.envelope.ack_token == token)
+                    && let Some(update) = &entry.queued_message
+                {
+                    updates.push(update.clone());
+                }
+                tokens_to_ack.push(token);
+            }
+            (tokens_to_ack, updates)
+        };
+        for update in updates {
+            self.thread_service
+                .mark_message_submitted(
+                    &update.scope,
+                    &update.thread_id,
+                    update.message_id,
+                    update.turn_id.to_string(),
+                    run_id.to_string(),
+                )
+                .await
+                .map_err(|source| HostInputQueueError::ThreadStatusUpdate { source })?;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| HostInputQueueError::Internal)?;
+        let queue = state.runs.entry(run_id).or_default();
+        for token in tokens_to_ack {
+            queue.acked.insert(token);
+        }
+        Ok(())
+    }
+}
+
+fn cursor_sequence(token: &LoopInputCursorToken) -> Result<u64, HostInputQueueError> {
+    if token.is_origin() {
+        return Ok(0);
+    }
+    token
+        .as_str()
+        .strip_prefix("input-cursor:")
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| HostInputQueueError::InvalidCursor {
+            reason: "input cursor token is malformed".to_string(),
+        })
+}
+
+fn cursor_token(sequence: u64) -> Result<LoopInputCursorToken, HostInputQueueError> {
+    LoopInputCursorToken::new(format!("input-cursor:{sequence}"))
+        .map_err(|_| HostInputQueueError::Internal)
+}
+
+fn ack_token(sequence: u64) -> Result<LoopInputAckToken, HostInputQueueError> {
+    LoopInputAckToken::new(format!("input-ack:{sequence}"))
+        .map_err(|_| HostInputQueueError::Internal)
 }

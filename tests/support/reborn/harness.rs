@@ -857,6 +857,13 @@ impl RebornBinaryE2EHarness {
             accept_harness_blocked_evidence,
         });
         let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
+        let host_input_queue = Arc::new(ironclaw_loop_support::InMemoryHostInputQueue::new(
+            thread_harness.service.clone() as Arc<dyn ironclaw_threads::SessionThreadService>,
+        ));
+        let host_input_queue_reader: Arc<dyn ironclaw_loop_support::HostInputQueue> =
+            host_input_queue.clone();
+        let host_input_enqueue: Arc<dyn ironclaw_loop_support::HostInputEnqueuePort> =
+            host_input_queue.clone();
         let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
             turn_state: turn_state_for_runtime,
             thread_service: thread_harness.service.clone()
@@ -886,7 +893,7 @@ impl RebornBinaryE2EHarness {
             model_route_resolver: None,
             cancellation_factory: None,
             skill_context_source: None,
-            input_queue: None,
+            input_queue: Some(host_input_queue_reader),
             identity_context_source,
             user_profile_source: Arc::new(EmptyUserProfileSource),
             model_policy_guard: None,
@@ -901,11 +908,14 @@ impl RebornBinaryE2EHarness {
         })?;
         let binding_service: Arc<dyn ConversationBindingService> =
             Arc::new(product_harness.binding_service()?);
-        let inbound: Arc<dyn InboundTurnService> = Arc::new(DefaultInboundTurnService::new(
-            Arc::clone(&binding_service),
-            thread_harness.service_instance()?,
-            composition.coordinator.clone(),
-        ));
+        let inbound: Arc<dyn InboundTurnService> = Arc::new(
+            DefaultInboundTurnService::new(
+                Arc::clone(&binding_service),
+                thread_harness.service_instance()?,
+                composition.coordinator.clone(),
+            )
+            .with_input_enqueue(host_input_enqueue),
+        );
         let ledger: Arc<dyn IdempotencyLedger> = Arc::new(product_harness.idempotency_ledger());
         let workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
 

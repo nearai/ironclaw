@@ -4,6 +4,7 @@ export const SETTINGS_TABS = [
   { id: "channels", labelKey: "settings.channels", icon: "send" },
   { id: "networking", labelKey: "settings.networking", icon: "pulse" },
   { id: "tools", labelKey: "settings.tools", icon: "tool" },
+  { id: "usage", labelKey: "settings.budget", icon: "pulse" },
   { id: "skills", labelKey: "settings.skills", icon: "file" },
   { id: "traces", labelKey: "settings.traceCommons", icon: "layers" },
   { id: "users", labelKey: "settings.users", icon: "lock" },

@@ -45,6 +45,7 @@ mod lifecycle;
 mod outbound_delivery;
 mod policy;
 mod reborn_services;
+mod steering;
 mod webui_inbound;
 mod workflow;
 
@@ -143,7 +144,7 @@ pub use ironclaw_product_adapters::{
 pub use reborn_services::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
-    AutomationListRequest, AutomationProductFacade, CodexLoginStart,
+    AutomationListRequest, AutomationProductFacade, BudgetSettingsService, CodexLoginStart,
     ConnectableChannelsProductFacade, ExtensionCredentialSetupService,
     ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FilesystemBrowseReader,
     FsMount, InboundAttachmentLander, InboundAttachmentReader, LlmActiveSelection,
@@ -156,7 +157,8 @@ pub use reborn_services::{
     ProjectServiceError, RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest,
     RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
+    RebornAutomationState, RebornBudgetAccountView, RebornBudgetSettingsResponse,
+    RebornBudgetThresholdView, RebornCancelRunResponse, RebornChannelConnectAction,
     RebornChannelConnectStrategy, RebornConnectableChannelInfo,
     RebornConnectableChannelListResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
     RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
@@ -197,6 +199,7 @@ pub use reborn_services::{
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
     RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    ResourceGateResolutionDecision, ResourceGateResolutionRequest, ResourceGateResolutionService,
     SetActiveLlmRequest, SkillsProductFacade, StaticConnectableChannelsProductFacade,
     StaticOperatorStatusService, TriggerRunThreadScope, UnsupportedAutomationProductFacade,
     UnsupportedOperatorLogsService, UnsupportedOperatorServiceLifecycleService,

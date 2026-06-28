@@ -1190,6 +1190,13 @@ fn push_explicit_capability_request_token(
     end: usize,
     ids: &mut Vec<CapabilityId>,
 ) {
+    if start >= end
+        || end > content.len()
+        || !content.is_char_boundary(start)
+        || !content.is_char_boundary(end)
+    {
+        return;
+    }
     let token = &content[start..end];
     if !is_likely_capability_reference(token)
         || !is_explicit_capability_request_token(content, start, end)
@@ -1208,7 +1215,19 @@ fn is_likely_capability_reference(token: &str) -> bool {
 }
 
 fn is_explicit_capability_request_token(content: &str, start: usize, end: usize) -> bool {
-    let previous_content = &content[..start]; // safety: start is produced by char_indices or content.len().
+    if start > end
+        || end > content.len()
+        || !content.is_char_boundary(start)
+        || !content.is_char_boundary(end)
+    {
+        return false;
+    }
+    let Some(previous_content) = content.get(..start) else {
+        return false;
+    };
+    let Some(next_content) = content.get(end..) else {
+        return false;
+    };
     let previous_word = previous_content
         .trim_end()
         .rsplit(|character: char| !is_capability_request_word_char(character))
@@ -1217,7 +1236,7 @@ fn is_explicit_capability_request_token(content: &str, start: usize, end: usize)
         return true;
     }
 
-    let next_word = content[end..]
+    let next_word = next_content
         .trim_start()
         .split(|character: char| !is_capability_request_word_char(character))
         .find(|word| !word.is_empty());

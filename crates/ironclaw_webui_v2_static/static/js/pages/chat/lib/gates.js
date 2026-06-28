@@ -3,14 +3,18 @@
 // `WebChatV2Event::AuthRequired { prompt: AuthPromptView }`. The
 // browser must hold `run_id` + `gate_ref` so a follow-up
 // `resolve_gate` call can fill them into the v2 path params.
+import { GATE_KIND } from "./gate-kinds.js";
+
 export function gateFromEvent(eventType, prompt) {
   if (!prompt) return null;
 
   if (eventType === "gate") {
     const approvalContext = prompt.approval_context || null;
+    const gateKind = prompt.gate_kind || GATE_KIND.APPROVAL;
+    const details = Array.isArray(prompt.details) ? prompt.details : [];
     const gate = {
       kind: "gate",
-      gateKind: "approval",
+      gateKind,
       runId: prompt.turn_run_id,
       gateRef: prompt.gate_ref,
       invocationId: prompt.invocation_id || null,
@@ -18,12 +22,12 @@ export function gateFromEvent(eventType, prompt) {
       body: prompt.body,
       allowAlways: prompt.allow_always === true,
     };
-    return gateWithApprovalContext(gate, approvalContext, prompt.body);
+    return gateWithApprovalContext(gate, approvalContext, prompt.body, details);
   }
   if (eventType === "auth_required") {
     return {
       kind: "auth_required",
-      gateKind: "auth",
+      gateKind: GATE_KIND.AUTH,
       // Legacy auth_required prompts predate challenge_kind and are manual
       // token prompts. Explicit unknown/other challenge kinds still route to
       // the neutral auth card in chat.js.
@@ -60,7 +64,8 @@ export function gateFromEvent(eventType, prompt) {
 
 export function gateFromProjectionGate(gate) {
   if (!gate?.run_id || !gate.gate_ref) return null;
-  const gateKind = gate.gate_kind || "generic";
+  const gateKind = gate.gate_kind || GATE_KIND.GENERIC;
+  const details = Array.isArray(gate.details) ? gate.details : [];
   const base = {
     gateKind,
     runId: gate.run_id,
@@ -70,7 +75,7 @@ export function gateFromProjectionGate(gate) {
     body: gate.body || "",
     allowAlways: gate.allow_always === true,
   };
-  if (gateKind === "auth") {
+  if (gateKind === GATE_KIND.AUTH) {
     const authContext = gate.auth_context || {};
     return {
       ...base,
@@ -82,27 +87,51 @@ export function gateFromProjectionGate(gate) {
       expiresAt: authContext.expires_at || null,
     };
   }
-  return {
+  return gateWithApprovalContext({
     ...base,
     kind: "gate",
-  };
+  }, gate.approval_context || null, base.body, details);
 }
 
-function gateWithApprovalContext(gate, approvalContext, fallbackDescription) {
-  if (!approvalContext) return gate;
-  const approvalDetails = approvalDetailsFromContext(approvalContext);
+function gateWithApprovalContext(gate, approvalContext, fallbackDescription, details = []) {
+  if (!approvalContext) {
+    const description = displayDescription(fallbackDescription);
+    const withDetails = details.length ? { ...gate, approvalDetails: details } : gate;
+    return description ? { ...withDetails, description } : withDetails;
+  }
+  // Merge the structured projection/event `details` with the rows derived
+  // from the approval context so neither source is dropped from the card.
+  const approvalDetails = [...approvalDetailsFromContext(approvalContext), ...details];
   return {
     ...gate,
     toolName: approvalContext.tool_name || null,
-    description: approvalContext.reason || fallbackDescription,
+    description: approvalContext.reason || displayDescription(fallbackDescription),
     actionLabel: approvalContext.action?.label || null,
     destination: approvalContext.destination || null,
     approvalScope: approvalContext.scope || null,
     approvalDetails,
-    parameters: approvalDetails.length
-      ? approvalDetails.map((detail) => `${detail.label}: ${detail.value}`).join("\n")
-      : null,
+    parameters: null,
   };
+}
+
+function displayDescription(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+// The single source for turning a normalized gate into the multi-line
+// `label: value` parameter string the approval/tool surfaces display.
+// Gate normalization sets `parameters: null` (the structured
+// `approvalDetails` are the source of truth); this folds them back into a
+// flat string on demand so the join lives in exactly one place.
+export function gateDisplayParameters(gate) {
+  if (typeof gate?.parameters === "string" && gate.parameters.trim()) {
+    return gate.parameters.trim();
+  }
+  const details = Array.isArray(gate?.approvalDetails) ? gate.approvalDetails : [];
+  const lines = details
+    .filter((detail) => detail?.label && detail.value != null)
+    .map((detail) => `${detail.label}: ${detail.value}`);
+  return lines.length > 0 ? lines.join("\n") : null;
 }
 
 function approvalDetailsFromContext(context) {

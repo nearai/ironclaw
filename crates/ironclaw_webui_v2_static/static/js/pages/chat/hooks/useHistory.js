@@ -1,7 +1,7 @@
 import { React } from "../../../lib/html.js";
 import { fetchTimeline } from "../../../lib/api.js";
 import { authScope } from "../../../lib/auth-scope.js";
-import { messagesFromTimeline } from "../lib/history-messages.js";
+import { coalesceToolFields, messagesFromTimeline } from "../lib/history-messages.js";
 
 const PAGE_SIZE = 50;
 
@@ -325,7 +325,7 @@ function hydrateFreshMessages(fresh, current, options = {}) {
   const currentByConfirmedId = new Map();
   const finalAssistantByRun = new Map();
   for (const message of current || []) {
-    if (!message || !message.timestamp) continue;
+    if (!message) continue;
     if (typeof message.id === "string") {
       currentByConfirmedId.set(message.id, message);
     }
@@ -345,7 +345,7 @@ function hydrateFreshMessages(fresh, current, options = {}) {
     return fresh;
   }
   return fresh.map((message) => {
-    if (!message || message.timestamp || typeof message.id !== "string") {
+    if (!message || typeof message.id !== "string") {
       return message;
     }
     const turnRunId = typeof message.turnRunId === "string" ? message.turnRunId : null;
@@ -358,15 +358,30 @@ function hydrateFreshMessages(fresh, current, options = {}) {
       isFinalAssistantMessage(message) && turnRunId
         ? finalReplyTimestampByRun?.[turnRunId]
         : null;
-    const timestamp = currentMessage?.timestamp || fallbackTimestamp;
-    return timestamp
-      ? { ...message, timestamp }
-      : message;
+    const timestamp = message.timestamp || currentMessage?.timestamp || fallbackTimestamp;
+    let hydrated = hydrateToolActivityDetails(message, currentMessage);
+    if (timestamp) {
+      hydrated = { ...hydrated, timestamp };
+    }
+    return hydrated;
   });
 }
 
 function isFinalAssistantMessage(message) {
   return message?.role === "assistant" && message?.isFinalReply === true;
+}
+
+function hydrateToolActivityDetails(message, currentMessage) {
+  if (message?.role !== "tool_activity" || currentMessage?.role !== "tool_activity") {
+    return message;
+  }
+  // Fill display fields the refreshed record left empty from the live card,
+  // using the same coalescing predicate as the live merge.
+  return coalesceToolFields(message, currentMessage, [
+    "toolDetail",
+    "toolParameters",
+    "toolResultPreview",
+  ]);
 }
 
 function isRuntimeActivityMessage(message) {

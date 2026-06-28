@@ -472,7 +472,11 @@ async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v
     await expect(composer).to_have_attribute("data-send-disabled", "true")
 
     await composer.press("Enter")
-    await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
+
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(2, timeout=5000)
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"]).nth(1)).to_contain_text(
+        "draft while the reply is still running"
+    )
 
 
 async def test_reborn_v2_new_chat_sends_while_a_run_is_active(reborn_v2_page):

@@ -292,6 +292,7 @@ async fn steering_drain_acks_only_after_cursor_checkpoint_is_durable() {
         vec![
             "checkpoint:before_model".to_string(),
             "ack_inputs".to_string(),
+            "checkpoint:before_model".to_string(),
             "checkpoint:final".to_string(),
         ]
     );

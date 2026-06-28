@@ -146,6 +146,10 @@ fn host_queue_error_into_host_error(error: HostInputQueueError) -> AgentLoopHost
         HostInputQueueError::InvalidCursor { reason } => {
             AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, reason)
         }
+        HostInputQueueError::ThreadStatusUpdate { source } => AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            format!("failed to persist queued input status: {source}"),
+        ),
         HostInputQueueError::Internal => AgentLoopHostError::new(
             AgentLoopHostErrorKind::Internal,
             "input queue internal error",

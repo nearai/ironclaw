@@ -971,7 +971,7 @@ test("useChatEvents: late started activity cannot downgrade remembered declined 
   assert.equal(harness.messages[0].id, `tool-${invocationId}`);
   assert.equal(harness.messages[0].toolName, "web_search");
   assert.equal(harness.messages[0].toolStatus, "declined");
-  assert.equal(harness.messages[0].toolError, "gate_declined");
+  assert.equal(harness.messages[0].toolError, "gate declined");
   assert.equal(harness.messages[0].toolErrorKind, "gate_declined");
 });
 

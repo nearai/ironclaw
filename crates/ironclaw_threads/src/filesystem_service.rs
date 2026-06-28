@@ -1326,8 +1326,23 @@ where
             .ok_or_else(|| SessionThreadError::UnknownThread {
                 thread_id: thread_id.clone(),
             })?;
+        let queued_sequence = match self
+            .read_message_versioned(scope, thread_id, message_id)
+            .await?
+            .ok_or(SessionThreadError::UnknownMessage { message_id })?
+            .0
+            .status
+        {
+            MessageStatus::Queued => Some(self.reserve_sequence(scope, thread_id).await?),
+            _ => None,
+        };
         self.apply_message_update(scope, thread_id, message_id, |message| {
             ensure_user_accepted(message, "mark_message_submitted")?;
+            if message.status == MessageStatus::Queued
+                && let Some(sequence) = queued_sequence
+            {
+                message.sequence = sequence;
+            }
             message.status = MessageStatus::Submitted;
             message.turn_id = Some(turn_id.clone());
             message.turn_run_id = Some(turn_run_id.clone());
@@ -1357,14 +1372,36 @@ where
         .await
     }
 
+    async fn mark_message_queued(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+        active_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.read_thread_versioned(scope, thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?;
+        self.apply_message_update(scope, thread_id, message_id, |message| {
+            ensure_user_accepted(message, "mark_message_queued")?;
+            message.status = MessageStatus::Queued;
+            message.turn_id = None;
+            message.turn_run_id = Some(active_run_id.clone());
+            Ok(())
+        })
+        .await
+    }
+
     async fn append_assistant_draft(
         &self,
         request: AppendAssistantDraftRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        // Dedup-by-turn-run-id: read the secondary index first and fall back
-        // to the legacy scan for rows written before the index existed.
-        // Retrying a draft append with the same `turn_run_id` returns the
-        // existing record rather than creating a sibling.
+        // Dedup-by-turn-run-id while preserving multiple finalized assistant
+        // replies in a run. Retries of the same draft/final content reuse the
+        // existing record; a different finalized reply starts a sibling draft.
+        let requested_content = request.content.as_text().to_owned();
         if let Some(existing) = self
             .find_assistant_message_by_run(
                 &request.scope,
@@ -1373,6 +1410,7 @@ where
                 None,
             )
             .await?
+            && should_reuse_assistant_run_message(&existing, &requested_content)
         {
             return Ok(existing);
         }
@@ -1392,7 +1430,7 @@ where
             turn_run_id: Some(request.turn_run_id),
             tool_result_ref: None,
             tool_result_provider_call: None,
-            content: Some(request.content.into_text()),
+            content: Some(requested_content),
             attachments: Vec::new(),
             redaction_ref: None,
         };
@@ -2366,7 +2404,7 @@ fn ensure_user_accepted(
     if message.kind == MessageKind::User
         && matches!(
             message.status,
-            MessageStatus::Accepted | MessageStatus::DeferredBusy
+            MessageStatus::Accepted | MessageStatus::DeferredBusy | MessageStatus::Queued
         )
     {
         return Ok(());
@@ -2436,6 +2474,17 @@ fn assistant_message_matches_run(
     message.kind == MessageKind::Assistant
         && message.turn_run_id.as_deref() == Some(turn_run_id)
         && required_status.is_none_or(|status| message.status == status)
+}
+
+fn should_reuse_assistant_run_message(
+    message: &ThreadMessageRecord,
+    requested_content: &str,
+) -> bool {
+    match message.status {
+        MessageStatus::Draft | MessageStatus::Redacted | MessageStatus::Deleted => true,
+        MessageStatus::Finalized => message.content.as_deref() == Some(requested_content),
+        _ => false,
+    }
 }
 
 const REDACTED_SUMMARY_CONTENT: &str = "[redacted]";
@@ -2561,7 +2610,7 @@ fn history_summary_artifacts(
 /// apply — blocking it would silently drop a legitimate compacted range.
 ///
 /// Resurfaceable statuses (must still block the summary):
-///   Draft | Interrupted | Superseded | DeferredBusy
+///   Draft | Interrupted | Superseded | Queued | DeferredBusy
 /// Permanent non-visible (must NOT block):
 ///   RejectedBusy (terminal, user must explicitly resend)
 ///   CapabilityDisplayPreview kind (never model-visible regardless of status)
@@ -2575,6 +2624,7 @@ fn can_resurface_as_model_visible(message: &ThreadMessageRecord) -> bool {
         MessageStatus::Draft
             | MessageStatus::Interrupted
             | MessageStatus::Superseded
+            | MessageStatus::Queued
             | MessageStatus::DeferredBusy
     )
 }

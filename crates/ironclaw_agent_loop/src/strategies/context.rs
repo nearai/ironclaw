@@ -70,7 +70,12 @@ impl ContextStrategy for DefaultContextStrategy {
         ContextPlan {
             request: LoopPromptBundleRequest {
                 mode: PromptMode::TextOnly,
-                context_cursor: None,
+                context_cursor: Some(
+                    state
+                        .prompt_context_cursor
+                        .clone()
+                        .unwrap_or_else(|| state.input_cursor.clone()),
+                ),
                 surface_version: None,
                 checkpoint_state_ref: None,
                 max_messages: Some(self.max_messages.max(1)),
@@ -130,8 +135,9 @@ mod tests {
         AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
         run_profile::{
             CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
-            ConcurrencyClass, ContextProfileId, LoopDriverId, LoopRunContext, ModelProfileId,
-            PromptMode, RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
+            ConcurrencyClass, ContextProfileId, LoopDriverId, LoopInputCursor,
+            LoopInputCursorToken, LoopRunContext, ModelProfileId, PromptMode,
+            RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
             ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
             SchedulingClass, SteeringPolicy,
         },
@@ -237,9 +243,29 @@ mod tests {
         assert!(request.request.inline_messages.is_empty());
         assert!(!request.emitted_admission_control);
         assert!(!request.emitted_repeated_call_warning);
-        assert!(request.request.context_cursor.is_none());
+        assert_eq!(
+            request.request.context_cursor,
+            Some(state.input_cursor.clone())
+        );
         assert!(request.request.surface_version.is_none());
         assert!(request.request.checkpoint_state_ref.is_none());
+    }
+
+    #[tokio::test]
+    async fn plan_context_request_prefers_pending_prompt_context_cursor() {
+        let strategy = DefaultContextStrategy::default();
+        let run_context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&run_context);
+        let original_cursor = state.input_cursor.clone();
+        state.input_cursor = LoopInputCursor::from_host_token(
+            &run_context,
+            LoopInputCursorToken::new("input-cursor:after-queued").expect("valid cursor"),
+        );
+        state.prompt_context_cursor = Some(original_cursor.clone());
+
+        let request = strategy.plan_context_request(&state).await;
+
+        assert_eq!(request.request.context_cursor, Some(original_cursor));
     }
 
     #[tokio::test]

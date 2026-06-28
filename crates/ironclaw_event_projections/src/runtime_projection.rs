@@ -299,8 +299,12 @@ fn apply_capability_activity_event(
             | CapabilityActivityStatus::Completed
     ) {
         activity.error_kind = None;
+        activity.error_summary = None;
     } else if sanitized_error_kind.is_some() {
         activity.error_kind = sanitized_error_kind;
+    }
+    if matches!(status, CapabilityActivityStatus::Failed) && event.error_summary.is_some() {
+        activity.error_summary = event.error_summary.clone();
     }
     activity.last_cursor = entry.cursor;
     activity.updated_at = event.timestamp;
@@ -322,6 +326,7 @@ fn capability_activity_projection_for_entry(
         process_id: event.process_id,
         output_bytes: event.output_bytes,
         error_kind: event.error_kind.clone().map(sanitize_error_kind),
+        error_summary: event.error_summary.clone(),
         first_cursor: entry.cursor,
         last_cursor: entry.cursor,
         updated_at: event.timestamp,

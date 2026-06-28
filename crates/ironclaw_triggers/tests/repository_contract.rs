@@ -3733,6 +3733,7 @@ mod fire_claim_contract {
             equivalent_fire_slot_text, canonical_fire_slot_text,
             "test must rewrite to an equivalent but non-canonical timestamp string"
         );
+        // safety: test setup performs one raw UPDATE to create non-canonical persisted text.
         db.connect()
             .expect("connect raw libsql")
             .execute(
@@ -3962,6 +3963,7 @@ mod fire_claim_contract {
             equivalent_fire_slot_text, canonical_fire_slot_text,
             "test must rewrite to an equivalent but non-canonical timestamp string"
         );
+        // safety: test setup performs one raw UPDATE to create non-canonical persisted text.
         pool.get()
             .await
             .expect("postgres connection")

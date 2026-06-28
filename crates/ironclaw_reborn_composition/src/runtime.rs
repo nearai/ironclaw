@@ -480,6 +480,7 @@ pub struct RebornRuntime {
     turn_coordinator: Arc<dyn TurnCoordinator>,
     turn_tree_store: Arc<dyn TurnSpawnTreeStateStore>,
     thread_service: Arc<dyn SessionThreadService>,
+    input_enqueue: Arc<dyn ironclaw_loop_support::HostInputEnqueuePort>,
     thread_scope: ThreadScope,
     turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
@@ -844,7 +845,14 @@ impl ResourceGateEvidenceStore for LocalDevResourceGateEvidence {
 fn budget_gate_id_from_gate_ref(
     gate_ref: &LoopGateRef,
 ) -> Result<Option<ironclaw_resources::BudgetGateId>, TurnError> {
-    let Some(value) = gate_ref.as_str().strip_prefix("gate:budget-") else {
+    // A non-budget gate ref is `Ok(None)`; a budget-prefixed ref with an
+    // invalid uuid is an error (not silently skipped), so this consumer needs
+    // finer semantics than `BudgetGateId::from_gate_ref` and parses the uuid
+    // itself after matching the canonical prefix.
+    let Some(value) = gate_ref
+        .as_str()
+        .strip_prefix(ironclaw_resources::BudgetGateId::GATE_REF_PREFIX)
+    else {
         return Ok(None);
     };
     let id = uuid::Uuid::parse_str(value).map_err(|error| TurnError::InvalidRequest {
@@ -1254,6 +1262,12 @@ impl RebornRuntime {
 
     pub(crate) fn webui_turn_coordinator(&self) -> Arc<dyn TurnCoordinator> {
         self.turn_coordinator.clone()
+    }
+
+    pub(crate) fn webui_input_enqueue(
+        &self,
+    ) -> Arc<dyn ironclaw_loop_support::HostInputEnqueuePort> {
+        Arc::clone(&self.input_enqueue)
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -2830,7 +2844,9 @@ pub async fn build_reborn_runtime(
     if let Some(local_runtime) = local_runtime {
         projection_services = projection_services
             .with_approval_requests(Arc::clone(&local_runtime.approval_requests)
-                as Arc<dyn ironclaw_run_state::ApprovalRequestStore>);
+                as Arc<dyn ironclaw_run_state::ApprovalRequestStore>)
+            .with_budget_gates(Arc::clone(&local_runtime.budget_gate_store))
+            .with_budget_governor(Arc::clone(&local_runtime.resource_governor));
     }
     let live_projection_publisher =
         projection_services.live_projection_publisher(actor_user_id.clone());
@@ -3073,6 +3089,14 @@ pub async fn build_reborn_runtime(
         _ => None,
     };
 
+    let host_input_queue = Arc::new(ironclaw_loop_support::InMemoryHostInputQueue::new(
+        Arc::clone(&thread_service),
+    ));
+    let host_input_queue_reader: Arc<dyn ironclaw_loop_support::HostInputQueue> =
+        host_input_queue.clone();
+    let host_input_enqueue: Arc<dyn ironclaw_loop_support::HostInputEnqueuePort> =
+        host_input_queue.clone();
+
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
@@ -3117,7 +3141,7 @@ pub async fn build_reborn_runtime(
         model_route_resolver: None,
         cancellation_factory: None,
         skill_context_source,
-        input_queue: None,
+        input_queue: Some(host_input_queue_reader),
         identity_context_source: match local_runtime {
             Some(local_runtime) => Arc::new(
                 // Local-dev seeding validates the prompt path first, so non-file prompt paths fail
@@ -3416,6 +3440,7 @@ pub async fn build_reborn_runtime(
         turn_coordinator,
         turn_tree_store: turn_state_store,
         thread_service,
+        input_enqueue: host_input_enqueue,
         thread_scope,
         turn_scheduler: RuntimeTurnScheduler::new(composition.scheduler_handle, scheduler_notifier),
         trigger_poller_handle,
@@ -9238,17 +9263,26 @@ output_schema_ref = "schemas/write.output.json"
             )
             .await
             .expect("approval gate event stream");
-        assert!(
-            streamed.events.iter().any(|event| {
-                matches!(
-                    event.payload(),
-                    ProductOutboundPayload::GatePrompt(prompt)
-                        if prompt.turn_run_id == run_id
-                            && prompt.gate_ref == gate_ref.as_str()
-                            && prompt.headline == "Approval required"
-                )
-            }),
-            "blocked approval run should be visible as a gate prompt on the product event stream"
+        let prompt = streamed
+            .events
+            .iter()
+            .find_map(|event| match event.payload() {
+                ProductOutboundPayload::GatePrompt(prompt)
+                    if prompt.turn_run_id == run_id && prompt.gate_ref == gate_ref.as_str() =>
+                {
+                    Some(prompt)
+                }
+                _ => None,
+            })
+            .expect("blocked approval run should be visible as a gate prompt on the product event stream");
+        assert_eq!(prompt.headline, "Approval required");
+        assert_eq!(
+            prompt
+                .approval_context
+                .as_ref()
+                .expect("approval gate prompt should include tool context")
+                .tool_name,
+            "demo.echo"
         );
 
         bundle
@@ -9644,16 +9678,16 @@ output_schema_ref = "schemas/write.output.json"
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
-    /// Regression guard: a message that arrives while the thread is busy is stored with
-    /// `RejectedBusy` status and must NOT be auto-resubmitted when the blocking run
-    /// reaches a terminal state.
+    /// Regression guard: a WebUI message that arrives while the thread is busy is queued
+    /// into the active run and must NOT be submitted as a separate run when the blocking
+    /// run reaches a terminal state.
     ///
     /// Scenario:
     ///  A – submitted via `turn_coordinator.submit_turn`; worker is stopped so it stays
     ///      Queued and holds the active-lock.
     ///  B – submitted via `bundle.api.submit_turn` (WebUI path); thread is busy → stored
-    ///      as `RejectedBusy`; response carries a non-empty `notice`.
-    ///  Cancel A → B stays `RejectedBusy` (no auto-resubmission).
+    ///      as `Queued`; response is `DeferredBusy`.
+    ///  Cancel A → B stays queued/consumed by A and is not submitted as a separate run.
     ///  C – submitted after A is cancelled; thread is free → `Submitted`.
     ///
     /// arch-note: lives in runtime.rs (adds ~200 lines to an already >3000-line file) because
@@ -9661,7 +9695,7 @@ output_schema_ref = "schemas/write.output.json"
     /// harness provides; moving it would require duplicating that harness. Decomposition of
     /// runtime.rs is tracked in plan #4471.
     #[tokio::test]
-    async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
+    async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
         let root = tempfile::tempdir().expect("tempdir");
         let gateway = Arc::new(RecordingGateway {
             reply: "busy-drain ok".to_string(),
@@ -9737,7 +9771,7 @@ output_schema_ref = "schemas/write.output.json"
             run_id: run_id_a, ..
         } = submitted_a;
 
-        // Submit message B through the WebUI path — thread is busy, must get RejectedBusy.
+        // Submit message B through the WebUI path — thread is busy, must get queued.
         let response_b = bundle
             .api
             .submit_turn(
@@ -9752,25 +9786,30 @@ output_schema_ref = "schemas/write.output.json"
             .await
             .expect("message B submit should not error");
 
-        let RebornSubmitTurnResponse::RejectedBusy {
+        let RebornSubmitTurnResponse::DeferredBusy {
             notice: notice_b,
             active_run_id: busy_run_id,
+            status: status_b,
             ..
         } = response_b
         else {
-            panic!("expected RejectedBusy for message B, got {response_b:?}");
+            panic!("expected DeferredBusy for message B, got {response_b:?}");
         };
         assert_eq!(
-            busy_run_id,
-            Some(run_id_a),
-            "RejectedBusy should report run A as the active run"
+            busy_run_id, run_id_a,
+            "DeferredBusy should report run A as the active run"
+        );
+        assert_eq!(
+            status_b,
+            TurnStatus::Queued,
+            "message B should be queued into run A"
         );
         assert!(
             !notice_b.is_empty(),
-            "RejectedBusy response must carry a non-empty notice"
+            "DeferredBusy response must carry a non-empty notice"
         );
 
-        // Verify message B is stored with RejectedBusy status.
+        // Verify message B is stored with queued status.
         let history = runtime
             .thread_service
             .list_thread_history(ThreadHistoryRequest {
@@ -9779,23 +9818,23 @@ output_schema_ref = "schemas/write.output.json"
             })
             .await
             .expect("thread history after B");
-        let rejected_messages: Vec<_> = history
+        let queued_messages: Vec<_> = history
             .messages
             .iter()
-            .filter(|m| matches!(m.status, MessageStatus::RejectedBusy))
+            .filter(|m| matches!(m.status, MessageStatus::Queued))
             .collect();
         assert_eq!(
-            rejected_messages.len(),
+            queued_messages.len(),
             1,
-            "exactly one message should be stored as RejectedBusy after thread-busy submit"
+            "exactly one message should be stored as queued after thread-busy submit"
         );
         assert_eq!(
-            rejected_messages[0].kind,
+            queued_messages[0].kind,
             MessageKind::User,
-            "the RejectedBusy message must be of kind User"
+            "the queued message must be of kind User"
         );
 
-        // Cancel run A — this is the terminal event that (must NOT) auto-resubmit B.
+        // Cancel run A — this is the terminal event that must not submit B as a separate run.
         runtime
             .cancel_run(
                 &scope,
@@ -9806,7 +9845,7 @@ output_schema_ref = "schemas/write.output.json"
             .await
             .expect("run A cancellation succeeds");
 
-        // B must remain RejectedBusy — no auto-resubmission should have fired.
+        // B must remain the same row and no auto-resubmission should have fired.
         let history_after_cancel = runtime
             .thread_service
             .list_thread_history(ThreadHistoryRequest {
@@ -9816,10 +9855,10 @@ output_schema_ref = "schemas/write.output.json"
             .await
             .expect("thread history after cancel");
         // Identify message B by the message_id we captured from the pre-cancel history.
-        // Using the stable message_id (rather than a simple RejectedBusy count) ensures
-        // a regression that leaves the RejectedBusy row AND adds a Submitted row for the
-        // same message cannot slip past as "still one RejectedBusy".
-        let msg_b_id = rejected_messages[0].message_id;
+        // Using the stable message_id (rather than a simple queued count) ensures
+        // a regression that leaves the queued row AND adds a Submitted row for the
+        // same message cannot slip past as "still one queued message".
+        let msg_b_id = queued_messages[0].message_id;
 
         let msg_b_after_cancel: Vec<_> = history_after_cancel
             .messages
@@ -9833,8 +9872,8 @@ output_schema_ref = "schemas/write.output.json"
         );
         assert_eq!(
             msg_b_after_cancel[0].status,
-            MessageStatus::RejectedBusy,
-            "message B must still be RejectedBusy after run A is cancelled — no auto-resubmission"
+            MessageStatus::Queued,
+            "message B must still be queued after run A is cancelled — no auto-resubmission"
         );
         // Guard: no additional Submitted row must have been created for message B's message_id.
         let submitted_for_b: Vec<_> = history_after_cancel

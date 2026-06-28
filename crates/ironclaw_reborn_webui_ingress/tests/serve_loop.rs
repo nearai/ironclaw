@@ -10,13 +10,14 @@
 //! trivial axum `Router`.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{Router, extract::ConnectInfo, routing::get};
 use ironclaw_reborn_webui_ingress::{
     RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2,
 };
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 async fn build_test_router() -> Router {
     Router::new()
@@ -150,6 +151,57 @@ async fn serve_webui_v2_shuts_down_when_shutdown_sender_drops() {
         .expect("serve loop must exit within 2s of shutdown-sender drop")
         .expect("serve loop join handle must not panic");
     outcome.expect("serve loop must return Ok after shutdown-sender drop");
+}
+
+#[tokio::test]
+async fn serve_webui_v2_bounds_graceful_shutdown_drain_for_long_lived_requests() {
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let (bound_tx, bound_rx) = oneshot::channel::<SocketAddr>();
+    let (request_started_tx, mut request_started_rx) = watch::channel(false);
+    let request_started_for_handler = Arc::new(request_started_tx);
+    let router = Router::new().route(
+        "/hold",
+        get(move || {
+            let request_started = Arc::clone(&request_started_for_handler);
+            async move {
+                let _ = request_started.send(true);
+                std::future::pending::<&'static str>().await
+            }
+        }),
+    );
+    let opts = RebornWebuiServeOptions {
+        addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        router,
+        shutdown: shutdown_rx,
+        bound_addr_tx: Some(bound_tx),
+    };
+
+    let serve_handle = tokio::spawn(async move { serve_webui_v2(opts).await });
+    let bound = tokio::time::timeout(Duration::from_secs(2), bound_rx)
+        .await
+        .expect("bound_addr_tx must fire")
+        .expect("bound addr");
+    let client = test_client();
+    let held_request = tokio::spawn(async move {
+        let _ = client.get(format!("http://{bound}/hold")).send().await;
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        if !*request_started_rx.borrow() {
+            let _ = request_started_rx.changed().await;
+        }
+    })
+    .await
+    .expect("held request must reach handler");
+
+    shutdown_tx
+        .send(())
+        .expect("shutdown receiver must be open");
+    let outcome = tokio::time::timeout(Duration::from_secs(2), serve_handle)
+        .await
+        .expect("serve loop must stop waiting for long-lived requests")
+        .expect("serve loop join handle must not panic");
+    outcome.expect("serve loop must return Ok after bounded shutdown drain");
+    held_request.abort();
 }
 
 #[tokio::test]

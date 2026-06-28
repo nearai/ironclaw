@@ -22,10 +22,12 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, InvocationId, PermissionMode,
     Principal, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
+use ironclaw_loop_support::{HostInputEnqueuePort, HostInputQueueError, RejectingInputEnqueue};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
     ProjectionSubscriptionRequest,
 };
+use ironclaw_resources::BudgetGateId;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, AttachmentRef, EnsureThreadRequest,
     MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError,
@@ -38,6 +40,7 @@ use ironclaw_turns::{
     TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use secrecy::{ExposeSecret as _, SecretString};
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use url::Url;
 use uuid::Uuid;
@@ -703,6 +706,7 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
 enum GateResolutionRoute {
     Approval,
     Auth,
+    Resource,
     Generic,
 }
 
@@ -730,6 +734,16 @@ impl GateResolutionRoute {
                 )?;
                 Ok(Self::Auth)
             }
+            TurnStatus::BlockedResource
+                if BudgetGateId::is_budget_gate_ref(requested_gate_ref.as_str()) =>
+            {
+                validate_current_gate_ref(
+                    parked_gate_ref,
+                    requested_gate_ref,
+                    RebornServicesErrorKind::Conflict,
+                )?;
+                Ok(Self::Resource)
+            }
             status if status.is_terminal() => Err(RebornServicesError::from_status_kind(
                 RebornServicesErrorCode::Conflict,
                 RebornServicesErrorKind::Conflict,
@@ -748,6 +762,7 @@ impl GateResolutionRoute {
         ) {
             (true, _, _) => Self::Approval,
             (_, true, _) | (_, _, true) => Self::Auth,
+            _ if BudgetGateId::is_budget_gate_ref(gate_ref.as_str()) => Self::Resource,
             _ => Self::Generic,
         }
     }
@@ -1670,6 +1685,14 @@ pub trait RebornServicesApi: Send + Sync {
         request: RebornGetRunStateRequest,
     ) -> Result<RebornGetRunStateResponse, RebornServicesError>;
 
+    async fn get_budget_settings(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornBudgetSettingsResponse, RebornServicesError> {
+        let _ = caller;
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     /// List a directory under the thread's project workspace.
     ///
     /// Read-only navigation surface over the same `/workspace` mount the agent's
@@ -2342,11 +2365,99 @@ pub trait InboundAttachmentReader: Send + Sync {
     ) -> Result<Vec<u8>, RebornServicesError>;
 }
 
+// arch-exempt: large_file, budget resolution service + settings DTOs belong in a
+// `reborn_services/budget.rs` submodule; extraction tracked in
+// docs/plans/2026-06-27-reborn-budget-module-decomposition.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceGateResolutionDecision {
+    Approve,
+    Decline,
+}
+
+pub struct ResourceGateResolutionRequest {
+    pub scope: TurnScope,
+    pub actor: TurnActor,
+    pub gate_ref: GateRef,
+    pub decision: ResourceGateResolutionDecision,
+}
+
+#[async_trait]
+pub trait ResourceGateResolutionService: Send + Sync {
+    async fn resolve_resource_gate(
+        &self,
+        request: ResourceGateResolutionRequest,
+    ) -> Result<(), RebornServicesError>;
+}
+
+struct RejectingResourceGateResolutionService;
+
+#[async_trait]
+impl ResourceGateResolutionService for RejectingResourceGateResolutionService {
+    async fn resolve_resource_gate(
+        &self,
+        _request: ResourceGateResolutionRequest,
+    ) -> Result<(), RebornServicesError> {
+        Err(RebornServicesError::service_unavailable(false))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornBudgetThresholdView {
+    pub warn_at: f64,
+    pub pause_at: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornBudgetAccountView {
+    pub account: String,
+    pub usage_usd: String,
+    pub reserved_usd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_usd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utilization: Option<f64>,
+    pub unlimited: bool,
+    pub period: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_end: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thresholds: Option<RebornBudgetThresholdView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornBudgetSettingsResponse {
+    pub generated_at: String,
+    pub accounts: Vec<RebornBudgetAccountView>,
+}
+
+#[async_trait]
+pub trait BudgetSettingsService: Send + Sync {
+    async fn budget_settings(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornBudgetSettingsResponse, RebornServicesError>;
+}
+
+struct RejectingBudgetSettingsService;
+
+#[async_trait]
+impl BudgetSettingsService for RejectingBudgetSettingsService {
+    async fn budget_settings(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornBudgetSettingsResponse, RebornServicesError> {
+        Err(RebornServicesError::service_unavailable(false))
+    }
+}
+
 /// Default facade implementation composed at the WebUI boundary.
 #[derive(Clone)]
 pub struct RebornServices {
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    input_enqueue: Arc<dyn HostInputEnqueuePort>,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
     project_filesystem: Option<Arc<dyn ProjectFilesystemReader>>,
     filesystem_browser: Option<Arc<dyn FilesystemBrowseReader>>,
@@ -2363,6 +2474,8 @@ pub struct RebornServices {
     operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
+    resource_gate_resolver: Arc<dyn ResourceGateResolutionService>,
+    budget_settings: Arc<dyn BudgetSettingsService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
@@ -2379,6 +2492,7 @@ impl RebornServices {
         Self {
             thread_service,
             turn_coordinator,
+            input_enqueue: Arc::new(RejectingInputEnqueue),
             inbound_attachments: None,
             project_filesystem: None,
             filesystem_browser: None,
@@ -2399,6 +2513,8 @@ impl RebornServices {
             operator_service_lifecycle: Arc::new(UnsupportedOperatorServiceLifecycleService),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
+            resource_gate_resolver: Arc::new(RejectingResourceGateResolutionService),
+            budget_settings: Arc::new(RejectingBudgetSettingsService),
             extension_credentials: None,
             skill_activation_recorder: None,
             skill_activation_clearer: None,
@@ -2410,6 +2526,11 @@ impl RebornServices {
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
+        self
+    }
+
+    pub fn with_input_enqueue(mut self, input_enqueue: Arc<dyn HostInputEnqueuePort>) -> Self {
+        self.input_enqueue = input_enqueue;
         self
     }
 
@@ -2564,6 +2685,19 @@ impl RebornServices {
         auth_interactions: Arc<dyn AuthInteractionService>,
     ) -> Self {
         self.auth_interactions = auth_interactions;
+        self
+    }
+
+    pub fn with_resource_gate_resolver(
+        mut self,
+        resource_gate_resolver: Arc<dyn ResourceGateResolutionService>,
+    ) -> Self {
+        self.resource_gate_resolver = resource_gate_resolver;
+        self
+    }
+
+    pub fn with_budget_settings(mut self, budget_settings: Arc<dyn BudgetSettingsService>) -> Self {
+        self.budget_settings = budget_settings;
         self
     }
 
@@ -2953,6 +3087,25 @@ impl RebornServicesApi for RebornServices {
                         notice: NOTICE_BUSY_GENERIC.to_string(),
                     });
                 }
+                MessageStatus::Queued => {
+                    let run_id = parse_replay_run_id(replay.turn_run_id)?;
+                    let state = self
+                        .turn_coordinator
+                        .get_run_state(GetRunStateRequest {
+                            scope: scope.clone(),
+                            run_id,
+                        })
+                        .await
+                        .map_err(map_turn_error)?;
+                    return Ok(RebornSubmitTurnResponse::DeferredBusy {
+                        thread_id: replay.thread_id,
+                        accepted_message_ref: accepted_message_ref(replay.message_id.to_string())?,
+                        active_run_id: run_id,
+                        status: state.status,
+                        event_cursor: state.event_cursor,
+                        notice: rejected_busy_notice(state.status),
+                    });
+                }
                 MessageStatus::Accepted | MessageStatus::DeferredBusy => AcceptedWebUiMessage {
                     thread_id: replay.thread_id,
                     message_id: replay.message_id,
@@ -3073,22 +3226,74 @@ impl RebornServicesApi for RebornServices {
             }
             Err(TurnError::ThreadBusy(busy)) => {
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
-                mark_message_rejected_busy_or_replay(
-                    &*self.thread_service,
-                    &thread_scope,
-                    &handoff,
-                    &client_action_id,
+                match crate::steering::enqueue_busy_steering(
+                    &*self.turn_coordinator,
+                    self.input_enqueue.as_ref(),
+                    scope.clone(),
+                    thread_scope.clone(),
+                    handoff.thread_id.clone(),
+                    handoff.message_id,
+                    &accepted_message_ref,
+                    busy.active_run_id,
                 )
-                .await?;
-                let notice = rejected_busy_notice(busy.status);
-                Ok(RebornSubmitTurnResponse::RejectedBusy {
-                    thread_id: handoff.thread_id,
-                    accepted_message_ref,
-                    active_run_id: Some(busy.active_run_id),
-                    status: Some(busy.status),
-                    event_cursor: Some(busy.event_cursor),
-                    notice,
-                })
+                .await
+                {
+                    Ok(()) => {
+                        mark_message_queued_or_replay(
+                            &*self.thread_service,
+                            &thread_scope,
+                            &handoff,
+                            &client_action_id,
+                            busy.active_run_id.to_string(),
+                        )
+                        .await?;
+                        let notice = rejected_busy_notice(busy.status);
+                        Ok(RebornSubmitTurnResponse::DeferredBusy {
+                            thread_id: handoff.thread_id,
+                            accepted_message_ref,
+                            active_run_id: busy.active_run_id,
+                            status: busy.status,
+                            event_cursor: busy.event_cursor,
+                            notice,
+                        })
+                    }
+                    // No input queue wired for this runtime: queueing is
+                    // disabled, so reject the message as busy instead of
+                    // deferring it. This is the single mapped fallback for the
+                    // "no steering" mode (see RejectingInputEnqueue).
+                    Err(crate::steering::SteeringEnqueueError::Enqueue(
+                        HostInputQueueError::Unavailable { .. },
+                    )) => {
+                        mark_message_rejected_busy_or_replay(
+                            &*self.thread_service,
+                            &thread_scope,
+                            &handoff,
+                            &client_action_id,
+                        )
+                        .await?;
+                        let notice = rejected_busy_notice(busy.status);
+                        Ok(RebornSubmitTurnResponse::RejectedBusy {
+                            thread_id: handoff.thread_id,
+                            accepted_message_ref,
+                            active_run_id: Some(busy.active_run_id),
+                            status: Some(busy.status),
+                            event_cursor: Some(busy.event_cursor),
+                            notice,
+                        })
+                    }
+                    Err(crate::steering::SteeringEnqueueError::InvalidMessageRef(_)) => {
+                        Err(RebornServicesError::internal_invariant())
+                    }
+                    Err(crate::steering::SteeringEnqueueError::RunState(error)) => {
+                        Err(map_turn_error(error))
+                    }
+                    Err(crate::steering::SteeringEnqueueError::Enqueue(error)) => {
+                        // Carry the cause to the server log; the user-facing
+                        // surface stays the sanitized 503 (error-handling.md).
+                        tracing::warn!(%error, "failed to enqueue steering input for busy run");
+                        Err(RebornServicesError::service_unavailable(false))
+                    }
+                }
             }
             Err(error) => {
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
@@ -3589,6 +3794,17 @@ impl RebornServicesApi for RebornServices {
                 )
                 .await
             }
+            GateResolutionRoute::Resource => {
+                self.resolve_resource_gate(
+                    access.scope,
+                    access.run_actor,
+                    run_id,
+                    gate_ref,
+                    client_action_id,
+                    resolution,
+                )
+                .await
+            }
             GateResolutionRoute::Generic => {
                 self.resolve_generic_gate(
                     access.scope,
@@ -3628,6 +3844,13 @@ impl RebornServicesApi for RebornServices {
             .await
             .map_err(map_turn_error)?;
         Ok(state.into())
+    }
+
+    async fn get_budget_settings(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornBudgetSettingsResponse, RebornServicesError> {
+        self.budget_settings.budget_settings(caller).await
     }
 
     async fn list_threads(
@@ -4451,6 +4674,51 @@ async fn mark_message_rejected_busy_or_replay(
     }
 }
 
+async fn mark_message_queued_or_replay(
+    thread_service: &dyn SessionThreadService,
+    thread_scope: &ThreadScope,
+    handoff: &AcceptedWebUiMessage,
+    client_action_id: &IdempotencyKey,
+    run_id: String,
+) -> Result<(), RebornServicesError> {
+    match thread_service
+        .mark_message_queued(
+            thread_scope,
+            &handoff.thread_id,
+            handoff.message_id,
+            run_id.clone(),
+        )
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let reconciled = reconcile_terminal_duplicate(
+                thread_service,
+                thread_scope,
+                handoff,
+                client_action_id,
+                |replay| {
+                    matches!(
+                        replay.status,
+                        MessageStatus::Queued | MessageStatus::Submitted
+                    ) && replay.turn_run_id == Some(run_id)
+                },
+                error,
+            )
+            .await;
+            if let Err(error) = reconciled {
+                tracing::debug!(
+                    %error,
+                    thread_id = %handoff.thread_id,
+                    message_id = %handoff.message_id,
+                    "queued steering input accepted before transcript queued-status reconciliation failed"
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
 async fn reconcile_terminal_duplicate(
     thread_service: &dyn SessionThreadService,
     thread_scope: &ThreadScope,
@@ -5005,6 +5273,80 @@ impl RebornServices {
                 Ok(RebornResolveGateResponse::Resumed(response.into()))
             }
             ResolveAuthInteractionResponse::Canceled(response) => {
+                Ok(RebornResolveGateResponse::Cancelled(response.into()))
+            }
+        }
+    }
+
+    async fn resolve_resource_gate(
+        &self,
+        scope: TurnScope,
+        actor: TurnActor,
+        run_id: TurnRunId,
+        gate_ref: GateRef,
+        client_action_id: IdempotencyKey,
+        resolution: WebUiGateResolution,
+    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+        match resolution {
+            WebUiGateResolution::Approved { always } => {
+                if always {
+                    return Err(persistent_approval_unavailable());
+                }
+                self.resource_gate_resolver
+                    .resolve_resource_gate(ResourceGateResolutionRequest {
+                        scope: scope.clone(),
+                        actor: actor.clone(),
+                        gate_ref: gate_ref.clone(),
+                        decision: ResourceGateResolutionDecision::Approve,
+                    })
+                    .await?;
+                let binding_id = webui_gate_binding_id(&scope, &gate_ref_string(&gate_ref));
+                let response = self
+                    .turn_coordinator
+                    .resume_turn(ResumeTurnRequest {
+                        scope,
+                        actor,
+                        run_id,
+                        gate_resolution_ref: gate_ref,
+                        precondition: ResumeTurnPrecondition::AnyBlockedGate,
+                        source_binding_ref: webui_source_binding_ref_from_raw(
+                            "webui-gate-src",
+                            &binding_id,
+                        )?,
+                        reply_target_binding_ref: webui_reply_target_binding_ref_from_raw(
+                            "webui-gate-reply",
+                            &binding_id,
+                        )?,
+                        idempotency_key: client_action_id,
+                        resume_disposition: None,
+                    })
+                    .await
+                    .map_err(map_turn_error)?;
+                Ok(RebornResolveGateResponse::Resumed(response.into()))
+            }
+            WebUiGateResolution::CredentialProvided { .. } => {
+                Err(blocked_authentication_unavailable())
+            }
+            WebUiGateResolution::Declined => {
+                self.resource_gate_resolver
+                    .resolve_resource_gate(ResourceGateResolutionRequest {
+                        scope: scope.clone(),
+                        actor: actor.clone(),
+                        gate_ref,
+                        decision: ResourceGateResolutionDecision::Decline,
+                    })
+                    .await?;
+                let response = self
+                    .turn_coordinator
+                    .cancel_run(ironclaw_turns::CancelRunRequest {
+                        scope,
+                        actor,
+                        run_id,
+                        reason: SanitizedCancelReason::UserRequested,
+                        idempotency_key: client_action_id,
+                    })
+                    .await
+                    .map_err(map_turn_error)?;
                 Ok(RebornResolveGateResponse::Cancelled(response.into()))
             }
         }

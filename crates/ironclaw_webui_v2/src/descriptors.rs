@@ -55,6 +55,7 @@ pub const WEBUI_V2_ROUTE_SET_SETTINGS_TOOLS_AUTO_APPROVE: &str =
     "webui.v2.settings.set_tools_auto_approve";
 pub const WEBUI_V2_ROUTE_SET_SETTINGS_TOOL_PERMISSION: &str =
     "webui.v2.settings.set_tool_permission";
+pub const WEBUI_V2_ROUTE_GET_SETTINGS_USAGE: &str = "webui.v2.settings.get_usage";
 pub const WEBUI_V2_ROUTE_GET_LLM_CONFIG: &str = "webui.v2.get_llm_config";
 pub const WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER: &str = "webui.v2.upsert_llm_provider";
 pub const WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER: &str = "webui.v2.delete_llm_provider";
@@ -139,6 +140,7 @@ pub const WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED: &str =
 pub const WEBUI_V2_PATTERN_SETTINGS_TOOLS: &str = "/api/webchat/v2/settings/tools";
 pub const WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION: &str =
     "/api/webchat/v2/settings/tools/{capability_id}";
+pub const WEBUI_V2_PATTERN_SETTINGS_USAGE: &str = "/api/webchat/v2/settings/usage";
 pub const WEBUI_V2_PATTERN_GET_LLM_CONFIG: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER: &str =
@@ -222,6 +224,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         list_settings_tools_descriptor(),
         set_settings_tools_auto_approve_descriptor(),
         set_settings_tool_permission_descriptor(),
+        get_settings_usage_descriptor(),
         get_llm_config_descriptor(),
         upsert_llm_provider_descriptor(),
         delete_llm_provider_descriptor(),
@@ -1074,6 +1077,20 @@ fn set_settings_tool_permission_descriptor() -> IngressRouteDescriptor {
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn get_settings_usage_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_SETTINGS_USAGE,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_SETTINGS_USAGE,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
         ),
     )
 }

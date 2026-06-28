@@ -751,7 +751,11 @@ fn find_local_tool_source_in(
 /// callers fall back to the extension name in that case.
 fn read_crate_name_from_cargo_toml(source_dir: &std::path::Path) -> Option<String> {
     let contents = std::fs::read_to_string(source_dir.join("Cargo.toml")).ok()?;
-    let value: toml::Value = contents.parse().ok()?;
+    // Parse as a TOML *document*. `str::parse::<toml::Value>()` (FromStr) parses
+    // a single value expression in toml 1.x, so `[package]` is read as an array
+    // literal and the rest is rejected as trailing content. `toml::from_str` is
+    // the canonical document parser used elsewhere in the tree.
+    let value: toml::Value = toml::from_str(&contents).ok()?;
     value
         .get("package")?
         .get("name")?

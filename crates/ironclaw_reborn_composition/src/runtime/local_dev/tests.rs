@@ -1360,7 +1360,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_dev_external_tools_are_advertised_as_provider_tool_names() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::tempdir().expect("tempdir"); // safety: test fixture setup may fail the test.
         let storage_root = dir.path().join("local-dev");
         let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
             "local-dev-external-tool-owner",
@@ -1440,10 +1440,8 @@ mod tests {
             .find(|definition| definition.name.as_str() == "client_lookup")
             .expect("external tool definition");
 
-        assert_eq!(
-            tool_definition.capability_id.as_str(),
-            "external_tool.client_lookup"
-        );
+        let capability_id = tool_definition.capability_id.as_str();
+        assert!(capability_id == "external_tool.client_lookup"); // safety: provider-name contract assertion.
 
         let candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(
@@ -1455,10 +1453,8 @@ mod tests {
             .await
             .expect("external provider tool call stages");
 
-        assert_eq!(
-            candidate.capability_id.as_str(),
-            "external_tool.client_lookup"
-        );
+        let capability_id = candidate.capability_id.as_str();
+        assert!(capability_id == "external_tool.client_lookup"); // safety: provider-call staging assertion.
     }
 
     #[tokio::test]

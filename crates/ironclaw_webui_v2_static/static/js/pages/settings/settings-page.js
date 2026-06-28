@@ -2,6 +2,7 @@ import { Navigate, useOutletContext, useParams } from "react-router";
 import { React, html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
 import { AgentTab } from "./components/agent-tab.js";
+import { BudgetTab } from "./components/budget-tab.js";
 import { ChannelsTab } from "./components/channels-tab.js";
 import { InferenceTab } from "./components/inference-tab.js";
 import { LanguageTab } from "./components/language-tab.js";
@@ -59,6 +60,7 @@ export function SettingsPage() {
       isLoading=${isLoading}
       searchQuery=${searchQuery}
     />`,
+    usage: html`<${BudgetTab} searchQuery=${searchQuery} />`,
     skills: html`<${SkillsTab} searchQuery=${searchQuery} />`,
     traces: html`<${TraceCommonsTab} searchQuery=${searchQuery} />`,
     users: html`<${UsersTab} searchQuery=${searchQuery} />`,
@@ -70,6 +72,10 @@ export function SettingsPage() {
   const visibleTabIds = Object.keys(tabContent).filter((id) => isAdmin || !isOperatorTab(id));
   const defaultTabIsVisible = tabContentHas(defaultTab) && visibleTabIds.includes(defaultTab);
   const redirectTab = defaultTabIsVisible ? defaultTab : visibleTabIds[0] || "language";
+
+  if (tab === "budget") {
+    return html`<${Navigate} to="/settings/usage" replace />`;
+  }
 
   if (!tabContentHas(tab) || (!isAdmin && isOperatorTab(tab))) {
     return html`<${Navigate} to=${`/settings/${redirectTab}`} replace />`;

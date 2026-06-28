@@ -227,6 +227,7 @@ pub struct CapabilityActivityView {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    pub error_summary: Option<String>,
     /// Inline primary-argument detail for the activity row, surfaced while the
     /// invocation is still running (the completed card carries its own).
     pub subtitle: Option<String>,
@@ -258,6 +259,8 @@ impl Serialize for CapabilityActivityView {
             output_bytes: Option<u64>,
             error_kind: &'a Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            error_summary: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             subtitle: &'a Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
             input_summary: &'a Option<String>,
@@ -277,6 +280,7 @@ impl Serialize for CapabilityActivityView {
             process_id: &self.process_id,
             output_bytes: self.output_bytes,
             error_kind: &self.error_kind,
+            error_summary: &self.error_summary,
             subtitle: &self.subtitle,
             input_summary: &self.input_summary,
             updated_at: &self.updated_at,
@@ -299,6 +303,7 @@ impl CapabilityActivityView {
             process_id: input.process_id,
             output_bytes: input.output_bytes,
             error_kind: input.error_kind,
+            error_summary: input.error_summary,
             subtitle: input.subtitle,
             input_summary: input.input_summary,
             updated_at: input.updated_at,
@@ -312,6 +317,11 @@ impl CapabilityActivityView {
         if let Some(error_kind) = self.error_kind.as_deref() {
             validate_error_kind("capability_activity_error_kind", error_kind)?;
         }
+        validate_optional_display_text(
+            "capability_activity_error_summary",
+            self.error_summary.as_deref(),
+            CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+        )?;
         // The running-frame input fields are sanitized/byte-bounded upstream;
         // re-validate them at the product boundary (as `error_kind` is) so an
         // upstream regression can't leak unbounded/control-char text to the
@@ -342,6 +352,7 @@ pub struct CapabilityActivityViewInput {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    pub error_summary: Option<String>,
     pub subtitle: Option<String>,
     pub input_summary: Option<String>,
     pub updated_at: DateTime<Utc>,
@@ -367,6 +378,8 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             output_bytes: Option<u64>,
             error_kind: Option<String>,
             #[serde(default)]
+            error_summary: Option<String>,
+            #[serde(default)]
             subtitle: Option<String>,
             #[serde(default)]
             input_summary: Option<String>,
@@ -385,6 +398,7 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             process_id: wire.process_id,
             output_bytes: wire.output_bytes,
             error_kind: wire.error_kind,
+            error_summary: wire.error_summary,
             subtitle: wire.subtitle,
             input_summary: wire.input_summary,
             updated_at: wire.updated_at,
@@ -626,6 +640,8 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatePromptView {
     pub turn_run_id: TurnRunId,
+    #[serde(default = "default_product_gate_kind")]
+    pub gate_kind: ProductGateKind,
     pub gate_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<InvocationId>,
@@ -633,6 +649,8 @@ pub struct GatePromptView {
     pub body: String,
     #[serde(default)]
     pub allow_always: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<ApprovalPromptDetailView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_context: Option<ApprovalPromptContextView>,
 }
@@ -729,6 +747,21 @@ impl<'de> Deserialize<'de> for ApprovalPromptContextView {
         )
         .map_err(serde::de::Error::custom)
     }
+}
+
+fn validate_approval_details(
+    details: &[ApprovalPromptDetailView],
+) -> Result<(), ProductAdapterError> {
+    if details.len() > APPROVAL_PROMPT_DETAIL_MAX_ITEMS {
+        return Err(invalid(
+            "approval_prompt_details",
+            format!("must contain at most {APPROVAL_PROMPT_DETAIL_MAX_ITEMS} items"),
+        ));
+    }
+    for detail in details {
+        detail.validate()?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1092,6 +1125,13 @@ pub enum ProductGateKind {
     Generic,
 }
 
+fn default_product_gate_kind() -> ProductGateKind {
+    // An omitted `gate_kind` on the wire defaults to the inert `Generic`, never
+    // the most-privileged `Approval`. A producer that fails to set the kind (or
+    // a legacy/replay shape) must not be silently upgraded to an approval gate.
+    ProductGateKind::Generic
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductProjectionItem {
@@ -1138,6 +1178,10 @@ pub enum ProductProjectionItem {
         body: Option<String>,
         #[serde(default)]
         allow_always: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        details: Vec<ApprovalPromptDetailView>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval_context: Option<ApprovalPromptContextView>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth_context: Option<AuthPromptContextView>,
     },
@@ -1189,7 +1233,9 @@ impl ProductProjectionItem {
                 gate_ref,
                 headline,
                 body,
+                details,
                 auth_context,
+                approval_context,
                 ..
             } => {
                 validate_bounded_text(
@@ -1205,7 +1251,11 @@ impl ProductProjectionItem {
                 if let Some(body) = body {
                     validate_bounded_text("projection_gate_body", body, PROJECTION_TEXT_MAX_BYTES)?;
                 }
+                validate_approval_details(details)?;
                 if let Some(context) = auth_context {
+                    context.validate()?;
+                }
+                if let Some(context) = approval_context {
                     context.validate()?;
                 }
                 Ok(())
@@ -1284,6 +1334,7 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
             },
             Gate {
                 run_id: TurnRunId,
+                #[serde(default = "default_product_gate_kind")]
                 gate_kind: ProductGateKind,
                 gate_ref: String,
                 #[serde(default)]
@@ -1293,6 +1344,10 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 body: Option<String>,
                 #[serde(default)]
                 allow_always: bool,
+                #[serde(default)]
+                details: Vec<ApprovalPromptDetailView>,
+                #[serde(default)]
+                approval_context: Option<ApprovalPromptContextView>,
                 #[serde(default)]
                 auth_context: Option<AuthPromptContextView>,
             },
@@ -1344,6 +1399,8 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 headline,
                 body,
                 allow_always,
+                details,
+                approval_context,
                 auth_context,
             } => ProductProjectionItem::Gate {
                 run_id,
@@ -1353,6 +1410,8 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 headline,
                 body,
                 allow_always,
+                details,
+                approval_context,
                 auth_context,
             },
             Wire::SkillActivation {
@@ -1574,6 +1633,7 @@ mod tests {
                     process_id: None,
                     output_bytes: None,
                     error_kind: None,
+                    error_summary: None,
                     subtitle: None,
                     input_summary: None,
                     updated_at: Utc::now(),
@@ -1690,6 +1750,8 @@ mod tests {
                 headline: "Approval required".to_string(),
                 body: Some("capability requires approval".to_string()),
                 allow_always: true,
+                details: Vec::new(),
+                approval_context: None,
                 auth_context: None,
             }],
         )
@@ -1715,6 +1777,44 @@ mod tests {
     }
 
     #[test]
+    fn gate_projection_without_gate_kind_defaults_to_generic() {
+        // Older stored/replayed gate projections may omit `gate_kind`. It must
+        // deserialize to the inert `Generic` (matching `GatePromptView`) rather
+        // than failing or defaulting to the privileged `Approval`.
+        let run_id = TurnRunId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::Gate {
+                run_id,
+                gate_kind: ProductGateKind::Resource,
+                gate_ref: "gate:legacy".to_string(),
+                invocation_id: None,
+                headline: "Legacy gate".to_string(),
+                body: None,
+                allow_always: false,
+                details: Vec::new(),
+                approval_context: None,
+                auth_context: None,
+            }],
+        )
+        .expect("valid gate projection");
+        let mut value = serde_json::to_value(&state).expect("serialize");
+        value["items"][0]["gate"]
+            .as_object_mut()
+            .expect("gate object")
+            .remove("gate_kind");
+
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize gate projection without gate_kind");
+        match &decoded.items[0] {
+            ProductProjectionItem::Gate { gate_kind, .. } => {
+                assert_eq!(*gate_kind, ProductGateKind::Generic);
+            }
+            other => panic!("expected gate item, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn projection_state_round_trips_auth_gate_context() {
         let run_id = TurnRunId::new();
         let state = ProductProjectionState::new(
@@ -1727,6 +1827,8 @@ mod tests {
                 headline: "Authentication required".to_string(),
                 body: Some("Authenticate to continue this run.".to_string()),
                 allow_always: false,
+                details: Vec::new(),
+                approval_context: None,
                 auth_context: Some(
                     AuthPromptContextView::new(
                         AuthPromptChallengeKind::OAuthUrl,
@@ -1797,11 +1899,13 @@ mod tests {
     fn gate_prompt_view_round_trips_approval_context() {
         let view = GatePromptView {
             turn_run_id: TurnRunId::new(),
+            gate_kind: ProductGateKind::Approval,
             gate_ref: "gate:approval-test".to_string(),
             invocation_id: Some(InvocationId::new()),
             headline: "Approval required".to_string(),
             body: "capability requires approval".to_string(),
             allow_always: true,
+            details: Vec::new(),
             approval_context: Some(
                 ApprovalPromptContextView::new(
                     "builtin.http",
@@ -1978,6 +2082,7 @@ mod tests {
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            error_summary: None,
             subtitle: None,
             input_summary: None,
             updated_at: Utc::now(),
@@ -2234,6 +2339,7 @@ mod tests {
             process_id: None,
             output_bytes: None,
             error_kind: Some("/tmp/private-host-path".to_string()),
+            error_summary: None,
             subtitle: None,
             input_summary: None,
             updated_at: Utc::now(),
@@ -2278,6 +2384,7 @@ mod tests {
             process_id: None,
             output_bytes: None,
             error_kind: None,
+            error_summary: None,
             subtitle: None,
             input_summary: None,
             updated_at: Utc::now(),
