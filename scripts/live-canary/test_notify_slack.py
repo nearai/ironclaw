@@ -265,6 +265,53 @@ class RebornQaSlackReportTests(unittest.TestCase):
             any("requires live Google runtime access" in text for text in section_texts)
         )
 
+    def test_reborn_rows_fit_with_scheduled_all_lane_report(self):
+        reports = [
+            notify.LaneReport(
+                lane=f"lane-{idx}",
+                provider="default",
+                passed=1,
+                failed=0,
+                tests=1,
+                status="pass",
+            )
+            for idx in range(14)
+        ]
+        reports.append(
+            notify.LaneReport(
+                lane="reborn-webui-v2-live-qa",
+                provider="reborn-webui-v2",
+                passed=33,
+                failed=0,
+                tests=33,
+                status="pass",
+                reborn_qa_cases=[
+                    notify.RebornQaCaseReport(
+                        rows=(f"{idx}",),
+                        case=f"qa_case_{idx}",
+                        feature=f"Feature {idx}",
+                        success=True,
+                    )
+                    for idx in range(1, 34)
+                ],
+            )
+        )
+
+        payload = notify.slack_payload(
+            reports,
+            "https://github.com/nearai/ironclaw/actions/runs/1",
+            "abcdef0123456789",
+        )
+
+        self.assertLessEqual(len(payload["blocks"]), notify.SLACK_MAX_BLOCKS)
+        section_texts = [
+            block["text"]["text"]
+            for block in payload["blocks"]
+            if block.get("type") == "section"
+        ]
+        self.assertTrue(any("*QA 1: Feature 1*" in text for text in section_texts))
+        self.assertTrue(any("*QA 33: Feature 33*" in text for text in section_texts))
+
 
 if __name__ == "__main__":
     unittest.main()

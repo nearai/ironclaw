@@ -28,6 +28,7 @@ MODEL = "claude-haiku-4-5-20251001"
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 MAX_LOG_BYTES = 20_000
+SLACK_MAX_BLOCKS = 50
 
 HAIKU_SYSTEM = (
     "You analyze CI canary test logs. Given a lane's summary, JUnit digest, "
@@ -513,9 +514,9 @@ def slack_payload(
             lines.append(f"tools: {', '.join(r.tools_used)} (≈{r.tool_calls_total} calls)")
         if r.notable:
             lines.append(f"_{r.notable}_")
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
-        if r.reborn_qa_cases:
-            blocks.append({"type": "divider"})
+        if not r.reborn_qa_cases:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+        else:
             for case in r.reborn_qa_cases:
                 row_label = ", ".join(case.rows) if case.rows else case.case
                 status = ":white_check_mark:" if case.success else ":x:"
@@ -540,7 +541,7 @@ def slack_payload(
 
     # Cross-lane "Summary by Category" block — only emitted when there
     # are >=2 failures (with 1 the per-lane block is already enough).
-    if category_summary:
+    if category_summary and len(blocks) + 2 <= SLACK_MAX_BLOCKS:
         blocks.append({"type": "divider"})
         blocks.append(
             {
@@ -556,7 +557,7 @@ def slack_payload(
         ctx.append(f"commit `{commit[:7]}`")
     if run_url:
         ctx.append(f"<{run_url}|GitHub run>")
-    if ctx:
+    if ctx and len(blocks) < SLACK_MAX_BLOCKS:
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": " • ".join(ctx)}]})
     return {"blocks": blocks}
 
