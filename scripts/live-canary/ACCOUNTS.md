@@ -119,6 +119,17 @@ Without that matching client secret, Reborn WebUI v2 live QA records
 `missing_google_ready` before executing the Google runtime rows `2D`, `2F`,
 `4E`, `5C`, `5D`, `6C`, `6E`, and `7E`.
 
+If the preflight artifact reports `reborn_secret_master_key_missing`, the
+copied DB has encrypted Google refresh material but the matching
+`local-dev/.reborn-local-dev-secrets-master-key` was not copied with it. If the
+preflight artifact reports `invalid_client` or `unauthorized_client` with
+`client_secret_present: true`, the provided client secret is present but does
+not match the OAuth client ID stored by the copied Reborn home. Use the Google
+Cloud OAuth client secret for that stored client ID, or re-authorize the QA
+Google account with the OAuth client configured by
+`IRONCLAW_REBORN_GOOGLE_CLIENT_ID` and
+`IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET`.
+
 If the preflight artifact reports `Google OAuth refresh probe failed:
 invalid_grant` with `client_secret_present: true`, the client secret is wired
 but the stored refresh token is invalid for that OAuth client. Re-authorize the
