@@ -266,7 +266,7 @@ impl HarnessCapabilityRecorder {
         }
     }
 
-    fn capability_results(&self) -> Vec<RecordedCapabilityResult> {
+    pub(crate) fn capability_results(&self) -> Vec<RecordedCapabilityResult> {
         match self {
             Self::Recording(_) => Vec::new(),
             Self::HostRuntime(harness) => harness.capability_results(),
@@ -2196,6 +2196,20 @@ impl HostRuntimeCapabilityHarness {
             .unwrap_or_default()
     }
 
+    /// Install URL/method/capability-keyed scripted responses into the recording
+    /// HTTP egress (§3.6 P1 ergonomics). Errors if this harness wired no
+    /// recording egress (e.g. the live-HTTP variant).
+    pub(crate) fn install_http_responses(
+        &self,
+        responses: impl IntoIterator<Item = super::http_matcher::ScriptedHttpResponse>,
+    ) -> HarnessResult<()> {
+        self.http_egress
+            .as_ref()
+            .ok_or("host runtime harness has no recording http egress to script")?
+            .install_scripted(responses);
+        Ok(())
+    }
+
     fn network_http_requests(&self) -> Vec<NetworkHttpRequest> {
         self.network_egress
             .as_ref()
@@ -3069,6 +3083,9 @@ impl TrustAwareCapabilityDispatchAuthorizer for GithubHarnessAuthorizer {
 #[derive(Debug, Clone)]
 struct RecordingRuntimeHttpEgress {
     default_body: Vec<u8>,
+    /// URL/method/capability-keyed scripted responses (§3.6 P1 ergonomics).
+    /// Consulted before the FIFO queue; first match wins.
+    scripted: Arc<Mutex<Vec<super::http_matcher::ScriptedHttpResponse>>>,
     response_bodies: Arc<Mutex<VecDeque<Vec<u8>>>>,
     requests: Arc<Mutex<Vec<RuntimeHttpEgressRequest>>>,
 }
@@ -3077,6 +3094,7 @@ impl RecordingRuntimeHttpEgress {
     fn with_body(body: Vec<u8>) -> Self {
         Self {
             default_body: body,
+            scripted: Arc::new(Mutex::new(Vec::new())),
             response_bodies: Arc::new(Mutex::new(VecDeque::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
         }
@@ -3084,6 +3102,14 @@ impl RecordingRuntimeHttpEgress {
 
     fn requests(&self) -> Vec<RuntimeHttpEgressRequest> {
         self.requests.lock().unwrap().clone()
+    }
+
+    /// Append keyed scripted responses (the canonical keyed-matcher install).
+    fn install_scripted(
+        &self,
+        responses: impl IntoIterator<Item = super::http_matcher::ScriptedHttpResponse>,
+    ) {
+        self.scripted.lock().unwrap().extend(responses);
     }
 }
 
@@ -3094,12 +3120,18 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         let request_bytes = request.body.len() as u64;
+        // Resolve the keyed body BEFORE recording the request: pushing moves the
+        // request into the log and (via its `Drop`) zeroizes its URL/headers.
+        let keyed_body = {
+            let scripted = self.scripted.lock().unwrap();
+            scripted
+                .iter()
+                .find(|response| response.matches(&request))
+                .map(|response| response.body_bytes())
+        };
         self.requests.lock().unwrap().push(request);
-        let body = self
-            .response_bodies
-            .lock()
-            .unwrap()
-            .pop_front()
+        let body = keyed_body
+            .or_else(|| self.response_bodies.lock().unwrap().pop_front())
             .unwrap_or_else(|| self.default_body.clone());
         Ok(RuntimeHttpEgressResponse {
             status: 200,

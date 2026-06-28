@@ -57,12 +57,15 @@ use ironclaw_turns::{
     LoopCheckpointStore, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
 };
 
+use ironclaw_host_api::RuntimeHttpEgressRequest;
+
 use super::filesystem::BlockingTurnStatePutFilesystem;
 use super::harness::{
     EmptyIdentityContextSource, HarnessCapabilityMode, HarnessCapabilityRecorder,
     HarnessTurnBackend, HarnessTurnStorageBackend, HostRuntimeCapabilityHarness,
-    RecordingTestCapabilityPort, scoped_turns_fs, test_product_scope,
+    RecordedCapabilityResult, RecordingTestCapabilityPort, scoped_turns_fs, test_product_scope,
 };
+use super::http_matcher::ScriptedHttpResponse;
 use super::reply::RebornScriptedReply;
 use super::scripted_provider::{SCRIPTED_MODEL_NAME, scripted_trace_llm};
 use super::session_thread::RebornThreadHarness;
@@ -93,6 +96,7 @@ pub struct RebornIntegrationHarnessBuilder {
     conversation_id: String,
     replies: Vec<RebornScriptedReply>,
     capability: RebornCapabilityBackend,
+    keyed_http_responses: Vec<ScriptedHttpResponse>,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -107,6 +111,21 @@ impl RebornIntegrationHarnessBuilder {
     /// for tool-calling tests; a text-only turn needs only the default echo backend.
     pub fn with_builtin_http_tools(mut self) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self
+    }
+
+    /// Install URL/method/capability-keyed scripted HTTP responses over the
+    /// recording `RuntimeHttpEgress` (§3.6 P1 ergonomics) and switch on the real
+    /// first-party tool runtime. For multi-step tool-HTTP flows where each
+    /// `builtin.http` call to a different URL must get a different scripted body;
+    /// requests that match no scripted response fall back to the default body.
+    /// Implies [`with_builtin_http_tools`](Self::with_builtin_http_tools).
+    pub fn with_keyed_http_responses(
+        mut self,
+        responses: impl IntoIterator<Item = ScriptedHttpResponse>,
+    ) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self.keyed_http_responses = responses.into_iter().collect();
         self
     }
 
@@ -186,9 +205,11 @@ impl RebornIntegrationHarnessBuilder {
             RebornCapabilityBackend::Echo => {
                 HarnessCapabilityMode::Recording(RecordingTestCapabilityPort::echo())
             }
-            RebornCapabilityBackend::BuiltinHttpTools => HarnessCapabilityMode::HostRuntime(
-                Arc::new(HostRuntimeCapabilityHarness::core_builtin_tools().await?),
-            ),
+            RebornCapabilityBackend::BuiltinHttpTools => {
+                let host_runtime = HostRuntimeCapabilityHarness::core_builtin_tools().await?;
+                host_runtime.install_http_responses(self.keyed_http_responses)?;
+                HarnessCapabilityMode::HostRuntime(Arc::new(host_runtime))
+            }
         };
         let (
             capability_factory,
@@ -316,6 +337,7 @@ impl RebornIntegrationHarness {
             conversation_id: conversation_id.into(),
             replies: Vec::new(),
             capability: RebornCapabilityBackend::Echo,
+            keyed_http_responses: Vec::new(),
         }
     }
 
@@ -387,6 +409,19 @@ impl RebornIntegrationHarness {
             "no captured runtime HTTP egress request matching {url_substr:?}; saw {seen:?}"
         )
         .into())
+    }
+
+    /// Snapshot of the captured Tier-2 runtime HTTP egress requests, in call
+    /// order. Read by the egress assertions in `assertions.rs` (the canonical
+    /// egress-assertion API — method/URL/body/count/order).
+    pub(super) fn captured_egress_requests(&self) -> Vec<RuntimeHttpEgressRequest> {
+        self.capability_recorder.runtime_http_requests()
+    }
+
+    /// Snapshot of the recorded capability results (tool outputs), in execution
+    /// order. Read by `assert_tool_result_contains` in `assertions.rs`.
+    pub(super) fn captured_capability_results(&self) -> Vec<RecordedCapabilityResult> {
+        self.capability_recorder.capability_results()
     }
 
     async fn wait_for_completion(&self, run_id: TurnRunId) -> HarnessResult<()> {
