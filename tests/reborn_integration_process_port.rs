@@ -26,11 +26,19 @@ async fn shell_call_recorded_not_executed() {
             RebornScriptedReply::tool_call("builtin.shell", json!({"command": "echo s5-probe"})),
             RebornScriptedReply::text("done"),
         ])
-        .build().await.expect("harness builds");
+        .build()
+        .await
+        .expect("harness builds");
     h.submit_turn("run shell").await.expect("turn completes");
-    h.assert_shell_command_recorded("s5-probe").await.expect("command recorded by inert port");
-    h.assert_no_real_process_executed().await.expect("inert port ran, no real process spawned");
-    h.assert_reply_contains("done").await.expect("final reply finalized");
+    h.assert_shell_command_recorded("s5-probe")
+        .await
+        .expect("command recorded by inert port");
+    h.assert_no_real_process_executed()
+        .await
+        .expect("inert port ran, no real process spawned");
+    h.assert_reply_contains("done")
+        .await
+        .expect("final reply finalized");
 }
 
 /// Guards the assertion helpers: on a plain text turn (no shell call) both shell
@@ -40,7 +48,9 @@ async fn shell_call_recorded_not_executed() {
 async fn shell_assertions_fail_when_no_shell_call_ran() {
     let h = RebornIntegrationHarness::test_default()
         .script([RebornScriptedReply::text("no shell")])
-        .build().await.expect("harness builds");
+        .build()
+        .await
+        .expect("harness builds");
     h.submit_turn("just talk").await.expect("turn completes");
     assert!(h.assert_shell_command_recorded("echo").await.is_err());
     assert!(h.assert_no_real_process_executed().await.is_err());

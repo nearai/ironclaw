@@ -527,10 +527,7 @@ impl RebornIntegrationHarness {
             return Ok(());
         }
         let seen: Vec<&str> = commands.iter().map(|s| s.as_str()).collect();
-        Err(format!(
-            "no recorded shell command containing {substr:?}; saw {seen:?}"
-        )
-        .into())
+        Err(format!("no recorded shell command containing {substr:?}; saw {seen:?}").into())
     }
 
     /// Assert that the process port is the inert recording port — i.e. at
@@ -542,9 +539,11 @@ impl RebornIntegrationHarness {
         if !commands.is_empty() {
             return Ok(());
         }
-        Err("no shell commands were recorded by the inert process port; either no \
+        Err(
+            "no shell commands were recorded by the inert process port; either no \
              builtin.shell turn ran or the harness is using the live-shell path"
-            .into())
+                .into(),
+        )
     }
 
     /// Snapshot of the recorded capability results (tool outputs), in execution

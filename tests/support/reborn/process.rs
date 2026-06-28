@@ -33,7 +33,10 @@ impl RecordingProcessPort {
 
     /// Snapshot of every command string recorded so far, in call order.
     pub fn commands(&self) -> Vec<String> {
-        self.commands.lock().expect("recording process port lock poisoned").clone()
+        self.commands
+            .lock()
+            .expect("recording process port lock poisoned")
+            .clone()
     }
 }
 
