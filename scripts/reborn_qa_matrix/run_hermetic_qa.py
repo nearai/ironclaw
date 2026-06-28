@@ -2754,6 +2754,41 @@ WEBUI_V2_SESSION_THREAD_MESSAGE_HANDLER_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SESSION_THREAD_MESSAGE_SERVED_E2E_COMMAND = CommandSpec(
+    name="webui_v2_session_thread_message_served_e2e",
+    description=(
+        "Served WebUI v2 session/thread/message API tests through a real "
+        "ironclaw-reborn serve process: authenticated session projection, "
+        "thread create/list/delete pagination, message submission, timeline "
+        "readback, and auth/validation/not-found errors."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_session_api.py",
+        "-q",
+    ],
+)
+
 WEBUI_V2_STREAMING_RUN_CONTROL_HANDLER_COMMAND = CommandSpec(
     name="webui_v2_streaming_run_control_handler_contract",
     description=(
@@ -4169,19 +4204,14 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-043-TC-10",
             "REBCLI-043-TC-11",
         ],
-        commands=[
-            WEBUI_V2_SESSION_THREAD_MESSAGE_HANDLER_COMMAND,
-            WEBUI_V2_SESSION_SERVICE_SUBSTRATE_COMMAND,
-            WEBUI_V2_SESSION_EXECUTION_SUBSTRATE_COMMAND,
-        ],
+        commands=[WEBUI_V2_SESSION_THREAD_MESSAGE_SERVED_E2E_COMMAND],
         notes=(
-            "Runs a focused caller-level WebUI v2 router contract for the "
-            "session/thread/message API family, then the service and "
-            "execution substrate sweeps that preserve caller scope, turn "
-            "state, persistence, gates, capabilities, and host runtime "
-            "contracts after route admission. This is hermetic Rust coverage "
-            "and intentionally does not duplicate PR #5348 browser Playwright "
-            "ports."
+            "Runs served WebUI v2 API coverage through a real "
+            "ironclaw-reborn process for session projection, thread "
+            "create/list/delete pagination, message submission, timeline "
+            "readback, and auth/validation/not-found errors. Rust route, "
+            "service, and execution substrate contracts stay in normal CI "
+            "instead of this QA lane."
         ),
     ),
     "webui_v2_streaming_run_control_api_regression": CaseSpec(

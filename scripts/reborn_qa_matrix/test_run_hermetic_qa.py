@@ -36,6 +36,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
 
         self.assertIn("openai_responses_api_workflow_regression", selected)
         self.assertIn("openai_responses_external_tools_e2e_regression", selected)
+        self.assertIn("webui_v2_session_thread_message_api_regression", selected)
         self.assertIn("webui_v2_chat_client_regression", selected)
         self.assertIn("webui_v2_workspace_project_client_regression", selected)
         self.assertNotIn("openai_chat_completions_workflow_regression", selected)
@@ -91,6 +92,24 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
         ]
 
         self.assertEqual(cargo_contracts, [])
+
+    def test_session_thread_message_case_executes_only_served_e2e_command(self):
+        parser = run_hermetic_qa.build_parser()
+        args = parser.parse_args(["--case", "webui_v2_session_thread_message_api_regression"])
+
+        self.assertEqual(
+            run_hermetic_qa._selected_case_names(args),
+            ["webui_v2_session_thread_message_api_regression"],
+        )
+        case = run_hermetic_qa.CASES["webui_v2_session_thread_message_api_regression"]
+        self.assertEqual(
+            [command.name for command in run_hermetic_qa._commands_for_case(case)],
+            ["webui_v2_session_thread_message_served_e2e"],
+        )
+        self.assertEqual(
+            [command["name"] for command in run_hermetic_qa._removed_existing_ci_commands(case)],
+            [],
+        )
 
     def test_manifest_emits_only_active_cases(self):
         with tempfile.TemporaryDirectory() as tmpdir:
