@@ -8,7 +8,6 @@ import {
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages.js";
-import { onboardingFromExtensionActivatePreview } from "./extension-onboarding.js";
 import { gateFromProjectionGate } from "./gates.js";
 import {
   createToolActivityState,
@@ -66,7 +65,6 @@ function createUseChatEventsHarness({
     globalThis: {},
     ensureGateToolActivity,
     isTerminalToolStatus,
-    onboardingFromExtensionActivatePreview,
     toolCardFromActivity,
     toolCardFromPreview,
     upsertToolActivityMessage,
@@ -434,7 +432,7 @@ test("useChatEvents: approval gate creates activity from stable invocation id be
   assert.equal(harness.messages[0].gateActivity, false);
 });
 
-test("useChatEvents: extension activation preview opens pairing panel for external channels", () => {
+test("useChatEvents: extension activation preview never opens a pairing panel", () => {
   const harness = createUseChatEventsHarness();
 
   harness.handleEvent({
@@ -462,13 +460,9 @@ test("useChatEvents: extension activation preview opens pairing panel for extern
     },
   });
 
-  assert.equal(harness.pendingOnboarding?.extensionName, "telegram");
-  assert.equal(harness.pendingOnboarding?.state, "pairing_required");
-  assert.match(
-    harness.pendingOnboarding?.instructions,
-    /Open Telegram's app or bot/,
-  );
-  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.pendingOnboarding, null);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].toolName, "extension_activate");
 });
 
 test("useChatEvents: cleared non-auth gates are not restored by later projections", () => {

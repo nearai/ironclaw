@@ -5,7 +5,6 @@ import {
   toolCardFromPreview,
 } from "./history-messages.js";
 import { failureMessageForRunStatus } from "./failureMessages.js";
-import { onboardingFromExtensionActivatePreview } from "./extension-onboarding.js";
 import {
   ensureGateToolActivity,
   upsertToolActivityMessage,
@@ -41,7 +40,6 @@ export function useChatEvents({
   setActiveRun,
   activeRunRef,
   locallyResolvedGatesRef,
-  dismissedOnboardingIdsRef,
   toolActivityStateRef,
   onRunSettled,
 }) {
@@ -121,15 +119,6 @@ export function useChatEvents({
           if (!preview || !preview.invocation_id) return;
           const card = toolCardFromPreview(preview);
           upsertToolActivityMessage(setMessages, card, toolActivityStateRef);
-          const onboarding = onboardingFromExtensionActivatePreview(
-            preview,
-            threadId,
-            dismissedOnboardingIdsRef?.current,
-          );
-          if (onboarding) {
-            setPendingOnboarding?.(onboarding);
-            setIsProcessing(false);
-          }
           return;
         }
 
@@ -244,7 +233,6 @@ export function useChatEvents({
       setActiveRun,
       activeRunRef,
       locallyResolvedGatesRef,
-      dismissedOnboardingIdsRef,
       toolActivityStateRef,
       onRunSettled,
     ],

@@ -7,13 +7,19 @@ import {
 } from "../../../lib/api.js";
 import { redeemSlackPairingCode } from "../../../lib/slack-pairing-api.js";
 import { listConnectableChannels } from "../../../lib/channel-connect.js";
+import {
+  channelConnectionContinuationMessage,
+  connectionEventMatchesOnboarding,
+  forgetChannelConnectionWaiter,
+  rememberChannelConnectionWaiter,
+  subscribeChannelConnected,
+} from "../../../lib/channel-connection-events.js";
 import { queryClient } from "../../../lib/query-client.js";
 import { React } from "../../../lib/html.js";
 import {
   approvePairingCode,
   fetchExtensions,
 } from "../../extensions/lib/extensions-api.js";
-import { onboardingFromToolMessages } from "../lib/extension-onboarding.js";
 import { useChatEvents } from "../lib/useChatEvents.js";
 import {
   addPending,
@@ -78,6 +84,14 @@ function threadNeedsSidebarRefresh(threadId) {
 function busyNoticeKey(threadId, gate) {
   if (!threadId || !gate?.runId || !gate?.gateRef) return null;
   return `${threadId}\n${gate.runId}\n${gate.gateRef}`;
+}
+
+function onboardingBelongsToThread(onboarding, threadId) {
+  if (!onboarding) return false;
+  const onboardingThreadId = String(onboarding.threadId || "").trim();
+  if (!onboardingThreadId) return true;
+  const currentThreadId = String(threadId || "").trim();
+  return Boolean(currentThreadId) && onboardingThreadId === currentThreadId;
 }
 
 function dismissedOnboardingStorageKey(threadId) {
@@ -174,11 +188,24 @@ function slackStartupPairingOnboarding({
   };
 }
 
-function slackExtensionRequiresPairing(extensions) {
-  const slack = (extensions || []).find((item) => packageRefId(item) === "slack");
-  if (!slack || slack.kind !== "channel") return true;
-  const state = extensionLifecycleState(slack);
+function extensionRequiresPairing(extensionName, extensions) {
+  const expected = String(extensionName || "").toLowerCase();
+  const extension = (extensions || []).find(
+    (item) => packageRefId(item).toLowerCase() === expected,
+  );
+  if (!extension || extension.kind !== "channel") return true;
+  if (extension.authenticated === true && extension.needs_setup !== true) {
+    return false;
+  }
+  if (extension.authenticated === false || extension.needs_setup === true) {
+    return true;
+  }
+  const state = extensionLifecycleState(extension);
   return ["setup_required", "pairing_required", "pairing"].includes(state);
+}
+
+function slackExtensionRequiresPairing(extensions) {
+  return extensionRequiresPairing("slack", extensions);
 }
 
 function fetchWithQueryCache(queryKey, queryFn) {
@@ -403,6 +430,12 @@ export function useChat(threadId) {
   }, [threadId]);
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
+  const visiblePendingOnboarding = onboardingBelongsToThread(
+    pendingOnboarding,
+    threadId,
+  )
+    ? pendingOnboarding
+    : null;
   const pendingAuthGateKey =
     pendingGate?.runId && pendingGate?.gateRef
       ? `${pendingGate.runId}\n${pendingGate.gateRef}`
@@ -425,55 +458,21 @@ export function useChat(threadId) {
   }, [pendingAuthGateKey]);
 
   React.useEffect(() => {
-    const onboarding = onboardingFromToolMessages(
-      messages,
-      threadId,
-      dismissedOnboardingIdsRef.current,
-    );
-    if (!onboarding) return;
-    setPendingOnboarding((current) => {
-      if (
-        current?.extensionName === onboarding.extensionName &&
-        current?.threadId === onboarding.threadId
-      ) {
-        return current;
-      }
-      return onboarding;
-    });
-    setIsProcessing(false);
-    if (
-      isSlackPersonalPairing(onboarding.extensionName) &&
-      typeof fetchExtensions === "function"
-    ) {
-      let cancelled = false;
-      fetchWithQueryCache(["extensions"], fetchExtensions)
-        .then((extensionData) => {
-          if (cancelled || slackExtensionRequiresPairing(extensionData?.extensions)) {
-            return;
-          }
-          setPendingOnboarding((current) => {
-            if (
-              current?.extensionName === onboarding.extensionName &&
-              current?.threadId === onboarding.threadId &&
-              current?.sourceMessageId === onboarding.sourceMessageId
-            ) {
-              return null;
-            }
-            return current;
-          });
-        })
-        .catch(() => {
-          // Historical activation cards are still useful fallback evidence when
-          // extension-state refresh fails; keep the panel instead of hiding it.
-        });
-      return () => {
-        cancelled = true;
-      };
+    if (pendingOnboarding?.threadId && pendingOnboarding?.extensionName) {
+      rememberChannelConnectionWaiter({
+        channel: pendingOnboarding.extensionName,
+        threadId: pendingOnboarding.threadId,
+        sourceMessageId: pendingOnboarding.sourceMessageId || null,
+      });
     }
-  }, [messages, threadId, setPendingOnboarding, setIsProcessing]);
+  }, [
+    pendingOnboarding?.extensionName,
+    pendingOnboarding?.threadId,
+    pendingOnboarding?.sourceMessageId,
+  ]);
 
   React.useEffect(() => {
-    if (!threadId || pendingOnboarding || pendingGate) return;
+    if (!threadId || visiblePendingOnboarding || pendingGate || historyLoading) return;
     if (Array.isArray(messages) && messages.length > 0) return;
     let cancelled = false;
     Promise.all([
@@ -498,7 +497,15 @@ export function useChat(threadId) {
     return () => {
       cancelled = true;
     };
-  }, [messages, pendingGate, pendingOnboarding, threadId, setPendingOnboarding, setIsProcessing]);
+  }, [
+    historyLoading,
+    messages,
+    pendingGate,
+    visiblePendingOnboarding,
+    threadId,
+    setPendingOnboarding,
+    setIsProcessing,
+  ]);
 
   React.useEffect(() => {
     if (!isPendingOAuthGate(pendingGate)) return;
@@ -550,7 +557,6 @@ export function useChat(threadId) {
     setActiveRun,
     activeRunRef,
     locallyResolvedGatesRef,
-    dismissedOnboardingIdsRef,
     toolActivityStateRef,
     // Reborn's projection bridge does not yet emit `Text` items for
     // assistant replies, and never emits `capability_display_preview`
@@ -620,7 +626,11 @@ export function useChat(threadId) {
         pendingGate ||
         pendingGateRef.current ||
         (!bypassPendingOnboarding &&
-          (pendingOnboarding || pendingOnboardingRef.current))
+          (onboardingBelongsToThread(pendingOnboarding, targetThreadId || threadId) ||
+            onboardingBelongsToThread(
+              pendingOnboardingRef.current,
+              targetThreadId || threadId,
+            )))
       ) {
         throw approvalGatePendingSendError();
       }
@@ -894,6 +904,37 @@ export function useChat(threadId) {
     ],
   );
 
+  const resumeOnboardingAfterChannelConnected = React.useCallback(
+    async (onboarding, event = {}) => {
+      const threadForResume = onboarding?.threadId || threadId || null;
+      if (!threadForResume) return;
+      if (event.sourceThreadId && event.sourceThreadId === threadForResume) {
+        return;
+      }
+      if (onboarding.sourceMessageId) {
+        dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
+        persistDismissedOnboardingId(threadForResume, onboarding.sourceMessageId);
+      }
+      forgetChannelConnectionWaiter({
+        channel: onboarding.extensionName,
+        threadId: threadForResume,
+        sourceMessageId: onboarding.sourceMessageId || null,
+      });
+      setPendingOnboarding(null);
+    },
+    [threadId, setPendingOnboarding],
+  );
+
+  React.useEffect(() => {
+    return subscribeChannelConnected((event) => {
+      const onboarding = pendingOnboardingRef.current;
+      if (!connectionEventMatchesOnboarding(event, onboarding)) return;
+      resumeOnboardingAfterChannelConnected(onboarding, event).catch((error) => {
+        console.error("channel connection resume failed:", error);
+      });
+    });
+  }, [resumeOnboardingAfterChannelConnected]);
+
   // v2 resolveGate signature: `(resolution, { always?, credentialRef? })`.
   // run_id and gate_ref come from the live `pendingGate` (set by the
   // gate / auth_required event) so the UI doesn't have to plumb them
@@ -1045,9 +1086,14 @@ export function useChat(threadId) {
         dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
         persistDismissedOnboardingId(threadForResume, onboarding.sourceMessageId);
       }
+      forgetChannelConnectionWaiter({
+        channel: onboarding.extensionName,
+        threadId: threadForResume,
+        sourceMessageId: onboarding.sourceMessageId || null,
+      });
       setPendingOnboarding(null);
-      if (isSlackPairing && threadForResume && !onboarding.requestId) {
-        await send("Slack is connected. Continue the previous request.", {
+      if (threadForResume && !onboarding.requestId) {
+        await send(channelConnectionContinuationMessage(onboarding.extensionName), {
           threadId: threadForResume,
           bypassPendingOnboarding: true,
         });
@@ -1063,12 +1109,17 @@ export function useChat(threadId) {
 
   const dismissOnboardingPairing = React.useCallback(() => {
     const onboarding = pendingOnboardingRef.current;
-    if (onboarding?.sourceMessageId) {
-      dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
-      persistDismissedOnboardingId(
-        onboarding.threadId || threadId,
-        onboarding.sourceMessageId,
-      );
+    if (onboarding) {
+      const threadForDismiss = onboarding.threadId || threadId;
+      if (onboarding.sourceMessageId) {
+        dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
+        persistDismissedOnboardingId(threadForDismiss, onboarding.sourceMessageId);
+      }
+      forgetChannelConnectionWaiter({
+        channel: onboarding.extensionName,
+        threadId: threadForDismiss,
+        sourceMessageId: onboarding.sourceMessageId || null,
+      });
     }
     setPendingOnboarding(null);
   }, [threadId, setPendingOnboarding]);
@@ -1129,7 +1180,7 @@ export function useChat(threadId) {
     messages,
     isProcessing,
     pendingGate,
-    pendingOnboarding,
+    pendingOnboarding: visiblePendingOnboarding,
     busyGateNotice,
     activeRun,
     sseStatus,

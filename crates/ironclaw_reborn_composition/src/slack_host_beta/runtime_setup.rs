@@ -37,9 +37,9 @@ use crate::slack_outbound_targets::{
 use crate::slack_pairing_notifier::SlackPairingChallengeHttpNotifier;
 use crate::slack_personal_binding::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
-    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
-    SlackPersonalUserBindingService,
+    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
+    RebornUserIdentityBindingStore, SlackPersonalBindingInstallation,
+    SlackPersonalBindingPrincipal, SlackPersonalUserBindingError, SlackPersonalUserBindingService,
 };
 use crate::slack_personal_binding_pairing::{
     IssuedSlackPersonalBindingPairingChallenge, SlackPairingActorResolver,
@@ -92,6 +92,7 @@ pub(super) async fn build_runtime_mounts(
     let token_handle = slack_bot_token_handle()?;
     let binding_store: Arc<dyn RebornUserIdentityBindingStore> = state.clone();
     let user_identity_lookup: Arc<dyn RebornUserIdentityLookup> = state.clone();
+    let user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore> = state.clone();
     let channel_route_store: Arc<dyn SlackChannelRouteStore> = state.clone();
     let personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore> = state.clone();
     let dynamic_binding_service: Arc<dyn SlackPersonalUserBinder> = Arc::new(
@@ -152,7 +153,7 @@ pub(super) async fn build_runtime_mounts(
             },
             Arc::clone(&setup_service),
             channel_route_store,
-            personal_dm_target_store,
+            Arc::clone(&personal_dm_target_store),
         ));
     let provider_key = slack_dynamic_outbound_delivery_target_provider_key(&config);
     let provider_already_registered = runtime
@@ -211,7 +212,11 @@ pub(super) async fn build_runtime_mounts(
         commands,
         personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
         channel_routes,
+        tenant_id: config.tenant_id.clone(),
+        personal_connection_scope: None,
         user_identity_lookup,
+        user_identity_delete_store,
+        personal_dm_target_store,
         outbound_delivery_target_provider,
         outbound_delivery_target_provider_registered: true,
     })

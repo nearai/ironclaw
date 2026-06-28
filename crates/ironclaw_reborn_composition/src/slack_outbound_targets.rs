@@ -129,6 +129,19 @@ pub(crate) trait SlackPersonalDmTargetStore: Send + Sync + std::fmt::Debug {
         &self,
         target: SlackPersonalDmTarget,
     ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError>;
+
+    async fn delete_personal_dm_target(
+        &self,
+        key: &SlackPersonalDmTargetKey,
+    ) -> Result<bool, SlackPersonalDmTargetError>;
+
+    async fn delete_personal_dm_targets_for_user(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        installation_id: Option<&AdapterInstallationId>,
+        team_id: Option<&str>,
+    ) -> Result<usize, SlackPersonalDmTargetError>;
 }
 
 #[cfg(test)]
@@ -168,6 +181,51 @@ impl SlackPersonalDmTargetStore for InMemorySlackPersonalDmTargetStore {
             .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?
             .insert(target.key.clone(), target.clone());
         Ok(target)
+    }
+
+    async fn delete_personal_dm_target(
+        &self,
+        key: &SlackPersonalDmTargetKey,
+    ) -> Result<bool, SlackPersonalDmTargetError> {
+        Ok(self
+            .targets
+            .write()
+            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?
+            .remove(key)
+            .is_some())
+    }
+
+    async fn delete_personal_dm_targets_for_user(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        installation_id: Option<&AdapterInstallationId>,
+        team_id: Option<&str>,
+    ) -> Result<usize, SlackPersonalDmTargetError> {
+        let mut targets = self
+            .targets
+            .write()
+            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?;
+        let before = targets.len();
+        targets.retain(|key, _| {
+            if &key.tenant_id != tenant_id || &key.user_id != user_id {
+                return true;
+            }
+            if installation_id
+                .map(|expected| &key.installation_id != expected)
+                .unwrap_or(false)
+            {
+                return true;
+            }
+            if team_id
+                .map(|expected| key.team_id != expected)
+                .unwrap_or(false)
+            {
+                return true;
+            }
+            false
+        });
+        Ok(before - targets.len())
     }
 }
 

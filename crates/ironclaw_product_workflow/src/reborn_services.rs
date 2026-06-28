@@ -237,6 +237,14 @@ pub trait ChannelConnectionFacade: Send + Sync {
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError>;
+
+    async fn disconnect_channel_for_caller(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _channel: &str,
+    ) -> Result<(), RebornServicesError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3925,7 +3933,13 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::remove_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
+        extensions::remove_extension(
+            self.lifecycle_facade.as_ref(),
+            self.channel_connection_facade.clone(),
+            caller,
+            package_ref,
+        )
+        .await
     }
 
     async fn setup_extension(

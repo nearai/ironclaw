@@ -291,6 +291,36 @@ mod tests {
     }
 
     #[test]
+    fn channel_connection_completion_wakes_waiting_chat_assets() {
+        let events = asset_text("js/lib/channel-connection-events.js");
+        assert!(events.contains("notifyChannelConnected"));
+        assert!(events.contains("subscribeChannelConnected"));
+        assert!(events.contains("BroadcastChannel"));
+        assert!(events.contains("channelConnectionContinuationMessage"));
+        assert!(events.contains("rememberChannelConnectionWaiter"));
+        assert!(events.contains("resumeWaitingChannelConnections"));
+        assert!(events.contains("ironclaw:channel-connection:waiting:v1"));
+
+        let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
+        assert!(use_chat.contains("subscribeChannelConnected"));
+        assert!(use_chat.contains("connectionEventMatchesOnboarding"));
+        assert!(use_chat.contains("resumeOnboardingAfterChannelConnected"));
+        assert!(use_chat.contains("rememberChannelConnectionWaiter"));
+        assert!(use_chat.contains("forgetChannelConnectionWaiter"));
+        assert!(
+            use_chat.contains("channelConnectionContinuationMessage(onboarding.extensionName)")
+        );
+        assert!(!use_chat.contains("Slack is connected. Continue the previous request."));
+
+        let slack_pairing = asset_text("js/lib/slack-pairing-api.js");
+        assert!(slack_pairing.contains("notifyChannelConnected"));
+        assert!(slack_pairing.contains("sourceThreadId: options.threadId || null"));
+
+        let generic_pairing = asset_text("js/pages/extensions/lib/pairing-api.js");
+        assert!(generic_pairing.contains("notifyChannelConnected"));
+    }
+
+    #[test]
     fn automations_panel_assets_are_embedded() {
         let app = asset_text("js/app/app.js");
         assert!(app.contains("AutomationsPage"));

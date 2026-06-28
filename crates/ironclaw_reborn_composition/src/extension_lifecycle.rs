@@ -14,9 +14,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
-    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleSearchExtensionSummary, ProductWorkflowError,
+    LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary,
+    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleSearchExtensionSummary, ProductWorkflowError,
 };
 use tokio::sync::Mutex;
 
@@ -195,7 +195,12 @@ impl RebornLocalExtensionManagementPort {
                 count,
             },
         );
-        if extension_search_has_ready_result(response.payload.as_ref()) {
+        if extension_search_has_installed_external_channel_result(response.payload.as_ref()) {
+            response.message = Some(
+                "Search found installed external channel results. Search cannot prove the calling user's channel account is personally connected, so do not treat those results as ready for delivery or message access. Call builtin.extension_activate now for the matching extension id; activation surfaces the channel-specific pairing/setup instructions and, for proof-code flows, the user must paste the code into the WebChat connection panel rather than normal chat."
+                    .to_string(),
+            );
+        } else if extension_search_has_ready_result(response.payload.as_ref()) {
             response.message = Some(
                 "Search found installed extension results that are already configured or active. Treat those results as ready for this connection request; do not ask the user for credentials unless a later tool call reports auth_required."
                     .to_string(),
@@ -1165,10 +1170,10 @@ fn activation_success_message(
 ) -> String {
     if package_declares_inbound_product_adapter(package) {
         if package_ref.id.as_str() == "slack" {
-            return "Slack is installed as an inbound channel, but the user's Slack account still needs pairing. Tell the user to DM the Slack app; the bot will reply with a pairing code. The user should paste that code into the Slack account connection panel in WebChat, not into normal chat. After the connection panel succeeds, continue the user's original request. Do not claim Slack message-reading tools are available unless a separate Slack read capability is installed.".to_string();
+            return "Slack is installed as an inbound channel. If WebChat shows a Slack account connection panel, tell the user to DM the Slack app; the bot will reply with a pairing code. The user should paste that code into the Slack account connection panel in WebChat, not into normal chat. If the user's Slack account is already connected, continue the user's original request instead of asking them to pair again. Do not claim Slack message-reading tools are available unless a separate Slack read capability is installed.".to_string();
         }
         return format!(
-            "{} is installed as an external channel, but the user's account still needs channel-specific connection or pairing. Tell the user to open the extension's app or bot, get the pairing code or connection challenge, and paste it into the WebChat connection panel rather than normal chat. After the connection panel succeeds, continue the user's original request. Do not claim the channel can receive or send messages for the user until pairing completes.",
+            "{} is installed as an external channel. If WebChat shows a channel connection panel, tell the user to open the extension's app or bot, get the pairing code or connection challenge, and paste it into the WebChat connection panel rather than normal chat. If the user's channel account is already connected, continue the user's original request instead of asking them to pair again. Do not claim the channel can receive or send messages for the user until connection is confirmed.",
             package.manifest.name.as_str()
         );
     }
@@ -1253,8 +1258,29 @@ fn extension_search_has_ready_result(payload: Option<&LifecycleProductPayload>) 
         matches!(
             extension.installation_phase,
             Some(LifecyclePhase::Configured | LifecyclePhase::Active)
-        ) && extension.summary.credential_requirements.is_empty()
+        ) && !extension
+            .summary
+            .surface_kinds
+            .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
+            && extension.summary.credential_requirements.is_empty()
             && extension.summary.onboarding.is_none()
+    })
+}
+
+fn extension_search_has_installed_external_channel_result(
+    payload: Option<&LifecycleProductPayload>,
+) -> bool {
+    let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = payload else {
+        return false;
+    };
+    extensions.iter().any(|extension| {
+        matches!(
+            extension.installation_phase,
+            Some(LifecyclePhase::Configured | LifecyclePhase::Active)
+        ) && extension
+            .summary
+            .surface_kinds
+            .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
     })
 }
 
@@ -1512,6 +1538,10 @@ mod tests {
                 && message.contains("Do not claim Slack message-reading tools"),
             "Slack activation should guide the model into pairing UI, got: {message}"
         );
+        assert!(
+            !message.contains("still needs pairing"),
+            "activation is package-level and must not claim the caller is unpaired once the user may already be connected: {message}"
+        );
         let Some(LifecycleProductPayload::ExtensionActivate {
             visible_capability_ids,
             ..
@@ -1563,9 +1593,75 @@ mod tests {
                 && message.contains("WebChat connection panel")
                 && message.contains("rather than normal chat")
                 && message.contains("continue the user's original request")
-                && message.contains("until pairing completes"),
+                && message.contains("already connected")
+                && message.contains("until connection is confirmed"),
             "external channel activation should guide the model into generic pairing UI, got: {message}"
         );
+    }
+
+    #[tokio::test]
+    async fn extension_search_routes_active_external_channel_to_activation_pairing_flow() {
+        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+            extension_lifecycle_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
+                    "slack", "Slack",
+                )]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("valid ref");
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install slack channel");
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionActivate {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("activate slack channel");
+
+        let search = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionSearch {
+                    query: "slack".to_string(),
+                },
+            )
+            .await
+            .expect("search active slack channel");
+
+        let message = search.message.as_deref().expect("search guidance");
+        assert!(
+            message.contains("external channel")
+                && message.contains("do not treat")
+                && message.contains("builtin.extension_activate")
+                && message.contains("WebChat connection panel")
+                && message.contains("rather than normal chat"),
+            "active external channel search should route models into activation/pairing, got: {message}"
+        );
+        assert!(
+            !message.contains("Treat those results as ready"),
+            "active external channels must not use ready-extension guidance: {message}"
+        );
+        let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) =
+            search.payload.as_ref()
+        else {
+            panic!("expected extension search payload");
+        };
+        let slack = extensions
+            .iter()
+            .find(|extension| extension.summary.package_ref.id.as_str() == "slack")
+            .expect("slack search result");
+        assert_eq!(slack.installation_phase, Some(LifecyclePhase::Active));
     }
 
     #[tokio::test]
@@ -4318,7 +4414,10 @@ host = "example.com"
 credential_handle = "{id}_bot_token"
 "#
         );
-        fixture_extension_package_from_manifest_with_product_adapter_contracts(&manifest, id)
+        let mut package =
+            fixture_extension_package_from_manifest_with_product_adapter_contracts(&manifest, id);
+        package.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+        package
     }
 
     fn fixture_extension_manifest() -> &'static str {

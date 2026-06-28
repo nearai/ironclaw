@@ -57,7 +57,7 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
         lifecycle_manifest(
             EXTENSION_SEARCH_CAPABILITY_ID,
-            "Search the local Reborn extension catalog by extension, product, provider, or service name. The catalog includes host-bundled extensions that are not installed yet and installed extensions that are inactive. For connect, enable, install, or integrate requests, use this for discovery only, then continue with builtin.extension_install for the matching extension instead of asking the user to configure credentials from search results.",
+            "Search the local Reborn extension catalog by extension, product, provider, or service name. The catalog includes host-bundled extensions that are not installed yet and installed extensions that are inactive. For connect, enable, install, or integrate requests, use this for discovery only, then continue with builtin.extension_install for the matching extension instead of asking the user to configure credentials from search results. If search returns an installed external channel, still call builtin.extension_activate so channel-specific pairing/setup instructions can be surfaced before claiming the channel is ready.",
             vec![EffectKind::ReadFilesystem],
             PermissionMode::Allow,
         )?,
@@ -314,6 +314,10 @@ mod tests {
                 && search.description.contains("connect")
                 && search.description.contains("service name")
                 && search.description.contains("discovery only")
+                && search.description.contains("external channel")
+                && search
+                    .description
+                    .contains(EXTENSION_ACTIVATE_CAPABILITY_ID)
                 && search.description.contains(EXTENSION_INSTALL_CAPABILITY_ID),
             "extension_search description should teach the model to discover bundled or inactive integrations from generic service names: {}",
             search.description

@@ -4,6 +4,7 @@
 //   projection and maps those operations to the extension registry.
 
 import { apiFetch, setupExtension } from "../../../lib/api.js";
+import { notifyChannelConnected } from "../../../lib/channel-connection-events.js";
 
 export function fetchExtensions() {
   return apiFetch("/api/webchat/v2/extensions");
@@ -63,6 +64,15 @@ export function approvePairingCode(channel, code, options = {}) {
   return apiFetch(`/api/pairing/${encodeURIComponent(channelName(channel))}/approve`, {
     method: "POST",
     body: JSON.stringify(body),
+  }).then((response) => {
+    if (response?.success !== false) {
+      notifyChannelConnected({
+        channel,
+        sourceThreadId: options.threadId || null,
+        source: options.source || "webui",
+      });
+    }
+    return response;
   });
 }
 

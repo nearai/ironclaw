@@ -35,7 +35,8 @@ use crate::slack_outbound_targets::{
     SlackPersonalDmTargetStore,
 };
 use crate::slack_personal_binding::{
-    RebornUserIdentityBinding, RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
+    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
 };
 use crate::slack_personal_binding_pairing::{
     IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingChallenge,
@@ -578,6 +579,20 @@ where
         ))
     }
 
+    fn personal_dm_target_root_path() -> Result<ScopedPath, FilesystemError> {
+        scoped_path(PERSONAL_DM_TARGET_ROOT)
+    }
+
+    fn personal_dm_target_installation_path(
+        installation_id: &AdapterInstallationId,
+    ) -> Result<ScopedPath, FilesystemError> {
+        scoped_path(&format!(
+            "{}/{}",
+            PERSONAL_DM_TARGET_ROOT,
+            path_segment(installation_id.as_str())
+        ))
+    }
+
     fn listed_channel_route_path(
         installation_id: &AdapterInstallationId,
         team_id: &str,
@@ -828,6 +843,80 @@ where
     }
 }
 
+#[async_trait::async_trait]
+impl<F> RebornUserIdentityBindingDeleteStore for FilesystemSlackHostState<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn delete_user_identity_bindings_for_user(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+        provider_user_id_prefix: Option<&str>,
+    ) -> Result<usize, RebornUserIdentityBindingError> {
+        let provider_dir = scoped_path(&format!("{IDENTITY_ROOT}/{}", path_segment(provider)))
+            .map_err(map_binding_fs_error)?;
+        let entries = match self.filesystem.list_dir(&self.scope, &provider_dir).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(0),
+            Err(error) => return Err(map_binding_fs_error(error)),
+        };
+        let mut deleted = 0;
+        for entry in entries {
+            if !entry.name.ends_with(".json") {
+                continue;
+            }
+            let path = scoped_path(&format!(
+                "{IDENTITY_ROOT}/{}/{}",
+                path_segment(provider),
+                entry.name
+            ))
+            .map_err(map_binding_fs_error)?;
+            let Some((candidate, _)) = self
+                .read_record::<StoredSlackUserIdentity>(&path)
+                .await
+                .map_err(map_binding_fs_error)?
+            else {
+                continue;
+            };
+            if !identity_record_matches_disconnect(
+                &candidate,
+                provider,
+                user_id,
+                provider_user_id_prefix,
+            ) {
+                continue;
+            }
+            let lock = self.lock_for(format!(
+                "identity:{}:{}",
+                candidate.provider, candidate.provider_user_id
+            ));
+            let _guard = lock.lock().await;
+            let Some((current, _)) = self
+                .read_record::<StoredSlackUserIdentity>(&path)
+                .await
+                .map_err(map_binding_fs_error)?
+            else {
+                continue;
+            };
+            if !identity_record_matches_disconnect(
+                &current,
+                provider,
+                user_id,
+                provider_user_id_prefix,
+            ) {
+                continue;
+            }
+            match self.delete_record(&path).await {
+                Ok(()) => deleted += 1,
+                Err(FilesystemError::NotFound { .. }) => {}
+                Err(error) => return Err(map_binding_fs_error(error)),
+            }
+        }
+        Ok(deleted)
+    }
+}
+
 impl<F> FilesystemSlackHostState<F>
 where
     F: RootFilesystem + 'static,
@@ -870,6 +959,28 @@ where
             Err(error) => Err(map_personal_dm_target_fs_error(error)),
         }
     }
+
+    async fn list_dm_target_segments(
+        &self,
+        path: &ScopedPath,
+    ) -> Result<Vec<FilesystemDmTargetSegment>, SlackPersonalDmTargetError> {
+        let entries = match self.filesystem.list_dir(&self.scope, path).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
+            Err(error) => return Err(map_personal_dm_target_fs_error(error)),
+        };
+        Ok(entries
+            .into_iter()
+            .filter_map(|entry| {
+                let decoded = decode_path_segment(&entry.name)?;
+                Some(FilesystemDmTargetSegment { decoded })
+            })
+            .collect())
+    }
+}
+
+struct FilesystemDmTargetSegment {
+    decoded: String,
 }
 
 #[async_trait::async_trait]
@@ -944,6 +1055,92 @@ where
             }
             Err(error) => Err(map_personal_dm_target_fs_error(error)),
         }
+    }
+
+    async fn delete_personal_dm_target(
+        &self,
+        key: &SlackPersonalDmTargetKey,
+    ) -> Result<bool, SlackPersonalDmTargetError> {
+        if key.tenant_id != self.scope.tenant_id {
+            return Ok(false);
+        }
+        let path = Self::personal_dm_target_path(key).map_err(map_personal_dm_target_fs_error)?;
+        let lock = self.lock_for(format!(
+            "personal-dm:{}:{}:{}",
+            key.installation_id.as_str(),
+            key.team_id,
+            key.user_id.as_str()
+        ));
+        let _guard = lock.lock().await;
+        match self.delete_record(&path).await {
+            Ok(()) => Ok(true),
+            Err(FilesystemError::NotFound { .. }) => Ok(false),
+            Err(error) => Err(map_personal_dm_target_fs_error(error)),
+        }
+    }
+
+    async fn delete_personal_dm_targets_for_user(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        installation_id: Option<&AdapterInstallationId>,
+        team_id: Option<&str>,
+    ) -> Result<usize, SlackPersonalDmTargetError> {
+        if tenant_id != &self.scope.tenant_id {
+            return Ok(0);
+        }
+        if let (Some(installation_id), Some(team_id)) = (installation_id, team_id) {
+            let key = SlackPersonalDmTargetKey::new(
+                tenant_id.clone(),
+                installation_id.clone(),
+                team_id.to_string(),
+                user_id.clone(),
+            )?;
+            return self.delete_personal_dm_target(&key).await.map(usize::from);
+        }
+
+        let installation_entries = match installation_id {
+            Some(installation_id) => vec![FilesystemDmTargetSegment {
+                decoded: installation_id.as_str().to_string(),
+            }],
+            None => {
+                let root = Self::personal_dm_target_root_path()
+                    .map_err(map_personal_dm_target_fs_error)?;
+                self.list_dm_target_segments(&root).await?
+            }
+        };
+
+        let mut deleted = 0;
+        for installation in installation_entries {
+            let Ok(parsed_installation_id) = AdapterInstallationId::new(installation.decoded)
+            else {
+                continue;
+            };
+            let installation_path =
+                Self::personal_dm_target_installation_path(&parsed_installation_id)
+                    .map_err(map_personal_dm_target_fs_error)?;
+            let team_entries = match team_id {
+                Some(team_id) => vec![FilesystemDmTargetSegment {
+                    decoded: team_id.to_string(),
+                }],
+                None => self.list_dm_target_segments(&installation_path).await?,
+            };
+            for team in team_entries {
+                let key = match SlackPersonalDmTargetKey::new(
+                    tenant_id.clone(),
+                    parsed_installation_id.clone(),
+                    team.decoded,
+                    user_id.clone(),
+                ) {
+                    Ok(key) => key,
+                    Err(_) => continue,
+                };
+                if self.delete_personal_dm_target(&key).await? {
+                    deleted += 1;
+                }
+            }
+        }
+        Ok(deleted)
     }
 }
 
@@ -1456,6 +1653,19 @@ impl StoredSlackUserIdentity {
     }
 }
 
+fn identity_record_matches_disconnect(
+    record: &StoredSlackUserIdentity,
+    provider: &str,
+    user_id: &UserId,
+    provider_user_id_prefix: Option<&str>,
+) -> bool {
+    record.provider == provider
+        && record.user_id == user_id.as_str()
+        && provider_user_id_prefix
+            .map(|prefix| record.provider_user_id.starts_with(prefix))
+            .unwrap_or(true)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredSlackPersonalDmTarget {
     tenant_id: String,
@@ -1748,6 +1958,11 @@ fn path_segment(value: &str) -> String {
     URL_SAFE_NO_PAD.encode(value.as_bytes())
 }
 
+fn decode_path_segment(value: &str) -> Option<String> {
+    let decoded = URL_SAFE_NO_PAD.decode(value.as_bytes()).ok()?;
+    String::from_utf8(decoded).ok()
+}
+
 fn scoped_path(raw: &str) -> Result<ScopedPath, FilesystemError> {
     ScopedPath::new(raw).map_err(|error| FilesystemError::BackendInfrastructure {
         operation: FilesystemOperation::WriteFile,
@@ -1811,7 +2026,10 @@ mod tests {
     };
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
-    use crate::slack_personal_binding::{RebornIdentityProviderId, RebornIdentityProviderUserId};
+    use crate::slack_personal_binding::{
+        RebornIdentityProviderId, RebornIdentityProviderUserId,
+        RebornUserIdentityBindingDeleteStore,
+    };
 
     #[tokio::test]
     async fn filesystem_slack_host_state_binds_and_resolves_identity() {
@@ -1873,6 +2091,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filesystem_slack_host_state_deletes_installation_scoped_identity_bindings_for_user() {
+        let state = state();
+        state
+            .bind_user_identity(RebornUserIdentityBinding {
+                provider: RebornIdentityProviderId::new("slack").unwrap(),
+                provider_user_id: RebornIdentityProviderUserId::new("install-alpha:U123").unwrap(),
+                user_id: user("user:alice"),
+            })
+            .await
+            .expect("bind alpha succeeds");
+        state
+            .bind_user_identity(RebornUserIdentityBinding {
+                provider: RebornIdentityProviderId::new("slack").unwrap(),
+                provider_user_id: RebornIdentityProviderUserId::new("install-beta:U123").unwrap(),
+                user_id: user("user:alice"),
+            })
+            .await
+            .expect("bind beta succeeds");
+        state
+            .bind_user_identity(RebornUserIdentityBinding {
+                provider: RebornIdentityProviderId::new("slack").unwrap(),
+                provider_user_id: RebornIdentityProviderUserId::new("install-alpha:U999").unwrap(),
+                user_id: user("user:bob"),
+            })
+            .await
+            .expect("bind bob succeeds");
+
+        let deleted = state
+            .delete_user_identity_bindings_for_user(
+                "slack",
+                &user("user:alice"),
+                Some("install-alpha:"),
+            )
+            .await
+            .expect("delete succeeds");
+
+        assert_eq!(deleted, 1);
+        assert_eq!(
+            state
+                .resolve_user_identity("slack", "install-alpha:U123")
+                .await
+                .expect("alpha alice lookup succeeds"),
+            None
+        );
+        assert_eq!(
+            state
+                .resolve_user_identity("slack", "install-beta:U123")
+                .await
+                .expect("beta alice lookup succeeds"),
+            Some(user("user:alice"))
+        );
+        assert_eq!(
+            state
+                .resolve_user_identity("slack", "install-alpha:U999")
+                .await
+                .expect("alpha bob lookup succeeds"),
+            Some(user("user:bob"))
+        );
+    }
+
+    #[tokio::test]
     async fn filesystem_slack_host_state_persists_personal_dm_targets_across_state_recreation() {
         let root = Arc::new(InMemoryBackend::default());
         let writer = state_with_root(root.clone());
@@ -1907,6 +2186,26 @@ mod tests {
                 .expect("load persisted personal DM target succeeds"),
             Some(target)
         );
+
+        assert!(
+            reader
+                .delete_personal_dm_target(&key)
+                .await
+                .expect("delete personal DM target succeeds")
+        );
+        assert_eq!(
+            reader
+                .load_personal_dm_target(&key)
+                .await
+                .expect("load after delete succeeds"),
+            None
+        );
+        assert!(
+            !reader
+                .delete_personal_dm_target(&key)
+                .await
+                .expect("second delete is idempotent")
+        );
     }
 
     #[tokio::test]
@@ -1936,6 +2235,12 @@ mod tests {
                 .await
                 .expect("foreign tenant load fails closed"),
             None
+        );
+        assert!(
+            !state
+                .delete_personal_dm_target(&foreign_key)
+                .await
+                .expect("foreign tenant delete fails closed")
         );
     }
 

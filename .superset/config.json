@@ -1,0 +1,7 @@
+{
+  "setup": [
+    "gsync"
+  ],
+  "teardown": [],
+  "run": []
+}

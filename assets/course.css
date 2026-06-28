@@ -1,0 +1,359 @@
+:root {
+  color-scheme: light;
+  --ink: #17202a;
+  --muted: #5c6b73;
+  --line: #d8dee3;
+  --paper: #fbfaf7;
+  --panel: #ffffff;
+  --wash: #eef5f2;
+  --accent: #0b6b5c;
+  --accent-2: #8a4b14;
+  --danger: #8c2f39;
+  --code: #263238;
+  --shadow: 0 14px 40px rgba(23, 32, 42, 0.08);
+  font-family: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  line-height: 1.55;
+}
+
+main {
+  width: min(1080px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 48px 0 72px;
+}
+
+header {
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 32px;
+  padding-bottom: 24px;
+}
+
+.eyebrow {
+  color: var(--accent);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+h1,
+h2,
+h3 {
+  line-height: 1.12;
+}
+
+h1 {
+  font-size: clamp(2.2rem, 5vw, 4.4rem);
+  margin: 0.18em 0;
+  letter-spacing: 0;
+}
+
+h2 {
+  border-top: 1px solid var(--line);
+  font-size: clamp(1.55rem, 2.6vw, 2.2rem);
+  margin: 40px 0 16px;
+  padding-top: 28px;
+}
+
+h3 {
+  font-size: 1.08rem;
+  margin: 18px 0 8px;
+}
+
+p,
+li {
+  font-size: 1.03rem;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+code {
+  background: #edf1f0;
+  border-radius: 4px;
+  color: var(--code);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  padding: 0.12em 0.32em;
+}
+
+.lede {
+  color: var(--muted);
+  font-size: clamp(1.12rem, 2vw, 1.34rem);
+  max-width: 820px;
+}
+
+.grid {
+  display: grid;
+  gap: 16px;
+}
+
+.grid.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.grid.three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.panel,
+.callout,
+.quiz {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  padding: 18px;
+}
+
+.callout {
+  background: var(--wash);
+  box-shadow: none;
+}
+
+.callout strong {
+  color: var(--accent);
+}
+
+.tag {
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  display: inline-flex;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.78rem;
+  font-weight: 700;
+  gap: 6px;
+  margin: 2px 4px 2px 0;
+  padding: 4px 9px;
+  text-transform: uppercase;
+}
+
+.flow {
+  display: grid;
+  gap: 10px;
+  margin: 18px 0;
+}
+
+.flow-row {
+  align-items: stretch;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.flow-row.four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.flow-box {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--accent);
+  border-radius: 8px;
+  min-height: 100px;
+  padding: 12px;
+}
+
+.flow-box.kernel {
+  border-left-color: var(--danger);
+}
+
+.flow-box.loop {
+  border-left-color: var(--accent-2);
+}
+
+.flow-box.substrate {
+  border-left-color: #2f5597;
+}
+
+.flow-box small {
+  color: var(--muted);
+  display: block;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.74rem;
+  font-weight: 700;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+
+.scenario {
+  border-left: 4px solid var(--accent);
+  padding-left: 14px;
+}
+
+.scenario ol {
+  margin-top: 8px;
+}
+
+.story {
+  counter-reset: story-step;
+  display: grid;
+  gap: 12px;
+  margin: 18px 0;
+}
+
+.story-step {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: auto 1fr;
+  padding: 14px;
+}
+
+.story-step::before {
+  align-items: center;
+  background: var(--accent);
+  border-radius: 50%;
+  color: #fff;
+  content: counter(story-step);
+  counter-increment: story-step;
+  display: inline-flex;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.88rem;
+  font-weight: 800;
+  height: 32px;
+  justify-content: center;
+  margin-top: 2px;
+  width: 32px;
+}
+
+.story-step h3 {
+  margin-top: 0;
+}
+
+.story-step p {
+  margin: 6px 0;
+}
+
+.plain-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.plain-list li {
+  border-bottom: 1px solid var(--line);
+  padding: 9px 0;
+}
+
+.plain-list li:last-child {
+  border-bottom: 0;
+}
+
+.compare {
+  border-collapse: collapse;
+  margin: 18px 0;
+  width: 100%;
+}
+
+.compare th,
+.compare td {
+  border-bottom: 1px solid var(--line);
+  padding: 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.compare th {
+  color: var(--muted);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+}
+
+.quiz button {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  cursor: pointer;
+  display: block;
+  font: inherit;
+  margin: 8px 0;
+  padding: 10px 12px;
+  text-align: left;
+  width: 100%;
+}
+
+.quiz button:hover,
+.quiz button:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.quiz .feedback {
+  border-left: 4px solid var(--accent);
+  color: var(--muted);
+  margin-top: 10px;
+  min-height: 2rem;
+  padding-left: 10px;
+}
+
+.source-list li {
+  margin-bottom: 8px;
+}
+
+.print-note {
+  color: var(--muted);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.9rem;
+}
+
+@media (max-width: 820px) {
+  main {
+    width: min(100% - 22px, 1080px);
+    padding-top: 28px;
+  }
+
+  .grid.two,
+  .grid.three,
+  .flow-row {
+    grid-template-columns: 1fr;
+  }
+
+  .story-step {
+    grid-template-columns: 1fr;
+  }
+
+  .flow-box {
+    min-height: auto;
+  }
+}
+
+@media print {
+  body {
+    background: #fff;
+  }
+
+  main {
+    padding: 0;
+    width: 100%;
+  }
+
+  .panel,
+  .callout,
+  .quiz {
+    box-shadow: none;
+  }
+
+  a {
+    color: #000;
+  }
+}

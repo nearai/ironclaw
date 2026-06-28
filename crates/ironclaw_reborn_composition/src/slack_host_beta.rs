@@ -63,8 +63,8 @@ use crate::slack_outbound_targets::{
 };
 use crate::slack_pairing_notifier::SlackPairingChallengeHttpNotifier;
 use crate::slack_personal_binding::{
-    RebornUserIdentityBindingStore, SlackPersonalBindingInstallation,
-    SlackPersonalUserBindingService,
+    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingStore,
+    SlackPersonalBindingInstallation, SlackPersonalUserBindingService,
 };
 use crate::slack_personal_binding_pairing::{
     SlackPairingActorResolver, SlackPersonalBindingPairingChallengeStore,
@@ -411,12 +411,26 @@ pub struct SlackHostBetaMounts {
     pub commands: PublicRouteMount,
     pub personal_binding_pairing: SlackPersonalBindingPairingRouteConfig,
     pub channel_routes: SlackChannelRouteAdminRouteConfig,
+    pub(crate) tenant_id: TenantId,
+    pub(crate) personal_connection_scope: Option<SlackPersonalConnectionScope>,
     /// Reverse identity lookup: tells whether the calling WebUI user has
     /// personally connected this channel (Slack personal pairing).
     pub(crate) user_identity_lookup: Arc<dyn RebornUserIdentityLookup>,
+    /// Personal identity delete handle used when a caller uninstalls the
+    /// Slack channel extension from the WebUI.
+    pub(crate) user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
+    /// Personal Slack DM target store used by the same disconnect path, so
+    /// outbound targets no longer show a stale Slack DM after uninstall.
+    pub(crate) personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore>,
     /// Internal target-authority handle consumed only by WebUI product-facade composition.
     pub(crate) outbound_delivery_target_provider: Arc<dyn OutboundDeliveryTargetProvider>,
     pub(crate) outbound_delivery_target_provider_registered: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct SlackPersonalConnectionScope {
+    pub(crate) installation_id: AdapterInstallationId,
+    pub(crate) team_id: SlackTeamId,
 }
 
 #[derive(Clone)]
@@ -559,6 +573,7 @@ pub fn build_slack_host_beta_mounts(
     ));
     let binding_store: Arc<dyn RebornUserIdentityBindingStore> = state.clone();
     let user_identity_lookup: Arc<dyn RebornUserIdentityLookup> = state.clone();
+    let user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore> = state.clone();
     let binding_service = SlackPersonalUserBindingService::new(
         [SlackPersonalBindingInstallation {
             tenant_id: config.tenant_id.clone(),
@@ -704,7 +719,14 @@ pub fn build_slack_host_beta_mounts(
             commands,
             personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
             channel_routes,
+            tenant_id: config.tenant_id.clone(),
+            personal_connection_scope: Some(SlackPersonalConnectionScope {
+                installation_id: config.installation_id.clone(),
+                team_id: config.team_id.clone(),
+            }),
             user_identity_lookup: user_identity_lookup.clone(),
+            user_identity_delete_store: user_identity_delete_store.clone(),
+            personal_dm_target_store: personal_dm_target_store.clone(),
             outbound_delivery_target_provider,
             outbound_delivery_target_provider_registered: true,
         });
@@ -731,7 +753,14 @@ pub fn build_slack_host_beta_mounts(
         commands,
         personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
         channel_routes,
+        tenant_id: config.tenant_id.clone(),
+        personal_connection_scope: Some(SlackPersonalConnectionScope {
+            installation_id: config.installation_id.clone(),
+            team_id: config.team_id.clone(),
+        }),
         user_identity_lookup: user_identity_lookup.clone(),
+        user_identity_delete_store,
+        personal_dm_target_store,
         outbound_delivery_target_provider,
         outbound_delivery_target_provider_registered: true,
     })
@@ -4409,6 +4438,23 @@ mod tests {
         ) -> Result<crate::slack_outbound_targets::SlackPersonalDmTarget, SlackPersonalDmTargetError>
         {
             Ok(target)
+        }
+
+        async fn delete_personal_dm_target(
+            &self,
+            _key: &crate::slack_outbound_targets::SlackPersonalDmTargetKey,
+        ) -> Result<bool, SlackPersonalDmTargetError> {
+            Err(SlackPersonalDmTargetError::StoreUnavailable)
+        }
+
+        async fn delete_personal_dm_targets_for_user(
+            &self,
+            _tenant_id: &TenantId,
+            _user_id: &UserId,
+            _installation_id: Option<&AdapterInstallationId>,
+            _team_id: Option<&str>,
+        ) -> Result<usize, SlackPersonalDmTargetError> {
+            Err(SlackPersonalDmTargetError::StoreUnavailable)
         }
     }
 
