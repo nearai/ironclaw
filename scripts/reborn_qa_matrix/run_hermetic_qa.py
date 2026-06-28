@@ -2,10 +2,10 @@
 """Hermetic QA matrix runner for Reborn WebUI v2 and OpenAI-compatible rows.
 
 This lane executes QA matrix rows that are not already covered by the normal
-Reborn CI contract suite. Existing Rust contract coverage belongs in CI and in
-the workbook's external-existing evidence; the executable lane is for
-ResponsesAPI served checks plus WebUI v2 static, node, and browser-facing
-behavior.
+Reborn CI contract and frontend suites. Existing Rust contracts, static JS
+contracts, and build/setup checks belong in CI and in the workbook's
+external-existing evidence; the executable lane is for ResponsesAPI served
+checks plus WebUI v2 served API and browser-facing behavior.
 """
 
 from __future__ import annotations
@@ -101,6 +101,18 @@ CI_OWNED_PACKAGE_TEST_COVERAGE = (
 CI_OWNED_CARGO_TEST_COVERAGE = (
     "already covered by normal Reborn CI cargo test lanes; this QA runner "
     "does not execute Rust contract suites"
+)
+
+CI_OWNED_WEBUI_JS_COVERAGE = (
+    "already covered by .github/workflows/reborn-tests.yml Reborn WebUI v2 JS "
+    "tests or frontend static checks; keep the QA matrix runner focused on "
+    "served ResponsesAPI and WebUI v2 browser/API coverage"
+)
+
+CI_OWNED_WEBUI_BUILD_SETUP_COVERAGE = (
+    "already covered as setup by .github/workflows/reborn-e2e.yml and by the "
+    "served pytest fixtures; this QA runner does not execute standalone build "
+    "setup commands"
 )
 
 
@@ -6172,6 +6184,8 @@ def _command_ci_coverage(command: CommandSpec) -> str | None:
         return command.existing_ci_coverage
     if command.name in CI_OWNED_CONTRACT_COMMANDS:
         return CI_OWNED_CONTRACT_COVERAGE
+    if command.name == "reborn_cli_webui_v2_binary":
+        return CI_OWNED_WEBUI_BUILD_SETUP_COVERAGE
 
     rendered = render_command(command)
     if command.argv[:2] == ["cargo", "test"]:
@@ -6185,12 +6199,12 @@ def _command_ci_coverage(command: CommandSpec) -> str | None:
         return "already covered by .github/workflows/reborn-e2e.yml Rust Reborn matrix"
     if "test_reborn_webui_v2_smoke.py" in rendered:
         return "already covered by .github/workflows/reborn-e2e.yml Reborn WebUI v2 smoke"
-    if (
-        "node --test" in rendered
-        and "crates/ironclaw_webui_v2_static/static/js/pages/settings" in rendered
-        and "find crates/ironclaw_webui_v2_static/static/js/pages/settings" in rendered
-    ):
-        return "already covered by .github/workflows/reborn-tests.yml Reborn settings JS tests"
+    if "node --test" in rendered and "crates/ironclaw_webui_v2_static" in rendered:
+        return CI_OWNED_WEBUI_JS_COVERAGE
+    if command.argv[:2] == ["npm", "test"] and "ironclaw_webui_v2_static" in rendered:
+        return CI_OWNED_WEBUI_JS_COVERAGE
+    if command.name == "webui_v2_frontend_supply_chain_build":
+        return CI_OWNED_WEBUI_JS_COVERAGE
     return None
 
 
