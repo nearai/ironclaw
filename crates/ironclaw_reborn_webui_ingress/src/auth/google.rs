@@ -18,6 +18,7 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use jsonwebtoken::Algorithm;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
@@ -120,12 +121,59 @@ struct GoogleTokenErrorResponse {
 #[derive(Deserialize)]
 struct GoogleIdTokenClaims {
     sub: String,
+    aud: GoogleIdTokenAudience,
+    iss: String,
     email: Option<String>,
     email_verified: Option<bool>,
     name: Option<String>,
     exp: i64,
     /// Google Workspace hosted domain claim (e.g. `company.com`).
     hd: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum GoogleIdTokenAudience {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl GoogleIdTokenAudience {
+    fn contains(&self, client_id: &str) -> bool {
+        match self {
+            Self::Single(audience) => audience == client_id,
+            Self::Multiple(audiences) => audiences.iter().any(|audience| audience == client_id),
+        }
+    }
+}
+
+fn decode_google_id_token(
+    id_token: &str,
+    client_id: &str,
+) -> Result<GoogleIdTokenClaims, OAuthError> {
+    let token_data = jsonwebtoken::dangerous::insecure_decode::<GoogleIdTokenClaims>(id_token)
+        .map_err(|err| OAuthError::ProfileFetch(format!("decode id_token: {err}")))?;
+
+    if token_data.header.alg != Algorithm::RS256 {
+        return Err(OAuthError::ProfileFetch(format!(
+            "decode id_token: unexpected algorithm {:?}",
+            token_data.header.alg
+        )));
+    }
+
+    let claims = token_data.claims;
+    if !claims.aud.contains(client_id) {
+        return Err(OAuthError::ProfileFetch(
+            "decode id_token: invalid audience".to_string(),
+        ));
+    }
+    if claims.iss != GOOGLE_ISSUER && claims.iss != "accounts.google.com" {
+        return Err(OAuthError::ProfileFetch(
+            "decode id_token: invalid issuer".to_string(),
+        ));
+    }
+
+    Ok(claims)
 }
 
 #[async_trait]
@@ -211,24 +259,10 @@ impl OAuthProvider for GoogleProvider {
         })?;
 
         // Skip signature verification — token was received over TLS
-        // directly from Google. Validate `aud` (prevents another
-        // Google client substituting tokens), `iss` (defense in
-        // depth against a forged TLS termination), and `exp` so
-        // expired tokens still fail closed.
-        let mut validation = jsonwebtoken::Validation::default();
-        #[allow(deprecated)]
-        validation.insecure_disable_signature_validation();
-        validation.set_audience(&[&self.client_id]);
-        validation.set_issuer(&[GOOGLE_ISSUER, "accounts.google.com"]);
-        validation.validate_exp = true;
-
-        let token_data = jsonwebtoken::decode::<GoogleIdTokenClaims>(
-            &id_token,
-            &jsonwebtoken::DecodingKey::from_secret(&[]),
-            &validation,
-        )
-        .map_err(|err| OAuthError::ProfileFetch(format!("decode id_token: {err}")))?;
-        let claims = token_data.claims;
+        // directly from Google. We still validate `alg`, `aud`, `iss`,
+        // and `exp` explicitly so the dependency's crypto backend does
+        // not need a fake RSA key just to parse Google's RS256 token.
+        let claims = decode_google_id_token(&id_token, &self.client_id)?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|err| OAuthError::ProfileFetch(format!("decode id_token: {err}")))?
@@ -278,7 +312,9 @@ mod tests {
     use super::*;
     use axum::Json;
     use axum::routing::post;
-    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use jsonwebtoken::Header;
     use serde::Serialize;
     use std::net::SocketAddr;
 
@@ -342,11 +378,18 @@ mod tests {
     }
 
     fn make_id_token(client_id: &'static str, hd: Option<&'static str>, exp: i64) -> String {
-        // Sign with HS256 + a dummy secret — `GoogleProvider` disables
-        // signature verification, so any well-formed JWT decodes
-        // successfully as long as the claims pass audience+issuer
-        // validation.
+        make_id_token_with_algorithm(client_id, hd, exp, Algorithm::RS256)
+    }
+
+    fn make_id_token_with_algorithm(
+        client_id: &'static str,
+        hd: Option<&'static str>,
+        exp: i64,
+        alg: Algorithm,
+    ) -> String {
         let now = chrono::Utc::now().timestamp();
+        let mut header = Header::new(alg);
+        header.kid = Some("test-key-id".to_string());
         let claims = MockIdTokenClaims {
             sub: "google-sub-123",
             email: "alice@example.com",
@@ -358,12 +401,9 @@ mod tests {
             exp,
             hd,
         };
-        encode(
-            &Header::new(Algorithm::HS256),
-            &claims,
-            &EncodingKey::from_secret(b"unused-test-secret"),
-        )
-        .expect("encode JWT")
+        let header = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("encode header"));
+        let claims = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("encode claims"));
+        format!("{header}.{claims}.signature")
     }
 
     async fn spawn_mock_token_endpoint(id_token: String) -> SocketAddr {
@@ -447,6 +487,35 @@ mod tests {
         assert!(
             matches!(err, OAuthError::Denied(_)),
             "expected Denied, got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_code_rejects_non_google_id_token_algorithm() {
+        let client_id: &'static str = "client-id-123";
+        let id_token = make_id_token_with_algorithm(
+            client_id,
+            None,
+            chrono::Utc::now().timestamp() + 600,
+            Algorithm::HS256,
+        );
+        let addr = spawn_mock_token_endpoint(id_token).await;
+        let endpoint = format!("http://{addr}/token");
+
+        let provider =
+            GoogleProvider::with_endpoints(cfg(None), "https://example.invalid/auth", endpoint)
+                .expect("build provider");
+        let err = provider
+            .exchange_code(
+                "fake-auth-code",
+                "https://example.com/auth/callback/google",
+                "fake-verifier",
+            )
+            .await
+            .expect_err("non-Google alg must reject");
+        assert!(
+            matches!(&err, OAuthError::ProfileFetch(msg) if msg.contains("unexpected algorithm")),
+            "expected ProfileFetch for unexpected alg, got {err:?}",
         );
     }
 
