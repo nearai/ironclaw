@@ -633,6 +633,7 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
         name: msg.action_name.clone(),
         tool_calls: None,
         reasoning: None,
+        reasoning_details: None,
     };
 
     // Convert action calls if present (assistant message with tool calls)
@@ -925,6 +926,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }
@@ -1329,6 +1331,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }
@@ -2158,6 +2161,7 @@ And also check the token price:\n\
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }
@@ -2264,6 +2268,7 @@ And also check the token price:\n\
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }

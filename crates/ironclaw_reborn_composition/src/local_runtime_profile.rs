@@ -46,9 +46,8 @@ pub fn local_runtime_build_input_with_options(
     root: PathBuf,
     options: RebornLocalRuntimeProfileOptions,
 ) -> Result<RebornBuildInput, RebornLocalRuntimeProfileError> {
-    #[cfg(not(feature = "libsql"))]
     if profile == RebornCompositionProfile::HostedSingleTenantVolume {
-        return Err(RebornLocalRuntimeProfileError::MissingLibsqlFeature);
+        return hosted_single_tenant_volume_build_input(owner_id, root);
     }
 
     let policy = local_runtime_policy(profile, options)?;
@@ -56,6 +55,31 @@ pub fn local_runtime_build_input_with_options(
         RebornBuildInput::local_dev_with_profile(profile, owner_id, root)
             .with_runtime_policy(policy),
     )
+}
+
+/// Build the hosted single-tenant volume substrate input with the matching
+/// secure hosted runtime policy.
+pub(crate) fn hosted_single_tenant_volume_build_input(
+    owner_id: impl Into<String>,
+    root: PathBuf,
+) -> Result<RebornBuildInput, RebornLocalRuntimeProfileError> {
+    #[cfg(not(feature = "libsql"))]
+    {
+        let _ = owner_id;
+        let _ = root;
+        return Err(RebornLocalRuntimeProfileError::MissingLibsqlFeature);
+    }
+
+    #[cfg(feature = "libsql")]
+    let policy = hosted_single_tenant_volume_runtime_policy()
+        .map_err(RebornLocalRuntimeProfileError::Policy)?;
+    #[cfg(feature = "libsql")]
+    Ok(RebornBuildInput::local_dev_with_profile(
+        RebornCompositionProfile::HostedSingleTenantVolume,
+        owner_id,
+        root,
+    )
+    .with_runtime_policy(policy))
 }
 
 /// Resolved policy for the standalone local development runtime profile.
@@ -78,19 +102,6 @@ pub fn hosted_single_tenant_volume_runtime_policy() -> Result<ResolvedRuntimePol
         RuntimeProfile::SecureDefault,
     );
     ironclaw_runtime_policy::resolve(request)
-}
-
-/// Build the hosted single-tenant volume substrate input with the matching
-/// secure hosted runtime policy.
-pub fn hosted_single_tenant_volume_build_input(
-    owner_id: impl Into<String>,
-    root: PathBuf,
-) -> Result<RebornBuildInput, RebornLocalRuntimeProfileError> {
-    local_runtime_build_input(
-        RebornCompositionProfile::HostedSingleTenantVolume,
-        owner_id,
-        root,
-    )
 }
 
 /// Resolved policy for trusted single-user local development with inherited

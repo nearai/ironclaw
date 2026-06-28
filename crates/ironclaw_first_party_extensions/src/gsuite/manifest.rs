@@ -72,7 +72,7 @@ const CALENDAR_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
     GsuiteCapabilitySpec {
         id: "google-calendar.list_events",
         short_name: "list_events",
-        description: "List Google Calendar events.",
+        description: "List Google Calendar events. Defaults to upcoming expanded events ordered by start time; use include_all_calendars or calendar_ids to cover more than the primary calendar.",
         default_permission: PermissionMode::Allow,
         effects: READ_EFFECTS,
         required_scopes: CALENDAR_READONLY_SCOPES,

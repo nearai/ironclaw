@@ -1764,6 +1764,8 @@ async fn libsql_utc_backfill_on_legacy_row_without_schedule_timezone() {
 mod fire_claim_contract {
     use super::*;
 
+    // safety: these contract tests intentionally issue multiple independent repository calls;
+    // atomicity is asserted inside the repository methods under test.
     use ironclaw_triggers::{
         ClaimDueFireOutcome, ClaimDueFireRequest, FireAcceptedRequest, FirePermanentFailedRequest,
         FireReplayedRequest, FireRetryableFailedRequest, FireTerminalFailedRequest,

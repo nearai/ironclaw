@@ -38,7 +38,7 @@ struct TestKey {
 }
 
 fn generate_test_key() -> TestKey {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand_core::OsRng;
     // 2048-bit is required, not just preferred: `jsonwebtoken` rejects
     // smaller RSA keys at sign time with `InvalidRsaKey("TooSmall")`, so
     // a faster 1024-bit test key is not an option here.

@@ -4538,13 +4538,13 @@ fn parse_websocket_hello_heartbeat_interval_ms(text: &str) -> Option<u64> {
 }
 
 fn websocket_reconnect_backoff(attempt: u32) -> Duration {
-    use rand::Rng;
+    use rand::RngExt as _;
 
     let exponent = attempt.min(6);
     let base_ms = (1u64 << exponent) * 1_000;
     // Add 0-25% jitter per Discord's reconnection recommendations to avoid
     // thundering-herd when many bots reconnect after a Discord deploy.
-    let jitter_ms = rand::thread_rng().gen_range(0..=base_ms / 4);
+    let jitter_ms = rand::rng().random_range(0..=base_ms / 4);
     Duration::from_millis(base_ms + jitter_ms)
 }
 
