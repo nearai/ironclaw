@@ -88,3 +88,12 @@ Slice 1 ships the spine + one text-reply test. Slice 2 (this PR) ships
 matrix; inert process port + `.with_live_shell()` / `.with_live_http_egress()`
 opt-ins; outbound/HTTP/secrets/MCP capture wiring; a dedicated `assertions.rs`
 once the `assert_*` family grows; the pre-commit test-style check.
+
+**Descoped (not planned): the embeddings fake.** Slice 9 verified there is no
+embeddings seam to intercept in the Reborn memory path — `NativeMemoryService`
+(the only memory service the first-party memory tools dispatch through) hardcodes
+`.with_vector(false)` on every search and wires no `EmbeddingProvider` on write,
+so `EmbeddingProvider::embed` is never called. memory_search returns correct
+**membership** via FTS with zero embeddings wiring; a future memory-coverage
+test should assert membership there, not build a fake. Full evidence: design spec
+§3.6 "Embeddings — no fake (Slice 9 verdict)".
