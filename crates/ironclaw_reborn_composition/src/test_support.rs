@@ -517,17 +517,17 @@ impl OAuthProductAuthTestBundle {
 /// - Includes `refresh_token` in the scripted egress response so the initial
 ///   token exchange stores a refresh secret handle (required for the keepalive
 ///   refresh sweep to call the token endpoint).
-///
-/// Requires `feature = "libsql"` or `feature = "postgres"` because
-/// `sweep_for_refresh` (which consumes this bundle) depends on
-/// `credential_refresh_worker` which is gated on those features.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 /// - Calls `.with_provider_client()` on the constructed `RebornProductAuthServices`
 ///   so `refresh_credential_account` routes through
 ///   `ProviderBackedCredentialAccountService` rather than returning
 ///   `BackendUnavailable`.
 ///
+/// Gated on `any(feature = "libsql", feature = "postgres")` because
+/// `sweep_for_refresh` (the primary consumer) requires `credential_refresh_worker`,
+/// which is compiled only under those features.
+///
 /// Calling this multiple times produces independent, isolated bundles.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub fn build_google_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
