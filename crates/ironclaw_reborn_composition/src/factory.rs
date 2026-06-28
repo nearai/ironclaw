@@ -2271,6 +2271,21 @@ pub(crate) async fn build_default_local_dev_database_roots(
     }
 }
 
+/// Thin void wrapper over [`build_default_local_dev_database_roots`] for
+/// `#[cfg(feature = "test-support")]` callers that need to mount the local-dev
+/// database roots but don't need the opaque `LocalDevDurableBackend` handle
+/// (which is private to this module).
+///
+/// Used by `test_support::build_default_local_dev_database_roots_for_test`.
+pub(crate) async fn mount_default_local_dev_database_roots(
+    root: &Path,
+    composite: &mut CompositeRootFilesystem,
+) -> Result<(), RebornBuildError> {
+    build_default_local_dev_database_roots(root, composite)
+        .await
+        .map(|_| ())
+}
+
 fn local_dev_project_filesystem(
     root: &Path,
     workspace_root: &Path,
