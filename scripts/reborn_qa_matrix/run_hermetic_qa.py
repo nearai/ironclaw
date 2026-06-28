@@ -1683,6 +1683,42 @@ COMPOSITION_SKILL_MANAGEMENT_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_SKILL_MANAGEMENT_SERVED_E2E_COMMAND = CommandSpec(
+    name="webui_v2_skill_management_served_e2e",
+    description=(
+        "Served WebUI v2 skill-management API tests through a real "
+        "ironclaw-reborn process: list, install, read, search, update, "
+        "delete, per-skill auto-activation, global auto-activation, bearer "
+        "gating, malformed JSON, missing content, unsafe content rejection, "
+        "and not-found behavior."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_skills_api.py",
+        "-q",
+    ],
+)
+
 WEBUI_V2_SLACK_PAIRING_UI_COMMAND = CommandSpec(
     name="webui_v2_slack_pairing_ui_contracts",
     description=(
@@ -4753,20 +4789,14 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-047-TC-05",
             "REBCLI-047-TC-06",
         ],
-        commands=[
-            WEBUI_V2_SKILL_MANAGEMENT_HANDLER_COMMAND,
-            WEBUI_V2_SKILL_MANAGEMENT_DESCRIPTOR_COMMAND,
-            COMPOSITION_SKILL_MANAGEMENT_COMMAND,
-        ],
+        commands=[WEBUI_V2_SKILL_MANAGEMENT_SERVED_E2E_COMMAND],
         notes=(
-            "Covers the generated WebUI v2 skill-management API rows without "
-            "duplicating PR #5348 browser legacy scenarios: actual axum "
-            "handler dispatch for list/search/install/read/update/remove and "
-            "per-skill auto-activation; descriptor method/path/auth/body/"
-            "rate/effect-path policy lockstep; and composition skill listing, "
-            "bundled skill installation, lifecycle facade, scoped owner "
-            "visibility, unsafe-content rejection, and local-dev capability "
-            "skill-root write contracts."
+            "Converts the generated WebUI v2 skill-management API rows from "
+            "CI-owned Rust contracts to served WebUI v2 HTTP coverage without "
+            "duplicating PR #5348 browser legacy scenarios: list/search/"
+            "install/read/update/remove, per-skill auto-activation, global "
+            "auto-activation, bearer gating, malformed JSON, missing content, "
+            "unsafe content rejection, and not-found behavior."
         ),
     ),
     "webui_v2_slack_pairing_ui_regression": CaseSpec(
