@@ -118,6 +118,14 @@ enum RebornCapabilityBackend {
     /// Real first-party tool runtime (`builtin.http` + friends) with the recording
     /// `RuntimeHttpEgress` (scripted body, no network) — the §3.7 Tier-2 capture.
     BuiltinHttpTools,
+    /// Real MCP runtime wired to a loopback mock MCP server (slice 6 §3.6).
+    /// Uses `LoopbackMcpRuntimeHttpEgress` which makes real HTTP connections to
+    /// the mock server; no real credentials or network policy are required.
+    MockMcp {
+        mcp_url: String,
+        provider_id: String,
+        capability_id: String,
+    },
 }
 
 /// Builder for [`RebornIntegrationHarness`]. The script is fixed at build time
@@ -185,6 +193,26 @@ impl RebornIntegrationHarnessBuilder {
     ) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
         self.keyed_http_responses = responses.into_iter().collect();
+        self
+    }
+
+    /// Wire the real MCP runtime backed by a loopback mock MCP server (slice 6).
+    ///
+    /// `mcp_url` is the full mock endpoint URL (e.g. `server.mcp_url()`). The
+    /// harness registers a single MCP capability `"<provider>.search"` (where
+    /// provider = `"mock-mcp"`) and wires it via `LoopbackMcpRuntimeHttpEgress`
+    /// — real HTTP connections to the mock server on a loopback port, with an
+    /// injected Bearer token so the mock's OAuth gate passes.
+    ///
+    /// Script the model with `RebornScriptedReply::tool_call("mock-mcp.search", json!({}))`.
+    /// Assert via `assert_mcp_tool_called("search")`.
+    pub fn with_mock_mcp(mut self, mcp_url: impl Into<String>) -> Self {
+        let mcp_url = mcp_url.into();
+        self.capability = RebornCapabilityBackend::MockMcp {
+            provider_id: "mock-mcp".to_string(),
+            capability_id: "mock-mcp.search".to_string(),
+            mcp_url,
+        };
         self
     }
 
@@ -283,6 +311,20 @@ impl RebornIntegrationHarnessBuilder {
                     HostRuntimeCapabilityHarness::core_builtin_tools().await?
                 };
                 host_runtime.install_http_responses(self.keyed_http_responses)?;
+                HarnessCapabilityMode::HostRuntime(Arc::new(host_runtime))
+            }
+            RebornCapabilityBackend::MockMcp {
+                mcp_url,
+                provider_id,
+                capability_id,
+            } => {
+                // Slice 6: wire the real MCP runtime backed by the loopback mock server.
+                let host_runtime = HostRuntimeCapabilityHarness::mock_mcp_tools(
+                    &mcp_url,
+                    &provider_id,
+                    &capability_id,
+                )
+                .await?;
                 HarnessCapabilityMode::HostRuntime(Arc::new(host_runtime))
             }
         };
@@ -544,6 +586,16 @@ impl RebornIntegrationHarness {
              builtin.shell turn ran or the harness is using the live-shell path"
                 .into(),
         )
+    }
+
+    /// Assert that the MCP tool named `tool_name` (the name on the mock server,
+    /// e.g. `"search"`) was invoked via the real MCP runtime (slice 6).
+    ///
+    /// Internally maps `tool_name` → capability id `"mock-mcp.{tool_name}"` and
+    /// delegates to `assert_tool_invoked`. The `"mock-mcp"` prefix matches the
+    /// fixed provider id set by `with_mock_mcp`.
+    pub async fn assert_mcp_tool_called(&self, tool_name: &str) -> HarnessResult<()> {
+        self.assert_tool_invoked(&format!("mock-mcp.{tool_name}")).await
     }
 
     /// Snapshot of the recorded capability results (tool outputs), in execution

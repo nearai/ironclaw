@@ -31,7 +31,10 @@ use ironclaw_auth::{
     CredentialOwnership, NewCredentialAccount, ProviderScope,
 };
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extensions::{
+    CapabilityManifest, CapabilityVisibility, ExtensionManifest, ExtensionPackage, ExtensionRegistry,
+    ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
+};
 use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind,
     InMemoryBackend, IndexPolicy, LocalFilesystem, MountDescriptor, RootFilesystem,
@@ -39,11 +42,12 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     Action, AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
-    CapabilityId, CapabilitySet, CredentialStageError, Decision, EffectKind, ExecutionContext,
-    ExtensionId, GrantConstraints, HostPath, InvocationId, MountAlias, MountGrant,
-    MountPermissions, MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
-    Obligations, PackageId, Principal, ProjectId, ProviderToolName, ResourceEstimate,
-    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeHttpEgress, RuntimeHttpEgressError,
+    CapabilityId, CapabilityProfileSchemaRef, CapabilitySet, CredentialStageError, Decision,
+    EffectKind, ExecutionContext, ExtensionId, GrantConstraints, HostPath, InvocationId,
+    MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod, NetworkPolicy, NetworkScheme,
+    NetworkTargetPattern, Obligation, Obligations, PackageId, PermissionMode, Principal, ProjectId,
+    ProviderToolName, RequestedTrustClass, ResourceEstimate, ResourceScope,
+    RuntimeCredentialAccountProviderId, RuntimeHttpEgress, RuntimeHttpEgressError,
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId,
     ThreadId, TrustClass, UserId, VirtualPath,
 };
@@ -76,6 +80,10 @@ use ironclaw_loop_support::{
     EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostManagedModelRequest, HostRuntimeLoopCapabilityPortFactory,
     JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+};
+use ironclaw_mcp::{
+    McpHostHttpClient, McpHostHttpEgressPlan, McpRuntimeConfig, McpRuntimeHttpAdapter, McpRuntime,
+    StaticMcpHostHttpEgressPlanner,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -2223,6 +2231,69 @@ impl HostRuntimeCapabilityHarness {
         })
     }
 
+    /// Slice 6: wire a single MCP capability backed by the loopback mock server.
+    ///
+    /// `mcp_url`  — the mock server's MCP endpoint (e.g. `"http://127.0.0.1:PORT/mcp"`).
+    /// `provider_id`   — extension id used in the registry (e.g. `"mock-mcp"`).
+    /// `capability_id` — capability id surfaced to the model (e.g. `"mock-mcp.search"`).
+    ///
+    /// The harness builds a `LoopbackMcpRuntimeHttpEgress` that makes REAL HTTP
+    /// connections to the mock server, injecting a fake Bearer token to satisfy
+    /// the mock's auth gate. Production egress policy, network policy, and
+    /// credential stores are bypassed — this path is test-only.
+    pub(crate) async fn mock_mcp_tools(
+        mcp_url: &str,
+        provider_id: &str,
+        capability_id: &str,
+    ) -> HarnessResult<Self> {
+        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        // Recording egress for any first-party tool paths (unused in MCP tests,
+        // but HostRuntimeServices requires it when first_party_capabilities are wired).
+        let first_party_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+            br#"{"accepted":true}"#.to_vec(),
+        ));
+        // Real loopback egress for the mock MCP server.
+        let mcp_egress = Arc::new(LoopbackMcpRuntimeHttpEgress::new(mcp_url)?);
+        let adapter = McpRuntimeHttpAdapter::new(Arc::clone(&mcp_egress));
+        let planner = StaticMcpHostHttpEgressPlanner::new(McpHostHttpEgressPlan::default());
+        let client = McpHostHttpClient::new(adapter, planner);
+        let mcp_runtime: Arc<LoopbackMcpRuntime> =
+            Arc::new(McpRuntime::new(McpRuntimeConfig::default(), client));
+        let mut registry = ExtensionRegistry::new();
+        registry.insert(mock_mcp_extension_package(provider_id, mcp_url, capability_id)?)?;
+        let runtime = local_dev_host_runtime_with_registry_egress_and_mcp(
+            storage_root,
+            registry,
+            Arc::clone(&first_party_egress),
+            mcp_runtime,
+        )?;
+        let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
+        Ok(Self {
+            runtime,
+            approval_parts: None,
+            auto_approve_settings: None,
+            pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
+            io: Arc::new(ProductLiveCapabilityIo::default()),
+            root,
+            workspace_root,
+            mounts,
+            capability_mount_overrides: Vec::new(),
+            capability_ids: vec![CapabilityId::new(capability_id)?],
+            runtime_kind: RuntimeKind::Mcp,
+            effect_kinds: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            network_policy: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            provider_id: ExtensionId::new(provider_id)?,
+            additional_provider_trust: Vec::new(),
+            user_id: UserId::new("reborn-itest-mcp-user")?,
+            invocations: Arc::new(Mutex::new(Vec::new())),
+            results: Arc::new(Mutex::new(Vec::new())),
+            http_egress: None,
+            network_egress: None,
+            process_port: None,
+        })
+    }
+
     fn capability_factory(
         self: &Arc<Self>,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
@@ -2721,6 +2792,92 @@ fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     }
 
     Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
+/// Slice 6: variant of `local_dev_host_runtime_with_registry_and_runtime_http_egress`
+/// that also wires a loopback MCP runtime for the mock-MCP integration test.
+///
+/// The `first_party_egress` covers any first-party tool calls (recording, no
+/// network). The `mcp_runtime` is a concrete loopback runtime that makes real
+/// HTTP requests to the test-local mock MCP server.
+type LoopbackMcpRuntime = McpRuntime<
+    McpHostHttpClient<McpRuntimeHttpAdapter<Arc<LoopbackMcpRuntimeHttpEgress>>, StaticMcpHostHttpEgressPlanner>,
+>;
+
+fn local_dev_host_runtime_with_registry_egress_and_mcp(
+    storage_root: PathBuf,
+    registry: ExtensionRegistry,
+    first_party_egress: Arc<RecordingRuntimeHttpEgress>,
+    mcp_runtime: Arc<LoopbackMcpRuntime>,
+) -> HarnessResult<Arc<dyn HostRuntime>> {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry),
+        local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
+    )
+    .with_secret_store(Arc::new(InMemorySecretStore::new()))
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
+        ironclaw_triggers::InMemoryTriggerRepository::default(),
+    ))?))
+    .with_first_party_http_egress(first_party_egress)
+    .with_mcp_runtime(mcp_runtime)
+    .with_trust_policy(Arc::new(first_party_trust_policy()?));
+    Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
+/// Build an `ExtensionPackage` describing a hosted MCP extension backed by the
+/// loopback mock server. `provider_id` is both the extension id and the prefix
+/// stripped from capability ids to derive the MCP tool name
+/// (`"mock-mcp"` + `"mock-mcp.search"` → MCP tool `"search"`).
+/// No `runtime_credentials` are declared because `LoopbackMcpRuntimeHttpEgress`
+/// injects the Bearer token directly for test purposes.
+fn mock_mcp_extension_package(
+    provider_id: &str,
+    mcp_url: &str,
+    capability_id: &str,
+) -> HarnessResult<ExtensionPackage> {
+    Ok(ExtensionPackage::from_manifest(
+        ExtensionManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION.to_string(),
+            id: ExtensionId::new(provider_id)?,
+            name: provider_id.to_string(),
+            version: "0.1.0".to_string(),
+            description: "Mock MCP extension (test only)".to_string(),
+            source: ManifestSource::HostBundled,
+            requested_trust: RequestedTrustClass::ThirdParty,
+            descriptor_trust_default: TrustClass::Sandbox,
+            runtime: ExtensionRuntime::Mcp {
+                transport: "http".to_string(),
+                command: None,
+                args: Vec::new(),
+                url: Some(mcp_url.to_string()),
+            },
+            host_apis: Vec::new(),
+            hooks: Vec::new(),
+            capabilities: vec![CapabilityManifest {
+                id: CapabilityId::new(capability_id)?,
+                implements: Vec::new(),
+                description: "Mock MCP capability".to_string(),
+                effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+                default_permission: PermissionMode::Allow,
+                visibility: CapabilityVisibility::Model,
+                input_schema_ref: CapabilityProfileSchemaRef::new(
+                    "schemas/mock-mcp/mock.input.v1.json",
+                )?,
+                output_schema_ref: CapabilityProfileSchemaRef::new(
+                    "schemas/mock-mcp/mock.output.v1.json",
+                )?,
+                prompt_doc_ref: None,
+                required_host_ports: Vec::new(),
+                runtime_credentials: Vec::new(),
+                resource_profile: None,
+            }],
+        },
+        VirtualPath::new(format!("/system/extensions/{provider_id}"))?,
+    )?)
 }
 
 fn local_dev_host_runtime_with_registry_and_egress(
@@ -3280,6 +3437,106 @@ impl NetworkHttpEgress for RecordingNetworkHttpEgress {
                 response_bytes: body.len() as u64,
                 resolved_ip: None,
             },
+        })
+    }
+}
+
+/// Test-only `RuntimeHttpEgress` that routes MCP traffic to the loopback mock
+/// MCP server using a real HTTP client (slice 6 design).
+///
+/// Unlike `RecordingRuntimeHttpEgress`, this makes REAL HTTP connections so the
+/// `MockMcpServer` actually receives the JSON-RPC handshake. It:
+///   - rejects any URL that does not start with the configured mock endpoint
+///     (hermetic guard — prevents accidental real-network egress)
+///   - injects `Authorization: Bearer mock-mcp-test-token` on every request,
+///     satisfying the mock server's OAuth gate without a credential-staging
+///     pipeline (acceptable because this egress is test-only and never ships)
+///   - passes all other request headers through unchanged
+struct LoopbackMcpRuntimeHttpEgress {
+    /// Full MCP endpoint URL (e.g. `"http://127.0.0.1:PORT/mcp"`).
+    /// All outbound URLs must start with this value — hermetic guard.
+    mcp_url: String,
+    client: reqwest::Client,
+}
+
+impl LoopbackMcpRuntimeHttpEgress {
+    fn new(mcp_url: &str) -> HarnessResult<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|e| format!("failed to build reqwest client for mock MCP egress: {e}"))?;
+        Ok(Self {
+            mcp_url: mcp_url.to_string(),
+            client,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeHttpEgress for LoopbackMcpRuntimeHttpEgress {
+    async fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        // Hermetic guard: only route to the configured loopback mock endpoint.
+        if !request.url.starts_with(&self.mcp_url) {
+            return Err(RuntimeHttpEgressError::Request {
+                reason: format!(
+                    "loopback MCP egress: URL {:?} is outside allowed mock endpoint {:?}",
+                    request.url, self.mcp_url,
+                ),
+                request_bytes: 0,
+                response_bytes: 0,
+            });
+        }
+        let request_bytes = request.body.len() as u64;
+        let method = match request.method {
+            NetworkMethod::Get => reqwest::Method::GET,
+            NetworkMethod::Post => reqwest::Method::POST,
+            NetworkMethod::Put => reqwest::Method::PUT,
+            NetworkMethod::Patch => reqwest::Method::PATCH,
+            NetworkMethod::Delete => reqwest::Method::DELETE,
+            NetworkMethod::Head => reqwest::Method::HEAD,
+        };
+        let mut builder = self.client.request(method, &request.url);
+        for (name, value) in &request.headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        // The mock server requires a non-empty Bearer token on every request.
+        // Inject a fixed test token since there is no credential-staging
+        // pipeline in this test-only egress path.
+        builder = builder.header("authorization", "Bearer mock-mcp-test-token");
+        if !request.body.is_empty() {
+            builder = builder.body(request.body.clone());
+        }
+        let response = builder.send().await.map_err(|e| RuntimeHttpEgressError::Network {
+            reason: e.to_string(),
+            request_bytes,
+            response_bytes: 0,
+        })?;
+        let status = response.status().as_u16();
+        let headers: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| RuntimeHttpEgressError::Network {
+                reason: e.to_string(),
+                request_bytes,
+                response_bytes: 0,
+            })?;
+        let response_bytes = body.len() as u64;
+        Ok(RuntimeHttpEgressResponse {
+            status,
+            headers,
+            body: body.to_vec(),
+            saved_body: None,
+            request_bytes,
+            response_bytes,
+            redaction_applied: false,
         })
     }
 }
