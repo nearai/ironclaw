@@ -324,6 +324,13 @@ class RebornQaSlackReportTests(unittest.TestCase):
 
         qa_sections = [text for text in section_texts if "*QA 2*" in text]
         self.assertEqual(len(qa_sections), 1)
+        self.assertTrue(
+            any(
+                "*reborn-webui-v2-live-qa* (reborn-webui-v2) — 1/2 passed"
+                in text
+                for text in section_texts
+            )
+        )
         qa_text = qa_sections[0]
         self.assertIn("1/2 passed", qa_text)
         self.assertIn("\n*Cases:*", qa_text)

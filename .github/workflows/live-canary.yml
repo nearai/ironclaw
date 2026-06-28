@@ -572,10 +572,24 @@ jobs:
           write_secret "AUTH_LIVE_GITHUB_TOKEN" "${AUTH_LIVE_GITHUB_TOKEN:-}"
           write_secret "TELEGRAM_BOT_TOKEN" "${TELEGRAM_BOT_TOKEN:-}"
           write_secret "TELEGRAM_WEBHOOK_SECRET" "${TELEGRAM_WEBHOOK_SECRET:-}"
+      - name: Resolve Reborn WebUI v2 live QA cases
+        shell: bash
+        env:
+          REQUESTED_CASES: ${{ inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || '' }}
+        run: |
+          set -euo pipefail
+          cases="$(echo "${REQUESTED_CASES:-}" | xargs)"
+          if [[ "${cases}" == "all" ]]; then
+            echo "CASES=" >> "${GITHUB_ENV}"
+            echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=promoted-non-telegram" >> "${GITHUB_ENV}"
+            echo "CASES=all requested; running the promoted non-Telegram Reborn QA suite."
+          else
+            echo "CASES=${cases}" >> "${GITHUB_ENV}"
+            echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=requested" >> "${GITHUB_ENV}"
+          fi
       - name: Run Reborn WebUI v2 live QA lane
         env:
           LANE: reborn-webui-v2-live-qa
-          CASES: ${{ inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || '' }}
           PROVIDER: reborn-webui-v2
           COMMAND_TIMEOUT: 90m
           PLAYWRIGHT_INSTALL: with-deps

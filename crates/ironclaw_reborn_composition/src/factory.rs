@@ -3888,6 +3888,9 @@ where
     })?;
     let services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
+    #[cfg(any(test, feature = "test-support"))]
+    let local_dev_wasm_runtime_credential_provider_captured =
+        services.wasm_runtime_credential_provider_captured_for_test();
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_production(&wiring_config)?);
 
@@ -3904,7 +3907,7 @@ where
         production_scheduler_wake: Some(scheduler_wake_wiring),
         secret_store,
         #[cfg(any(test, feature = "test-support"))]
-        local_dev_wasm_runtime_credential_provider_captured: false,
+        local_dev_wasm_runtime_credential_provider_captured,
         // `Ready` only when this path built a durable candidate source (i.e. no
         // caller-supplied product_auth_ports override); `Absent` otherwise. The
         // leader lock is always available on this production path.

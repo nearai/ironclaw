@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 QA_SHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"

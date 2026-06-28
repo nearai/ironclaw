@@ -18,6 +18,7 @@ from scripts.reborn_webui_v2_live_qa.root_filesystem import (
     _encrypt_filesystem_secret,
     _put_root_filesystem_json,
     _root_filesystem_create_table,
+    _write_new_secret_file_0600,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -222,8 +223,7 @@ def _seed_generated_github_product_auth_if_configured(reborn_home: Path, user_id
         master_key = master_key_path.read_text(encoding="utf-8").strip()
     else:
         master_key = hashlib.sha256(os.urandom(32)).hexdigest()
-        master_key_path.write_text(master_key, encoding="utf-8")
-        master_key_path.chmod(0o600)
+        _write_new_secret_file_0600(master_key_path, master_key)
 
     _root_filesystem_create_table(db_path)
     account_id = str(

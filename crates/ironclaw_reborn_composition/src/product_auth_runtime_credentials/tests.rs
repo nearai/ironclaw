@@ -668,6 +668,37 @@ async fn resolver_propagates_backend_error_when_stale_access_token_cannot_refres
 }
 
 #[tokio::test]
+async fn resolver_propagates_backend_error_when_access_secret_metadata_is_missing() {
+    let accounts = Arc::new(InMemoryAuthProductServices::new());
+    let scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+    let access_secret = SecretHandle::new("google_missing_access_metadata").unwrap();
+    let drive_scope = ProviderScope::new("https://www.googleapis.com/auth/drive.readonly").unwrap();
+    let account = ConfiguredAccount::new(auth_scope, "google")
+        .access_secret(Some(access_secret))
+        .refresh_secret(SecretHandle::new("google_refresh_missing_metadata").unwrap())
+        .scopes(&["https://www.googleapis.com/auth/drive.readonly"])
+        .create(&accounts)
+        .await;
+    accounts.fail_next_refresh_backend_for_tests(account.id);
+    let resolver = resolver_with_refresh_and_store(accounts, Arc::new(InMemorySecretStore::new()));
+
+    let error = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &scope,
+            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            provider_scopes: &[drive_scope.as_str().to_string()],
+            requester_extension: &ExtensionId::new("google-drive").unwrap(),
+        })
+        .await
+        .expect_err("missing access-token metadata must not fall back after refresh failure");
+
+    assert_eq!(error, CredentialStageError::Backend);
+}
+
+#[tokio::test]
 async fn resolver_maps_oauth_refresh_failure_to_auth_required() {
     let accounts = Arc::new(InMemoryAuthProductServices::new());
     let scope =

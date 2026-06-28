@@ -9,36 +9,43 @@ import urllib.parse
 
 from scripts.reborn_webui_v2_live_qa.env_helpers import _first_env_value
 
+_SPREADSHEET_ID_PATTERNS = (
+    re.compile(r"https://docs\.google\.com/spreadsheets/d/([A-Za-z0-9_-]+)", re.IGNORECASE),
+    re.compile(r"\bspreadsheet(?:\s+id)?\s*[:=]\s*([A-Za-z0-9_-]{20,})", re.IGNORECASE),
+)
+
+_DOCUMENT_ID_PATTERNS = (
+    re.compile(r"https://docs\.google\.com/document/d/([A-Za-z0-9_-]+)", re.IGNORECASE),
+    re.compile(
+        r"\b(?:google\s+)?(?:docs?\s+)?document\s+id\s*[:=]\s*([A-Za-z0-9_-]{20,})",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bdoc(?:ument)?\s+id\s*[:=]\s*([A-Za-z0-9_-]{20,})", re.IGNORECASE),
+    re.compile(r"\(ID:\s*([A-Za-z0-9_-]{20,})\)", re.IGNORECASE),
+)
+
+
+def _latest_google_id_match(
+    text: str,
+    patterns: tuple[re.Pattern[str], ...],
+) -> str | None:
+    candidates: list[tuple[int, str]] = []
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            candidate = match.group(1)
+            if not candidate.startswith("REBORN_QA_"):
+                candidates.append((match.start(), candidate))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
 
 def _extract_google_spreadsheet_id(text: str) -> str | None:
-    patterns = [
-        r"https://docs\.google\.com/spreadsheets/d/([A-Za-z0-9_-]+)",
-        r"\bspreadsheet(?:\s+id)?\s*[:=]\s*([A-Za-z0-9_-]{20,})",
-    ]
-    for pattern in patterns:
-        matches = [
-            match.group(1)
-            for match in re.finditer(pattern, text, re.IGNORECASE)
-        ]
-        if matches:
-            return matches[-1]
-    return None
+    return _latest_google_id_match(text, _SPREADSHEET_ID_PATTERNS)
 
 
 def _extract_google_document_id(text: str) -> str | None:
-    patterns = [
-        r"https://docs\.google\.com/document/d/([A-Za-z0-9_-]+)",
-        r"\b(?:google\s+)?(?:docs?\s+)?document\s+id\s*[:=]\s*([A-Za-z0-9_-]{20,})",
-        r"\bdoc(?:ument)?\s+id\s*[:=]\s*([A-Za-z0-9_-]{20,})",
-        r"\(ID:\s*([A-Za-z0-9_-]{20,})\)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            candidate = match.group(1)
-            if not candidate.startswith("REBORN_QA_"):
-                return candidate
-    return None
+    return _latest_google_id_match(text, _DOCUMENT_ID_PATTERNS)
 
 
 def _google_drive_query_literal(value: str) -> str:

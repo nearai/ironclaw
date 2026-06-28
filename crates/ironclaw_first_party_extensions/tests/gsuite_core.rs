@@ -1082,6 +1082,42 @@ async fn gmail_send_message_accepts_structured_fields_and_encodes_raw_body() {
 }
 
 #[tokio::test]
+async fn gmail_send_message_encodes_non_ascii_structured_headers() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
+    let egress = Arc::new(RecordingEgress::permissive_success());
+
+    dispatch_ok(
+        auth,
+        scope,
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        json!({
+            "message": {
+                "from": "José <jose@example.test>",
+                "to": "Zoë <zoe@example.test>",
+                "subject": "Résumé ready",
+                "body": "REBORN_QA_GMAIL_MARKER"
+            }
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let raw = body["raw"].as_str().expect("raw body");
+    let decoded = String::from_utf8(URL_SAFE_NO_PAD.decode(raw).unwrap()).unwrap();
+    assert!(decoded.contains("From: =?UTF-8?B?Sm9zw6k=?= <jose@example.test>\r\n"));
+    assert!(decoded.contains("To: =?UTF-8?B?Wm/Dqw==?= <zoe@example.test>\r\n"));
+    assert!(decoded.contains("Subject: =?UTF-8?B?"));
+    assert!(!decoded.contains("From: José"));
+    assert!(!decoded.contains("To: Zoë"));
+    assert!(!decoded.contains("Subject: Résumé ready"));
+}
+
+#[tokio::test]
 async fn gmail_send_message_raw_payload_drops_structured_fields_before_egress() {
     let scope = scope();
     let auth =

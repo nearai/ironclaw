@@ -22,6 +22,10 @@ from scripts.reborn_webui_v2_live_qa.root_filesystem import (
 )
 
 
+def _toml_string(value: str) -> str:
+    return json.dumps(value)
+
+
 def _slack_enabled(config_text: str) -> bool:
     in_slack = False
     for raw_line in config_text.splitlines():
@@ -99,13 +103,17 @@ def _append_slack_channel_route(
     if not route_subject_user_id:
         route_subject_user_id = subject_user_id
     config = config_path.read_text(encoding="utf-8")
-    if channel_id in config and route_subject_user_id in config:
+    if _config_has_slack_channel_route(
+        config,
+        subject_user_id=route_subject_user_id,
+        channel_id=channel_id,
+    ):
         return True
     with config_path.open("a", encoding="utf-8") as fh:
         fh.write(
             "\n[[slack.channel_routes]]\n"
-            f'channel_id = "{channel_id}"\n'
-            f'subject_user_id = "{route_subject_user_id}"\n'
+            f"channel_id = {_toml_string(channel_id)}\n"
+            f"subject_user_id = {_toml_string(route_subject_user_id)}\n"
         )
     return True
 
@@ -137,16 +145,17 @@ def _set_slack_section_key(config_path: Path, key: str, value: str) -> bool:
             insert_index = index
             break
         if in_slack and stripped.startswith(f"{key} ="):
-            if line.strip() == f'{key} = "{value}"':
+            rendered = f"{key} = {_toml_string(value)}"
+            if line.strip() == rendered:
                 return False
-            lines[index] = f'{key} = "{value}"'
+            lines[index] = rendered
             config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             return True
     if slack_header_index is None:
         return False
     if insert_index is None:
         insert_index = len(lines)
-    lines.insert(insert_index, f'{key} = "{value}"')
+    lines.insert(insert_index, f"{key} = {_toml_string(value)}")
     config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return True
 
@@ -216,7 +225,7 @@ def _discover_slack_dm_route_channel(
     return result
 
 
-def _config_has_slack_channel_route_for_user(config_text: str, user_id: str) -> bool:
+def _slack_channel_routes(config_text: str) -> list[dict[str, str]]:
     in_route = False
     route: dict[str, str] = {}
     routes: list[dict[str, str]] = []
@@ -239,9 +248,26 @@ def _config_has_slack_channel_route_for_user(config_text: str, user_id: str) -> 
             route[key.strip()] = value.strip().strip('"')
     if route:
         routes.append(route)
+    return routes
+
+
+def _config_has_slack_channel_route(
+    config_text: str,
+    *,
+    subject_user_id: str,
+    channel_id: str,
+) -> bool:
+    return any(
+        route.get("subject_user_id") == subject_user_id
+        and route.get("channel_id") == channel_id
+        for route in _slack_channel_routes(config_text)
+    )
+
+
+def _config_has_slack_channel_route_for_user(config_text: str, user_id: str) -> bool:
     return any(
         route.get("subject_user_id") == user_id and bool(route.get("channel_id"))
-        for route in routes
+        for route in _slack_channel_routes(config_text)
     )
 
 

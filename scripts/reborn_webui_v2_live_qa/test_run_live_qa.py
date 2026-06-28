@@ -21,7 +21,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import run_live_qa
+if __package__:
+    from . import run_live_qa
+else:
+    import run_live_qa
 
 
 class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
@@ -389,6 +392,43 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     config_path.read_text(encoding="utf-8"),
                 )
 
+    def test_slack_route_append_matches_exact_user_channel_pair(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.toml"
+            config_path.write_text(
+                '[slack]\n\n[[slack.channel_routes]]\nchannel_id = "D0QA"\n'
+                'subject_user_id = "U0FIRST"\n',
+                encoding="utf-8",
+            )
+
+            self.assertTrue(
+                run_live_qa._append_slack_channel_route(
+                    config_path,
+                    subject_user_id="U0SECOND",
+                    channel_id="D0QA",
+                )
+            )
+
+            config = config_path.read_text(encoding="utf-8")
+            self.assertEqual(config.count('channel_id = "D0QA"'), 2)
+            self.assertIn('subject_user_id = "U0FIRST"', config)
+            self.assertIn('subject_user_id = "U0SECOND"', config)
+
+    def test_slack_config_values_are_toml_escaped(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.toml"
+            config_path.write_text("[slack]\n", encoding="utf-8")
+            value = 'U0"REBORN\nQA'
+
+            self.assertTrue(
+                run_live_qa._set_slack_section_key(config_path, "slack_user_id", value)
+            )
+
+            self.assertIn(
+                f"slack_user_id = {json.dumps(value)}",
+                config_path.read_text(encoding="utf-8"),
+            )
+
     def test_non_signed_slack_cases_do_not_configure_legacy_actor(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.toml"
@@ -545,9 +585,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertEqual(account["refresh_probe"]["reason"], "disabled_by_env")
 
             db_path = home / "local-dev" / "reborn-local-dev.db"
-            master_key = (
-                home / "local-dev" / ".reborn-local-dev-secrets-master-key"
-            ).read_text(encoding="utf-8")
+            master_key_path = home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+            self.assertEqual(master_key_path.stat().st_mode & 0o777, 0o600)
+            master_key = master_key_path.read_text(encoding="utf-8")
             with sqlite3.connect(db_path) as db:
                 rows = db.execute(
                     "SELECT contents FROM root_filesystem_entries "
@@ -636,9 +676,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertEqual(preflight["configured_account_count"], 1)
 
             db_path = home / "local-dev" / "reborn-local-dev.db"
-            master_key = (
-                home / "local-dev" / ".reborn-local-dev-secrets-master-key"
-            ).read_text(encoding="utf-8")
+            master_key_path = home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+            self.assertEqual(master_key_path.stat().st_mode & 0o777, 0o600)
+            master_key = master_key_path.read_text(encoding="utf-8")
             with sqlite3.connect(db_path) as db:
                 account_row = db.execute(
                     "SELECT contents FROM root_filesystem_entries "
@@ -860,6 +900,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ),
             spreadsheet_id,
         )
+        explicit_id = "1NewExplicitSpreadsheetId_1234567890abcdefghi"
+        self.assertEqual(
+            run_live_qa._extract_google_spreadsheet_id(
+                f"Draft URL: https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit\n"
+                f"spreadsheet id: {explicit_id}"
+            ),
+            explicit_id,
+        )
         corrected_id = "18xFRoOs2aLrat-aq7daZ60Y_EPG2Wei6ZyDkkMebF30"
         self.assertEqual(
             run_live_qa._extract_google_spreadsheet_id(
@@ -891,6 +939,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 f"Document created: QA doc (ID: {document_id})"
             ),
             document_id,
+        )
+        explicit_id = "1NewExplicitDocumentId_1234567890abcdefghijk"
+        self.assertEqual(
+            run_live_qa._extract_google_document_id(
+                f"Draft URL: https://docs.google.com/document/d/{document_id}/edit\n"
+                f"Document created: QA doc (ID: {explicit_id})"
+            ),
+            explicit_id,
         )
         self.assertIsNone(
             run_live_qa._extract_google_document_id(

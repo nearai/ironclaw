@@ -395,16 +395,23 @@ impl RuntimeCredentialAccountRefreshService for ProductAuthRuntimeCredentialAcco
         // or cleanup deleted it, both are fail-safe: proceed with refresh.
         let mut access_secret_requires_refresh = false;
         if let Some(access_handle) = &account.access_secret {
-            let metadata = self
+            let metadata = match self
                 .secret_store
                 .metadata(&account.scope.resource, access_handle)
-                .await;
-            if let Err(error) = &metadata
-                && error.is_expired()
+                .await
             {
-                access_secret_requires_refresh = true;
-            }
-            let metadata = metadata.unwrap_or(None); // silent-ok: non-expiry metadata unavailability is non-fatal — fall through to refresh
+                Ok(Some(metadata)) => Some(metadata),
+                Ok(None) => {
+                    access_secret_requires_refresh = true;
+                    None
+                }
+                Err(error) => {
+                    if error.is_expired() {
+                        access_secret_requires_refresh = true;
+                    }
+                    None
+                }
+            };
             if let Some(meta) = metadata
                 && let Some(expires_at) = meta.expires_at
             {

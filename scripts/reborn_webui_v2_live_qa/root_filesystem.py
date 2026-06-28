@@ -142,6 +142,14 @@ def _root_filesystem_create_table(db_path: Path) -> None:
         db.commit()
 
 
+def _write_new_secret_file_0600(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(value)
+
+
 def _put_root_filesystem_json(db_path: Path, path: str, payload: dict[str, object]) -> None:
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     contents = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")

@@ -7,7 +7,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use futures_util::FutureExt as _;
 use ironclaw_auth::{
     CredentialAccountRecordSource, CredentialAccountService, CredentialRecoveryKind,
@@ -780,8 +783,41 @@ fn inferred_subject_from_body(body: &str) -> Result<String, GsuiteDispatchError>
 fn push_mail_header(message: &mut String, name: &str, value: &str) {
     message.push_str(name);
     message.push_str(": ");
-    message.push_str(value);
+    if name.eq_ignore_ascii_case("subject") {
+        message.push_str(&encode_rfc2047_phrase(value));
+    } else {
+        message.push_str(&encode_address_header_value(value));
+    }
     message.push_str("\r\n");
+}
+
+fn encode_address_header_value(value: &str) -> String {
+    value
+        .split(',')
+        .map(|part| {
+            let trimmed = part.trim();
+            if let Some(address_start) = trimmed.find('<') {
+                let (display, address) = trimmed.split_at(address_start);
+                let display = display.trim().trim_matches('"');
+                if display.is_empty() {
+                    trimmed.to_string()
+                } else {
+                    format!("{} {}", encode_rfc2047_phrase(display), address.trim())
+                }
+            } else {
+                encode_rfc2047_phrase(trimmed)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn encode_rfc2047_phrase(value: &str) -> String {
+    if value.is_ascii() {
+        value.to_string()
+    } else {
+        format!("=?UTF-8?B?{}?=", STANDARD.encode(value.as_bytes()))
+    }
 }
 
 fn gmail_create_draft_request(

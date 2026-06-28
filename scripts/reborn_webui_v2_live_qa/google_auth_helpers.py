@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ from scripts.reborn_webui_v2_live_qa.root_filesystem import (
     _root_filesystem_create_table,
     _root_filesystem_json,
     _root_filesystem_secret_by_handle,
+    _write_new_secret_file_0600,
 )
 
 DEFAULT_USER_ID = "reborn-webui-v2-live-qa-user"
@@ -68,6 +70,7 @@ def _google_product_auth_env_status(
             ["GOOGLE_OAUTH_CLIENT_ID"],
         ],
     }
+
 
 def _google_required_env_for_block(
     preflight: dict[str, object],
@@ -696,8 +699,7 @@ def _seed_generated_google_product_auth_if_configured(reborn_home: Path, user_id
         master_key = master_key_path.read_text(encoding="utf-8").strip()
     else:
         master_key = hashlib.sha256(os.urandom(32)).hexdigest()
-        master_key_path.write_text(master_key, encoding="utf-8")
-        master_key_path.chmod(0o600)
+        _write_new_secret_file_0600(master_key_path, master_key)
 
     _root_filesystem_create_table(db_path)
     account_id = str(

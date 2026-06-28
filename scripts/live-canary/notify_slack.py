@@ -693,10 +693,10 @@ def slack_payload(
             lines.append(f"tools: {', '.join(r.tools_used)} (≈{r.tool_calls_total} calls)")
         if r.notable:
             lines.append(f"_{r.notable}_")
-        if not r.reborn_qa_cases:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
-        else:
-            blocks.extend(_format_reborn_qa_groups(r.reborn_qa_cases))
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+        if r.reborn_qa_cases:
+            remaining = max(0, SLACK_MAX_BLOCKS - len(blocks))
+            blocks.extend(_format_reborn_qa_groups(r.reborn_qa_cases)[:remaining])
 
     # Cross-lane "Summary by Category" block — only emitted when there
     # are >=2 failures (with 1 the per-lane block is already enough).
