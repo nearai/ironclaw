@@ -129,6 +129,9 @@ pub struct RebornIntegrationHarnessBuilder {
     capability: RebornCapabilityBackend,
     keyed_http_responses: Vec<ScriptedHttpResponse>,
     storage: StorageMode,
+    /// Slice 5: when `true`, the `BuiltinHttpTools` backend uses the real
+    /// `LocalHostProcessPort` instead of the inert `RecordingProcessPort`.
+    live_shell: bool,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -152,6 +155,21 @@ impl RebornIntegrationHarnessBuilder {
     /// for tool-calling tests; a text-only turn needs only the default echo backend.
     pub fn with_builtin_http_tools(mut self) -> Self {
         self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self
+    }
+
+    /// Opt-in to real shell execution for this harness (slice 5). By default the
+    /// `BuiltinHttpTools` backend injects an inert `RecordingProcessPort` so that
+    /// `builtin.shell` turns record the command without spawning any OS process.
+    ///
+    /// Call `.with_live_shell()` only when the test genuinely needs to observe the
+    /// output of a real command (e.g. `echo hello`). The command must be hermetic —
+    /// no network, no external state, reproducible on any developer machine.
+    ///
+    /// Implies [`with_builtin_http_tools`](Self::with_builtin_http_tools).
+    pub fn with_live_shell(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self.live_shell = true;
         self
     }
 
@@ -257,7 +275,13 @@ impl RebornIntegrationHarnessBuilder {
                 HarnessCapabilityMode::Recording(RecordingTestCapabilityPort::echo())
             }
             RebornCapabilityBackend::BuiltinHttpTools => {
-                let host_runtime = HostRuntimeCapabilityHarness::core_builtin_tools().await?;
+                // Slice 5: `.with_live_shell()` opts into the real LocalHostProcessPort;
+                // the default recording path uses the inert RecordingProcessPort.
+                let host_runtime = if self.live_shell {
+                    HostRuntimeCapabilityHarness::core_builtin_tools_with_live_shell().await?
+                } else {
+                    HostRuntimeCapabilityHarness::core_builtin_tools().await?
+                };
                 host_runtime.install_http_responses(self.keyed_http_responses)?;
                 HarnessCapabilityMode::HostRuntime(Arc::new(host_runtime))
             }
@@ -394,6 +418,7 @@ impl RebornIntegrationHarness {
             capability: RebornCapabilityBackend::Echo,
             keyed_http_responses: Vec::new(),
             storage: StorageMode::default(),
+            live_shell: false,
         }
     }
 
