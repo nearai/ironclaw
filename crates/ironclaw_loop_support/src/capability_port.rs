@@ -1867,10 +1867,34 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 }
                 Err(error) => return Err(error.error),
             };
-            (
-                host_runtime_input_for_capability(&request.capability_id, input)?,
-                capability.estimate.clone(),
-            )
+            let runtime_input = match host_runtime_input_for_capability(
+                &request.capability_id,
+                input,
+            ) {
+                Ok(runtime_input) => runtime_input,
+                Err(error) if error.kind == AgentLoopHostErrorKind::InvalidInvocation => {
+                    // A malformed/invalid model-supplied process sandbox plan is a
+                    // model-fixable error, not a host fault: surface it as a
+                    // model-visible tool error so the agent can correct the
+                    // arguments instead of ending the run. `host_runtime_input_for_capability`
+                    // only returns `InvalidInvocation` for the sandbox-plan parse/validation
+                    // case; its host-internal serialization failure keeps its `Internal` Err.
+                    let result = Ok(CapabilityOutcome::Failed(CapabilityFailure {
+                        error_kind: CapabilityFailureKind::InvalidInput,
+                        safe_summary: error.safe_summary,
+                        detail: None,
+                    }));
+                    guard.commit();
+                    self.record_loop_completed(
+                        &idempotency_key,
+                        requested_invocation_id,
+                        result.clone(),
+                    )?;
+                    return result;
+                }
+                Err(error) => return Err(error),
+            };
+            (runtime_input, capability.estimate.clone())
         };
         let mut invocation_context =
             invocation_context_from_visible(VisibleInvocationContextRequest {
@@ -7111,7 +7135,7 @@ mod tests {
             .await
             .expect("visible capabilities load");
 
-        let error = port
+        let outcome = port
             .invoke_capability(CapabilityInvocation {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
@@ -7122,9 +7146,14 @@ mod tests {
                 auth_resume: None,
             })
             .await
-            .expect_err("invalid process sandbox plan must fail before runtime dispatch");
+            .expect("invalid process sandbox plan is a recoverable model-visible tool error");
 
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        match outcome {
+            CapabilityOutcome::Failed(failure) => {
+                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
+            }
+            other => panic!("expected Failed(InvalidInput), got {other:?}"),
+        }
         assert!(runtime.take_requests().is_empty());
         assert!(runtime.take_spawn_requests().is_empty());
     }
@@ -7169,7 +7198,7 @@ mod tests {
             .await
             .expect("visible capabilities load");
 
-        let error = port
+        let outcome = port
             .invoke_capability(CapabilityInvocation {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
@@ -7180,9 +7209,14 @@ mod tests {
                 auth_resume: None,
             })
             .await
-            .expect_err("malformed process sandbox plan must fail before runtime dispatch");
+            .expect("malformed process sandbox plan is a recoverable model-visible tool error");
 
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        match outcome {
+            CapabilityOutcome::Failed(failure) => {
+                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
+            }
+            other => panic!("expected Failed(InvalidInput), got {other:?}"),
+        }
         assert!(runtime.take_requests().is_empty());
         assert!(runtime.take_spawn_requests().is_empty());
     }
