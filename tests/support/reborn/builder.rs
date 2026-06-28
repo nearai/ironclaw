@@ -95,19 +95,14 @@ const INTERACTIVE_MODEL_PROFILE: &str = "interactive_model";
 /// `LibSql` creates a real SQLite file in a per-`build()` `TempDir`, runs
 /// the full libSQL migration suite, and lets `assert_reply_persists_after_reopen`
 /// verify that data survived serialization to disk (design §3.8 guardrail).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StorageMode {
     /// In-memory backend: fast, no filesystem I/O, default.
+    #[default]
     InMemory,
     /// Real SQLite on a per-test `TempDir`: full SQL + migrations + CAS.
     /// Enables `assert_reply_persists_after_reopen`.
     LibSql,
-}
-
-impl Default for StorageMode {
-    fn default() -> Self {
-        Self::InMemory
-    }
 }
 
 /// Provider id prefix used by every mock-MCP test capability and assertion.

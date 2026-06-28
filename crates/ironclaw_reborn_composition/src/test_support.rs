@@ -337,21 +337,24 @@ pub struct OAuthProductAuthTestBundle {
 
 /// Shared infrastructure preamble for OAuth product-auth test bundles.
 ///
+/// Shared in-memory product-auth infra (named to keep the helper's return type
+/// out of clippy's `type_complexity` lint — a 3-tuple of nested `Arc`s trips it).
+struct OAuthProductAuthInfra {
+    secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
+    durable: Arc<
+        crate::product_auth_durable::FilesystemAuthProductServices<
+            ironclaw_filesystem::InMemoryBackend,
+        >,
+    >,
+}
+
 /// Builds the fixed-view in-memory secrets filesystem, the secret store, and
 /// the durable `FilesystemAuthProductServices`. The two callers
 /// (`build_oauth_product_auth_for_test` and
 /// `build_google_oauth_product_auth_for_test`) differ only in the egress
 /// constructor, the `HostOAuthProviderSpec` fields, and the optional
 /// `.with_provider_client()` call.
-fn build_oauth_product_auth_infra() -> (
-    Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::InMemoryBackend>>,
-    Arc<dyn ironclaw_secrets::SecretStore>,
-    Arc<
-        crate::product_auth_durable::FilesystemAuthProductServices<
-            ironclaw_filesystem::InMemoryBackend,
-        >,
-    >,
-) {
+fn build_oauth_product_auth_infra() -> OAuthProductAuthInfra {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
     use ironclaw_secrets::InMemorySecretStore;
@@ -376,7 +379,12 @@ fn build_oauth_product_auth_infra() -> (
             Arc::clone(&secret_store),
         ),
     );
-    (scoped_fs, secret_store, durable)
+    // `scoped_fs` is intentionally not returned: `durable` holds its own
+    // `Arc` clone above, and no caller needs the filesystem handle directly.
+    OAuthProductAuthInfra {
+        secret_store,
+        durable,
+    }
 }
 
 /// Construct a self-contained [`OAuthProductAuthTestBundle`] for OAuth
@@ -394,7 +402,10 @@ fn build_oauth_product_auth_infra() -> (
 ///
 /// Calling this multiple times produces independent, isolated bundles.
 pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
-    let (_scoped_fs, secret_store, durable) = build_oauth_product_auth_infra();
+    let OAuthProductAuthInfra {
+        secret_store,
+        durable,
+    } = build_oauth_product_auth_infra();
 
     // Scripted egress: returns a valid access-token JSON body, records calls.
     let egress = Arc::new(ScriptedOAuthTokenEgress::with_access_token(
@@ -548,7 +559,10 @@ impl OAuthProductAuthTestBundle {
 /// Calling this multiple times produces independent, isolated bundles.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub fn build_google_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
-    let (_scoped_fs, secret_store, durable) = build_oauth_product_auth_infra();
+    let OAuthProductAuthInfra {
+        secret_store,
+        durable,
+    } = build_oauth_product_auth_infra();
 
     // Include a refresh_token in the scripted response so the token exchange
     // stores a refresh secret handle (needed for the keepalive sweep to call
