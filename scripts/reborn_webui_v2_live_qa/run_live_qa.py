@@ -5355,6 +5355,95 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
     return path
 
 
+TRACE_EXPORT_PATH_MARKERS = (
+    "/threads/agents/",
+    "/run-state/agents/",
+    "/checkpoint-state/agents/",
+    "/approvals/agents/",
+    "/authorization/leases/agents/",
+)
+
+
+def _decoded_trace_contents(contents: object) -> dict[str, object]:
+    if isinstance(contents, bytes):
+        text = contents.decode("utf-8", errors="replace")
+    elif isinstance(contents, str):
+        text = contents
+    else:
+        text = str(contents)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {"text": text}
+    if isinstance(parsed, dict):
+        return parsed
+    return {"value": parsed}
+
+
+def export_case_trace(output_dir: Path, case_name: str, reborn_home: Path) -> dict[str, object]:
+    trace_dir = output_dir / "traces"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    trace_path = trace_dir / f"{case_name}.json"
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    payload: dict[str, object] = {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "case": case_name,
+        "reborn_home": str(reborn_home),
+        "entries": [],
+    }
+    if not db_path.exists():
+        payload["error"] = f"Reborn local-dev database not found at {db_path}"
+        trace_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        return {"case": case_name, "path": str(trace_path), "entry_count": 0}
+
+    where = " OR ".join("path LIKE ?" for _ in TRACE_EXPORT_PATH_MARKERS)
+    params = [f"%{marker}%" for marker in TRACE_EXPORT_PATH_MARKERS]
+    try:
+        with sqlite3.connect(db_path) as db:
+            rows = db.execute(
+                f"""
+                SELECT path, contents, content_type, kind, updated_at, version
+                FROM root_filesystem_entries
+                WHERE is_dir = 0
+                  AND content_type = 'application/json'
+                  AND ({where})
+                ORDER BY path
+                LIMIT 2000
+                """,
+                params,
+            ).fetchall()
+    except sqlite3.Error as exc:
+        payload["error"] = f"failed to export Reborn trace from {db_path}: {exc}"
+        trace_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        return {"case": case_name, "path": str(trace_path), "entry_count": 0}
+
+    entries = [
+        {
+            "path": path,
+            "content_type": content_type,
+            "kind": kind,
+            "updated_at": updated_at,
+            "version": version,
+            "contents": _decoded_trace_contents(contents),
+        }
+        for path, contents, content_type, kind, updated_at, version in rows
+    ]
+    payload["entries"] = entries
+    trace_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return {"case": case_name, "path": str(trace_path), "entry_count": len(entries)}
+
+
+def write_trace_index(output_dir: Path, traces: list[dict[str, object]]) -> Path:
+    path = output_dir / "traces" / "index.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "traces": traces,
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def write_preflight(output_dir: Path, prepared_home: PreparedRebornHome) -> Path:
     payload = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -5383,6 +5472,7 @@ async def run_cases(args: argparse.Namespace) -> int:
             f"ironclaw-reborn binary missing at {binary}; rerun without --skip-build"
         )
     results: list[ProbeResult] = []
+    trace_exports: list[dict[str, object]] = []
     first_base_url = ""
     for name in selected_cases:
         case_spec = CASES[name]
@@ -5601,8 +5691,17 @@ async def run_cases(args: argparse.Namespace) -> int:
             )
         finally:
             stop_process(proc)
+            trace_export = export_case_trace(args.output_dir, name, prepared_home.path)
+            trace_exports.append(trace_export)
+            print(
+                f"[reborn-webui-v2-live-qa] trace={trace_export['path']} "
+                f"entries={trace_export['entry_count']}",
+                flush=True,
+            )
     results_path = write_results(args.output_dir, results, first_base_url)
+    trace_index_path = write_trace_index(args.output_dir, trace_exports)
     print(f"[reborn-webui-v2-live-qa] results={results_path}", flush=True)
+    print(f"[reborn-webui-v2-live-qa] trace_index={trace_index_path}", flush=True)
     return 0 if all(result.success for result in results) else 1
 
 

@@ -762,11 +762,14 @@ fn encode_plain_text_gmail_message(message: &Value) -> Result<String, GsuiteDisp
     let cc = optional_recipient_header(message, "cc")?;
     let bcc = optional_recipient_header(message, "bcc")?;
     let from = optional_header_value(message, "from")?;
-    let subject = required_header_value(message, "subject")?;
     let body = required_str(message, "body")?;
     if body.is_empty() {
         return Err(input_error());
     }
+    let subject = optional_header_value(message, "subject")?
+        .map(ToString::to_string)
+        .map(Ok)
+        .unwrap_or_else(|| inferred_subject_from_body(body))?;
 
     let mut rfc822 = String::new();
     if let Some(from) = from {
@@ -779,7 +782,7 @@ fn encode_plain_text_gmail_message(message: &Value) -> Result<String, GsuiteDisp
     if let Some(bcc) = bcc {
         push_mail_header(&mut rfc822, "Bcc", &bcc);
     }
-    push_mail_header(&mut rfc822, "Subject", subject);
+    push_mail_header(&mut rfc822, "Subject", &subject);
     rfc822.push_str("MIME-Version: 1.0\r\n");
     rfc822.push_str("Content-Type: text/plain; charset=UTF-8\r\n");
     rfc822.push_str("Content-Transfer-Encoding: 8bit\r\n");
@@ -787,6 +790,20 @@ fn encode_plain_text_gmail_message(message: &Value) -> Result<String, GsuiteDisp
     rfc822.push_str(body);
 
     Ok(URL_SAFE_NO_PAD.encode(rfc822.as_bytes()))
+}
+
+fn inferred_subject_from_body(body: &str) -> Result<String, GsuiteDispatchError> {
+    let mut subject = body
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .find(|line| !line.is_empty())
+        .unwrap_or_else(|| "No subject".to_string());
+    if subject.chars().count() > 120 {
+        subject = subject.chars().take(117).collect::<String>();
+        subject.push_str("...");
+    }
+    validate_header_value(&subject)?;
+    Ok(subject)
 }
 
 fn push_mail_header(message: &mut String, name: &str, value: &str) {
@@ -1018,11 +1035,6 @@ fn optional_str<'a>(input: &'a Value, key: &str) -> Result<Option<&'a str>, Gsui
         .get(key)
         .map(|value| value.as_str().ok_or_else(input_error))
         .transpose()
-}
-
-fn required_header_value<'a>(input: &'a Value, key: &str) -> Result<&'a str, GsuiteDispatchError> {
-    let value = required_str(input, key)?;
-    validate_header_value(value)
 }
 
 fn optional_header_value<'a>(

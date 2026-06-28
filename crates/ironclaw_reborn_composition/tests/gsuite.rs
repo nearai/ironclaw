@@ -212,7 +212,7 @@ async fn bundled_gsuite_input_schemas_reject_reviewed_shape_regressions() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|shape| shape["required"] == serde_json::json!(["to", "subject", "body"])),
+            .any(|shape| shape["required"] == serde_json::json!(["to", "body"])),
         "send_message schema must advertise structured email input"
     );
 }

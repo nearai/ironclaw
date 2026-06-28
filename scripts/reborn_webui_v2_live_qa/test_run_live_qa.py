@@ -1112,6 +1112,52 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
         )
 
+    def test_export_case_trace_writes_runtime_entries_without_secret_store(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            home = root / "reborn-home"
+            db_path = home / "local-dev" / "reborn-local-dev.db"
+            output_dir = root / "out"
+            run_live_qa._root_filesystem_create_table(db_path)
+            message_path = (
+                "/tenants/reborn-cli/users/test/threads/agents/reborn-cli-agent/"
+                "owners/test/threads/thread-1/messages/message-1.json"
+            )
+            tool_index_path = (
+                "/tenants/reborn-cli/users/test/threads/agents/reborn-cli-agent/"
+                "owners/test/threads/thread-1/indexes/tool-results/tool-result-1.json"
+            )
+            secret_path = (
+                "/tenants/reborn-cli/users/test/secrets/agents/reborn-cli-agent/"
+                "secrets/access-token.json"
+            )
+            run_live_qa._put_root_filesystem_json(
+                db_path,
+                message_path,
+                {"kind": "user", "content": "hello live trace"},
+            )
+            run_live_qa._put_root_filesystem_json(
+                db_path,
+                tool_index_path,
+                {"target": "tool-result-1"},
+            )
+            run_live_qa._put_root_filesystem_json(
+                db_path,
+                secret_path,
+                {"access_token": "should-not-be-exported"},
+            )
+
+            trace = run_live_qa.export_case_trace(output_dir, "case_a", home)
+
+            self.assertEqual(trace["entry_count"], 2)
+            payload = json.loads(
+                (output_dir / "traces" / "case_a.json").read_text(encoding="utf-8")
+            )
+            paths = [entry["path"] for entry in payload["entries"]]
+            self.assertEqual(paths, [tool_index_path, message_path])
+            self.assertNotIn(secret_path, paths)
+            self.assertEqual(payload["entries"][1]["contents"]["content"], "hello live trace")
+
     def test_run_cases_isolates_reborn_home_and_preflight_per_selected_case(self):
         async def fake_case(ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:
             return run_live_qa.ProbeResult(
@@ -1181,6 +1227,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
             self.assertEqual(case_a_preflight["reborn_home"], str(case_a_home))
             self.assertEqual(case_b_preflight["reborn_home"], str(case_b_home))
+            self.assertTrue((output_dir / "traces" / "case_a.json").exists())
+            self.assertTrue((output_dir / "traces" / "case_b.json").exists())
+            self.assertTrue((output_dir / "traces" / "index.json").exists())
 
 
 if __name__ == "__main__":
