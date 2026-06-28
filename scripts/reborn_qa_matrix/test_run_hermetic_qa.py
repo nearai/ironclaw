@@ -35,6 +35,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
         selected = run_hermetic_qa._selected_case_names(args)
 
         self.assertIn("openai_responses_api_workflow_regression", selected)
+        self.assertIn("openai_responses_external_tools_e2e_regression", selected)
         self.assertIn("openai_chat_completions_workflow_regression", selected)
         self.assertIn("webui_v2_chat_client_regression", selected)
         self.assertIn("webui_v2_workspace_project_client_regression", selected)
@@ -87,6 +88,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             )
             case_names = {case["case"] for case in manifest["cases"]}
             self.assertIn("openai_responses_api_workflow_regression", case_names)
+            self.assertIn("openai_responses_external_tools_e2e_regression", case_names)
             self.assertIn("webui_v2_chat_client_regression", case_names)
             self.assertNotIn("support_substrate_product_workflow_regression", case_names)
             self.assertNotIn("webui_v2_route_contract_regression", case_names)
@@ -140,6 +142,51 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             for command in commands:
                 self.assertTrue(Path(command["stdout_log"]).exists())
                 self.assertTrue(Path(command["stderr_log"]).exists())
+
+    def test_responses_external_tools_e2e_dry_run_writes_results_and_logs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            exit_code = run_hermetic_qa.main(
+                [
+                    "--output-dir",
+                    str(output_dir),
+                    "--case",
+                    "openai_responses_external_tools_e2e_regression",
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            results = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(results["success"])
+            self.assertEqual(
+                results["results"][0]["details"]["qa_matrix_test_ids"],
+                [
+                    "REBCLI-100-TC-01",
+                    "REBCLI-100-TC-02",
+                    "REBCLI-100-TC-03",
+                    "REBCLI-100-TC-04",
+                    "REBCLI-100-TC-05",
+                    "REBCLI-100-TC-06",
+                ],
+            )
+            commands = results["results"][0]["details"]["commands"]
+            self.assertEqual(
+                [command["name"] for command in commands],
+                ["openai_responses_external_tools_served_e2e"],
+            )
+            self.assertIn(
+                "test_reborn_responses_repeated_external_tools_round_trip",
+                commands[0]["command"],
+            )
+            self.assertIn(
+                "test_reborn_responses_rejects_wrong_external_tool_call_id",
+                commands[0]["command"],
+            )
+            self.assertTrue(Path(commands[0]["stdout_log"]).exists())
+            self.assertTrue(Path(commands[0]["stderr_log"]).exists())
 
     def test_webui_mixed_case_prunes_ci_owned_browser_duplicate(self):
         case = run_hermetic_qa.CASES["webui_v2_workspace_project_client_regression"]

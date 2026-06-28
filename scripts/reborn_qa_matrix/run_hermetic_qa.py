@@ -375,6 +375,40 @@ OPENAI_RESPONSES_STREAMING_COMMAND = CommandSpec(
     ],
 )
 
+OPENAI_RESPONSES_EXTERNAL_TOOLS_E2E_COMMAND = CommandSpec(
+    name="openai_responses_external_tools_served_e2e",
+    description=(
+        "Served ironclaw-reborn ResponsesAPI e2e coverage for client-supplied "
+        "external function tools: multi-step function_call round trips, "
+        "failure outputs reaching the model, wrong call_id rejection, and "
+        "mixed built-in plus external tool exposure."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_repeated_external_tools_round_trip",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_external_tool_failure_output_reaches_llm",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_rejects_wrong_external_tool_call_id",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_mixed_internal_and_external_tools_same_assistant_response",
+        "-q",
+    ],
+)
+
 OPENAI_CHAT_WORKFLOW_COMMAND = CommandSpec(
     name="openai_chat_workflow_handlers_contract",
     description=(
@@ -3987,6 +4021,28 @@ CASES: dict[str, CaseSpec] = {
             "invalid input, unsupported fields, wait timeout, cross-scope "
             "not-found shape, stream=true SSE terminal/error behavior, and "
             "sanitized ProductWorkflow errors."
+        ),
+    ),
+    "openai_responses_external_tools_e2e_regression": CaseSpec(
+        name="openai_responses_external_tools_e2e_regression",
+        feature="OpenAI-compatible Responses external function tools",
+        category="Served Reborn ResponsesAPI E2E",
+        qa_matrix_test_ids=[
+            "REBCLI-100-TC-01",
+            "REBCLI-100-TC-02",
+            "REBCLI-100-TC-03",
+            "REBCLI-100-TC-04",
+            "REBCLI-100-TC-05",
+            "REBCLI-100-TC-06",
+        ],
+        commands=[OPENAI_RESPONSES_EXTERNAL_TOOLS_E2E_COMMAND],
+        notes=(
+            "Caller-facing ResponsesAPI coverage through a served "
+            "ironclaw-reborn instance. This is not CI-owned contract coverage "
+            "and does not duplicate PR #5348 browser workflows: it verifies "
+            "client-declared external function tools, function_call_output "
+            "continuations, validation, and model-visible tool-output "
+            "transcript behavior."
         ),
     ),
     "openai_chat_completions_workflow_regression": CaseSpec(
