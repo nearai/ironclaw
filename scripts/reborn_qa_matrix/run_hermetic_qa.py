@@ -676,6 +676,38 @@ OPENAI_COMPAT_ALL_FEATURE_COMPOSITION_COMMAND = CommandSpec(
     ],
 )
 
+OPENAI_COMPAT_ROUTE_MOUNT_SERVED_E2E_COMMAND = CommandSpec(
+    name="openai_compat_route_mount_served_e2e",
+    description=(
+        "Served ironclaw-reborn OpenAI-compatible route mount coverage for "
+        "the /v1/chat/completions, /v1/models, /api/v1/models, "
+        "/v1/responses, and /api/v1/responses route families, including "
+        "bearer gating and authenticated alias behavior."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_openai_compat_route_mounts_require_bearer_served",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_openai_compat_route_mounts_authenticated_aliases_served",
+        "-q",
+    ],
+)
+
 REBORN_COMPOSITION_ALL_FEATURE_COMMAND = CommandSpec(
     name="reborn_composition_all_feature_contracts",
     description=(
@@ -4113,7 +4145,7 @@ CASES: dict[str, CaseSpec] = {
     "openai_compat_beta_routes_regression": CaseSpec(
         name="openai_compat_beta_routes_regression",
         feature="OpenAI-Compatible Beta Routes",
-        category="Hermetic WebUI v2/OpenAI-Compatible Route Mount Regression",
+        category="Served OpenAI-Compatible Route Mount E2E",
         qa_matrix_test_ids=[
             "REBCLI-039-TC-01",
             "REBCLI-039-TC-02",
@@ -4124,16 +4156,13 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-039-TC-07",
             "REBCLI-039-TC-08",
         ],
-        commands=[
-            OPENAI_COMPAT_ROUTE_MOUNT_COMMAND,
-            OPENAI_COMPAT_ALL_FEATURE_COMPOSITION_COMMAND,
-        ],
+        commands=[OPENAI_COMPAT_ROUTE_MOUNT_SERVED_E2E_COMMAND],
         notes=(
-            "Hermetic coverage for the Reborn serve/composition boundary that "
-            "PR #5348's browser canary work does not own: OpenAI-compatible "
-            "protected route mounts, WebUI bearer-auth gating, ProductWorkflow "
-            "submission/readback, feature-gated all-feature composition, and "
-            "shared turn-admission behavior without live OpenAI traffic."
+            "Runs served OpenAI-compatible route-mount coverage through a "
+            "real ironclaw-reborn process for bearer gating across the chat, "
+            "models, and Responses route families plus authenticated v1/api "
+            "alias behavior. Rust composition/all-feature contracts stay in "
+            "normal CI instead of this QA lane."
         ),
     ),
     "openai_compat_owner_crate_regression": CaseSpec(
