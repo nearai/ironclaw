@@ -715,7 +715,7 @@ impl RootFilesystem for FailingConversationStateFilesystem {
 
 #[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
 pub(crate) async fn local_runtime_with_failing_trigger_conversations_for_test()
--> Arc<RebornLocalRuntimeServices> {
+-> (Arc<RebornLocalRuntimeServices>, tempfile::TempDir) {
     let local_dev_root = tempfile::tempdir().expect("tempdir");
     let owner_user_id = "pairing-owner";
     let services = build_reborn_services(RebornBuildInput::local_dev(
@@ -742,7 +742,7 @@ pub(crate) async fn local_runtime_with_failing_trigger_conversations_for_test()
             Arc::new(FailingConversationStateFilesystem),
         )
         .expect("mount failing backend");
-    Arc::new(RebornLocalRuntimeServices {
+    let runtime = Arc::new(RebornLocalRuntimeServices {
         extension_lifecycle_surface_context: base_runtime
             .extension_lifecycle_surface_context
             .clone(),
@@ -810,7 +810,8 @@ pub(crate) async fn local_runtime_with_failing_trigger_conversations_for_test()
         audit_log: Arc::clone(&base_runtime.audit_log),
         extension_registry: Arc::clone(&base_runtime.extension_registry),
         shared_extension_registry: base_runtime.shared_extension_registry.clone(),
-    })
+    });
+    (runtime, local_dev_root)
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -4284,7 +4285,8 @@ mod tests {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[tokio::test]
     async fn durable_trigger_conversation_services_propagates_init_error() {
-        let runtime = local_runtime_with_failing_trigger_conversations_for_test().await;
+        let (runtime, _local_dev_root) =
+            local_runtime_with_failing_trigger_conversations_for_test().await;
 
         let error = match runtime.durable_trigger_conversation_services().await {
             Ok(_) => panic!("conversation service init should fail"),
@@ -4300,9 +4302,9 @@ mod tests {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[tokio::test]
     async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backend() {
-        let hook = LocalRuntimeTriggerCreatorPairingHook {
-            runtime: local_runtime_with_failing_trigger_conversations_for_test().await,
-        };
+        let (runtime, _local_dev_root) =
+            local_runtime_with_failing_trigger_conversations_for_test().await;
+        let hook = LocalRuntimeTriggerCreatorPairingHook { runtime };
         let record = trigger_record_for_pairing_test();
 
         let error = hook

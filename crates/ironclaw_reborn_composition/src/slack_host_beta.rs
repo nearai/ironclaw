@@ -1394,9 +1394,9 @@ mod tests {
     #[tokio::test]
     async fn build_slack_events_route_mount_fails_when_conversation_services_unavailable() {
         let (mut runtime, _root) = runtime().await;
-        runtime.replace_local_runtime_for_test(
-            crate::factory::local_runtime_with_failing_trigger_conversations_for_test().await,
-        );
+        let (failing_local_runtime, _local_dev_root) =
+            crate::factory::local_runtime_with_failing_trigger_conversations_for_test().await;
+        runtime.replace_local_runtime_for_test(failing_local_runtime);
 
         let error = match build_slack_events_route_mount(&runtime, config()).await {
             Ok(_) => panic!("Slack route requires durable conversation services"),
