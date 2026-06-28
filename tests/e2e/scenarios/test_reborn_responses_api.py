@@ -397,6 +397,41 @@ async def test_reborn_responses_lookup_and_cancel_missing_id_match_not_found_sha
     assert retrieve.json() == cancel.json()
 
 
+async def test_reborn_models_v1_lists_configured_mock_model(reborn_responses_client):
+    response = await reborn_responses_client.get("/v1/models")
+    assert response.status_code == 200, response.text
+
+    body = response.json()
+    assert body["object"] == "list"
+    models = body["data"]
+    assert models
+
+    mock_model = next(model for model in models if model["id"] == "mock-model")
+    assert mock_model["object"] == "model"
+    assert mock_model["owned_by"] == "openai"
+    assert isinstance(mock_model["created"], int)
+
+
+async def test_reborn_models_api_v1_alias_matches_v1_models(reborn_responses_client):
+    v1 = await reborn_responses_client.get("/v1/models")
+    api_v1 = await reborn_responses_client.get("/api/v1/models")
+
+    assert v1.status_code == 200, v1.text
+    assert api_v1.status_code == 200, api_v1.text
+    assert [model["id"] for model in api_v1.json()["data"]] == [
+        model["id"] for model in v1.json()["data"]
+    ]
+
+
+async def test_reborn_models_requires_auth(reborn_responses_server):
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(f"{reborn_responses_server}/v1/models")
+        alias = await client.get(f"{reborn_responses_server}/api/v1/models")
+
+    assert response.status_code == 401
+    assert alias.status_code == 401
+
+
 async def test_reborn_responses_repeated_external_tools_round_trip(
     reborn_responses_client, mock_llm_server
 ):

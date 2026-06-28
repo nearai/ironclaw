@@ -36,6 +36,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
 
         self.assertIn("openai_responses_api_workflow_regression", selected)
         self.assertIn("openai_responses_external_tools_e2e_regression", selected)
+        self.assertIn("openai_models_list_api_regression", selected)
         self.assertIn("webui_v2_session_thread_message_api_regression", selected)
         self.assertIn("webui_v2_chat_client_regression", selected)
         self.assertIn("webui_v2_workspace_project_client_regression", selected)
@@ -79,19 +80,19 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             [],
         )
 
-    def test_default_executable_lane_has_no_package_level_cargo_contracts(self):
+    def test_default_executable_lane_has_no_cargo_test_commands(self):
         parser = run_hermetic_qa.build_parser()
         args = parser.parse_args([])
         selected = run_hermetic_qa._selected_case_names(args)
 
-        cargo_contracts = [
+        cargo_tests = [
             command.name
             for name in selected
             for command in run_hermetic_qa._commands_for_case(run_hermetic_qa.CASES[name])
-            if command.argv[:2] == ["cargo", "test"] and "-p" in command.argv
+            if command.argv[:2] == ["cargo", "test"]
         ]
 
-        self.assertEqual(cargo_contracts, [])
+        self.assertEqual(cargo_tests, [])
 
     def test_session_thread_message_case_executes_only_served_e2e_command(self):
         parser = run_hermetic_qa.build_parser()
@@ -105,6 +106,24 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
         self.assertEqual(
             [command.name for command in run_hermetic_qa._commands_for_case(case)],
             ["webui_v2_session_thread_message_served_e2e"],
+        )
+        self.assertEqual(
+            [command["name"] for command in run_hermetic_qa._removed_existing_ci_commands(case)],
+            [],
+        )
+
+    def test_models_case_executes_only_served_e2e_command(self):
+        parser = run_hermetic_qa.build_parser()
+        args = parser.parse_args(["--case", "openai_models_list_api_regression"])
+
+        self.assertEqual(
+            run_hermetic_qa._selected_case_names(args),
+            ["openai_models_list_api_regression"],
+        )
+        case = run_hermetic_qa.CASES["openai_models_list_api_regression"]
+        self.assertEqual(
+            [command.name for command in run_hermetic_qa._commands_for_case(case)],
+            ["openai_models_served_e2e"],
         )
         self.assertEqual(
             [command["name"] for command in run_hermetic_qa._removed_existing_ci_commands(case)],

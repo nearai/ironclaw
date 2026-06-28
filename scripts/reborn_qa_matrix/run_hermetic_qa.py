@@ -67,6 +67,11 @@ CI_OWNED_PACKAGE_TEST_COVERAGE = (
     "cargo test -p <package> --all-targets contract coverage"
 )
 
+CI_OWNED_CARGO_TEST_COVERAGE = (
+    "already covered by normal Reborn CI cargo test lanes; this QA runner "
+    "does not execute Rust contract suites"
+)
+
 
 @dataclass(frozen=True)
 class CommandSpec:
@@ -554,6 +559,38 @@ OPENAI_MODELS_HOST_CATALOG_COMMAND = CommandSpec(
         "--",
         "--format",
         "terse",
+    ],
+)
+
+OPENAI_MODELS_SERVED_E2E_COMMAND = CommandSpec(
+    name="openai_models_served_e2e",
+    description=(
+        "Served ironclaw-reborn Models API e2e coverage for /v1/models, "
+        "the /api/v1/models alias, configured model projection, and auth "
+        "rejection before model catalog access."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_models_v1_lists_configured_mock_model",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_models_api_v1_alias_matches_v1_models",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_models_requires_auth",
+        "-q",
     ],
 )
 
@@ -4080,7 +4117,7 @@ CASES: dict[str, CaseSpec] = {
     "openai_responses_api_workflow_regression": CaseSpec(
         name="openai_responses_api_workflow_regression",
         feature="OpenAI-compatible Responses create, retrieve, and cancel APIs",
-        category="Hermetic Responses API Handler Contract",
+        category="Served Responses API E2E",
         qa_matrix_test_ids=[
             "REBCLI-057-TC-01",
             "REBCLI-057-TC-02",
@@ -4150,7 +4187,7 @@ CASES: dict[str, CaseSpec] = {
     "openai_models_list_api_regression": CaseSpec(
         name="openai_models_list_api_regression",
         feature="OpenAI-compatible Models API",
-        category="Hermetic Models API Handler Contract",
+        category="Served OpenAI-compatible Models API E2E",
         qa_matrix_test_ids=[
             "REBCLI-099-TC-01",
             "REBCLI-099-TC-02",
@@ -4159,14 +4196,12 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-099-TC-05",
             "REBCLI-099-TC-06",
         ],
-        commands=[OPENAI_MODELS_LIST_COMMAND, OPENAI_MODELS_HOST_CATALOG_COMMAND],
+        commands=[OPENAI_MODELS_SERVED_E2E_COMMAND],
         notes=(
-            "Focused Models API contract coverage for the discovered /v1/models "
-            "and /api/v1/models OpenAI-compatible feature: descriptor metadata, "
-            "authenticated model-list projection, auth-before-catalog rejection, "
-            "fail-closed 501 behavior when the host does not wire a catalog, "
-            "empty-catalog envelope handling, and host LLM-config catalog "
-            "ordering/de-duplication."
+            "Runs served OpenAI-compatible Models API coverage through a real "
+            "ironclaw-reborn process for /v1/models, the /api/v1/models alias, "
+            "configured model projection, and auth rejection. Rust route and "
+            "host-catalog contracts stay in normal CI instead of this QA lane."
         ),
     ),
     "support_substrate_product_workflow_regression": CaseSpec(
@@ -4374,7 +4409,7 @@ CASES: dict[str, CaseSpec] = {
     "webui_v2_chat_client_regression": CaseSpec(
         name="webui_v2_chat_client_regression",
         feature="WebUI v2 chat screen and gate UX",
-        category="Hermetic Chat Client Contract Regression",
+        category="Hermetic Chat Static Client Regression",
         qa_matrix_test_ids=[
             "REBCLI-065-TC-01",
             "REBCLI-065-TC-02",
@@ -4388,7 +4423,7 @@ CASES: dict[str, CaseSpec] = {
         commands=[WEBUI_V2_CHAT_CLIENT_COMMAND],
         notes=(
             "Covers the six generated WebUI v2 chat/gate UX rows at the "
-            "static client contract layer without re-porting PR #5348 browser "
+            "static client layer without re-porting PR #5348 browser "
             "legacy Playwright scenarios: send/retry state, pending-message "
             "reconciliation, approvals, auth gates, SSE timeline projection, "
             "history merge, markdown/readability, attachment staging, message "
@@ -4400,7 +4435,7 @@ CASES: dict[str, CaseSpec] = {
     "webui_v2_workspace_project_client_regression": CaseSpec(
         name="webui_v2_workspace_project_client_regression",
         feature="WebUI v2 workspace and project browser screens",
-        category="Hermetic Workspace/Project Client Contract Regression",
+        category="Hermetic Workspace/Project Static Client Regression",
         qa_matrix_test_ids=[
             "REBCLI-066-TC-01",
             "REBCLI-066-TC-02",
@@ -4425,7 +4460,7 @@ CASES: dict[str, CaseSpec] = {
         ],
         notes=(
             "Covers the generated WebUI v2 workspace/project rows at the "
-            "static client contract layer plus a Reborn WebUI v2 browser "
+            "static client layer plus a Reborn WebUI v2 browser "
             "projects overview/detail smoke and workspace preview smoke: "
             "root mount browsing, mount-qualified "
             "directory entries, mount-root directory handling, bounded text "
@@ -4443,7 +4478,7 @@ CASES: dict[str, CaseSpec] = {
     "webui_v2_automations_client_regression": CaseSpec(
         name="webui_v2_automations_client_regression",
         feature="WebUI v2 automations and outbound delivery defaults screen",
-        category="Hermetic Automations Client Contract Regression",
+        category="Hermetic Automations Static Client Regression",
         qa_matrix_test_ids=[
             "REBCLI-067-TC-01",
             "REBCLI-067-TC-02",
@@ -4473,7 +4508,7 @@ CASES: dict[str, CaseSpec] = {
     "webui_v2_extensions_client_regression": CaseSpec(
         name="webui_v2_extensions_client_regression",
         feature="WebUI v2 extensions and channel pairing screens",
-        category="Hermetic Extensions Client Contract Regression",
+        category="Hermetic Extensions Static Client Regression",
         qa_matrix_test_ids=[
             "REBCLI-068-TC-01",
             "REBCLI-068-TC-02",
@@ -4563,7 +4598,7 @@ CASES: dict[str, CaseSpec] = {
     "webui_v2_slack_pairing_ui_regression": CaseSpec(
         name="webui_v2_slack_pairing_ui_regression",
         feature="WebUI v2 Slack proof-code pairing UI",
-        category="Hermetic Slack Pairing UI Contract Regression",
+        category="Hermetic Slack Pairing Static UI Regression",
         qa_matrix_test_ids=[
             "REBCLI-091-TC-01",
             "REBCLI-091-TC-02",
@@ -4596,7 +4631,7 @@ CASES: dict[str, CaseSpec] = {
     "webui_v2_settings_onboarding_client_regression": CaseSpec(
         name="webui_v2_settings_onboarding_client_regression",
         feature="WebUI v2 provider settings and onboarding screens",
-        category="Hermetic Settings/Onboarding Client Contract Regression",
+        category="Hermetic Settings/Onboarding Static Client Regression",
         qa_matrix_test_ids=[
             "REBCLI-069-TC-01",
             "REBCLI-069-TC-02",
@@ -4629,7 +4664,7 @@ CASES: dict[str, CaseSpec] = {
     "webui_v2_hidden_stubbed_routes_regression": CaseSpec(
         name="webui_v2_hidden_stubbed_routes_regression",
         feature="WebUI v2 hidden and stubbed direct routes",
-        category="Hermetic Hidden/Stubbed Route Contract Regression",
+        category="Hermetic Hidden/Stubbed Static Route Regression",
         qa_matrix_test_ids=[
             "REBCLI-070-TC-01",
             "REBCLI-070-TC-02",
@@ -5794,10 +5829,12 @@ def _command_ci_coverage(command: CommandSpec) -> str | None:
         return CI_OWNED_CONTRACT_COVERAGE
 
     rendered = render_command(command)
-    if command.argv[:2] == ["cargo", "test"] and "-p" in command.argv:
-        package = command.argv[command.argv.index("-p") + 1]
-        if package.startswith("ironclaw_"):
-            return CI_OWNED_PACKAGE_TEST_COVERAGE
+    if command.argv[:2] == ["cargo", "test"]:
+        if "-p" in command.argv:
+            package = command.argv[command.argv.index("-p") + 1]
+            if package.startswith("ironclaw_"):
+                return CI_OWNED_PACKAGE_TEST_COVERAGE
+        return CI_OWNED_CARGO_TEST_COVERAGE
 
     if "scripts/reborn-e2e-rust.sh" in rendered:
         return "already covered by .github/workflows/reborn-e2e.yml Rust Reborn matrix"
