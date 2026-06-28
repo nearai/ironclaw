@@ -14,6 +14,13 @@
 //! non-breaking addition (the builder defaults to InMemory directly today rather
 //! than introducing a one-variant enum).
 
+// Shared integration-test support: not every binary that mounts the
+// `reborn_support` tree consumes this module — `support_unit_tests.rs` mounts
+// the tree to run the support unit tests but exercises none of the slice-1/2
+// integration harness, so its symbols read as dead there under `-D warnings`.
+// Module-level allow matches `assertions.rs`/`test_channel.rs`/`live_mission_helpers.rs`.
+#![allow(dead_code)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -202,6 +209,15 @@ impl RebornIntegrationHarnessBuilder {
             ));
 
         // --- planned runtime composition ------------------------------------
+        // NOTE: this `DefaultPlannedRuntimeParts` literal overlaps the one in
+        // `RebornBinaryE2EHarness` — but the two harnesses differ in three places
+        // (model_gateway, loop_exit_evidence type, identity source) plus their
+        // upstream binding/thread-scope/storage wiring, so the shared core is
+        // mostly the 23 default `None` extension-point fields below. Extracting a
+        // shared builder now would be a 20+-param bag over a struct that already
+        // is the container. Deliberately kept duplicated; extract into a shared
+        // `build_harness_planned_runtime(...)` when a THIRD harness copies this,
+        // or when these fields start diverging between the two harnesses.
         let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
         let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
             turn_state: turn_state_for_runtime,

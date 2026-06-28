@@ -4,6 +4,12 @@
 //! line per model turn. Raw `TraceStep`/`LlmTrace`/`TraceResponse` construction
 //! is forbidden in new Reborn integration tests (design §4.2) — use this.
 
+// Shared integration-test support: `support_unit_tests.rs` mounts the
+// `reborn_support` tree without consuming this module, so its symbols read as
+// dead there under `-D warnings`. Module-level allow matches the sibling
+// support modules (`assertions.rs`, `test_channel.rs`).
+#![allow(dead_code)]
+
 use crate::support::trace_llm::{TraceResponse, TraceStep, TraceToolCall};
 use std::sync::atomic::{AtomicU64, Ordering};
 

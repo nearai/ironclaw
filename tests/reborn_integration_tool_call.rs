@@ -61,3 +61,66 @@ async fn assertions_fail_when_tool_did_not_run() {
             .is_err()
     );
 }
+
+/// Proves the assertion helpers discriminate when the invocation + egress lists
+/// are NON-empty: a real `builtin.http` call runs, but assertions for a
+/// *different* capability / host must return `Err` — exercising the
+/// "present but no match" branch, not the empty-list branch (builder.rs:331).
+#[tokio::test]
+async fn assertions_fail_when_tool_present_but_requested_tool_or_url_does_not_match() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .script([
+            RebornScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("fetch items").await.expect("turn completes");
+    // Non-empty invocation list — wrong capability id must fail.
+    assert!(
+        h.assert_tool_invoked("some.other.capability")
+            .await
+            .is_err()
+    );
+    // Non-empty egress list — non-matching host substring must fail.
+    assert!(
+        h.assert_egress_request_matching("nonmatching.host.test")
+            .await
+            .is_err()
+    );
+}
+
+/// Proves the multi-segment `builtin.http.save` capability id — whose
+/// `.`→`__` encoding produces `builtin__http__save` at the provider seam
+/// (reply.rs:33) — resolves end-to-end through the real runtime.
+///
+/// Args: `url` (same constant the existing test uses) + `save_to` under the
+/// `/workspace` mount that `core_builtin_tools` provides with read-write
+/// permissions. The recording egress returns a fixed `{"accepted":true}` body;
+/// no network is touched.
+#[tokio::test]
+async fn runs_http_save_tool_call_through_recorded_egress() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.http.save",
+                json!({"url": HTTP_TOOL_URL, "save_to": "/workspace/response.json"}),
+            ),
+            RebornScriptedReply::text("saved"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    h.submit_turn("fetch and save")
+        .await
+        .expect("turn completes");
+    h.assert_tool_invoked("builtin.http.save")
+        .await
+        .expect("http.save tool ran");
+    h.assert_reply_contains("saved")
+        .await
+        .expect("final reply finalized");
+}
