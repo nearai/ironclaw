@@ -77,7 +77,6 @@ registerPack("pt-BR", {
 
   // Chat — input
   "chat.placeholder": "Mensagem para o IronClaw...",
-  "chat.composerLabel": "Mensagem para o IronClaw",
   "chat.heroPlaceholder": "Pergunte qualquer coisa ao IronClaw.",
   "chat.followUpPlaceholder": "Peca alteracoes de acompanhamento",
   "chat.send": "Enviar mensagem",

@@ -3,9 +3,10 @@
 
 This lane executes QA matrix rows that are not already covered by the normal
 Reborn CI contract and frontend suites. Existing Rust contracts, static JS
-contracts, and build/setup checks belong in CI and in the workbook's
-external-existing evidence; the executable lane is for ResponsesAPI served
-checks plus WebUI v2 served API and browser-facing behavior.
+contracts, browser workflows, and build/setup checks belong in CI/external
+Playwright coverage and in the workbook's external-existing evidence; the
+executable lane is for ResponsesAPI served checks plus WebUI v2 served API
+behavior.
 """
 
 from __future__ import annotations
@@ -106,7 +107,13 @@ CI_OWNED_CARGO_TEST_COVERAGE = (
 CI_OWNED_WEBUI_JS_COVERAGE = (
     "already covered by .github/workflows/reborn-tests.yml Reborn WebUI v2 JS "
     "tests or frontend static checks; keep the QA matrix runner focused on "
-    "served ResponsesAPI and WebUI v2 browser/API coverage"
+    "served ResponsesAPI and WebUI v2 API coverage"
+)
+
+EXTERNAL_WEBUI_BROWSER_COVERAGE = (
+    "already covered by external WebUI v2 Playwright browser coverage "
+    "(nearai/ironclaw#5348 and split follow-up browser PRs); keep this QA "
+    "branch focused on served ResponsesAPI and WebUI v2 API coverage"
 )
 
 CI_OWNED_WEBUI_BUILD_SETUP_COVERAGE = (
@@ -6205,6 +6212,8 @@ def _command_ci_coverage(command: CommandSpec) -> str | None:
         return CI_OWNED_WEBUI_JS_COVERAGE
     if command.name == "webui_v2_frontend_supply_chain_build":
         return CI_OWNED_WEBUI_JS_COVERAGE
+    if command.name.endswith("_browser_smoke"):
+        return EXTERNAL_WEBUI_BROWSER_COVERAGE
     return None
 
 

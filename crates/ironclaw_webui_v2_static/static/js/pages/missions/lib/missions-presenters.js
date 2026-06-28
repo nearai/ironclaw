@@ -1,8 +1,6 @@
 export function formatMissionDate(iso, options = {}) {
   if (!iso) return "Not scheduled";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "Not scheduled";
-  return date.toLocaleString([], {
+  return new Date(iso).toLocaleString([], {
     month: "short",
     day: "numeric",
     hour: "2-digit",
@@ -45,8 +43,6 @@ export function sortMissions(missions = []) {
   return [...missions].sort((a, b) => {
     const rankDiff = (statusRank[a.status] ?? 4) - (statusRank[b.status] ?? 4);
     if (rankDiff !== 0) return rankDiff;
-    const bTime = new Date(b.updated_at || 0).getTime();
-    const aTime = new Date(a.updated_at || 0).getTime();
-    return (Number.isNaN(bTime) ? 0 : bTime) - (Number.isNaN(aTime) ? 0 : aTime);
+    return new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime();
   });
 }

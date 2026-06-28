@@ -1,8 +1,6 @@
 export function formatRoutineDate(iso) {
   if (!iso) return "Not scheduled";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "Not scheduled";
-  return date.toLocaleString([], {
+  return new Date(iso).toLocaleString([], {
     month: "short",
     day: "numeric",
     hour: "2-digit",
@@ -28,9 +26,8 @@ export function verificationTone(status) {
 export function sortRoutines(routines = []) {
   return [...routines].sort((a, b) => {
     if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
-    const bTime = new Date(b.next_fire_at || b.last_run_at || 0).getTime();
-    const aTime = new Date(a.next_fire_at || a.last_run_at || 0).getTime();
-    return (Number.isNaN(bTime) ? 0 : bTime) - (Number.isNaN(aTime) ? 0 : aTime);
+    return new Date(b.next_fire_at || b.last_run_at || 0).getTime()
+      - new Date(a.next_fire_at || a.last_run_at || 0).getTime();
   });
 }
 

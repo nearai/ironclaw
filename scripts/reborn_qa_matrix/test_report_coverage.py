@@ -111,6 +111,12 @@ class ReportCoverageTests(unittest.TestCase):
                     [
                         "REBCLI-777-TC-03",
                         "REBCLI-777",
+                        "Blocked - external credential preflight",
+                        "Documented live side-effect blocker",
+                    ],
+                    [
+                        "REBCLI-777-TC-04",
+                        "REBCLI-777",
                         "Partial",
                         "Needs implementation",
                     ],
@@ -126,16 +132,18 @@ class ReportCoverageTests(unittest.TestCase):
             report = report_coverage.build_report(workbook_path, Path(tmpdir))
 
             self.assertEqual(report["all_feature_count"], 2)
-            self.assertEqual(report["all_matrix_test_count"], 4)
+            self.assertEqual(report["all_matrix_test_count"], 5)
             self.assertEqual(report["feature_count"], 1)
-            self.assertEqual(report["matrix_test_count"], 3)
+            self.assertEqual(report["matrix_test_count"], 4)
             self.assertEqual(report["workbook_external_existing_test_count"], 1)
+            self.assertEqual(report["blocked_gap_test_count"], 1)
             self.assertIn("REBCLI-777-TC-01", report["workbook_external_existing_ids"])
             self.assertNotIn(
                 "REBCLI-777-TC-02",
                 report["workbook_ids_not_in_combined_runner"],
             )
-            self.assertEqual(report["actionable_gap_ids"], ["REBCLI-777-TC-03"])
+            self.assertEqual(report["blocked_gap_ids"], ["REBCLI-777-TC-03"])
+            self.assertEqual(report["actionable_gap_ids"], ["REBCLI-777-TC-04"])
             self.assertEqual(report["actionable_gap_test_count"], 1)
 
             all_report = report_coverage.build_report(
@@ -145,10 +153,10 @@ class ReportCoverageTests(unittest.TestCase):
             )
 
             self.assertEqual(all_report["feature_count"], 2)
-            self.assertEqual(all_report["matrix_test_count"], 4)
+            self.assertEqual(all_report["matrix_test_count"], 5)
             self.assertEqual(
                 all_report["actionable_gap_ids"],
-                ["REBCLI-777-TC-03", "REBCLI-778-TC-01"],
+                ["REBCLI-777-TC-04", "REBCLI-778-TC-01"],
             )
 
     def test_build_report_tracks_runner_ids_missing_from_workbook(self):
@@ -179,8 +187,8 @@ class ReportCoverageTests(unittest.TestCase):
             "scope_tokens": ["webui v2"],
             "feature_count": 1,
             "all_feature_count": 1,
-            "matrix_test_count": 3,
-            "all_matrix_test_count": 3,
+            "matrix_test_count": 4,
+            "all_matrix_test_count": 4,
             "hermetic_runner_test_count": 0,
             "hermetic_runner_coverage_pct": 0.0,
             "matrix_only_or_new_runner_test_count": 0,
@@ -188,6 +196,7 @@ class ReportCoverageTests(unittest.TestCase):
             "existing_ci_only_test_count": 0,
             "workbook_external_existing_test_count": 1,
             "workbook_existing_evidence_not_in_runner_count": 1,
+            "blocked_gap_test_count": 1,
             "actionable_gap_test_count": 1,
             "combined_runner_test_count": 0,
             "combined_runner_coverage_pct": 0.0,
@@ -206,10 +215,12 @@ class ReportCoverageTests(unittest.TestCase):
                 "REBCLI-777-TC-01",
                 "REBCLI-777-TC-02",
                 "REBCLI-777-TC-03",
+                "REBCLI-777-TC-04",
             ],
             "workbook_external_existing_ids": ["REBCLI-777-TC-01"],
             "workbook_existing_evidence_not_in_runner_ids": ["REBCLI-777-TC-02"],
-            "actionable_gap_ids": ["REBCLI-777-TC-03"],
+            "blocked_gap_ids": ["REBCLI-777-TC-03"],
+            "actionable_gap_ids": ["REBCLI-777-TC-04"],
         }
         output = StringIO()
 
@@ -222,7 +233,8 @@ class ReportCoverageTests(unittest.TestCase):
             "Workbook existing-evidence IDs not in runner:\n  REBCLI-777-TC-02",
             text,
         )
-        self.assertIn("Actionable gap IDs:\n  REBCLI-777-TC-03", text)
+        self.assertIn("Blocked gap IDs:\n  REBCLI-777-TC-03", text)
+        self.assertIn("Actionable gap IDs:\n  REBCLI-777-TC-04", text)
 
 
 if __name__ == "__main__":

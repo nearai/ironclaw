@@ -10,7 +10,7 @@ import vm from "node:vm";
 // and capture the otherwise-private helpers via `globalThis.__testExports`.
 // Each call evaluates a FRESH module instance, so the module-level
 // `packs` / `pending` caches start empty per test.
-function loadI18n({ savedLanguage = null, navigatorLanguage = "en" } = {}) {
+function loadI18n() {
   let source = readFileSync(new URL("./i18n.js", import.meta.url), "utf8");
   source = source
     .split("\n")
@@ -24,7 +24,7 @@ function loadI18n({ savedLanguage = null, navigatorLanguage = "en" } = {}) {
   source = source.replaceAll("export function ", "function ");
   source = source.replaceAll("export const ", "const ");
   source +=
-    "\nglobalThis.__testExports = { detectLanguage, ensurePack, registerPack, packs, loaders, translate, I18nProvider };";
+    "\nglobalThis.__testExports = { ensurePack, registerPack, packs, loaders, I18nProvider };";
 
   const setItemCalls = [];
   const stateSetters = [];
@@ -55,10 +55,10 @@ function loadI18n({ savedLanguage = null, navigatorLanguage = "en" } = {}) {
     },
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     localStorage: {
-      getItem: () => savedLanguage,
+      getItem: () => null,
       setItem: (key, value) => setItemCalls.push({ key, value }),
     },
-    navigator: { language: navigatorLanguage },
+    navigator: { language: "en" },
     document: { documentElement: {} },
     globalThis: {},
   };
@@ -95,24 +95,6 @@ function loadLocalePack(locale) {
 test("ensurePack: unknown locale resolves null (no loader, not registered)", async () => {
   const { ensurePack } = loadI18n();
   assert.equal(await ensurePack("zz-unknown"), null);
-});
-
-test("detectLanguage prefers saved language, then navigator prefixes, then English", () => {
-  assert.equal(loadI18n({ savedLanguage: "ja", navigatorLanguage: "fr-FR" }).detectLanguage(), "ja");
-  assert.equal(loadI18n({ navigatorLanguage: "pt-PT" }).detectLanguage(), "pt-BR");
-  assert.equal(loadI18n({ navigatorLanguage: "zh-Hant" }).detectLanguage(), "zh-CN");
-  assert.equal(loadI18n({ navigatorLanguage: "zz-ZZ" }).detectLanguage(), "en");
-});
-
-test("translate falls back to English and then the raw key", () => {
-  const { packs, registerPack, translate } = loadI18n();
-  registerPack("en", {
-    known: "Known {name}",
-  });
-
-  assert.equal(translate({ known: "Local {name}" }, "known", { name: "value" }), "Local value");
-  assert.equal(translate(null, "known", { name: "fallback" }), "Known fallback");
-  assert.equal(translate(packs.es, "missing.key"), "missing.key");
 });
 
 test("ensurePack: a known locale resolves and populates its pack", async () => {

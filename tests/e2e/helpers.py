@@ -255,22 +255,6 @@ SEL_V2 = {
     "slack_pairing_submit": "[data-testid='slack-pairing-submit']",
     "slack_pairing_success": "[data-testid='slack-pairing-success']",
     "slack_pairing_error": "[data-testid='slack-pairing-error']",
-    "extension_card_for": "[data-testid='extension-card'][data-extension-id='{id}']",
-    "extension_registry_card_for": (
-        "[data-testid='extension-registry-card'][data-extension-id='{id}']"
-    ),
-    "extension_install_for": (
-        "[data-testid='extension-action-install'][data-extension-id='{id}']"
-    ),
-    "extension_activate_for": (
-        "[data-testid='extension-action-activate'][data-extension-id='{id}']"
-    ),
-    "extension_actions_for": (
-        "[data-testid='extension-card-actions'][data-extension-id='{id}']"
-    ),
-    "extension_remove_for": (
-        "[data-testid='extension-menu-remove'][data-extension-id='{id}']"
-    ),
     "approval_card":  "[data-testid='approval-card']",  # approval gate card
     "busy_gate_notice": "[data-testid='busy-gate-notice']",  # gate busy notice
     "activity_run":   "[data-testid='activity-run']",
@@ -302,27 +286,6 @@ SEL_V2 = {
         "[data-testid='project-file-chip'][data-file-path='{path}'] "
         "+ [data-testid='project-file-download']"
     ),
-    "llm_provider_card_for": (
-        "[data-testid='llm-provider-card'][data-provider-id='{id}']"
-    ),
-    "llm_provider_nearai_github_login": (
-        "[data-testid='llm-provider-nearai-github-login']"
-    ),
-    "llm_provider_nearai_google_login": (
-        "[data-testid='llm-provider-nearai-google-login']"
-    ),
-    "llm_provider_nearai_setup_menu": (
-        "[data-testid='llm-provider-nearai-setup-menu']"
-    ),
-    "llm_provider_nearai_setup_menu_items": (
-        "[data-testid='llm-provider-nearai-setup-menu-items']"
-    ),
-    "llm_provider_codex_login": "[data-testid='llm-provider-codex-login']",
-    "llm_provider_nearai_waiting": "[data-testid='llm-provider-nearai-waiting']",
-    "llm_provider_nearai_error": "[data-testid='llm-provider-nearai-error']",
-    "llm_provider_codex_code": "[data-testid='llm-provider-codex-code']",
-    "llm_provider_codex_waiting": "[data-testid='llm-provider-codex-waiting']",
-    "llm_provider_codex_error": "[data-testid='llm-provider-codex-error']",
     # Download action inside the shared attachment preview modal.
     "attachment_download": "[data-testid='attachment-download']",
     "logs_scope_toolbar": "[data-testid='logs-scope-toolbar']",
@@ -332,27 +295,6 @@ SEL_V2 = {
     "logs_entry_message": "[data-testid='logs-entry-message']",
     "logs_entry_context": "[data-testid='logs-entry-context']",
     "logs_context_chip": "[data-testid='logs-context-chip'][data-context-key='{key}']",
-    "automation_delivery_defaults": "[data-testid='automation-delivery-defaults']",
-    "automation_delivery_current_default": (
-        "[data-testid='automation-delivery-current-default']"
-    ),
-    "automation_delivery_target_for": (
-        "[data-testid='automation-delivery-target'][data-target-id='{id}']"
-    ),
-    "automation_delivery_save": "[data-testid='automation-delivery-save']",
-    "trace_credits_card": "[data-testid='sidebar-trace-credits']",
-    "trace_credits_final": "[data-testid='sidebar-trace-credits-final']",
-    "trace_credits_counts": "[data-testid='sidebar-trace-credits-counts']",
-    "trace_credits_held": "[data-testid='sidebar-trace-credits-held']",
-    "settings_restart_banner": "[data-testid='settings-restart-banner']",
-    "settings_restart_unavailable": "[data-testid='settings-restart-unavailable']",
-    "settings_restart_action": "[data-testid='settings-restart-action']",
-    "settings_toolbar_search": "[data-testid='settings-toolbar-search']",
-    "settings_toolbar_clear_search": "[data-testid='settings-toolbar-clear-search']",
-    "settings_toolbar_export": "[data-testid='settings-toolbar-export']",
-    "settings_toolbar_import": "[data-testid='settings-toolbar-import']",
-    "settings_toolbar_import_input": "[data-testid='settings-toolbar-import-input']",
-    "settings_toolbar_status": "[data-testid='settings-toolbar-status']",
 }
 
 

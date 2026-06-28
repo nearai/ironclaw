@@ -77,7 +77,6 @@ registerPack("ar", {
 
   // Chat — input
   "chat.placeholder": "راسل IronClaw...",
-  "chat.composerLabel": "راسل IronClaw",
   "chat.heroPlaceholder": "اسأل IronClaw أي شيء.",
   "chat.followUpPlaceholder": "اطلب تغييرات متابعة",
   "chat.send": "إرسال",

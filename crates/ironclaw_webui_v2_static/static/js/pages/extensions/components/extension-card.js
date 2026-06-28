@@ -33,7 +33,7 @@ function packageId(item) {
 }
 
 /* Lightweight overflow menu. Real <button>s; closes on outside click. */
-function OverflowMenu({ actions, isBusy, packageRefId }) {
+function OverflowMenu({ actions, isBusy }) {
   const t = useT();
   const [open, setOpen] = React.useState(false);
   const ref = React.useRef(null);
@@ -51,8 +51,6 @@ function OverflowMenu({ actions, isBusy, packageRefId }) {
     <div ref=${ref} className="relative shrink-0">
       <button
         type="button"
-        data-testid="extension-card-actions"
-        data-extension-id=${packageRefId}
         aria-label=${t("extensions.moreActions")}
         aria-haspopup="true"
         aria-expanded=${open ? "true" : "false"}
@@ -73,8 +71,6 @@ function OverflowMenu({ actions, isBusy, packageRefId }) {
               <button
                 key=${action.id}
                 type="button"
-                data-testid=${`extension-menu-${action.id}`}
-                data-extension-id=${packageRefId}
                 role="menuitem"
                 disabled=${isBusy}
                 onClick=${() => {
@@ -192,23 +188,14 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   const primary = primaryActions[0];
 
   return html`
-    <div
-      className=${CARD}
-      data-testid="extension-card"
-      data-extension-id=${packageId(ext)}
-      data-extension-state=${state}
-    >
+    <div className=${CARD}>
       <div className="flex items-start gap-2">
         <${Badge} tone=${tone} label=${label} size="sm" />
         <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
           ${displayName}
         </span>
         ${overflowActions.length > 0 &&
-        html`<${OverflowMenu}
-          actions=${overflowActions}
-          isBusy=${isBusy}
-          packageRefId=${packageId(ext)}
-        />`}
+        html`<${OverflowMenu} actions=${overflowActions} isBusy=${isBusy} />`}
       </div>
 
       <div className=${META}>
@@ -255,14 +242,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
         <span className="flex-1"></span>
         ${primary &&
         html`
-          <${Button}
-            variant="secondary"
-            size="sm"
-            onClick=${primary.run}
-            disabled=${isBusy}
-            data-testid=${`extension-action-${primary.id}`}
-            data-extension-id=${packageId(ext)}
-          >
+          <${Button} variant="secondary" size="sm" onClick=${primary.run} disabled=${isBusy}>
             ${primary.label}
           <//>
         `}
@@ -282,11 +262,7 @@ export function RegistryCard({ entry, onInstall, isBusy, statusLabel }) {
   const [kwOpen, setKwOpen] = React.useState(false);
 
   return html`
-    <div
-      className=${CARD}
-      data-testid="extension-registry-card"
-      data-extension-id=${packageId(entry)}
-    >
+    <div className=${CARD}>
       <div className="flex items-start gap-2">
         <${Badge}
           tone="muted"
@@ -329,8 +305,6 @@ export function RegistryCard({ entry, onInstall, isBusy, statusLabel }) {
           <${Button}
             variant="outline"
             size="sm"
-            data-testid="extension-action-install"
-            data-extension-id=${packageId(entry)}
             onClick=${() => onInstall({ packageRef: entry.package_ref, displayName })}
             disabled=${isBusy}
           >

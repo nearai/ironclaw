@@ -120,7 +120,6 @@ export function SettingsToolbar({
             />
             <input
               type="search"
-              data-testid="settings-toolbar-search"
               value=${searchQuery}
               onChange=${(event) => onSearchChange(event.target.value)}
               placeholder=${t("settings.searchPlaceholder")}
@@ -130,7 +129,6 @@ export function SettingsToolbar({
             html`
               <button
                 type="button"
-                data-testid="settings-toolbar-clear-search"
                 onClick=${onSearchClear}
                 aria-label=${t("settings.clearSearch")}
                 className="absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-[var(--v2-text-faint)] hover:bg-white/[0.07] hover:text-[var(--v2-text-strong)]"
@@ -148,7 +146,6 @@ export function SettingsToolbar({
             size="sm"
             onClick=${handleExport}
             disabled=${!settingsExport || isImporting}
-            data-testid="settings-toolbar-export"
             className="gap-2"
           >
             <${Icon} name="download" className="h-3.5 w-3.5" />
@@ -160,7 +157,6 @@ export function SettingsToolbar({
             size="sm"
             onClick=${() => fileInputRef.current?.click()}
             disabled=${isImporting}
-            data-testid="settings-toolbar-import"
             className="gap-2"
           >
             <${Icon} name="upload" className="h-3.5 w-3.5" />
@@ -169,7 +165,6 @@ export function SettingsToolbar({
           <input
             ref=${fileInputRef}
             type="file"
-            data-testid="settings-toolbar-import-input"
             accept=".json,application/json"
             className="hidden"
             onChange=${handleImportFile}
@@ -183,7 +178,6 @@ export function SettingsToolbar({
         html`
           <div
             role="status"
-            data-testid="settings-toolbar-status"
             className=${[
               "mt-1 text-xs",
               message.tone === "error" ? "text-red-200" : "text-mint",

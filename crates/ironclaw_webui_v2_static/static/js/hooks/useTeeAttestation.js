@@ -1,8 +1,4 @@
 import { React } from "../lib/html.js";
-import {
-  buildTeeReportCopyPayload,
-  getTeeEndpoint,
-} from "../lib/tee-attestation.js";
 
 export function useTeeAttestation() {
   const endpoint = React.useMemo(() => getTeeEndpoint(window.location), []);
@@ -53,7 +49,7 @@ export function useTeeAttestation() {
     const data = report || (await loadReport());
     if (!data || !navigator.clipboard) return false;
     await navigator.clipboard.writeText(
-      buildTeeReportCopyPayload({ report: data, teeInfo })
+      JSON.stringify({ ...data, instance_attestation: teeInfo }, null, 2)
     );
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1800);
@@ -70,4 +66,23 @@ export function useTeeAttestation() {
     loadReport,
     copyReport,
   };
+}
+
+function getTeeEndpoint(location) {
+  const hostname = location.hostname;
+  if (!hostname || hostname === "localhost" || isIpAddress(hostname)) {
+    return null;
+  }
+
+  const parts = hostname.split(".");
+  if (parts.length < 2) return null;
+
+  return {
+    base: `${location.protocol}//api.${parts.slice(1).join(".")}`,
+    instance: parts[0],
+  };
+}
+
+function isIpAddress(hostname) {
+  return hostname.includes(":") || /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname);
 }

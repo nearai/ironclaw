@@ -179,6 +179,14 @@ def _workbook_existing_evidence_ids(records: dict[str, dict[str, str]]) -> set[s
     }
 
 
+def _workbook_blocked_ids(records: dict[str, dict[str, str]]) -> set[str]:
+    return {
+        test_id
+        for test_id, record in records.items()
+        if (record.get("Status") or "").lower().startswith("blocked")
+    }
+
+
 def hermetic_runner_ids(default_only: bool = False) -> set[str]:
     ids: set[str] = set()
     for case in run_hermetic_qa.CASES.values():
@@ -248,6 +256,7 @@ def build_report(
     }
     workbook_external_existing_ids = _external_existing_ids(workbook_records) & matrix_ids
     workbook_existing_evidence_ids = _workbook_existing_evidence_ids(workbook_records) & matrix_ids
+    workbook_blocked_ids = _workbook_blocked_ids(workbook_records) & matrix_ids
     hermetic_ids = hermetic_runner_ids()
     default_hermetic_ids = hermetic_runner_ids(default_only=True)
     matrix_only_ids = matrix_only_runner_ids(default_only=True)
@@ -268,7 +277,8 @@ def build_report(
     executable_features = {test_id[:10] for test_id in executable_matrix_ids}
     matrix_only_covered_features = {test_id[:10] for test_id in matrix_only_covered_ids}
     raw_missing_ids = matrix_ids - traceable_ids
-    actionable_gap_ids = raw_missing_ids
+    blocked_gap_ids = raw_missing_ids & workbook_blocked_ids
+    actionable_gap_ids = raw_missing_ids - blocked_gap_ids
     return {
         "workbook": str(workbook_path),
         "scope_tokens": list(scope_tokens) if scope_tokens is not None else [],
@@ -286,9 +296,11 @@ def build_report(
         "matrix_only_or_new_combined_test_count": len(matrix_only_covered_ids),
         "workbook_external_existing_test_count": len(workbook_external_existing_ids),
         "workbook_existing_evidence_test_count": len(workbook_existing_evidence_ids),
+        "workbook_blocked_test_count": len(workbook_blocked_ids),
         "workbook_existing_evidence_not_in_runner_count": len(
             raw_missing_ids & workbook_existing_evidence_ids
         ),
+        "blocked_gap_test_count": len(blocked_gap_ids),
         "actionable_gap_test_count": len(actionable_gap_ids),
         "hermetic_runner_coverage_pct": _pct(len(matrix_ids & hermetic_ids), len(matrix_ids)),
         "combined_runner_coverage_pct": _pct(len(executable_matrix_ids), len(matrix_ids)),
@@ -314,6 +326,7 @@ def build_report(
         "workbook_existing_evidence_not_in_runner_ids": sorted(
             raw_missing_ids & workbook_existing_evidence_ids
         ),
+        "blocked_gap_ids": sorted(blocked_gap_ids),
         "actionable_gap_ids": sorted(actionable_gap_ids),
     }
 
@@ -357,6 +370,10 @@ def _print_text(report: dict[str, object], include_missing: bool) -> None:
         "Workbook-existing evidence not represented by runner: "
         f"{report['workbook_existing_evidence_not_in_runner_count']} / "
         f"{report['matrix_test_count']}"
+    )
+    print(
+        "Blocked coverage gaps: "
+        f"{report['blocked_gap_test_count']} / {report['matrix_test_count']}"
     )
     print(
         "Actionable coverage gaps after duplicate/existing pruning: "
@@ -406,6 +423,9 @@ def _print_text(report: dict[str, object], include_missing: bool) -> None:
             print(f"  {test_id}")
         print("Workbook existing-evidence IDs not in runner:")
         for test_id in report["workbook_existing_evidence_not_in_runner_ids"]:
+            print(f"  {test_id}")
+        print("Blocked gap IDs:")
+        for test_id in report["blocked_gap_ids"]:
             print(f"  {test_id}")
         print("Actionable gap IDs:")
         for test_id in report["actionable_gap_ids"]:

@@ -6,7 +6,6 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "test": "find ../static/js -type f \\( -name '*test.js' -o -name '*test.mjs' \\) -print0 | xargs -0 node --test",
     "vendor": "bash vendor.sh",
     "all": "bash build.sh"
   },
@@ -16,7 +15,7 @@
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-hook-form": "7.62.0",
-    "react-router": "7.18.0"
+    "react-router": "7.9.1"
   },
   "devDependencies": {
     "esbuild": "0.25.0"

@@ -595,7 +595,6 @@ export function useChat(threadId) {
                   isOptimistic: false,
                   status: "error",
                   error: err.message,
-                  retryThreadId: sendThreadId,
                 }
               : m,
           );
@@ -635,18 +634,6 @@ export function useChat(threadId) {
       setPendingGate,
       setActiveRun,
     ],
-  );
-
-  const retryMessage = React.useCallback(
-    async (message) => {
-      const content = typeof message?.content === "string" ? message.content : "";
-      const retryThreadId = message?.retryThreadId || message?.threadId || threadId;
-      if (!content.trim() || !retryThreadId) return null;
-
-      setMessages((prev) => prev.filter((item) => item.id !== message.id));
-      return await send(content, { threadId: retryThreadId });
-    },
-    [send, setMessages, threadId],
   );
 
   // v2 resolveGate signature: `(resolution, { always?, credentialRef? })`.
@@ -811,8 +798,10 @@ export function useChat(threadId) {
     [resolveGate],
   );
 
-  // Fork chat.js expects suggestions / recovery callbacks; v2 stream is
-  // deterministic enough that those remain no-ops in local-dev.
+  // Fork chat.js expects these as stubs: v2 stream is deterministic
+  // enough that retry / suggestions / recovery are not necessary in
+  // local-dev. Wire them as no-ops so the chat UI renders without
+  // additional branches.
   const noop = React.useCallback(() => {}, []);
 
   return {
@@ -837,7 +826,7 @@ export function useChat(threadId) {
     // fork-shape compatibility — see comments above
     suggestions: [],
     setSuggestions: noop,
-    retryMessage,
+    retryMessage: noop,
     approve,
     recoverHistory: noop,
     recoveryNotice: null,

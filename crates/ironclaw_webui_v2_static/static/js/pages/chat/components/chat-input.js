@@ -102,13 +102,10 @@ export function ChatInput({
   // explicit hand-off draft still wins over the stored one.
   React.useEffect(() => {
     setText(getDraft(draftKey));
-    window.requestAnimationFrame(() => {
-      if (!disabled) textareaRef.current?.focus();
-    });
     // Flush any queued write (for the previous key) before this key changes
     // or the composer unmounts, so a debounced draft is never lost.
     return () => flushDraft();
-  }, [draftKey, disabled, flushDraft]);
+  }, [draftKey, flushDraft]);
 
   // Keep the in-memory staged-attachment store in sync so files survive
   // navigating away from (and back to) this composer, the same way the text
@@ -411,7 +408,6 @@ export function ChatInput({
           onPaste=${onPaste}
           data-send-disabled=${isSubmitDisabled ? "true" : "false"}
           placeholder=${placeholder}
-          aria-label=${t("chat.composerLabel")}
           rows=${1}
           disabled=${disabled}
           className=${textClass}

@@ -12,8 +12,6 @@ import {
 function ProjectCard({ project, onOpen, t }) {
   return html`
     <article
-      data-testid="project-card"
-      data-project-id=${project.id}
       onClick=${() => onOpen(project.id)}
       role="button"
       tabIndex=${0}
@@ -74,7 +72,6 @@ function ProjectCard({ project, onOpen, t }) {
           <div className="mt-1 text-xs uppercase tracking-[0.16em] text-iron-500">${formatProjectRelativeTime(project.last_activity)}</div>
         </div>
         <${Button}
-          data-testid="project-open-workspace"
           variant="secondary"
           onClick=${(event) => {
             event.stopPropagation();
@@ -164,7 +161,7 @@ export function ProjectsGrid({
   }
 
   return html`
-    <div data-testid="projects-grid" className="space-y-5">
+    <div className="space-y-5">
       ${defaultProject && html`<${GeneralProjectCard} project=${defaultProject} onOpen=${onOpenProject} t=${t} />`}
 
       <${Panel} className="p-4 sm:p-5">
@@ -178,7 +175,6 @@ export function ProjectsGrid({
           </div>
           <div className="flex gap-2">
             <input
-              data-testid="projects-search-input"
               value=${search}
               onInput=${(event) => onSearchChange(event.target.value)}
               placeholder=${t("projects.searchPlaceholder")}

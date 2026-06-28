@@ -81,51 +81,19 @@ export function ProviderCard({
     !isActive && provider.id === "nearai"
       ? html`
           ${apiKeyAction}
-          <${Button}
-            type="button"
-            variant="secondary"
-            size="sm"
-            disabled=${loginBusy}
-            onClick=${onNearaiWallet}
-            data-testid="llm-provider-nearai-wallet-login"
-            data-provider-id=${provider.id}
-          >
+          <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${onNearaiWallet}>
             ${t("onboarding.nearWallet")}
           <//>
-          <${Button}
-            type="button"
-            variant="secondary"
-            size="sm"
-            disabled=${loginBusy}
-            onClick=${() => onNearaiLogin("github")}
-            data-testid="llm-provider-nearai-github-login"
-            data-provider-id=${provider.id}
-          >
+          <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${() => onNearaiLogin("github")}>
             GitHub
           <//>
-          <${Button}
-            type="button"
-            variant="secondary"
-            size="sm"
-            disabled=${loginBusy}
-            onClick=${() => onNearaiLogin("google")}
-            data-testid="llm-provider-nearai-google-login"
-            data-provider-id=${provider.id}
-          >
+          <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${() => onNearaiLogin("google")}>
             Google
           <//>
         `
       : !isActive && provider.id === "openai_codex"
       ? html`
-          <${Button}
-            type="button"
-            variant="secondary"
-            size="sm"
-            disabled=${loginBusy}
-            onClick=${onCodexLogin}
-            data-testid="llm-provider-codex-login"
-            data-provider-id=${provider.id}
-          >
+          <${Button} type="button" variant="secondary" size="sm" disabled=${loginBusy} onClick=${onCodexLogin}>
             ${t("onboarding.codexSignIn")}
           <//>
         `

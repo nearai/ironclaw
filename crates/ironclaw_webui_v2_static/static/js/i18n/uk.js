@@ -77,7 +77,6 @@ registerPack("uk", {
 
   // Chat — input
   "chat.placeholder": "Напишіть IronClaw…",
-  "chat.composerLabel": "Напишіть IronClaw",
   "chat.heroPlaceholder": "Запитайте IronClaw про що завгодно.",
   "chat.followUpPlaceholder": "Попросіть подальші зміни",
   "chat.send": "Надіслати повідомлення",

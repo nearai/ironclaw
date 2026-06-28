@@ -42,9 +42,11 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
         self.assertIn("webui_v2_session_thread_message_api_regression", selected)
         self.assertIn("webui_v2_streaming_run_control_api_regression", selected)
         self.assertIn("webui_v2_operator_config_api_regression", selected)
-        self.assertIn("webui_v2_settings_toolbar_search_regression", selected)
         self.assertNotIn("webui_v2_chat_client_regression", selected)
         self.assertNotIn("webui_v2_workspace_project_client_regression", selected)
+        self.assertNotIn("webui_v2_settings_toolbar_search_regression", selected)
+        self.assertNotIn("webui_v2_provider_login_api_regression", selected)
+        self.assertNotIn("webui_v2_admin_console_usage_regression", selected)
         self.assertNotIn("openai_compat_owner_crate_regression", selected)
         self.assertNotIn("support_substrate_product_workflow_regression", selected)
         self.assertNotIn("webui_v2_route_contract_regression", selected)
@@ -127,6 +129,20 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
         ]
 
         self.assertEqual(static_contract_commands, [])
+
+    def test_default_executable_lane_has_no_browser_smoke_commands(self):
+        parser = run_hermetic_qa.build_parser()
+        args = parser.parse_args([])
+        selected = run_hermetic_qa._selected_case_names(args)
+
+        browser_commands = [
+            command.name
+            for name in selected
+            for command in run_hermetic_qa._commands_for_case(run_hermetic_qa.CASES[name])
+            if command.name.endswith("_browser_smoke")
+        ]
+
+        self.assertEqual(browser_commands, [])
 
     def test_session_thread_message_case_executes_only_served_e2e_command(self):
         parser = run_hermetic_qa.build_parser()
@@ -285,8 +301,9 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             case_names = {case["case"] for case in manifest["cases"]}
             self.assertIn("openai_responses_external_tools_e2e_regression", case_names)
             self.assertIn("openai_responses_api_workflow_regression", case_names)
-            self.assertIn("webui_v2_settings_toolbar_search_regression", case_names)
             self.assertNotIn("webui_v2_chat_client_regression", case_names)
+            self.assertNotIn("webui_v2_settings_toolbar_search_regression", case_names)
+            self.assertNotIn("webui_v2_provider_login_api_regression", case_names)
             self.assertNotIn("support_substrate_product_workflow_regression", case_names)
             self.assertNotIn("webui_v2_route_contract_regression", case_names)
             self.assertNotIn("openai_compat_owner_crate_regression", case_names)

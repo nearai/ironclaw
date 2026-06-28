@@ -452,21 +452,14 @@ mod tests {
         // endpoint), not a parallel fetch.
         assert!(card.contains("useTraceCredits"));
         // Renders nothing unless enrolled — keeps the sidebar clean.
-        assert!(card.contains("sidebarTraceCreditsSummary(credits)"));
-        assert!(card.contains("if (!summary) return null;"));
+        assert!(card.contains("if (!credits || !credits.enrolled) return null;"));
         // Click-through opens the full Settings -> Trace Commons tab.
         assert!(card.contains("to=\"/settings/traces\""));
         assert!(card.contains("traceCommons.cardAccepted"));
         // Held-for-review count surfaces only when there are holds.
+        assert!(card.contains("manual_review_hold_count"));
         assert!(card.contains("heldCount > 0"));
         assert!(card.contains("traceCommons.cardHeld"));
-
-        let card_logic = asset_text("js/lib/trace-credits-card.js");
-        assert!(card_logic.contains("export function formatSignedCredit"));
-        assert!(card_logic.contains("Number(value) || 0"));
-        assert!(card_logic.contains("numeric.toFixed(2)"));
-        assert!(card_logic.contains("!credits || !credits.enrolled"));
-        assert!(card_logic.contains("manual_review_hold_count"));
 
         let sidebar = asset_text("js/components/sidebar.js");
         assert!(sidebar.contains("SidebarTraceCredits"));
