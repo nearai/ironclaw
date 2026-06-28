@@ -74,8 +74,14 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
 - `builder.rs` — `RebornIntegrationHarness` + builder, hermetic env, the
   slice-1/2 asserts (`assert_reply_contains` / `assert_tool_invoked` /
   `assert_egress_request_matching`, co-located with the harness fields) plus the
-  `pub(super)` capture accessors (`captured_egress_requests` /
+  slice-5 asserts (`assert_shell_command_recorded` / `assert_no_real_process_executed`)
+  and the `pub(super)` capture accessors (`captured_egress_requests` /
   `captured_capability_results`) the assertion file reads.
+- `process.rs` — `RecordingProcessPort`, the inert process port (slice 5): records
+  every `CommandExecutionRequest.command` and returns exit 0 / empty output without
+  spawning any OS process. Injected by default when `with_builtin_http_tools()` is
+  used; the `.with_live_shell()` opt-in skips injection so the real
+  `LocalHostProcessPort` executes instead.
 - `http_matcher.rs` — `ScriptedHttpResponse`, the URL/method/capability-keyed
   HTTP scripting layer over `RecordingRuntimeHttpEgress` (install via
   `.with_keyed_http_responses([..])`).
@@ -118,8 +124,23 @@ Slice 3 ships `StorageMode { InMemory, LibSql }` (design spec §3.2, §3.8):
 - Product / auth / approval / install / skill / secret stores join the same composite in
   their own §3.8 coverage slices; this slice covers thread + turn only.
 
+Slice 5 ships the **inert process port + `.with_live_shell()` opt-in** (design spec §3.6):
+- `RecordingProcessPort` (`process.rs`): impl `RuntimeProcessPort`, records every
+  `command` string, returns exit 0 / empty output, never spawns a real OS process.
+- Injected by default when `with_builtin_http_tools()` is used: the
+  `local_dev_host_runtime_with_http_egress` helper calls
+  `HostRuntimeServices::with_runtime_process_port_dyn(port)` — the existing pub builder
+  method. **No production change was needed** (the injection seam was already public).
+- `SHELL_CAPABILITY_ID` added to `core_builtin_tools_from_runtime`'s `capability_ids`
+  so scripted `builtin.shell` calls surface to the model.
+- `assert_shell_command_recorded(substr)` + `assert_no_real_process_executed()` on
+  `RebornIntegrationHarness` (in `builder.rs`).
+- `.with_live_shell()` builder opt-in skips recording-port injection so the real
+  `LocalHostProcessPort` executes instead (use only for hermetic commands).
+- `reborn_integration_process_port.rs`: `shell_call_recorded_not_executed` (end-to-end
+  safety invariant) + `shell_assertions_fail_when_no_shell_call_ran` (guard).
+
 **Planned (do not assume present; add behind a test that exercises it — no dead code):**
 `StorageMode::Postgres` (CI container lane); product/auth/approval/install/skill/secret
-stores on the composite; inert process port + `.with_live_shell()` /
-`.with_live_http_egress()` opt-ins; outbound/secrets/MCP capture wiring +
-`.with_mock_mcp(..)`; the pre-commit test-style check.
+stores on the composite; `.with_live_http_egress()` opt-in; outbound/secrets/MCP capture
+wiring + `.with_mock_mcp(..)`; the pre-commit test-style check.
