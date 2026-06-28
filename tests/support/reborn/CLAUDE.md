@@ -90,6 +90,12 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
   / `assert_egress_body_contains` / `assert_tool_result_contains`).
 - Tests live as flat `tests/reborn_*.rs` (Cargo requires top-level test files).
 
+Slice 6 MCP support lives in `harness.rs` (the `LoopbackMcpRuntimeHttpEgress`,
+`LoopbackMcpRuntime` type alias, `mock_mcp_extension_package`,
+`local_dev_host_runtime_with_registry_egress_and_mcp`, and
+`HostRuntimeCapabilityHarness::mock_mcp_tools`) and `builder.rs`
+(`MockMcp` variant, `.with_mock_mcp(mcp_url)`, `assert_mcp_tool_called`).
+
 Module paths: each `tests/reborn_*.rs` declares both `#[path = "support/reborn/mod.rs"] mod reborn_support;` and `mod support;`, then `use reborn_support::builder::RebornIntegrationHarness;` / `use reborn_support::reply::RebornScriptedReply;`. Inside the support tree, siblings reference each other via `super::` and `trace_llm` via `crate::support::trace_llm` (there is no `crate::support::reborn` path). Copy the includes from `tests/reborn_integration_greeting.rs`.
 
 Design: `docs/superpowers/specs/2026-06-26-reborn-integration-test-framework-design.md`.
@@ -140,7 +146,25 @@ Slice 5 ships the **inert process port + `.with_live_shell()` opt-in** (design s
 - `reborn_integration_process_port.rs`: `shell_call_recorded_not_executed` (end-to-end
   safety invariant) + `shell_assertions_fail_when_no_shell_call_ran` (guard).
 
+Slice 6 ships the **real MCP runtime wired to a loopback mock MCP server** (design spec §3.6):
+- `LoopbackMcpRuntimeHttpEgress`: test-only `RuntimeHttpEgress` making real HTTP
+  connections to a loopback `MockMcpServer`; injects `Authorization: Bearer mock-mcp-test-token`;
+  hermetic guard rejects any URL not prefixed by the configured `mcp_url`.
+- `LoopbackMcpRuntime` type alias: the concrete `McpRuntime<...>` parameterisation used
+  in test compositions.
+- `mock_mcp_extension_package`: builds an `ExtensionPackage` via
+  `from_host_bundled_manifest_with_inline_dynamic_schemas` so `parameters_schema` is the
+  inline `{"type":"object"}` (not a `$ref`); this prevents `surface_descriptor` from
+  attempting a filesystem read of a schema file that doesn't exist for a test-only extension.
+- `local_dev_host_runtime_with_registry_egress_and_mcp`: wires the above into
+  `HostRuntimeServices` with both first-party egress and the MCP runtime.
+- `HostRuntimeCapabilityHarness::mock_mcp_tools`: convenience constructor for the above.
+- `.with_mock_mcp(mcp_url)` on `RebornIntegrationHarnessBuilder`: switches to the MCP backend.
+- `assert_mcp_tool_called(tool_name)` on `RebornIntegrationHarness`: asserts `"<provider>.<tool_name>"` was invoked.
+- `reborn_integration_mcp.rs`: `mcp_tool_call_reaches_mock_server` (positive) +
+  `assert_mcp_tool_called_fails_when_no_mcp_call_ran` (guard).
+
 **Planned (do not assume present; add behind a test that exercises it — no dead code):**
 `StorageMode::Postgres` (CI container lane); product/auth/approval/install/skill/secret
-stores on the composite; `.with_live_http_egress()` opt-in; outbound/secrets/MCP capture
-wiring + `.with_mock_mcp(..)`; the pre-commit test-style check.
+stores on the composite; `.with_live_http_egress()` opt-in; outbound/secrets capture wiring;
+the pre-commit test-style check.
