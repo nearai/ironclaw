@@ -2159,6 +2159,10 @@ impl HostRuntimeCapabilityHarness {
                 EffectKind::WriteFilesystem,
                 EffectKind::Network,
                 EffectKind::SpawnProcess,
+                // slice 5: `builtin.shell` declares ExecuteCode; the grant's
+                // allowed_effects must include it or the authorizer denies the
+                // capability before it reaches the process port.
+                EffectKind::ExecuteCode,
             ],
             network_policy,
             secrets: Vec::new(),
