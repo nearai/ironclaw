@@ -73,3 +73,29 @@ async fn libsql_persists_reply_across_reopen() {
         .await
         .expect("reply durable in reopened SQLite");
 }
+
+/// Guard: `assert_reply_persists_after_reopen` must return `Err` when the
+/// expected text is absent — proving the LibSql reopen read-back assertion is
+/// not vacuously green (it really inspects the reopened on-disk history, and a
+/// wrong expectation fails). Mirrors the negative-guard tests the other slices
+/// carry (e.g. `assertions_fail_when_tool_did_not_run`).
+#[tokio::test]
+async fn persistence_assertion_fails_on_mismatch_after_reopen() {
+    let harness = RebornIntegrationHarness::test_default()
+        .storage(StorageMode::LibSql)
+        .script([RebornScriptedReply::text("durable answer")])
+        .build()
+        .await
+        .expect("harness builds");
+    harness
+        .submit_turn("remember this")
+        .await
+        .expect("turn completes");
+    assert!(
+        harness
+            .assert_reply_persists_after_reopen("a reply that was never produced")
+            .await
+            .is_err(),
+        "reopen assertion must fail when the expected text is absent from persisted history"
+    );
+}
