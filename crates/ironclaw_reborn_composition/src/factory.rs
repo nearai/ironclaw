@@ -2235,7 +2235,12 @@ async fn build_local_dev_root_filesystem(
     })
 }
 
-async fn build_default_local_dev_database_roots(
+// `pub(crate)` so the `test_support` accessor
+// (`build_default_local_dev_database_roots_for_test`) can call this
+// without duplicating the 4-step libSQL setup sequence (Builder →
+// LibSqlRootFilesystem → run_migrations → mount). Production callers
+// stay inside this module (`build_local_dev_root_filesystem`).
+pub(crate) async fn build_default_local_dev_database_roots(
     root: &Path,
     composite: &mut CompositeRootFilesystem,
 ) -> Result<LocalDevDurableBackend, RebornBuildError> {

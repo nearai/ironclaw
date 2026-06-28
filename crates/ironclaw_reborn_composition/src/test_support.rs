@@ -193,6 +193,30 @@ impl HostManagedModelGateway for FailingTestGateway {
     }
 }
 
+/// Test-only accessor mirroring the full local-dev database-roots boot path
+/// (`build_local_dev_root_filesystem` → `build_default_local_dev_database_roots`).
+///
+/// Constructs the durable database backend and mounts it across the
+/// control-plane roots (`/tenants`, `/memory`, `/events`) of `composite`,
+/// selecting the backend by compile-time feature:
+/// - With `libsql`: opens `root/reborn-local-dev.db`, runs migrations, mounts.
+/// - Without a durable backend feature: mounts an in-memory backend.
+///
+/// Called by the Reborn integration-test framework's `StorageMode::LibSql`
+/// builder arm (`tests/support/reborn/builder.rs:build_storage_composite`) so
+/// the 4-step libSQL setup sequence lives once (production call site:
+/// `build_local_dev_root_filesystem` → `build_default_local_dev_database_roots`).
+/// For tests only — gated behind `test-support`, ships zero bytes in production.
+#[cfg(feature = "test-support")]
+pub async fn build_default_local_dev_database_roots_for_test(
+    root: &std::path::Path,
+    composite: &mut ironclaw_filesystem::CompositeRootFilesystem,
+) -> Result<(), crate::RebornBuildError> {
+    crate::factory::build_default_local_dev_database_roots(root, composite)
+        .await
+        .map(|_| ())
+}
+
 /// Test-only accessor mirroring the production local-dev boot path
 /// (`build_local_dev_root_filesystem` → `mount_local_dev_database_roots`).
 ///
