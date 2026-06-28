@@ -34,10 +34,10 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
 
         selected = run_hermetic_qa._selected_case_names(args)
 
+        self.assertIn("openai_responses_api_workflow_regression", selected)
         self.assertIn("openai_responses_external_tools_e2e_regression", selected)
         self.assertIn("webui_v2_chat_client_regression", selected)
         self.assertIn("webui_v2_workspace_project_client_regression", selected)
-        self.assertNotIn("openai_responses_api_workflow_regression", selected)
         self.assertNotIn("openai_chat_completions_workflow_regression", selected)
         self.assertNotIn("openai_compat_owner_crate_regression", selected)
         self.assertNotIn("support_substrate_product_workflow_regression", selected)
@@ -60,12 +60,26 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             run_hermetic_qa._selected_case_names(args)
 
-    def test_rust_responses_contract_case_cannot_be_selected_for_execution(self):
+    def test_responses_workflow_case_executes_only_served_e2e_command(self):
         parser = run_hermetic_qa.build_parser()
         args = parser.parse_args(["--case", "openai_responses_api_workflow_regression"])
 
-        with self.assertRaises(SystemExit):
-            run_hermetic_qa._selected_case_names(args)
+        self.assertEqual(
+            run_hermetic_qa._selected_case_names(args),
+            ["openai_responses_api_workflow_regression"],
+        )
+        case = run_hermetic_qa.CASES["openai_responses_api_workflow_regression"]
+        self.assertEqual(
+            [command.name for command in run_hermetic_qa._commands_for_case(case)],
+            ["openai_responses_served_e2e"],
+        )
+        self.assertEqual(
+            [command["name"] for command in run_hermetic_qa._removed_existing_ci_commands(case)],
+            [
+                "openai_responses_workflow_handlers_contract",
+                "openai_responses_streaming_handlers_contract",
+            ],
+        )
 
     def test_default_executable_lane_has_no_package_level_cargo_contracts(self):
         parser = run_hermetic_qa.build_parser()
@@ -103,8 +117,8 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             )
             case_names = {case["case"] for case in manifest["cases"]}
             self.assertIn("openai_responses_external_tools_e2e_regression", case_names)
+            self.assertIn("openai_responses_api_workflow_regression", case_names)
             self.assertIn("webui_v2_chat_client_regression", case_names)
-            self.assertNotIn("openai_responses_api_workflow_regression", case_names)
             self.assertNotIn("support_substrate_product_workflow_regression", case_names)
             self.assertNotIn("webui_v2_route_contract_regression", case_names)
             self.assertNotIn("openai_compat_owner_crate_regression", case_names)

@@ -179,9 +179,11 @@ async def reborn_responses_client(reborn_responses_server):
         yield client
 
 
-async def create_response(client: httpx.AsyncClient, **payload) -> dict:
+async def create_response(
+    client: httpx.AsyncClient, path: str = "/v1/responses", **payload
+) -> dict:
     body = {"model": "mock-model", **payload}
-    response = await client.post("/v1/responses", json=body)
+    response = await client.post(path, json=body)
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -264,6 +266,25 @@ async def test_reborn_responses_non_streaming_messages_input(reborn_responses_cl
     assert len(response["output"]) > 0
 
 
+async def test_reborn_responses_api_v1_alias_accepts_untyped_message_input(
+    reborn_responses_client,
+):
+    response = await create_response(
+        reborn_responses_client,
+        path="/api/v1/responses",
+        input=[
+            {
+                "role": "user",
+                "content": "What is 3+3? Reply with just the number.",
+            }
+        ],
+    )
+
+    assert response["status"] == "completed"
+    assert response["id"].startswith("resp_")
+    assert len(response["output"]) > 0
+
+
 async def test_reborn_responses_continue_conversation(reborn_responses_client):
     first = await create_response(reborn_responses_client, input="Say hello")
     assert first["status"] == "completed"
@@ -305,6 +326,39 @@ async def test_reborn_responses_streaming_raw_sse(reborn_responses_client):
     assert "event: response.completed" in raw
 
 
+async def test_reborn_responses_context_injection_approval_and_rejection(
+    reborn_responses_client,
+):
+    approved = await create_response(
+        reborn_responses_client,
+        input="Go ahead with the transfer",
+        x_context={
+            "notification_response": {
+                "notification_id": "msg_456",
+                "action": "approved",
+                "original_signal": "convert_now",
+                "score": 72,
+            }
+        },
+        stream=False,
+    )
+    assert approved["status"] == "completed"
+    assert len(approved["output"]) > 0
+
+    rejected = await create_response(
+        reborn_responses_client,
+        input="Cancel it",
+        x_context={
+            "notification_response": {
+                "notification_id": "msg_789",
+                "action": "rejected",
+            }
+        },
+        stream=False,
+    )
+    assert rejected["status"] == "completed"
+
+
 async def test_reborn_responses_error_no_auth(reborn_responses_server):
     async with httpx.AsyncClient(timeout=10) as client:
         response = await client.post(
@@ -321,6 +375,26 @@ async def test_reborn_responses_rejects_empty_input_items(reborn_responses_clien
         json={"model": "mock-model", "input": []},
     )
     assert response.status_code == 400
+
+
+async def test_reborn_responses_rejects_empty_text_input(reborn_responses_client):
+    response = await reborn_responses_client.post(
+        "/v1/responses",
+        json={"model": "mock-model", "input": ""},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == "input"
+
+
+async def test_reborn_responses_lookup_and_cancel_missing_id_match_not_found_shape(
+    reborn_responses_client,
+):
+    retrieve = await reborn_responses_client.get("/api/v1/responses/resp_missing")
+    cancel = await reborn_responses_client.post("/api/v1/responses/resp_missing/cancel")
+
+    assert retrieve.status_code == 404
+    assert cancel.status_code == 404
+    assert retrieve.json() == cancel.json()
 
 
 async def test_reborn_responses_repeated_external_tools_round_trip(

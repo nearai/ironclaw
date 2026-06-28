@@ -380,6 +380,46 @@ OPENAI_RESPONSES_STREAMING_COMMAND = CommandSpec(
     ],
 )
 
+OPENAI_RESPONSES_SERVED_E2E_COMMAND = CommandSpec(
+    name="openai_responses_served_e2e",
+    description=(
+        "Served ironclaw-reborn ResponsesAPI e2e coverage for create, "
+        "retrieve, stream, auth, validation, /api/v1 alias, x_context, "
+        "and cancel-not-found public behavior."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_non_streaming_text_input",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_non_streaming_messages_input",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_api_v1_alias_accepts_untyped_message_input",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_continue_conversation",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_get_response_by_id",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_streaming_raw_sse",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_context_injection_approval_and_rejection",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_error_no_auth",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_rejects_empty_input_items",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_rejects_empty_text_input",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_responses_lookup_and_cancel_missing_id_match_not_found_shape",
+        "-q",
+    ],
+)
+
 OPENAI_RESPONSES_EXTERNAL_TOOLS_E2E_COMMAND = CommandSpec(
     name="openai_responses_external_tools_served_e2e",
     description=(
@@ -4019,13 +4059,18 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-058-TC-05",
             "REBCLI-058-TC-06",
         ],
-        commands=[OPENAI_RESPONSES_WORKFLOW_COMMAND, OPENAI_RESPONSES_STREAMING_COMMAND],
+        commands=[
+            OPENAI_RESPONSES_WORKFLOW_COMMAND,
+            OPENAI_RESPONSES_STREAMING_COMMAND,
+            OPENAI_RESPONSES_SERVED_E2E_COMMAND,
+        ],
         notes=(
-            "Focused ResponsesAPI contract coverage that PR #5348 does not "
-            "duplicate: create on /api/v1 and /v1, retrieve/cancel, auth, "
-            "invalid input, unsupported fields, wait timeout, cross-scope "
-            "not-found shape, stream=true SSE terminal/error behavior, and "
-            "sanitized ProductWorkflow errors."
+            "Focused ResponsesAPI coverage that PR #5348 does not duplicate. "
+            "The Rust handler contracts are existing CI traceability; this "
+            "case remains executable through served ironclaw-reborn e2e "
+            "coverage for create on /api/v1 and /v1, retrieve, missing "
+            "cancel, auth, invalid input, x_context, and stream=true SSE "
+            "behavior."
         ),
     ),
     "openai_responses_external_tools_e2e_regression": CaseSpec(
