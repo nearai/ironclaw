@@ -148,6 +148,7 @@ ESSENTIAL_BUILTINS = {
     "builtin__json",
     "builtin__memory_read",
     "builtin__memory_search",
+    "builtin__memory_write",
     "builtin__time",
 }
 

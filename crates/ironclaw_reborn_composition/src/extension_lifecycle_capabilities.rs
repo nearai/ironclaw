@@ -20,7 +20,9 @@ use ironclaw_product_workflow::{
 use serde::Deserialize;
 
 use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
-use crate::extension_lifecycle::{ExtensionActivationMode, RebornLocalExtensionManagementPort};
+use crate::extension_lifecycle::{
+    ExtensionActivationMode, RebornLocalExtensionManagementPort, extension_search_has_ready_result,
+};
 use crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService;
 
 pub(crate) const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
@@ -179,7 +181,7 @@ impl ExtensionLifecycleToolHandler {
         let Some(policy) = self.activation_policy.as_ref() else {
             return;
         };
-        if let Some(LifecycleProductPayload::ExtensionSearch { extensions, count }) =
+        let filtered = if let Some(LifecycleProductPayload::ExtensionSearch { extensions, count }) =
             response.payload.as_mut()
         {
             let mut kept = Vec::with_capacity(extensions.len());
@@ -191,6 +193,16 @@ impl ExtensionLifecycleToolHandler {
             }
             *count = kept.len();
             *extensions = kept;
+            true
+        } else {
+            false
+        };
+        // `search` set the "treat these as ready / don't ask for credentials"
+        // hint over the UNFILTERED results. Re-derive it against the filtered
+        // payload so the message can never claim ready/available results we just
+        // hid from the member (a hidden extension must not leave a stale hint).
+        if filtered && !extension_search_has_ready_result(response.payload.as_ref()) {
+            response.message = None;
         }
     }
 }
