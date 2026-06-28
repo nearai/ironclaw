@@ -64,6 +64,7 @@ pub const ESSENTIAL_MEMBER_CAPABILITIES: &[&str] = &[
     "builtin.json",
     "builtin.memory_read",
     "builtin.memory_search",
+    "builtin.memory_tree",
     "builtin.memory_write",
     "builtin.time",
 ];

@@ -27,8 +27,9 @@
 # 7. bob:   GRANT google-drive.* (+ github.*).
 # 8. carl:  grant nothing (deny-all = the essential baseline only).
 #   NOTE: members now default to an ESSENTIAL allowlist (extension_search,
-#   extension_activate, echo, time, json, memory_read, memory_search) +
-#   capability_info; EVERYTHING else is Hidden by default and must be GRANTED by
+#   extension_activate, echo, time, json, memory_read, memory_search,
+#   memory_write, memory_tree) + capability_info; EVERYTHING else is Hidden by
+#   default and must be GRANTED by
 #   an admin (an `available` per-user delta) — the model flipped from
 #   "hide-the-rest" to "grant-the-allowed". Extension caps (nearai.*,
 #   google-drive.*) surface to the model only via builtin.extension_search, so
@@ -148,6 +149,7 @@ ESSENTIAL_BUILTINS = {
     "builtin__json",
     "builtin__memory_read",
     "builtin__memory_search",
+    "builtin__memory_tree",
     "builtin__memory_write",
     "builtin__time",
 }
@@ -399,6 +401,105 @@ async def _drive_probe(client, token, prompt=SURFACE_PROBE_PROMPT):
     await asyncio.sleep(1.0)
     items = await _drain_projection_items(thread_id, token)
     return thread_id, items
+
+
+# ---------------------------------------------------------------------------
+# SECTION 5 helpers — live memory write (two real turns) + cross-member /fs read.
+# ---------------------------------------------------------------------------
+
+# Local-dev memory virtual path:
+#   /memory/tenants/<tenant>/users/<user_id>/agents/<agent>/projects/<project>/<doc>
+# tenant/agent/project are local-dev constants; the user segment is the directory
+# user_id. `tenants/reborn-cli/users/bob` is exactly the prefix the Workspace tab
+# shows for member "bob".
+MEMORY_TENANT = "reborn-cli"
+
+
+def _member_memory_base(user_id: str) -> str:
+    return f"tenants/{MEMORY_TENANT}/users/{user_id}"
+
+
+async def _post_message(client, thread_id, token, prompt):
+    """POST one chat turn to an existing thread; assert it was accepted."""
+    send = await client.post(
+        f"{API}/threads/{thread_id}/messages",
+        headers=_bearer(token),
+        json={"client_action_id": str(uuid.uuid4()), "content": prompt},
+        timeout=30,
+    )
+    assert send.status_code in (200, 202), f"send: {send.status_code} {send.text}"
+
+
+async def _send_and_settle(client, thread_id, token, prompt, *, timeout: float = 60.0):
+    """POST a turn and drain its SSE projection until the run settles, so the poem
+    turn is finished (in context, thread no longer busy) before the next turn."""
+    await _post_message(client, thread_id, token, prompt)
+    await asyncio.sleep(1.0)
+    return await _drain_projection_items(thread_id, token, timeout=timeout)
+
+
+async def _poll_member_memory_files(client, token, base, *, timeout: float = 45.0, interval: float = 2.5):
+    """Poll the caller's OWN memory (via the caller-confined mount) until at least
+    one non-empty file appears, or `timeout` elapses. Returns the files (possibly
+    empty).
+
+    This is the live, mock-free, race-free signal that a `memory_write` turn
+    actually persisted: a real-LLM turn takes a few seconds, so we re-read until the
+    document lands rather than draining the run's SSE stream (whose tool-lifecycle
+    frames the drain-only local-dev projection does not surface)."""
+    waited = 0.0
+    while True:
+        files = await _walk_member_memory_files(client, token, base)
+        if files or waited >= timeout:
+            return files
+        await asyncio.sleep(interval)
+        waited += interval
+
+
+async def _walk_member_memory_files(client, token, base, *, max_depth: int = 6, max_reads: int = 25):
+    """As `token`, walk the `memory` mount under `base` via GET /fs/list and read
+    each file via GET /fs/content. Returns [{path, bytes, snippet}] for every
+    NON-EMPTY file the caller could actually read. An empty list means the caller
+    reached no file under `base` — the isolated outcome."""
+    found: list = []
+    queue = [(base, 0)]
+    seen = set()
+    while queue and len(found) < max_reads:
+        path, depth = queue.pop(0)
+        if path in seen or depth > max_depth:
+            continue
+        seen.add(path)
+        resp = await client.get(
+            f"{API}/fs/list",
+            params={"mount": "memory", "path": path},
+            headers=_bearer(token),
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            continue
+        for entry in (resp.json().get("entries") or []):
+            epath = entry.get("path")
+            if not epath:
+                name = entry.get("name")
+                epath = f"{path}/{name}" if name else None
+            if not epath:
+                continue
+            if entry.get("kind") == "directory":
+                queue.append((epath, depth + 1))
+            elif entry.get("kind") == "file":
+                content = await client.get(
+                    f"{API}/fs/content",
+                    params={"mount": "memory", "path": epath},
+                    headers=_bearer(token),
+                    timeout=15,
+                )
+                if content.status_code == 200 and content.content:
+                    found.append(
+                        {"path": epath, "bytes": len(content.content), "snippet": content.text[:160]}
+                    )
+                    if len(found) >= max_reads:
+                        break
+    return found
 
 
 def _offered_provider_tools_from_log(thread_id):
@@ -716,6 +817,69 @@ async def check_section4_step16_approval_pref_unavailable(client, state):
     )
 
 
+async def check_section5_member_memory_isolation(client, state):
+    """SECTION 5 — cross-member memory isolation (live; the leak this PR targets).
+
+    NO mock. Two real turns as bob: write a poem, then persist it to memory. We
+    confirm the write actually LANDED by reading bob's OWN memory back through the
+    caller-confined mount (the live, race-free signal that memory_write succeeded) —
+    else the isolation probe is moot and we FAIL. Then alice — a DIFFERENT member —
+    tries to read bob's memory through the WebUI filesystem browser (GET /fs/list +
+    /fs/content, mount=memory) at bob's known absolute path. If alice can read ANY of
+    bob's memory bytes, that is a cross-user leak -> FAIL. After the isolation fix
+    alice reaches no file under bob's path and this PASSES.
+
+    bob's/alice's user_id are the directory ids bootstrap_org created via
+    `_create_user(...)` — the same values keyed in `state["tokens"]` — and they are
+    exactly the `users/<id>` segment in the memory mount path.
+    """
+    bob_uid, alice_uid = "bob", "alice"
+    bob, alice = state["tokens"][bob_uid], state["tokens"][alice_uid]
+
+    # Steps 1-2: bob writes a poem (turn 1, settled) then asks to save it (turn 2).
+    thread_id = await _create_thread(client, bob)
+    await _send_and_settle(client, thread_id, bob, "Write a short, original four-line poem about apples.")
+    await _post_message(
+        client,
+        thread_id,
+        bob,
+        "Save that poem into your long-term memory now, using your memory_write tool, "
+        "so you can recall it later.",
+    )
+
+    # Steps 3-4: confirm the write landed by reading bob's OWN memory back. The
+    # caller-confined memory root lists only bob's subtree; empty after the poll
+    # window => memory_write never persisted => the probe is moot -> FAIL.
+    bob_files = await _poll_member_memory_files(client, bob, "")
+    assert bob_files, (
+        "after asking bob to save the poem, bob has no readable memory document — "
+        "memory_write did not persist within the poll window, so the cross-member "
+        "isolation probe cannot run (re-run; if it recurs the model may not be "
+        "calling memory_write)."
+    )
+
+    # Steps 5-7: alice must NOT be able to read bob's memory through /fs.
+    bob_base = _member_memory_base(bob_uid)
+    leaked = await _walk_member_memory_files(client, alice, bob_base)
+    assert not leaked, (
+        f"MEMORY LEAK: member '{alice_uid}' read member '{bob_uid}' memory via {API}/fs "
+        f"(mount=memory, base={bob_base!r}). Files alice could read: "
+        f"{[(f['path'], f['bytes']) for f in leaked]}. First snippet: {leaked[0]['snippet']!r}"
+    )
+
+    # Strict isolation applies to EVERY role — admins/owner deliberately get NO
+    # cross-member memory oversight. A fresh admin and the env owner (director) must
+    # ALSO be confined to their own subtree and reach none of bob's memory.
+    mem_admin = await _create_user(client, state["owner"], "memprobe-admin", "admin")
+    for role_label, role_token in (("admin", mem_admin), ("owner", state["owner"])):
+        role_leaked = await _walk_member_memory_files(client, role_token, bob_base)
+        assert not role_leaked, (
+            f"MEMORY LEAK: {role_label} read member '{bob_uid}' memory via {API}/fs "
+            f"(mount=memory, base={bob_base!r}) — strict isolation must apply to all roles "
+            f"(no admin/owner oversight). Files read: {[(f['path'], f['bytes']) for f in role_leaked]}."
+        )
+
+
 CHECKS = [
     ("S1 accounts + roles", check_section1_accounts),
     ("S2 allow-list grants", check_section2_grants),
@@ -732,6 +896,7 @@ CHECKS = [
     ("S4.11 admin full surface (bypass)", check_section4_admin_surface),
     ("S4.16 approval pref on available cap", check_section4_step16_approval_pref_available),
     ("S4.16 approval pref on unavailable cap", check_section4_step16_approval_pref_unavailable),
+    ("S5 memory isolation: bob hidden from alice + admin + owner", check_section5_member_memory_isolation),
 ]
 
 

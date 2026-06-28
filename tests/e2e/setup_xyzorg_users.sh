@@ -19,7 +19,8 @@
 #       7. bob:   grant the live google-drive.* (+ github.*) cap-ids
 #       8. carl:  grant nothing extra (keeps just the essential baseline)
 #     Every member already comes with the essential baseline (extension_search,
-#     extension_activate, echo, time, json, memory_read/search) + capability_info;
+#     extension_activate, echo, time, json, memory_read, memory_search,
+#     memory_write, memory_tree) + capability_info;
 #     mechanism: PUT {"availability":"available"} on each cap to grant.
 #
 # The login bearer is shown ONCE at creation (stored only as a hash), so this
@@ -62,7 +63,8 @@ fi
 # each member (set availability=available). This script only ever SETS/ADDS
 # capabilities — it never hides or removes any. Members already come with the
 # essential baseline (extension_search, extension_activate, echo, time, json,
-# memory_read, memory_search), so we grant only the EXTRA caps each one needs.
+# memory_read, memory_search, memory_write, memory_tree), so we grant only the
+# EXTRA caps each one needs.
 # Extension caps (nearai.*, google-drive.*) are reached by the agent via
 # extension_search, so granting them just makes them available to discover.
 ALICE_ALLOW="builtin.shell nearai.web_search"
