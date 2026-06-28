@@ -118,6 +118,9 @@ HN_KEYWORD_SEARCH_URL = (
     "https://hn.algolia.com/api/v1/search_by_date"
     "?query=NEAR%20AI&tags=story&hitsPerPage=1"
 )
+EXTENSION_SEARCH_CAPABILITY_ID = "builtin.extension_search"
+EXTENSION_INSTALL_CAPABILITY_ID = "builtin.extension_install"
+EXTENSION_ACTIVATE_CAPABILITY_ID = "builtin.extension_activate"
 
 
 class LiveQaContext:
@@ -1526,50 +1529,22 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
     from playwright.async_api import expect
 
     started = time.monotonic()
-    observed: dict[str, object] = {}
+    prompt = "connect my Slack account"
+    observed: dict[str, object] = {"chat_connect_prompt": prompt}
 
     async def action(page: object) -> None:
         await page.goto(
-            f"{ctx.base_url}/v2/extensions/registry?token={AUTH_TOKEN}",
+            f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
-        await expect(page.locator("body")).to_contain_text("Extensions", timeout=15000)  # type: ignore[attr-defined]
-        body = await _fetch_webui_json(page, "/api/webchat/v2/channels/connectable")
-        channels = body.get("channels")
-        if not isinstance(channels, list):
-            raise AssertionError(f"connectable channels body did not include a list: {body!r}")
-        slack_channels = [
-            channel
-            for channel in channels
-            if isinstance(channel, dict) and channel.get("channel") == "slack"
-        ]
-        observed["connectable_channel_count"] = len(channels)
-        observed["slack_strategy_count"] = len(slack_channels)
-        observed["slack_strategies"] = [
-            channel.get("strategy")
-            for channel in slack_channels
-            if isinstance(channel, dict)
-        ]
-        personal = next(
-            (
-                channel
-                for channel in slack_channels
-                if isinstance(channel, dict)
-                and channel.get("strategy") == "inbound_proof_code"
-            ),
-            None,
-        )
-        if not isinstance(personal, dict):
-            raise AssertionError(f"Slack inbound_proof_code connect strategy missing: {channels!r}")
-        action_body = personal.get("action")
-        if not isinstance(action_body, dict):
-            raise AssertionError(f"Slack connect action missing: {personal!r}")
-        instructions = str(action_body.get("instructions") or "")
-        if "Message the Slack app" not in instructions:
-            raise AssertionError(f"unexpected Slack connect instructions: {instructions!r}")
-        observed["slack_display_name"] = personal.get("display_name")
-        observed["slack_connect_title"] = action_body.get("title")
-        observed["slack_connect_instructions"] = instructions
+        composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
+        await expect(composer).to_be_visible(timeout=15000)
+        await composer.fill(prompt)
+        await composer.press("Enter")
+        body = page.locator("body")  # type: ignore[attr-defined]
+        await expect(body).to_contain_text("Connect Slack", timeout=15000)
+        await expect(body).to_contain_text("Message the Slack app", timeout=15000)
+        observed["slack_connect_card_visible"] = True
 
     try:
         slack = _slack_preflight(ctx)
@@ -1626,6 +1601,139 @@ async def _extension_authenticated_case(
 
     try:
         await _with_page(ctx.output_dir, case_name, action)
+        return _result(case_name, True, started, observed)
+    except Exception as exc:
+        return _result(case_name, False, started, {"error": str(exc), **observed})
+
+
+def _capability_run_statuses(
+    reborn_home: Path,
+    capability_ids: list[str],
+) -> dict[str, list[str]]:
+    statuses = {capability_id: [] for capability_id in capability_ids}
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    if not db_path.exists():
+        return statuses
+    try:
+        with sqlite3.connect(db_path) as db:
+            rows = db.execute(
+                """
+                SELECT contents
+                FROM root_filesystem_entries
+                WHERE is_dir = 0
+                  AND content_type = 'application/json'
+                  AND path LIKE '%/run-state/%'
+                """
+            ).fetchall()
+    except sqlite3.Error:
+        return statuses
+    wanted = set(capability_ids)
+    for (contents,) in rows:
+        if isinstance(contents, bytes):
+            text = contents.decode("utf-8", errors="replace")
+        else:
+            text = str(contents)
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        capability_id = payload.get("capability_id")
+        if capability_id in wanted:
+            statuses[str(capability_id)].append(str(payload.get("status") or "unknown"))
+    return statuses
+
+
+async def _extension_chat_connect_case(
+    ctx: LiveQaContext,
+    *,
+    case_name: str,
+    package_id: str,
+    display_name: str,
+    required_tools: list[str],
+    marker: str,
+    verification_instruction: str,
+    verification_capabilities: list[str],
+) -> ProbeResult:
+    started = time.monotonic()
+    setup_capabilities = [
+        EXTENSION_SEARCH_CAPABILITY_ID,
+        EXTENSION_INSTALL_CAPABILITY_ID,
+        EXTENSION_ACTIVATE_CAPABILITY_ID,
+    ]
+    expected_capabilities = [*setup_capabilities, *verification_capabilities]
+    prompt = (
+        f"QA connect case {case_name}: connect my {display_name} from this chat. "
+        f"Use extension_search for `{package_id}`, then install and activate "
+        f"`{package_id}` if it is not already active. {verification_instruction} "
+        "Do not create, update, send, or delete anything. In the final answer "
+        f"include the exact marker {marker} and include the words "
+        f"{display_name} connected."
+    )
+    chat = await _live_chat_case(
+        ctx,
+        case_name=case_name,
+        prompt=prompt,
+        marker=marker,
+        required_text=[display_name, "connected"],
+        timeout=240.0,
+        extra_details={
+            "chat_connect_flow": True,
+            "package_id": package_id,
+            "required_capabilities": expected_capabilities,
+        },
+        forbidden_text=[
+            "auth_denied",
+            "auth_required",
+            "authentication required",
+            "can't connect",
+            "cannot connect",
+            "permission denied",
+        ],
+    )
+    if not chat.success:
+        chat.latency_ms = int((time.monotonic() - started) * 1000)
+        return chat
+
+    observed: dict[str, object] = {
+        "marker": marker,
+        "chat_connect_flow": True,
+        "chat_connect_prompt": prompt,
+        "chat_latency_ms": chat.latency_ms,
+        "text_excerpt": chat.details.get("text_excerpt"),
+        "package_id": package_id,
+        "display_name": display_name,
+        "required_tools": required_tools,
+        "required_capabilities": expected_capabilities,
+    }
+    try:
+        statuses = _capability_run_statuses(ctx.reborn_home, expected_capabilities)
+        observed["capability_statuses"] = statuses
+        missing = [
+            capability_id
+            for capability_id in expected_capabilities
+            if "completed" not in statuses.get(capability_id, [])
+        ]
+        if missing:
+            raise AssertionError(
+                "chat connect did not complete expected capabilities: "
+                f"{missing!r}; observed statuses={statuses!r}"
+            )
+        registry_check = await _extension_authenticated_case(
+            ctx,
+            case_name=case_name,
+            package_id=package_id,
+            display_name=display_name,
+            required_tools=required_tools,
+            ensure_installed=False,
+        )
+        observed["post_chat_registry_check"] = registry_check.details
+        observed["post_chat_registry_latency_ms"] = registry_check.latency_ms
+        if not registry_check.success:
+            raise AssertionError(
+                registry_check.details.get("error") or registry_check.details
+            )
         return _result(case_name, True, started, observed)
     except Exception as exc:
         return _result(case_name, False, started, {"error": str(exc), **observed})
@@ -1713,35 +1821,50 @@ async def _ensure_extension_authenticated_on_page(
 
 
 async def case_qa_2a_gmail_connect(ctx: LiveQaContext) -> ProbeResult:
-    return await _extension_authenticated_case(
+    return await _extension_chat_connect_case(
         ctx,
         case_name="qa_2a_gmail_connect",
         package_id="gmail",
         display_name="Gmail",
         required_tools=["gmail.list_messages"],
-        ensure_installed=True,
+        marker="REBORN_QA_2A_GMAIL_CONNECT_DONE",
+        verification_instruction=(
+            "After connecting, make exactly one safe read-only verification call "
+            "with gmail.list_messages for at most one recent message."
+        ),
+        verification_capabilities=["gmail.list_messages"],
     )
 
 
 async def case_qa_2b_calendar_connect(ctx: LiveQaContext) -> ProbeResult:
-    return await _extension_authenticated_case(
+    return await _extension_chat_connect_case(
         ctx,
         case_name="qa_2b_calendar_connect",
         package_id="google-calendar",
         display_name="Google Calendar",
         required_tools=["google-calendar.list_events"],
-        ensure_installed=True,
+        marker="REBORN_QA_2B_CALENDAR_CONNECT_DONE",
+        verification_instruction=(
+            "After connecting, make exactly one safe read-only verification call "
+            "with google-calendar.list_events for at most one upcoming event."
+        ),
+        verification_capabilities=["google-calendar.list_events"],
     )
 
 
 async def case_qa_2c_drive_connect(ctx: LiveQaContext) -> ProbeResult:
-    return await _extension_authenticated_case(
+    return await _extension_chat_connect_case(
         ctx,
         case_name="qa_2c_drive_connect",
         package_id="google-drive",
         display_name="Google Drive",
         required_tools=["google-drive.list_files"],
-        ensure_installed=True,
+        marker="REBORN_QA_2C_DRIVE_CONNECT_DONE",
+        verification_instruction=(
+            "After connecting, make exactly one safe read-only verification call "
+            "with google-drive.list_files for at most one file."
+        ),
+        verification_capabilities=["google-drive.list_files"],
     )
 
 
@@ -1947,46 +2070,66 @@ async def case_qa_2f_calendar_prep_email_delivery(ctx: LiveQaContext) -> ProbeRe
 
 
 async def case_qa_4a_gmail_connect(ctx: LiveQaContext) -> ProbeResult:
-    return await _extension_authenticated_case(
+    return await _extension_chat_connect_case(
         ctx,
         case_name="qa_4a_gmail_connect",
         package_id="gmail",
         display_name="Gmail",
         required_tools=["gmail.list_messages"],
-        ensure_installed=True,
+        marker="REBORN_QA_4A_GMAIL_CONNECT_DONE",
+        verification_instruction=(
+            "After connecting, make exactly one safe read-only verification call "
+            "with gmail.list_messages for at most one recent message."
+        ),
+        verification_capabilities=["gmail.list_messages"],
     )
 
 
 async def case_qa_4b_github_connect(ctx: LiveQaContext) -> ProbeResult:
-    return await _extension_authenticated_case(
+    return await _extension_chat_connect_case(
         ctx,
         case_name="qa_4b_github_connect",
         package_id="github",
         display_name="GitHub",
         required_tools=["github.get_authenticated_user"],
-        ensure_installed=True,
+        marker="REBORN_QA_4B_GITHUB_CONNECT_DONE",
+        verification_instruction=(
+            "After connecting, make exactly one safe read-only verification call "
+            "with github.get_authenticated_user."
+        ),
+        verification_capabilities=["github.get_authenticated_user"],
     )
 
 
 async def case_qa_6a_gmail_connect(ctx: LiveQaContext) -> ProbeResult:
-    return await _extension_authenticated_case(
+    return await _extension_chat_connect_case(
         ctx,
         case_name="qa_6a_gmail_connect",
         package_id="gmail",
         display_name="Gmail",
         required_tools=["gmail.list_messages"],
-        ensure_installed=True,
+        marker="REBORN_QA_6A_GMAIL_CONNECT_DONE",
+        verification_instruction=(
+            "After connecting, make exactly one safe read-only verification call "
+            "with gmail.list_messages for at most one recent message."
+        ),
+        verification_capabilities=["gmail.list_messages"],
     )
 
 
 async def case_qa_5b_drive_connect(ctx: LiveQaContext) -> ProbeResult:
-    return await _extension_authenticated_case(
+    return await _extension_chat_connect_case(
         ctx,
         case_name="qa_5b_drive_connect",
         package_id="google-drive",
         display_name="Google Drive",
         required_tools=["google-drive.list_files"],
-        ensure_installed=True,
+        marker="REBORN_QA_5B_DRIVE_CONNECT_DONE",
+        verification_instruction=(
+            "After connecting, make exactly one safe read-only verification call "
+            "with google-drive.list_files for at most one file."
+        ),
+        verification_capabilities=["google-drive.list_files"],
     )
 
 
@@ -2180,13 +2323,18 @@ async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResul
 
 
 async def case_qa_6b_sheets_connect(ctx: LiveQaContext) -> ProbeResult:
-    return await _extension_authenticated_case(
+    return await _extension_chat_connect_case(
         ctx,
         case_name="qa_6b_sheets_connect",
         package_id="google-sheets",
         display_name="Google Sheets",
         required_tools=["google-sheets.read_values"],
-        ensure_installed=True,
+        marker="REBORN_QA_6B_SHEETS_CONNECT_DONE",
+        verification_instruction=(
+            "After connecting, do not create or modify any spreadsheet; just "
+            "finish after the Google Sheets extension is active."
+        ),
+        verification_capabilities=[],
     )
 
 
@@ -2341,13 +2489,18 @@ async def case_qa_6e_gmail_to_sheet_delivery(ctx: LiveQaContext) -> ProbeResult:
 
 
 async def case_qa_7b_sheets_connect(ctx: LiveQaContext) -> ProbeResult:
-    return await _extension_authenticated_case(
+    return await _extension_chat_connect_case(
         ctx,
         case_name="qa_7b_sheets_connect",
         package_id="google-sheets",
         display_name="Google Sheets",
         required_tools=["google-sheets.read_values"],
-        ensure_installed=True,
+        marker="REBORN_QA_7B_SHEETS_CONNECT_DONE",
+        verification_instruction=(
+            "After connecting, do not create or modify any spreadsheet; just "
+            "finish after the Google Sheets extension is active."
+        ),
+        verification_capabilities=[],
     )
 
 

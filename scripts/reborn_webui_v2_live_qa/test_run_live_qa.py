@@ -85,6 +85,173 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertFalse(absent_result)
         self.assertFalse(absent.clicked)
 
+    def test_product_connect_cases_start_from_chat_then_verify_registry(self):
+        captured_chat: dict[str, dict[str, object]] = {}
+        captured_registry: dict[str, dict[str, object]] = {}
+
+        async def fake_live_chat_case(_ctx, **kwargs):
+            case_name = kwargs["case_name"]
+            captured_chat[case_name] = kwargs
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{case_name}",
+                success=True,
+                latency_ms=1,
+                details={"text_excerpt": f"{kwargs['marker']} connected"},
+            )
+
+        async def fake_extension_authenticated_case(_ctx, **kwargs):
+            case_name = kwargs["case_name"]
+            captured_registry[case_name] = kwargs
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{case_name}",
+                success=True,
+                latency_ms=1,
+                details={
+                    "package_id": kwargs["package_id"],
+                    "ensure_installed": kwargs["ensure_installed"],
+                },
+            )
+
+        def fake_capability_run_statuses(_reborn_home, capability_ids):
+            return {capability_id: ["completed"] for capability_id in capability_ids}
+
+        cases = {
+            "qa_2a_gmail_connect": (
+                run_live_qa.case_qa_2a_gmail_connect,
+                "gmail",
+                ["gmail.list_messages"],
+            ),
+            "qa_2b_calendar_connect": (
+                run_live_qa.case_qa_2b_calendar_connect,
+                "google-calendar",
+                ["google-calendar.list_events"],
+            ),
+            "qa_2c_drive_connect": (
+                run_live_qa.case_qa_2c_drive_connect,
+                "google-drive",
+                ["google-drive.list_files"],
+            ),
+            "qa_4a_gmail_connect": (
+                run_live_qa.case_qa_4a_gmail_connect,
+                "gmail",
+                ["gmail.list_messages"],
+            ),
+            "qa_4b_github_connect": (
+                run_live_qa.case_qa_4b_github_connect,
+                "github",
+                ["github.get_authenticated_user"],
+            ),
+            "qa_5b_drive_connect": (
+                run_live_qa.case_qa_5b_drive_connect,
+                "google-drive",
+                ["google-drive.list_files"],
+            ),
+            "qa_6a_gmail_connect": (
+                run_live_qa.case_qa_6a_gmail_connect,
+                "gmail",
+                ["gmail.list_messages"],
+            ),
+            "qa_6b_sheets_connect": (
+                run_live_qa.case_qa_6b_sheets_connect,
+                "google-sheets",
+                [],
+            ),
+            "qa_7b_sheets_connect": (
+                run_live_qa.case_qa_7b_sheets_connect,
+                "google-sheets",
+                [],
+            ),
+        }
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_case",
+                side_effect=fake_live_chat_case,
+            ),
+            patch.object(
+                run_live_qa,
+                "_extension_authenticated_case",
+                side_effect=fake_extension_authenticated_case,
+            ),
+            patch.object(
+                run_live_qa,
+                "_capability_run_statuses",
+                side_effect=fake_capability_run_statuses,
+            ),
+        ):
+            ctx = self._dummy_ctx()
+            for case_name, (case_fn, _package_id, _verification_caps) in cases.items():
+                with self.subTest(case=case_name):
+                    self.assertTrue(asyncio.run(case_fn(ctx)).success)
+
+        self.assertEqual(set(captured_chat), set(cases))
+        self.assertEqual(set(captured_registry), set(cases))
+        for case_name, (_case_fn, package_id, verification_caps) in cases.items():
+            prompt = str(captured_chat[case_name]["prompt"])
+            self.assertIn("from this chat", prompt)
+            self.assertIn("extension_search", prompt)
+            self.assertIn(f"`{package_id}`", prompt)
+            self.assertNotIn("/v2/extensions/registry", prompt)
+            extra_details = captured_chat[case_name]["extra_details"]
+            self.assertIsInstance(extra_details, dict)
+            self.assertTrue(extra_details["chat_connect_flow"])
+            required_capabilities = extra_details["required_capabilities"]
+            self.assertIn(run_live_qa.EXTENSION_SEARCH_CAPABILITY_ID, required_capabilities)
+            self.assertIn(run_live_qa.EXTENSION_INSTALL_CAPABILITY_ID, required_capabilities)
+            self.assertIn(run_live_qa.EXTENSION_ACTIVATE_CAPABILITY_ID, required_capabilities)
+            for capability_id in verification_caps:
+                self.assertIn(capability_id, required_capabilities)
+            self.assertFalse(captured_registry[case_name]["ensure_installed"])
+
+    def test_product_connect_case_fails_when_chat_does_not_use_extension_lifecycle(self):
+        async def fake_live_chat_case(_ctx, **kwargs):
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={"text_excerpt": f"{kwargs['marker']} connected"},
+            )
+
+        def fake_capability_run_statuses(_reborn_home, capability_ids):
+            return {capability_id: [] for capability_id in capability_ids}
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_case",
+                side_effect=fake_live_chat_case,
+            ),
+            patch.object(
+                run_live_qa,
+                "_capability_run_statuses",
+                side_effect=fake_capability_run_statuses,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa._extension_chat_connect_case(
+                    self._dummy_ctx(),
+                    case_name="qa_test_connect",
+                    package_id="gmail",
+                    display_name="Gmail",
+                    required_tools=["gmail.list_messages"],
+                    marker="REBORN_QA_TEST_CONNECT_DONE",
+                    verification_instruction=(
+                        "After connecting, call gmail.list_messages once."
+                    ),
+                    verification_capabilities=["gmail.list_messages"],
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertIn(
+            "chat connect did not complete expected capabilities",
+            str(result.details["error"]),
+        )
+
     def test_live_google_side_effect_cases_install_required_extensions(self):
         captured: dict[str, dict[str, object]] = {}
         spreadsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
