@@ -1196,7 +1196,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     auth_continuation_dispatcher(turn_coordinator.clone()),
                     Arc::clone(&secret_store),
                 )
-                .with_provider_client(provider_client)
+                .with_provider_client(Arc::clone(&provider_client))
                 .with_flow_record_source(durable_services);
                 let services = match provider_composition.dcr_registry.clone() {
                     Some(registry) => services.with_dcr_oauth_registry(registry),
