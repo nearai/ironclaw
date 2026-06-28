@@ -3082,6 +3082,42 @@ WEBUI_V2_AUTOMATIONS_TRACE_OUTBOUND_CHANNEL_HANDLER_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_AUTOMATIONS_TRACE_OUTBOUND_SERVED_E2E_COMMAND = CommandSpec(
+    name="webui_v2_automation_trace_outbound_served_e2e",
+    description=(
+        "Served WebUI v2 automations, Trace Commons, outbound preferences, "
+        "outbound targets, and connectable-channel API tests through a real "
+        "ironclaw-reborn process: bearer gating, empty-state projections, "
+        "query/input validation, no-op trace hold authorization, preference "
+        "clear/invalid-target behavior, and secret-free responses."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_automation_trace_outbound_api.py",
+        "-q",
+    ],
+)
+
 WEBUI_V2_FS_HANDLER_COMMAND = CommandSpec(
     name="webui_v2_filesystem_handler_slice",
     description="Focused WebUI v2 filesystem handler negative-path contract slice.",
@@ -4615,6 +4651,29 @@ CASES: dict[str, CaseSpec] = {
             "contracts. Static automations screen coverage remains mapped "
             "separately to REBCLI-067, and PR #5348 browser duplicates stay "
             "referenced instead of reimplemented here."
+        ),
+    ),
+    "webui_v2_automation_trace_outbound_served_api_regression": CaseSpec(
+        name="webui_v2_automation_trace_outbound_served_api_regression",
+        feature="WebUI v2 automations, trace, outbound, and channel served APIs",
+        category="Served WebUI v2 Automation/Trace/Outbound API E2E",
+        qa_matrix_test_ids=[
+            "REBCLI-045-TC-11",
+            "REBCLI-045-TC-12",
+            "REBCLI-045-TC-13",
+            "REBCLI-045-TC-14",
+        ],
+        commands=[WEBUI_V2_AUTOMATIONS_TRACE_OUTBOUND_SERVED_E2E_COMMAND],
+        notes=(
+            "Runs served WebUI v2 automation, Trace Commons, outbound "
+            "preferences/targets, and connectable-channel API coverage "
+            "through a real ironclaw-reborn process: bearer gating, "
+            "automation empty-state and malformed query rejection, invalid "
+            "automation-id validation, unenrolled trace-credit zero-state, "
+            "no-op hold authorization, outbound preference clear/invalid "
+            "target behavior, target/channel projections, and secret-free "
+            "responses. CI-owned Rust contract/substrate rows for REBCLI-045 "
+            "remain external-existing coverage."
         ),
     ),
     "webui_v2_route_contract_regression": CaseSpec(
