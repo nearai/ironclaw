@@ -212,8 +212,7 @@ pub async fn build_default_local_dev_database_roots_for_test(
     root: &std::path::Path,
     composite: &mut ironclaw_filesystem::CompositeRootFilesystem,
 ) -> Result<(), crate::RebornBuildError> {
-    crate::factory::mount_default_local_dev_database_roots(root, composite)
-        .await
+    crate::factory::mount_default_local_dev_database_roots(root, composite).await
 }
 
 /// Test-only accessor mirroring the production local-dev boot path

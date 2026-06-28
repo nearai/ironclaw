@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use ironclaw_filesystem::{CompositeRootFilesystem, LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{
+    CompositeRootFilesystem, LocalFilesystem, RootFilesystem, ScopedFilesystem,
+};
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ThreadId, VirtualPath,
 };
@@ -54,11 +56,8 @@ where
 /// Shared methods: work for any `F: RootFilesystem`.
 impl<F: RootFilesystem> RebornThreadHarness<F> {
     pub fn reopened(&self) -> Result<Self, RebornThreadHarnessError> {
-        let scoped = scoped_threads_fs_at(
-            &self.root_prefix,
-            Arc::clone(&self.backend),
-            &self.scope,
-        )?;
+        let scoped =
+            scoped_threads_fs_at(&self.root_prefix, Arc::clone(&self.backend), &self.scope)?;
         let service = Arc::new(FilesystemSessionThreadService::new(scoped));
         Ok(Self {
             scope: self.scope.clone(),
@@ -72,11 +71,8 @@ impl<F: RootFilesystem> RebornThreadHarness<F> {
     pub fn service_instance(
         &self,
     ) -> Result<FilesystemSessionThreadService<F>, RebornThreadHarnessError> {
-        let scoped = scoped_threads_fs_at(
-            &self.root_prefix,
-            Arc::clone(&self.backend),
-            &self.scope,
-        )?;
+        let scoped =
+            scoped_threads_fs_at(&self.root_prefix, Arc::clone(&self.backend), &self.scope)?;
         Ok(FilesystemSessionThreadService::new(scoped))
     }
 

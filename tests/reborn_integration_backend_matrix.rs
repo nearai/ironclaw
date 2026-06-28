@@ -41,7 +41,10 @@ async fn backend_parity_replies_to_greeting(#[case] storage: StorageMode) {
         .build()
         .await
         .expect("harness builds");
-    harness.submit_turn("hi there").await.expect("turn completes");
+    harness
+        .submit_turn("hi there")
+        .await
+        .expect("turn completes");
     harness
         .assert_reply_contains("Hello! How can I help?")
         .await

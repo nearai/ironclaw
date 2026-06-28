@@ -220,12 +220,11 @@ impl RebornIntegrationHarnessBuilder {
             Arc::clone(&composite),
             Arc::clone(&turn_root),
         )?;
-        let turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>> = Arc::new(
-            FilesystemTurnStateStore::new(scoped_turns_fs_composite(
+        let turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>> =
+            Arc::new(FilesystemTurnStateStore::new(scoped_turns_fs_composite(
                 Arc::clone(&composite),
                 &binding,
-            )?),
-        );
+            )?));
         let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
@@ -588,7 +587,9 @@ pub(super) fn scoped_turns_fs_composite(
         VirtualPath::new(target).expect("valid turns target"),
         MountPermissions::read_write_list_delete(),
     )])?;
-    Ok(Arc::new(ScopedFilesystem::with_fixed_view(composite, mounts)))
+    Ok(Arc::new(ScopedFilesystem::with_fixed_view(
+        composite, mounts,
+    )))
 }
 
 // ---------------------------------------------------------------------------
