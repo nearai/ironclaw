@@ -1027,7 +1027,7 @@ mod tests {
     use async_trait::async_trait;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use http_body_util::BodyExt;
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_extensions::ExtensionRegistry;
@@ -3980,7 +3980,7 @@ mod tests {
             HmacSha256::new_from_slice(SECRET.as_bytes()).expect("HMAC accepts any key size");
         mac.update(format!("v0:{timestamp}:").as_bytes());
         mac.update(body.as_bytes());
-        format!("v0={:x}", mac.finalize().into_bytes())
+        format!("v0={}", hex::encode(mac.finalize().into_bytes()))
     }
 
     fn dm_event_body() -> &'static str {

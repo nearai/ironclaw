@@ -158,15 +158,15 @@ const TEST_CAPABILITY_SURFACE_VERSION: &str = "trace_replay_v1";
 const SUBAGENT_ALLOWED_TEST_TOOL_NAME: &str = "test_read_file";
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
-type HarnessCapabilityParts = (
+pub(crate) type HarnessCapabilityParts = (
     Arc<dyn LoopCapabilityPortFactory>,
     Arc<dyn CapabilitySurfaceProfileResolver>,
     Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
     Arc<dyn LoopCapabilityResultWriter>,
     HarnessCapabilityRecorder,
 );
-type HarnessTurnStorageBackend = BlockingTurnStatePutFilesystem<InMemoryBackend>;
-type HarnessTurnBackend = CompositeRootFilesystem;
+pub(crate) type HarnessTurnStorageBackend = BlockingTurnStatePutFilesystem<InMemoryBackend>;
+pub(crate) type HarnessTurnBackend = CompositeRootFilesystem;
 
 pub struct RebornBinaryE2EHarness {
     ingress: RebornTestIngress,
@@ -240,19 +240,19 @@ pub struct RecordedCapabilityResult {
     pub output: serde_json::Value,
 }
 
-enum HarnessCapabilityMode {
+pub(crate) enum HarnessCapabilityMode {
     Recording(RecordingTestCapabilityPort),
     HostRuntime(Arc<HostRuntimeCapabilityHarness>),
 }
 
 #[derive(Clone)]
-enum HarnessCapabilityRecorder {
+pub(crate) enum HarnessCapabilityRecorder {
     Recording(Arc<RecordingTestCapabilityPort>),
     HostRuntime(Arc<HostRuntimeCapabilityHarness>),
 }
 
 impl HarnessCapabilityRecorder {
-    fn invocations(&self) -> Vec<CapabilityInvocation> {
+    pub(crate) fn invocations(&self) -> Vec<CapabilityInvocation> {
         match self {
             Self::Recording(port) => port.invocations(),
             Self::HostRuntime(harness) => harness.invocations(),
@@ -273,7 +273,7 @@ impl HarnessCapabilityRecorder {
         }
     }
 
-    fn runtime_http_requests(&self) -> Vec<RuntimeHttpEgressRequest> {
+    pub(crate) fn runtime_http_requests(&self) -> Vec<RuntimeHttpEgressRequest> {
         match self {
             Self::Recording(_) => Vec::new(),
             Self::HostRuntime(harness) => harness.runtime_http_requests(),
@@ -1459,7 +1459,7 @@ impl LoopExitEvidencePort for HarnessLoopExitEvidencePort {
 }
 
 impl HarnessCapabilityMode {
-    fn into_parts(
+    pub(crate) fn into_parts(
         self,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
     ) -> HarnessResult<HarnessCapabilityParts> {
@@ -1492,7 +1492,7 @@ impl HarnessCapabilityMode {
     }
 }
 
-struct HostRuntimeCapabilityHarness {
+pub(crate) struct HostRuntimeCapabilityHarness {
     runtime: Arc<dyn HostRuntime>,
     approval_parts: Option<RebornLocalDevApprovalTestParts>,
     auto_approve_settings: Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>>,
@@ -2014,7 +2014,7 @@ impl HostRuntimeCapabilityHarness {
         })
     }
 
-    async fn core_builtin_tools() -> HarnessResult<Self> {
+    pub(crate) async fn core_builtin_tools() -> HarnessResult<Self> {
         Self::core_builtin_tools_with_network_policy(http_test_policy()).await
     }
 
@@ -3537,8 +3537,8 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
     }
 }
 
-struct HarnessCapabilityPortFactory {
-    port: Arc<RecordingTestCapabilityPort>,
+pub(crate) struct HarnessCapabilityPortFactory {
+    pub(crate) port: Arc<RecordingTestCapabilityPort>,
 }
 
 #[async_trait]
@@ -3551,8 +3551,8 @@ impl LoopCapabilityPortFactory for HarnessCapabilityPortFactory {
     }
 }
 
-struct StaticCapabilitySurfaceProfileResolver {
-    allow_set: CapabilityAllowSet,
+pub(crate) struct StaticCapabilitySurfaceProfileResolver {
+    pub(crate) allow_set: CapabilityAllowSet,
 }
 
 #[async_trait]
@@ -3565,7 +3565,7 @@ impl CapabilitySurfaceProfileResolver for StaticCapabilitySurfaceProfileResolver
     }
 }
 
-struct EmptyIdentityContextSource;
+pub(crate) struct EmptyIdentityContextSource;
 
 #[async_trait]
 impl HostIdentityContextSource for EmptyIdentityContextSource {
@@ -3677,7 +3677,7 @@ fn route_kind_for_trigger(trigger: ProductTriggerReason) -> ProductConversationR
     }
 }
 
-fn scoped_turns_fs(
+pub(crate) fn scoped_turns_fs(
     backend: Arc<HarnessTurnStorageBackend>,
     binding: &ResolvedBinding,
 ) -> HarnessResult<Arc<ScopedFilesystem<HarnessTurnBackend>>> {
