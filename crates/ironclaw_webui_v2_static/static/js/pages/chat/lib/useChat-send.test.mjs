@@ -2220,6 +2220,88 @@ test("useChat.send: active run refuses duplicate submit before network call", as
   assert.deepEqual(renderedMessages, []);
 });
 
+test("useChat.send: active run from another thread does not block new conversation", async () => {
+  let renderedMessages = [];
+  let createThreadCalls = 0;
+  let sendCalls = 0;
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [2, { runId: "run-old", threadId: "thread-old", status: "running" }],
+      ]),
+    }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      createThreadCalls += 1;
+      return { thread: { thread_id: "thread-new" } };
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async ({ threadId, content }) => {
+      sendCalls += 1;
+      return {
+        accepted_message_ref: "msg:message-new",
+        run_id: "run-new",
+        status: "queued",
+        thread_id: threadId,
+        content,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(null);
+  const response = await chat.send("first message in new chat");
+
+  assert.equal(createThreadCalls, 1);
+  assert.equal(sendCalls, 1);
+  assert.equal(response.run_id, "run-new");
+  assert.equal(renderedMessages.length, 1);
+  assert.equal(renderedMessages[0].content, "first message in new chat");
+});
+
 test("useChat.send: accepted run blocks another submit until settlement", async () => {
   const threadId = "thread-1";
   let renderedMessages = [];

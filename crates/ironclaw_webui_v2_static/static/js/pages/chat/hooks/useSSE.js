@@ -89,6 +89,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
           lastEventIdRef.current = event.lastEventId;
         }
         onEventRef.current?.({
+          sourceThreadId: threadId,
           // The frame's own `type` field is the canonical source;
           // `event.type` (from the SSE `event:` line) is the
           // fallback for forwards-compatibility if Rust adds an

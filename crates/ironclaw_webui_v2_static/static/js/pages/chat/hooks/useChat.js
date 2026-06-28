@@ -401,11 +401,11 @@ export function useChat(threadId) {
         throw approvalGatePendingSendError();
       }
       const activeRunForSend = activeRunRef.current;
+      const targetRunThreadId = targetThreadId || threadId;
       const activeRunBlocksSend =
         activeRunForSend &&
-        (!targetThreadId ||
-          activeRunForSend.threadId === targetThreadId ||
-          activeRunForSend.threadId === threadId);
+        targetRunThreadId &&
+        activeRunForSend.threadId === targetRunThreadId;
       if (
         submitBusyRef.current ||
         isProcessingRef.current ||

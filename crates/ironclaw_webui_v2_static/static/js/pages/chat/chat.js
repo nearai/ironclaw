@@ -74,12 +74,19 @@ export function Chat({
     () => threads.find((thread) => thread.id === activeThreadId) || null,
     [threads, activeThreadId]
   );
+  const isActiveThreadProcessing = Boolean(
+    isProcessing &&
+      (!activeRun?.threadId || activeRun.threadId === activeThreadId)
+  );
   const runtimeContext = React.useMemo(
     () => buildRuntimeContext({ gatewayStatus, activeThread }),
     [gatewayStatus, activeThread]
   );
   const hasMessages =
-    messages.length > 0 || isProcessing || Boolean(pendingGate) || Boolean(channelConnectAction);
+    messages.length > 0 ||
+    isActiveThreadProcessing ||
+    Boolean(pendingGate) ||
+    Boolean(channelConnectAction);
   // Don't show the landing composer when history failed to load — show the
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
@@ -88,7 +95,9 @@ export function Chat({
     ? "Resolve the approval request before sending another message."
     : "";
   const composerSendDisabled =
-    Boolean(pendingGate) || (isProcessing && !pendingGate) || cooldownSeconds > 0;
+    Boolean(pendingGate) ||
+    (isActiveThreadProcessing && !pendingGate) ||
+    cooldownSeconds > 0;
   const composerSendBlockedRef = React.useRef(composerSendDisabled);
   composerSendBlockedRef.current = composerSendDisabled;
   const composerStatusText =
@@ -101,7 +110,7 @@ export function Chat({
     activeThreadId &&
       activeRun?.runId &&
       activeRun.threadId === activeThreadId &&
-      isProcessing &&
+      isActiveThreadProcessing &&
       !pendingGate
   );
   const handleSend = React.useCallback(
@@ -181,7 +190,7 @@ export function Chat({
       setThreadState(activeThreadId, THREAD_STATE.NEEDS_ATTENTION);
       return undefined;
     }
-    if (isProcessing) {
+    if (isActiveThreadProcessing) {
       setThreadState(activeThreadId, THREAD_STATE.RUNNING);
       return undefined;
     }
@@ -190,7 +199,7 @@ export function Chat({
       THREAD_STATE_CLEAR_GRACE_MS
     );
     return () => clearTimeout(timer);
-  }, [activeThreadId, pendingGate, isProcessing]);
+  }, [activeThreadId, pendingGate, isActiveThreadProcessing]);
 
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
   React.useEffect(() => {
@@ -250,7 +259,7 @@ export function Chat({
             onLoadMore=${loadMore}
             onRetryMessage=${retryMessage}
             threadId=${activeThreadId}
-            pending=${isProcessing}
+            pending=${isActiveThreadProcessing}
           >
             ${recoveryNotice &&
             html`
@@ -259,7 +268,7 @@ export function Chat({
                 onRecover=${recoverHistory}
               />
             `}
-            ${isProcessing && !pendingGate && html`<${TypingIndicator} />`}
+            ${isActiveThreadProcessing && !pendingGate && html`<${TypingIndicator} />`}
             ${channelConnectAction &&
             html`
               <${ChannelConnectCard}

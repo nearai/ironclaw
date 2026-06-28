@@ -173,6 +173,25 @@ test("useChatEvents: projection activity preserves reasoning/tool chronology", (
   );
 });
 
+test("useChatEvents: ignores frames from a stale SSE thread", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    sourceThreadId: "thread-old",
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-old", status: "running" } }],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.activeRun, null);
+  assert.equal(harness.pendingGate, null);
+  assert.deepEqual(harness.messages, []);
+});
+
 test("useChatEvents: auth gate stays visible through progress events", () => {
   const runId = "run-auth-1";
   const authGate = {
