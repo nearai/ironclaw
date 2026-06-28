@@ -93,7 +93,14 @@ def _feature(feature_id: str, name: str = "WebUI v2 Chat") -> list[str]:
     ]
 
 
-def _test_row(test_id: str, feature_id: str, *, status: str = "Passed") -> list[str]:
+def _test_row(
+    test_id: str,
+    feature_id: str,
+    *,
+    status: str = "Passed",
+    actual: str = "Actual",
+    notes: str = "Evidence notes",
+) -> list[str]:
     return [
         test_id,
         feature_id,
@@ -102,11 +109,11 @@ def _test_row(test_id: str, feature_id: str, *, status: str = "Passed") -> list[
         "Preconditions",
         "Steps",
         "Expected",
-        "Actual",
+        actual,
         status,
         "High",
         "2026-06-28",
-        "Evidence notes",
+        notes,
     ]
 
 
@@ -203,6 +210,79 @@ class AuditExecutionEvidenceTests(unittest.TestCase):
             self.assertEqual(
                 report["unknown_status_tests"][0]["status"],
                 "Needs Review",
+            )
+
+    def test_build_audit_requires_external_existing_source_reference(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "matrix.xlsx"
+            _write_workbook(
+                workbook_path,
+                feature_rows=[
+                    list(audit_workbook_completeness.REQUIRED_FEATURE_COLUMNS),
+                    _feature("REBCLI-001"),
+                ],
+                test_rows=[
+                    TEST_COLUMNS,
+                    _test_row(
+                        "REBCLI-001-TC-01",
+                        "REBCLI-001",
+                        status="External-existing coverage",
+                        actual="Covered elsewhere",
+                        notes="No source owner named",
+                    ),
+                ],
+            )
+
+            report = audit_execution_evidence.build_audit(workbook_path)
+
+            self.assertEqual(report["missing_external_reference_count"], 1)
+            self.assertEqual(
+                report["missing_external_references"][0]["test_id"],
+                "REBCLI-001-TC-01",
+            )
+            self.assertEqual(
+                audit_execution_evidence.main(["--workbook", str(workbook_path)]),
+                1,
+            )
+
+    def test_build_audit_rejects_superseded_pr_5348_without_split_pr_reference(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "matrix.xlsx"
+            _write_workbook(
+                workbook_path,
+                feature_rows=[
+                    list(audit_workbook_completeness.REQUIRED_FEATURE_COLUMNS),
+                    _feature("REBCLI-001"),
+                ],
+                test_rows=[
+                    TEST_COLUMNS,
+                    _test_row(
+                        "REBCLI-001-TC-01",
+                        "REBCLI-001",
+                        status="External-existing coverage",
+                        actual="External-existing browser coverage",
+                        notes="Covered by nearai/ironclaw#5348 legacy browser flows.",
+                    ),
+                    _test_row(
+                        "REBCLI-001-TC-02",
+                        "REBCLI-001",
+                        status="External-existing coverage",
+                        actual="External-existing browser coverage",
+                        notes=(
+                            "Covered by nearai/ironclaw#5348, superseded by "
+                            "nearai/ironclaw#5371 and #5372 split browser flows."
+                        ),
+                    ),
+                ],
+            )
+
+            report = audit_execution_evidence.build_audit(workbook_path)
+
+            self.assertEqual(report["missing_external_reference_count"], 0)
+            self.assertEqual(report["stale_external_reference_count"], 1)
+            self.assertEqual(
+                report["stale_external_references"][0]["test_id"],
+                "REBCLI-001-TC-01",
             )
 
 

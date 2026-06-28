@@ -21,6 +21,8 @@ REQUIRED_EXECUTION_COLUMNS = (
 PASSED_STATUSES = ("passed",)
 EXTERNAL_STATUSES = ("external-existing coverage",)
 BLOCKED_PREFIXES = ("blocked",)
+STALE_EXTERNAL_ONLY_PR = "5348"
+CURRENT_EXTERNAL_SPLIT_PR_REFS = ("5371", "5372", "5373", "5374", "5375", "5376")
 
 
 def _status_class(status: str) -> str:
@@ -57,6 +59,8 @@ def build_audit(
     }
     blocked_tests: list[dict[str, str]] = []
     unknown_status_tests: list[dict[str, str]] = []
+    missing_external_references: list[dict[str, str]] = []
+    stale_external_references: list[dict[str, str]] = []
     tests_with_missing_fields: set[str] = set()
 
     for test in scoped_tests:
@@ -93,6 +97,42 @@ def build_audit(
                     "category": test.get("Category", ""),
                 }
             )
+        elif status_class == "external_existing":
+            external_evidence = " ".join(
+                [
+                    test.get("Actual Result", ""),
+                    test.get("Notes", ""),
+                ]
+            )
+            normalized_evidence = external_evidence.lower()
+            if not (
+                "nearai/ironclaw#" in normalized_evidence
+                or " pr #" in normalized_evidence
+                or " ci" in normalized_evidence
+                or "github action" in normalized_evidence
+            ):
+                missing_external_references.append(
+                    {
+                        "test_id": test_id,
+                        "feature_id": test.get("Feature ID", ""),
+                        "category": test.get("Category", ""),
+                    }
+                )
+            if (
+                STALE_EXTERNAL_ONLY_PR in normalized_evidence
+                and "superseded" not in normalized_evidence
+                and not any(
+                    ref in normalized_evidence for ref in CURRENT_EXTERNAL_SPLIT_PR_REFS
+                )
+            ):
+                stale_external_references.append(
+                    {
+                        "test_id": test_id,
+                        "feature_id": test.get("Feature ID", ""),
+                        "category": test.get("Category", ""),
+                        "notes": test.get("Notes", ""),
+                    }
+                )
 
     return {
         "workbook": str(workbook_path),
@@ -103,9 +143,13 @@ def build_audit(
         "blocked_test_count": status_counts["blocked"],
         "unknown_status_test_count": status_counts["unknown"],
         "missing_execution_field_count": len(missing_execution_fields),
+        "missing_external_reference_count": len(missing_external_references),
+        "stale_external_reference_count": len(stale_external_references),
         "execution_evidence_test_count": len(scoped_tests)
         - len(tests_with_missing_fields),
         "missing_execution_fields": missing_execution_fields,
+        "missing_external_references": missing_external_references,
+        "stale_external_references": stale_external_references,
         "blocked_tests": blocked_tests,
         "unknown_status_tests": unknown_status_tests,
     }
@@ -117,6 +161,9 @@ def _gap_count(report: dict[str, object], *, strict_no_blocked: bool) -> int:
     )
     if strict_no_blocked:
         gap_count += int(report["blocked_test_count"])
+    gap_count += int(report["missing_external_reference_count"]) + int(
+        report["stale_external_reference_count"]
+    )
     return gap_count
 
 
@@ -128,8 +175,14 @@ def print_report(report: dict[str, object]) -> None:
     print(f"Blocked tests: {report['blocked_test_count']}")
     print(f"Unknown-status tests: {report['unknown_status_test_count']}")
     print(f"Missing execution fields: {report['missing_execution_field_count']}")
+    print(f"Missing external references: {report['missing_external_reference_count']}")
+    print(f"Stale external references: {report['stale_external_reference_count']}")
     for gap in report["missing_execution_fields"]:
         print(f"- missing execution field {gap['test_id']} {gap['column']}")
+    for gap in report["missing_external_references"]:
+        print(f"- missing external reference {gap['test_id']}")
+    for gap in report["stale_external_references"]:
+        print(f"- stale external reference {gap['test_id']}")
     for gap in report["unknown_status_tests"]:
         print(f"- unknown status {gap['test_id']} {gap['status']}")
     for blocked in report["blocked_tests"]:

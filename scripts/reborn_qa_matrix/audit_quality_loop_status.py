@@ -34,6 +34,8 @@ def _count_blocking_gaps(
     gap_count += int(coverage["actionable_gap_test_count"])
     gap_count += int(execution["missing_execution_field_count"])
     gap_count += int(execution["unknown_status_test_count"])
+    gap_count += int(execution["missing_external_reference_count"])
+    gap_count += int(execution["stale_external_reference_count"])
     if strict_no_blocked:
         gap_count += int(execution["blocked_test_count"])
     gap_count += int(defects["undocumented_non_passing_test_count"])
@@ -79,6 +81,8 @@ def build_status(
         + int(coverage["actionable_gap_test_count"])
         + int(execution["missing_execution_field_count"])
         + int(execution["unknown_status_test_count"])
+        + int(execution["missing_external_reference_count"])
+        + int(execution["stale_external_reference_count"])
     )
     traceable_runner_coverage_pct = coverage.get(
         "traceable_runner_coverage_pct",
@@ -130,6 +134,12 @@ def build_status(
             "uncovered_surface_count": surface["uncovered_surface_count"],
             "missing_test_suite_count": completeness["missing_test_suite_count"],
             "unknown_status_test_count": execution["unknown_status_test_count"],
+            "missing_external_reference_count": execution[
+                "missing_external_reference_count"
+            ],
+            "stale_external_reference_count": execution[
+                "stale_external_reference_count"
+            ],
         },
         "confidence_score": f"{traceable_runner_coverage_pct}%",
         "surface": surface,
@@ -168,6 +178,8 @@ def print_report(report: dict[str, object]) -> None:
         "Remaining Risks: "
         f"{risks['blocked_test_count']} blocked tests, "
         f"{risks['undocumented_non_passing_test_count']} undocumented non-passing rows, "
+        f"{risks['missing_external_reference_count']} missing external references, "
+        f"{risks['stale_external_reference_count']} stale external references, "
         f"{risks['open_defect_count']} open defects, "
         f"{risks['open_high_critical_defect_count']} open high/critical defects"
     )

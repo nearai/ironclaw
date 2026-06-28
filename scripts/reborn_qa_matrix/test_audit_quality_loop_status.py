@@ -68,8 +68,12 @@ def _execution_report(**overrides):
         "blocked_test_count": 2,
         "unknown_status_test_count": 0,
         "missing_execution_field_count": 0,
+        "missing_external_reference_count": 0,
+        "stale_external_reference_count": 0,
         "execution_evidence_test_count": 464,
         "missing_execution_fields": [],
+        "missing_external_references": [],
+        "stale_external_references": [],
         "blocked_tests": [
             {
                 "test_id": "REBCLI-055-TC-18",
@@ -180,6 +184,8 @@ class AuditQualityLoopStatusTests(unittest.TestCase):
             execution=_execution_report(
                 missing_execution_field_count=1,
                 unknown_status_test_count=1,
+                missing_external_reference_count=1,
+                stale_external_reference_count=1,
                 blocked_test_count=0,
                 blocked_tests=[],
             ),
@@ -205,7 +211,7 @@ class AuditQualityLoopStatusTests(unittest.TestCase):
             )
 
             self.assertFalse(report["loop_gate_passed"])
-            self.assertEqual(report["blocking_gap_count"], 9)
+            self.assertEqual(report["blocking_gap_count"], 11)
 
     def test_main_exit_code_tracks_gate_state(self):
         with tempfile.TemporaryDirectory() as tmpdir, self._patch_reports():
