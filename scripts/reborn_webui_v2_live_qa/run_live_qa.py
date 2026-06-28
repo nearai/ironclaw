@@ -159,6 +159,14 @@ def parse_args() -> argparse.Namespace:
         help="Run every QA-sheet case, including cases normally gated by live credentials.",
     )
     parser.add_argument(
+        "--non-telegram-qa-cases",
+        action="store_true",
+        help=(
+            "Run every implemented QA-sheet case except Telegram cases. This is "
+            "the full current live QA target."
+        ),
+    )
+    parser.add_argument(
         "--reborn-home",
         type=Path,
         default=Path(
@@ -198,8 +206,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     args = parser.parse_args()
-    if args.all_cases and args.case:
-        parser.error("--all-cases cannot be combined with --case")
+    selected_modes = sum(
+        [
+            bool(args.case),
+            args.all_cases,
+            args.non_telegram_qa_cases,
+        ]
+    )
+    if selected_modes > 1:
+        parser.error(
+            "--case, --all-cases, and --non-telegram-qa-cases are mutually exclusive"
+        )
     return args
 
 
@@ -3404,13 +3421,26 @@ def write_preflight(output_dir: Path, prepared_home: PreparedRebornHome) -> Path
     return path
 
 
-async def run_cases(args: argparse.Namespace) -> int:
+def _non_telegram_qa_case_names() -> list[str]:
+    return [
+        name
+        for name, spec in CASES.items()
+        if name in QA_SHEET_CASES and spec.implemented and not spec.requires_telegram
+    ]
+
+
+def _selected_case_names(args: argparse.Namespace) -> list[str]:
     if args.all_cases:
-        selected_cases = list(CASES)
-    else:
-        selected_cases = args.case or [
-            name for name, spec in CASES.items() if spec.default_enabled
-        ]
+        return list(CASES)
+    if args.non_telegram_qa_cases:
+        return _non_telegram_qa_case_names()
+    return args.case or [
+        name for name, spec in CASES.items() if spec.default_enabled
+    ]
+
+
+async def run_cases(args: argparse.Namespace) -> int:
+    selected_cases = _selected_case_names(args)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = write_case_manifest(args.output_dir, selected_cases)
     print(f"[reborn-webui-v2-live-qa] case_manifest={manifest_path}", flush=True)
@@ -3679,6 +3709,8 @@ def main() -> int:
             forwarded.append("--require-slack-live")
         if args.all_cases:
             forwarded.append("--all-cases")
+        if args.non_telegram_qa_cases:
+            forwarded.append("--non-telegram-qa-cases")
         for case_name in args.case:
             forwarded.extend(["--case", case_name])
         return subprocess.run(forwarded, cwd=ROOT).returncode

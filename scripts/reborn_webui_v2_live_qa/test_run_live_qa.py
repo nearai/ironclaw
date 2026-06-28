@@ -812,6 +812,31 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             f"default cases must come from the QA spreadsheet: {default_cases}",
         )
 
+    def test_non_telegram_qa_suite_selects_full_current_live_target(self):
+        args = argparse.Namespace(
+            all_cases=False,
+            non_telegram_qa_cases=True,
+            case=[],
+        )
+
+        selected_cases = run_live_qa._selected_case_names(args)
+
+        self.assertEqual(len(selected_cases), 33)
+        self.assertNotIn("qa_1a_telegram_connect", selected_cases)
+        self.assertNotIn("qa_1b_telegram_near_news_chat", selected_cases)
+        self.assertNotIn("qa_1c_telegram_near_news_routine", selected_cases)
+        for case_name in (
+            "qa_2d_calendar_prep_live_chat",
+            "qa_2f_calendar_prep_email_delivery",
+            "qa_4e_github_release_email_delivery",
+            "qa_5c_strategy_doc_knowledge_base",
+            "qa_5d_slack_strategy_doc_answer",
+            "qa_6c_gmail_to_sheet_live_chat",
+            "qa_6e_gmail_to_sheet_delivery",
+            "qa_7e_slack_bug_sheet_delivery",
+        ):
+            self.assertIn(case_name, selected_cases)
+
     def test_case_manifest_distinguishes_targeted_from_placeholder_gates(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir)
@@ -1010,6 +1035,32 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
             forwarded = subprocess_run.call_args.args[0]
             self.assertIn("--all-cases", forwarded)
+            self.assertNotIn("--case", forwarded)
+
+    def test_bootstrap_forwards_non_telegram_qa_cases_flag(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "out"
+            home = Path(tmpdir) / "home"
+            argv = [
+                "run_live_qa.py",
+                "--output-dir",
+                str(output_dir),
+                "--reborn-home",
+                str(home),
+                "--non-telegram-qa-cases",
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(run_live_qa, "bootstrap_python", return_value=Path("/venv/bin/python")),
+                patch.object(run_live_qa, "install_playwright"),
+                patch.object(run_live_qa.subprocess, "run") as subprocess_run,
+            ):
+                subprocess_run.return_value.returncode = 0
+                self.assertEqual(run_live_qa.main(), 0)
+
+            forwarded = subprocess_run.call_args.args[0]
+            self.assertIn("--non-telegram-qa-cases", forwarded)
+            self.assertNotIn("--all-cases", forwarded)
             self.assertNotIn("--case", forwarded)
 
     def test_delivered_gate_routes_for_run_reads_trigger_gate_records(self):
@@ -1281,6 +1332,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             binary.touch()
             args = argparse.Namespace(
                 all_cases=False,
+                non_telegram_qa_cases=False,
                 case=["case_a", "case_b"],
                 output_dir=output_dir,
                 reborn_home=root / "missing-source-home",

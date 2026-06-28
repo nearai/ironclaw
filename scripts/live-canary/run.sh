@@ -209,7 +209,11 @@ build_case_args() {
       trimmed="$(echo "$case_name" | xargs)"
       if [[ -n "${trimmed}" ]]; then
         if [[ "${trimmed}" == "all" || "${trimmed}" == "ALL" || "${trimmed}" == "*" ]]; then
-          case_args+=(--all-cases)
+          if [[ "${LANE}" == "reborn-webui-v2-live-qa" ]]; then
+            case_args+=(--non-telegram-qa-cases)
+          else
+            case_args+=(--all-cases)
+          fi
         else
           case_args+=(--case "${trimmed}")
         fi
