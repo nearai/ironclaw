@@ -107,7 +107,10 @@ async fn connect_google_account(
     bundle
         .services
         .credential_account_service()
-        .get_account(CredentialAccountLookupRequest::new(scope.clone(), account_id))
+        .get_account(CredentialAccountLookupRequest::new(
+            scope.clone(),
+            account_id,
+        ))
         .await
         .expect("get_account must not error")
         .expect("credential account must be persisted after a successful OAuth callback")
