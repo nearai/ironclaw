@@ -18,7 +18,7 @@ import shlex
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +54,37 @@ CI_OWNED_CONTRACT_COMMANDS = {
     "webui_v2_sso_auth_route_contracts",
     "webui_v2_sso_network_limits",
     "webui_v2_sso_session_round_trip",
+}
+
+REMOVED_CI_OWNED_CASES = {
+    "openai_compat_owner_crate_regression",
+    "reborn_cli_credential_refresh_settings_regression",
+    "reborn_cli_docker_railway_entrypoint_regression",
+    "reborn_cli_trigger_poller_settings_regression",
+    "reborn_operator_logs_service_regression",
+    "slack_events_ingress_regression",
+    "slack_host_beta_serve_mount_regression",
+    "slack_outbound_delivery_rendering_regression",
+    "slack_personal_oauth_binding_regression",
+    "slack_personal_pairing_regression",
+    "support_substrate_product_workflow_regression",
+    "webui_v2_auth_surface_composition_regression",
+    "webui_v2_automations_trace_outbound_channel_api_regression",
+    "webui_v2_composition_regression",
+    "webui_v2_extension_oauth_setup_regression",
+    "webui_v2_filesystem_api_regression",
+    "webui_v2_gateway_middleware_serve_foundation_regression",
+    "webui_v2_manual_token_regression",
+    "webui_v2_product_auth_account_lifecycle_regression",
+    "webui_v2_product_auth_oauth_regression",
+    "webui_v2_public_sso_session_regression",
+    "webui_v2_route_contract_regression",
+    "webui_v2_rust_static_regression",
+    "webui_v2_serve_listener_regression",
+    "webui_v2_serve_security_config_regression",
+    "webui_v2_spa_static_serving_regression",
+    "webui_v2_sso_login_startup_regression",
+    "webui_v2_sso_user_admission_regression",
 }
 
 CI_OWNED_CONTRACT_COVERAGE = (
@@ -6000,7 +6031,7 @@ def _selected_case_names(args: argparse.Namespace) -> list[str]:
     names: list[str] = []
     for name in args.case:
         if name not in active_name_set:
-            if name in CASES:
+            if name in REMOVED_CI_OWNED_CASES or name in CASES:
                 raise SystemExit(
                     f"case {name!r} is existing-CI coverage and has been "
                     "removed from the executable QA lane"
@@ -6057,6 +6088,22 @@ def _commands_for_case(case: CaseSpec) -> list[CommandSpec]:
     return [
         command for command in case.commands if _command_ci_coverage(command) is None
     ]
+
+
+def _prune_ci_owned_cases() -> None:
+    global CASES
+    CASES = {
+        name: spec
+        for name, spec in CASES.items()
+        if name not in REMOVED_CI_OWNED_CASES
+    }
+    for name, spec in list(CASES.items()):
+        commands = _commands_for_case(spec)
+        if len(commands) != len(spec.commands):
+            CASES[name] = replace(spec, commands=commands)
+
+
+_prune_ci_owned_cases()
 
 
 def _active_case_items() -> list[tuple[str, CaseSpec]]:

@@ -62,8 +62,22 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
         parser = run_hermetic_qa.build_parser()
         args = parser.parse_args(["--case", "support_substrate_product_workflow_regression"])
 
-        with self.assertRaises(SystemExit):
+        with self.assertRaisesRegex(SystemExit, "removed from the executable QA lane"):
             run_hermetic_qa._selected_case_names(args)
+
+    def test_ci_owned_contract_cases_are_removed_from_case_registry(self):
+        self.assertNotIn(
+            "support_substrate_product_workflow_regression",
+            run_hermetic_qa.CASES,
+        )
+        self.assertNotIn(
+            "webui_v2_session_service_substrate_contracts",
+            {
+                command.name
+                for case in run_hermetic_qa.CASES.values()
+                for command in case.commands
+            },
+        )
 
     def test_responses_workflow_case_executes_only_served_e2e_command(self):
         parser = run_hermetic_qa.build_parser()
@@ -326,7 +340,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
         case = run_hermetic_qa.CASES["webui_v2_workspace_project_client_regression"]
 
         self.assertEqual(
-            [command.name for command in run_hermetic_qa._commands_for_case(case)],
+            [command.name for command in case.commands],
             [
                 "reborn_cli_webui_v2_binary",
                 "webui_v2_workspace_project_client_contracts",
@@ -334,7 +348,7 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             [command["name"] for command in run_hermetic_qa._removed_existing_ci_commands(case)],
-            ["webui_v2_projects_browser_smoke", "webui_v2_workspace_browser_smoke"],
+            [],
         )
 
     def test_previous_command_failure_skips_remaining_matrix_owned_commands(self):
