@@ -33,7 +33,7 @@ async fn shell_call_recorded_not_executed() {
     h.assert_shell_command_recorded("s5-probe")
         .await
         .expect("command recorded by inert port");
-    h.assert_no_real_process_executed()
+    h.assert_shell_ran_through_inert_port()
         .await
         .expect("inert port ran, no real process spawned");
     h.assert_reply_contains("done")
@@ -53,7 +53,7 @@ async fn shell_assertions_fail_when_no_shell_call_ran() {
         .expect("harness builds");
     h.submit_turn("just talk").await.expect("turn completes");
     assert!(h.assert_shell_command_recorded("echo").await.is_err());
-    assert!(h.assert_no_real_process_executed().await.is_err());
+    assert!(h.assert_shell_ran_through_inert_port().await.is_err());
 }
 
 // `.with_live_shell()` test omitted: a live `echo` is hermetic but offers no

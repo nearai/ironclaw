@@ -572,11 +572,11 @@ impl RebornIntegrationHarness {
         Err(format!("no recorded shell command containing {substr:?}; saw {seen:?}").into())
     }
 
-    /// Assert that the process port is the inert recording port — i.e. at
-    /// least one shell command was captured and no real process was spawned.
-    /// Passes when `recorded_process_commands()` is non-empty (the harness
-    /// used the recording path, not the live-shell opt-in).
-    pub async fn assert_no_real_process_executed(&self) -> HarnessResult<()> {
+    /// Asserts ≥1 shell command was dispatched through the inert recording
+    /// process port, proving no real OS process was spawned. Passes when
+    /// `recorded_process_commands()` is non-empty (the harness used the
+    /// recording path, not the live-shell opt-in).
+    pub async fn assert_shell_ran_through_inert_port(&self) -> HarnessResult<()> {
         let commands = self.capability_recorder.recorded_process_commands();
         if !commands.is_empty() {
             return Ok(());
