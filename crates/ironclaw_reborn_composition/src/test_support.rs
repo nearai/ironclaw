@@ -634,6 +634,7 @@ pub async fn build_default_local_dev_database_roots_for_test(
 /// composite without a second copy of the mount wiring (design spec §3.2).
 /// For tests only — gated behind `test-support`, so it ships zero bytes in
 /// production binaries.
+#[cfg(feature = "test-support")]
 pub fn mount_local_dev_database_roots_for_test<F>(
     root: &mut ironclaw_filesystem::CompositeRootFilesystem,
     database: std::sync::Arc<F>,
