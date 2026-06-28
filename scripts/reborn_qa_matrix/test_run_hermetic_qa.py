@@ -36,11 +36,11 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
 
         self.assertIn("openai_responses_api_workflow_regression", selected)
         self.assertIn("openai_responses_external_tools_e2e_regression", selected)
+        self.assertIn("openai_chat_completions_workflow_regression", selected)
         self.assertIn("openai_models_list_api_regression", selected)
         self.assertIn("webui_v2_session_thread_message_api_regression", selected)
         self.assertIn("webui_v2_chat_client_regression", selected)
         self.assertIn("webui_v2_workspace_project_client_regression", selected)
-        self.assertNotIn("openai_chat_completions_workflow_regression", selected)
         self.assertNotIn("openai_compat_owner_crate_regression", selected)
         self.assertNotIn("support_substrate_product_workflow_regression", selected)
         self.assertNotIn("webui_v2_route_contract_regression", selected)
@@ -124,6 +124,26 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
         self.assertEqual(
             [command.name for command in run_hermetic_qa._commands_for_case(case)],
             ["openai_models_served_e2e"],
+        )
+        self.assertEqual(
+            [command["name"] for command in run_hermetic_qa._removed_existing_ci_commands(case)],
+            [],
+        )
+
+    def test_chat_completions_case_executes_only_served_e2e_command(self):
+        parser = run_hermetic_qa.build_parser()
+        args = parser.parse_args(
+            ["--case", "openai_chat_completions_workflow_regression"]
+        )
+
+        self.assertEqual(
+            run_hermetic_qa._selected_case_names(args),
+            ["openai_chat_completions_workflow_regression"],
+        )
+        case = run_hermetic_qa.CASES["openai_chat_completions_workflow_regression"]
+        self.assertEqual(
+            [command.name for command in run_hermetic_qa._commands_for_case(case)],
+            ["openai_chat_completions_served_e2e"],
         )
         self.assertEqual(
             [command["name"] for command in run_hermetic_qa._removed_existing_ci_commands(case)],

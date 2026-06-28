@@ -509,6 +509,40 @@ OPENAI_CHAT_STREAMING_COMMAND = CommandSpec(
     ],
 )
 
+OPENAI_CHAT_SERVED_E2E_COMMAND = CommandSpec(
+    name="openai_chat_completions_served_e2e",
+    description=(
+        "Served ironclaw-reborn Chat Completions e2e coverage for "
+        "/v1/chat/completions non-streaming responses, idempotency replay "
+        "and conflict, stream=true SSE chunks, authentication, and request "
+        "validation."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_chat_completions_non_streaming_served",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_chat_completions_idempotency_replay_and_conflict_served",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_chat_completions_streaming_raw_sse_served",
+        "tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_chat_completions_auth_and_validation_served",
+        "-q",
+    ],
+)
+
 OPENAI_MODELS_LIST_COMMAND = CommandSpec(
     name="openai_models_list_api_contracts",
     description=(
@@ -4166,7 +4200,7 @@ CASES: dict[str, CaseSpec] = {
     "openai_chat_completions_workflow_regression": CaseSpec(
         name="openai_chat_completions_workflow_regression",
         feature="OpenAI-compatible Chat Completions API",
-        category="Hermetic Chat Completions Handler Contract",
+        category="Served Chat Completions API E2E",
         qa_matrix_test_ids=[
             "REBCLI-056-TC-01",
             "REBCLI-056-TC-02",
@@ -4175,13 +4209,13 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-056-TC-05",
             "REBCLI-056-TC-06",
         ],
-        commands=[OPENAI_CHAT_WORKFLOW_COMMAND, OPENAI_CHAT_STREAMING_COMMAND],
+        commands=[OPENAI_CHAT_SERVED_E2E_COMMAND],
         notes=(
-            "Focused Chat Completions contract coverage that PR #5348 does "
-            "not duplicate: non-stream success, idempotency replay/conflict, "
-            "malformed JSON, model/idempotency validation, streaming "
-            "guardrails, stream=true SSE terminal/error behavior, projection "
-            "metadata, and sanitized ProductWorkflow errors."
+            "Runs served OpenAI-compatible Chat Completions coverage through "
+            "a real ironclaw-reborn process for non-streaming success, "
+            "idempotency replay/conflict, stream=true SSE chunks, missing "
+            "auth, and messages validation. Rust handler/streaming contracts "
+            "stay in normal CI instead of this QA lane."
         ),
     ),
     "openai_models_list_api_regression": CaseSpec(

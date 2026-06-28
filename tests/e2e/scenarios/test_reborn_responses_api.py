@@ -188,6 +188,13 @@ async def create_response(
     return response.json()
 
 
+async def create_chat_completion(client: httpx.AsyncClient, **payload) -> dict:
+    body = {"model": "mock-model", **payload}
+    response = await client.post("/v1/chat/completions", json=body)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 def _function_calls(response: dict) -> list[dict]:
     return [item for item in response.get("output", []) if item.get("type") == "function_call"]
 
@@ -395,6 +402,105 @@ async def test_reborn_responses_lookup_and_cancel_missing_id_match_not_found_sha
     assert retrieve.status_code == 404
     assert cancel.status_code == 404
     assert retrieve.json() == cancel.json()
+
+
+async def test_reborn_chat_completions_non_streaming_served(reborn_responses_client):
+    response = await create_chat_completion(
+        reborn_responses_client,
+        messages=[
+            {
+                "role": "user",
+                "content": "Say hello in exactly three words.",
+            }
+        ],
+    )
+
+    assert response["id"].startswith("chatcmpl-")
+    assert response["object"] == "chat.completion"
+    assert response["model"] == "mock-model"
+    assert response["choices"][0]["message"]["role"] == "assistant"
+    assert response["choices"][0]["message"]["content"]
+
+
+async def test_reborn_chat_completions_idempotency_replay_and_conflict_served(
+    reborn_responses_client,
+):
+    payload = {
+        "model": "mock-model",
+        "messages": [{"role": "user", "content": "Reply with one short sentence."}],
+    }
+    headers = {"idempotency-key": "served-chat-idempotency"}
+
+    first = await reborn_responses_client.post(
+        "/v1/chat/completions",
+        json=payload,
+        headers=headers,
+    )
+    replay = await reborn_responses_client.post(
+        "/v1/chat/completions",
+        json=payload,
+        headers=headers,
+    )
+    conflict = await reborn_responses_client.post(
+        "/v1/chat/completions",
+        json={
+            **payload,
+            "messages": [{"role": "user", "content": "Different request body."}],
+        },
+        headers=headers,
+    )
+
+    assert first.status_code == 200, first.text
+    assert replay.status_code == 200, replay.text
+    assert first.json()["id"] == replay.json()["id"]
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "conflict"
+
+
+async def test_reborn_chat_completions_streaming_raw_sse_served(
+    reborn_responses_client,
+):
+    async with reborn_responses_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "mock-model",
+            "messages": [{"role": "user", "content": "Say hi"}],
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        raw = ""
+        async for line in response.aiter_lines():
+            raw += line + "\n"
+            if line == "data: [DONE]":
+                break
+
+    assert "chat.completion.chunk" in raw
+    assert "data: [DONE]" in raw
+
+
+async def test_reborn_chat_completions_auth_and_validation_served(
+    reborn_responses_server,
+    reborn_responses_client,
+):
+    async with httpx.AsyncClient(timeout=10) as client:
+        unauthenticated = await client.post(
+            f"{reborn_responses_server}/v1/chat/completions",
+            headers={"Content-Type": "application/json"},
+            json={
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+    invalid = await reborn_responses_client.post(
+        "/v1/chat/completions",
+        json={"model": "mock-model", "messages": []},
+    )
+
+    assert unauthenticated.status_code == 401
+    assert invalid.status_code == 400
+    assert invalid.json()["error"]["param"] == "messages"
 
 
 async def test_reborn_models_v1_lists_configured_mock_model(reborn_responses_client):
