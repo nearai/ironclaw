@@ -186,7 +186,7 @@ fn onboarding(package_ref: &LifecyclePackageRef) -> Option<LifecycleExtensionOnb
             "After authorization completes, activate Notion to publish its MCP tools.",
         )),
         "web-access" => Some(onboarding_message(
-            "Web Access does not need credentials. Activate it to make web search and saved-result retrieval tools available.",
+            "Web Access does not need credentials. Activate it to make web search and page-content retrieval tools available.",
             Some("No credentials are required for Web Access."),
             None,
             "Activate Web Access to publish its tools.",
