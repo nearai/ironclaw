@@ -2994,6 +2994,42 @@ WEBUI_V2_FS_HANDLER_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_PROJECT_FILES_SERVED_E2E_COMMAND = CommandSpec(
+    name="webui_v2_project_files_served_e2e",
+    description=(
+        "Served WebUI v2 project-file and filesystem-browser API tests through "
+        "a real ironclaw-reborn process: agent-produced file creation, "
+        "thread-scoped list/stat/content routes, standalone fs mount/list/stat/"
+        "content routes, download headers, bearer gating, and invalid path "
+        "handling."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_filesystem_api.py",
+        "-q",
+    ],
+)
+
 WEBUI_V2_PROJECT_HANDLER_COMMAND = CommandSpec(
     name="webui_v2_project_handler_contracts",
     description=(
@@ -5503,7 +5539,7 @@ CASES: dict[str, CaseSpec] = {
     "webui_v2_project_files_api_regression": CaseSpec(
         name="webui_v2_project_files_api_regression",
         feature="WebUI v2 project file and filesystem browser APIs",
-        category="Hermetic Project Filesystem API Regression",
+        category="Served WebUI v2 Project Filesystem API E2E",
         qa_matrix_test_ids=[
             "REBCLI-049-TC-01",
             "REBCLI-049-TC-02",
@@ -5512,17 +5548,15 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-049-TC-05",
             "REBCLI-049-TC-06",
         ],
-        commands=[
-            WEBUI_V2_FS_HANDLER_COMMAND,
-            COMPOSITION_PROJECT_FS_COMMAND,
-            COMPOSITION_MOUNT_FS_COMMAND,
-        ],
+        commands=[WEBUI_V2_PROJECT_FILES_SERVED_E2E_COMMAND],
         notes=(
-            "Covers project-file and read-only filesystem API rows: fs route "
-            "mount/list/stat/read handlers, project-scoped reader confinement, "
-            "hidden/sensitive path denial, oversize and missing-file handling, "
-            "mount-relative traversal rejection, and attachment download "
-            "headers without duplicating browser file-tree smoke coverage."
+            "Runs served WebUI v2 project-file and read-only filesystem API "
+            "coverage through a real ironclaw-reborn process: agent-produced "
+            "file creation, thread-scoped list/stat/read routes, standalone "
+            "fs mount/list/stat/read routes, attachment download headers, "
+            "bearer gating, blank path validation, unknown mount rejection, "
+            "and traversal fail-closed behavior. Rust handler/composition "
+            "filesystem contracts stay in normal CI instead of this QA lane."
         ),
     ),
     "webui_v2_project_membership_api_regression": CaseSpec(
