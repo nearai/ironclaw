@@ -36,7 +36,10 @@ pub enum RebornThreadHarnessError {
 /// The integration tier uses `RebornThreadHarness<CompositeRootFilesystem>` via
 /// `filesystem_shared_composite`, mounting the thread service directly on the
 /// per-`build()` production-path composite (threads at `/tenants/{t}/users/{u}/threads`).
-pub struct RebornThreadHarness<F = LocalFilesystem> {
+pub struct RebornThreadHarness<F = LocalFilesystem>
+where
+    F: RootFilesystem,
+{
     pub scope: ThreadScope,
     pub service: Arc<FilesystemSessionThreadService<F>>,
     backend: Arc<F>,
