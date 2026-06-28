@@ -1606,6 +1606,42 @@ WASM_PRODUCT_ADAPTER_RUNTIME_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_EXTENSION_LIFECYCLE_SERVED_E2E_COMMAND = CommandSpec(
+    name="webui_v2_extension_lifecycle_served_e2e",
+    description=(
+        "Served WebUI v2 extension lifecycle API tests through a real "
+        "ironclaw-reborn process: registry/list projection, first-party "
+        "extension install/setup/activate/remove lifecycle, bearer gating, "
+        "malformed install body, wrong package kind, invalid package id, and "
+        "missing package setup rejection."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_extensions_api.py",
+        "-q",
+    ],
+)
+
 WEBUI_V2_SKILL_MANAGEMENT_HANDLER_COMMAND = CommandSpec(
     name="webui_v2_skill_management_handler_contract",
     description=(
@@ -4757,24 +4793,16 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-046-TC-04",
             "REBCLI-046-TC-05",
             "REBCLI-046-TC-06",
-            "REBCLI-046-TC-08",
         ],
-        commands=[
-            WEBUI_V2_EXTENSION_LIFECYCLE_HANDLER_COMMAND,
-            WEBUI_V2_EXTENSION_DESCRIPTOR_COMMAND,
-            COMPOSITION_EXTENSION_SETUP_ROUTE_COMMAND,
-            COMPOSITION_EXTENSION_LIFECYCLE_COMMAND,
-            WASM_PRODUCT_ADAPTER_RUNTIME_COMMAND,
-        ],
+        commands=[WEBUI_V2_EXTENSION_LIFECYCLE_SERVED_E2E_COMMAND],
         notes=(
-            "Covers the generated WebUI v2 extension lifecycle API rows "
-            "without duplicating PR #5348 browser legacy scenarios: list/"
-            "registry reads, install/activate/remove mutations, setup GET and "
-            "POST, malformed package-id rejection, caller-scoped facade "
-            "dispatch, descriptor route policy/body-limit/effect-path "
-            "lockstep, composition-mounted setup projection behavior, "
-            "lifecycle service install/activation/removal/restoration "
-            "contracts, and WASM ProductAdapter runtime dependency contracts."
+            "Converts the generated WebUI v2 extension lifecycle API rows "
+            "from CI-owned Rust contracts to served WebUI v2 HTTP coverage "
+            "without duplicating PR #5348 browser legacy scenarios: registry/"
+            "list projection, first-party web-access install/setup/activate/"
+            "remove lifecycle, bearer gating, malformed install body, wrong "
+            "package kind, invalid package id, and missing package setup "
+            "rejection."
         ),
     ),
     "webui_v2_skill_management_api_regression": CaseSpec(
