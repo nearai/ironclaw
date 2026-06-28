@@ -180,7 +180,10 @@ struct LocalDevRootFilesystemBundle {
     durable_backend: LocalDevDurableBackend,
 }
 
-enum LocalDevDurableBackend {
+// `pub(crate)` to match `build_default_local_dev_database_roots` (also
+// `pub(crate)` for the `test_support` accessor): a `pub(crate)` fn returning a
+// private enum trips `private_interfaces`. The enum stays crate-internal.
+pub(crate) enum LocalDevDurableBackend {
     #[cfg(feature = "libsql")]
     LibSql(Arc<libsql::Database>),
     #[cfg(feature = "postgres")]
