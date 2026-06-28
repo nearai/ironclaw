@@ -711,8 +711,12 @@ fn gmail_send_message_request(
 }
 
 fn gmail_outgoing_message_body(message: &Value) -> Result<Value, GsuiteDispatchError> {
-    if optional_str(message, "raw")?.is_some() {
-        return Ok(message.clone());
+    if let Some(raw) = optional_str(message, "raw")? {
+        let mut body = json!({ "raw": raw });
+        if let Some(thread_id) = optional_str(message, "threadId")? {
+            body["threadId"] = json!(thread_id);
+        }
+        return Ok(body);
     }
 
     let mut body = json!({

@@ -1082,6 +1082,40 @@ async fn gmail_send_message_accepts_structured_fields_and_encodes_raw_body() {
 }
 
 #[tokio::test]
+async fn gmail_send_message_raw_payload_drops_structured_fields_before_egress() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
+    let egress = Arc::new(RecordingEgress::permissive_success());
+
+    dispatch_ok(
+        auth,
+        scope,
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        json!({
+            "message": {
+                "raw": "base64url-rfc822",
+                "threadId": "thread-123",
+                "to": "qa@example.test",
+                "subject": "must not leak",
+                "body": "must not leak"
+            }
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["raw"], "base64url-rfc822");
+    assert_eq!(body["threadId"], "thread-123");
+    assert!(body.get("to").is_none());
+    assert!(body.get("subject").is_none());
+    assert!(body.get("body").is_none());
+}
+
+#[tokio::test]
 async fn gmail_send_message_infers_subject_when_structured_subject_is_omitted() {
     let scope = scope();
     let auth =

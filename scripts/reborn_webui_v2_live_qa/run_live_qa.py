@@ -42,6 +42,23 @@ from scripts.live_canary.common import (  # noqa: E402
     wait_for_ready,
     write_results,
 )
+from scripts.reborn_webui_v2_live_qa.case_matrix import (  # noqa: E402
+    CaseFn,
+    CaseSpec,
+    QA_SHEET_CASES,
+    QA_SHEET_TAB,
+    QA_SHEET_URL,
+    qa_row_sort_key,
+)
+from scripts.reborn_webui_v2_live_qa.errors import LiveQaError  # noqa: E402
+from scripts.reborn_webui_v2_live_qa.root_filesystem import (  # noqa: E402
+    _decrypt_filesystem_secret,
+    _encrypt_filesystem_secret,
+    _put_root_filesystem_json,
+    _root_filesystem_create_table,
+    _root_filesystem_json,
+    _root_filesystem_secret_by_handle,
+)
 
 DEFAULT_OUTPUT_DIR = ROOT / "artifacts" / "reborn-webui-v2-live-qa"
 DEFAULT_REBORN_HOME = Path("/tmp/ironclaw-reborn-real-slack")
@@ -49,21 +66,10 @@ AUTH_TOKEN = "reborn-webui-v2-live-qa-token-0123456789abcdef"
 DEFAULT_USER_ID = "reborn-webui-v2-live-qa-user"
 PROVIDER = "reborn-webui-v2"
 MODE = "live"
-QA_SHEET_URL = (
-    "https://docs.google.com/spreadsheets/d/"
-    "1IpioaRFnDw8cW4fj9vxg1pBRWN7swVQLRq1FqVlJAls/edit?gid=0#gid=0"
-)
-QA_SHEET_TAB = "Automated"
 HN_KEYWORD_SEARCH_URL = (
     "https://hn.algolia.com/api/v1/search_by_date"
     "?query=NEAR%20AI&tags=story&hitsPerPage=1"
 )
-
-CaseFn = Callable[["LiveQaContext"], Awaitable[ProbeResult]]
-
-
-class LiveQaError(RuntimeError):
-    pass
 
 
 class LiveQaContext:
@@ -86,199 +92,6 @@ class PreparedRebornHome:
     path: Path
     env: dict[str, str] = field(default_factory=dict)
     preflight: dict[str, object] = field(default_factory=dict)
-
-
-QA_SHEET_CASES: dict[str, dict[str, object]] = {
-    "qa_1a_telegram_connect": {
-        "rows": ["1A"],
-        "feature": "Telegram connection flow",
-        "gate": "requires live Telegram bot/user credentials and OAuth/pairing automation",
-    },
-    "qa_1b_telegram_near_news_chat": {
-        "rows": ["1B"],
-        "feature": "Telegram NEAR AI news summary delivery",
-        "gate": "requires live Telegram connection and live Twitter/X or web search access",
-    },
-    "qa_1c_telegram_near_news_routine": {
-        "rows": ["1C"],
-        "feature": "Scheduled Telegram NEAR AI news digest routine",
-        "gate": "requires live Telegram connection and routine delivery verification",
-    },
-    "qa_2a_gmail_connect": {
-        "rows": ["2A"],
-        "feature": "Gmail connection flow",
-        "gate": "requires live Google browser consent state or OAuth test account",
-    },
-    "qa_2b_calendar_connect": {
-        "rows": ["2B"],
-        "feature": "Google Calendar connection flow",
-        "gate": "requires live Google browser consent state or OAuth test account",
-    },
-    "qa_2c_drive_connect": {
-        "rows": ["2C"],
-        "feature": "Google Drive connection flow",
-        "gate": "requires live Google browser consent state or OAuth test account",
-    },
-    "qa_2d_calendar_prep_live_chat": {
-        "rows": ["2D"],
-        "feature": "Calendar prep assistant using Google Docs and live news",
-        "gate": (
-            "requires a live Google OAuth account authorized for Calendar, Drive, "
-            "Docs, and web/search runtime execution, plus Google OAuth refresh "
-            "env when the copied access token is expired"
-        ),
-    },
-    "qa_2e_calendar_prep_email_routine": {
-        "rows": ["2E"],
-        "feature": "Scheduled meeting-prep email routine",
-        "gate": "requires live Gmail, Calendar, Drive, Docs, and routine verification",
-    },
-    "qa_2f_calendar_prep_email_delivery": {
-        "rows": ["2F"],
-        "feature": "Meeting-prep email side-effect delivery",
-        "gate": "requires live Gmail inbox delivery verification",
-    },
-    "qa_3a_slack_connect": {
-        "rows": ["3A"],
-        "feature": "Slack connection flow",
-        "gate": "requires live Slack OAuth or host-beta Slack bot/signing-secret env",
-    },
-    "qa_3b_endpoint_status_live_chat": {
-        "rows": ["3B"],
-        "feature": "Deployment health watcher endpoint status check",
-    },
-    "qa_3c_endpoint_status_slack_routine": {
-        "rows": ["3C"],
-        "feature": "Deployment health watcher Slack routine creation",
-        "gate": "requires live Slack host-beta bot/signing-secret env",
-    },
-    "qa_3d_endpoint_status_slack_delivery": {
-        "rows": ["3D"],
-        "feature": "Deployment health watcher Slack delivery",
-        "gate": "requires live Slack message delivery verification",
-    },
-    "qa_4a_gmail_connect": {
-        "rows": ["4A"],
-        "feature": "Gmail connection flow for release tracker",
-        "gate": "requires live Google browser consent state or OAuth test account",
-    },
-    "qa_4b_github_connect": {
-        "rows": ["4B"],
-        "feature": "GitHub connection flow",
-        "gate": "requires live GitHub PAT/auth state",
-    },
-    "qa_4c_github_release_live_chat": {
-        "rows": ["4C"],
-        "feature": "GitHub release tracker summary",
-    },
-    "qa_4d_github_release_slack_routine": {
-        "rows": ["4D"],
-        "feature": "Scheduled GitHub release summary routine",
-        "gate": "requires live Slack delivery target and routine verification",
-    },
-    "qa_4e_github_release_email_delivery": {
-        "rows": ["4E"],
-        "feature": "GitHub release summary email delivery",
-        "gate": "requires live Gmail delivery verification and a new release/change trigger",
-    },
-    "qa_5a_slack_connect": {
-        "rows": ["5A"],
-        "feature": "Slack connection flow for AMA",
-        "gate": "requires live Slack OAuth or host-beta Slack bot/signing-secret env",
-    },
-    "qa_5b_drive_connect": {
-        "rows": ["5B"],
-        "feature": "Google Drive connection flow for AMA",
-        "gate": "requires live Google browser consent state or OAuth test account",
-    },
-    "qa_5c_strategy_doc_knowledge_base": {
-        "rows": ["5C"],
-        "feature": "Google Drive strategy document grounding",
-        "gate": (
-            "requires a live Google OAuth account authorized for Google Docs/Drive "
-            "runtime execution, plus Google OAuth refresh env when the copied "
-            "access token is expired"
-        ),
-    },
-    "qa_5d_slack_strategy_doc_answer": {
-        "rows": ["5D"],
-        "feature": "Slack AMA answer grounded in Google Drive document",
-        "gate": "requires live Slack and Google Drive side-effect verification",
-    },
-    "qa_6a_gmail_connect": {
-        "rows": ["6A"],
-        "feature": "Gmail connection flow for CRM tracker",
-        "gate": "requires live Google browser consent state or OAuth test account",
-    },
-    "qa_6b_sheets_connect": {
-        "rows": ["6B"],
-        "feature": "Google Sheets connection flow",
-        "gate": "requires live Google browser consent state or OAuth test account",
-    },
-    "qa_6c_gmail_to_sheet_live_chat": {
-        "rows": ["6C"],
-        "feature": "CRM inbound email extraction to Google Sheet",
-        "gate": (
-            "requires a live Google OAuth account authorized for Gmail and Google "
-            "Sheets runtime execution plus test data, and Google OAuth refresh "
-            "env when the copied access token is expired"
-        ),
-    },
-    "qa_6d_gmail_to_sheet_routine": {
-        "rows": ["6D"],
-        "feature": "Scheduled CRM inbound email tracker routine",
-        "gate": "requires live Gmail and Google Sheets routine verification",
-    },
-    "qa_6e_gmail_to_sheet_delivery": {
-        "rows": ["6E"],
-        "feature": "CRM inbound email row side effect",
-        "gate": "requires live Gmail inbox and Google Sheets row verification",
-    },
-    "qa_7a_slack_product_channel_connect": {
-        "rows": ["7A"],
-        "feature": "Slack product channel connection flow",
-        "gate": "requires live Slack OAuth/channel setup",
-    },
-    "qa_7b_sheets_connect": {
-        "rows": ["7B"],
-        "feature": "Google Sheets connection flow for bug logger",
-        "gate": "requires live Google browser consent state or OAuth test account",
-    },
-    "qa_7c_slack_bug_logger_routine": {
-        "rows": ["7C"],
-        "feature": "Slack bug-message to Google Sheet routine creation",
-        "gate": "requires live Slack and Google Sheets routine verification",
-    },
-    "qa_7d_slack_bug_message_trigger": {
-        "rows": ["7D"],
-        "feature": "Slack bug-message trigger",
-        "gate": "requires live Slack message injection",
-    },
-    "qa_7e_slack_bug_sheet_delivery": {
-        "rows": ["7E"],
-        "feature": "Slack bug-message row side effect",
-        "gate": "requires live Slack and Google Sheets row verification",
-    },
-    "qa_8a_slack_connect": {
-        "rows": ["8A"],
-        "feature": "Slack connection flow for HN monitor",
-        "gate": "requires live Slack OAuth or host-beta Slack bot/signing-secret env",
-    },
-    "qa_8b_hn_keyword_live_chat": {
-        "rows": ["8B"],
-        "feature": "Hacker News keyword monitor search",
-    },
-    "qa_8c_hn_keyword_slack_routine": {
-        "rows": ["8C"],
-        "feature": "Hacker News keyword monitor Slack routine creation",
-        "gate": "requires live Slack host-beta bot/signing-secret env",
-    },
-    "qa_8d_hn_keyword_slack_delivery": {
-        "rows": ["8D"],
-        "feature": "Hacker News keyword monitor Slack delivery",
-        "gate": "requires live Slack message delivery verification",
-    },
-}
 
 
 def parse_args() -> argparse.Namespace:
@@ -1721,158 +1534,6 @@ def _google_product_auth_preflight(
         else:
             preflight["reason"] = "configured Google product-auth account is not ready"
     return preflight
-
-
-def _build_aad(domain: bytes, parts: list[bytes]) -> bytes:
-    aad = bytearray(domain)
-    for part in parts:
-        aad.extend(len(part).to_bytes(8, "big"))
-        aad.extend(part)
-    return bytes(aad)
-
-
-def _filesystem_secret_aad(scope: dict[str, object], handle: str) -> bytes:
-    return _build_aad(
-        b"reborn/v1/fs_secret_record",
-        [
-            str(scope.get("tenant_id") or "").encode(),
-            str(scope.get("user_id") or "").encode(),
-            str(scope.get("agent_id") or "").encode(),
-            str(scope.get("project_id") or "").encode(),
-            handle.encode(),
-        ],
-    )
-
-
-def _root_filesystem_json(db_path: Path, path: str) -> dict[str, object]:
-    with sqlite3.connect(db_path) as db:
-        row = db.execute(
-            "SELECT contents FROM root_filesystem_entries WHERE path = ?",
-            (path,),
-        ).fetchone()
-    if not row:
-        raise LiveQaError(f"expected Reborn root filesystem entry is missing: {path}")
-    return json.loads(row[0])
-
-
-def _root_filesystem_secret_by_handle(db_path: Path, handle: str) -> dict[str, object]:
-    suffix = f"/{handle}.json"
-    with sqlite3.connect(db_path) as db:
-        rows = db.execute(
-            "SELECT path, contents FROM root_filesystem_entries WHERE path LIKE ?",
-            (f"%{suffix}",),
-        ).fetchall()
-    if len(rows) != 1:
-        raise LiveQaError(
-            f"expected exactly one Reborn secret record for handle {handle!r}, found {len(rows)}"
-        )
-    return json.loads(rows[0][1])
-
-
-def _decrypt_filesystem_secret(master_key: str, stored: dict[str, object]) -> str:
-    try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        from cryptography.hazmat.primitives.hashes import SHA256
-        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-    except ModuleNotFoundError as exc:
-        raise LiveQaError(
-            "Decrypting Slack secrets from the Reborn home requires the e2e "
-            "Python dependency `cryptography`; rerun without SKIP_PYTHON_BOOTSTRAP "
-            "or install tests/e2e dependencies."
-        ) from exc
-
-    handle = str(stored["handle"])
-    scope = stored["scope"]
-    if not isinstance(scope, dict):
-        raise LiveQaError(f"secret record {handle!r} has invalid scope")
-    encrypted_value = bytes(stored["encrypted_value"])  # type: ignore[arg-type]
-    key_salt = bytes(stored["key_salt"])  # type: ignore[arg-type]
-    if len(encrypted_value) < 28:
-        raise LiveQaError(f"secret record {handle!r} is too short to decrypt")
-    key = HKDF(
-        algorithm=SHA256(),
-        length=32,
-        salt=key_salt,
-        info=b"near-agent-secrets-v1",
-    ).derive(master_key.encode())
-    nonce = encrypted_value[:12]
-    ciphertext = encrypted_value[12:]
-    aad = _filesystem_secret_aad(scope, handle)
-    plaintext = AESGCM(key).decrypt(nonce, ciphertext, aad)
-    return plaintext.decode("utf-8")
-
-
-def _encrypt_filesystem_secret(
-    *,
-    master_key: str,
-    scope: dict[str, object],
-    handle: str,
-    plaintext: str,
-) -> tuple[list[int], list[int]]:
-    try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        from cryptography.hazmat.primitives.hashes import SHA256
-        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-    except ModuleNotFoundError as exc:
-        raise LiveQaError(
-            "Seeding Google OAuth secrets into a generated Reborn home requires "
-            "the e2e Python dependency `cryptography`; rerun without "
-            "SKIP_PYTHON_BOOTSTRAP or install tests/e2e dependencies."
-        ) from exc
-
-    key_salt = os.urandom(32)
-    key = HKDF(
-        algorithm=SHA256(),
-        length=32,
-        salt=key_salt,
-        info=b"near-agent-secrets-v1",
-    ).derive(master_key.encode())
-    nonce = os.urandom(12)
-    aad = _filesystem_secret_aad(scope, handle)
-    ciphertext = AESGCM(key).encrypt(nonce, plaintext.encode("utf-8"), aad)
-    return list(nonce + ciphertext), list(key_salt)
-
-
-def _root_filesystem_create_table(db_path: Path) -> None:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as db:
-        db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS root_filesystem_entries (
-                path TEXT PRIMARY KEY,
-                contents BLOB NOT NULL DEFAULT X'',
-                is_dir INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0, 1)),
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
-                kind TEXT,
-                indexed TEXT NOT NULL DEFAULT '{}',
-                version INTEGER NOT NULL DEFAULT 0
-            )
-            """
-        )
-        db.commit()
-
-
-def _put_root_filesystem_json(db_path: Path, path: str, payload: dict[str, object]) -> None:
-    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    contents = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    with sqlite3.connect(db_path) as db:
-        db.execute(
-            """
-            INSERT INTO root_filesystem_entries
-                (path, contents, is_dir, created_at, updated_at, content_type, kind, indexed, version)
-            VALUES
-                (?, ?, 0, ?, ?, 'application/json', NULL, '{}', 0)
-            ON CONFLICT(path) DO UPDATE SET
-                contents = excluded.contents,
-                updated_at = excluded.updated_at,
-                content_type = excluded.content_type,
-                version = root_filesystem_entries.version + 1
-            """,
-            (path, contents, now, now),
-        )
-        db.commit()
 
 
 def _seed_generated_google_product_auth_if_configured(reborn_home: Path, user_id: str) -> dict[str, object]:
@@ -5105,38 +4766,6 @@ def _gated_case(case_name: str) -> CaseFn:
     return run_gated
 
 
-def _qa_row_sort_key(row_id: str) -> tuple[int, str]:
-    match = re.match(r"^(\d+)([A-Z]+)$", row_id)
-    if not match:
-        return (9999, row_id)
-    return (int(match.group(1)), match.group(2))
-
-
-class CaseSpec:
-    def __init__(
-        self,
-        fn: CaseFn,
-        *,
-        requires_slack: bool = False,
-        requires_slack_target: bool = False,
-        requires_google_product_auth: bool = False,
-        requires_google_runtime_access: bool = False,
-        requires_telegram: bool = False,
-        requires_github_auth: bool = False,
-        default_enabled: bool = True,
-        implemented: bool = True,
-    ) -> None:
-        self.fn = fn
-        self.requires_slack = requires_slack
-        self.requires_slack_target = requires_slack_target
-        self.requires_google_product_auth = requires_google_product_auth
-        self.requires_google_runtime_access = requires_google_runtime_access
-        self.requires_telegram = requires_telegram
-        self.requires_github_auth = requires_github_auth
-        self.default_enabled = default_enabled
-        self.implemented = implemented
-
-
 CASES: dict[str, CaseSpec] = {
     "qa_1a_telegram_connect": CaseSpec(
         _gated_case("qa_1a_telegram_connect"),
@@ -5319,7 +4948,7 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
             for row in case_data.get("rows", [])
             if isinstance(row, str)
         },
-        key=_qa_row_sort_key,
+        key=qa_row_sort_key,
     )
     manifest = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
