@@ -32,8 +32,8 @@ use ironclaw_auth::{
 };
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::{
-    CapabilityManifest, CapabilityVisibility, ExtensionManifest, ExtensionPackage, ExtensionRegistry,
-    ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
+    CapabilityManifest, CapabilityVisibility, ExtensionManifest, ExtensionPackage,
+    ExtensionRegistry, ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
 use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind,
@@ -44,9 +44,9 @@ use ironclaw_host_api::{
     Action, AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
     CapabilityId, CapabilityProfileSchemaRef, CapabilitySet, CredentialStageError, Decision,
     EffectKind, ExecutionContext, ExtensionId, GrantConstraints, HostPath, InvocationId,
-    MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod, NetworkPolicy, NetworkScheme,
-    NetworkTargetPattern, Obligation, Obligations, PackageId, PermissionMode, Principal, ProjectId,
-    ProviderToolName, RequestedTrustClass, ResourceEstimate, ResourceScope,
+    MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod, NetworkPolicy,
+    NetworkScheme, NetworkTargetPattern, Obligation, Obligations, PackageId, PermissionMode,
+    Principal, ProjectId, ProviderToolName, RequestedTrustClass, ResourceEstimate, ResourceScope,
     RuntimeCredentialAccountProviderId, RuntimeHttpEgress, RuntimeHttpEgressError,
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId,
     ThreadId, TrustClass, UserId, VirtualPath,
@@ -82,7 +82,7 @@ use ironclaw_loop_support::{
     JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
 use ironclaw_mcp::{
-    McpHostHttpClient, McpHostHttpEgressPlan, McpRuntimeConfig, McpRuntimeHttpAdapter, McpRuntime,
+    McpHostHttpClient, McpHostHttpEgressPlan, McpRuntime, McpRuntimeConfig, McpRuntimeHttpAdapter,
     StaticMcpHostHttpEgressPlanner,
 };
 use ironclaw_network::{
@@ -2260,7 +2260,11 @@ impl HostRuntimeCapabilityHarness {
         let mcp_runtime: Arc<LoopbackMcpRuntime> =
             Arc::new(McpRuntime::new(McpRuntimeConfig::default(), client));
         let mut registry = ExtensionRegistry::new();
-        registry.insert(mock_mcp_extension_package(provider_id, mcp_url, capability_id)?)?;
+        registry.insert(mock_mcp_extension_package(
+            provider_id,
+            mcp_url,
+            capability_id,
+        )?)?;
         let runtime = local_dev_host_runtime_with_registry_egress_and_mcp(
             storage_root,
             registry,
@@ -2801,7 +2805,10 @@ fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
 /// network). The `mcp_runtime` is a concrete loopback runtime that makes real
 /// HTTP requests to the test-local mock MCP server.
 type LoopbackMcpRuntime = McpRuntime<
-    McpHostHttpClient<McpRuntimeHttpAdapter<Arc<LoopbackMcpRuntimeHttpEgress>>, StaticMcpHostHttpEgressPlanner>,
+    McpHostHttpClient<
+        McpRuntimeHttpAdapter<Arc<LoopbackMcpRuntimeHttpEgress>>,
+        StaticMcpHostHttpEgressPlanner,
+    >,
 >;
 
 fn local_dev_host_runtime_with_registry_egress_and_mcp(
@@ -2897,12 +2904,14 @@ fn mock_mcp_extension_package(
         resource_profile: None,
     }];
     let root = VirtualPath::new(format!("/system/extensions/{provider_id}"))?;
-    Ok(ExtensionPackage::from_host_bundled_manifest_with_inline_dynamic_schemas(
-        manifest,
-        root,
-        None,
-        capabilities,
-    )?)
+    Ok(
+        ExtensionPackage::from_host_bundled_manifest_with_inline_dynamic_schemas(
+            manifest,
+            root,
+            None,
+            capabilities,
+        )?,
+    )
 }
 
 fn local_dev_host_runtime_with_registry_and_egress(
@@ -3534,11 +3543,14 @@ impl RuntimeHttpEgress for LoopbackMcpRuntimeHttpEgress {
         if !request.body.is_empty() {
             builder = builder.body(request.body.clone());
         }
-        let response = builder.send().await.map_err(|e| RuntimeHttpEgressError::Network {
-            reason: e.to_string(),
-            request_bytes,
-            response_bytes: 0,
-        })?;
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| RuntimeHttpEgressError::Network {
+                reason: e.to_string(),
+                request_bytes,
+                response_bytes: 0,
+            })?;
         let status = response.status().as_u16();
         let headers: Vec<(String, String)> = response
             .headers()

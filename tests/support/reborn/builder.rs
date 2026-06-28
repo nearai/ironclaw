@@ -595,7 +595,8 @@ impl RebornIntegrationHarness {
     /// delegates to `assert_tool_invoked`. The `"mock-mcp"` prefix matches the
     /// fixed provider id set by `with_mock_mcp`.
     pub async fn assert_mcp_tool_called(&self, tool_name: &str) -> HarnessResult<()> {
-        self.assert_tool_invoked(&format!("mock-mcp.{tool_name}")).await
+        self.assert_tool_invoked(&format!("mock-mcp.{tool_name}"))
+            .await
     }
 
     /// Snapshot of the recorded capability results (tool outputs), in execution
