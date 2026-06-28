@@ -440,10 +440,15 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
 /// test inject a real `CredentialAccount` (read back after an OAuth connect
 /// flow) directly into `sweep_once` without needing the full tenant-path
 /// enumeration to work in an in-memory backend.
+///
+/// Gated on `any(feature = "libsql", feature = "postgres")` because
+/// `credential_refresh_worker` is only compiled under those features.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 struct FixedCandidateSource {
     candidates: Vec<ironclaw_auth::CredentialAccount>,
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[async_trait]
 impl crate::credential_refresh_worker::CredentialRefreshCandidateSource for FixedCandidateSource {
     async fn list_refresh_candidates(&self) -> Vec<ironclaw_auth::CredentialAccount> {
@@ -451,6 +456,7 @@ impl crate::credential_refresh_worker::CredentialRefreshCandidateSource for Fixe
     }
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 impl OAuthProductAuthTestBundle {
     /// Run one credential-refresh sweep tick with a fixed account list and a
     /// frozen clock.
@@ -511,6 +517,11 @@ impl OAuthProductAuthTestBundle {
 /// - Includes `refresh_token` in the scripted egress response so the initial
 ///   token exchange stores a refresh secret handle (required for the keepalive
 ///   refresh sweep to call the token endpoint).
+///
+/// Requires `feature = "libsql"` or `feature = "postgres"` because
+/// `sweep_for_refresh` (which consumes this bundle) depends on
+/// `credential_refresh_worker` which is gated on those features.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 /// - Calls `.with_provider_client()` on the constructed `RebornProductAuthServices`
 ///   so `refresh_credential_account` routes through
 ///   `ProviderBackedCredentialAccountService` rather than returning
