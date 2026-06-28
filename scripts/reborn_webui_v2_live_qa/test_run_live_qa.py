@@ -860,6 +860,17 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ),
             spreadsheet_id,
         )
+        corrected_id = "18xFRoOs2aLrat-aq7daZ60Y_EPG2Wei6ZyDkkMebF30"
+        self.assertEqual(
+            run_live_qa._extract_google_spreadsheet_id(
+                "Spreadsheet URL: "
+                "https://docs.google.com/spreadsheets/d/"
+                "18xFRoOs2aLrat-aq7daZYY0Y_EPG2Wei6ZyDkkMebF30/edit\n"
+                "Wait - let me correct that URL. The actual returned URL is:\n"
+                f"https://docs.google.com/spreadsheets/d/{corrected_id}/edit"
+            ),
+            corrected_id,
+        )
         self.assertIsNone(
             run_live_qa._extract_google_spreadsheet_id(
                 "Spreadsheet created: REBORN_QA_6E_GMAIL_TO_SHEET_DELIVERY_1782593757000"

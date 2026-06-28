@@ -2799,9 +2799,12 @@ def _extract_google_spreadsheet_id(text: str) -> str | None:
         r"\bspreadsheet(?:\s+id)?\s*[:=]\s*([A-Za-z0-9_-]{20,})",
     ]
     for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return match.group(1)
+        matches = [
+            match.group(1)
+            for match in re.finditer(pattern, text, re.IGNORECASE)
+        ]
+        if matches:
+            return matches[-1]
     return None
 
 
