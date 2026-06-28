@@ -3713,32 +3713,14 @@ pub(crate) fn scoped_turns_fs(
     backend: Arc<HarnessTurnStorageBackend>,
     binding: &ResolvedBinding,
 ) -> HarnessResult<Arc<ScopedFilesystem<HarnessTurnBackend>>> {
-    let owner_user_id = binding
-        .subject_user_id
-        .as_ref()
-        .unwrap_or(&binding.actor_user_id);
     // Include agent_id and project_id in the path when present so that
     // distinct agents or projects stored under the same tenant/user
     // (e.g. shared-storage multi-harness tests) get isolated turn state
     // files and cannot cross-claim each other's queued runs.
-    let target = match (binding.agent_id.as_ref(), binding.project_id.as_ref()) {
-        (Some(agent_id), Some(project_id)) => format!(
-            "/engine/tenants/{}/agents/{}/projects/{}/users/{}/turns",
-            binding.tenant_id, agent_id, project_id, owner_user_id
-        ),
-        (Some(agent_id), None) => format!(
-            "/engine/tenants/{}/agents/{}/users/{}/turns",
-            binding.tenant_id, agent_id, owner_user_id
-        ),
-        (None, Some(project_id)) => format!(
-            "/engine/tenants/{}/projects/{}/users/{}/turns",
-            binding.tenant_id, project_id, owner_user_id
-        ),
-        (None, None) => format!(
-            "/engine/tenants/{}/users/{}/turns",
-            binding.tenant_id, owner_user_id
-        ),
-    };
+    // The 4-arm match lives in `super::filesystem::turns_scope_path`; the
+    // integration tier reuses it with a different prefix via
+    // `scoped_turns_fs_composite` in builder.rs.
+    let target = super::filesystem::turns_scope_path("/engine", binding);
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").expect("valid turns alias"),
         VirtualPath::new(target).expect("valid turns target"),
