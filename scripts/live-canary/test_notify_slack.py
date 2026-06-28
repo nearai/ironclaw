@@ -65,6 +65,42 @@ Artifacts:
 """
 
 
+def _trace_json(tool_calls: list[dict]) -> str:
+    signatures = [
+        {
+            "name": call["name"],
+            "args_hash": call.get("args_hash", ""),
+        }
+        for call in tool_calls
+    ]
+    outputs = [
+        {
+            "signature": {
+                "name": call["name"],
+                "args_hash": call.get("args_hash", ""),
+            },
+            "output_digest": call.get("output_digest", ""),
+        }
+        for call in tool_calls
+        if call.get("output_digest")
+    ]
+    payload = {
+        "recent_call_signatures": {"items": signatures},
+        "seen_capability_output_digests": {"items": outputs},
+    }
+    return json.dumps(
+        {
+            "entries": [
+                {
+                    "contents": {
+                        "payload_hex": json.dumps(payload).encode("utf-8").hex()
+                    }
+                }
+            ]
+        }
+    )
+
+
 class ParseSummaryStatusTests(unittest.TestCase):
     def test_zero_status_means_pass(self):
         self.assertEqual(
@@ -202,6 +238,20 @@ class RebornQaSlackReportTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            traces_dir = lane_dir / "traces"
+            traces_dir.mkdir()
+            (traces_dir / "qa_2a_gmail_connect.json").write_text(
+                _trace_json(
+                    [
+                        {
+                            "name": "gmail.list_messages",
+                            "args_hash": "1234567890123",
+                            "output_digest": "9876543210987",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
 
             report = notify.collect_lane(lane_dir)
 
@@ -213,6 +263,10 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertEqual(report.reborn_qa_cases[0].rows, ("2A",))
         self.assertEqual(report.reborn_qa_cases[0].feature, "Gmail connection flow")
         self.assertEqual(report.reborn_qa_cases[0].message, "")
+        self.assertEqual(len(report.reborn_qa_cases[0].tool_calls), 1)
+        self.assertEqual(report.reborn_qa_cases[0].tool_calls[0].name, "gmail.list_messages")
+        self.assertEqual(report.reborn_qa_cases[0].tool_calls[0].args_hash, "1234567890123")
+        self.assertEqual(report.reborn_qa_cases[0].tool_calls[0].output_digest, "9876543210987")
         self.assertEqual(report.reborn_qa_cases[1].rows, ("2D",))
         self.assertEqual(
             report.reborn_qa_cases[1].message,
@@ -235,6 +289,13 @@ class RebornQaSlackReportTests(unittest.TestCase):
                     feature="Gmail connection flow",
                     success=True,
                     latency_ms=1200,
+                    tool_calls=[
+                        notify.RebornQaToolCall(
+                            name="gmail.list_messages",
+                            args_hash="1234567890123",
+                            output_digest="9876543210987",
+                        )
+                    ],
                 ),
                 notify.RebornQaCaseReport(
                     rows=("2D",),
@@ -243,6 +304,13 @@ class RebornQaSlackReportTests(unittest.TestCase):
                     success=False,
                     latency_ms=0,
                     message="requires live Google runtime access",
+                    tool_calls=[
+                        notify.RebornQaToolCall(
+                            name="google-calendar.list_events",
+                            args_hash="2234567890123",
+                            output_digest="8876543210987",
+                        )
+                    ],
                 ),
             ],
         )
@@ -254,18 +322,26 @@ class RebornQaSlackReportTests(unittest.TestCase):
             if block.get("type") == "section"
         ]
 
-        self.assertTrue(any("*QA 2A: Gmail connection flow*" in text for text in section_texts))
-        self.assertTrue(
-            any(
-                "*QA 2D: Calendar prep assistant using Google Docs and live news*" in text
-                for text in section_texts
-            )
-        )
-        self.assertTrue(
-            any("requires live Google runtime access" in text for text in section_texts)
-        )
+        qa_sections = [text for text in section_texts if "*QA 2*" in text]
+        self.assertEqual(len(qa_sections), 1)
+        qa_text = qa_sections[0]
+        self.assertIn("1/2 passed", qa_text)
+        self.assertIn("\n*Cases:*", qa_text)
+        self.assertIn("\n*Tools:*", qa_text)
+        self.assertIn("\n*Tool I/O digests:*", qa_text)
+        self.assertIn("`2A` Gmail connection flow", qa_text)
+        self.assertIn("`2D` Calendar prep assistant using Google Docs and live news", qa_text)
+        self.assertIn("requires live Google runtime access", qa_text)
+        self.assertIn("*Tools:* 2 calls across 2 tools", qa_text)
+        self.assertIn("`gmail.list_messages` in#1234567890 out#9876543210", qa_text)
+        self.assertIn("`google-calendar.list_events` in#2234567890 out#8876543210", qa_text)
 
     def test_reborn_rows_fit_with_scheduled_all_lane_report(self):
+        case_rows = [
+            f"{group}{suffix}"
+            for group in range(2, 9)
+            for suffix in ("A", "B", "C", "D", "E")
+        ]
         reports = [
             notify.LaneReport(
                 lane=f"lane-{idx}",
@@ -281,18 +357,18 @@ class RebornQaSlackReportTests(unittest.TestCase):
             notify.LaneReport(
                 lane="reborn-webui-v2-live-qa",
                 provider="reborn-webui-v2",
-                passed=33,
+                passed=len(case_rows),
                 failed=0,
-                tests=33,
+                tests=len(case_rows),
                 status="pass",
                 reborn_qa_cases=[
                     notify.RebornQaCaseReport(
-                        rows=(f"{idx}",),
+                        rows=(row,),
                         case=f"qa_case_{idx}",
                         feature=f"Feature {idx}",
                         success=True,
                     )
-                    for idx in range(1, 34)
+                    for idx, row in enumerate(case_rows, start=1)
                 ],
             )
         )
@@ -309,8 +385,9 @@ class RebornQaSlackReportTests(unittest.TestCase):
             for block in payload["blocks"]
             if block.get("type") == "section"
         ]
-        self.assertTrue(any("*QA 1: Feature 1*" in text for text in section_texts))
-        self.assertTrue(any("*QA 33: Feature 33*" in text for text in section_texts))
+        self.assertTrue(any("*QA 2*" in text for text in section_texts))
+        self.assertTrue(any("*QA 8*" in text for text in section_texts))
+        self.assertFalse(any("*QA 2A" in text for text in section_texts))
 
 
 if __name__ == "__main__":

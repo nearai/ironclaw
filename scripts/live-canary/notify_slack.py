@@ -74,6 +74,14 @@ class RebornQaCaseReport:
     success: bool
     latency_ms: int | float | None = None
     message: str = ""
+    tool_calls: list["RebornQaToolCall"] = field(default_factory=list)
+
+
+@dataclass
+class RebornQaToolCall:
+    name: str
+    args_hash: str = ""
+    output_digest: str = ""
 
 
 @dataclass
@@ -201,6 +209,14 @@ def _trim_slack_text(value: object, limit: int = 180) -> str:
     return text[: max(0, limit - 1)].rstrip() + "…"
 
 
+def _trim_slack_block_text(value: object, limit: int = 2900) -> str:
+    text = str(value or "").strip()
+    text = "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
 def _reborn_case_from_result(entry: dict) -> str:
     details = entry.get("details") or {}
     if isinstance(details, dict):
@@ -227,6 +243,86 @@ def _reborn_failure_message(entry: dict) -> str:
     if blocked:
         return _trim_slack_text(f"blocked={blocked}")
     return ""
+
+
+def _decode_payload_hex(value: object) -> dict:
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        decoded = bytes.fromhex(value).decode("utf-8")
+        payload = json.loads(decoded)
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _signature_key(signature: object) -> tuple[str, str] | None:
+    if not isinstance(signature, dict):
+        return None
+    name = signature.get("name")
+    if not name:
+        return None
+    args_hash = signature.get("args_hash")
+    return (str(name), str(args_hash or ""))
+
+
+def parse_reborn_trace_tool_calls(trace_path: Path) -> list[RebornQaToolCall]:
+    """Read a scrubbed Reborn trace and return hashed tool I/O summaries.
+
+    Trace payloads can contain live integration data. The checkpoint state
+    exposes stable argument hashes and output digests, which are enough for
+    correlating "what tool ran with which input/output identity" without
+    posting raw Gmail, Slack, Docs, Sheets, or web content into Slack.
+    """
+    if not trace_path.exists() or trace_path.stat().st_size == 0:
+        return []
+    try:
+        data = json.loads(trace_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    entries = data.get("entries") or []
+    if not isinstance(entries, list):
+        return []
+
+    best_signatures: list[dict] = []
+    best_outputs: list[dict] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        contents = entry.get("contents") or {}
+        if not isinstance(contents, dict):
+            continue
+        payload = _decode_payload_hex(contents.get("payload_hex"))
+        signatures = payload.get("recent_call_signatures", {}).get("items", [])
+        outputs = payload.get("seen_capability_output_digests", {}).get("items", [])
+        if isinstance(signatures, list) and len(signatures) > len(best_signatures):
+            best_signatures = [item for item in signatures if isinstance(item, dict)]
+        if isinstance(outputs, list) and len(outputs) > len(best_outputs):
+            best_outputs = [item for item in outputs if isinstance(item, dict)]
+
+    output_by_signature: dict[tuple[str, str], str] = {}
+    for item in best_outputs:
+        key = _signature_key(item.get("signature"))
+        if key is None:
+            continue
+        output = item.get("output_digest")
+        if output is not None:
+            output_by_signature[key] = str(output)
+
+    tool_calls: list[RebornQaToolCall] = []
+    for signature in best_signatures:
+        key = _signature_key(signature)
+        if key is None:
+            continue
+        name, args_hash = key
+        tool_calls.append(
+            RebornQaToolCall(
+                name=name,
+                args_hash=args_hash,
+                output_digest=output_by_signature.get(key, ""),
+            )
+        )
+    return tool_calls
 
 
 def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
@@ -282,6 +378,7 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
             or case.replace("_", " ")
         )
         latency = entry.get("latency_ms")
+        tool_calls = parse_reborn_trace_tool_calls(lane_dir / "traces" / f"{case}.json")
         cases.append(
             RebornQaCaseReport(
                 rows=row_tuple,
@@ -290,6 +387,7 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
                 success=bool(entry.get("success")),
                 latency_ms=latency if isinstance(latency, (int, float)) else None,
                 message=_reborn_failure_message(entry),
+                tool_calls=tool_calls,
             )
         )
     report.reborn_qa_cases = cases
@@ -473,6 +571,100 @@ def run_haiku(api_key: str, report: LaneReport) -> None:
     report.fix = str(data.get("fix", ""))[:300]
 
 
+QA_ROW_PREFIX_RE = re.compile(r"^(?P<num>\d+)")
+
+
+def _qa_case_rows(case: RebornQaCaseReport) -> str:
+    return ", ".join(case.rows) if case.rows else case.case
+
+
+def _qa_group_key(case: RebornQaCaseReport) -> str:
+    for row in case.rows:
+        match = QA_ROW_PREFIX_RE.match(row)
+        if match:
+            return match.group("num")
+    return _qa_case_rows(case)
+
+
+def _qa_group_sort_key(value: str) -> tuple[int, int | str]:
+    if value.isdigit():
+        return (0, int(value))
+    return (1, value)
+
+
+def _short_digest(value: str) -> str:
+    if not value:
+        return "-"
+    return value[:10]
+
+
+def _format_reborn_tool_summary(cases: list[RebornQaCaseReport]) -> list[str]:
+    calls: list[RebornQaToolCall] = []
+    for case in cases:
+        calls.extend(case.tool_calls)
+    if not calls:
+        return []
+
+    distinct_tools = list(dict.fromkeys(call.name for call in calls))
+    tool_names = ", ".join(f"`{name}`" for name in distinct_tools[:8])
+    if len(distinct_tools) > 8:
+        tool_names += f", +{len(distinct_tools) - 8} more"
+
+    lines = [f"*Tools:* {len(calls)} calls across {len(distinct_tools)} tools: {tool_names}"]
+    io_parts = [
+        f"`{call.name}` in#{_short_digest(call.args_hash)} out#{_short_digest(call.output_digest)}"
+        for call in calls[:10]
+    ]
+    if len(calls) > 10:
+        io_parts.append(f"+{len(calls) - 10} more")
+    lines.append(f"*Tool I/O digests:* {'; '.join(io_parts)}")
+    return lines
+
+
+def _format_reborn_qa_group(group: str, cases: list[RebornQaCaseReport]) -> dict:
+    passed = sum(1 for case in cases if case.success)
+    failed = len(cases) - passed
+    status = ":white_check_mark:" if failed == 0 else ":x:"
+    duration_ms = sum(
+        case.latency_ms for case in cases if isinstance(case.latency_ms, (int, float))
+    )
+    duration = f" in {duration_ms / 1000.0:.1f}s" if duration_ms else ""
+
+    case_summaries = [
+        f"`{_qa_case_rows(case)}` {case.feature}"
+        for case in cases
+    ]
+    lines = [
+        f"{status} *QA {group}* — {passed}/{len(cases)} passed{duration}",
+        f"*Cases:* {_trim_slack_text('; '.join(case_summaries), 900)}",
+    ]
+    failed_messages = [
+        f"`{_qa_case_rows(case)}` {case.message or 'failed'}"
+        for case in cases
+        if not case.success
+    ]
+    if failed_messages:
+        lines.append(f"*Failures:* {_trim_slack_text('; '.join(failed_messages), 700)}")
+    lines.extend(_format_reborn_tool_summary(cases))
+    return {
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": _trim_slack_block_text("\n".join(lines), 2900),
+        },
+    }
+
+
+def _format_reborn_qa_groups(cases: list[RebornQaCaseReport]) -> list[dict]:
+    grouped: dict[str, list[RebornQaCaseReport]] = {}
+    for case in cases:
+        grouped.setdefault(_qa_group_key(case), []).append(case)
+    return [
+        _format_reborn_qa_group(group, grouped[group])
+        for group in sorted(grouped, key=_qa_group_sort_key)
+    ]
+
+
 def slack_payload(
     reports: list[LaneReport],
     run_url: str | None,
@@ -517,27 +709,7 @@ def slack_payload(
         if not r.reborn_qa_cases:
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
         else:
-            for case in r.reborn_qa_cases:
-                row_label = ", ".join(case.rows) if case.rows else case.case
-                status = ":white_check_mark:" if case.success else ":x:"
-                latency = ""
-                if case.latency_ms is not None:
-                    latency = f" in {case.latency_ms / 1000.0:.1f}s"
-                case_lines = [
-                    f"{status} *QA {row_label}: {case.feature}*",
-                    f"`{case.case}` — {'passed' if case.success else 'failed'}{latency}",
-                ]
-                if case.message:
-                    case_lines.append(f"> {case.message}")
-                blocks.append(
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": "\n".join(case_lines),
-                        },
-                    }
-                )
+            blocks.extend(_format_reborn_qa_groups(r.reborn_qa_cases))
 
     # Cross-lane "Summary by Category" block — only emitted when there
     # are >=2 failures (with 1 the per-lane block is already enough).
