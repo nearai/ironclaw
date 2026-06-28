@@ -406,6 +406,113 @@ test("useChat.send: target-thread send does not append into active thread", asyn
   assert.deepEqual(stateUpdates.filter((update) => update.index === 4), []);
 });
 
+test("useChat.send: target-thread send ignores current thread gate and processing", async () => {
+  const currentThreadId = "thread-current";
+  const targetThreadId = "thread-target";
+  const pendingGate = {
+    runId: "run-current",
+    gateRef: "gate-current",
+    kind: "gate",
+  };
+  let currentMessages = [];
+  let sendCalls = 0;
+  const seededByThread = new Map();
+  const stateUpdates = [];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [
+          2,
+          {
+            runId: "run-current",
+            threadId: currentThreadId,
+            status: "awaiting_gate",
+          },
+        ],
+        [4, true],
+        [5, pendingGate],
+      ]),
+      setCalls: stateUpdates,
+    }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("target thread should already exist");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async ({ threadId }) => {
+      sendCalls += 1;
+      return {
+        accepted_message_ref: "msg:target-message-1",
+        run_id: "run-target",
+        status: "queued",
+        thread_id: threadId,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: currentMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: (threadId, updater) => {
+        const previous = seededByThread.get(threadId) || [];
+        const next = typeof updater === "function" ? updater(previous) : updater;
+        seededByThread.set(threadId, next);
+      },
+      setMessages: (updater) => {
+        currentMessages =
+          typeof updater === "function" ? updater(currentMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(currentThreadId);
+  await chat.send("send to another thread", { threadId: targetThreadId });
+
+  assert.equal(sendCalls, 1);
+  assert.deepEqual(currentMessages, []);
+  assert.equal(seededByThread.get(targetThreadId).length, 1);
+  assert.equal(seededByThread.get(targetThreadId)[0].role, "user");
+  assert.equal(
+    seededByThread.get(targetThreadId)[0].timelineMessageId,
+    "target-message-1",
+  );
+  assert.deepEqual(stateUpdates.filter((update) => update.index === 2), []);
+  assert.deepEqual(stateUpdates.filter((update) => update.index === 4), []);
+  assert.deepEqual(stateUpdates.filter((update) => update.index === 5), []);
+});
+
 test("useChat.send: target-thread rejected_busy updates seeded cache", async () => {
   const currentThreadId = "thread-current";
   const targetThreadId = "thread-target";
