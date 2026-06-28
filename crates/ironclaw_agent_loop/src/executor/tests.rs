@@ -1733,6 +1733,44 @@ async fn no_progress_nudge_synthesizes_reply_when_gate_enabled() {
 }
 
 #[tokio::test]
+async fn nudge_clears_prompt_context_cursor_in_final_state() {
+    // Regression: the final-answer nudge builds its own prompt bundle from
+    // `plan_context_request`, so it must consume the prompt-context handoff
+    // once — like the main prompt-build path (`BuiltPromptBundle`) — instead of
+    // leaving a lagging `prompt_context_cursor` in the checkpointed final state.
+    let host = MockHost::new(vec![reply_response_with_text("Here is the final answer.")])
+        .with_driver_nudges_enabled();
+    let run_context = host.run_context().clone();
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.prompt_context_cursor = Some(LoopInputCursor::origin_for_run(&run_context));
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::NoProgressDetected,
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    assert!(
+        matches!(exit, LoopExit::Completed(_)),
+        "nudge with a queued reply should complete the turn"
+    );
+    assert!(
+        final_staged_state(&host).prompt_context_cursor.is_none(),
+        "nudge must clear prompt_context_cursor before the final checkpoint"
+    );
+}
+
+#[tokio::test]
 async fn no_progress_skips_nudge_when_gate_disabled() {
     // Gate OFF: even with a model reply available, no tool-free nudge call is
     // issued and the no-progress stop terminates as a typed failure (production
