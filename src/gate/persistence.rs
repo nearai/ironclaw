@@ -5,7 +5,6 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::bootstrap::ironclaw_base_dir;
@@ -55,10 +54,9 @@ impl FileGatePersistence {
                 reason: format!("open '{}': {e}", self.path.display()),
             })?;
 
-        file.lock_exclusive()
-            .map_err(|e| GateStoreError::Persistence {
-                reason: format!("lock '{}': {e}", self.path.display()),
-            })?;
+        file.lock().map_err(|e| GateStoreError::Persistence {
+            reason: format!("lock '{}': {e}", self.path.display()),
+        })?;
         Ok(file)
     }
 

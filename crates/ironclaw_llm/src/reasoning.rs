@@ -437,6 +437,8 @@ pub enum RespondResult {
         /// the next turn — otherwise the provider rejects the follow-up
         /// request with HTTP 400. See #3201, #3225.
         reasoning: Option<String>,
+        /// Typed provider reasoning payloads for exact replay when available.
+        reasoning_details: Option<crate::ReasoningDetails>,
     },
 }
 
@@ -828,6 +830,7 @@ Respond in JSON format:
                     clean_response(&pre_truncated)
                 });
                 let provider_reasoning = response.reasoning;
+                let provider_reasoning_details = response.reasoning_details;
                 // Populate per-tool reasoning from the shared narrative when the
                 // provider did not supply per-tool rationale.
                 let tool_calls: Vec<ToolCall> = response
@@ -855,6 +858,7 @@ Respond in JSON format:
                         tool_calls,
                         content: narrative,
                         reasoning: provider_reasoning,
+                        reasoning_details: provider_reasoning_details,
                     },
                     usage,
                     finish_reason: response.finish_reason,
@@ -886,6 +890,7 @@ Respond in JSON format:
                         // reasoning artifacts — those would have been on the
                         // structured tool_calls path instead.
                         reasoning: response.reasoning,
+                        reasoning_details: response.reasoning_details,
                     },
                     usage,
                     finish_reason: response.finish_reason,
@@ -3952,6 +3957,7 @@ That's my plan."#;
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     reasoning: None,
+                    reasoning_details: None,
                 })
             }
         }
@@ -4104,6 +4110,7 @@ That's my plan."#;
                 tool_calls,
                 content,
                 reasoning: _,
+                reasoning_details: _,
             } => {
                 assert_eq!(tool_calls.len(), 1);
                 assert_eq!(tool_calls[0].name, "tool_list");
@@ -4138,6 +4145,7 @@ That's my plan."#;
                 tool_calls,
                 content,
                 reasoning: _,
+                reasoning_details: _,
             } => {
                 assert_eq!(tool_calls.len(), 1);
                 assert_eq!(tool_calls[0].name, "tool_list");
@@ -4308,6 +4316,7 @@ That's my plan."#;
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }

@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use ironclaw_auth::{AuthErrorCode, CredentialRefreshRequest};
-use rand::Rng;
+use rand::RngExt as _;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -363,7 +363,7 @@ fn jitter_delay(max: Duration) -> Duration {
         return Duration::ZERO;
     }
     let max_nanos = max.as_nanos().min(u64::MAX as u128);
-    let nanos = rand::thread_rng().gen_range(0..=max_nanos);
+    let nanos = rand::rng().random_range(0..=max_nanos);
     let nanos = u64::try_from(nanos).unwrap_or(u64::MAX);
     Duration::from_nanos(nanos)
 }

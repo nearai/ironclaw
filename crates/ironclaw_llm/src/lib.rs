@@ -80,8 +80,9 @@ pub use openai_codex_session::{DeviceCodeStart, OpenAiCodexSessionManager};
 pub use provider::sanitize_tool_messages;
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
-    LlmProvider, ModelMetadata, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition, ToolResult, generate_tool_call_id, normalized_model_override,
+    LlmProvider, ModelMetadata, ReasoningDetail, ReasoningDetails, Role, ToolCall,
+    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
+    generate_tool_call_id, normalized_model_override,
 };
 pub use reasoning::{
     ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, ResponseAnomaly,
@@ -407,13 +408,14 @@ fn create_openai_compat_from_registry(
         normalize_openai_base_url(&config.base_url)
     };
 
-    let mut builder = openai::Client::<reqwest::Client>::builder()
-        .api_key(&api_key)
-        .http_client(provider_http_client(
-            &config.provider_id,
-            &config.base_url,
-            request_timeout_secs,
-        )?);
+    let mut builder =
+        openai::Client::builder()
+            .api_key(&api_key)
+            .http_client(provider_http_client(
+                &config.provider_id,
+                &config.base_url,
+                request_timeout_secs,
+            )?);
     if !config.base_url.is_empty() {
         builder = builder.base_url(&normalized_base_url);
     }
@@ -489,13 +491,14 @@ fn create_anthropic_from_registry(
     // a localhost/self-hosted Anthropic-compatible endpoint bypasses the system
     // proxy for live chat too — not just model discovery. Remote hosts keep
     // default proxy behavior.
-    let mut builder = anthropic::Client::<reqwest::Client>::builder()
-        .api_key(&api_key)
-        .http_client(provider_http_client(
-            &config.provider_id,
-            &config.base_url,
-            request_timeout_secs,
-        )?);
+    let mut builder =
+        anthropic::Client::builder()
+            .api_key(&api_key)
+            .http_client(provider_http_client(
+                &config.provider_id,
+                &config.base_url,
+                request_timeout_secs,
+            )?);
     if !config.base_url.is_empty() {
         builder = builder.base_url(&config.base_url);
     }
@@ -562,7 +565,7 @@ fn create_ollama_from_registry(
     use rig::client::Nothing;
     use rig::providers::ollama;
 
-    let client: ollama::Client = ollama::Client::<reqwest::Client>::builder()
+    let client: ollama::Client = ollama::Client::builder()
         .base_url(&config.base_url)
         .api_key(Nothing)
         .http_client(provider_http_client(
@@ -636,13 +639,14 @@ fn create_deepseek_from_registry(
             provider: config.provider_id.clone(),
         })?;
 
-    let mut builder = deepseek::Client::<reqwest::Client>::builder()
-        .api_key(&api_key)
-        .http_client(provider_http_client(
-            &config.provider_id,
-            &config.base_url,
-            request_timeout_secs,
-        )?);
+    let mut builder =
+        deepseek::Client::builder()
+            .api_key(&api_key)
+            .http_client(provider_http_client(
+                &config.provider_id,
+                &config.base_url,
+                request_timeout_secs,
+            )?);
     if !config.base_url.is_empty() {
         builder = builder.base_url(&config.base_url);
     }
@@ -722,13 +726,14 @@ fn create_openrouter_from_registry(
         extra_headers.insert(name, val);
     }
 
-    let mut builder = openrouter::Client::<reqwest::Client>::builder()
-        .api_key(&api_key)
-        .http_client(provider_http_client(
-            &config.provider_id,
-            &config.base_url,
-            request_timeout_secs,
-        )?);
+    let mut builder =
+        openrouter::Client::builder()
+            .api_key(&api_key)
+            .http_client(provider_http_client(
+                &config.provider_id,
+                &config.base_url,
+                request_timeout_secs,
+            )?);
     if !config.base_url.is_empty() {
         builder = builder.base_url(&config.base_url);
     }
@@ -789,13 +794,14 @@ fn create_gemini_from_registry(
     // request. Discard any persisted shim URL and use the native default.
     let base_url = sanitize_gemini_base_url(&config.base_url);
 
-    let mut builder = gemini::Client::<reqwest::Client>::builder()
-        .api_key(&api_key)
-        .http_client(provider_http_client(
-            &config.provider_id,
-            &base_url,
-            request_timeout_secs,
-        )?);
+    let mut builder =
+        gemini::Client::builder()
+            .api_key(&api_key)
+            .http_client(provider_http_client(
+                &config.provider_id,
+                &base_url,
+                request_timeout_secs,
+            )?);
     if !base_url.is_empty() {
         builder = builder.base_url(&base_url);
     }

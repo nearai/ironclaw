@@ -205,7 +205,7 @@ impl DeviceKeypair {
         }
 
         // Generate a new keypair.
-        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let signing_key = SigningKey::generate(&mut rand_core::OsRng);
         let verifying_key = signing_key.verifying_key();
         let pubkey_bytes: [u8; 32] = verifying_key.to_bytes();
         let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(pubkey_bytes);

@@ -31,7 +31,7 @@ use ironclaw_host_api::ingress::{
 };
 use ironclaw_product_adapters::AdapterInstallationId;
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
-use rand::{RngCore, rngs::OsRng};
+use rand::RngExt as _;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -477,7 +477,7 @@ struct SlackPersonalBindingOAuthState(String);
 impl SlackPersonalBindingOAuthState {
     fn mint() -> Self {
         let mut bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut bytes);
+        rand::rng().fill(&mut bytes);
         Self(URL_SAFE_NO_PAD.encode(bytes))
     }
 

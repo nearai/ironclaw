@@ -2450,7 +2450,8 @@ impl RebornRuntime {
 ///
 /// **Currently supported profiles:** `RebornCompositionProfile::LocalDev`,
 /// `RebornCompositionProfile::LocalDevYolo`,
-/// `RebornCompositionProfile::HostedSingleTenant`, and
+/// `RebornCompositionProfile::HostedSingleTenant`,
+/// `RebornCompositionProfile::HostedSingleTenantVolume`, and
 /// `RebornCompositionProfile::Production` are wired end-to-end here. Production
 /// starts only after readiness diagnostics validate that live traffic can be
 /// exposed without a partial cutover.
@@ -2588,7 +2589,8 @@ pub async fn build_reborn_runtime(
     let runtime_parts = match profile {
         RebornCompositionProfile::LocalDev
         | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenant => {
+        | RebornCompositionProfile::HostedSingleTenant
+        | RebornCompositionProfile::HostedSingleTenantVolume => {
             let local_runtime =
                 services
                     .local_runtime
@@ -5018,6 +5020,7 @@ output_schema_ref = "schemas/write.output.json"
                 output_tokens: 1,
                 finish_reason: ironclaw_llm::FinishReason::Stop,
                 reasoning: None,
+                reasoning_details: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -5559,6 +5562,7 @@ output_schema_ref = "schemas/write.output.json"
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }

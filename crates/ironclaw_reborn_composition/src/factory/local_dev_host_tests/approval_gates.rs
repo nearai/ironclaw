@@ -37,16 +37,16 @@ async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one
             .with_runtime_policy(local_dev_policy()),
     )
     .await
-    .expect("local-dev services build");
+    .expect("local-dev services build"); // safety: test-only local-dev fixture setup.
     let local_runtime = services
         .local_runtime
         .as_ref()
-        .expect("local-dev runtime substrate");
+        .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
     let host_runtime = services
         .host_runtime
         .as_ref()
-        .expect("local-dev host runtime");
-    let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
+        .expect("local-dev host runtime"); // safety: test-only service fixture invariant.
+    let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: constant capability id.
     let estimate = ResourceEstimate::default();
     let input = serde_json::json!({"command": "echo approved"});
     let context = shell_execution_context("local-dev-approval-owner", "thread-local-dev-approval");
@@ -115,11 +115,11 @@ async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
             )),
     )
     .await
-    .expect("local-dev services build");
+    .expect("local-dev services build"); // safety: test-only local-dev fixture setup.
     let local_runtime = services
         .local_runtime
         .as_ref()
-        .expect("local-dev runtime substrate");
+        .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
     let host_runtime = services.host_runtime.as_ref().expect("host runtime");
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
     let estimate = ResourceEstimate::default();
@@ -230,11 +230,11 @@ async fn local_dev_auto_approve_setting_update_skips_next_shell_gate() {
             .with_runtime_policy(local_dev_policy()),
     )
     .await
-    .expect("local-dev services build");
+    .expect("local-dev services build"); // safety: test-only local-dev fixture setup.
     let local_runtime = services
         .local_runtime
         .as_ref()
-        .expect("local-dev runtime substrate");
+        .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
     let host_runtime = services
         .host_runtime
         .as_ref()

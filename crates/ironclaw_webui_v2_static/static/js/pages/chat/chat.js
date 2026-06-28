@@ -80,13 +80,18 @@ export function Chat({
     () => buildRuntimeContext({ gatewayStatus, activeThread }),
     [gatewayStatus, activeThread]
   );
+  const activeThreadHasGate = Boolean(activeThreadId) && Boolean(pendingGate);
+  const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
   const hasMessages =
-    messages.length > 0 || isProcessing || Boolean(pendingGate) || Boolean(channelConnectAction);
+    messages.length > 0 ||
+    activeThreadIsProcessing ||
+    activeThreadHasGate ||
+    Boolean(channelConnectAction);
   // Don't show the landing composer when history failed to load — show the
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
   const showLanding = !historyLoading && !hasMessages && !historyLoadError;
-  const approvalSubmitWarning = pendingGate
+  const approvalSubmitWarning = activeThreadHasGate
     ? "Resolve the approval request before sending another message."
     : "";
   const composerSendDisabled =
@@ -105,8 +110,8 @@ export function Chat({
     activeThreadId &&
       activeRun?.runId &&
       activeRun.threadId === activeThreadId &&
-      isProcessing &&
-      !pendingGate
+      activeThreadIsProcessing &&
+      !activeThreadHasGate
   );
   const pendingGateForDisplay = React.useMemo(
     () => enrichApprovalGateWithActivityArguments(pendingGate, messages),
@@ -123,7 +128,7 @@ export function Chat({
       : null;
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [] } = {}) => {
-      if (pendingGate) {
+      if (activeThreadHasGate) {
         throw new Error(approvalSubmitWarning);
       }
       if (composerSendBlockedRef.current) return null;
@@ -140,10 +145,10 @@ export function Chat({
     },
     [
       activeThreadId,
+      activeThreadHasGate,
       approvalSubmitWarning,
       composerSendDisabled,
       onSelectThread,
-      pendingGate,
       send,
     ]
   );
@@ -268,7 +273,7 @@ export function Chat({
             onLoadMore=${loadMore}
             onRetryMessage=${retryMessage}
             threadId=${activeThreadId}
-            pending=${isProcessing}
+            pending=${activeThreadIsProcessing}
           >
             ${recoveryNotice &&
             html`
@@ -277,7 +282,7 @@ export function Chat({
                 onRecover=${recoverHistory}
               />
             `}
-            ${isProcessing && !pendingGate && html`<${TypingIndicator} />`}
+            ${activeThreadIsProcessing && !activeThreadHasGate && html`<${TypingIndicator} />`}
             ${channelConnectAction &&
             html`
               <${ChannelConnectCard}
