@@ -46,7 +46,9 @@ async fn keyed_matcher_routes_distinct_bodies_per_url_in_multi_step_flow() {
         .build()
         .await
         .expect("harness builds");
-    h.submit_turn("fetch then order").await.expect("turn completes");
+    h.submit_turn("fetch then order")
+        .await
+        .expect("turn completes");
     h.assert_tool_result_contains("items-body")
         .await
         .expect("items keyed body surfaced");
