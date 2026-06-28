@@ -228,6 +228,27 @@ impl ScriptedOAuthTokenEgress {
         }
     }
 
+    /// Build a scripted egress that returns `200` with
+    /// `{access_token, refresh_token, token_type, expires_in}`.
+    ///
+    /// Use this for Google OAuth tests where the initial token exchange must
+    /// store a refresh secret handle so the keepalive worker can later load and
+    /// use it.
+    pub fn with_access_and_refresh_token(access_token: &str, refresh_token: &str) -> Self {
+        let body = serde_json::json!({
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "Bearer",
+            "expires_in": 3600
+        })
+        .to_string()
+        .into_bytes();
+        Self {
+            body,
+            captured: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
     /// Number of token-exchange HTTP calls captured so far.
     pub fn captured_count(&self) -> usize {
         self.captured
@@ -392,6 +413,182 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
         durable as Arc<dyn ironclaw_auth::SecretCleanupService>,
         Arc::new(TestNoopContinuationDispatcher),
     ));
+
+    OAuthProductAuthTestBundle { services, egress }
+}
+
+// ─── Slice 8: OAuth credential-refresh sweep test support ────────────────────
+//
+// `FixedCandidateSource` and `OAuthProductAuthTestBundle::sweep_for_refresh`
+// together let a test drive `credential_refresh_worker::sweep_once` with:
+//   • a pre-seeded list of accounts (bypasses the filesystem walk)
+//   • a frozen `now` instant (controls the idle-cutoff comparison)
+//   • the real `ProviderBackedCredentialAccountService` refresh path
+//   • the scripted `ScriptedOAuthTokenEgress` for HTTP assertion
+//
+// `build_google_oauth_product_auth_for_test` wires the same fixture chain as
+// `build_oauth_product_auth_for_test` but for `provider_id = "google"`, includes
+// a `refresh_token` in the scripted response so the exchange stores a refresh
+// secret handle, and calls `.with_provider_client()` so `refresh_account` routes
+// through `ProviderBackedCredentialAccountService` instead of returning
+// `BackendUnavailable`.
+
+/// Fixed candidate source for credential-refresh sweep tests (slice 8).
+///
+/// Returns a caller-supplied list of accounts from `list_refresh_candidates`,
+/// bypassing the `FilesystemAuthProductServices` filesystem walk. This lets a
+/// test inject a real `CredentialAccount` (read back after an OAuth connect
+/// flow) directly into `sweep_once` without needing the full tenant-path
+/// enumeration to work in an in-memory backend.
+struct FixedCandidateSource {
+    candidates: Vec<ironclaw_auth::CredentialAccount>,
+}
+
+#[async_trait]
+impl crate::credential_refresh_worker::CredentialRefreshCandidateSource for FixedCandidateSource {
+    async fn list_refresh_candidates(&self) -> Vec<ironclaw_auth::CredentialAccount> {
+        self.candidates.clone()
+    }
+}
+
+impl OAuthProductAuthTestBundle {
+    /// Run one credential-refresh sweep tick with a fixed account list and a
+    /// frozen clock.
+    ///
+    /// This exercises the production `sweep_once` path — `select_idle_candidates`
+    /// (idle-threshold + cap), `CredentialRefreshRequest` construction,
+    /// `RebornProductAuthServices::refresh_credential_account` →
+    /// `ProviderBackedCredentialAccountService::refresh_account` →
+    /// `HostOAuthProviderClient::refresh_token` → scripted HTTP egress — without
+    /// needing a real filesystem walk or a Postgres leader lock.
+    ///
+    /// # Arguments
+    ///
+    /// * `candidates` — `CredentialAccount` records to feed into the sweep.
+    ///   Obtain these by calling `services.credential_account_service().get_account()`
+    ///   after a successful OAuth connect flow so the handles are real.
+    /// * `settings` — pass `CredentialRefreshSettings::enabled()` to enable the
+    ///   sweep with the default 2-day idle threshold and cap of 5.
+    /// * `now` — frozen instant. Pass `Utc::now() + Duration::days(3)` to make a
+    ///   just-created account appear idle; pass `Utc::now()` (or any time within
+    ///   the threshold) to verify no refresh is triggered.
+    pub async fn sweep_for_refresh(
+        &self,
+        candidates: Vec<ironclaw_auth::CredentialAccount>,
+        settings: crate::runtime_input::CredentialRefreshSettings,
+        now: chrono::DateTime<chrono::Utc>,
+    ) {
+        use crate::credential_refresh_worker::{CredentialRefreshWorkerDeps, sweep_once};
+        use tokio_util::sync::CancellationToken;
+
+        let candidate_source = std::sync::Arc::new(FixedCandidateSource { candidates });
+
+        // Build an always-leader lock: no Postgres pool needed for tests.
+        #[cfg(not(feature = "postgres"))]
+        let leader_lock = std::sync::Arc::new(
+            crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::always_leader(),
+        );
+        #[cfg(feature = "postgres")]
+        let leader_lock = std::sync::Arc::new(
+            crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(None),
+        );
+
+        let deps = CredentialRefreshWorkerDeps {
+            candidate_source,
+            refresh_port: std::sync::Arc::clone(&self.services),
+            leader_lock,
+        };
+        let cancel = CancellationToken::new();
+        sweep_once(&deps, &settings, &cancel, now).await;
+    }
+}
+
+/// Construct a `OAuthProductAuthTestBundle` wired for the Google OAuth provider.
+///
+/// Unlike `build_oauth_product_auth_for_test`, this variant:
+/// - Uses `provider_id = "google"` (required by
+///   `HostOAuthProviderClient::refresh_token`, which rejects provider mismatches).
+/// - Includes `refresh_token` in the scripted egress response so the initial
+///   token exchange stores a refresh secret handle (required for the keepalive
+///   refresh sweep to call the token endpoint).
+/// - Calls `.with_provider_client()` on the constructed `RebornProductAuthServices`
+///   so `refresh_credential_account` routes through
+///   `ProviderBackedCredentialAccountService` rather than returning
+///   `BackendUnavailable`.
+///
+/// Calling this multiple times produces independent, isolated bundles.
+pub fn build_google_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_secrets::InMemorySecretStore;
+
+    // Same fixed-view mount layout as build_oauth_product_auth_for_test.
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/secrets").unwrap(),
+        VirtualPath::new("/tenants/test-tenant/users/test-user/secrets").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped_fs: Arc<ScopedFilesystem<InMemoryBackend>> =
+        Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
+
+    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = Arc::new(InMemorySecretStore::new());
+
+    let durable = Arc::new(
+        crate::product_auth_durable::FilesystemAuthProductServices::new(
+            scoped_fs,
+            Arc::clone(&secret_store),
+        ),
+    );
+
+    // Include a refresh_token in the scripted response so the token exchange
+    // stores a refresh secret handle (needed for the keepalive sweep to call
+    // the token endpoint on the next egress request).
+    let egress = Arc::new(ScriptedOAuthTokenEgress::with_access_and_refresh_token(
+        "test-google-access-token",
+        "test-google-refresh-token",
+    ));
+
+    // Google OAuth spec: provider_id must be "google" for
+    // HostOAuthProviderClient::refresh_token to accept the request.
+    let spec = crate::oauth_provider_client::HostOAuthProviderSpec {
+        provider_id: "google",
+        capability_id: "builtin.oauth.google",
+        token_endpoint: "https://oauth2.googleapis.com/token",
+        secret_handle_prefix: "google",
+        resource: None,
+        exchange_scope_policy:
+            crate::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+    };
+    let provider_client: Arc<dyn ironclaw_auth::AuthProviderClient> = Arc::new(
+        crate::oauth_provider_client::HostOAuthProviderClient::new(
+            spec,
+            Arc::clone(&egress) as Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
+            Arc::clone(&secret_store),
+            Arc::new(TestNoopObligationHandler),
+            ironclaw_auth::OAuthClientId::new("test-client-id").unwrap(),
+            ironclaw_auth::OAuthRedirectUri::new("https://localhost/oauth/callback").unwrap(),
+        )
+        .expect("google test OAuth provider client must build"),
+    );
+
+    // Build services then wrap credential_account_service with
+    // ProviderBackedCredentialAccountService via with_provider_client() so
+    // refresh_credential_account routes through the real refresh path instead
+    // of returning BackendUnavailable.
+    let services = Arc::new(
+        crate::RebornProductAuthServices::new(
+            durable.clone() as Arc<dyn ironclaw_auth::AuthFlowManager>,
+            durable.clone() as Arc<dyn ironclaw_auth::AuthInteractionService>,
+            durable.clone() as Arc<dyn ironclaw_auth::CredentialSetupService>,
+            durable.clone() as Arc<dyn ironclaw_auth::CredentialAccountService>,
+            Arc::clone(&provider_client),
+            durable as Arc<dyn ironclaw_auth::SecretCleanupService>,
+            Arc::new(TestNoopContinuationDispatcher),
+        )
+        .with_provider_client(provider_client),
+    );
 
     OAuthProductAuthTestBundle { services, egress }
 }
