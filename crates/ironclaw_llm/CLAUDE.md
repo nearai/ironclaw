@@ -230,12 +230,12 @@ Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT
 
 ## Provider Chain Construction
 
-`build_provider_chain()` in `mod.rs` is the single source of truth for assembling decorators. It creates the base provider (dispatching to `create_openai_codex_provider()` for codex, `create_llm_provider()` for everything else), then applies all decorators inline:
+`build_provider_chain()` in `lib.rs` is the entry point for chain construction: it creates the base provider (dispatching to `create_openai_codex_provider()` for codex, `create_llm_provider()` for everything else), then delegates the decorator stack to `pub(crate) async fn apply_decorator_chain(raw, config, session)` — the single source of truth for decorator assembly. Assemble the chain only through `apply_decorator_chain`; never apply these decorators inline or at a higher seam. It is crate-internal; the integration-test harness wraps a scripted raw provider beneath the real chain via the test-only `testing::provider_chain_over` re-export (gated by the `testing` feature), so the production API is not widened. The decorators `apply_decorator_chain` assembles, in order (`RecordingLlm` is appended afterward by `build_provider_chain`, not by `apply_decorator_chain`):
 
 ```
 Raw provider
   → RetryProvider           (per-provider backoff; wraps both primary and fallback)
-  → SmartRoutingProvider    (cheap/primary split when NEARAI_CHEAP_MODEL is set)
+  → SmartRoutingProvider    (cheap/primary split when `cheap_model_name()` is non-None; resolves `LLM_CHEAP_MODEL` first, then `NEARAI_CHEAP_MODEL` as NearAI-only fallback)
   → FailoverProvider        (fallback model; only when NEARAI_FALLBACK_MODEL is set)
   → CircuitBreakerProvider  (fast-fail; only when LLM_CIRCUIT_BREAKER_THRESHOLD is set)
   → CachedProvider          (response cache; only when LLM_RESPONSE_CACHE_ENABLED=true)

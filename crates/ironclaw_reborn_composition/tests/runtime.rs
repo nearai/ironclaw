@@ -5,9 +5,9 @@ use ironclaw_host_api::runtime_policy::{
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
 use ironclaw_reborn_composition::{
-    HooksActivationConfig, PollSettings, RebornBuildInput, RebornRuntimeError,
-    RebornRuntimeIdentity, RebornRuntimeInput, RebornSkillSourceKind, TurnRunnerSettings,
-    build_reborn_runtime,
+    HooksActivationConfig, PollSettings, RebornBuildInput, RebornCompositionProfile,
+    RebornRuntimeError, RebornRuntimeIdentity, RebornRuntimeInput, RebornSkillSourceKind,
+    TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
 };
 use ironclaw_turns::TurnStatus;
 use tokio_util::sync::CancellationToken;
@@ -92,6 +92,41 @@ async fn runtime_requires_resolved_runtime_policy_for_local_dev() {
         panic!("expected invalid argument, got {error:?}");
     };
     assert!(reason.contains("resolved runtime policy"));
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn hosted_single_tenant_volume_builds_live_runtime() {
+    // Regression for #5346: the runtime profile match was hardcoded after
+    // #5259 added this live local-substrate profile, so startup reached the
+    // "unsupported runtime profile checked above" unreachable arm.
+    let _guard = runtime_composition_test_guard().await;
+    let root = tempfile::tempdir().unwrap();
+    let input = RebornRuntimeInput::from_services(
+        local_runtime_build_input_with_options(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            "runtime-hosted-volume-owner",
+            root.path().join("hosted-volume"),
+            Default::default(),
+        )
+        .unwrap(),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-hosted-volume-tenant".to_string(),
+        agent_id: "runtime-hosted-volume-agent".to_string(),
+        source_binding_id: "runtime-hosted-volume-source".to_string(),
+        reply_target_binding_id: "runtime-hosted-volume-reply".to_string(),
+    })
+    .with_runner_settings(TurnRunnerSettings {
+        heartbeat_interval: Duration::from_secs(60),
+        poll_interval: Duration::from_secs(60),
+        ..TurnRunnerSettings::default()
+    });
+
+    let runtime = build_reborn_runtime(input).await.unwrap();
+    assert_eq!(runtime.default_run_profile_id(), "reborn-planned-default");
+
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]

@@ -120,6 +120,18 @@ TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
 EMPTY_REPLY_TRIGGER = re.compile(r"issue 1780 empty reply", re.IGNORECASE)
 LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
 MULTI_STEP_TRIGGER = re.compile(r"multi step echo then time", re.IGNORECASE)
+REBORN_EXTERNAL_TOOL_LOOP_TRIGGER = re.compile(
+    r"reborn external tool loop",
+    re.IGNORECASE,
+)
+REBORN_EXTERNAL_TOOL_FAILURE_TRIGGER = re.compile(
+    r"reborn external tool failure",
+    re.IGNORECASE,
+)
+REBORN_MIXED_INTERNAL_EXTERNAL_TRIGGER = re.compile(
+    r"reborn mixed internal external tools",
+    re.IGNORECASE,
+)
 
 # Lifecycle canary triggers for write+cleanup flows against real provider APIs.
 GITHUB_ISSUE_LIFECYCLE_TRIGGER = re.compile(
@@ -870,6 +882,7 @@ TOOL_CALL_PATTERNS = [
 # Set via POST /__mock/set_github_api_url with {"url": "http://..."}
 _github_api_url: str = "https://api.github.com"
 _last_chat_request: dict | None = None
+_chat_requests: list[dict] = []
 
 
 def _new_oauth_state() -> dict:
@@ -1540,9 +1553,9 @@ def _find_tool_results(messages: list[dict]) -> list[dict]:
                     tool_call_names[tool_call_id] = tool_name
             continue
         if message.get("role") == "tool":
-            name = _extract_tool_name(message)
+            name = tool_call_names.get(message.get("tool_call_id", ""), "unknown")
             if name == "unknown":
-                name = tool_call_names.get(message.get("tool_call_id", ""), name)
+                name = _extract_tool_name(message)
             results.append({
                 "name": name,
                 "content": message.get("content", ""),
@@ -1559,6 +1572,146 @@ def _find_tool_result(messages: list[dict]) -> dict | None:
 def _find_named_tool_results(messages: list[dict], name: str) -> list[dict]:
     """Collect fresh tool results for one tool name."""
     return [result for result in _find_tool_results(messages) if result.get("name") == name]
+
+
+def match_reborn_external_tool_response(messages: list[dict], has_tools: bool) -> dict | None:
+    """Script a repeated caller-supplied Responses API tool loop.
+
+    This path is intentionally sentinel-gated for Reborn OpenAI-compatible E2E
+    tests. It exercises model-emitted calls for tools supplied by the HTTP
+    client, then verifies submitted tool outputs are fed back as standard
+    OpenAI tool-result messages on later LLM calls.
+    """
+    if not _conversation_has_user_trigger(messages, REBORN_EXTERNAL_TOOL_LOOP_TRIGGER):
+        return None
+
+    results = _find_tool_results(messages)
+    result_by_name = {result["name"]: result["content"] for result in results}
+
+    if "lookup_weather" not in result_by_name:
+        if not has_tools:
+            return {"type": "text", "text": "Reborn external tool loop missing tool definitions."}
+        return {
+            "type": "tool_call",
+            "tool_call": {
+                "tool_name": "lookup_weather",
+                "arguments": {"city": "Boston"},
+            },
+        }
+
+    if "lookup_time" not in result_by_name:
+        return {
+            "type": "tool_call",
+            "tool_call": {
+                "tool_name": "lookup_time",
+                "arguments": {"city": "Boston"},
+            },
+        }
+
+    if "lookup_fact" not in result_by_name:
+        return {
+            "type": "tool_call",
+            "tool_call": {
+                "tool_name": "lookup_fact",
+                "arguments": {"topic": "Boston"},
+            },
+        }
+
+    summary = "; ".join(
+        f"{name}={result_by_name[name]}"
+        for name in ("lookup_weather", "lookup_time", "lookup_fact")
+    )
+    return {
+        "type": "text",
+        "text": f"Reborn external tool loop complete: {summary}",
+    }
+
+
+def match_reborn_external_tool_failure_response(
+    messages: list[dict],
+    has_tools: bool,
+) -> dict | None:
+    """Script an external tool call whose caller-supplied output is an error."""
+    if not _conversation_has_user_trigger(messages, REBORN_EXTERNAL_TOOL_FAILURE_TRIGGER):
+        return None
+
+    results = _find_tool_results(messages)
+    result_by_name = {result["name"]: result["content"] for result in results}
+
+    if "lookup_weather" not in result_by_name:
+        if not has_tools:
+            return {"type": "text", "text": "Reborn external tool failure missing tool definitions."}
+        return {
+            "type": "tool_call",
+            "tool_call": {
+                "tool_name": "lookup_weather",
+                "arguments": {"city": "Boston"},
+            },
+        }
+
+    return {
+        "type": "text",
+        "text": (
+            "Reborn external tool failure observed: "
+            f"lookup_weather={result_by_name['lookup_weather']}"
+        ),
+    }
+
+
+def match_reborn_mixed_internal_external_response(
+    messages: list[dict],
+    has_tools: bool,
+) -> dict | None:
+    """Emit an internal tool and a caller-supplied external tool in one response."""
+    if not _conversation_has_user_trigger(messages, REBORN_MIXED_INTERNAL_EXTERNAL_TRIGGER):
+        return None
+
+    results = _find_tool_results(messages)
+    result_by_name = {result["name"]: result["content"] for result in results}
+
+    if "builtin__echo" not in result_by_name and "lookup_weather" not in result_by_name:
+        if not has_tools:
+            return {"type": "text", "text": "Reborn mixed tool run missing tool definitions."}
+        return {
+            "type": "tool_call",
+            "tool_call": [
+                {
+                    "tool_name": "builtin__echo",
+                    "arguments": {"message": "mixed-internal-echo"},
+                },
+                {
+                    "tool_name": "lookup_weather",
+                    "arguments": {"city": "Boston"},
+                },
+            ],
+        }
+
+    if "lookup_weather" not in result_by_name:
+        return {
+            "type": "tool_call",
+            "tool_call": {
+                "tool_name": "lookup_weather",
+                "arguments": {"city": "Boston"},
+            },
+        }
+
+    if "builtin__echo" not in result_by_name:
+        return {
+            "type": "tool_call",
+            "tool_call": {
+                "tool_name": "builtin__echo",
+                "arguments": {"message": "mixed-internal-echo"},
+            },
+        }
+
+    return {
+        "type": "text",
+        "text": (
+            "Reborn mixed tool run complete: "
+            f"builtin__echo={result_by_name['builtin__echo']}; "
+            f"lookup_weather={result_by_name['lookup_weather']}"
+        ),
+    }
 
 
 def _tool_results_include_denial(tool_results: list[dict]) -> bool:
@@ -2121,6 +2274,7 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     global _last_chat_request
     body = await request.json()
     _last_chat_request = body
+    _chat_requests.append(body)
     messages = body.get("messages", [])
     stream = body.get("stream", False)
     tools = body.get("tools")
@@ -2176,6 +2330,20 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
             if not stream:
                 return _tool_call_response(cid, followup)
             return await _stream_tool_call(request, cid, followup)
+    reborn_external_tool = match_reborn_external_tool_response(messages, has_tools)
+    if reborn_external_tool:
+        return await _dispatch_special_response(request, cid, stream, reborn_external_tool)
+    reborn_external_tool_failure = match_reborn_external_tool_failure_response(messages, has_tools)
+    if reborn_external_tool_failure:
+        return await _dispatch_special_response(
+            request,
+            cid,
+            stream,
+            reborn_external_tool_failure,
+        )
+    reborn_mixed_tool = match_reborn_mixed_internal_external_response(messages, has_tools)
+    if reborn_mixed_tool:
+        return await _dispatch_special_response(request, cid, stream, reborn_mixed_tool)
     if (
         not tool_results
         and _conversation_uses_codeact(messages)
@@ -2918,9 +3086,20 @@ def main():
     async def get_last_chat_request(request: web.Request) -> web.Response:
         return web.json_response(_last_chat_request or {})
 
+    async def get_chat_requests(request: web.Request) -> web.Response:
+        return web.json_response({"requests": _chat_requests})
+
+    async def reset_chat_requests(request: web.Request) -> web.Response:
+        global _last_chat_request
+        _last_chat_request = None
+        _chat_requests.clear()
+        return web.json_response({"ok": True})
+
     app.router.add_post("/__mock/set_github_api_url", set_github_api_url)
     app.router.add_get("/__mock/github_api_url", get_github_api_url)
     app.router.add_get("/__mock/last_chat_request", get_last_chat_request)
+    app.router.add_get("/__mock/chat_requests", get_chat_requests)
+    app.router.add_post("/__mock/chat_requests/reset", reset_chat_requests)
     # Mock MCP server endpoints
     app.router.add_post("/mcp", mcp_endpoint)
     app.router.add_post("/mcp-400", mcp_endpoint_400)
