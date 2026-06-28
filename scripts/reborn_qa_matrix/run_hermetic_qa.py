@@ -5060,17 +5060,14 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-054-TC-11",
         ],
         commands=[
-            SLACK_SHARED_CHANNEL_ADMIN_COMMAND,
             WEBUI_V2_SLACK_CHANNEL_ADMIN_CLIENT_COMMAND,
         ],
         notes=(
-            "Covers Slack shared-channel admin rows without live Slack "
-            "network calls: WebUI channel route list/upsert/delete, "
-            "operator-only and cross-tenant gating, dynamic/static route "
-            "merging, route owner changes, outbound target authority updates, "
-            "invalid/duplicate channel validation, client allowed-channel "
-            "normalization/save/list payloads, subject preservation, setup "
-            "dirty-field protection, and picker error states."
+            "Covers Slack shared-channel admin WebUI client rows without live "
+            "Slack network calls: allowed-channel normalization/save/list "
+            "payloads, subject preservation, setup dirty-field protection, "
+            "and picker error states. Rust route/service contracts stay in "
+            "normal CI instead of this QA lane."
         ),
     ),
     "slack_host_beta_serve_mount_regression": CaseSpec(
@@ -5146,7 +5143,6 @@ CASES: dict[str, CaseSpec] = {
         commands=[
             REBORN_CLI_WEBUI_V2_BINARY_COMMAND,
             WEBUI_V2_LOGS_CLIENT_COMMAND,
-            WEBUI_V2_OPERATOR_LOGS_HANDLER_COMMAND,
             WEBUI_V2_LOGS_BROWSER_COMMAND,
         ],
         notes=(
@@ -5156,8 +5152,9 @@ CASES: dict[str, CaseSpec] = {
             "public/operator log fallback behavior, paused scope reloads, stale "
             "entry suppression, unsupported operator-route handling, empty/error "
             "states, scroll layout, chat duplicate-log-bar suppression, "
-            "automation recent-run log links, operator logs capability "
-            "enforcement, and Chromium rendering of scoped log context."
+            "automation recent-run log links, and Chromium rendering of "
+            "scoped log context. Rust operator-log route contracts stay in "
+            "normal CI instead of this QA lane."
         ),
     ),
     "webui_v2_shell_navigation_regression": CaseSpec(
@@ -5203,16 +5200,14 @@ CASES: dict[str, CaseSpec] = {
         commands=[
             WEBUI_V2_FRONTEND_BUILD_COMMAND,
             WEBUI_V2_STATIC_JS_COMMAND,
-            WEBUI_V2_RUST_STATIC_COMMAND,
-            WEBUI_V2_COMPOSITION_STATIC_COMMAND,
         ],
         notes=(
             "Covers the WebUI v2 frontend build and dependency supply-chain "
             "rows: npm ci package-lock consistency, high-severity npm audit "
             "gate, no-vendor esbuild bundle rebuild, committed app/chunk output "
-            "shape, static JS suite, embedded static asset/router tests, and "
-            "composition static route contracts. This is not browser/live "
-            "coverage and does not duplicate PR #5348."
+            "shape, and static JS suite. Rust static/composition route "
+            "contracts stay in normal CI instead of this QA lane; this is not "
+            "browser/live coverage and does not duplicate PR #5348."
         ),
     ),
     "webui_v2_i18n_language_regression": CaseSpec(
@@ -5447,8 +5442,6 @@ CASES: dict[str, CaseSpec] = {
         commands=[
             REBORN_CLI_WEBUI_V2_BINARY_COMMAND,
             WEBUI_V2_WALLET_CONNECT_CLIENT_COMMAND,
-            WEBUI_V2_WALLET_CONNECT_ROUTER_COMMAND,
-            WEBUI_V2_LLM_PROVIDER_ROUTE_COMMAND,
             WEBUI_V2_WALLET_CONNECT_BROWSER_COMMAND,
         ],
         notes=(
@@ -5456,11 +5449,10 @@ CASES: dict[str, CaseSpec] = {
             "interaction: static popup route, missing channel/BroadcastChannel "
             "fail-closed source path, epoch-millis plus random nonce layout, "
             "fixed NEAR AI message/recipient, BroadcastChannel success/failure "
-            "payloads, no-store and wallet-scoped relaxed CSP, strict SPA CSP "
-            "isolation, protected backend wallet completion route gating, and "
-            "a real-browser served-popup smoke that stubs the remote connector "
-            "module and observes the signed success payload. Live "
-            "wallet-provider behavior remains external/canary scope."
+            "payloads, and a real-browser served-popup smoke that stubs the "
+            "remote connector module and observes the signed success payload. "
+            "Rust route/CSP contracts stay in normal CI instead of this QA "
+            "lane. Live wallet-provider behavior remains external/canary scope."
         ),
     ),
     "reborn_operator_logs_service_regression": CaseSpec(
@@ -5553,21 +5545,15 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-080-TC-06",
         ],
         commands=[
-            WEBUI_V2_DESCRIPTOR_POLICY_COMMAND,
-            WEBUI_V2_PROJECT_HANDLER_COMMAND,
-            WEBUI_V2_PROJECTS_HANDLER_COMMAND,
-            WEBUI_V2_MEMBER_HANDLER_COMMAND,
             WEBUI_V2_PROJECTS_CLIENT_API_COMMAND,
-            COMPOSITION_PROJECT_SERVICE_COMMAND,
         ],
         notes=(
-            "Covers WebUI v2 project and membership API rows without "
+            "Covers WebUI v2 project and membership client API rows without "
             "duplicating PR #5348 browser project overview coverage: "
-            "descriptor policy, project collection and item routes, project "
-            "client API mapping and route encoding, path/body ID precedence, "
-            "member add/update/remove routing, unwired service fail-closed "
-            "behavior, no-content delete responses, reborn-projects session "
-            "feature projection, and project service authorization contracts."
+            "project overview/detail mapping, route encoding, missing-id "
+            "fail-closed behavior, and explicit mission/thread/widget TODO "
+            "stubs. Rust descriptor, handler, membership, and project-service "
+            "contracts stay in normal CI instead of this QA lane."
         ),
     ),
     "webui_v2_public_sso_session_regression": CaseSpec(
@@ -5691,25 +5677,17 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-086-TC-06",
         ],
         commands=[
-            WEBUI_V2_STATIC_AUTH_JS_COMMAND,
             WEBUI_V2_STATIC_API_AUTH_COMMAND,
             WEBUI_V2_LOGIN_OAUTH_CLIENT_COMMAND,
-            WEBUI_V2_INGRESS_SESSION_AUTH_COMMAND,
         ],
         notes=(
             "Covers WebUI v2 login/client-session rows without duplicating PR "
-            "#5348 browser auth-flow coverage: login-ticket consumption, URL "
-            "credential stripping, stored-token non-overwrite, logout revoke "
-            "dispatch, login_error handling, sessionStorage bearer use on "
-            "same-origin API calls, off-origin bearer-send prevention, env "
-            "bearer matching, session creation/lookup/expiry, one-time "
-            "tickets, revoked-session denial, tenant isolation, signed "
-            "session round-trips, protected-route authentication, public OAuth "
-            "provider discovery, provider ordering/filtering, discovery "
-            "failure behavior, encoded login button href construction, and "
-            "browser-visible manual-token, OAuth-ticket, sign-out, mobile, "
-            "token-scrubbing, stored-token, fragment-precedence, and "
-            "login_error workflows."
+            "#5348 browser auth-flow coverage: sessionStorage bearer use on "
+            "same-origin API calls, off-origin bearer-send prevention, public "
+            "OAuth provider discovery, provider ordering/filtering, discovery "
+            "failure behavior, and encoded login button href construction. "
+            "Rust static-auth and ingress-session contracts stay in normal CI "
+            "instead of this QA lane."
         ),
     ),
     "webui_v2_product_auth_oauth_regression": CaseSpec(
@@ -5872,19 +5850,15 @@ CASES: dict[str, CaseSpec] = {
         ],
         commands=[
             REBORN_CLI_WEBUI_V2_BINARY_COMMAND,
-            WEBUI_V2_LLM_PROVIDER_ROUTE_COMMAND,
-            WEBUI_V2_NEARAI_LOGIN_STATE_COMMAND,
-            WEBUI_V2_PROVIDER_LOGIN_MOUNT_COMMAND,
             WEBUI_V2_PROVIDER_LOGIN_BROWSER_COMMAND,
         ],
         notes=(
-            "Covers the API/runtime and browser provider-login rows without "
-            "duplicating PR #5348 browser settings coverage: route dispatch, operator "
-            "authorization, NEAR AI login origin/state/callback policy, Codex "
-            "login route protection, wallet route protection, and multi-user "
-            "route suppression, plus committed Settings browser coverage for "
-            "NEAR AI hosted-login body/origin, Codex device-code UI, and "
-            "browser-visible NEAR AI/Codex start-failure errors."
+            "Covers the browser provider-login rows without duplicating PR "
+            "#5348 browser settings coverage: committed Settings browser "
+            "coverage for NEAR AI hosted-login body/origin, Codex device-code "
+            "UI, and browser-visible NEAR AI/Codex start-failure errors. Rust "
+            "provider route/state/mount contracts stay in normal CI instead "
+            "of this QA lane."
         ),
     ),
 }
