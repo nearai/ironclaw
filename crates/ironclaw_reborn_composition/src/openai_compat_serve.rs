@@ -19,9 +19,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, ProductAdapterError, ProductAdapterId, ProductInboundAck,
-    ProductInboundEnvelope, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
-    ProductProjectionState, ProductWorkflow, ProjectionCursor, ProjectionReadRequest,
-    ProjectionStream, ProjectionSubscriptionRequest,
+    ProductInboundEnvelope, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
+    ProductProjectionItem, ProductProjectionState, ProductWorkflow, ProjectionCursor,
+    ProjectionReadRequest, ProjectionStream, ProjectionSubscriptionRequest,
 };
 use ironclaw_product_adapters::{ExternalActorRef, ExternalConversationRef, FinalReplyView};
 use ironclaw_product_workflow::{
@@ -1570,6 +1570,25 @@ fn thread_scope_from_projection_read(
             .explicit_owner_user_id()
             .cloned()
             .or_else(|| Some(projection_read.actor.user_id.clone())),
+        mission_id: None,
+    })
+}
+
+fn thread_scope_from_projection_subscription(
+    projection_subscription: &ProjectionSubscriptionRequest,
+) -> Result<ThreadScope, OpenAiCompatHttpError> {
+    let Some(agent_id) = projection_subscription.scope.agent_id.clone() else {
+        return Err(OpenAiCompatHttpError::internal());
+    };
+    Ok(ThreadScope {
+        tenant_id: projection_subscription.scope.tenant_id.clone(),
+        agent_id,
+        project_id: projection_subscription.scope.project_id.clone(),
+        owner_user_id: projection_subscription
+            .scope
+            .explicit_owner_user_id()
+            .cloned()
+            .or_else(|| Some(projection_subscription.actor.user_id.clone())),
         mission_id: None,
     })
 }

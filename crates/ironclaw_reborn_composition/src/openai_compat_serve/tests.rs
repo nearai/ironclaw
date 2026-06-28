@@ -811,6 +811,7 @@ impl ResponseReaderFixture {
             created_at: 123,
             idempotency_key: None,
             accepted_ack: None,
+            external_tool_resume_completed: false,
             binding: OpenAiCompatResourceBinding::Bound {
                 internal_refs: OpenAiCompatInternalRefs::new(
                     OpenAiCompatProductActionRef::new("product-action:test").expect("action ref"),
