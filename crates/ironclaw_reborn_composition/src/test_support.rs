@@ -346,8 +346,7 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
     let scoped_fs: Arc<ScopedFilesystem<InMemoryBackend>> =
         Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
 
-    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> =
-        Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = Arc::new(InMemorySecretStore::new());
 
     // Real durable product-auth services over the in-memory scoped filesystem.
     let durable = Arc::new(
@@ -371,7 +370,8 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
         token_endpoint: "https://oauth.test.example.com/token",
         secret_handle_prefix: "test-oauth",
         resource: None,
-        exchange_scope_policy: crate::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+        exchange_scope_policy:
+            crate::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
     };
     let provider_client = crate::oauth_provider_client::HostOAuthProviderClient::new(
         spec,

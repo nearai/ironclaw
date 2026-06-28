@@ -120,8 +120,14 @@ async fn oauth_connect_flow_persists_credential_account() {
         .expect("get_account must not error")
         .expect("credential account must be persisted after a successful OAuth callback");
 
-    assert_eq!(account.id, account_id, "account id matches the callback response");
-    assert_eq!(account.provider, provider, "account provider matches the flow provider");
+    assert_eq!(
+        account.id, account_id,
+        "account id matches the callback response"
+    );
+    assert_eq!(
+        account.provider, provider,
+        "account provider matches the flow provider"
+    );
 
     // Step 5 — verify exactly one token-exchange HTTP call was captured.
     assert_eq!(
