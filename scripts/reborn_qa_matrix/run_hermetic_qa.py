@@ -3916,6 +3916,42 @@ WEBUI_V2_LLM_PROVIDER_ROUTE_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_OPERATOR_CONFIG_SERVED_E2E_COMMAND = CommandSpec(
+    name="webui_v2_operator_config_served_e2e",
+    description=(
+        "Served WebUI v2 operator and LLM configuration API coverage through "
+        "a real ironclaw-reborn process: bearer gating, provider CRUD, active "
+        "selection, model listing, connection probes, operator config "
+        "list/get/set/validate, status, diagnostics, logs, and secret "
+        "redaction."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_operator_api.py",
+        "-q",
+    ],
+)
+
 IRONCLAW_LLM_PROVIDER_SUBSTRATE_COMMAND = CommandSpec(
     name="ironclaw_llm_provider_substrate_contracts",
     description=(
@@ -5761,7 +5797,7 @@ CASES: dict[str, CaseSpec] = {
     "webui_v2_operator_config_api_regression": CaseSpec(
         name="webui_v2_operator_config_api_regression",
         feature="WebUI v2 LLM and operator configuration APIs",
-        category="Hermetic Operator Configuration API Regression",
+        category="Served WebUI v2 Operator Configuration API E2E",
         qa_matrix_test_ids=[
             "REBCLI-048-TC-01",
             "REBCLI-048-TC-02",
@@ -5769,23 +5805,15 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-048-TC-04",
             "REBCLI-048-TC-05",
             "REBCLI-048-TC-06",
-            "REBCLI-048-TC-07",
         ],
-        commands=[
-            WEBUI_V2_DESCRIPTOR_POLICY_COMMAND,
-            WEBUI_V2_LLM_PROVIDER_ROUTE_COMMAND,
-            IRONCLAW_LLM_PROVIDER_SUBSTRATE_COMMAND,
-            WEBUI_V2_OPERATOR_HANDLER_COMMAND,
-            WEBUI_V2_OPERATOR_MOUNT_COMMAND,
-            WEBUI_V2_OPERATOR_LLM_CONFIG_COMMAND,
-        ],
+        commands=[WEBUI_V2_OPERATOR_CONFIG_SERVED_E2E_COMMAND],
         notes=(
-            "Covers non-browser WebUI v2 operator/LLM configuration rows: "
-            "descriptor policy, provider CRUD and active/test/model routes, "
-            "LLM provider substrate contracts, "
-            "operator setup/config/diagnostics/status/logs/lifecycle handlers, "
-            "operator capability/mount gating, redacted secret/error handling, "
-            "and composed provider key persistence."
+            "Runs served WebUI v2 operator/LLM configuration coverage through "
+            "a real ironclaw-reborn process for bearer gating, provider CRUD, "
+            "active selection, list-models/test-connection, operator config "
+            "list/get/set/validate, status, diagnostics, logs, and secret-free "
+            "responses. REBCLI-048-TC-07 is LLM/embedding substrate cargo "
+            "coverage and remains owned by normal CI instead of this QA lane."
         ),
     ),
     "webui_v2_provider_login_api_regression": CaseSpec(
