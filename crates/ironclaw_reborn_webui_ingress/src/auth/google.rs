@@ -38,6 +38,10 @@ const GOOGLE_ISSUER: &str = "https://accounts.google.com";
 /// cross-border path can override it via `GoogleOAuthConfig::http_timeout`
 /// (the reborn CLI exposes `IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS`).
 const GOOGLE_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
+/// `jsonwebtoken::Validation` applied a small expiration leeway before the
+/// manual parse path. Keep that tolerance so normal clock skew does not turn a
+/// freshly-issued Google callback into a false profile-fetch failure.
+const ID_TOKEN_EXPIRY_LEEWAY_SECS: i64 = 60;
 
 /// Google OIDC provider.
 pub struct GoogleProvider {
@@ -235,14 +239,20 @@ impl OAuthProvider for GoogleProvider {
                 // it lands in an error string that gets logged — same
                 // log-injection guard as the GitHub provider.
                 let safe_error = sanitize_error_code(&error_code);
+                tracing::warn!(
+                    target = "ironclaw::reborn::webui_ingress::auth",
+                    %status,
+                    error_code = %safe_error,
+                    "Google token endpoint rejected OAuth code exchange",
+                );
                 return Err(OAuthError::CodeExchange(format!(
                     "Google token endpoint returned {status} ({safe_error})"
                 )));
             }
-            tracing::debug!(
+            tracing::warn!(
+                target = "ironclaw::reborn::webui_ingress::auth",
                 %status,
-                body = %String::from_utf8_lossy(&body),
-                "google token endpoint returned non-success response"
+                "Google token endpoint returned a non-success response without a JSON error code",
             );
             return Err(OAuthError::CodeExchange(format!(
                 "Google token endpoint returned {status}"
@@ -267,7 +277,7 @@ impl OAuthProvider for GoogleProvider {
             .duration_since(UNIX_EPOCH)
             .map_err(|err| OAuthError::ProfileFetch(format!("decode id_token: {err}")))?
             .as_secs() as i64;
-        if claims.exp <= now {
+        if claims.exp.saturating_add(ID_TOKEN_EXPIRY_LEEWAY_SECS) <= now {
             return Err(OAuthError::ProfileFetch(format!(
                 "decode id_token: token expired at {}",
                 claims.exp
@@ -660,5 +670,27 @@ mod tests {
             matches!(&err, OAuthError::ProfileFetch(_)),
             "expected ProfileFetch for expired token, got {err:?}",
         );
+    }
+
+    #[tokio::test]
+    async fn exchange_code_allows_small_id_token_clock_skew() {
+        let client_id: &'static str = "client-id-123";
+        let id_token = make_id_token(client_id, None, chrono::Utc::now().timestamp() - 30);
+        let addr = spawn_mock_token_endpoint(id_token).await;
+        let endpoint = format!("http://{addr}/token");
+
+        let provider =
+            GoogleProvider::with_endpoints(cfg(None), "https://example.invalid/auth", endpoint)
+                .expect("build provider");
+        let profile = provider
+            .exchange_code(
+                "fake-auth-code",
+                "https://example.com/auth/callback/google",
+                "fake-verifier",
+            )
+            .await
+            .expect("small clock skew should be accepted");
+
+        assert_eq!(profile.provider_user_id, "google-sub-123");
     }
 }
