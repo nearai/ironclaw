@@ -50,6 +50,10 @@ use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind, IndexPolicy,
     MountDescriptor, RootFilesystem, StorageClass,
 };
+#[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
+use ironclaw_filesystem::{
+    DirEntry, FileStat, FilesystemError, FilesystemOperation, VersionedEntry,
+};
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
@@ -681,6 +685,132 @@ impl RebornProductionRuntimeServices {
             Self::Postgres(graph) => Arc::clone(&graph.trigger_repository),
         }
     }
+}
+
+#[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
+struct FailingConversationStateFilesystem;
+
+#[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
+#[async_trait::async_trait]
+impl RootFilesystem for FailingConversationStateFilesystem {
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::ReadFile,
+            reason: "conversation state load failed".to_string(),
+        })
+    }
+
+    async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        Ok(Vec::new())
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        Err(FilesystemError::NotFound {
+            path: path.clone(),
+            operation: FilesystemOperation::ReadFile,
+        })
+    }
+}
+
+#[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
+pub(crate) async fn local_runtime_with_failing_trigger_conversations_for_test()
+-> Arc<RebornLocalRuntimeServices> {
+    let local_dev_root = tempfile::tempdir().expect("tempdir");
+    let owner_user_id = "pairing-owner";
+    let services = build_reborn_services(RebornBuildInput::local_dev(
+        owner_user_id,
+        local_dev_root.path().join("local-dev"),
+    ))
+    .await
+    .expect("local-dev services build");
+
+    let base_runtime = services.local_runtime.expect("local runtime");
+    let mut failing_root = CompositeRootFilesystem::new();
+    failing_root
+        .mount(
+            local_dev_mount_descriptor(
+                "/conversations",
+                "failing-conversation-state",
+                BackendKind::Custom("test".to_string()),
+                StorageClass::StructuredRecords,
+                ContentKind::StructuredRecord,
+                IndexPolicy::NotIndexed,
+                BackendCapabilities::default(),
+            )
+            .expect("mount descriptor"),
+            Arc::new(FailingConversationStateFilesystem),
+        )
+        .expect("mount failing backend");
+    Arc::new(RebornLocalRuntimeServices {
+        extension_lifecycle_surface_context: base_runtime
+            .extension_lifecycle_surface_context
+            .clone(),
+        owner_user_id: base_runtime.owner_user_id.clone(),
+        approval_requests: Arc::clone(&base_runtime.approval_requests),
+        capability_leases: Arc::clone(&base_runtime.capability_leases),
+        external_tool_catalog: Arc::clone(&base_runtime.external_tool_catalog),
+        runtime_policy: base_runtime.runtime_policy.clone(),
+        capability_policy: Arc::clone(&base_runtime.capability_policy),
+        persistent_approval_policies: Arc::clone(&base_runtime.persistent_approval_policies),
+        tool_permission_overrides: Arc::clone(&base_runtime.tool_permission_overrides),
+        auto_approve_settings: Arc::clone(&base_runtime.auto_approve_settings),
+        turn_state: Arc::clone(&base_runtime.turn_state),
+        trigger_repository: Arc::clone(&base_runtime.trigger_repository),
+        project_service: Arc::clone(&base_runtime.project_service),
+        outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
+        skill_auto_activate_learned: Arc::clone(&base_runtime.skill_auto_activate_learned),
+        #[cfg(feature = "slack-v2-host-beta")]
+        outbound_state: Arc::clone(&base_runtime.outbound_state),
+        #[cfg(feature = "slack-v2-host-beta")]
+        delivered_gate_routes: Arc::clone(&base_runtime.delivered_gate_routes),
+        #[cfg(feature = "slack-v2-host-beta")]
+        triggered_run_delivery: Arc::clone(&base_runtime.triggered_run_delivery),
+        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+        trigger_conversation_services: base_runtime.trigger_conversation_services.clone(),
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        trigger_conversation_services: tokio::sync::OnceCell::new(),
+        checkpoint_state_store: Arc::clone(&base_runtime.checkpoint_state_store),
+        loop_checkpoint_store: Arc::clone(&base_runtime.loop_checkpoint_store),
+        thread_service: Arc::clone(&base_runtime.thread_service),
+        resource_governor: Arc::clone(&base_runtime.resource_governor),
+        budget_event_sink: Arc::clone(&base_runtime.budget_event_sink),
+        in_memory_budget_event_sink: Arc::clone(&base_runtime.in_memory_budget_event_sink),
+        broadcast_budget_event_sink: Arc::clone(&base_runtime.broadcast_budget_event_sink),
+        budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
+        skill_management: Arc::clone(&base_runtime.skill_management),
+        extension_management: base_runtime.extension_management.clone(),
+        runtime_http_egress: base_runtime.runtime_http_egress.clone(),
+        host_runtime_http_egress: base_runtime.host_runtime_http_egress.clone(),
+        skill_mounts: base_runtime.skill_mounts.clone(),
+        memory_mounts: base_runtime.memory_mounts.clone(),
+        system_extensions_lifecycle_mounts: base_runtime.system_extensions_lifecycle_mounts.clone(),
+        skill_filesystem: Arc::clone(&base_runtime.skill_filesystem),
+        workspace_filesystem: Arc::clone(&base_runtime.workspace_filesystem),
+        #[cfg(feature = "slack-v2-host-beta")]
+        host_state_filesystem: Arc::clone(&base_runtime.host_state_filesystem),
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        identity_filesystem: Arc::clone(&base_runtime.identity_filesystem),
+        #[cfg(feature = "libsql")]
+        identity_substrate_db: base_runtime.identity_substrate_db.clone(),
+        subagent_goal_filesystem: Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(failing_root),
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new("/conversations").expect("mount alias"),
+                VirtualPath::new("/conversations").expect("virtual path"),
+                MountPermissions::read_write_list_delete(),
+            )])
+            .expect("mount view"),
+        )),
+        extension_filesystem: Arc::clone(&base_runtime.extension_filesystem),
+        workspace_mounts: base_runtime.workspace_mounts.clone(),
+        local_dev_storage_root: base_runtime.local_dev_storage_root.clone(),
+        default_system_prompt_path: base_runtime.default_system_prompt_path.clone(),
+        event_log: Arc::clone(&base_runtime.event_log),
+        audit_log: Arc::clone(&base_runtime.audit_log),
+        extension_registry: Arc::clone(&base_runtime.extension_registry),
+        shared_extension_registry: base_runtime.shared_extension_registry.clone(),
+    })
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -4036,10 +4166,6 @@ mod tests {
     };
     use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer};
     use ironclaw_filesystem::FilesystemError;
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    use ironclaw_filesystem::{
-        DirEntry, FileStat, FilesystemOperation, RootFilesystem, VersionedEntry,
-    };
     use ironclaw_host_api::{
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
         ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
@@ -4118,32 +4244,6 @@ mod tests {
         }
     }
 
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    struct FailingConversationStateFilesystem;
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    #[async_trait::async_trait]
-    impl RootFilesystem for FailingConversationStateFilesystem {
-        async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-            Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::ReadFile,
-                reason: "conversation state load failed".to_string(),
-            })
-        }
-
-        async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-            Ok(Vec::new())
-        }
-
-        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-            Err(FilesystemError::NotFound {
-                path: path.clone(),
-                operation: FilesystemOperation::ReadFile,
-            })
-        }
-    }
-
     fn trigger_record_for_pairing_test() -> TriggerRecord {
         TriggerRecord {
             trigger_id: ironclaw_triggers::TriggerId::new(),
@@ -4182,110 +4282,9 @@ mod tests {
     }
 
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornLocalRuntimeServices> {
-        let local_dev_root = tempfile::tempdir().expect("tempdir");
-        let owner_user_id = "pairing-owner";
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            owner_user_id,
-            local_dev_root.path().join("local-dev"),
-        ))
-        .await
-        .expect("local-dev services build");
-
-        let base_runtime = services.local_runtime.expect("local runtime");
-        let mut failing_root = CompositeRootFilesystem::new();
-        failing_root
-            .mount(
-                local_dev_mount_descriptor(
-                    "/conversations",
-                    "failing-conversation-state",
-                    BackendKind::Custom("test".to_string()),
-                    StorageClass::StructuredRecords,
-                    ContentKind::StructuredRecord,
-                    IndexPolicy::NotIndexed,
-                    BackendCapabilities::default(),
-                )
-                .expect("mount descriptor"),
-                Arc::new(FailingConversationStateFilesystem),
-            )
-            .expect("mount failing backend");
-        Arc::new(RebornLocalRuntimeServices {
-            extension_lifecycle_surface_context: base_runtime
-                .extension_lifecycle_surface_context
-                .clone(),
-            owner_user_id: base_runtime.owner_user_id.clone(),
-            approval_requests: Arc::clone(&base_runtime.approval_requests),
-            capability_leases: Arc::clone(&base_runtime.capability_leases),
-            external_tool_catalog: Arc::clone(&base_runtime.external_tool_catalog),
-            runtime_policy: base_runtime.runtime_policy.clone(),
-            capability_policy: Arc::clone(&base_runtime.capability_policy),
-            persistent_approval_policies: Arc::clone(&base_runtime.persistent_approval_policies),
-            tool_permission_overrides: Arc::clone(&base_runtime.tool_permission_overrides),
-            auto_approve_settings: Arc::clone(&base_runtime.auto_approve_settings),
-            turn_state: Arc::clone(&base_runtime.turn_state),
-            trigger_repository: Arc::clone(&base_runtime.trigger_repository),
-            project_service: Arc::clone(&base_runtime.project_service),
-            outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
-            skill_auto_activate_learned: Arc::clone(&base_runtime.skill_auto_activate_learned),
-            #[cfg(feature = "slack-v2-host-beta")]
-            outbound_state: Arc::clone(&base_runtime.outbound_state),
-            #[cfg(feature = "slack-v2-host-beta")]
-            delivered_gate_routes: Arc::clone(&base_runtime.delivered_gate_routes),
-            #[cfg(feature = "slack-v2-host-beta")]
-            triggered_run_delivery: Arc::clone(&base_runtime.triggered_run_delivery),
-            #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-            trigger_conversation_services: base_runtime.trigger_conversation_services.clone(),
-            #[cfg(any(feature = "libsql", feature = "postgres"))]
-            trigger_conversation_services: tokio::sync::OnceCell::new(),
-            checkpoint_state_store: Arc::clone(&base_runtime.checkpoint_state_store),
-            loop_checkpoint_store: Arc::clone(&base_runtime.loop_checkpoint_store),
-            thread_service: Arc::clone(&base_runtime.thread_service),
-            resource_governor: Arc::clone(&base_runtime.resource_governor),
-            budget_event_sink: Arc::clone(&base_runtime.budget_event_sink),
-            in_memory_budget_event_sink: Arc::clone(&base_runtime.in_memory_budget_event_sink),
-            broadcast_budget_event_sink: Arc::clone(&base_runtime.broadcast_budget_event_sink),
-            budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
-            skill_management: Arc::clone(&base_runtime.skill_management),
-            extension_management: base_runtime.extension_management.clone(),
-            runtime_http_egress: base_runtime.runtime_http_egress.clone(),
-            host_runtime_http_egress: base_runtime.host_runtime_http_egress.clone(),
-            skill_mounts: base_runtime.skill_mounts.clone(),
-            memory_mounts: base_runtime.memory_mounts.clone(),
-            system_extensions_lifecycle_mounts: base_runtime
-                .system_extensions_lifecycle_mounts
-                .clone(),
-            skill_filesystem: Arc::clone(&base_runtime.skill_filesystem),
-            workspace_filesystem: Arc::clone(&base_runtime.workspace_filesystem),
-            #[cfg(feature = "slack-v2-host-beta")]
-            host_state_filesystem: Arc::clone(&base_runtime.host_state_filesystem),
-            #[cfg(any(feature = "libsql", feature = "postgres"))]
-            identity_filesystem: Arc::clone(&base_runtime.identity_filesystem),
-            #[cfg(feature = "libsql")]
-            identity_substrate_db: base_runtime.identity_substrate_db.clone(),
-            subagent_goal_filesystem: Arc::new(ScopedFilesystem::with_fixed_view(
-                Arc::new(failing_root),
-                MountView::new(vec![MountGrant::new(
-                    MountAlias::new("/conversations").expect("mount alias"),
-                    VirtualPath::new("/conversations").expect("virtual path"),
-                    MountPermissions::read_write_list_delete(),
-                )])
-                .expect("mount view"),
-            )),
-            extension_filesystem: Arc::clone(&base_runtime.extension_filesystem),
-            workspace_mounts: base_runtime.workspace_mounts.clone(),
-            local_dev_storage_root: base_runtime.local_dev_storage_root.clone(),
-            default_system_prompt_path: base_runtime.default_system_prompt_path.clone(),
-            event_log: Arc::clone(&base_runtime.event_log),
-            audit_log: Arc::clone(&base_runtime.audit_log),
-            extension_registry: Arc::clone(&base_runtime.extension_registry),
-            shared_extension_registry: base_runtime.shared_extension_registry.clone(),
-        })
-    }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[tokio::test]
     async fn durable_trigger_conversation_services_propagates_init_error() {
-        let runtime = local_runtime_with_failing_trigger_conversations().await;
+        let runtime = local_runtime_with_failing_trigger_conversations_for_test().await;
 
         let error = match runtime.durable_trigger_conversation_services().await {
             Ok(_) => panic!("conversation service init should fail"),
@@ -4302,7 +4301,7 @@ mod tests {
     #[tokio::test]
     async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backend() {
         let hook = LocalRuntimeTriggerCreatorPairingHook {
-            runtime: local_runtime_with_failing_trigger_conversations().await,
+            runtime: local_runtime_with_failing_trigger_conversations_for_test().await,
         };
         let record = trigger_record_for_pairing_test();
 

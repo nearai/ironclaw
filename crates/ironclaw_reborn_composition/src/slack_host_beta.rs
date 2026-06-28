@@ -644,6 +644,11 @@ pub async fn build_slack_host_beta_mounts(
             config.installation_id.clone(),
             Arc::clone(&channel_route_store),
         ));
+    // Host-beta scale assumption: this intentionally reuses the runtime's
+    // singleton filesystem-backed conversation service so Slack bindings are
+    // restart-safe before a sharded/indexed conversation store exists. This is
+    // acceptable for host-beta traffic; revisit before promoting this webhook
+    // path to high-throughput production.
     let conversation_ports = parts.conversation_ports().await?;
     let events = build_slack_events_route_mount_with_resolvers_from_parts(
         &parts,
@@ -1385,6 +1390,30 @@ mod tests {
         runtime.shutdown().await.expect("runtime shuts down");
     }
 
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[tokio::test]
+    async fn build_slack_events_route_mount_fails_when_conversation_services_unavailable() {
+        let (mut runtime, _root) = runtime().await;
+        runtime.replace_local_runtime_for_test(
+            crate::factory::local_runtime_with_failing_trigger_conversations_for_test().await,
+        );
+
+        let error = match build_slack_events_route_mount(&runtime, config()).await {
+            Ok(_) => panic!("Slack route requires durable conversation services"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(
+                error,
+                SlackHostBetaBuildError::ConversationServicesUnavailable { ref reason }
+                    if reason.contains("conversation state load failed")
+            ),
+            "unexpected conversation service error: {error:?}"
+        );
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
     #[tokio::test]
     async fn slack_outbound_targets_fail_build_when_local_runtime_missing() {
         let (mut runtime, _root) = runtime().await;
@@ -1514,6 +1543,7 @@ mod tests {
     }
 
     #[cfg(any(feature = "libsql", feature = "postgres"))]
+    // arch-exempt: large_file, Slack host-beta integration tests rely on private route-build helpers here, plan #4469
     #[tokio::test]
     async fn build_slack_events_route_mount_reuses_conversation_binding_after_runtime_reopen() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1574,6 +1604,120 @@ mod tests {
         assert_eq!(
             reopened_thread_ids, original_thread_ids,
             "Slack conversation bindings should survive runtime reopen and route follow-up events to the existing thread"
+        );
+
+        reopened_runtime
+            .shutdown()
+            .await
+            .expect("runtime shuts down");
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[tokio::test]
+    async fn dynamic_slack_setup_reuses_conversation_binding_after_runtime_reopen() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let user_id = Some(UserId::new(USER).expect("user"));
+
+        let runtime = runtime_with_root_and_host_egress_override(
+            root.path(),
+            Some(Some(host_egress_port_for_test(Arc::clone(&egress)))),
+        )
+        .await;
+        let mounts = build_slack_host_beta_runtime_mounts(
+            &runtime,
+            dynamic_runtime_config_without_legacy_actor(),
+        )
+        .await
+        .expect("dynamic mounts build");
+
+        let pairing_body = dm_event_body_with(
+            "Ev-dynamic-host-beta-pair-before-restart",
+            "pair me before restart",
+            "1710000000.000023",
+        );
+        post_signed_slack_event(&mounts.events, &pairing_body).await;
+        if let Some(drain) = mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+        let pairing_code = wait_for_pairing_code(&egress).await;
+        let pairing_mount =
+            slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing);
+        let redeem_body = format!(r#"{{"channel":"slack","code":"{pairing_code}"}}"#);
+        let redeem_response = pairing_mount
+            .protected
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
+                    .header("content-type", "application/json")
+                    .extension(WebUiAuthenticatedCaller {
+                        tenant_id: TenantId::new(TENANT).expect("tenant"),
+                        user_id: UserId::new(USER).expect("user"),
+                        agent_id: Some(AgentId::new(AGENT).expect("agent")),
+                        project_id: Some(ProjectId::new(PROJECT).expect("project")),
+                        operator_webui_config: false,
+                    })
+                    .body(Body::from(redeem_body))
+                    .expect("redeem request builds"),
+            )
+            .await
+            .expect("redeem route responds");
+        assert_eq!(redeem_response.status(), StatusCode::OK);
+
+        let before_restart_body = dm_event_body_with(
+            "Ev-dynamic-host-beta-before-restart",
+            "dynamic before restart",
+            "1710000000.000024",
+        );
+        post_signed_slack_event(&mounts.events, &before_restart_body).await;
+        if let Some(drain) = mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+        wait_for_slack_message_count_with_text(
+            &runtime,
+            user_id.clone(),
+            "dynamic before restart",
+            1,
+        )
+        .await;
+        let original_thread_ids = wait_for_slack_thread_ids(&runtime, user_id.clone(), 1).await;
+        runtime.shutdown().await.expect("runtime shuts down");
+
+        let reopened_runtime = runtime_with_root_and_host_egress_override(
+            root.path(),
+            Some(Some(host_egress_port_for_test(Arc::clone(&egress)))),
+        )
+        .await;
+        let reopened_mounts = build_slack_host_beta_runtime_mounts(
+            &reopened_runtime,
+            dynamic_runtime_config_without_legacy_actor(),
+        )
+        .await
+        .expect("reopened dynamic mounts build");
+        let after_restart_body = dm_event_body_with(
+            "Ev-dynamic-host-beta-after-restart",
+            "dynamic after restart",
+            "1710000000.000025",
+        );
+
+        post_signed_slack_event(&reopened_mounts.events, &after_restart_body).await;
+        if let Some(drain) = reopened_mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+        wait_for_slack_message_count_with_text(
+            &reopened_runtime,
+            user_id.clone(),
+            "dynamic after restart",
+            1,
+        )
+        .await;
+        let reopened_thread_ids =
+            wait_for_slack_thread_ids(&reopened_runtime, user_id.clone(), 1).await;
+
+        assert_eq!(
+            reopened_thread_ids, original_thread_ids,
+            "dynamic Slack setup should reuse durable conversation bindings after runtime reopen"
         );
 
         reopened_runtime

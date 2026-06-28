@@ -1041,6 +1041,19 @@ impl RebornRuntime {
         self.outbound_delivery_target_registry = None;
     }
 
+    #[cfg(all(
+        test,
+        feature = "slack-v2-host-beta",
+        any(feature = "libsql", feature = "postgres")
+    ))]
+    pub(crate) fn replace_local_runtime_for_test(
+        &mut self,
+        local_runtime: Arc<crate::factory::RebornLocalRuntimeServices>,
+    ) {
+        self.services.local_runtime = Some(local_runtime);
+        self.outbound_delivery_target_registry = None;
+    }
+
     /// Operator boot config, when the runtime was assembled with one. The
     /// WebUI facade uses it to compose the LLM-config settings service.
     #[cfg(feature = "root-llm-provider")]
