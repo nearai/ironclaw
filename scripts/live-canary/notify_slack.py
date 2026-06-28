@@ -592,12 +592,6 @@ def _qa_group_sort_key(value: str) -> tuple[int, int | str]:
     return (1, value)
 
 
-def _short_digest(value: str) -> str:
-    if not value:
-        return "-"
-    return value[:10]
-
-
 def _format_reborn_tool_summary(cases: list[RebornQaCaseReport]) -> list[str]:
     calls: list[RebornQaToolCall] = []
     for case in cases:
@@ -611,13 +605,6 @@ def _format_reborn_tool_summary(cases: list[RebornQaCaseReport]) -> list[str]:
         tool_names += f", +{len(distinct_tools) - 8} more"
 
     lines = [f"*Tools:* {len(calls)} calls across {len(distinct_tools)} tools: {tool_names}"]
-    io_parts = [
-        f"`{call.name}` in#{_short_digest(call.args_hash)} out#{_short_digest(call.output_digest)}"
-        for call in calls[:10]
-    ]
-    if len(calls) > 10:
-        io_parts.append(f"+{len(calls) - 10} more")
-    lines.append(f"*Tool I/O digests:* {'; '.join(io_parts)}")
     return lines
 
 

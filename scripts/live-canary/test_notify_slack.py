@@ -328,13 +328,13 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertIn("1/2 passed", qa_text)
         self.assertIn("\n*Cases:*", qa_text)
         self.assertIn("\n*Tools:*", qa_text)
-        self.assertIn("\n*Tool I/O digests:*", qa_text)
+        self.assertNotIn("\n*Tool I/O digests:*", qa_text)
         self.assertIn("`2A` Gmail connection flow", qa_text)
         self.assertIn("`2D` Calendar prep assistant using Google Docs and live news", qa_text)
         self.assertIn("requires live Google runtime access", qa_text)
         self.assertIn("*Tools:* 2 calls across 2 tools", qa_text)
-        self.assertIn("`gmail.list_messages` in#1234567890 out#9876543210", qa_text)
-        self.assertIn("`google-calendar.list_events` in#2234567890 out#8876543210", qa_text)
+        self.assertNotIn("in#1234567890", qa_text)
+        self.assertNotIn("out#9876543210", qa_text)
 
     def test_reborn_rows_fit_with_scheduled_all_lane_report(self):
         case_rows = [
