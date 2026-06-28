@@ -56,7 +56,13 @@ function componentProps(node, component) {
   return props;
 }
 
-function renderChat({ hookState, activeThreadId = "thread-1" }) {
+function renderChat({
+  hookState,
+  activeThreadId = "thread-1",
+  runEffects = false,
+  setThreadState = () => {},
+  clearThreadState = () => {},
+}) {
   const components = {
     ApprovalCard() {},
     AuthGenericCard() {},
@@ -77,7 +83,7 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
     ...components,
     React: {
       useCallback: (fn) => fn,
-      useEffect: () => {},
+      useEffect: runEffects ? (fn) => fn() : () => {},
       useMemo: (fn) => fn(),
       useRef: (initial) => ({ current: initial }),
       useState: (initial) => [initial, () => {}],
@@ -94,10 +100,14 @@ function renderChat({ hookState, activeThreadId = "thread-1" }) {
       return `${absolute ? "/v2" : ""}/logs${query}`;
     },
     buildRuntimeContext: () => ({}),
-    clearThreadState: () => {},
+    clearThreadState,
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
-    setThreadState: () => {},
+    setThreadState,
+    window: {
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    },
     useChat: () => hookState,
     useT: () => (key) => key,
   };
@@ -253,6 +263,59 @@ test("Chat refuses composer sends while an active run is still running", async (
   assert.equal(props.sendDisabled, true);
   assert.equal(response, null);
   assert.equal(sendCalls, 0);
+});
+
+test("Chat keeps rehydrated active runs visually active", async () => {
+  const threadStates = [];
+  const { tree, components } = renderChat({
+    runEffects: true,
+    setThreadState: (...args) => threadStates.push(args),
+    hookState: {
+      messages: [],
+      isProcessing: false,
+      pendingGate: null,
+      channelConnectAction: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => {
+        throw new Error("send should stay blocked while the run is active");
+      },
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+      dismissChannelConnectAction: () => {},
+    },
+  });
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const inputProps = componentProps(chatInput, components.ChatInput);
+  assert.equal(inputProps.canCancel, true);
+  assert.equal(inputProps.sendDisabled, true);
+  assert.equal(await inputProps.onSend("draft while run is active"), null);
+
+  const messageList = findComponent(tree, components.MessageList);
+  assert.equal(
+    componentProps(messageList, components.MessageList).pending,
+    true,
+  );
+  assert.ok(findComponent(messageList, components.TypingIndicator));
+
+  const logsLink = findComponent(tree, components.Link);
+  assert.ok(logsLink, "active run should render a scoped logs link");
+  assert.equal(
+    componentProps(logsLink, components.Link).to,
+    "/v2/logs?thread_id=thread-1&run_id=run-1",
+  );
+  assert.deepEqual(threadStates, [["thread-1", "running"]]);
 });
 
 test("Chat cancel button ignores active runs from another thread", () => {

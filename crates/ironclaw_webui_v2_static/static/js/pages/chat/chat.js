@@ -81,8 +81,24 @@ export function Chat({
     () => buildRuntimeContext({ gatewayStatus, activeThread }),
     [gatewayStatus, activeThread]
   );
+  const activeRunForThread = Boolean(
+    activeThreadId &&
+      activeRun?.runId &&
+      activeRun.threadId === activeThreadId
+  );
+  const runActiveForThread = Boolean(
+    !pendingGate &&
+      (isProcessing ||
+        (activeRunForThread &&
+          (!activeRun.status ||
+            activeRun.status === "queued" ||
+            activeRun.status === "running")))
+  );
   const hasMessages =
-    messages.length > 0 || isProcessing || Boolean(pendingGate) || Boolean(channelConnectAction);
+    messages.length > 0 ||
+    runActiveForThread ||
+    Boolean(pendingGate) ||
+    Boolean(channelConnectAction);
   // Don't show the landing composer when history failed to load — show the
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
@@ -90,19 +106,9 @@ export function Chat({
   const approvalSubmitWarning = pendingGate
     ? "Resolve the approval request before sending another message."
     : "";
-  const activeRunBlocksSubmit = Boolean(
-    activeThreadId &&
-      activeRun?.runId &&
-      activeRun.threadId === activeThreadId &&
-      !pendingGate &&
-      (!activeRun.status ||
-        activeRun.status === "queued" ||
-        activeRun.status === "running")
-  );
   const composerSendDisabled =
     Boolean(pendingGate) ||
-    (isProcessing && !pendingGate) ||
-    activeRunBlocksSubmit ||
+    runActiveForThread ||
     cooldownSeconds > 0;
   const composerSendBlockedRef = React.useRef(composerSendDisabled);
   composerSendBlockedRef.current = composerSendDisabled;
@@ -113,16 +119,11 @@ export function Chat({
   // shared new-conversation slot when there's no active thread yet).
   const composerDraftKey = activeThreadId || NEW_DRAFT_KEY;
   const canCancelRun = Boolean(
-    activeThreadId &&
-      activeRun?.runId &&
-      activeRun.threadId === activeThreadId &&
-      isProcessing &&
-      !pendingGate
+    activeRunForThread &&
+      runActiveForThread
   );
   const activeRunLogsPath =
-    activeThreadId &&
-    activeRun?.runId &&
-    activeRun.threadId === activeThreadId
+    activeRunForThread
       ? buildScopedLogsPath(
           { threadId: activeThreadId, runId: activeRun.runId },
           { absolute: true },
@@ -172,18 +173,18 @@ export function Chat({
   /* Mirror the active thread's lifecycle into the per-thread state store
    * so the sidebar row reflects what's happening on the open thread:
    *
-   *   pendingGate                   → NEEDS_ATTENTION (amber)
-   *   isProcessing && !pendingGate  → RUNNING (green)
-   *   neither                       → clear (idle)
+   *   pendingGate         → NEEDS_ATTENTION (amber)
+   *   active current run  → RUNNING (green)
+   *   neither             → clear (idle)
    *
    * Priority is pendingGate-first because a gate logically subsumes
    * processing — the run is paused waiting on the user, not actively
    * working.
    *
-   * Invariant: useChat resets pendingGate (and isProcessing reaches a
-   * fresh value) on threadId change via the thread-reset effect in
-   * useChat, so within a single React commit batch we never observe
-   * stale state from a previous thread paired with a new activeThreadId.
+   * Invariant: useChat resets pendingGate / isProcessing / activeRun on
+   * threadId change via the thread-reset effect in useChat, so within a
+   * single React commit batch we never observe stale state from a previous
+   * thread paired with a new activeThreadId.
    *
    * Coverage gap (writer is per-active-thread only): this seam only
    * flags whichever thread the user is currently viewing. Cross-thread
@@ -205,7 +206,7 @@ export function Chat({
       setThreadState(activeThreadId, THREAD_STATE.NEEDS_ATTENTION);
       return undefined;
     }
-    if (isProcessing) {
+    if (runActiveForThread) {
       setThreadState(activeThreadId, THREAD_STATE.RUNNING);
       return undefined;
     }
@@ -214,7 +215,7 @@ export function Chat({
       THREAD_STATE_CLEAR_GRACE_MS
     );
     return () => clearTimeout(timer);
-  }, [activeThreadId, pendingGate, isProcessing]);
+  }, [activeThreadId, pendingGate, runActiveForThread]);
 
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
   React.useEffect(() => {
@@ -239,7 +240,7 @@ export function Chat({
       <div className="flex min-w-0 flex-1 flex-col">
         <${ConnectionStatus} status=${sseStatus} />
 
-        ${isProcessing && !pendingGate && activeRunLogsPath && html`
+        ${runActiveForThread && activeRunLogsPath && html`
           <div className="flex justify-end border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)] px-4 py-1.5">
             <${Link}
               to=${activeRunLogsPath}
@@ -287,7 +288,7 @@ export function Chat({
             onLoadMore=${loadMore}
             onRetryMessage=${retryMessage}
             threadId=${activeThreadId}
-            pending=${isProcessing}
+            pending=${runActiveForThread}
           >
             ${recoveryNotice &&
             html`
@@ -296,7 +297,7 @@ export function Chat({
                 onRecover=${recoverHistory}
               />
             `}
-            ${isProcessing && !pendingGate && html`<${TypingIndicator} />`}
+            ${runActiveForThread && html`<${TypingIndicator} />`}
             ${channelConnectAction &&
             html`
               <${ChannelConnectCard}
