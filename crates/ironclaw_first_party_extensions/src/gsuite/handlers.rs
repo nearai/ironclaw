@@ -30,6 +30,8 @@ use crate::gsuite::{
     network::google_api_network_policy,
 };
 
+mod calendar_list_events;
+
 pub const CALENDAR_LIST_CALENDARS_CAPABILITY_ID: &str = "google-calendar.list_calendars";
 pub const CALENDAR_LIST_EVENTS_CAPABILITY_ID: &str = "google-calendar.list_events";
 pub const CALENDAR_GET_EVENT_CAPABILITY_ID: &str = "google-calendar.get_event";
@@ -322,6 +324,7 @@ enum CapabilityExecution {
         url: String,
         body: Vec<u8>,
     },
+    CalendarListEvents(calendar_list_events::CalendarEventsQuery),
     AddAttendees(CalendarAddAttendeesInput),
 }
 
@@ -351,6 +354,9 @@ impl CapabilityExecution {
                 .await?;
                 let network_egress_bytes = response.request_bytes;
                 Ok(response_outcome(response, network_egress_bytes))
+            }
+            Self::CalendarListEvents(input) => {
+                calendar_list_events::execute(request, credential, stager, input).await
             }
             Self::AddAttendees(input) => {
                 execute_add_attendees(request, credential, stager, input).await
@@ -508,7 +514,9 @@ fn capability_execution(
     let single = |(method, url, body)| CapabilityExecution::Single { method, url, body };
     Ok(match capability.operation {
         Operation::CalendarListCalendars => single(calendar_list_calendars_request()),
-        Operation::CalendarListEvents => single(calendar_list_events_request(input)?),
+        Operation::CalendarListEvents => CapabilityExecution::CalendarListEvents(
+            calendar_list_events::CalendarEventsQuery::parse(input)?,
+        ),
         Operation::CalendarGetEvent => single(calendar_get_event_request(input)?),
         Operation::CalendarFindFreeSlots => single(calendar_find_free_slots_request(input)?),
         Operation::CalendarCreateEvent => single(calendar_create_event_request(input)?),
@@ -530,31 +538,9 @@ fn capability_execution(
 fn calendar_list_calendars_request() -> (NetworkMethod, String, Vec<u8>) {
     (
         NetworkMethod::Get,
-        format!("{CALENDAR_API_BASE}/users/me/calendarList"),
+        calendar_list_calendars_url(),
         Vec::new(),
     )
-}
-
-struct CalendarEventsQuery {
-    calendar_id: String,
-    time_min: Option<String>,
-    time_max: Option<String>,
-    page_token: Option<String>,
-    max_results: Option<String>,
-}
-
-impl CalendarEventsQuery {
-    fn parse(input: &Value) -> Result<Self, GsuiteDispatchError> {
-        Ok(Self {
-            calendar_id: optional_str(input, "calendar_id")?
-                .unwrap_or("primary")
-                .to_string(),
-            time_min: optional_query_value(input, "time_min")?,
-            time_max: optional_query_value(input, "time_max")?,
-            page_token: optional_query_value(input, "page_token")?,
-            max_results: optional_query_value(input, "max_results")?,
-        })
-    }
 }
 
 struct CalendarEventPath {
@@ -628,17 +614,6 @@ impl GmailMessagePath {
     }
 }
 
-fn calendar_list_events_request(
-    input: &Value,
-) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
-    let input = CalendarEventsQuery::parse(input)?;
-    Ok((
-        NetworkMethod::Get,
-        calendar_events_url(&input, None),
-        Vec::new(),
-    ))
-}
-
 fn calendar_get_event_request(
     input: &Value,
 ) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
@@ -662,18 +637,10 @@ fn calendar_find_free_slots_request(
 fn calendar_create_event_request(
     input: &Value,
 ) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
-    let query = CalendarEventsQuery {
-        calendar_id: optional_str(input, "calendar_id")?
-            .unwrap_or("primary")
-            .to_string(),
-        time_min: None,
-        time_max: None,
-        page_token: None,
-        max_results: None,
-    };
+    let calendar_id = optional_str(input, "calendar_id")?.unwrap_or("primary");
     Ok((
         NetworkMethod::Post,
-        calendar_events_url(&query, None),
+        calendar_events_collection_url(calendar_id, &[]),
         json_body(required_object(input, "event")?)?,
     ))
 }
@@ -884,22 +851,18 @@ fn add_network_usage(error: GsuiteDispatchError, network_egress_bytes: u64) -> G
     error.with_usage(usage)
 }
 
-fn calendar_events_url(input: &CalendarEventsQuery, extra_query: Option<&str>) -> String {
-    let calendar_id = encode_segment(&input.calendar_id);
+fn calendar_events_collection_url(calendar_id: &str, query: &[String]) -> String {
+    let calendar_id = encode_segment(calendar_id);
     let mut url = format!("{CALENDAR_API_BASE}/calendars/{calendar_id}/events");
-    let mut query = Vec::new();
-    push_optional_query(&mut query, "timeMin", input.time_min.as_deref());
-    push_optional_query(&mut query, "timeMax", input.time_max.as_deref());
-    push_optional_query(&mut query, "pageToken", input.page_token.as_deref());
-    push_optional_query(&mut query, "maxResults", input.max_results.as_deref());
-    if let Some(extra) = extra_query {
-        query.push(extra.to_string());
-    }
     if !query.is_empty() {
         url.push('?');
         url.push_str(&query.join("&"));
     }
     url
+}
+
+fn calendar_list_calendars_url() -> String {
+    format!("{CALENDAR_API_BASE}/users/me/calendarList")
 }
 
 fn gmail_messages_url(input: &GmailMessagesQuery) -> String {
@@ -931,6 +894,13 @@ fn optional_query_value(input: &Value, key: &str) -> Result<Option<String>, Gsui
         Some(_) => return Err(input_error()),
         None => None,
     })
+}
+
+fn optional_bool(input: &Value, key: &str) -> Result<Option<bool>, GsuiteDispatchError> {
+    input
+        .get(key)
+        .map(|value| value.as_bool().ok_or_else(input_error))
+        .transpose()
 }
 
 fn optional_string_array(
@@ -1389,15 +1359,10 @@ mod tests {
     fn url_building_tests() {
         assert_eq!(encode_percent("a b/c?d=e&f"), "a%20b%2Fc%3Fd%3De%26f");
 
-        let calendar_events = calendar_events_url(
-            &CalendarEventsQuery::parse(&json!({
-                "calendar_id": "team calendar",
-                "time_min": "2026-05-21T00:00:00Z",
-                "max_results": 10,
-            }))
-            .unwrap(),
-            None,
-        );
+        let mut calendar_query = Vec::new();
+        push_optional_query(&mut calendar_query, "timeMin", Some("2026-05-21T00:00:00Z"));
+        push_optional_query(&mut calendar_query, "maxResults", Some("10"));
+        let calendar_events = calendar_events_collection_url("team calendar", &calendar_query);
         assert!(calendar_events.contains("/calendars/team%20calendar/events"));
         assert!(calendar_events.contains("timeMin=2026-05-21T00%3A00%3A00Z"));
         assert!(calendar_events.contains("maxResults=10"));

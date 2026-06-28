@@ -490,12 +490,12 @@ pub struct RebornRuntime {
     #[cfg(feature = "root-llm-provider")]
     skill_learning_extraction_tasks:
         Option<Arc<crate::skill_learning::SkillLearningExtractionTasks>>,
-    /// Late-binding dispatcher shared with the trigger poller.
-    /// `set_trigger_post_submit_hook` installs the hook after
-    /// `build_reborn_runtime` returns and drains any startup settlements.
+    /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
+    /// `set_trigger_post_submit_hook` fills this after `build_reborn_runtime` returns.
     /// `None` when the trigger poller is not enabled.
     #[cfg(feature = "slack-v2-host-beta")]
-    post_submit_hook_dispatch: Option<Arc<crate::trigger_poller::PostSubmitHookDispatch>>,
+    post_submit_hook_slot:
+        Option<Arc<std::sync::OnceLock<Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>>>>,
     #[cfg(any(test, feature = "test-support"))]
     trigger_conversation_pairing:
         Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
@@ -573,11 +573,13 @@ type LocalDevSkillExecutionAdapter =
 struct TriggerPollerServices {
     materializer: Arc<dyn ironclaw_triggers::TriggerPromptMaterializer>,
     trusted_submitter: Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>,
-    /// Late-binding dispatcher for the post-submit hook. Created here and shared
-    /// with the poller; `RebornRuntime::set_trigger_post_submit_hook` installs
-    /// the hook later and drains accepted fires settled during startup.
+    /// Late-binding slot for the post-submit hook. Created here and shared with
+    /// the poller wrapper; filled later by `RebornRuntime::set_trigger_post_submit_hook`
+    /// so `build_slack_host_beta_mounts` (called after runtime build) can wire the
+    /// hook without restarting the poller.
     #[cfg(feature = "slack-v2-host-beta")]
-    post_submit_hook_dispatch: Arc<crate::trigger_poller::PostSubmitHookDispatch>,
+    post_submit_hook_slot:
+        Arc<std::sync::OnceLock<Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>>>,
     /// Test-support handle on the SAME conversation services instance the
     /// poller-side materializer/submitter use, so integration tests can call
     /// the production `pair_external_actor` API to seed the trigger
@@ -626,9 +628,7 @@ async fn build_trigger_poller_services(
             materializer,
             trusted_submitter,
             #[cfg(feature = "slack-v2-host-beta")]
-            post_submit_hook_dispatch: Arc::new(
-                crate::trigger_poller::PostSubmitHookDispatch::new(),
-            ),
+            post_submit_hook_slot: Arc::new(std::sync::OnceLock::new()),
             #[cfg(any(test, feature = "test-support"))]
             pairing_service,
         })
@@ -655,9 +655,7 @@ async fn build_trigger_poller_services(
             materializer,
             trusted_submitter,
             #[cfg(feature = "slack-v2-host-beta")]
-            post_submit_hook_dispatch: Arc::new(
-                crate::trigger_poller::PostSubmitHookDispatch::new(),
-            ),
+            post_submit_hook_slot: Arc::new(std::sync::OnceLock::new()),
             #[cfg(any(test, feature = "test-support"))]
             pairing_service,
         })
@@ -817,40 +815,42 @@ fn approval_request_id_from_gate_ref(gate_ref: &LoopGateRef) -> Option<ApprovalR
         .and_then(|value| ApprovalRequestId::parse(value).ok())
 }
 
-struct LocalDevBudgetResourceGateEvidence {
-    budget_gates: Arc<dyn ironclaw_resources::BudgetGateStore>,
+struct LocalDevResourceGateEvidence {
+    budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore>,
 }
 
 #[async_trait::async_trait]
-impl ResourceGateEvidenceStore for LocalDevBudgetResourceGateEvidence {
+impl ResourceGateEvidenceStore for LocalDevResourceGateEvidence {
     async fn pending_resource_gate(
         &self,
         scope: &TurnScope,
         gate_ref: &LoopGateRef,
     ) -> Result<bool, TurnError> {
-        let Some(gate_id) = budget_gate_id_from_gate_ref(gate_ref) else {
+        let Some(gate_id) = budget_gate_id_from_gate_ref(gate_ref)? else {
             return Ok(false);
         };
-        let gate = self
-            .budget_gates
+        let record = self
+            .budget_gate_store
             .get(&scope.to_resource_scope(), gate_id)
             .map_err(|error| TurnError::Unavailable {
                 reason: format!("budget gate evidence lookup failed: {error}"),
             })?;
-        Ok(gate
-            .map(|gate| matches!(gate.status, ironclaw_resources::BudgetGateStatus::Pending))
+        Ok(record
+            .map(|record| record.status == ironclaw_resources::BudgetGateStatus::Pending)
             .unwrap_or(false))
     }
 }
 
 fn budget_gate_id_from_gate_ref(
     gate_ref: &LoopGateRef,
-) -> Option<ironclaw_resources::BudgetGateId> {
-    gate_ref
-        .as_str()
-        .strip_prefix("gate:budget-")
-        .and_then(|value| uuid::Uuid::parse_str(value).ok())
-        .map(ironclaw_resources::BudgetGateId::from_uuid)
+) -> Result<Option<ironclaw_resources::BudgetGateId>, TurnError> {
+    let Some(value) = gate_ref.as_str().strip_prefix("gate:budget-") else {
+        return Ok(None);
+    };
+    let id = uuid::Uuid::parse_str(value).map_err(|error| TurnError::InvalidRequest {
+        reason: format!("invalid budget gate ref `{}`: {error}", gate_ref.as_str()),
+    })?;
+    Ok(Some(ironclaw_resources::BudgetGateId::from_uuid(id)))
 }
 
 #[async_trait::async_trait]
@@ -1375,32 +1375,33 @@ impl RebornRuntime {
     /// the hook itself is constructed (e.g. inside
     /// [`crate::slack_host_beta::build_slack_host_beta_mounts`]). The hook is
     /// idempotent: a second call is silently ignored. Returns `false` when the
-    /// trigger poller is not enabled (no dispatcher) or a hook is already
-    /// installed, `true` on first successful install.
+    /// trigger poller is not enabled (slot is `None`) or the slot is already
+    /// occupied, `true` on first successful set.
     #[cfg(feature = "slack-v2-host-beta")]
     pub fn set_trigger_post_submit_hook(
         &self,
         hook: Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>,
     ) -> bool {
-        let Some(dispatch) = self.post_submit_hook_dispatch.as_ref() else {
+        let Some(slot) = self.post_submit_hook_slot.as_ref() else {
             tracing::debug!("set_trigger_post_submit_hook: trigger poller not enabled, ignoring");
             return false;
         };
-        if dispatch.install_hook(hook) {
-            true
-        } else {
-            tracing::debug!(
-                "set_trigger_post_submit_hook: hook already installed, ignoring (idempotent)"
-            );
-            false
+        match slot.set(hook) {
+            Ok(()) => true,
+            Err(_) => {
+                tracing::debug!(
+                    "set_trigger_post_submit_hook: slot already occupied, ignoring (idempotent)"
+                );
+                false
+            }
         }
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) fn trigger_post_submit_hook_is_set(&self) -> bool {
-        self.post_submit_hook_dispatch
+        self.post_submit_hook_slot
             .as_ref()
-            .is_some_and(|dispatch| dispatch.is_hook_installed())
+            .is_some_and(|slot| slot.get().is_some())
     }
 
     #[cfg(test)]
@@ -1683,8 +1684,8 @@ impl RebornRuntime {
             .await?;
 
         let reply = async {
-            let settled_state = self
-                .wait_for_terminal_or_gate(&submitted.scope, submitted.run_id, &cancellation)
+            let terminal_state = self
+                .wait_for_terminal(&submitted.scope, submitted.run_id, &cancellation)
                 .await?;
             let assistant_text = self
                 .read_latest_assistant_text(&conversation.0, submitted.run_id)
@@ -1693,8 +1694,8 @@ impl RebornRuntime {
             Ok(AssistantReply {
                 conversation: conversation.clone(),
                 run_id: submitted.run_id,
-                status: settled_state.status,
-                failure_category: settled_state
+                status: terminal_state.status,
+                failure_category: terminal_state
                     .failure
                     .as_ref()
                     .map(|failure| failure.category().to_string()),
@@ -1979,15 +1980,83 @@ impl RebornRuntime {
         )
     }
 
-    /// Returns when the run reaches a terminal state or parks on a
-    /// user-/client-resolvable gate (auth/approval/resource/external-tool)
+    async fn wait_for_terminal(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        cancellation: &CancellationToken,
+    ) -> Result<TurnRunState, RebornRuntimeError> {
+        let start = std::time::Instant::now();
+        loop {
+            if self.turn_scheduler.is_stopped() {
+                return Err(RebornRuntimeError::WorkerStopped);
+            }
+            let state = self
+                .turn_coordinator
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await?;
+            if state.status.is_terminal() {
+                return Ok(state);
+            }
+            // TurnStatus::RecoveryRequired is now terminal (is_terminal() returns true)
+            // so the branch above handles it; no special cancel-to-release-lock is needed.
+            if start.elapsed() > self.poll_settings.max_total {
+                if self
+                    .cancel_run(
+                        scope,
+                        run_id,
+                        SanitizedCancelReason::Timeout,
+                        "timeout-cancel",
+                    )
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!(
+                        run_id = %run_id,
+                        "failed to cancel run after terminal-wait timeout"
+                    );
+                }
+                return Err(RebornRuntimeError::RunTimeout {
+                    timeout: self.poll_settings.max_total,
+                });
+            }
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    if self
+                        .cancel_run(
+                            scope,
+                            run_id,
+                            SanitizedCancelReason::UserRequested,
+                            "caller-cancel",
+                        )
+                        .await
+                        .is_err()
+                    {
+                        tracing::debug!(
+                            run_id = %run_id,
+                            "failed to cancel run after caller cancellation"
+                        );
+                    }
+                    return Err(RebornRuntimeError::OperationCancelled);
+                }
+                _ = tokio::time::sleep(self.poll_settings.interval) => {}
+            }
+        }
+    }
+
+    /// Like [`Self::wait_for_terminal`], but also returns when the run parks on
+    /// a user-/client-resolvable gate (auth/approval/resource/external-tool)
     /// instead of polling until those non-terminal states either resolve or hit
     /// `RunTimeout`.
     /// `BlockedDependentRun` is deliberately excluded — it is an internal wait
     /// on a child run, not facade-resolvable, so it keeps polling. The returned
     /// state carries the `Blocked*` status and
     /// `gate_ref`; the caller decides whether to resolve (through the WebUI
-    /// facade) or stop.
+    /// facade) or stop. Test/recording-support only.
+    #[cfg(any(test, feature = "test-support"))]
     async fn wait_for_terminal_or_gate(
         &self,
         scope: &TurnScope,
@@ -2504,7 +2573,10 @@ pub async fn build_reborn_runtime(
     let production_scheduler_wake: Option<ironclaw_reborn::runtime::SchedulerWakeWiring> = None;
 
     let runtime_parts = match profile {
-        profile if profile.uses_local_runtime_substrate() => {
+        RebornCompositionProfile::LocalDev
+        | RebornCompositionProfile::LocalDevYolo
+        | RebornCompositionProfile::HostedSingleTenant
+        | RebornCompositionProfile::HostedSingleTenantVolume => {
             let local_runtime =
                 services
                     .local_runtime
@@ -2731,8 +2803,8 @@ pub async fn build_reborn_runtime(
             },
         ));
         loop_exit_evidence = loop_exit_evidence.with_resource_gate_evidence(Arc::new(
-            LocalDevBudgetResourceGateEvidence {
-                budget_gates: Arc::clone(&local_runtime.budget_gate_store),
+            LocalDevResourceGateEvidence {
+                budget_gate_store: Arc::clone(&local_runtime.budget_gate_store),
             },
         ));
     }
@@ -3037,6 +3109,9 @@ pub async fn build_reborn_runtime(
             heartbeat_interval: runner.heartbeat_interval,
             poll_interval: runner.poll_interval,
             worker_count: runner.worker_count,
+            planned_default_iteration_limit: optional_u32_env(
+                "IRONCLAW_REBORN_PLANNED_DEFAULT_ITERATION_LIMIT",
+            )?,
             ..DefaultPlannedRuntimeConfig::default()
         },
         model_route_resolver: None,
@@ -3209,16 +3284,16 @@ pub async fn build_reborn_runtime(
     };
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
-    // `trigger_poller_handle`, `post_submit_hook_dispatch`, and the
-    // test-support `trigger_conversation_pairing_value` are produced atomically
-    // inside a single `if trigger_poller.enabled` expression. Avoid a
+    // `trigger_poller_handle`, `post_submit_hook_slot`, and the test-support
+    // `trigger_conversation_pairing_value` are produced atomically inside
+    // a single `if trigger_poller.enabled` expression. Avoid a
     // `let mut … = None` sentinel pattern flagged by code review
     // (review f-ptr-3): the `let X;` deferred-init form is single-assign
     // per branch and Rust's borrow checker prevents reads before init.
     let trigger_poller_handle: Option<TriggerPollerRuntimeHandle>;
     #[cfg(feature = "slack-v2-host-beta")]
-    let runtime_post_submit_hook_dispatch: Option<
-        Arc<crate::trigger_poller::PostSubmitHookDispatch>,
+    let runtime_post_submit_hook_slot: Option<
+        Arc<std::sync::OnceLock<Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>>>,
     >;
     #[cfg(any(test, feature = "test-support"))]
     let trigger_conversation_pairing_value: Option<
@@ -3250,10 +3325,10 @@ pub async fn build_reborn_runtime(
                 Some(Arc::clone(&trigger_poller_services.pairing_service));
         }
         #[cfg(feature = "slack-v2-host-beta")]
-        let hook_dispatch = Arc::clone(&trigger_poller_services.post_submit_hook_dispatch);
+        let hook_slot = Arc::clone(&trigger_poller_services.post_submit_hook_slot);
         #[cfg(feature = "slack-v2-host-beta")]
         {
-            runtime_post_submit_hook_dispatch = Some(Arc::clone(&hook_dispatch));
+            runtime_post_submit_hook_slot = Some(Arc::clone(&hook_slot));
         }
         trigger_poller_handle = spawn_trigger_poller(
             trigger_poller,
@@ -3263,7 +3338,7 @@ pub async fn build_reborn_runtime(
                 trusted_submitter: trigger_poller_services.trusted_submitter,
                 active_run_lookup,
                 #[cfg(feature = "slack-v2-host-beta")]
-                post_submit_hook_dispatch: hook_dispatch,
+                post_submit_hook_slot: hook_slot,
             },
         )
         .map_err(|error| RebornRuntimeError::InvalidArgument {
@@ -3273,7 +3348,7 @@ pub async fn build_reborn_runtime(
         trigger_poller_handle = None;
         #[cfg(feature = "slack-v2-host-beta")]
         {
-            runtime_post_submit_hook_dispatch = None;
+            runtime_post_submit_hook_slot = None;
         }
         #[cfg(any(test, feature = "test-support"))]
         {
@@ -3350,7 +3425,7 @@ pub async fn build_reborn_runtime(
         #[cfg(feature = "root-llm-provider")]
         skill_learning_extraction_tasks,
         #[cfg(feature = "slack-v2-host-beta")]
-        post_submit_hook_dispatch: runtime_post_submit_hook_dispatch,
+        post_submit_hook_slot: runtime_post_submit_hook_slot,
         #[cfg(any(test, feature = "test-support"))]
         trigger_conversation_pairing: trigger_conversation_pairing_value,
         outbound_delivery_target_registry,
@@ -3465,6 +3540,33 @@ struct LocalDevSkillContextSource {
 }
 
 const LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS: usize = 6000;
+
+fn optional_u32_env(key: &'static str) -> Result<Option<u32>, RebornRuntimeError> {
+    match std::env::var(key) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let parsed =
+                trimmed
+                    .parse::<u32>()
+                    .map_err(|error| RebornRuntimeError::InvalidArgument {
+                        reason: format!("{key} must be a positive integer: {error}"),
+                    })?;
+            if parsed == 0 {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason: format!("{key} must be greater than zero"),
+                });
+            }
+            Ok(Some(parsed))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(RebornRuntimeError::InvalidArgument {
+            reason: format!("could not read {key}: {error}"),
+        }),
+    }
+}
 
 /// Build the [`SkillActivationSelectorConfig`] used by the local-dev
 /// filesystem skill context source. Extracted from
@@ -3914,6 +4016,21 @@ mod tests {
     use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
 
     #[test]
+    fn budget_gate_ref_parser_rejects_malformed_budget_ref() {
+        let gate_ref =
+            ironclaw_turns::LoopGateRef::new("gate:budget-not-a-uuid").expect("gate ref");
+        let error = super::budget_gate_id_from_gate_ref(&gate_ref)
+            .expect_err("malformed budget gate refs should fail loudly");
+
+        assert!(matches!(
+            error,
+            ironclaw_turns::TurnError::InvalidRequest { reason }
+                if reason.contains("invalid budget gate ref")
+                    && reason.contains("gate:budget-not-a-uuid")
+        ));
+    }
+
+    #[test]
     fn persistent_grantee_resolver_maps_outbound_delivery_target_set_to_synthetic_provider() {
         let registry = Arc::new(ironclaw_extensions::ExtensionRegistry::new());
         let resolver = super::RegistryPersistentApprovalGranteeResolver::new(registry)
@@ -3930,6 +4047,58 @@ mod tests {
             ironclaw_product_workflow::PersistentApprovalGranteeResolver::persistent_approval_grantee(
                 &resolver,
                 &capability_id
+            ),
+            Some(Principal::Extension(expected_provider))
+        );
+    }
+
+    #[test]
+    fn persistent_grantee_resolver_maps_registered_capability_to_provider() {
+        let manifest = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "approval-provider"
+name = "approval-provider"
+version = "0.1.0"
+description = "approval provider"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/approval-provider.wasm"
+
+[[capabilities]]
+id = "approval-provider.write"
+description = "write"
+effects = ["external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/write.input.json"
+output_schema_ref = "schemas/write.output.json"
+"#;
+        let manifest = ironclaw_extensions::ExtensionManifest::parse(
+            manifest,
+            ironclaw_extensions::ManifestSource::HostBundled,
+            &ironclaw_host_api::HostPortCatalog::empty(),
+        )
+        .expect("manifest parses");
+        let package = ironclaw_extensions::ExtensionPackage::from_manifest(
+            manifest,
+            ironclaw_host_api::VirtualPath::new("/system/extensions/approval-provider")
+                .expect("root"),
+        )
+        .expect("package builds");
+        let mut registry = ironclaw_extensions::ExtensionRegistry::new();
+        registry.insert(package).expect("package inserts");
+        let resolver = super::RegistryPersistentApprovalGranteeResolver::new(Arc::new(registry))
+            .expect("resolver builds");
+        let capability_id = CapabilityId::new("approval-provider.write").expect("capability id");
+        let expected_provider =
+            ironclaw_host_api::ExtensionId::new("approval-provider").expect("extension id");
+
+        assert_eq!(
+            ironclaw_product_workflow::PersistentApprovalGranteeResolver::persistent_approval_grantee(
+                &resolver,
+                &capability_id,
             ),
             Some(Principal::Extension(expected_provider))
         );
@@ -4083,21 +4252,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_cutover_gate_allows_hosted_volume_preview_readiness() {
-        let readiness = readiness_for_runtime_gate(
-            RebornCompositionProfile::HostedSingleTenantVolume,
-            RebornReadinessState::HostedSingleTenantVolumePreviewValidated,
-            vec![crate::RebornReadinessDiagnostic::hosted_single_tenant_volume()],
-        );
-
-        super::enforce_runtime_cutover_gate(
-            RebornCompositionProfile::HostedSingleTenantVolume,
-            &readiness,
-        )
-        .expect("validated hosted volume preview runtime can start");
-    }
-
-    #[test]
     fn runtime_cutover_gate_rejects_local_dev_readiness_for_hosted_single_tenant() {
         let readiness = readiness_for_runtime_gate(
             RebornCompositionProfile::HostedSingleTenant,
@@ -4116,32 +4270,6 @@ mod tests {
         assert!(reason.contains("hosted-single-tenant"), "reason: {reason}");
         assert!(
             reason.contains("HostedSingleTenantValidated"),
-            "reason: {reason}"
-        );
-    }
-
-    #[test]
-    fn runtime_cutover_gate_rejects_local_dev_readiness_for_hosted_volume() {
-        let readiness = readiness_for_runtime_gate(
-            RebornCompositionProfile::HostedSingleTenantVolume,
-            RebornReadinessState::DevOnly,
-            vec![crate::RebornReadinessDiagnostic::local_dev()],
-        );
-
-        let error = super::enforce_runtime_cutover_gate(
-            RebornCompositionProfile::HostedSingleTenantVolume,
-            &readiness,
-        )
-        .expect_err("hosted volume runtime requires preview readiness");
-        let RebornRuntimeError::InvalidArgument { reason } = error else {
-            panic!("expected invalid argument, got {error:?}");
-        };
-        assert!(
-            reason.contains("hosted-single-tenant-volume"),
-            "reason: {reason}"
-        );
-        assert!(
-            reason.contains("HostedSingleTenantVolumePreviewValidated"),
             "reason: {reason}"
         );
     }
@@ -4867,6 +4995,7 @@ mod tests {
                 output_tokens: 1,
                 finish_reason: ironclaw_llm::FinishReason::Stop,
                 reasoning: None,
+                reasoning_details: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -5408,6 +5537,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }

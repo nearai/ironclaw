@@ -666,6 +666,7 @@ function appendRunFailureMessage(
   // (SSE reconnect with `last-event-id`, or repeated updates carrying
   // the same terminal status) collapse to one bubble instead of stacking.
   const messageId = `err-${runId || "unknown"}`;
+  const turnRunId = typeof runId === "string" && runId ? runId : null;
   setMessages((prev) => {
     const existing = prev.findIndex((m) => m.id === messageId);
     const content = failureMessageForRunStatus({
@@ -674,11 +675,18 @@ function appendRunFailureMessage(
       failureSummary,
     });
     if (existing >= 0) {
-      if (!failureSummary || prev[existing].content === content) return prev;
+      const contentChanged = Boolean(
+        failureSummary && prev[existing].content !== content,
+      );
+      const runAnchorChanged = Boolean(
+        turnRunId && prev[existing].turnRunId !== turnRunId,
+      );
+      if (!contentChanged && !runAnchorChanged) return prev;
       const next = [...prev];
       next[existing] = {
         ...next[existing],
-        content,
+        ...(contentChanged && { content }),
+        ...(runAnchorChanged && { turnRunId }),
       };
       return next;
     }
@@ -689,6 +697,7 @@ function appendRunFailureMessage(
         role: "error",
         content,
         timestamp: new Date().toISOString(),
+        ...(turnRunId && { turnRunId }),
       },
     ];
   });

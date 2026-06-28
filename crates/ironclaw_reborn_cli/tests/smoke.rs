@@ -1944,6 +1944,10 @@ fn repl_resolves_codex_api_key_auth_env_without_openai_api_key() {
     );
 }
 
+// Provider/auth validation lives behind `root-llm-provider` (a default
+// feature); the `libsql-only` build drops it and boots a stub, so this test
+// only applies when that feature is compiled in.
+#[cfg(feature = "root-llm-provider")]
 #[test]
 fn run_rejects_codex_backend_when_auth_file_is_missing() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -2861,6 +2865,7 @@ api_key_env = "sk-proj-1234567890abcdef12345678"
     );
 }
 
+#[cfg(feature = "root-llm-provider")]
 #[test]
 fn run_warns_when_falling_back_to_stub_gateway() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -3292,6 +3297,7 @@ default_approval_policy = "ask_always"
     );
 }
 
+#[cfg(feature = "root-llm-provider")]
 #[test]
 fn run_rejects_malformed_explicit_provider_overlay() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -3321,6 +3327,7 @@ provider_id = "openai"
     );
 }
 
+#[cfg(feature = "root-llm-provider")]
 #[test]
 fn run_rejects_empty_required_api_key_env() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -3425,6 +3432,7 @@ poll_interval_ms = 0
     );
 }
 
+#[cfg(feature = "root-llm-provider")]
 #[test]
 fn run_resolves_provider_from_config_and_demands_api_key_env() {
     let temp = tempfile::tempdir().expect("tempdir");
