@@ -371,17 +371,19 @@ class RebornQaMatrixHermeticRunnerTests(unittest.TestCase):
             self.assertTrue(Path(commands[0]["stdout_log"]).exists())
             self.assertTrue(Path(commands[0]["stderr_log"]).exists())
 
-    def test_webui_mixed_case_prunes_ci_owned_browser_duplicate(self):
-        case = run_hermetic_qa.CASES["webui_v2_workspace_project_client_regression"]
+    def test_browser_or_static_only_cases_are_not_executable_cases(self):
+        self.assertNotIn(
+            "webui_v2_workspace_project_client_regression",
+            run_hermetic_qa.CASES,
+        )
 
-        self.assertEqual(
-            [command.name for command in case.commands],
-            [],
+        parser = run_hermetic_qa.build_parser()
+        args = parser.parse_args(
+            ["--case", "webui_v2_workspace_project_client_regression"]
         )
-        self.assertEqual(
-            [command["name"] for command in run_hermetic_qa._removed_existing_ci_commands(case)],
-            [],
-        )
+
+        with self.assertRaisesRegex(SystemExit, "unknown case"):
+            run_hermetic_qa._selected_case_names(args)
 
     def test_previous_command_failure_skips_remaining_matrix_owned_commands(self):
         case = run_hermetic_qa.CaseSpec(
