@@ -20,7 +20,9 @@ Or directly::
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -144,6 +146,124 @@ class ParseSummaryStatusTests(unittest.TestCase):
                 # in prod that a writer tweak silently broke parsing).
                 got = notify.parse_summary_status(doc)
                 self.assertEqual(got, 0, f"variant not parsed: {variant!r}")
+
+
+class RebornQaSlackReportTests(unittest.TestCase):
+    def test_collect_lane_populates_per_case_reports(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lane_dir = Path(tmpdir) / "reborn-webui-v2-live-qa" / "reborn-webui-v2" / "20260628T000000Z"
+            lane_dir.mkdir(parents=True)
+            (lane_dir / "results.json").write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            {
+                                "provider": "reborn-webui-v2",
+                                "mode": "live:qa_2a_gmail_connect",
+                                "success": True,
+                                "latency_ms": 1200,
+                                "details": {
+                                    "case": "qa_2a_gmail_connect",
+                                    "gate": "requires live Google browser consent state",
+                                },
+                            },
+                            {
+                                "provider": "reborn-webui-v2",
+                                "mode": "live:qa_2d_calendar_prep_live_chat",
+                                "success": False,
+                                "latency_ms": 0,
+                                "details": {
+                                    "case": "qa_2d_calendar_prep_live_chat",
+                                    "blocked": "missing_google_ready",
+                                    "gate": "requires live Google runtime access",
+                                },
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (lane_dir / "case-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "cases": [
+                            {
+                                "case": "qa_2a_gmail_connect",
+                                "qa_rows": ["2A"],
+                                "feature": "Gmail connection flow",
+                            },
+                            {
+                                "case": "qa_2d_calendar_prep_live_chat",
+                                "qa_rows": ["2D"],
+                                "feature": "Calendar prep assistant using Google Docs and live news",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = notify.collect_lane(lane_dir)
+
+        self.assertIsNotNone(report)
+        self.assertEqual(report.tests, 2)
+        self.assertEqual(report.passed, 1)
+        self.assertEqual(report.failed, 1)
+        self.assertEqual(len(report.reborn_qa_cases), 2)
+        self.assertEqual(report.reborn_qa_cases[0].rows, ("2A",))
+        self.assertEqual(report.reborn_qa_cases[0].feature, "Gmail connection flow")
+        self.assertEqual(report.reborn_qa_cases[0].message, "")
+        self.assertEqual(report.reborn_qa_cases[1].rows, ("2D",))
+        self.assertEqual(
+            report.reborn_qa_cases[1].message,
+            "requires live Google runtime access",
+        )
+
+    def test_slack_payload_renders_each_reborn_qa_row(self):
+        report = notify.LaneReport(
+            lane="reborn-webui-v2-live-qa",
+            provider="reborn-webui-v2",
+            passed=1,
+            failed=1,
+            tests=2,
+            duration_s=1.2,
+            status="fail",
+            reborn_qa_cases=[
+                notify.RebornQaCaseReport(
+                    rows=("2A",),
+                    case="qa_2a_gmail_connect",
+                    feature="Gmail connection flow",
+                    success=True,
+                    latency_ms=1200,
+                ),
+                notify.RebornQaCaseReport(
+                    rows=("2D",),
+                    case="qa_2d_calendar_prep_live_chat",
+                    feature="Calendar prep assistant using Google Docs and live news",
+                    success=False,
+                    latency_ms=0,
+                    message="requires live Google runtime access",
+                ),
+            ],
+        )
+
+        payload = notify.slack_payload([report], None, "abcdef0123456789")
+        section_texts = [
+            block["text"]["text"]
+            for block in payload["blocks"]
+            if block.get("type") == "section"
+        ]
+
+        self.assertTrue(any("*QA 2A: Gmail connection flow*" in text for text in section_texts))
+        self.assertTrue(
+            any(
+                "*QA 2D: Calendar prep assistant using Google Docs and live news*" in text
+                for text in section_texts
+            )
+        )
+        self.assertTrue(
+            any("requires live Google runtime access" in text for text in section_texts)
+        )
 
 
 if __name__ == "__main__":

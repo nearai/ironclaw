@@ -66,6 +66,16 @@ CATEGORIZE_SYSTEM = (
 
 
 @dataclass
+class RebornQaCaseReport:
+    rows: tuple[str, ...]
+    case: str
+    feature: str
+    success: bool
+    latency_ms: int | float | None = None
+    message: str = ""
+
+
+@dataclass
 class LaneReport:
     lane: str
     provider: str
@@ -87,6 +97,7 @@ class LaneReport:
     error: str = ""
     root_cause: str = ""
     fix: str = ""
+    reborn_qa_cases: list[RebornQaCaseReport] = field(default_factory=list)
 
 
 def read_tail(path: Path, n_bytes: int) -> str:
@@ -181,6 +192,108 @@ def parse_results_json(path: Path, report: LaneReport) -> None:
             report.duration_s += latency / 1000.0
 
 
+def _trim_slack_text(value: object, limit: int = 180) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _reborn_case_from_result(entry: dict) -> str:
+    details = entry.get("details") or {}
+    if isinstance(details, dict):
+        case = details.get("case")
+        if isinstance(case, str) and case:
+            return case
+    mode = entry.get("mode")
+    if isinstance(mode, str) and mode.startswith("live:"):
+        return mode.removeprefix("live:")
+    return str(mode or "?")
+
+
+def _reborn_failure_message(entry: dict) -> str:
+    if entry.get("success"):
+        return ""
+    details = entry.get("details") or {}
+    if not isinstance(details, dict):
+        return ""
+    for key in ("error", "message", "reason", "gate"):
+        value = details.get(key)
+        if value:
+            return _trim_slack_text(value)
+    blocked = details.get("blocked")
+    if blocked:
+        return _trim_slack_text(f"blocked={blocked}")
+    return ""
+
+
+def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
+    if report.lane != "reborn-webui-v2-live-qa":
+        return
+    results_path = lane_dir / "results.json"
+    if not results_path.exists() or results_path.stat().st_size == 0:
+        return
+    try:
+        results_data = json.loads(results_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    results = results_data.get("results") or []
+    if not isinstance(results, list):
+        return
+
+    manifest_by_case: dict[str, dict] = {}
+    manifest_path = lane_dir / "case-manifest.json"
+    if manifest_path.exists() and manifest_path.stat().st_size > 0:
+        try:
+            manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            manifest_data = {}
+        for case_data in manifest_data.get("cases") or []:
+            if isinstance(case_data, dict) and isinstance(case_data.get("case"), str):
+                manifest_by_case[case_data["case"]] = case_data
+
+    cases: list[RebornQaCaseReport] = []
+    for entry in results:
+        if not isinstance(entry, dict):
+            continue
+        case = _reborn_case_from_result(entry)
+        details = entry.get("details") or {}
+        if not isinstance(details, dict):
+            details = {}
+        manifest = manifest_by_case.get(case, {})
+        rows = (
+            details.get("qa_rows")
+            or details.get("rows")
+            or manifest.get("qa_rows")
+            or manifest.get("rows")
+            or []
+        )
+        if isinstance(rows, str):
+            row_tuple = (rows,)
+        elif isinstance(rows, list):
+            row_tuple = tuple(str(row) for row in rows if row)
+        else:
+            row_tuple = ()
+        feature = (
+            details.get("feature")
+            or manifest.get("feature")
+            or case.replace("_", " ")
+        )
+        latency = entry.get("latency_ms")
+        cases.append(
+            RebornQaCaseReport(
+                rows=row_tuple,
+                case=case,
+                feature=_trim_slack_text(feature, 120),
+                success=bool(entry.get("success")),
+                latency_ms=latency if isinstance(latency, (int, float)) else None,
+                message=_reborn_failure_message(entry),
+            )
+        )
+    report.reborn_qa_cases = cases
+
+
 SUMMARY_STATUS_RE = re.compile(
     r"^\|\s*Status\s*\|\s*`(?P<status>-?\d+)`\s*\|\s*$", re.MULTILINE
 )
@@ -219,6 +332,7 @@ def collect_lane(lane_dir: Path) -> LaneReport | None:
     # enrichment is source-agnostic.
     parse_junit(lane_dir / "auth-canary-junit.xml", r)
     parse_results_json(lane_dir / "results.json", r)
+    parse_reborn_qa_case_reports(lane_dir, r)
     r.summary_md = read_tail(lane_dir / "summary.md", 4_000)
     r.log_tail = read_tail(lane_dir / "test-output.log", MAX_LOG_BYTES)
 
@@ -400,6 +514,29 @@ def slack_payload(
         if r.notable:
             lines.append(f"_{r.notable}_")
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+        if r.reborn_qa_cases:
+            blocks.append({"type": "divider"})
+            for case in r.reborn_qa_cases:
+                row_label = ", ".join(case.rows) if case.rows else case.case
+                status = ":white_check_mark:" if case.success else ":x:"
+                latency = ""
+                if case.latency_ms is not None:
+                    latency = f" in {case.latency_ms / 1000.0:.1f}s"
+                case_lines = [
+                    f"{status} *QA {row_label}: {case.feature}*",
+                    f"`{case.case}` — {'passed' if case.success else 'failed'}{latency}",
+                ]
+                if case.message:
+                    case_lines.append(f"> {case.message}")
+                blocks.append(
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "\n".join(case_lines),
+                        },
+                    }
+                )
 
     # Cross-lane "Summary by Category" block — only emitted when there
     # are >=2 failures (with 1 the per-lane block is already enough).
