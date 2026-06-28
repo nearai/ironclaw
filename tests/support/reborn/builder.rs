@@ -110,6 +110,11 @@ impl Default for StorageMode {
     }
 }
 
+/// Provider id prefix used by every mock-MCP test capability and assertion.
+/// One owner for the string — the `MockMcp` variant and `assert_mcp_tool_called`
+/// both derive their ids from this constant.
+const MOCK_MCP_PROVIDER_ID: &str = "mock-mcp";
+
 /// Selects the capability backend the integration harness wires.
 enum RebornCapabilityBackend {
     /// Echo recorder: records capability invocations, executes nothing. Default —
@@ -121,11 +126,7 @@ enum RebornCapabilityBackend {
     /// Real MCP runtime wired to a loopback mock MCP server (slice 6 §3.6).
     /// Uses `LoopbackMcpRuntimeHttpEgress` which makes real HTTP connections to
     /// the mock server; no real credentials or network policy are required.
-    MockMcp {
-        mcp_url: String,
-        provider_id: String,
-        capability_id: String,
-    },
+    MockMcp { mcp_url: String },
 }
 
 /// Builder for [`RebornIntegrationHarness`]. The script is fixed at build time
@@ -207,11 +208,8 @@ impl RebornIntegrationHarnessBuilder {
     /// Script the model with `RebornScriptedReply::tool_call("mock-mcp.search", json!({}))`.
     /// Assert via `assert_mcp_tool_called("search")`.
     pub fn with_mock_mcp(mut self, mcp_url: impl Into<String>) -> Self {
-        let mcp_url = mcp_url.into();
         self.capability = RebornCapabilityBackend::MockMcp {
-            provider_id: "mock-mcp".to_string(),
-            capability_id: "mock-mcp.search".to_string(),
-            mcp_url,
+            mcp_url: mcp_url.into(),
         };
         self
     }
@@ -313,16 +311,12 @@ impl RebornIntegrationHarnessBuilder {
                 host_runtime.install_http_responses(self.keyed_http_responses)?;
                 HarnessCapabilityMode::HostRuntime(Arc::new(host_runtime))
             }
-            RebornCapabilityBackend::MockMcp {
-                mcp_url,
-                provider_id,
-                capability_id,
-            } => {
+            RebornCapabilityBackend::MockMcp { mcp_url } => {
                 // Slice 6: wire the real MCP runtime backed by the loopback mock server.
                 let host_runtime = HostRuntimeCapabilityHarness::mock_mcp_tools(
                     &mcp_url,
-                    &provider_id,
-                    &capability_id,
+                    MOCK_MCP_PROVIDER_ID,
+                    &format!("{MOCK_MCP_PROVIDER_ID}.search"),
                 )
                 .await?;
                 HarnessCapabilityMode::HostRuntime(Arc::new(host_runtime))
@@ -595,7 +589,7 @@ impl RebornIntegrationHarness {
     /// delegates to `assert_tool_invoked`. The `"mock-mcp"` prefix matches the
     /// fixed provider id set by `with_mock_mcp`.
     pub async fn assert_mcp_tool_called(&self, tool_name: &str) -> HarnessResult<()> {
-        self.assert_tool_invoked(&format!("mock-mcp.{tool_name}"))
+        self.assert_tool_invoked(&format!("{MOCK_MCP_PROVIDER_ID}.{tool_name}"))
             .await
     }
 
