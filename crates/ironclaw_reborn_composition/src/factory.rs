@@ -2315,7 +2315,12 @@ where
     Ok(())
 }
 
-fn mount_local_dev_database_roots<F>(
+// `pub(crate)` (not private) so the `test_support` accessor
+// (`mount_local_dev_database_roots_for_test`) can forward to it across the
+// crate boundary for downstream integration tests without a second copy of the
+// mount truth. Production callers stay inside this module
+// (`build_local_dev_root_filesystem` / `build_default_local_dev_database_roots`).
+pub(crate) fn mount_local_dev_database_roots<F>(
     root: &mut CompositeRootFilesystem,
     database: Arc<F>,
 ) -> Result<(), RebornBuildError>

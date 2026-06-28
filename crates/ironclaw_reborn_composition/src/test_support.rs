@@ -192,3 +192,23 @@ impl HostManagedModelGateway for FailingTestGateway {
         Err(HostManagedModelError::safe(self.kind, self.summary.clone()))
     }
 }
+
+/// Test-only accessor mirroring the production local-dev boot path
+/// (`build_local_dev_root_filesystem` → `mount_local_dev_database_roots`).
+///
+/// Mounts `database` across the control-plane roots (`/tenants`, `/memory`,
+/// `/events`) of `root` exactly as the libSQL local-dev boot path does, so
+/// downstream integration tests (the Reborn integration-test framework in
+/// `tests/support/reborn/`) construct one real `LibSqlRootFilesystem` over a
+/// composite without a second copy of the mount wiring (design spec §3.2).
+/// For tests only — gated behind `test-support`, so it ships zero bytes in
+/// production binaries.
+pub fn mount_local_dev_database_roots_for_test<F>(
+    root: &mut ironclaw_filesystem::CompositeRootFilesystem,
+    database: std::sync::Arc<F>,
+) -> Result<(), crate::RebornBuildError>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+{
+    crate::factory::mount_local_dev_database_roots(root, database)
+}
