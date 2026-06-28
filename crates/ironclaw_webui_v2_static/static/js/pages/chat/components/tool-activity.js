@@ -127,10 +127,23 @@ function ToolActivityCard({ activity, nested = false }) {
     toolParameters,
     toolResultPreview,
   });
+  const hasTerminalNotice = isTerminalToolNotice(toolStatus);
+  const hasAutoExpandableContent = hasAutoExpandableToolContent({
+    toolStatus,
+    toolDetail,
+    toolParameters,
+    toolResultPreview,
+  });
   const [expanded, setExpanded] = React.useState(shouldAutoExpand);
+  const previousAutoExpandRef = React.useRef({ toolStatus, hasAutoExpandableContent });
   React.useEffect(() => {
-    if (shouldAutoExpand) setExpanded(true);
-  }, [shouldAutoExpand, toolStatus, toolDetail, toolParameters, toolResultPreview]);
+    const previous = previousAutoExpandRef.current;
+    const becameTerminalNotice = hasTerminalNotice && previous.toolStatus !== toolStatus;
+    const gainedAutoExpandableContent =
+      hasAutoExpandableContent && !previous.hasAutoExpandableContent;
+    if (becameTerminalNotice || gainedAutoExpandableContent) setExpanded(true);
+    previousAutoExpandRef.current = { toolStatus, hasAutoExpandableContent };
+  }, [hasTerminalNotice, hasAutoExpandableContent, toolStatus]);
 
   const dotClass = DOT_STYLE[toolStatus] || DOT_STYLE.running;
   const hasDuration = toolDurationMs !== null && toolDurationMs !== undefined;
@@ -194,7 +207,22 @@ function ToolActivityCard({ activity, nested = false }) {
 }
 
 function shouldAutoExpandToolCard({ toolStatus, toolDetail, toolParameters, toolResultPreview }) {
-  if (toolStatus === "error" || toolStatus === "declined") return true;
+  return (
+    isTerminalToolNotice(toolStatus) ||
+    hasAutoExpandableToolContent({ toolStatus, toolDetail, toolParameters, toolResultPreview })
+  );
+}
+
+function isTerminalToolNotice(toolStatus) {
+  return toolStatus === "error" || toolStatus === "declined";
+}
+
+function hasAutoExpandableToolContent({
+  toolStatus,
+  toolDetail,
+  toolParameters,
+  toolResultPreview,
+}) {
   return (
     (toolStatus === "running" || toolStatus === "success") &&
     Boolean(toolDetail || toolParameters || toolResultPreview)

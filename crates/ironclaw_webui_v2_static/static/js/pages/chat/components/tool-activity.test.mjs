@@ -33,6 +33,7 @@ function renderToolCard(activity) {
 function createToolCardHarness() {
   const hooks = {
     state: [],
+    refs: [],
     setters: [],
     effectDeps: [],
     hookIndex: 0,
@@ -52,6 +53,13 @@ function createToolCardHarness() {
       },
       useId: () => "tool-card-detail",
       useMemo: (factory) => factory(),
+      useRef: (initial) => {
+        const index = hooks.hookIndex++;
+        if (!(index in hooks.refs)) {
+          hooks.refs[index] = { current: initial };
+        }
+        return hooks.refs[index];
+      },
       useState: (initial) => {
         const index = hooks.hookIndex++;
         if (!(index in hooks.state)) {
@@ -146,6 +154,30 @@ test("ToolActivityCard expands when live details arrive on an existing running c
 
   assert.ok(hasValue(updated, "true"));
   assert.ok(hasComponentNamed(updated, "ToolDetailPanel"));
+});
+
+test("ToolActivityCard keeps a manually collapsed running card collapsed on later live updates", () => {
+  const harness = createToolCardHarness();
+  const running = runningActivity({
+    toolDetail: "deployment status",
+    toolParameters: "query: deployment status",
+  });
+
+  assert.ok(hasComponentNamed(harness.render(running), "ToolDetailPanel"));
+
+  harness.collapse();
+  const collapsed = harness.render(running);
+  assert.ok(hasValue(collapsed, "false"));
+  assert.equal(hasComponentNamed(collapsed, "ToolDetailPanel"), false);
+
+  const updated = runningActivity({
+    toolDetail: "deployment status: still running",
+    toolParameters: "query: deployment status",
+    toolResultPreview: "waiting for deployment",
+  });
+  const stillCollapsed = harness.render(updated);
+  assert.ok(hasValue(stillCollapsed, "false"));
+  assert.equal(hasComponentNamed(stillCollapsed, "ToolDetailPanel"), false);
 });
 
 test("ToolActivityCard expands when a successful preview arrives", () => {
