@@ -2277,6 +2277,7 @@ pub(crate) async fn build_default_local_dev_database_roots(
 /// (which is private to this module).
 ///
 /// Used by `test_support::build_default_local_dev_database_roots_for_test`.
+#[cfg(feature = "test-support")]
 pub(crate) async fn mount_default_local_dev_database_roots(
     root: &Path,
     composite: &mut CompositeRootFilesystem,
