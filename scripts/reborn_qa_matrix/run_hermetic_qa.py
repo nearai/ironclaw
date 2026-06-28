@@ -2917,6 +2917,42 @@ WEBUI_V2_STREAMING_RUN_CONTROL_HANDLER_COMMAND = CommandSpec(
     ],
 )
 
+WEBUI_V2_STREAMING_RUN_CONTROL_SERVED_E2E_COMMAND = CommandSpec(
+    name="webui_v2_streaming_run_control_served_e2e",
+    description=(
+        "Served WebUI v2 streaming/run-control API tests through a real "
+        "ironclaw-reborn process: SSE bearer and query-token authentication, "
+        "projection snapshot delivery, per-caller SSE capacity, token-shim "
+        "scope, cancel route dispatch, gate-resolution error/auth handling, "
+        "and sanitized control-route responses."
+    ),
+    env={"CARGO_INCREMENTAL": "0"},
+    argv=[
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "pytest",
+        "--with",
+        "pytest-asyncio",
+        "--with",
+        "pytest-playwright",
+        "--with",
+        "playwright",
+        "--with",
+        "pytest-timeout",
+        "--with",
+        "aiohttp",
+        "--with",
+        "httpx",
+        "--with",
+        "cryptography",
+        "pytest",
+        "tests/e2e/scenarios/test_reborn_webui_v2_streaming_run_control_api.py",
+        "-q",
+    ],
+)
+
 WEBUI_V2_AUTOMATIONS_TRACE_OUTBOUND_CHANNEL_HANDLER_COMMAND = CommandSpec(
     name="webui_v2_automations_trace_outbound_channel_handler_contract",
     description=(
@@ -4351,7 +4387,7 @@ CASES: dict[str, CaseSpec] = {
     "webui_v2_streaming_run_control_api_regression": CaseSpec(
         name="webui_v2_streaming_run_control_api_regression",
         feature="WebUI v2 streaming and run-control APIs",
-        category="Hermetic WebUI v2 API Regression",
+        category="Served WebUI v2 Streaming and Run-Control API E2E",
         qa_matrix_test_ids=[
             "REBCLI-044-TC-01",
             "REBCLI-044-TC-02",
@@ -4360,12 +4396,15 @@ CASES: dict[str, CaseSpec] = {
             "REBCLI-044-TC-05",
             "REBCLI-044-TC-06",
         ],
-        commands=[WEBUI_V2_STREAMING_RUN_CONTROL_HANDLER_COMMAND],
+        commands=[WEBUI_V2_STREAMING_RUN_CONTROL_SERVED_E2E_COMMAND],
         notes=(
-            "Runs a focused caller-level WebUI v2 router contract for SSE "
-            "event subscriptions, cursor handling, cancel, and gate "
-            "resolution. Browser approval UX overlap remains referenced to "
-            "PR #5348 instead of duplicated in this matrix branch."
+            "Runs served WebUI v2 streaming/run-control coverage through a "
+            "real ironclaw-reborn process for SSE bearer and query-token "
+            "authentication, projection snapshot delivery, per-caller SSE "
+            "capacity, token-shim scoping, cancel dispatch, and "
+            "gate-resolution auth/error handling. REBCLI-044-TC-07 is "
+            "support-substrate cargo coverage and remains owned by normal CI "
+            "instead of this QA lane."
         ),
     ),
     "webui_v2_automations_trace_outbound_channel_api_regression": CaseSpec(
