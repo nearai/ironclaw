@@ -49,6 +49,14 @@ slack-v2-host-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/slack-v2-host-beta",
 ]
+# Multi-user capability policy admin surface (owner/admin/member roles,
+# per-user capability grants, user-directory REST). Build the standalone
+# binary with `--features webui-v2-beta,capability-policy`, then set
+# `IRONCLAW_REBORN_CAPABILITY_POLICY=1` to enforce member default-DENY.
+capability-policy = [
+    "webui-v2-beta",
+    "ironclaw_reborn_composition/capability-policy",
+]
 openai-compat-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/openai-compat-beta",

@@ -9,7 +9,19 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
+
+// Multi-user capability policy admin surface (#5385). Compiled only with the
+// `capability-policy` feature.
+#[cfg(feature = "capability-policy")]
+const WEBUI_V2_PATTERN_ADMIN_USERS: &str = "/api/webchat/v2/admin/users";
+#[cfg(feature = "capability-policy")]
+const WEBUI_V2_PATTERN_ADMIN_USER: &str = "/api/webchat/v2/admin/users/{user_id}";
+#[cfg(feature = "capability-policy")]
+const WEBUI_V2_PATTERN_ADMIN_USER_ROLE: &str = "/api/webchat/v2/admin/users/{user_id}/role";
+#[cfg(feature = "capability-policy")]
+const WEBUI_V2_PATTERN_ADMIN_USER_CAPABILITY: &str =
+    "/api/webchat/v2/admin/users/{user_id}/capabilities/{capability_id}";
 use ironclaw_product_workflow::RebornServicesApi;
 use serde::Serialize;
 
@@ -275,7 +287,10 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         )
         .route(
             WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION,
-            post(handlers::set_settings_tool_permission),
+            // PUT is the canonical verb for setting one capability's pref; POST
+            // is kept for backward compatibility.
+            put(handlers::set_settings_tool_permission)
+                .post(handlers::set_settings_tool_permission),
         )
         .route(
             WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,
@@ -368,6 +383,31 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             .route(
                 WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE,
                 post(handlers::run_operator_service_lifecycle),
+            );
+    }
+    // Multi-user capability policy admin surface (#5385). Mounted only with the
+    // `capability-policy` feature and when the authenticator exposes the
+    // operator route plane (the directory authenticator does). Per-request
+    // authority (owner > admin > member, owner-protection, no-self-delete) is
+    // re-checked in the facade against the caller's directory role.
+    #[cfg(feature = "capability-policy")]
+    if options.mount_operator_routes {
+        router = router
+            .route(
+                WEBUI_V2_PATTERN_ADMIN_USERS,
+                post(handlers::admin_create_user).get(handlers::admin_list_users),
+            )
+            .route(
+                WEBUI_V2_PATTERN_ADMIN_USER,
+                delete(handlers::admin_delete_user),
+            )
+            .route(
+                WEBUI_V2_PATTERN_ADMIN_USER_ROLE,
+                put(handlers::admin_set_user_role),
+            )
+            .route(
+                WEBUI_V2_PATTERN_ADMIN_USER_CAPABILITY,
+                put(handlers::admin_set_user_capability),
             );
     }
     router.with_state(state)

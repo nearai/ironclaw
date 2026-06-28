@@ -23,6 +23,12 @@ webui-v2-beta = [
     "dep:futures",
     "dep:tokio",
 ]
+# Compile in the multi-user capability-policy admin surface on top of the v2
+# routes: user-directory CRUD, owner/admin/member roles, and per-user
+# capability grants (`/api/webchat/v2/admin/users*`). Off by default; the
+# standalone `ironclaw-reborn serve` opts in with `--features capability-policy`.
+# Implies `webui-v2-beta` (the admin routes ride the same router + facade).
+capability-policy = ["webui-v2-beta"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

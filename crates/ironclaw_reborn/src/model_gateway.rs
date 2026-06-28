@@ -822,9 +822,12 @@ where
             .tool_definitions()
             .map_err(map_capability_host_error)?;
         if tracing::enabled!(tracing::Level::DEBUG) {
+            // Cover the full offered surface (the host builtin set is ~35, plus a
+            // handful of static extension caps) so the per-user capability policy
+            // is auditable from the log, not truncated to an arbitrary prefix.
             let tool_name_sample = tool_definitions
                 .iter()
-                .take(20)
+                .take(64)
                 .map(|definition| definition.name.as_str())
                 .collect::<Vec<_>>();
             debug!(

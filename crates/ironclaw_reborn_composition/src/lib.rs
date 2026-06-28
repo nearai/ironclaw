@@ -32,6 +32,11 @@ mod available_extensions;
 mod budget;
 mod budget_events;
 mod bundled_skills;
+// Multi-user capability policy (#5385): directory store, per-user surface
+// resolver, directory authenticator. Gated with the WebChat v2 surface (which
+// pulls in libSQL for the directory document).
+#[cfg(feature = "webui-v2-beta")]
+mod capability_policy;
 mod communication_context;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod credential_refresh_worker;
@@ -345,6 +350,10 @@ pub use slack_serve::{
 };
 pub use trajectory_observer::RebornTrajectoryObserver;
 pub use webui::{RebornWebuiBundle, build_webui_services};
+// Multi-user capability policy (#5385): the directory authenticator the serve
+// command wraps the auth surface with when the policy is enabled.
+#[cfg(feature = "webui-v2-beta")]
+pub use capability_policy::DirectoryAuthenticator;
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;
 #[cfg(feature = "webui-v2-beta")]
