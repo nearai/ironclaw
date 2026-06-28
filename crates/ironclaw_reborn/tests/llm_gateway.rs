@@ -504,6 +504,7 @@ async fn gateway_rejects_empty_tool_capable_stop_response_without_text_only_retr
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
         reasoning: None,
+        reasoning_details: None,
     }));
     let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
@@ -607,6 +608,7 @@ async fn gateway_preserves_structured_tool_calls_when_content_has_legacy_marker(
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
         reasoning: Some("response reasoning".to_string()),
+        reasoning_details: None,
     }));
     let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
@@ -698,6 +700,7 @@ async fn gateway_repairs_oversized_provider_tool_arguments_before_registration()
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: Some("response reasoning".to_string()),
+            reasoning_details: None,
         },
         ToolCompletionResponse {
             content: Some("Finished after repair.".to_string()),
@@ -708,6 +711,7 @@ async fn gateway_repairs_oversized_provider_tool_arguments_before_registration()
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: None,
+            reasoning_details: None,
         },
     ]));
     let gateway = LlmProviderModelGateway::with_provider_identity(
@@ -3054,6 +3058,7 @@ impl ToolAwareProvider {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: Some("response reasoning".to_string()),
+            reasoning_details: None,
         })
     }
 
@@ -3067,6 +3072,7 @@ impl ToolAwareProvider {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: None,
+            reasoning_details: None,
         })
     }
 

@@ -350,7 +350,7 @@ where
         request: BlockedEvidenceRequest<'_>,
     ) -> Result<bool, TurnError> {
         match request.blocked.kind {
-            LoopBlockedKind::Auth => {}
+            LoopBlockedKind::Auth | LoopBlockedKind::ExternalTool => {}
             LoopBlockedKind::Approval => {
                 if !self.verify_pending_approval_gate(&request).await? {
                     return Ok(false);
@@ -365,9 +365,12 @@ where
                 // A BeforeBlock checkpoint alone is not sufficient for approval,
                 // resource, or dependent-run gates: #3424 requires a durable
                 // pending gate/process ref for those block types. Auth gates use
-                // the blocked turn state itself as the product-visible pending ref,
-                // so verifying the pre-block checkpoint is enough to let the
-                // applier persist that state.
+                // the blocked turn state itself as the product-visible pending
+                // ref. External-tool gates are expected to have a parked call
+                // recorded by the external-tool catalog, but this applier only
+                // validates the checkpoint and blocked-state refs. For both,
+                // verifying the pre-block checkpoint is enough to let the
+                // applier persist the blocked state.
                 return Ok(false);
             }
             // `LoopBlockedKind` is `#[non_exhaustive]` in a sibling crate, so

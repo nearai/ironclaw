@@ -55,6 +55,24 @@ pub fn nearai_test_config(model: impl Into<String>) -> crate::config::LlmConfig 
     }
 }
 
+/// Test-only public door to the internal decorator-chain assembler.
+///
+/// `apply_decorator_chain` is `pub(crate)` — production assembles the chain
+/// internally and it is not directly callable cross-crate. This wrapper function,
+/// gated to test builds (the `testing` feature or `cfg(test)`), is the sole
+/// cross-crate entry point: it forwards directly to `apply_decorator_chain`,
+/// letting a test harness inject a scripted raw provider beneath the real
+/// decorator chain without widening the production API. (A `pub use` re-export
+/// of a `pub(crate)` item fails E0364; hence a forwarding wrapper rather than a
+/// re-export.)
+pub async fn provider_chain_over(
+    raw: std::sync::Arc<dyn crate::provider::LlmProvider>,
+    config: &crate::config::LlmConfig,
+    session: std::sync::Arc<crate::session::SessionManager>,
+) -> Result<std::sync::Arc<dyn crate::provider::LlmProvider>, crate::error::LlmError> {
+    crate::apply_decorator_chain(raw, config, session).await
+}
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -253,6 +271,7 @@ impl LlmProvider for StubLlm {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: None,
+            reasoning_details: None,
         })
     }
 }
