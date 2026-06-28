@@ -422,6 +422,88 @@ def _non_empty_env(name: str, default: str) -> str:
     return default
 
 
+def _write_minimal_reborn_config(path: Path, *, include_slack: bool) -> None:
+    api_key_env = os.environ.get(
+        "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV",
+        "NEARAI_API_KEY" if os.environ.get("NEARAI_API_KEY") else "LIVE_OPENAI_COMPATIBLE_API_KEY",
+    )
+    api_key = env_secret(api_key_env)
+    if not api_key:
+        raise LiveQaError(
+            f"Reborn home is missing config.toml and {api_key_env} is unset; "
+            "set REBORN_WEBUI_V2_LIVE_QA_HOME to a complete Reborn home or provide live LLM env."
+        )
+    provider_id = os.environ.get(
+        "REBORN_WEBUI_V2_LIVE_QA_LLM_PROVIDER_ID",
+        "nearai",
+    )
+    model = os.environ.get(
+        "REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL",
+        os.environ.get("LIVE_OPENAI_COMPATIBLE_MODEL", "deepseek-ai/DeepSeek-V4-Flash"),
+    )
+    base_url = os.environ.get("REBORN_WEBUI_V2_LIVE_QA_LLM_BASE_URL")
+    if provider_id != "nearai" and not base_url:
+        base_url = os.environ.get("LIVE_OPENAI_COMPATIBLE_BASE_URL", "https://cloud-api.near.ai/v1")
+    llm_default_lines = [
+        f'provider_id = "{provider_id}"',
+        f'model = "{model}"',
+        f'api_key_env = "{api_key_env}"',
+    ]
+    if base_url:
+        llm_default_lines.append(f'base_url = "{base_url}"')
+    slack_lines: list[str] = []
+    if include_slack:
+        slack_installation_id = _non_empty_env(
+            "REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID",
+            "local-dev-installation",
+        )
+        slack_signing_secret_env = _non_empty_env(
+            "REBORN_WEBUI_V2_LIVE_QA_SLACK_SIGNING_SECRET_ENV",
+            "IRONCLAW_REBORN_SLACK_SIGNING_SECRET",
+        )
+        slack_bot_token_env = _non_empty_env(
+            "REBORN_WEBUI_V2_LIVE_QA_SLACK_BOT_TOKEN_ENV",
+            "IRONCLAW_REBORN_SLACK_BOT_TOKEN",
+        )
+        slack_team_id = _non_empty_env(
+            "REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID",
+            _slack_team_id_from_bot_token_env(slack_bot_token_env) or "local-dev-team",
+        )
+        slack_api_app_id = _non_empty_env(
+            "REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID",
+            "local-dev-app-id",
+        )
+        slack_lines = [
+            "[slack]",
+            "enabled = true",
+            f'installation_id = "{slack_installation_id}"',
+            f'team_id = "{slack_team_id}"',
+            f'api_app_id = "{slack_api_app_id}"',
+            f'signing_secret_env = "{slack_signing_secret_env}"',
+            f'bot_token_env = "{slack_bot_token_env}"',
+            "",
+        ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            [
+                'api_version = "ironclaw.runtime/v1"',
+                "",
+                "[boot]",
+                'profile = "local-dev"',
+                "",
+                "[llm]",
+                "",
+                "[llm.default]",
+                *llm_default_lines,
+                "",
+                *slack_lines,
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 def _slack_enabled(config_text: str) -> bool:
     in_slack = False
     for raw_line in config_text.splitlines():
@@ -2108,6 +2190,8 @@ def prepare_reborn_home(
     prepared_home.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source_home, prepared_home, ignore=_ignore)
     config_path = prepared_home / "config.toml"
+    if not config_path.exists() and (prepared_home / "local-dev" / "reborn-local-dev.db").exists():
+        _write_minimal_reborn_config(config_path, include_slack=needs_slack)
     route_configured_from_env = _append_slack_channel_route_if_configured(
         config_path,
         auth_user_id,
@@ -2251,16 +2335,6 @@ def prepare_reborn_home(
 
 
 def create_generated_reborn_home(path: Path, *, include_slack: bool = False) -> Path:
-    api_key_env = os.environ.get(
-        "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV",
-        "NEARAI_API_KEY" if os.environ.get("NEARAI_API_KEY") else "LIVE_OPENAI_COMPATIBLE_API_KEY",
-    )
-    api_key = env_secret(api_key_env)
-    if not api_key:
-        raise LiveQaError(
-            f"Reborn home does not exist and {api_key_env} is unset; "
-            "set REBORN_WEBUI_V2_LIVE_QA_HOME or provide live LLM env."
-        )
     provider_id = os.environ.get(
         "REBORN_WEBUI_V2_LIVE_QA_LLM_PROVIDER_ID",
         "nearai",
@@ -2269,69 +2343,14 @@ def create_generated_reborn_home(path: Path, *, include_slack: bool = False) -> 
         "REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL",
         os.environ.get("LIVE_OPENAI_COMPATIBLE_MODEL", "deepseek-ai/DeepSeek-V4-Flash"),
     )
-    base_url = os.environ.get("REBORN_WEBUI_V2_LIVE_QA_LLM_BASE_URL")
-    if provider_id != "nearai" and not base_url:
-        base_url = os.environ.get("LIVE_OPENAI_COMPATIBLE_BASE_URL", "https://cloud-api.near.ai/v1")
-    llm_default_lines = [
-        f'provider_id = "{provider_id}"',
-        f'model = "{model}"',
-        f'api_key_env = "{api_key_env}"',
-    ]
-    if base_url:
-        llm_default_lines.append(f'base_url = "{base_url}"')
-    slack_lines: list[str] = []
-    if include_slack:
-        slack_installation_id = _non_empty_env(
-            "REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID",
-            "local-dev-installation",
-        )
-        slack_signing_secret_env = _non_empty_env(
-            "REBORN_WEBUI_V2_LIVE_QA_SLACK_SIGNING_SECRET_ENV",
-            "IRONCLAW_REBORN_SLACK_SIGNING_SECRET",
-        )
-        slack_bot_token_env = _non_empty_env(
-            "REBORN_WEBUI_V2_LIVE_QA_SLACK_BOT_TOKEN_ENV",
-            "IRONCLAW_REBORN_SLACK_BOT_TOKEN",
-        )
-        slack_team_id = _non_empty_env(
-            "REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID",
-            _slack_team_id_from_bot_token_env(slack_bot_token_env) or "local-dev-team",
-        )
-        slack_api_app_id = _non_empty_env(
-            "REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID",
-            "local-dev-app-id",
-        )
-        slack_lines = [
-            "[slack]",
-            "enabled = true",
-            f'installation_id = "{slack_installation_id}"',
-            f'team_id = "{slack_team_id}"',
-            f'api_app_id = "{slack_api_app_id}"',
-            f'signing_secret_env = "{slack_signing_secret_env}"',
-            f'bot_token_env = "{slack_bot_token_env}"',
-            "",
-        ]
     path.mkdir(parents=True, exist_ok=True)
-    (path / "config.toml").write_text(
-        "\n".join(
-            [
-                'api_version = "ironclaw.runtime/v1"',
-                "",
-                "[boot]",
-                'profile = "local-dev"',
-                "",
-                "[llm]",
-                "",
-                "[llm.default]",
-                *llm_default_lines,
-                "",
-                *slack_lines,
-            ]
-        ),
-        encoding="utf-8",
-    )
+    _write_minimal_reborn_config(path / "config.toml", include_slack=include_slack)
     google_seed = _seed_generated_google_product_auth_if_configured(path, _auth_user_id())
     github_seed = _seed_generated_github_product_auth_if_configured(path, _auth_user_id())
+    api_key_env = os.environ.get(
+        "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV",
+        "NEARAI_API_KEY" if os.environ.get("NEARAI_API_KEY") else "LIVE_OPENAI_COMPATIBLE_API_KEY",
+    )
     print(
         "[reborn-webui-v2-live-qa] Generated temp Reborn home from live LLM env "
         f"(provider_id={provider_id}, model={model}, api_key_env={api_key_env}).",

@@ -702,6 +702,37 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertEqual(slack["config_team_id"], "local-dev-team")
             self.assertEqual(slack["config_api_app_id"], "local-dev-app-id")
 
+    def test_prepare_reborn_home_synthesizes_config_for_copied_db_home(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_home = root / "source-home"
+            (source_home / "local-dev").mkdir(parents=True)
+            run_live_qa._root_filesystem_create_table(
+                source_home / "local-dev" / "reborn-local-dev.db"
+            )
+            args = argparse.Namespace(
+                output_dir=root / "out",
+                reborn_home=source_home,
+                require_slack_live=False,
+            )
+            env = {
+                "LIVE_OPENAI_COMPATIBLE_API_KEY": "fake-live-llm-key",
+                "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV": "LIVE_OPENAI_COMPATIBLE_API_KEY",
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                prepared = run_live_qa.prepare_reborn_home(
+                    args,
+                    ["qa_3a_slack_connect"],
+                )
+
+            config = (prepared.path / "config.toml").read_text(encoding="utf-8")
+            self.assertIn('profile = "local-dev"', config)
+            self.assertIn("[llm.default]", config)
+            self.assertIn("[slack]", config)
+            self.assertIn('api_key_env = "LIVE_OPENAI_COMPATIBLE_API_KEY"', config)
+            self.assertFalse((source_home / "config.toml").exists())
+
     def test_generated_slack_home_ignores_empty_ci_vars(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "reborn-home"

@@ -86,6 +86,16 @@ Local runs normally reuse a copied Reborn home:
 
 - `REBORN_WEBUI_V2_LIVE_QA_HOME=/tmp/ironclaw-reborn-real-slack`
 
+The copied home must include either a root `config.toml` or a
+`local-dev/reborn-local-dev.db` file so the runner can synthesize a minimal
+temporary config for the copied run. If the copied DB stores encrypted provider
+secrets, it must also include
+`local-dev/.reborn-local-dev-secrets-master-key`; without that local master key
+the runner can see provider metadata but cannot decrypt copied Slack tokens or
+Google product-auth refresh secrets. Copy this file from the same source Reborn
+home as the DB, or export the required provider env vars directly before running
+the local lane.
+
 When a copied home is not available, the lane can generate a temporary Reborn
 home from CI secrets. The generated home can seed Google product-auth from the
 existing auth-live Google token secrets:
