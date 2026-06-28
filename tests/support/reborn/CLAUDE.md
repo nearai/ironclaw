@@ -72,7 +72,16 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
 - `scripted_provider.rs` — `scripted_trace_llm(..)`, the `TraceLlm` raw-provider seam.
 - `reply.rs` — `RebornScriptedReply` (the one-line-per-turn façade).
 - `builder.rs` — `RebornIntegrationHarness` + builder, hermetic env, the
-  `assert_reply_contains` assertion (co-located with the harness fields).
+  slice-1/2 asserts (`assert_reply_contains` / `assert_tool_invoked` /
+  `assert_egress_request_matching`, co-located with the harness fields) plus the
+  `pub(super)` capture accessors (`captured_egress_requests` /
+  `captured_capability_results`) the assertion file reads.
+- `http_matcher.rs` — `ScriptedHttpResponse`, the URL/method/capability-keyed
+  HTTP scripting layer over `RecordingRuntimeHttpEgress` (install via
+  `.with_keyed_http_responses([..])`).
+- `assertions.rs` — the richer egress + tool-result assertions
+  (`assert_egress_count` / `assert_egress_url_order` / `assert_egress_method_order`
+  / `assert_egress_body_contains` / `assert_tool_result_contains`).
 - Tests live as flat `tests/reborn_*.rs` (Cargo requires top-level test files).
 
 Module paths: each `tests/reborn_*.rs` declares both `#[path = "support/reborn/mod.rs"] mod reborn_support;` and `mod support;`, then `use reborn_support::builder::RebornIntegrationHarness;` / `use reborn_support::reply::RebornScriptedReply;`. Inside the support tree, siblings reference each other via `super::` and `trace_llm` via `crate::support::trace_llm` (there is no `crate::support::reborn` path). Copy the includes from `tests/reborn_integration_greeting.rs`.
@@ -81,10 +90,19 @@ Design: `docs/superpowers/specs/2026-06-26-reborn-integration-test-framework-des
 
 ## Implemented now vs planned
 
-Slice 1 ships the spine + one text-reply test. Slice 2 (this PR) ships
-`RebornScriptedReply::tool_call(..)` + the CapabilityId→ProviderToolName mapping.
+Slice 1 ships the spine + one text-reply test. Slice 2 ships
+`RebornScriptedReply::tool_call(..)` + the CapabilityId→ProviderToolName mapping
++ `RecordingRuntimeHttpEgress` (FIFO body) + `assert_tool_invoked` /
+`assert_egress_request_matching` (substring). Slice 4 (this PR) ships the §3.6
+P1-ergonomics **URL/method/capability-keyed HTTP matcher**
+(`ScriptedHttpResponse` + `.with_keyed_http_responses([..])` — different scripted
+body per URL for a multi-step tool-HTTP flow) and the richer **egress assertion
+API** in the now-extracted `assertions.rs` (count / URL order / method order /
+per-URL body / surfaced tool result). The keyed matcher is the canonical
+HTTP-matcher API; an MCP/OAuth interceptor with per-URL response needs folds
+into `ScriptedHttpResponse` rather than adding a parallel matcher.
 **Planned (do not assume present; add behind a test that exercises it — no dead code):**
 `StorageMode::LibSql` (real SQLite on tmp) and the InMemory-vs-libSQL backend
 matrix; inert process port + `.with_live_shell()` / `.with_live_http_egress()`
-opt-ins; outbound/HTTP/secrets/MCP capture wiring; a dedicated `assertions.rs`
-once the `assert_*` family grows; the pre-commit test-style check.
+opt-ins; outbound/secrets/MCP capture wiring + `.with_mock_mcp(..)`; the
+pre-commit test-style check.
