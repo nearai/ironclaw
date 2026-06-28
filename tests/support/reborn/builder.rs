@@ -10,9 +10,12 @@
 //! retry/routing/circuit/cache decorators for real.
 //!
 //! Slice 1 scope: InMemory storage, single text reply, `build → submit_turn →
-//! assert_reply_contains`. A future `StorageMode::LibSql` variant is a
-//! non-breaking addition (the builder defaults to InMemory directly today rather
-//! than introducing a one-variant enum).
+//! assert_reply_contains`.
+//! Slice 3: `StorageMode { InMemory, LibSql }` — the builder defaults to
+//! `InMemory`; `.storage(StorageMode::LibSql)` selects a real SQLite file in a
+//! per-`build()` `TempDir`. Both modes ride **one** `CompositeRootFilesystem`
+//! at `/tenants/...` so thread history and turn state share the same backend
+//! and the same production path layout.
 
 // Shared integration-test support: not every binary that mounts the
 // `reborn_support` tree consumes this module — `support_unit_tests.rs` mounts
@@ -21,11 +24,15 @@
 // Module-level allow matches `assertions.rs`/`test_channel.rs`/`live_mission_helpers.rs`.
 #![allow(dead_code)]
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_filesystem::{CompositeRootFilesystem, InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::{
+    MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, VirtualPath,
+};
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_support::{
@@ -57,13 +64,10 @@ use ironclaw_turns::{
     LoopCheckpointStore, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
 };
 
-use ironclaw_host_api::RuntimeHttpEgressRequest;
-
-use super::filesystem::BlockingTurnStatePutFilesystem;
 use super::harness::{
     EmptyIdentityContextSource, HarnessCapabilityMode, HarnessCapabilityRecorder,
-    HarnessTurnBackend, HarnessTurnStorageBackend, HostRuntimeCapabilityHarness,
-    RecordedCapabilityResult, RecordingTestCapabilityPort, scoped_turns_fs, test_product_scope,
+    HarnessTurnBackend, HostRuntimeCapabilityHarness, RecordedCapabilityResult,
+    RecordingTestCapabilityPort, test_product_scope,
 };
 use super::http_matcher::ScriptedHttpResponse;
 use super::reply::RebornScriptedReply;
@@ -78,6 +82,33 @@ type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 const HARNESS_ACTOR_ID: &str = "host-user";
 /// Model profile the planned runtime requests; the gateway policy permits it.
 const INTERACTIVE_MODEL_PROFILE: &str = "interactive_model";
+
+/// Selects the durable storage backend mounted into the integration harness's
+/// `CompositeRootFilesystem` (design spec §3.2, §3.8).
+///
+/// Both modes ride **one** composite at the production path layout
+/// `/tenants/<tenant>/users/<user>/...` — the only difference is which
+/// `RootFilesystem` is mounted under `/tenants`, `/memory`, and `/events`.
+///
+/// `InMemory` is the default: it's fast, needs no filesystem, and covers
+/// all assertion cases that don't require on-disk durability.
+/// `LibSql` creates a real SQLite file in a per-`build()` `TempDir`, runs
+/// the full libSQL migration suite, and lets `assert_reply_persists_after_reopen`
+/// verify that data survived serialization to disk (design §3.8 guardrail).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageMode {
+    /// In-memory backend: fast, no filesystem I/O, default.
+    InMemory,
+    /// Real SQLite on a per-test `TempDir`: full SQL + migrations + CAS.
+    /// Enables `assert_reply_persists_after_reopen`.
+    LibSql,
+}
+
+impl Default for StorageMode {
+    fn default() -> Self {
+        Self::InMemory
+    }
+}
 
 /// Selects the capability backend the integration harness wires.
 enum RebornCapabilityBackend {
@@ -97,12 +128,22 @@ pub struct RebornIntegrationHarnessBuilder {
     replies: Vec<RebornScriptedReply>,
     capability: RebornCapabilityBackend,
     keyed_http_responses: Vec<ScriptedHttpResponse>,
+    storage: StorageMode,
 }
 
 impl RebornIntegrationHarnessBuilder {
     /// Set the scripted model replies (consumed in order at the raw-provider seam).
     pub fn script(mut self, replies: impl IntoIterator<Item = RebornScriptedReply>) -> Self {
         self.replies = replies.into_iter().collect();
+        self
+    }
+
+    /// Select the durable storage backend for this harness.
+    ///
+    /// Defaults to [`StorageMode::InMemory`]. Pass [`StorageMode::LibSql`] to
+    /// test on-disk durability via `assert_reply_persists_after_reopen`.
+    pub fn storage(mut self, mode: StorageMode) -> Self {
+        self.storage = mode;
         self
     }
 
@@ -166,13 +207,24 @@ impl RebornIntegrationHarnessBuilder {
             binding.subject_user_id.clone(),
         );
 
-        // --- durable stores (InMemory) --------------------------------------
-        let thread_harness = RebornThreadHarness::filesystem_temp(thread_scope.clone())?;
+        // --- one composite for threads + turns (slice 3) -------------------
+        // `_turn_root` keeps the TempDir alive for the harness's lifetime.
+        // Post-migration: this TempDir is the durable root for the whole
+        // composite (thread history + turn state), not just turns. The libSQL
+        // `.db` file lives in this directory; InMemory ignores the path.
         let turn_root = Arc::new(tempfile::tempdir()?);
-        let turn_backend: Arc<HarnessTurnStorageBackend> =
-            Arc::new(BlockingTurnStatePutFilesystem::new(InMemoryBackend::new()));
+        let composite = build_storage_composite(self.storage, turn_root.path()).await?;
+
+        let thread_harness = RebornThreadHarness::filesystem_shared_composite(
+            thread_scope.clone(),
+            Arc::clone(&composite),
+            Arc::clone(&turn_root),
+        )?;
         let turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>> = Arc::new(
-            FilesystemTurnStateStore::new(scoped_turns_fs(turn_backend, &binding)?),
+            FilesystemTurnStateStore::new(scoped_turns_fs_composite(
+                Arc::clone(&composite),
+                &binding,
+            )?),
         );
         let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
@@ -317,11 +369,15 @@ pub struct RebornIntegrationHarness {
     binding: ResolvedBinding,
     turn_scope: TurnScope,
     turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
-    thread_harness: RebornThreadHarness,
+    thread_harness: RebornThreadHarness<CompositeRootFilesystem>,
     scheduler_handle: Option<ironclaw_host_runtime::TurnRunSchedulerHandle>,
     event_seq: AtomicU64,
     capability_recorder: HarnessCapabilityRecorder,
     _product_harness: super::product_workflow::RebornProductWorkflowHarness,
+    /// Keeps the per-`build()` TempDir alive for the harness's lifetime.
+    /// This directory is the durable root for the whole composite (thread
+    /// history + turn state). For `StorageMode::LibSql`, the SQLite file lives
+    /// here; for `StorageMode::InMemory`, only the LLM session cache does.
     _turn_root: Arc<tempfile::TempDir>,
 }
 
@@ -338,6 +394,7 @@ impl RebornIntegrationHarness {
             replies: Vec::new(),
             capability: RebornCapabilityBackend::Echo,
             keyed_http_responses: Vec::new(),
+            storage: StorageMode::default(),
         }
     }
 
@@ -369,6 +426,24 @@ impl RebornIntegrationHarness {
     /// it can move to a dedicated `assertions.rs` with deliberate field accessors.)
     pub async fn assert_reply_contains(&self, text: &str) -> HarnessResult<()> {
         self.thread_harness
+            .assert_final_reply(self.binding.thread_id.clone(), text)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Assert the finalized reply survives a close-and-reopen of the thread
+    /// service (design §3.8 durability guardrail).
+    ///
+    /// Reconstructs a fresh `FilesystemSessionThreadService` over the same
+    /// `CompositeRootFilesystem` backend — for `StorageMode::LibSql` this
+    /// creates a new read path over the same SQLite file on disk, proving
+    /// the reply was serialized rather than cached in process. For
+    /// `StorageMode::InMemory` the backend is still in memory; this asserts
+    /// only that the service can be re-instantiated (the durability assertion
+    /// is inherently `LibSql`-only).
+    pub async fn assert_reply_persists_after_reopen(&self, text: &str) -> HarnessResult<()> {
+        let reopened = self.thread_harness.reopened()?;
+        reopened
             .assert_final_reply(self.binding.thread_id.clone(), text)
             .await
             .map_err(Into::into)
@@ -463,6 +538,62 @@ impl Drop for RebornIntegrationHarness {
         let _ = self.scheduler_handle.take();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Storage helpers
+// ---------------------------------------------------------------------------
+
+/// Build the one `CompositeRootFilesystem` for a harness, selecting the durable
+/// backend by `mode`. The `dir` argument is used only for `LibSql` (the SQLite
+/// file is created there by the production `build_default_local_dev_database_roots`
+/// sequence); `InMemory` ignores it.
+async fn build_storage_composite(
+    mode: StorageMode,
+    dir: &Path,
+) -> HarnessResult<Arc<CompositeRootFilesystem>> {
+    let mut composite = CompositeRootFilesystem::new();
+    match mode {
+        StorageMode::InMemory => {
+            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+                &mut composite,
+                Arc::new(InMemoryBackend::new()),
+            )?;
+        }
+        StorageMode::LibSql => {
+            ironclaw_reborn_composition::test_support::build_default_local_dev_database_roots_for_test(
+                dir,
+                &mut composite,
+            )
+            .await?;
+        }
+    }
+    Ok(Arc::new(composite))
+}
+
+/// Build a `ScopedFilesystem` that maps `/turns` → the turn-state path for
+/// `binding` inside the production composite.
+///
+/// Uses the production path prefix `""` (no `/engine` prefix) so turn state
+/// lands under `/tenants/...` inside the composite, where the database backend
+/// is mounted. The 4-arm match lives in `filesystem::turns_scope_path`; the
+/// binary-E2E tier reuses it via `scoped_turns_fs` in `harness.rs` with the
+/// `/engine` prefix.
+pub(super) fn scoped_turns_fs_composite(
+    composite: Arc<CompositeRootFilesystem>,
+    binding: &ResolvedBinding,
+) -> HarnessResult<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
+    let target = super::filesystem::turns_scope_path("", binding);
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").expect("valid turns alias"),
+        VirtualPath::new(target).expect("valid turns target"),
+        MountPermissions::read_write_list_delete(),
+    )])?;
+    Ok(Arc::new(ScopedFilesystem::with_fixed_view(composite, mounts)))
+}
+
+// ---------------------------------------------------------------------------
+// Hermetic env and private helpers
+// ---------------------------------------------------------------------------
 
 /// Hermetic env baked unconditionally so every test form inherits it and a
 /// developer `.env` can never reach a vendor (design §2/§4.1). The chain itself
