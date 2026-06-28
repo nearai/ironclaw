@@ -318,7 +318,8 @@ test("Chat keeps rehydrated active runs visually active", async () => {
   assert.deepEqual(threadStates, [["thread-1", "running"]]);
 });
 
-test("Chat cancel button ignores active runs from another thread", () => {
+test("Chat ignores active runs from another thread", async () => {
+  let sendCalls = 0;
   const { tree, components } = renderChat({
     hookState: {
       messages: [{ id: "message-1" }],
@@ -331,7 +332,10 @@ test("Chat cancel button ignores active runs from another thread", () => {
       cooldownSeconds: 0,
       recoveryNotice: null,
       activeRun: { runId: "run-1", threadId: "thread-2", status: "running" },
-      send: async () => ({}),
+      send: async () => {
+        sendCalls += 1;
+        return { thread_id: "thread-1" };
+      },
       cancelRun: async () => {},
       retryMessage: () => {},
       approve: () => {},
@@ -345,6 +349,18 @@ test("Chat cancel button ignores active runs from another thread", () => {
   const chatInput = findComponent(tree, components.ChatInput);
   const props = componentProps(chatInput, components.ChatInput);
   assert.equal(props.canCancel, false);
+  assert.equal(props.sendDisabled, false);
+  assert.deepEqual(await props.onSend("draft for active thread"), {
+    thread_id: "thread-1",
+  });
+  assert.equal(sendCalls, 1);
+
+  const messageList = findComponent(tree, components.MessageList);
+  assert.equal(
+    componentProps(messageList, components.MessageList).pending,
+    false,
+  );
+  assert.equal(findComponent(messageList, components.TypingIndicator), null);
 });
 
 test("Chat keeps composer send blocked while a gate owns the run decision", async () => {

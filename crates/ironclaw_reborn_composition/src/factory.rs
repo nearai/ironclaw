@@ -716,16 +716,16 @@ impl RootFilesystem for FailingConversationStateFilesystem {
 #[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
 pub(crate) async fn local_runtime_with_failing_trigger_conversations_for_test()
 -> (Arc<RebornLocalRuntimeServices>, tempfile::TempDir) {
-    let local_dev_root = tempfile::tempdir().expect("tempdir");
+    let local_dev_root = tempfile::tempdir().expect("tempdir"); // safety: cfg(test) fixture creation should fail fast.
     let owner_user_id = "pairing-owner";
     let services = build_reborn_services(RebornBuildInput::local_dev(
         owner_user_id,
         local_dev_root.path().join("local-dev"),
     ))
     .await
-    .expect("local-dev services build");
+    .expect("local-dev services build"); // safety: cfg(test) fixture requires local-dev services.
 
-    let base_runtime = services.local_runtime.expect("local runtime");
+    let base_runtime = services.local_runtime.expect("local runtime"); // safety: cfg(test) local-dev input must return a runtime.
     let mut failing_root = CompositeRootFilesystem::new();
     failing_root
         .mount(
@@ -738,10 +738,10 @@ pub(crate) async fn local_runtime_with_failing_trigger_conversations_for_test()
                 IndexPolicy::NotIndexed,
                 BackendCapabilities::default(),
             )
-            .expect("mount descriptor"),
+            .expect("mount descriptor"), // safety: cfg(test) literal mount paths are fixed.
             Arc::new(FailingConversationStateFilesystem),
         )
-        .expect("mount failing backend");
+        .expect("mount failing backend"); // safety: cfg(test) fixture mount must install or fail.
     let runtime = Arc::new(RebornLocalRuntimeServices {
         extension_lifecycle_surface_context: base_runtime
             .extension_lifecycle_surface_context

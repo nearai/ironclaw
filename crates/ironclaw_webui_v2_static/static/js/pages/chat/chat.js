@@ -88,7 +88,8 @@ export function Chat({
   );
   const runActiveForThread = Boolean(
     !pendingGate &&
-      (isProcessing ||
+      ((isProcessing &&
+        (!activeRun?.threadId || activeRun.threadId === activeThreadId)) ||
         (activeRunForThread &&
           (!activeRun.status ||
             activeRun.status === "queued" ||
