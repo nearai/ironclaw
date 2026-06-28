@@ -517,6 +517,36 @@ impl RebornIntegrationHarness {
         self.capability_recorder.runtime_http_requests()
     }
 
+    /// Assert that a `builtin.shell` command was recorded by the inert process
+    /// port and that the recorded command string contains `substr`. This proves
+    /// the shell tool call was dispatched through the process port without
+    /// spawning a real OS process (slice 5 safety invariant).
+    pub async fn assert_shell_command_recorded(&self, substr: &str) -> HarnessResult<()> {
+        let commands = self.capability_recorder.recorded_process_commands();
+        if commands.iter().any(|cmd| cmd.contains(substr)) {
+            return Ok(());
+        }
+        let seen: Vec<&str> = commands.iter().map(|s| s.as_str()).collect();
+        Err(format!(
+            "no recorded shell command containing {substr:?}; saw {seen:?}"
+        )
+        .into())
+    }
+
+    /// Assert that the process port is the inert recording port — i.e. at
+    /// least one shell command was captured and no real process was spawned.
+    /// Passes when `recorded_process_commands()` is non-empty (the harness
+    /// used the recording path, not the live-shell opt-in).
+    pub async fn assert_no_real_process_executed(&self) -> HarnessResult<()> {
+        let commands = self.capability_recorder.recorded_process_commands();
+        if !commands.is_empty() {
+            return Ok(());
+        }
+        Err("no shell commands were recorded by the inert process port; either no \
+             builtin.shell turn ran or the harness is using the live-shell path"
+            .into())
+    }
+
     /// Snapshot of the recorded capability results (tool outputs), in execution
     /// order. Read by `assert_tool_result_contains` in `assertions.rs`.
     pub(super) fn captured_capability_results(&self) -> Vec<RecordedCapabilityResult> {
