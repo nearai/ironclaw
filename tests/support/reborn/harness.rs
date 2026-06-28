@@ -2834,49 +2834,74 @@ fn local_dev_host_runtime_with_registry_egress_and_mcp(
 /// (`"mock-mcp"` + `"mock-mcp.search"` → MCP tool `"search"`).
 /// No `runtime_credentials` are declared because `LoopbackMcpRuntimeHttpEgress`
 /// injects the Bearer token directly for test purposes.
+///
+/// Uses `from_host_bundled_manifest_with_inline_dynamic_schemas` with an inline
+/// `{"type":"object"}` parameters_schema so `surface_descriptor` in the host
+/// runtime skips the `$ref` filesystem read (no schema file exists for the mock
+/// extension). All descriptor fields except `parameters_schema` still match the
+/// manifest projection exactly.
 fn mock_mcp_extension_package(
     provider_id: &str,
     mcp_url: &str,
     capability_id: &str,
 ) -> HarnessResult<ExtensionPackage> {
-    Ok(ExtensionPackage::from_manifest(
-        ExtensionManifest {
-            schema_version: MANIFEST_SCHEMA_VERSION.to_string(),
-            id: ExtensionId::new(provider_id)?,
-            name: provider_id.to_string(),
-            version: "0.1.0".to_string(),
-            description: "Mock MCP extension (test only)".to_string(),
-            source: ManifestSource::HostBundled,
-            requested_trust: RequestedTrustClass::ThirdParty,
-            descriptor_trust_default: TrustClass::Sandbox,
-            runtime: ExtensionRuntime::Mcp {
-                transport: "http".to_string(),
-                command: None,
-                args: Vec::new(),
-                url: Some(mcp_url.to_string()),
-            },
-            host_apis: Vec::new(),
-            hooks: Vec::new(),
-            capabilities: vec![CapabilityManifest {
-                id: CapabilityId::new(capability_id)?,
-                implements: Vec::new(),
-                description: "Mock MCP capability".to_string(),
-                effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
-                default_permission: PermissionMode::Allow,
-                visibility: CapabilityVisibility::Model,
-                input_schema_ref: CapabilityProfileSchemaRef::new(
-                    "schemas/mock-mcp/mock.input.v1.json",
-                )?,
-                output_schema_ref: CapabilityProfileSchemaRef::new(
-                    "schemas/mock-mcp/mock.output.v1.json",
-                )?,
-                prompt_doc_ref: None,
-                required_host_ports: Vec::new(),
-                runtime_credentials: Vec::new(),
-                resource_profile: None,
-            }],
+    let manifest = ExtensionManifest {
+        schema_version: MANIFEST_SCHEMA_VERSION.to_string(),
+        id: ExtensionId::new(provider_id)?,
+        name: provider_id.to_string(),
+        version: "0.1.0".to_string(),
+        description: "Mock MCP extension (test only)".to_string(),
+        source: ManifestSource::HostBundled,
+        requested_trust: RequestedTrustClass::ThirdParty,
+        descriptor_trust_default: TrustClass::Sandbox,
+        runtime: ExtensionRuntime::Mcp {
+            transport: "http".to_string(),
+            command: None,
+            args: Vec::new(),
+            url: Some(mcp_url.to_string()),
         },
-        VirtualPath::new(format!("/system/extensions/{provider_id}"))?,
+        host_apis: Vec::new(),
+        hooks: Vec::new(),
+        capabilities: vec![CapabilityManifest {
+            id: CapabilityId::new(capability_id)?,
+            implements: Vec::new(),
+            description: "Mock MCP capability".to_string(),
+            effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            default_permission: PermissionMode::Allow,
+            visibility: CapabilityVisibility::Model,
+            input_schema_ref: CapabilityProfileSchemaRef::new(
+                "schemas/mock-mcp/mock.input.v1.json",
+            )?,
+            output_schema_ref: CapabilityProfileSchemaRef::new(
+                "schemas/mock-mcp/mock.output.v1.json",
+            )?,
+            prompt_doc_ref: None,
+            required_host_ports: Vec::new(),
+            runtime_credentials: Vec::new(),
+            resource_profile: None,
+        }],
+    };
+    // Inline schema so surface_descriptor returns Ok(descriptor) without
+    // trying to read "schemas/mock-mcp/mock.input.v1.json" from the test
+    // filesystem (that file doesn't exist for a test-only mock extension).
+    let capabilities = vec![CapabilityDescriptor {
+        id: CapabilityId::new(capability_id)?,
+        provider: ExtensionId::new(provider_id)?,
+        runtime: RuntimeKind::Mcp,
+        trust_ceiling: TrustClass::Sandbox,
+        description: "Mock MCP capability".to_string(),
+        parameters_schema: json!({"type": "object"}),
+        effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+        default_permission: PermissionMode::Allow,
+        runtime_credentials: Vec::new(),
+        resource_profile: None,
+    }];
+    let root = VirtualPath::new(format!("/system/extensions/{provider_id}"))?;
+    Ok(ExtensionPackage::from_host_bundled_manifest_with_inline_dynamic_schemas(
+        manifest,
+        root,
+        None,
+        capabilities,
     )?)
 }
 
