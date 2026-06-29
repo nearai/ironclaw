@@ -2827,14 +2827,21 @@ fn runtime_failure_safe_summary(
 fn runtime_failure_loop_safe_summary(
     failure: &RuntimeCapabilityFailure,
 ) -> Option<LoopSafeSummary> {
-    if matches!(failure.kind, RuntimeFailureKind::InvalidInput) {
-        return Some(runtime_input_encode_summary());
+    match failure.safe_summary() {
+        Some(summary) => {
+            if let Ok(summary) = LoopSafeSummary::new(summary.clone()) {
+                return Some(summary);
+            }
+            if matches!(failure.kind, RuntimeFailureKind::InvalidInput) {
+                return Some(runtime_input_encode_summary());
+            }
+            Some(LoopSafeSummary::capability_failure_summary(summary))
+        }
+        None if matches!(failure.kind, RuntimeFailureKind::InvalidInput) => {
+            Some(runtime_input_encode_summary())
+        }
+        None => None,
     }
-    let summary = failure.safe_summary()?;
-    if let Ok(summary) = LoopSafeSummary::new(summary.clone()) {
-        return Some(summary);
-    }
-    Some(LoopSafeSummary::capability_failure_summary(summary))
 }
 
 fn runtime_failure_fallback_summary(
@@ -4627,6 +4634,16 @@ mod tests {
     #[tokio::test]
     async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones() {
         let cases = [
+            (
+                RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
+                    capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
+                    kind: RuntimeFailureKind::InvalidInput,
+                    message: Some("invalid JSON: expected value at line 1 column 1".to_string()),
+                    detail: None,
+                }),
+                CapabilityFailureKind::InvalidInput,
+                Some("invalid JSON: expected value at line 1 column 1"),
+            ),
             (
                 RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
                     capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
