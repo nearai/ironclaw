@@ -393,21 +393,32 @@ impl RuntimeCredentialAccountRefreshService for ProductAuthRuntimeCredentialAcco
         // staged token. We always re-read from the store (never cache).
         // Skip only when `expires_at` is present — absent means legacy record
         // or cleanup deleted it, both are fail-safe: proceed with refresh.
+        let mut access_secret_requires_refresh = false;
         if let Some(access_handle) = &account.access_secret {
-            let metadata = self
+            let metadata = match self
                 .secret_store
                 .metadata(&account.scope.resource, access_handle)
                 .await
-                .unwrap_or(None); // silent-ok: metadata unavailability is non-fatal — fall through to refresh
+            {
+                Ok(Some(metadata)) => Some(metadata),
+                Ok(None) => {
+                    access_secret_requires_refresh = true;
+                    None
+                }
+                Err(_) => {
+                    access_secret_requires_refresh = true;
+                    None
+                }
+            };
             if let Some(meta) = metadata
                 && let Some(expires_at) = meta.expires_at
             {
                 let margin = chrono::Duration::from_std(DEFAULT_ACCESS_REFRESH_MARGIN)
                     .unwrap_or(chrono::Duration::seconds(300));
-                if expires_at
+                access_secret_requires_refresh = expires_at
                     .checked_sub_signed(margin)
-                    .is_some_and(|cutoff| cutoff > Utc::now())
-                {
+                    .is_none_or(|cutoff| cutoff <= Utc::now());
+                if !access_secret_requires_refresh {
                     tracing::debug!(
                         provider = %account.provider,
                         "oauth access token still fresh, skipping inline refresh"
@@ -437,10 +448,29 @@ impl RuntimeCredentialAccountRefreshService for ProductAuthRuntimeCredentialAcco
                     .await
             }
             Err(
-                AuthProductError::BackendUnavailable
+                error @ (AuthProductError::BackendUnavailable
                 | AuthProductError::BackendConflict
-                | AuthProductError::MalformedConfig,
-            ) => Ok(account),
+                | AuthProductError::MalformedConfig),
+            ) => {
+                tracing::debug!(
+                    provider = %account.provider,
+                    account_status = ?account.status,
+                    has_access_secret = account.access_secret.is_some(),
+                    has_refresh_secret = account.refresh_secret.is_some(),
+                    auth_error = ?error,
+                    "runtime product-auth refresh fell back to existing access secret"
+                );
+                if access_secret_requires_refresh {
+                    tracing::warn!(
+                        provider = %account.provider,
+                        account_status = ?account.status,
+                        auth_error = ?error,
+                        "runtime product-auth refresh failed with a known stale access secret"
+                    );
+                    return Err(error);
+                }
+                Ok(account)
+            }
             Err(error) => Err(error),
         }
     }
@@ -487,12 +517,44 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             .accounts
             .select_unique_configured_runtime_account(selection_request.clone())
             .await
-            .map_err(map_account_error)?;
+            .map_err(|error| {
+                tracing::debug!(
+                    provider = %request.provider,
+                    requester_extension = %request.requester_extension,
+                    auth_error = ?error,
+                    "runtime product-auth account selection failed"
+                );
+                map_account_error(error)
+            })?;
+        tracing::debug!(
+            provider = %request.provider,
+            requester_extension = %request.requester_extension,
+            has_access_secret = account.access_secret.is_some(),
+            has_refresh_secret = account.refresh_secret.is_some(),
+            status = ?account.status,
+            "runtime product-auth account selected"
+        );
         let account = self
             .refresher
             .refresh_configured_runtime_account(selection_request, account, self.accounts.as_ref())
             .await
-            .map_err(map_account_error)?;
+            .map_err(|error| {
+                tracing::debug!(
+                    provider = %request.provider,
+                    requester_extension = %request.requester_extension,
+                    auth_error = ?error,
+                    "runtime product-auth account refresh failed"
+                );
+                map_account_error(error)
+            })?;
+        tracing::debug!(
+            provider = %request.provider,
+            requester_extension = %request.requester_extension,
+            has_access_secret = account.access_secret.is_some(),
+            has_refresh_secret = account.refresh_secret.is_some(),
+            status = ?account.status,
+            "runtime product-auth account refresh resolved"
+        );
         if account.status != CredentialAccountStatus::Configured {
             return Err(CredentialStageError::AuthRequired);
         }

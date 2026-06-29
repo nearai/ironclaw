@@ -5,6 +5,7 @@ Use it when adding or rotating providers for:
 
 - `auth-live-seeded`
 - `auth-browser-consent`
+- `reborn-webui-v2-live-qa`
 - any future auth canary lane added under `scripts/live-canary/run.sh`
 
 The shared implementation for auth lanes lives in:
@@ -74,6 +75,91 @@ adding new provider credentials should add them under
 `github.com/nearai/ironclaw/settings/secrets/actions` at repo scope.
 
 Only providers with populated secrets are executed.
+
+## Reborn WebUI v2 Live QA Lane
+
+The `reborn-webui-v2-live-qa` lane drives the Reborn CLI `serve` command and
+WebUI v2 with Playwright. It is backed by the QA spreadsheet cases, not by the
+legacy gateway stack.
+
+Local runs normally reuse a copied Reborn home:
+
+- `REBORN_WEBUI_V2_LIVE_QA_HOME=/tmp/ironclaw-reborn-real-slack`
+
+The copied home must include either a root `config.toml` or a
+`local-dev/reborn-local-dev.db` file so the runner can synthesize a minimal
+temporary config for the copied run. If the copied DB stores encrypted provider
+secrets, it must also include
+`local-dev/.reborn-local-dev-secrets-master-key`; without that local master key
+the runner can see provider metadata but cannot decrypt copied Slack tokens or
+Google product-auth refresh secrets. Copy this file from the same source Reborn
+home as the DB, or export the required provider env vars directly before running
+the local lane.
+
+When a copied home is not available, the lane can generate a temporary Reborn
+home from CI secrets. The generated home can seed Google product-auth from the
+existing auth-live Google token secrets:
+
+- `GOOGLE_OAUTH_CLIENT_ID`
+- `GOOGLE_OAUTH_CLIENT_SECRET`
+- `AUTH_LIVE_GOOGLE_ACCESS_TOKEN`
+- `AUTH_LIVE_GOOGLE_REFRESH_TOKEN`
+
+For copied Reborn homes whose stored Google access tokens have expired, the
+runtime/side-effect rows also require a Google OAuth client secret that matches
+the client ID used by the stored Google consent flow. Set one of these to that
+Google Cloud OAuth client secret, locally or as a repo-scoped GitHub Actions
+secret under `github.com/nearai/ironclaw/settings/secrets/actions`:
+
+- `IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET`
+- `GOOGLE_CLIENT_SECRET`
+- `GOOGLE_OAUTH_CLIENT_SECRET`
+
+Without that matching client secret, Reborn WebUI v2 live QA records
+`missing_google_ready` before executing the Google runtime rows `2D`, `2F`,
+`4E`, `5C`, `5D`, `6C`, `6E`, and `7E`.
+
+If the preflight artifact reports `reborn_secret_master_key_missing`, the
+copied DB has encrypted Google refresh material but the matching
+`local-dev/.reborn-local-dev-secrets-master-key` was not copied with it. If the
+preflight artifact reports `invalid_client` or `unauthorized_client` with
+`client_secret_present: true`, the provided client secret is present but does
+not match the OAuth client ID stored by the copied Reborn home. Use the Google
+Cloud OAuth client secret for that stored client ID, or re-authorize the QA
+Google account with the OAuth client configured by
+`IRONCLAW_REBORN_GOOGLE_CLIENT_ID` and
+`IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET`.
+
+If the preflight artifact reports `Google OAuth refresh probe failed:
+invalid_grant` with `client_secret_present: true`, the client secret is wired
+but the stored refresh token is invalid for that OAuth client. Re-authorize the
+live Google QA account with the same Google Cloud OAuth client configured by
+`IRONCLAW_REBORN_GOOGLE_CLIENT_ID` and `IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET`,
+then rotate these repo-scoped GitHub Actions secrets together:
+
+- `AUTH_LIVE_GOOGLE_ACCESS_TOKEN`
+- `AUTH_LIVE_GOOGLE_REFRESH_TOKEN`
+
+Slack workflow cases require bot-level Slack credentials for the Reborn Slack
+adapter. `SLACK_WEBHOOK_URL` is only for canary reporting and is not sufficient
+for WebUI Slack workflow coverage.
+
+- `IRONCLAW_REBORN_SLACK_SIGNING_SECRET`
+- `IRONCLAW_REBORN_SLACK_BOT_TOKEN`
+- `REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_CHANNEL_ID` when a stable delivery
+  target should be pinned instead of discovered from `auth.test`
+
+Telegram workflow cases require a real test bot token:
+
+- `TELEGRAM_BOT_TOKEN` or `LIVE_CANARY_TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_WEBHOOK_SECRET` or `LIVE_CANARY_TELEGRAM_WEBHOOK_SECRET` when the
+  channel configuration requires one
+- `REBORN_WEBUI_V2_LIVE_QA_TELEGRAM_CHAT_ID` for cases that need a stable
+  recipient chat
+
+Use `CASES=all` only after the Slack, Google, and Telegram credentials above
+are populated; otherwise the runner records the affected cases as credential
+gates and exits nonzero.
 
 ## Shared Provider Fixtures
 

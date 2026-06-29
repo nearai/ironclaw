@@ -146,6 +146,9 @@ fn asset_schema(path: &str) -> serde_json::Value {
         "gmail/list_messages.input.v1.json" => include_str!(
             "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/list_messages.input.v1.json"
         ),
+        "gmail/send_message.input.v1.json" => include_str!(
+            "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/send_message.input.v1.json"
+        ),
         other => panic!("unknown GSuite asset schema {other}"),
     };
     serde_json::from_str(schema_json).unwrap()
@@ -251,6 +254,23 @@ async fn bundled_gsuite_input_schemas_reject_reviewed_shape_regressions() {
     assert_eq!(
         list_messages["properties"]["max_results"]["oneOf"][1]["pattern"],
         "^(?:[1-9][0-9]{0,1}|[1-4][0-9]{2}|500)$"
+    );
+
+    let send_message = asset_schema("gmail/send_message.input.v1.json");
+    let send_message_properties = send_message["properties"]["message"]["properties"]
+        .as_object()
+        .unwrap();
+    assert!(send_message_properties.contains_key("raw"));
+    assert!(send_message_properties.contains_key("to"));
+    assert!(send_message_properties.contains_key("subject"));
+    assert!(send_message_properties.contains_key("body"));
+    assert!(
+        send_message["properties"]["message"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|shape| shape["required"] == serde_json::json!(["to", "body"])),
+        "send_message schema must advertise structured email input"
     );
 }
 
