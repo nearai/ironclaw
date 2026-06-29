@@ -29,7 +29,9 @@ use crate::worker::autonomous_recovery::{
     EMPTY_TOOL_COMPLETION_NUDGE, FORCE_TEXT_RECOVERY_PROMPT,
 };
 use crate::worker::proxy_llm::ProxyLlmProvider;
-use ironclaw_llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, ResponseMetadata};
+use ironclaw_llm::{
+    ChatMessage, LlmProvider, Reasoning, ReasoningContext, ReasoningDetails, ResponseMetadata,
+};
 use ironclaw_safety::SafetyLayer;
 
 /// Configuration for the worker runtime.
@@ -525,6 +527,7 @@ impl LoopDelegate for ContainerDelegate {
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
         reasoning: Option<String>,
+        reasoning_details: Option<ReasoningDetails>,
     ) -> Result<Option<LoopOutcome>, crate::error::Error> {
         {
             let mut recovery = self.recovery_state.lock().await;
@@ -546,6 +549,7 @@ impl LoopDelegate for ContainerDelegate {
         // Carry reasoning for the next turn — see #3201, #3225.
         reason_ctx.messages.push(
             ChatMessage::assistant_with_tool_calls(content, tool_calls.clone())
+                .with_reasoning_details(reasoning_details)
                 .with_reasoning(reasoning),
         );
 

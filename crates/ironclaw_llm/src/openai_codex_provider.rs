@@ -341,6 +341,7 @@ impl LlmProvider for OpenAiCodexProvider {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             reasoning: parsed.reasoning,
+            reasoning_details: None,
         })
     }
 

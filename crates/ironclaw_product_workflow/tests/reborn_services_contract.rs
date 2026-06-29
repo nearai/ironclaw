@@ -8053,6 +8053,28 @@ fn services_with_operator_approval_config_policy_store(
                     default_permission: PermissionMode::Ask,
                     effects: Arc::from([EffectKind::Financial]),
                 },
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("nearai.web_search").expect("capability id"),
+                    provider: ExtensionId::new("nearai").expect("extension id"),
+                    description: Arc::from("Search through the NEAR AI MCP server."),
+                    default_permission: PermissionMode::Ask,
+                    effects: Arc::from([EffectKind::DispatchCapability]),
+                },
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("github.get_repo").expect("capability id"),
+                    provider: ExtensionId::new("github").expect("extension id"),
+                    description: Arc::from("Read GitHub repository metadata."),
+                    default_permission: PermissionMode::Ask,
+                    effects: Arc::from([EffectKind::DispatchCapability]),
+                },
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("google-calendar.list_events")
+                        .expect("capability id"),
+                    provider: ExtensionId::new("google-calendar").expect("extension id"),
+                    description: Arc::from("List Google Calendar events."),
+                    default_permission: PermissionMode::Ask,
+                    effects: Arc::from([EffectKind::DispatchCapability]),
+                },
             ],
         }),
     )
@@ -8083,6 +8105,53 @@ fn operator_policy_scope_for_test(tenant_id: &str, user_id: &str) -> ResourceSco
 }
 
 #[tokio::test]
+async fn operator_config_reads_provider_grantee_policies_as_always_allow() {
+    let (services, persistent_policies) = services_with_operator_approval_config_parts();
+    let operator_scope = operator_policy_scope_for_test("tenant-alpha", "user-alpha");
+
+    for (capability_id, provider) in [
+        ("nearai.web_search", "nearai"),
+        ("github.get_repo", "github"),
+        ("google-calendar.list_events", "google-calendar"),
+    ] {
+        persistent_policies
+            .allow(PersistentApprovalPolicyInput {
+                scope: operator_scope.clone(),
+                action: PersistentApprovalAction::Dispatch,
+                capability_id: CapabilityId::new(capability_id).expect("capability id"),
+                grantee: Principal::Extension(ExtensionId::new(provider).expect("extension id")),
+                approved_by: Principal::User(UserId::new("user-alpha").expect("user id")),
+                constraints: ironclaw_host_api::GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: Default::default(),
+                    network: Default::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+                source_approval_request_id: Some(ApprovalRequestId::new()),
+            })
+            .await
+            .expect("seed provider-grantee always-allow policy");
+    }
+
+    let config = services
+        .list_operator_config(caller())
+        .await
+        .expect("operator config");
+    for capability_id in [
+        "nearai.web_search",
+        "github.get_repo",
+        "google-calendar.list_events",
+    ] {
+        let value = operator_config_entry_value(&config, &format!("tool.{capability_id}"));
+        assert_eq!(value["state"], "always_allow");
+        assert_eq!(value["effective_source"], "override");
+    }
+}
+
+#[tokio::test]
 async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
     let (services, persistent_policies) = services_with_operator_approval_config_parts();
 
@@ -8092,11 +8161,11 @@ async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
         .expect("operator config");
     assert_eq!(
         operator_config_entry_value(&initial, "agent.auto_approve_tools"),
-        &json!(false)
+        &json!(true)
     );
     assert_eq!(
         operator_config_entry_value(&initial, "tool.tool.alpha")["state"],
-        "ask_each_time"
+        "always_allow"
     );
     assert_eq!(
         operator_config_entry_value(&initial, "tool.tool.alpha")["effective_source"],
@@ -8104,8 +8173,8 @@ async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
     );
     assert_eq!(
         operator_config_entry_value(&initial, "tool.tool.default_allow")["state"],
-        "ask_each_time",
-        "default-allow tools must still ask while global auto-approve is off"
+        "always_allow",
+        "follow-global tools auto-approve while global auto-approve defaults on"
     );
     assert_eq!(
         operator_config_entry_value(&initial, "tool.tool.default_allow")["effective_source"],
@@ -8313,10 +8382,14 @@ async fn operator_config_is_scoped_by_tenant_and_user() {
         .set_operator_config_key(
             alice_tenant_a.clone(),
             "agent.auto_approve_tools".to_string(),
-            RebornOperatorConfigSetRequest { value: json!(true) },
+            // Set the non-default (off) so isolation is provable: other
+            // users/tenants must still read the default (on), not this value.
+            RebornOperatorConfigSetRequest {
+                value: json!(false),
+            },
         )
         .await
-        .expect("alice enables auto approve in tenant alpha");
+        .expect("alice disables auto approve in tenant alpha");
     services
         .set_operator_config_key(
             alice_tenant_a.clone(),
@@ -8341,7 +8414,7 @@ async fn operator_config_is_scoped_by_tenant_and_user() {
         .expect("same tenant/user operator config");
     assert_eq!(
         operator_config_entry_value(&alice_alpha_other_project, "agent.auto_approve_tools"),
-        &json!(true),
+        &json!(false),
         "auto-approve settings are scoped by tenant/user, not agent/project"
     );
     assert_eq!(
@@ -8361,13 +8434,13 @@ async fn operator_config_is_scoped_by_tenant_and_user() {
             .expect("isolated operator config");
         assert_eq!(
             operator_config_entry_value(&config, "agent.auto_approve_tools"),
-            &json!(false),
+            &json!(true),
             "auto-approve must not leak across user or tenant"
         );
         assert_eq!(
             operator_config_entry_value(&config, "tool.tool.alpha")["state"],
-            "ask_each_time",
-            "tool override must not leak across user or tenant"
+            "always_allow",
+            "tool override must not leak across user or tenant (follows global default-on)"
         );
         assert_eq!(
             operator_config_entry_value(&config, "tool.tool.alpha")["effective_source"],

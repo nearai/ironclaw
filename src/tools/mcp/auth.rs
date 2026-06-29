@@ -9,7 +9,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::RngCore;
+use rand::RngExt as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
@@ -272,7 +272,7 @@ impl PkceChallenge {
     /// Generate a new PKCE challenge pair.
     pub fn generate() -> Self {
         let mut verifier_bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut verifier_bytes);
+        rand::rng().fill(&mut verifier_bytes);
         let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
 
         let mut hasher = Sha256::new();
@@ -816,7 +816,7 @@ pub async fn authorize_mcp_server(
     // `wait_for_authorization_callback`). Some MCP servers (e.g. Attio) also
     // require state to be present in the request.
     let mut state_bytes = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut state_bytes);
+    rand::rng().fill(&mut state_bytes);
     let state = URL_SAFE_NO_PAD.encode(state_bytes);
     extra_params.insert("state".to_string(), state.clone());
 
@@ -2227,7 +2227,7 @@ mod tests {
         // insert it into extra_params.
         let mut extra_params = HashMap::new();
         let mut state_bytes = [0u8; 16];
-        rand::rngs::OsRng.fill_bytes(&mut state_bytes);
+        rand::rng().fill(&mut state_bytes);
         let state = URL_SAFE_NO_PAD.encode(state_bytes);
         extra_params.insert("state".to_string(), state.clone());
 
@@ -2268,7 +2268,7 @@ mod tests {
 
         // Two generated states must differ
         let mut state_bytes_2 = [0u8; 16];
-        rand::rngs::OsRng.fill_bytes(&mut state_bytes_2);
+        rand::rng().fill(&mut state_bytes_2);
         let state_2 = URL_SAFE_NO_PAD.encode(state_bytes_2);
         assert_ne!(state, state_2, "State must be unique per request");
     }

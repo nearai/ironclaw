@@ -1,5 +1,4 @@
 import { React, html } from "../../lib/html.js";
-import { Link } from "react-router";
 import { useT } from "../../lib/i18n.js";
 import {
   THREAD_STATE,
@@ -22,7 +21,6 @@ import { TypingIndicator } from "./components/typing-indicator.js";
 import { useChat } from "./hooks/useChat.js";
 import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
-import { buildScopedLogsPath } from "../logs/lib/logs-data.js";
 
 /* Grace window before an active thread's sidebar state is cleared to idle.
  * Long enough for SSE to rehydrate a gate/run after a thread switch (so a
@@ -81,17 +79,24 @@ export function Chat({
     () => buildRuntimeContext({ gatewayStatus, activeThread }),
     [gatewayStatus, activeThread]
   );
+  const activeThreadHasGate = Boolean(activeThreadId) && Boolean(pendingGate);
+  const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
   const hasMessages =
-    messages.length > 0 || isProcessing || Boolean(pendingGate) || Boolean(channelConnectAction);
+    messages.length > 0 ||
+    activeThreadIsProcessing ||
+    activeThreadHasGate ||
+    Boolean(channelConnectAction);
   // Don't show the landing composer when history failed to load — show the
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
   const showLanding = !historyLoading && !hasMessages && !historyLoadError;
-  const approvalSubmitWarning = pendingGate
+  const approvalSubmitWarning = activeThreadHasGate
     ? "Resolve the approval request before sending another message."
     : "";
   const composerSendDisabled =
-    Boolean(pendingGate) || (isProcessing && !pendingGate) || cooldownSeconds > 0;
+    activeThreadHasGate ||
+    (activeThreadIsProcessing && !activeThreadHasGate) ||
+    cooldownSeconds > 0;
   const composerSendBlockedRef = React.useRef(composerSendDisabled);
   composerSendBlockedRef.current = composerSendDisabled;
   const composerStatusText =
@@ -104,21 +109,12 @@ export function Chat({
     activeThreadId &&
       activeRun?.runId &&
       activeRun.threadId === activeThreadId &&
-      isProcessing &&
-      !pendingGate
+      activeThreadIsProcessing &&
+      !activeThreadHasGate
   );
-  const activeRunLogsPath =
-    activeThreadId &&
-    activeRun?.runId &&
-    activeRun.threadId === activeThreadId
-      ? buildScopedLogsPath(
-          { threadId: activeThreadId, runId: activeRun.runId },
-          { absolute: true },
-        )
-      : null;
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [] } = {}) => {
-      if (pendingGate) {
+      if (activeThreadHasGate) {
         throw new Error(approvalSubmitWarning);
       }
       if (composerSendBlockedRef.current) return null;
@@ -135,10 +131,10 @@ export function Chat({
     },
     [
       activeThreadId,
+      activeThreadHasGate,
       approvalSubmitWarning,
       composerSendDisabled,
       onSelectThread,
-      pendingGate,
       send,
     ]
   );
@@ -262,7 +258,7 @@ export function Chat({
             onLoadMore=${loadMore}
             onRetryMessage=${retryMessage}
             threadId=${activeThreadId}
-            pending=${isProcessing}
+            pending=${activeThreadIsProcessing}
           >
             ${recoveryNotice &&
             html`
@@ -271,19 +267,7 @@ export function Chat({
                 onRecover=${recoverHistory}
               />
             `}
-            ${isProcessing && !pendingGate && html`
-              <div className="flex flex-wrap items-center gap-3">
-                <${TypingIndicator} />
-                ${activeRunLogsPath && html`
-                  <${Link}
-                    to=${activeRunLogsPath}
-                    className="text-xs font-medium text-signal hover:underline"
-                  >
-                    ${t("nav.logs")}
-                  <//>
-                `}
-              </div>
-            `}
+            ${activeThreadIsProcessing && !activeThreadHasGate && html`<${TypingIndicator} />`}
             ${channelConnectAction &&
             html`
               <${ChannelConnectCard}

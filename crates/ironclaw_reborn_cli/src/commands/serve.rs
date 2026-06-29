@@ -22,7 +22,7 @@ use ironclaw_reborn_composition::{
     SlackOperatorRouteVisibility, build_slack_host_beta_runtime_mounts,
     build_webui_services_with_slack_host_beta_mounts,
 };
-use ironclaw_reborn_config::{IdentitySection, RebornProfile, seed_default_config_file_if_missing};
+use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
 use ironclaw_reborn_webui_ingress::{
     DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
     RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2,
@@ -343,13 +343,21 @@ impl ServeCommand {
             .map_err(anyhow::Error::from)?;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
+            // The agent loop executes a deep async dispatch chain (turn runner ->
+            // planned driver -> canonical executor -> capability stage -> host
+            // dispatch -> first-party tool); a single poll of one capability
+            // dispatch consumes ~1.9 MB of stack in debug builds, which overflows
+            // the default 2 MB worker thread. Match the 8 MB stack the codebase
+            // already uses for deep work (see ironclaw_reborn_cli traces tests and
+            // src/cli stack_size sites).
+            .thread_stack_size(8 * 1024 * 1024)
             .build()
             .context("failed to build tokio runtime for `serve`")?;
 
         rt.block_on(async move {
             let trigger_poller_enabled = runtime_input.trigger_poller.enabled;
             let sso_enabled = sso_startup.is_some();
-            let startup_serve = if profile == RebornProfile::HostedSingleTenant {
+            let startup_serve = if profile.starts_hosted_single_tenant_listener() {
                 Some(start_hosted_single_tenant_startup_listener(listen_addr).await?)
             } else {
                 None

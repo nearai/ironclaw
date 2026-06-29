@@ -1762,7 +1762,7 @@ impl Store for HybridStore {
         // for incident review, not a runtime integrity guarantee.
         if is_protected_orchestrator_doc(doc) {
             use sha2::{Digest, Sha256};
-            let hash = format!("{:x}", Sha256::digest(doc.content.as_bytes()));
+            let hash = hex::encode(Sha256::digest(doc.content.as_bytes()));
             if !stamped.metadata.is_object() {
                 stamped.metadata = serde_json::json!({});
             }

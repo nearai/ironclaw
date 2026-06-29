@@ -187,8 +187,65 @@ async fn bundled_gsuite_input_schemas_reject_reviewed_shape_regressions() {
     let list_events = asset_schema("google-calendar/list_events.input.v1.json");
     assert_eq!(
         list_events["properties"]["max_results"]["oneOf"][1]["pattern"],
-        "^(?:[1-9][0-9]{0,2}|[12][0-9]{3}|2[0-4][0-9]{2}|2500)$"
+        "^(?:[1-9][0-9]{0,2}|1[0-9]{3}|2[0-4][0-9]{2}|2500)$"
     );
+    assert!(list_events["properties"].get("calendar_ids").is_some());
+    assert!(
+        list_events["properties"]
+            .get("include_all_calendars")
+            .is_some()
+    );
+    assert!(list_events["properties"].get("page_tokens").is_some());
+    assert_eq!(
+        list_events["properties"]["page_tokens"]["propertyNames"]["minLength"],
+        json!(1)
+    );
+    assert!(list_events["properties"].get("query").is_some());
+    let list_events_schema_rules = list_events["allOf"]
+        .as_array()
+        .expect("list_events schema should reject incompatible selector and paging modes");
+    assert!(
+        list_events_schema_rules
+            .iter()
+            .any(|rule| { rule["not"]["required"] == json!(["calendar_id", "calendar_ids"]) })
+    );
+    assert!(list_events_schema_rules.iter().any(|rule| {
+        rule["not"]["required"] == json!(["calendar_id", "include_all_calendars"])
+            && rule["not"]["properties"]["include_all_calendars"]["const"] == json!(true)
+    }));
+    assert!(list_events_schema_rules.iter().any(|rule| {
+        rule["not"]["required"] == json!(["calendar_ids", "include_all_calendars"])
+            && rule["not"]["properties"]["include_all_calendars"]["const"] == json!(true)
+    }));
+    assert!(
+        list_events_schema_rules
+            .iter()
+            .any(|rule| { rule["not"]["required"] == json!(["page_token", "calendar_ids"]) })
+    );
+    assert!(list_events_schema_rules.iter().any(|rule| {
+        rule["not"]["required"] == json!(["page_token", "include_all_calendars"])
+            && rule["not"]["properties"]["include_all_calendars"]["const"] == json!(true)
+    }));
+    assert!(
+        list_events_schema_rules
+            .iter()
+            .any(|rule| { rule["not"]["required"] == json!(["page_token", "page_tokens"]) })
+    );
+    assert!(list_events_schema_rules.iter().any(|rule| {
+        let Some(any_of) = rule["anyOf"].as_array() else {
+            return false;
+        };
+        any_of
+            .iter()
+            .any(|branch| branch["not"]["required"] == json!(["page_tokens"]))
+            && any_of
+                .iter()
+                .any(|branch| branch["required"] == json!(["calendar_ids"]))
+            && any_of.iter().any(|branch| {
+                branch["required"] == json!(["include_all_calendars"])
+                    && branch["properties"]["include_all_calendars"]["const"] == json!(true)
+            })
+    }));
 
     let list_messages = asset_schema("gmail/list_messages.input.v1.json");
     assert_eq!(

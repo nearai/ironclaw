@@ -183,6 +183,21 @@ where
         self.root.append(&virtual_path, payload).await
     }
 
+    /// Append multiple `payloads` to the event log at `path` in one backend
+    /// round-trip, returning the assigned SeqNos in payload order. The mount /
+    /// permission is resolved once for the shared path; the multi-row write
+    /// itself happens in the backend's [`RootFilesystem::append_batch`].
+    pub async fn append_batch(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        let virtual_path =
+            self.resolve_with_permission(scope, path, FilesystemOperation::Append)?;
+        self.root.append_batch(&virtual_path, payloads).await
+    }
+
     /// Read events at `path` starting just after `from`.
     pub async fn tail(
         &self,

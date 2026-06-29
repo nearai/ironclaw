@@ -126,6 +126,7 @@ fn worker_new_rejects_invalid_config() {
             materializer: Arc::new(RecordingMaterializer::success("content:trigger-fire")),
             trusted_submitter: Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
             active_run_lookup: Arc::new(RecordingActiveRunLookup::default()),
+            fire_settlement_observer: Arc::new(NoopTriggerFireSettlementObserver),
         },
     );
 
@@ -183,6 +184,7 @@ fn worker_with_config(
             materializer,
             trusted_submitter: submitter,
             active_run_lookup: active_lookup,
+            fire_settlement_observer: Arc::new(NoopTriggerFireSettlementObserver),
         },
     )
     .expect("valid worker")
@@ -306,6 +308,62 @@ async fn tick_processes_one_due_trigger_happy_path() {
     assert_eq!(persisted.active_fire_slot, Some(fire_slot));
     assert_eq!(persisted.active_run_ref, Some(run_id));
     assert_eq!(persisted.next_run_at, expected_next_run_at);
+}
+
+#[tokio::test]
+async fn tick_notifies_settlement_observer_after_accepted_fire_persists() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZY").expect("ulid");
+    let tenant_id = tenant("tenant-settlement-observer");
+    let fire_slot = ts(1_704_067_200);
+    let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+    repo.upsert_trigger(record.clone()).await.expect("insert");
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5b").expect("run id");
+    let turn_scope = test_turn_scope();
+    let observer = Arc::new(RecordingSettlementObserver::with_visibility_assertion(
+        repo.clone(),
+        tenant_id.clone(),
+        trigger_id,
+        fire_slot,
+        run_id,
+        turn_scope.thread_id.clone(),
+    ));
+    let worker = TriggerPollerWorker::new(
+        TriggerPollerWorkerConfig::default(),
+        TriggerPollerWorkerDeps {
+            repository: repo.clone(),
+            source_provider: Arc::new(crate::ScheduleTriggerSourceProvider),
+            materializer: Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+            trusted_submitter: Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
+                TrustedTriggerFireSubmitOutcome::Accepted {
+                    run_id,
+                    submitted_at: ts(1_704_067_205),
+                    turn_scope: turn_scope.clone(),
+                },
+            )])),
+            active_run_lookup: Arc::new(RecordingActiveRunLookup::default()),
+            fire_settlement_observer: observer.clone(),
+        },
+    )
+    .expect("valid worker");
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert_eq!(
+        report.results.last().map(|result| &result.outcome),
+        Some(&TriggerPollerFireOutcome::Submitted { run_id })
+    );
+    let events = observer.events();
+    assert_eq!(
+        events.len(),
+        1,
+        "settlement observer must fire exactly once"
+    );
+    assert_eq!(events[0].run_id, run_id);
+    assert_eq!(events[0].turn_scope, turn_scope);
+    assert_eq!(events[0].fire.identity.trigger_id, trigger_id);
+    assert_eq!(events[0].fire.identity.fire_slot, fire_slot);
+    assert_eq!(events[0].fire.creator_user_id, record.creator_user_id);
 }
 
 #[tokio::test]
@@ -2780,6 +2838,78 @@ impl TrustedTriggerFireSubmitter for RecordingSubmitter {
             .expect("outcomes lock")
             .pop()
             .expect("submit outcome configured")
+    }
+}
+
+#[derive(Default)]
+struct RecordingSettlementObserver {
+    events: Mutex<Vec<TriggerAcceptedFireSettlement>>,
+    visibility_assertion: Option<SettlementVisibilityAssertion>,
+}
+
+struct SettlementVisibilityAssertion {
+    repository: Arc<dyn TriggerRepository>,
+    tenant_id: TenantId,
+    trigger_id: TriggerId,
+    fire_slot: Timestamp,
+    run_id: TurnRunId,
+    thread_id: ThreadId,
+}
+
+impl RecordingSettlementObserver {
+    fn with_visibility_assertion(
+        repository: Arc<dyn TriggerRepository>,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        run_id: TurnRunId,
+        thread_id: ThreadId,
+    ) -> Self {
+        Self {
+            events: Mutex::new(Vec::new()),
+            visibility_assertion: Some(SettlementVisibilityAssertion {
+                repository,
+                tenant_id,
+                trigger_id,
+                fire_slot,
+                run_id,
+                thread_id,
+            }),
+        }
+    }
+
+    fn events(&self) -> Vec<TriggerAcceptedFireSettlement> {
+        self.events.lock().expect("events lock").clone()
+    }
+}
+
+#[async_trait]
+impl TriggerFireSettlementObserver for RecordingSettlementObserver {
+    async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement) {
+        if let Some(assertion) = &self.visibility_assertion {
+            let persisted = assertion
+                .repository
+                .get_trigger(assertion.tenant_id.clone(), assertion.trigger_id)
+                .await
+                .expect("load trigger during settlement callback")
+                .expect("trigger must exist during settlement callback");
+            assert_eq!(persisted.active_fire_slot, Some(assertion.fire_slot));
+            assert_eq!(persisted.active_run_ref, Some(assertion.run_id));
+            let history = assertion
+                .repository
+                .list_trigger_run_history(assertion.tenant_id.clone(), assertion.trigger_id, 1)
+                .await
+                .expect("run history during settlement callback");
+            assert_eq!(
+                history.first().and_then(|run| run.run_id),
+                Some(assertion.run_id)
+            );
+            assert_eq!(
+                history.first().and_then(|run| run.thread_id.clone()),
+                Some(assertion.thread_id.clone())
+            );
+        }
+        self.events.lock().expect("events lock").push(event);
     }
 }
 

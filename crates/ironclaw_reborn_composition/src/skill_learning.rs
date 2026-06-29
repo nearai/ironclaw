@@ -893,8 +893,8 @@ mod learning {
     }
 
     /// Render a context window into a role-labelled transcript for the
-    /// distiller. Tool-result rows are prefixed with the real tool name so the
-    /// distilled skill can name the exact tools that worked.
+    /// distiller. Tool-result rows are prefixed with the capability id so the
+    /// distilled skill can name the exact runtime capabilities that worked.
     fn format_transcript(window: &ContextWindow) -> String {
         let mut out = String::new();
         for message in &window.messages {
@@ -909,7 +909,7 @@ mod learning {
                 && let Some(call) = message.tool_result_provider_call.as_ref()
             {
                 out.push_str("tool_call: ");
-                out.push_str(&call.provider_tool_name);
+                out.push_str(call.capability_id.as_str());
                 out.push('\n');
             }
             out.push_str(role);
