@@ -209,15 +209,38 @@ impl HostManagedModelGateway for FailingTestGateway {
 /// Scripted [`ironclaw_host_api::RuntimeHttpEgress`] for OAuth token-exchange
 /// tests.
 ///
-/// Returns a fixed `200` JSON body on every call, records every request so the
-/// test can assert the exchange happened, and ignores the URL so the
-/// `HostOAuthProviderClient`'s HTTPS guard can use a fake-but-valid URL.
+/// Returns a configurable HTTP status and JSON body on every call, records
+/// every request so the test can assert the exchange happened, and ignores the
+/// URL so the `HostOAuthProviderClient`'s HTTPS guard can use a fake-but-valid
+/// URL.
+///
+/// The default `(status, body)` is used for every call unless a per-call
+/// override has been queued with [`push_response`].
+///
+/// [`push_response`]: ScriptedOAuthTokenEgress::push_response
 pub struct ScriptedOAuthTokenEgress {
+    /// HTTP status code returned by the default response.  Success constructors
+    /// set this to `200`; `with_error_response` sets it to the supplied code.
+    status: u16,
     body: Vec<u8>,
     captured: Arc<Mutex<Vec<ironclaw_host_api::RuntimeHttpEgressRequest>>>,
+    /// Pre-scripted sequential response overrides consumed FIFO on each
+    /// `execute()` call.  While the queue is non-empty the front entry is
+    /// popped and used instead of `(status, body)`.  Use `push_response` to
+    /// stage per-call overrides after construction.
+    response_queue: Arc<Mutex<std::collections::VecDeque<(u16, Vec<u8>)>>>,
 }
 
 impl ScriptedOAuthTokenEgress {
+    fn build(status: u16, body: Vec<u8>) -> Self {
+        Self {
+            status,
+            body,
+            captured: Arc::new(Mutex::new(Vec::new())),
+            response_queue: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+        }
+    }
+
     /// Build a scripted egress that returns `200` with a minimal
     /// `{access_token, token_type, expires_in}` body.
     pub fn with_access_token(access_token: &str) -> Self {
@@ -228,10 +251,7 @@ impl ScriptedOAuthTokenEgress {
         })
         .to_string()
         .into_bytes();
-        Self {
-            body,
-            captured: Arc::new(Mutex::new(Vec::new())),
-        }
+        Self::build(200, body)
     }
 
     /// Build a scripted egress that returns `200` with
@@ -249,10 +269,43 @@ impl ScriptedOAuthTokenEgress {
         })
         .to_string()
         .into_bytes();
-        Self {
-            body,
-            captured: Arc::new(Mutex::new(Vec::new())),
-        }
+        Self::build(200, body)
+    }
+
+    /// Build a scripted egress that returns `status` with a minimal
+    /// `{"error":"<error_code>"}` body — for example, `(400, "invalid_grant")`
+    /// to simulate an OAuth provider permanently revoking a refresh token.
+    ///
+    /// Every call returns this error response until a per-call override is
+    /// pushed via [`push_response`].  To interleave a success response followed
+    /// by an error (e.g. a valid connect exchange then a rejected sweep), use a
+    /// success constructor and queue the error with `push_response`:
+    ///
+    /// ```ignore
+    /// let bundle = build_google_oauth_product_auth_for_test(); // default: 200
+    /// connect_google_account(&bundle, &scope, 0xcc).await;     // call 1 → 200
+    /// bundle.egress.push_response(400, b"{\"error\":\"invalid_grant\"}".to_vec());
+    /// bundle.sweep_for_refresh(candidates, settings, now).await; // call 2 → 400
+    /// ```
+    ///
+    /// [`push_response`]: ScriptedOAuthTokenEgress::push_response
+    pub fn with_error_response(status: u16, error_code: &str) -> Self {
+        let body = serde_json::json!({"error": error_code})
+            .to_string()
+            .into_bytes();
+        Self::build(status, body)
+    }
+
+    /// Stage a one-shot response override to be consumed on the next
+    /// `execute()` call before the default `(status, body)` is used.
+    ///
+    /// Overrides are consumed in FIFO order; each `push_response` call adds
+    /// one entry that covers exactly one future `execute()` call.
+    pub fn push_response(&self, status: u16, body: Vec<u8>) {
+        self.response_queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back((status, body));
     }
 
     /// Number of token-exchange HTTP calls captured so far.
@@ -282,6 +335,7 @@ impl ScriptedOAuthTokenEgress {
 impl std::fmt::Debug for ScriptedOAuthTokenEgress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ScriptedOAuthTokenEgress")
+            .field("status", &self.status)
             .field("body_len", &self.body.len())
             .finish()
     }
@@ -301,10 +355,20 @@ impl ironclaw_host_api::RuntimeHttpEgress for ScriptedOAuthTokenEgress {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(request);
-        let body = self.body.clone();
+        // Pop a per-call override if one was staged; fall back to the default
+        // (status, body) set by the constructor.
+        let (status, body) = {
+            let mut queue = self
+                .response_queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            queue
+                .pop_front()
+                .unwrap_or_else(|| (self.status, self.body.clone()))
+        };
         let response_bytes = body.len() as u64;
         Ok(ironclaw_host_api::RuntimeHttpEgressResponse {
-            status: 200,
+            status,
             headers: vec![("content-type".to_string(), "application/json".to_string())],
             body,
             saved_body: None,
