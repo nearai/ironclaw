@@ -405,10 +405,8 @@ impl RuntimeCredentialAccountRefreshService for ProductAuthRuntimeCredentialAcco
                     access_secret_requires_refresh = true;
                     None
                 }
-                Err(error) => {
-                    if error.is_expired() {
-                        access_secret_requires_refresh = true;
-                    }
+                Err(_) => {
+                    access_secret_requires_refresh = true;
                     None
                 }
             };
