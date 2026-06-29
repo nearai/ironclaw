@@ -200,7 +200,8 @@ https://<public-host>/webhooks/slack/commands
 `/pair` replies privately (ephemeral — only the invoking user sees it) with a
 fresh pairing code that expires in 10 minutes and invalidates any previous
 code. If the user is already linked, it replies that they are already
-connected. Paste the code into WebUI Slack setup to finish linking.
+connected. Paste the code into the caller-facing Slack connect flow to finish
+linking.
 
 App Home:
 

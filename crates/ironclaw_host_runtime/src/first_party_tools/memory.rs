@@ -30,6 +30,7 @@ pub const MEMORY_WRITE_CAPABILITY_ID: &str = "builtin.memory_write";
 pub const MEMORY_READ_CAPABILITY_ID: &str = "builtin.memory_read";
 pub const MEMORY_TREE_CAPABILITY_ID: &str = "builtin.memory_tree";
 const MEMORY_PROMPT_SAFETY_EXTENSION_ID: &str = "memory.prompt_safety";
+const MEMORY_SEARCH_SCOPE: &str = "reborn_internal_persistent_memory";
 
 struct MemoryServices {
     invocation: MemoryInvocation,
@@ -62,7 +63,7 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
         first_party_capability_manifest(
             MEMORY_SEARCH_CAPABILITY_ID,
-            "Search Reborn persistent memory documents in the current tenant/user/agent/project scope",
+            "Search only Reborn internal persistent memory documents in the current tenant/user/agent/project scope. This does not search connected app or extension data.",
             vec![EffectKind::ReadFilesystem],
             PermissionMode::Allow,
             resource_profile(),
@@ -447,6 +448,8 @@ fn search_response_to_value(response: MemoryServiceSearchResponse) -> Value {
         "query": response.query,
         "results": results,
         "result_count": result_count,
+        "search_scope": MEMORY_SEARCH_SCOPE,
+        "external_services_searched": false,
     })
 }
 
@@ -586,6 +589,11 @@ mod tests {
             .expect("memory_search should succeed through IronClaw memory facade");
 
         assert_eq!(result.output["result_count"], 1);
+        assert_eq!(
+            result.output["search_scope"],
+            "reborn_internal_persistent_memory"
+        );
+        assert_eq!(result.output["external_services_searched"], false);
         assert_eq!(
             result.output["results"][0]["content"],
             "captured through IronClaw memory"

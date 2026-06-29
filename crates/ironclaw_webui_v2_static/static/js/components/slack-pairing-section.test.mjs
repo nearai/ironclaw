@@ -100,6 +100,7 @@ test("SlackPairingSection activates Slack after redeeming a pairing code", async
 
 test("SlackPairingSection treats post-redeem activation failure as best-effort", async () => {
   const calls = [];
+  const consoleErrors = [];
   const invalidations = [];
   let mutationConfig = null;
   const context = {
@@ -107,7 +108,7 @@ test("SlackPairingSection treats post-redeem activation failure as best-effort",
       throw new Error("activation boom");
     },
     Button() {},
-    console: { error: () => {} },
+    console: { error: (...args) => consoleErrors.push(args) },
     globalThis: {},
     html: () => ({}),
     React: { useState: (initial) => [initial, () => {}] },
@@ -143,6 +144,7 @@ test("SlackPairingSection treats post-redeem activation failure as best-effort",
 
   assert.deepEqual(result, { success: true, message: "Slack account connected." });
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["redeem", "ABCD1234"]]);
+  assert.deepEqual(consoleErrors, [["Slack activation after pairing failed."]]);
   assert.deepEqual(JSON.parse(JSON.stringify(invalidations)), [
     ["extensions"],
     ["connectable-channels"],

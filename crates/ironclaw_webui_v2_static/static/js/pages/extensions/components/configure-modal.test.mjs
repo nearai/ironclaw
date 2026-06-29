@@ -29,9 +29,11 @@ function renderModal({
   packageRef = { kind: "extension", id: "slack" },
   channel = undefined,
   displayName = "Slack",
+  onboardingState = "pairing_required",
   onClose = () => {},
   onSaved,
   activate = async () => {},
+  translate,
   redeemPairingCode,
 } = {}) {
   const calls = [];
@@ -64,7 +66,7 @@ function renderModal({
       useRef: (value) => ({ current: value }),
     },
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
-    useT: () => (key) => key,
+    useT: () => translate || ((key) => key),
     useExtensionSetup: () => ({
       secrets: [],
       fields: [],
@@ -75,6 +77,12 @@ function renderModal({
     useOauthSetup: () => ({ mutate() {}, isPending: false, error: null }),
     useSetupSubmit: () => ({ mutate() {}, isPending: false, error: null }),
     extensionIsActive: () => false,
+    extensionLifecycleState: (extension) =>
+      extension?.onboarding_state ||
+      extension?.onboardingState ||
+      extension?.activation_status ||
+      extension?.activationStatus ||
+      (extension?.active ? "active" : "installed"),
     setupReadyForActivation: () => false,
     isChannelExtensionKind: (k) => k === "channel" || k === "wasm_channel",
     redeemPairingCode: redeem,
@@ -92,6 +100,7 @@ function renderModal({
       displayName,
       kind,
       channel,
+      onboarding_state: onboardingState,
     },
     onClose,
     onSaved,
@@ -100,12 +109,14 @@ function renderModal({
 }
 
 test("ConfigureModal renders the pairing panel for a channel extension", () => {
-  const { rendered, mutationConfig } = renderModal({ kind: "channel" });
+  const { rendered, mutationConfig } = renderModal({
+    kind: "channel",
+    onboardingState: "pairing_required",
+  });
   assert.ok(mutationConfig, "a pairing mutation must be configured");
   const body = JSON.stringify(rendered);
-  assert.match(body, /Enter pairing code/);
-  assert.match(body, /Open Slack and message the IronClaw Reborn app/);
-  assert.match(body, /never sent to the model/);
+  assert.match(body, /pairing\.slackPlaceholder/);
+  assert.match(body, /pairing\.slackInstructions/);
 });
 
 test("ConfigureModal does not render the pairing panel for a non-channel extension", () => {
@@ -113,10 +124,44 @@ test("ConfigureModal does not render the pairing panel for a non-channel extensi
   assert.doesNotMatch(JSON.stringify(rendered), /Enter pairing code/);
 });
 
+test("ConfigureModal does not route setup-required channels to the pairing panel", () => {
+  const { rendered } = renderModal({
+    kind: "channel",
+    onboardingState: "setup_required",
+  });
+
+  assert.doesNotMatch(JSON.stringify(rendered), /pairing\.slackPlaceholder/);
+  assert.doesNotMatch(JSON.stringify(rendered), /pairing\.slackInstructions/);
+});
+
+test("ConfigureModal localizes channel pairing copy", () => {
+  const { rendered } = renderModal({
+    kind: "channel",
+    onboardingState: "pairing_required",
+    translate: (key) =>
+      ({
+        "extensions.configureName": "Configure {name}",
+        "pairing.slackInstructions": "Localized Slack pairing instructions",
+        "pairing.slackPlaceholder": "Localized Slack pairing placeholder",
+        "pairing.connect": "Localized connect",
+        "common.saving": "Localized saving",
+        "pairing.slackError": "Localized Slack pairing error",
+      })[key] || key,
+  });
+  const body = JSON.stringify(rendered);
+
+  assert.match(body, /Localized Slack pairing instructions/);
+  assert.match(body, /Localized Slack pairing placeholder/);
+  assert.match(body, /Localized connect/);
+  assert.doesNotMatch(body, /Open Slack and message/);
+  assert.doesNotMatch(body, /Enter pairing code/);
+});
+
 test("ConfigureModal pairing redeems then activates, invalidates queries, and closes", async () => {
   let closed = false;
   const { calls, invalidations, mutationConfig } = renderModal({
     kind: "channel",
+    onboardingState: "pairing_required",
     onClose: () => {
       closed = true;
     },
@@ -141,6 +186,7 @@ test("ConfigureModal pairing redeems then activates, invalidates queries, and cl
 test("ConfigureModal pairing redeems by channel slug and activates package id", async () => {
   const { calls, invalidations, mutationConfig } = renderModal({
     kind: "channel",
+    onboardingState: "pairing_required",
     packageRef: { kind: "extension", id: "slack-host-package" },
     channel: "slack",
   });
@@ -252,6 +298,7 @@ test("ConfigureModal pairing through the real API waits for blocked chats to res
 test("ConfigureModal treats post-redeem activation failure as best-effort", async () => {
   const { calls, mutationConfig } = renderModal({
     kind: "channel",
+    onboardingState: "pairing_required",
     activate: async () => {
       throw new Error("activation boom");
     },

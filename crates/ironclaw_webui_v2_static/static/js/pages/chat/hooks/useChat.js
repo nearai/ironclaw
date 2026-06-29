@@ -641,9 +641,12 @@ export function useChat(threadId) {
         threadId: targetThreadId,
         attachments: stagedAttachments = [],
         bypassPendingOnboarding = false,
+        displayContent,
       } = opts;
       const wireAttachments = stagedAttachments.map(toWireAttachment);
       const renderAttachments = stagedAttachments.map(toRenderAttachment);
+      const renderContent =
+        typeof displayContent === "string" ? displayContent : content;
 
       if (
         pendingGate ||
@@ -704,16 +707,22 @@ export function useChat(threadId) {
       const pendingRecord = {
         id: `pending-${pendingSeqRef.current++}`,
         role: "user",
-        content,
+        content: renderContent,
         attachments: renderAttachments,
+        retryContent: content,
+        retryDisplayContent: renderContent,
+        retryAttachments: stagedAttachments,
         timestamp: new Date().toISOString(),
         isOptimistic: true,
       };
       const pendingRenderMessage = {
         id: pendingRecord.id,
         role: "user",
-        content,
+        content: renderContent,
         attachments: renderAttachments,
+        retryContent: content,
+        retryDisplayContent: renderContent,
+        retryAttachments: stagedAttachments,
         timestamp: pendingRecord.timestamp,
         isOptimistic: true,
       };
@@ -1112,23 +1121,27 @@ export function useChat(threadId) {
       if (response?.success === false) {
         throw new Error(response.message || "Pairing failed");
       }
-      if (onboarding.sourceMessageId) {
-        dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
-        persistDismissedOnboardingId(threadForResume, onboarding.sourceMessageId);
-      }
-      forgetChannelConnectionWaiter({
-        channel: onboarding.extensionName,
-        threadId: threadForResume,
-        sourceMessageId: onboarding.sourceMessageId || null,
-      });
-      setPendingOnboarding(null);
+      const clearOnboarding = () => {
+        if (onboarding.sourceMessageId) {
+          dismissedOnboardingIdsRef.current.add(onboarding.sourceMessageId);
+          persistDismissedOnboardingId(threadForResume, onboarding.sourceMessageId);
+        }
+        forgetChannelConnectionWaiter({
+          channel: onboarding.extensionName,
+          threadId: threadForResume,
+          sourceMessageId: onboarding.sourceMessageId || null,
+        });
+        setPendingOnboarding(null);
+      };
       if (threadForResume && !onboarding.requestId) {
         await send(channelConnectionContinuationMessage(onboarding.extensionName), {
           threadId: threadForResume,
           bypassPendingOnboarding: true,
         });
+        clearOnboarding();
         return response;
       }
+      clearOnboarding();
       if (onboarding.requestId && threadForResume) {
         setIsProcessing(true);
       }
@@ -1216,11 +1229,59 @@ export function useChat(threadId) {
     [resolveGate],
   );
 
-  // Fork chat.js expects these as stubs: v2 stream is deterministic
-  // enough that retry / suggestions / recovery are not necessary in
-  // local-dev. Wire them as no-ops so the chat UI renders without
-  // additional branches.
   const noop = React.useCallback(() => {}, []);
+  const retryMessage = React.useCallback(
+    async (message) => {
+      if (!message || message.status !== "error") return;
+      const content =
+        typeof message.retryContent === "string"
+          ? message.retryContent
+          : typeof message.content === "string"
+            ? message.content
+            : "";
+      const attachments = Array.isArray(message.retryAttachments)
+        ? message.retryAttachments
+        : [];
+      if (!content && attachments.length === 0) return;
+
+      const removeFailed = (prev) => prev.filter((item) => item.id !== message.id);
+      const restoreFailedIfNoReplacement = (prev) => {
+        const hasReplacement = prev.some(
+          (item) =>
+            item.id !== message.id &&
+            item.role === "user" &&
+            item.status === "error" &&
+            item.retryContent === content,
+        );
+        return hasReplacement || prev.some((item) => item.id === message.id)
+          ? prev
+          : [...prev, message];
+      };
+      setMessages(removeFailed);
+      if (threadId) seedThreadMessages(threadId, removeFailed);
+      try {
+        const response = await send(content, {
+          threadId,
+          attachments,
+          displayContent:
+            typeof message.retryDisplayContent === "string"
+              ? message.retryDisplayContent
+              : message.content,
+        });
+        if (response === null) {
+          setMessages(restoreFailedIfNoReplacement);
+          if (threadId) seedThreadMessages(threadId, restoreFailedIfNoReplacement);
+        }
+      } catch {
+        // `send` renders a replacement failed optimistic message after
+        // admission. If admission failed before that point, restore the
+        // original retryable error bubble.
+        setMessages(restoreFailedIfNoReplacement);
+        if (threadId) seedThreadMessages(threadId, restoreFailedIfNoReplacement);
+      }
+    },
+    [send, seedThreadMessages, setMessages, threadId],
+  );
 
   return {
     // v2-native
@@ -1245,7 +1306,7 @@ export function useChat(threadId) {
     // fork-shape compatibility — see comments above
     suggestions: [],
     setSuggestions: noop,
-    retryMessage: noop,
+    retryMessage,
     approve,
     recoverHistory: noop,
     recoveryNotice: null,

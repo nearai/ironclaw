@@ -238,10 +238,10 @@ def _reborn_failure_message(entry: dict) -> str:
     for key in ("error", "message", "reason", "gate"):
         value = details.get(key)
         if value:
-            return _trim_slack_text(value)
+            return _trim_slack_text(value, 360)
     blocked = details.get("blocked")
     if blocked:
-        return _trim_slack_text(f"blocked={blocked}")
+        return _trim_slack_text(f"blocked={blocked}", 360)
     return ""
 
 
@@ -608,7 +608,18 @@ def _format_reborn_tool_summary(cases: list[RebornQaCaseReport]) -> list[str]:
     return lines
 
 
-def _format_reborn_qa_group(group: str, cases: list[RebornQaCaseReport]) -> dict:
+def _format_reborn_failure_lines(cases: list[RebornQaCaseReport]) -> list[str]:
+    lines: list[str] = []
+    for case in cases:
+        if case.success:
+            continue
+        rows = _qa_case_rows(case)
+        message = case.message or "failed"
+        lines.append(f"*Failure `{rows}`:* {message}")
+    return lines
+
+
+def _format_reborn_qa_group(group: str, cases: list[RebornQaCaseReport]) -> list[dict]:
     passed = sum(1 for case in cases if case.success)
     failed = len(cases) - passed
     status = ":white_check_mark:" if failed == 0 else ":x:"
@@ -625,31 +636,47 @@ def _format_reborn_qa_group(group: str, cases: list[RebornQaCaseReport]) -> dict
         f"{status} *QA {group}* — {passed}/{len(cases)} passed{duration}",
         f"*Cases:* {_trim_slack_text('; '.join(case_summaries), 900)}",
     ]
-    failed_messages = [
-        f"`{_qa_case_rows(case)}` {case.message or 'failed'}"
-        for case in cases
-        if not case.success
-    ]
-    if failed_messages:
-        lines.append(f"*Failures:* {_trim_slack_text('; '.join(failed_messages), 700)}")
+    lines.extend(_format_reborn_failure_lines(cases))
     lines.extend(_format_reborn_tool_summary(cases))
-    return {
-        "type": "section",
-        "text": {
-            "type": "mrkdwn",
-            "text": _trim_slack_block_text("\n".join(lines), 2900),
-        },
-    }
+    blocks: list[dict] = []
+    current: list[str] = []
+    continuation_header = f"{status} *QA {group}* — continued"
+    for line in lines:
+        candidate = "\n".join([*current, line])
+        if current and len(candidate) > 2900:
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": _trim_slack_block_text("\n".join(current), 2900),
+                    },
+                }
+            )
+            current = [continuation_header, line]
+        else:
+            current.append(line)
+    if current:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": _trim_slack_block_text("\n".join(current), 2900),
+                },
+            }
+        )
+    return blocks
 
 
 def _format_reborn_qa_groups(cases: list[RebornQaCaseReport]) -> list[dict]:
     grouped: dict[str, list[RebornQaCaseReport]] = {}
     for case in cases:
         grouped.setdefault(_qa_group_key(case), []).append(case)
-    return [
-        _format_reborn_qa_group(group, grouped[group])
-        for group in sorted(grouped, key=_qa_group_sort_key)
-    ]
+    blocks: list[dict] = []
+    for group in sorted(grouped, key=_qa_group_sort_key):
+        blocks.extend(_format_reborn_qa_group(group, grouped[group]))
+    return blocks
 
 
 def slack_payload(
@@ -667,6 +694,7 @@ def slack_payload(
         {"type": "header", "text": {"type": "plain_text", "text": header}},
     ]
     for r in reports:
+        renders_reborn_qa_groups = bool(r.reborn_qa_cases)
         header_line = (
             f"{emoji.get(r.status, ':grey_question:')} *{r.lane}* ({r.provider}) — "
             f"{r.passed}/{r.tests} passed, {r.failed} failed in {r.duration_s:.0f}s"
@@ -676,7 +704,11 @@ def slack_payload(
         # fields. The shape mirrors the issue-friendly format reviewers
         # asked for so a Slack reader can paste it straight into a
         # GitHub issue if needed.
-        if r.status == "fail" and (r.test_name or r.error or r.root_cause):
+        if (
+            r.status == "fail"
+            and not renders_reborn_qa_groups
+            and (r.test_name or r.error or r.root_cause)
+        ):
             if r.test_name:
                 lines.append(f"  *Test:* `{r.test_name}`")
             if r.error:
@@ -685,16 +717,16 @@ def slack_payload(
                 lines.append(f"  *Root Cause:* {r.root_cause}")
             if r.fix:
                 lines.append(f"  *Fix:* {r.fix}")
-        elif r.reason:
+        elif r.reason and not renders_reborn_qa_groups:
             # For passing/skipped lanes we keep the existing single-
             # line reason summary (Haiku's free-form notable).
             lines.append(f"> {r.reason}")
-        if r.tools_used:
+        if r.tools_used and not renders_reborn_qa_groups:
             lines.append(f"tools: {', '.join(r.tools_used)} (≈{r.tool_calls_total} calls)")
-        if r.notable:
+        if r.notable and not renders_reborn_qa_groups:
             lines.append(f"_{r.notable}_")
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
-        if r.reborn_qa_cases:
+        if renders_reborn_qa_groups:
             remaining = max(0, SLACK_MAX_BLOCKS - len(blocks))
             blocks.extend(_format_reborn_qa_groups(r.reborn_qa_cases)[:remaining])
 

@@ -26,241 +26,33 @@ Wiring confirmed manually before this test existed:
 
 import asyncio
 import json
-import os
 import re
-import signal
-import socket
-import uuid
 from enum import StrEnum
-from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 import httpx
 import pytest
-from playwright.async_api import async_playwright, expect
+from playwright.async_api import expect
 
-from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, wait_for_ready
-
-USER_ID = "reborn-v2-e2e-user"
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
+from reborn_webui_harness import (
+    USER_ID,
+    create_thread as _create_thread,
+    fetch_timeline as _get_timeline,
+    reborn_v2_browser,  # noqa: F401 - imported fixture
+    reborn_v2_page,  # noqa: F401 - imported fixture
+    reborn_v2_server,  # noqa: F401 - imported fixture
+    send_and_settle as _send_and_settle,
+    send_message as _send_message,
+    wait_for_assistant_message as _wait_for_assistant_message,
+)
 
 
 class ToolPermissionState(StrEnum):
     DEFAULT = "default"
     DISABLED = "disabled"
     ASK_EACH_TIME = "ask_each_time"
-
-
-def _find_free_port() -> int:
-    """Ask the OS for an available loopback port (startup hint; bind is retried)."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def _read_log(path: Path, limit: int = 8192) -> str:
-    try:
-        return path.read_text(encoding="utf-8", errors="replace")[-limit:]
-    except OSError:
-        return ""
-
-
-def _forward_coverage_env(env: dict[str, str]) -> None:
-    for key, value in os.environ.items():
-        if key.startswith(("CARGO_LLVM_COV", "LLVM_")) or key in {
-            "CARGO_ENCODED_RUSTFLAGS",
-            "CARGO_INCREMENTAL",
-        }:
-            env[key] = value
-
-
-async def _stop_process(proc, *, sig=signal.SIGINT, timeout: float = 10) -> None:
-    """Signal a subprocess and wait for exit without re-reading stdio pipes."""
-    if proc.returncode is not None:
-        return
-    try:
-        proc.send_signal(sig)
-    except ProcessLookupError:
-        return
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await asyncio.wait_for(proc.wait(), timeout=5)
-
-
-def _write_config_toml(
-    path: Path, mock_llm_server: str, profile: str = "local-dev"
-) -> None:
-    """Seed a sparse Reborn config that selects the mock LLM via the `openai` provider.
-
-    The built-in `openai` provider speaks the OpenAI Chat Completions wire shape
-    (`/v1/chat/completions`) that `mock_llm.py` serves. The `base_url` override
-    points it at the mock; `api_key_env` names an env var the server fixture sets.
-    Secrets stay out of the file — only the env-var NAME is referenced.
-
-    `profile` selects the composition profile (`local-dev` by default;
-    `local-dev-yolo` gives minimal approvals so workspace writes auto-proceed).
-    """
-    path.write_text(
-        f"""api_version = "ironclaw.runtime/v1"
-
-[boot]
-profile = "{profile}"
-
-[identity]
-default_owner = "{USER_ID}"
-tenant = "reborn-v2-e2e"
-default_agent = "reborn-v2-e2e-agent"
-
-[webui]
-env_token_var = "IRONCLAW_REBORN_WEBUI_TOKEN"
-env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
-
-[llm.default]
-provider_id = "openai"
-model = "mock-model"
-api_key_env = "MOCK_LLM_API_KEY"
-base_url = "{mock_llm_server}/v1"
-""",
-        encoding="utf-8",
-    )
-
-
-@pytest.fixture(scope="module")
-async def reborn_v2_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_factory):
-    """Start `ironclaw-reborn serve` with the v2 surface against the mock LLM."""
-    home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-home")
-    reborn_home = home_dir / "reborn-home"
-    reborn_home.mkdir(parents=True, exist_ok=True)
-    _write_config_toml(reborn_home / "config.toml", mock_llm_server)
-
-    proc = None
-    base_url = None
-    last_stderr = ""
-    last_port = None
-
-    for attempt in range(1, 4):
-        port = _find_free_port()
-        last_port = port
-        stdout_path = home_dir / f"reborn-v2-attempt-{attempt}.stdout.log"
-        stderr_path = home_dir / f"reborn-v2-attempt-{attempt}.stderr.log"
-
-        env = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": str(home_dir),
-            "IRONCLAW_REBORN_HOME": str(reborn_home),
-            "IRONCLAW_REBORN_PROFILE": "local-dev",
-            "IRONCLAW_REBORN_WEBUI_TOKEN": REBORN_V2_AUTH_TOKEN,
-            "IRONCLAW_REBORN_WEBUI_USER_ID": USER_ID,
-            "MOCK_LLM_API_KEY": "mock-api-key",
-            # Keep the provider's reqwest client off any developer-local HTTP
-            # proxy so the loopback mock request is not intercepted (502).
-            "NO_PROXY": "127.0.0.1,localhost,::1",
-            "no_proxy": "127.0.0.1,localhost,::1",
-            "RUST_LOG": "ironclaw=warn,ironclaw_reborn=warn",
-            "RUST_BACKTRACE": "1",
-        }
-        _forward_coverage_env(env)
-
-        with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
-            proc = await asyncio.create_subprocess_exec(
-                ironclaw_reborn_binary,
-                "serve",
-                "--host", "127.0.0.1",
-                "--port", str(port),
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=out,
-                stderr=err,
-                env=env,
-            )
-        base_url = f"http://127.0.0.1:{port}"
-
-        try:
-            await wait_for_ready(f"{base_url}/api/health", timeout=60)
-            break
-        except TimeoutError:
-            if proc.returncode is None:
-                await _stop_process(proc, timeout=2)
-            last_stderr = _read_log(stderr_path)
-            proc = None
-    else:
-        pytest.fail(
-            "Reborn WebUI v2 server failed to start after 3 attempts.\n"
-            f"Last attempted port: {last_port}\n"
-            f"stderr:\n{last_stderr}"
-        )
-
-    try:
-        yield base_url
-    finally:
-        if proc is not None and proc.returncode is None:
-            await _stop_process(proc, sig=signal.SIGINT, timeout=10)
-            if proc.returncode is None:
-                await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
-
-
-@pytest.fixture(scope="module")
-async def reborn_v2_browser():
-    """Chromium instance for the v2 smoke (independent of the legacy gateway).
-
-    Chromium's cold start can contend with the binary build and server startup,
-    so launch with a generous timeout and one retry rather than letting the
-    default 30s connect window flake the whole module.
-    """
-    from playwright.async_api import Error as PlaywrightError
-
-    headless = os.environ.get("HEADED", "").strip() not in ("1", "true")
-    async with async_playwright() as p:
-        browser = None
-        for attempt in range(3):
-            try:
-                browser = await p.chromium.launch(headless=headless, timeout=60000)
-                break
-            except PlaywrightError:
-                if attempt == 2:
-                    raise
-                await asyncio.sleep(1)
-        yield browser
-        await browser.close()
-
-
-@pytest.fixture
-async def reborn_v2_page(reborn_v2_server, reborn_v2_browser):
-    """Fresh authed page on the v2 SPA, navigated past the login/connect view."""
-    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
-    page = await context.new_page()
-    await page.goto(f"{reborn_v2_server}/v2/?token={REBORN_V2_AUTH_TOKEN}")
-    # Authenticated landing route is /chat; the composer is the shell anchor.
-    await page.wait_for_selector(SEL_V2["chat_composer"], timeout=15000)
-    yield page
-    await context.close()
-
-
-def _client_action_id() -> str:
-    """Idempotency key accepted by `webui_inbound::parse_client_action_id`."""
-    return str(uuid.uuid4())
-
-
-async def _create_thread(client: httpx.AsyncClient, base_url: str) -> str:
-    response = await client.post(
-        f"{base_url}/api/webchat/v2/threads",
-        json={"client_action_id": _client_action_id()},
-        timeout=15,
-    )
-    response.raise_for_status()
-    return response.json()["thread"]["thread_id"]
-
-
-async def _send_message(
-    client: httpx.AsyncClient, base_url: str, thread_id: str, content: str
-) -> None:
-    response = await client.post(
-        f"{base_url}/api/webchat/v2/threads/{thread_id}/messages",
-        json={"client_action_id": _client_action_id(), "content": content},
-        timeout=30,
-    )
-    assert response.status_code in (200, 202), response.text
 
 
 async def _set_tool_permission(
@@ -280,17 +72,6 @@ async def _set_tool_permission(
     )
 
 
-async def _get_timeline(
-    client: httpx.AsyncClient, base_url: str, thread_id: str
-) -> dict:
-    response = await client.get(
-        f"{base_url}/api/webchat/v2/threads/{thread_id}/timeline",
-        timeout=15,
-    )
-    response.raise_for_status()
-    return response.json()
-
-
 async def _restore_disabled_tool_policy(client: httpx.AsyncClient, base_url: str) -> None:
     errors = []
     for capability_id in ("builtin.echo", "builtin.shell"):
@@ -304,39 +85,6 @@ async def _restore_disabled_tool_policy(client: httpx.AsyncClient, base_url: str
         except Exception as error:
             errors.append(f"{capability_id}: {error}")
     assert not errors, "Failed to restore tool permission defaults: " + "; ".join(errors)
-
-
-async def _wait_for_assistant_message(
-    client: httpx.AsyncClient,
-    base_url: str,
-    thread_id: str,
-    *,
-    timeout: float = 45.0,
-) -> dict:
-    """Poll the timeline until a finalized assistant message appears."""
-    last_timeline: dict = {}
-    for _ in range(int(timeout * 2)):
-        response = await client.get(
-            f"{base_url}/api/webchat/v2/threads/{thread_id}/timeline",
-            timeout=15,
-        )
-        response.raise_for_status()
-        last_timeline = response.json()
-        finalized = [
-            message
-            for message in last_timeline.get("messages", [])
-            if message.get("kind") == "assistant"
-            and message.get("status") == "finalized"
-            and (message.get("content") or "").strip()
-        ]
-        if finalized:
-            return finalized[-1]
-        await asyncio.sleep(0.5)
-
-    raise AssertionError(
-        f"Timed out waiting for a finalized assistant message in thread {thread_id}. "
-        f"Last timeline: {last_timeline}"
-    )
 
 
 @pytest.fixture
@@ -851,38 +599,6 @@ async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
         remaining = {thread["thread_id"] for thread in relisted.json().get("threads", [])}
         assert drop_id not in remaining, "deleted thread must not reappear in the list"
         assert keep_id in remaining, "untouched thread must remain in the list"
-
-
-def _finalized_assistant_count(timeline: dict) -> int:
-    return sum(
-        1
-        for message in timeline.get("messages", [])
-        if message.get("kind") == "assistant"
-        and message.get("status") == "finalized"
-        and (message.get("content") or "").strip()
-    )
-
-
-async def _send_and_settle(
-    client: httpx.AsyncClient, base_url: str, thread_id: str, content: str, expected: int
-) -> None:
-    """Send a text turn and wait until `expected` assistant replies are finalized.
-
-    Sending while a prior turn is still running defers the message
-    (`deferred_busy`), so each turn must settle before the next is sent.
-    """
-    await _send_message(client, base_url, thread_id, content)
-    for _ in range(90):
-        response = await client.get(
-            f"{base_url}/api/webchat/v2/threads/{thread_id}/timeline", timeout=15
-        )
-        response.raise_for_status()
-        if _finalized_assistant_count(response.json()) >= expected:
-            return
-        await asyncio.sleep(0.5)
-    raise AssertionError(
-        f"Thread {thread_id} did not reach {expected} finalized assistant replies"
-    )
 
 
 async def test_reborn_v2_timeline_pagination(reborn_v2_server):

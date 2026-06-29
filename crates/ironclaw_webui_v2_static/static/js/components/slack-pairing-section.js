@@ -16,8 +16,8 @@ export function SlackPairingSection({ action }) {
       // failure. A stale "installed" status reconciles on the next refresh.
       try {
         await activateExtension({ id: "slack" });
-      } catch (activationError) {
-        console.error("Slack activation after pairing failed:", activationError);
+      } catch {
+        console.error("Slack activation after pairing failed.");
       }
       return result;
     },

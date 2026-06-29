@@ -113,6 +113,7 @@ jobs:
           CASES: ${{ steps.parse.outputs.cases }}
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ steps.parse.outputs.head_sha }}
+          PR: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
           TRIGGER_CONTEXT: ${{ steps.parse.outputs.trigger_context }}
         run: |
@@ -123,6 +124,7 @@ jobs:
             -f lane=reborn-webui-v2-live-qa \
             -f cases="$CASES" \
             -f target_ref="$HEAD_SHA" \
+            -f target_pr="$PR" \
             -f trigger_context="$TRIGGER_CONTEXT"
 
       - name: Post started comment

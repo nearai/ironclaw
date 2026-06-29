@@ -686,6 +686,104 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
   assert.equal(sendCalls, 0);
 });
 
+test("useChat.retryMessage: pre-admission rejection keeps failed bubble retryable", async () => {
+  const threadId = "thread-1";
+  const failedMessage = {
+    id: "failed-1",
+    role: "user",
+    content: "retry me",
+    retryContent: "retry me",
+    status: "error",
+  };
+  const pendingGate = {
+    runId: "run-gated",
+    gateRef: "gate-shell",
+    kind: "gate",
+    toolName: "builtin.shell",
+  };
+  let renderedMessages = [failedMessage];
+  let seededMessages = null;
+  let sendCalls = 0;
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [3, false],
+        [4, pendingGate],
+      ]),
+    }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("approval gate should block before channel discovery");
+    },
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("approval gate should block before channel discovery");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      sendCalls += 1;
+      throw new Error("sendMessage should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: (_threadId, updater) => {
+        seededMessages =
+          typeof updater === "function"
+            ? updater(seededMessages ?? renderedMessages)
+            : updater;
+      },
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.retryMessage(failedMessage);
+
+  assert.equal(sendCalls, 0);
+  assert.equal(renderedMessages.length, 1);
+  assert.equal(renderedMessages[0].id, failedMessage.id);
+  assert.equal(renderedMessages[0].content, failedMessage.content);
+  assert.equal(renderedMessages[0].retryContent, failedMessage.retryContent);
+  assert.equal(renderedMessages[0].status, failedMessage.status);
+  assert.equal(seededMessages.length, 1);
+  assert.equal(seededMessages[0].id, failedMessage.id);
+  assert.equal(seededMessages[0].content, failedMessage.content);
+  assert.equal(seededMessages[0].retryContent, failedMessage.retryContent);
+  assert.equal(seededMessages[0].status, failedMessage.status);
+});
+
 test("useChat.send: accepted send does not clear a gate received while in flight", async () => {
   const threadId = "thread-1";
   const replacementGate = {
@@ -2118,7 +2216,100 @@ test("useChat.submitOnboardingPairing: Slack redemption resumes chat without lea
   assert.equal(response.success, true);
   assert.ok(
     stateUpdates.some((update) => update.index === 5 && update.value === null),
-    "the pairing panel should clear before the continuation send",
+    "the pairing panel should clear after the continuation send succeeds",
+  );
+});
+
+test("useChat.submitOnboardingPairing: failed local resume keeps pairing panel retryable", async () => {
+  const threadId = "thread-slack-pairing-retry";
+  const sourceMessageId = "tool-slack-activation";
+  const stateUpdates = [];
+  const storageValues = new Map();
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [
+          5,
+          {
+            state: "pairing_required",
+            extensionName: "slack",
+            threadId,
+            requestId: null,
+            sourceMessageId,
+          },
+        ],
+      ]),
+      setCalls: stateUpdates,
+    }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    approvePairingCode: async () => {
+      throw new Error("Slack pairing should use the Slack redemption endpoint");
+    },
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {
+      localStorage: {
+        getItem: (key) => (storageValues.has(key) ? storageValues.get(key) : null),
+        setItem: (key, value) => storageValues.set(key, String(value)),
+      },
+    },
+    queryClient: {
+      getQueryData: () => ({
+        threads: [{ thread_id: threadId, title: "Slack pairing thread" }],
+      }),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    redeemSlackPairingCode: async () => ({ success: true }),
+    removePending,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw new Error("transient continuation failure");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await assert.rejects(
+    () => chat.submitOnboardingPairing("A1B2C3"),
+    /transient continuation failure/,
+  );
+
+  assert.equal(
+    stateUpdates.some((update) => update.index === 5 && update.value === null),
+    false,
+    "failed continuation must not clear the pairing panel",
+  );
+  assert.equal(
+    storageValues.has(`ironclaw.chat.dismissedOnboarding.v1:${threadId}`),
+    false,
+    "failed continuation must not persist a durable dismissal",
   );
 });
 

@@ -195,21 +195,21 @@ impl ChannelConnectionFacade for SlackChannelConnectionFacade {
                 "Slack personal connection scope is unavailable; refusing unscoped disconnect",
             ));
         };
-        let provider_user_id_prefix = format!("{}:", scope.installation_id.as_str());
-        self.user_identity_delete_store
-            .delete_user_identity_bindings_for_user(
-                SLACK_IDENTITY_PROVIDER,
-                &caller.user_id,
-                Some(provider_user_id_prefix.as_str()),
-            )
-            .await
-            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
         self.personal_dm_target_store
             .delete_personal_dm_targets_for_user(
                 &self.tenant_id,
                 &caller.user_id,
                 &scope.installation_id,
                 &scope.team_id,
+            )
+            .await
+            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+        let provider_user_id_prefix = format!("{}:", scope.installation_id.as_str());
+        self.user_identity_delete_store
+            .delete_user_identity_bindings_for_user(
+                SLACK_IDENTITY_PROVIDER,
+                &caller.user_id,
+                Some(provider_user_id_prefix.as_str()),
             )
             .await
             .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
@@ -341,7 +341,8 @@ mod tests {
             .ok()
             .and_then(|value| value.as_str().map(str::to_owned))
             .expect("strategy serializes to a string");
-        assert_eq!(requirement.strategy, strategy_wire);
+        assert_eq!(requirement.strategy, descriptor.strategy);
+        assert_eq!(strategy_wire, "inbound_proof_code");
     }
 
     #[test]
@@ -454,6 +455,49 @@ mod tests {
                 .expect("dm target lookup after disconnect"),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn slack_channel_connection_facade_keeps_identity_when_dm_target_delete_fails() {
+        let tenant_id = TenantId::new("tenant:test").expect("tenant");
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation id");
+        let team_id = SlackTeamId::new("T123");
+        let user_id = UserId::new("user:alice").expect("user");
+        let slack_provider_user_id = slack_user_identity_provider_user_id(&installation_id, "U123");
+        let identity_store = Arc::new(RecordingSlackIdentityStore::new([(
+            slack_provider_user_id,
+            user_id.clone(),
+        )]));
+        let facade = SlackChannelConnectionFacade {
+            tenant_id: tenant_id.clone(),
+            personal_connection_scope: Some(SlackPersonalConnectionScope {
+                installation_id,
+                team_id,
+            }),
+            personal_connection_scope_resolver: None,
+            user_identity_lookup: identity_store.clone(),
+            user_identity_delete_store: identity_store.clone(),
+            personal_dm_target_store: Arc::new(FailingSlackPersonalDmTargetStore),
+        };
+        let caller =
+            WebUiAuthenticatedCaller::new(tenant_id, user_id.clone(), None::<AgentId>, None);
+
+        assert!(
+            facade
+                .disconnect_channel_for_caller(caller.clone(), "slack")
+                .await
+                .is_err(),
+            "DM target cleanup failure must fail the disconnect"
+        );
+        assert_eq!(
+            facade
+                .caller_channel_connections(caller)
+                .await
+                .expect("connection lookup after failed disconnect"),
+            HashMap::from([("slack".to_string(), true)]),
+            "identity binding must remain until outbound delivery target cleanup succeeds"
+        );
+        assert_eq!(identity_store.deletes(), Vec::new());
     }
 
     #[tokio::test]
@@ -920,6 +964,49 @@ mod tests {
                 !(bound_user_id == user_id && prefix_matches)
             });
             Ok(before - bindings.len())
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingSlackPersonalDmTargetStore;
+
+    #[async_trait::async_trait]
+    impl SlackPersonalDmTargetStore for FailingSlackPersonalDmTargetStore {
+        async fn load_personal_dm_target(
+            &self,
+            _key: &crate::slack_outbound_targets::SlackPersonalDmTargetKey,
+        ) -> Result<
+            Option<crate::slack_outbound_targets::SlackPersonalDmTarget>,
+            crate::slack_outbound_targets::SlackPersonalDmTargetError,
+        > {
+            Ok(None)
+        }
+
+        async fn upsert_personal_dm_target(
+            &self,
+            target: crate::slack_outbound_targets::SlackPersonalDmTarget,
+        ) -> Result<
+            crate::slack_outbound_targets::SlackPersonalDmTarget,
+            crate::slack_outbound_targets::SlackPersonalDmTargetError,
+        > {
+            Ok(target)
+        }
+
+        async fn delete_personal_dm_target(
+            &self,
+            _key: &crate::slack_outbound_targets::SlackPersonalDmTargetKey,
+        ) -> Result<bool, crate::slack_outbound_targets::SlackPersonalDmTargetError> {
+            Err(crate::slack_outbound_targets::SlackPersonalDmTargetError::StoreUnavailable)
+        }
+
+        async fn delete_personal_dm_targets_for_user(
+            &self,
+            _tenant_id: &TenantId,
+            _user_id: &UserId,
+            _installation_id: &AdapterInstallationId,
+            _team_id: &SlackTeamId,
+        ) -> Result<usize, crate::slack_outbound_targets::SlackPersonalDmTargetError> {
+            Err(crate::slack_outbound_targets::SlackPersonalDmTargetError::StoreUnavailable)
         }
     }
 }

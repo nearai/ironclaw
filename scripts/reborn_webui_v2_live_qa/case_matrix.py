@@ -178,9 +178,10 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
         "rows": ["6C"],
         "feature": "CRM inbound email extraction to Google Sheet",
         "gate": (
-            "requires a live Google OAuth account authorized for Gmail and Google "
-            "Sheets runtime execution plus test data, and Google OAuth refresh "
-            "env when the copied access token is expired"
+            "requires a live Google OAuth account authorized for Gmail, Google "
+            "Drive name lookup, and Google Sheets runtime execution plus test "
+            "data, and Google OAuth refresh env when the copied access token is "
+            "expired"
         ),
     },
     "qa_6d_gmail_to_sheet_routine": {

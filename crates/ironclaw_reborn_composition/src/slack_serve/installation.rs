@@ -798,6 +798,8 @@ impl StaticSlackInstallationResolver {
             .filter(|installation| installation.selector.matches_command(&context))
             .collect();
         if candidates.is_empty() {
+            self.ensure_candidate_budget(self.installations.len())?;
+            self.verify_candidates(self.installations.iter(), headers, body)?;
             return Err(SlackIngressError::InstallationNotFound);
         }
         self.ensure_candidate_budget(candidates.len())?;
@@ -1449,6 +1451,36 @@ mod tests {
 
         assert!(
             matches!(error, SlackIngressError::InstallationNotFound),
+            "error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_command_ingress_authenticates_before_unknown_team_rejection() {
+        let resolver = StaticSlackInstallationResolver::new(vec![SlackInstallationRecord::new(
+            tenant_id("tenant-a"),
+            installation_id("install-a"),
+            SlackInstallationSelector::team("T-A"),
+            failing_dispatcher(),
+        )]);
+
+        let body = slack_command_body(
+            "T-UNKNOWN",
+            "U123",
+            "/pair",
+            "https://hooks.slack.com/commands/T-UNKNOWN/123/abc",
+        );
+
+        let error = resolver
+            .resolve_command_ingress(&HeaderMap::new(), &body)
+            .await
+            .expect_err("an unsigned unknown-team command must fail authentication first");
+
+        assert!(
+            matches!(
+                error,
+                SlackIngressError::Runner(RunnerError::AuthenticationFailed { .. })
+            ),
             "error: {error}"
         );
     }

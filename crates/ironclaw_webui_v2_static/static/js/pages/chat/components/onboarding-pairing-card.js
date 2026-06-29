@@ -26,8 +26,8 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onCancel }) {
     try {
       await onSubmit(trimmed);
       setCode("");
-    } catch (err) {
-      setError(err?.message || copy.errorMessage);
+    } catch {
+      setError(copy.errorMessage);
     } finally {
       setIsSubmitting(false);
     }

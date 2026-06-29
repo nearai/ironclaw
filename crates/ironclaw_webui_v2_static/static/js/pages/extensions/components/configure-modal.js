@@ -8,7 +8,11 @@ import {
   useOauthSetup,
   useSetupSubmit,
 } from "../hooks/useExtensions.js";
-import { extensionIsActive, setupReadyForActivation } from "../lib/extension-actions.js";
+import {
+  extensionIsActive,
+  extensionLifecycleState,
+  setupReadyForActivation,
+} from "../lib/extension-actions.js";
 import { isChannelExtensionKind } from "../lib/extensions-schema.js";
 import { redeemPairingCode } from "../lib/pairing-api.js";
 import { activateExtension } from "../lib/extensions-api.js";
@@ -55,19 +59,28 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       ? extension.packageRef
       : extension?.packageRef?.id || "";
   const channelId = extension?.channel || packageId;
-  const isChannel = isChannelExtensionKind(extension?.kind);
-  const channelPairingInstructions =
-    channelId.toLowerCase() === "slack"
-      ? "Open Slack and message the IronClaw Reborn app to get a pairing code, then paste it below. The code is redeemed directly and is never sent to the model."
-      : `Message ${extensionName} to get a pairing code, then paste it below. The code is redeemed directly and is never sent to the model.`;
+  const lifecycleState = extensionLifecycleState(extension);
+  const isSlackChannel = channelId.toLowerCase() === "slack";
+  const isPairingChannel =
+    isChannelExtensionKind(extension?.kind) &&
+    (lifecycleState === "pairing" || lifecycleState === "pairing_required");
+  const channelPairingInstructions = isSlackChannel
+    ? t("pairing.slackInstructions")
+    : t("pairing.instructions");
+  const channelPairingPlaceholder = isSlackChannel
+    ? t("pairing.slackPlaceholder")
+    : t("pairing.placeholder");
+  const channelPairingError = isSlackChannel
+    ? t("pairing.slackError")
+    : t("pairing.error");
   const [pairingCode, setPairingCode] = React.useState("");
   const pairingMutation = useMutation({
     mutationFn: async (code) => {
       const result = await redeemPairingCode(channelId, code);
       try {
         await activateExtension({ id: packageId || channelId });
-      } catch (activationError) {
-        console.error("channel activation after pairing failed:", activationError);
+      } catch {
+        console.error("channel activation after pairing failed.");
       }
       return result;
     },
@@ -96,7 +109,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const isActive = extensionIsActive(extension);
   const canActivate = setupReadyForActivation({ extension, secrets, fields });
 
-  if (isChannel) {
+  if (isPairingChannel) {
     return html`
       <${ModalShell}
         onClose=${onClose}
@@ -111,8 +124,8 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
             value=${pairingCode}
             onChange=${(event) => setPairingCode(event.target.value)}
             onKeyDown=${(event) => event.key === "Enter" && submitPairing()}
-            placeholder="Enter pairing code"
-            aria-label="Enter pairing code"
+            placeholder=${channelPairingPlaceholder}
+            aria-label=${channelPairingPlaceholder}
             className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
           />
           <${Button}
@@ -120,14 +133,12 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
             onClick=${submitPairing}
             disabled=${pairingMutation.isPending || !pairingCode.trim()}
           >
-            ${pairingMutation.isPending ? "Connecting…" : "Connect"}
+            ${pairingMutation.isPending ? t("common.saving") : t("pairing.connect")}
           <//>
         </div>
         ${pairingMutation.isError &&
         html`<p role="alert" className="mt-3 text-xs leading-5 text-red-300">
-          ${pairingMutation.error?.payload?.message ||
-          pairingMutation.error?.message ||
-          "Pairing failed. Check the code and try again."}
+          ${channelPairingError}
         </p>`}
       <//>
     `;

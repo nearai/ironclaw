@@ -321,6 +321,67 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
 }
 
 #[tokio::test]
+async fn builtin_memory_search_surface_declares_internal_scope_boundary() {
+    let runtime = runtime();
+    let request = VisibleCapabilityRequest::new(
+        execution_context(all_builtin_capability_ids()),
+        SurfaceKind::new("agent_loop").unwrap(),
+    )
+    .with_policy(CapabilitySurfacePolicy::allow_all())
+    .with_provider_trust(provider_trust());
+
+    let surface = runtime.visible_capabilities(request).await.unwrap();
+
+    let memory_search = surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id.as_str() == MEMORY_SEARCH_CAPABILITY_ID)
+        .expect("memory_search must appear in surface");
+    assert!(
+        memory_search
+            .descriptor
+            .description
+            .contains("only Reborn internal persistent memory"),
+        "memory_search description should declare the internal-memory boundary: {}",
+        memory_search.descriptor.description
+    );
+    assert!(
+        memory_search
+            .descriptor
+            .description
+            .contains("does not search connected app or extension data"),
+        "memory_search description should avoid implying it can search external apps: {}",
+        memory_search.descriptor.description
+    );
+
+    let schema = &memory_search.descriptor.parameters_schema;
+    let schema_description = schema
+        .get("description")
+        .and_then(Value::as_str)
+        .expect("memory_search schema should describe its search scope");
+    assert!(
+        schema_description.contains("only Reborn internal persistent memory"),
+        "memory_search schema description should declare scope: {schema_description}"
+    );
+    assert!(
+        schema_description.contains("does not search connected app or extension data"),
+        "memory_search schema description should avoid external-app ambiguity: {schema_description}"
+    );
+
+    let query_description = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .and_then(|properties| properties.get("query"))
+        .and_then(|query| query.get("description"))
+        .and_then(Value::as_str)
+        .expect("memory_search query should have a description");
+    assert!(
+        query_description.contains("Reborn internal persistent memory"),
+        "memory_search query description should declare internal memory: {query_description}"
+    );
+}
+
+#[tokio::test]
 async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
     let runtime = runtime_with_trigger_repository(Arc::new(InMemoryTriggerRepository::default()));
     let request = VisibleCapabilityRequest::new(

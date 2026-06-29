@@ -139,17 +139,17 @@ pub(super) async fn remove_extension(
 ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
     let context = lifecycle_surface_context(caller.clone());
     let channel = removable_channel_id(facade, context.clone(), &package_ref).await?;
+    if let Some(channel) = channel.as_deref() {
+        channel_connection_facade
+            .disconnect_channel_for_caller(caller, channel)
+            .await?;
+    }
     let lifecycle = execute_lifecycle(
         facade,
         context,
         LifecycleProductAction::ExtensionRemove { package_ref },
     )
     .await?;
-    if let Some(channel) = channel {
-        channel_connection_facade
-            .disconnect_channel_for_caller(caller, &channel)
-            .await?;
-    }
     Ok(action_response(&lifecycle, None, None))
 }
 
@@ -426,6 +426,7 @@ mod tests {
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 
     use super::*;
+    use crate::reborn_services::StaticChannelConnectionFacade;
     use crate::{
         ChannelConnectionFacade, ExtensionCredentialStatusRequest,
         ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
@@ -440,6 +441,7 @@ mod tests {
     struct TestConnections {
         connections: std::collections::HashMap<String, bool>,
         disconnects: Mutex<Vec<(UserId, String)>>,
+        disconnect_failures: Mutex<usize>,
     }
 
     impl TestConnections {
@@ -450,11 +452,16 @@ mod tests {
                     .map(|(key, value)| ((*key).to_string(), *value))
                     .collect(),
                 disconnects: Mutex::new(Vec::new()),
+                disconnect_failures: Mutex::new(0),
             }
         }
 
         fn disconnects(&self) -> Vec<(UserId, String)> {
             self.disconnects.lock().expect("lock").clone()
+        }
+
+        fn fail_next_disconnects(&self, count: usize) {
+            *self.disconnect_failures.lock().expect("lock") = count;
         }
     }
 
@@ -476,6 +483,11 @@ mod tests {
                 .lock()
                 .expect("lock")
                 .push((caller.user_id, channel.to_string()));
+            let mut failures = self.disconnect_failures.lock().expect("lock");
+            if *failures > 0 {
+                *failures -= 1;
+                return Err(RebornServicesError::service_unavailable(true));
+            }
             Ok(())
         }
     }
@@ -534,7 +546,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_action_disconnects_callers_channel_after_lifecycle_remove() {
+    async fn remove_action_disconnects_callers_channel_when_removing_channel_extension() {
         let facade = RemoveFacade::default();
         let caller = caller();
         let connections = Arc::new(TestConnections::default());
@@ -570,6 +582,43 @@ mod tests {
             }
             other => panic!("unexpected lifecycle context: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn remove_action_does_not_remove_channel_extension_when_disconnect_fails() {
+        let facade = RemoveFacade::default();
+        let caller = caller();
+        let connections = Arc::new(TestConnections::default());
+        connections.fail_next_disconnects(1);
+        let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
+
+        let error = remove_extension(&facade, channel_connections, caller.clone(), package_ref())
+            .await
+            .expect_err("disconnect failure must stop removal");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(
+            connections.disconnects(),
+            vec![(caller.user_id.clone(), "fixture".to_string())],
+            "the caller's channel cleanup should be attempted"
+        );
+        let calls = facade.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 1);
+        assert!(
+            matches!(calls[0].1, LifecycleProductAction::ExtensionList),
+            "extension removal must remain retryable when channel cleanup fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_channel_connection_facade_fails_disconnect_closed() {
+        let error = StaticChannelConnectionFacade
+            .disconnect_channel_for_caller(caller(), "slack")
+            .await
+            .expect_err("unwired disconnect must not report success");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+        assert!(!error.retryable);
     }
 
     #[tokio::test]

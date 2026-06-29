@@ -261,9 +261,9 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let message = body["error"].as_str().unwrap();
-        assert!(
-            message.contains("/pair"),
-            "invalid-code redeem error must point the user at /pair, got: {message}"
+        assert_eq!(
+            message, "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.",
+            "invalid-code redeem error must match the caller-facing recovery copy"
         );
     }
 

@@ -269,30 +269,33 @@ impl SlackSetupService {
     ) -> Result<(), SlackSetupError> {
         let _save_guard = self.save_lock.lock().await;
         let current = self.current_setup().await?;
-        if current.as_ref() != Some(saved) {
+        let current_changed = current.as_ref() != Some(saved);
+        if current_changed {
             tracing::warn!(
                 "skipping Slack setup activation rollback because setup changed after failed save"
             );
-            return Ok(());
+        } else {
+            match previous {
+                Some(previous) => {
+                    self.store.put_slack_installation_setup(previous).await?;
+                }
+                None => {
+                    self.store.delete_slack_installation_setup().await?;
+                }
+            }
         }
 
-        match previous {
-            Some(previous) => {
-                self.store.put_slack_installation_setup(previous).await?;
-            }
-            None => {
-                self.store.delete_slack_installation_setup().await?;
-            }
-        }
-
-        self.delete_secret_if_new(
+        let protected_current = current_changed.then_some(current.as_ref()).flatten();
+        self.delete_secret_if_unreferenced(
             &saved.bot_token_handle,
             previous.map(|setup| &setup.bot_token_handle),
+            protected_current.map(|setup| &setup.bot_token_handle),
         )
         .await?;
-        self.delete_secret_if_new(
+        self.delete_secret_if_unreferenced(
             &saved.signing_secret_handle,
             previous.map(|setup| &setup.signing_secret_handle),
+            protected_current.map(|setup| &setup.signing_secret_handle),
         )
         .await?;
         Ok(())
@@ -412,12 +415,13 @@ impl SlackSetupService {
         Ok(())
     }
 
-    async fn delete_secret_if_new(
+    async fn delete_secret_if_unreferenced(
         &self,
         handle: &SecretHandle,
         previous_handle: Option<&SecretHandle>,
+        current_handle: Option<&SecretHandle>,
     ) -> Result<(), SlackSetupError> {
-        if previous_handle == Some(handle) {
+        if previous_handle == Some(handle) || current_handle == Some(handle) {
             return Ok(());
         }
         self.secret_store
@@ -883,6 +887,100 @@ mod tests {
         assert_eq!(
             updated.shared_subject_user_id.as_deref(),
             Some("user:shared-agent")
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_failed_activation_save_deletes_superseded_secret_handles() {
+        let setup_store = Arc::new(MemorySetupStore::default());
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let service = SlackSetupService::new(
+            TenantId::new("tenant:test").expect("tenant"),
+            AgentId::new("agent:test").expect("agent"),
+            Some(ProjectId::new("project:test").expect("project")),
+            UserId::new("user:operator").expect("user"),
+            setup_store.clone(),
+            secret_store.clone(),
+        );
+        let _original = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-original")),
+                signing_secret: Some(SecretString::from("slack-signing-original")),
+            })
+            .await
+            .expect("save original");
+        let (previous, failed_save) = service
+            .save_with_previous(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-first-retry")),
+                signing_secret: Some(SecretString::from("slack-signing-first-retry")),
+            })
+            .await
+            .expect("save first retry");
+        let second_save = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-second-retry")),
+                signing_secret: Some(SecretString::from("slack-signing-second-retry")),
+            })
+            .await
+            .expect("save second retry");
+
+        service
+            .rollback_failed_activation_save(&failed_save, previous.as_ref())
+            .await
+            .expect("rollback failed first activation");
+
+        assert_eq!(
+            setup_store
+                .get_slack_installation_setup()
+                .await
+                .expect("setup")
+                .expect("stored"),
+            second_save,
+            "rollback must not clobber a newer setup save"
+        );
+        let scope = service.secret_scope();
+        assert!(
+            secret_store
+                .metadata(&scope, &failed_save.bot_token_handle)
+                .await
+                .expect("first bot token metadata")
+                .is_none()
+        );
+        assert!(
+            secret_store
+                .metadata(&scope, &failed_save.signing_secret_handle)
+                .await
+                .expect("first signing metadata")
+                .is_none()
+        );
+        assert!(
+            secret_store
+                .metadata(&scope, &second_save.bot_token_handle)
+                .await
+                .expect("second bot token metadata")
+                .is_some()
+        );
+        assert!(
+            secret_store
+                .metadata(&scope, &second_save.signing_secret_handle)
+                .await
+                .expect("second signing metadata")
+                .is_some()
         );
     }
 

@@ -1212,7 +1212,7 @@ where
             }
             Err(error) => return Err(map_pairing_fs_error(error)),
         }
-        self.cleanup_pairing_code_record(&path).await;
+        self.cleanup_pairing_code_record(&path).await?;
         self.cleanup_pairing_actor_record(&actor_path, code).await;
         Ok(challenge)
     }
@@ -1435,7 +1435,7 @@ where
                     {
                         Ok(_) => {}
                         Err(FilesystemError::VersionMismatch { .. }) => {
-                            self.cleanup_pairing_code_record(&path).await;
+                            self.cleanup_pairing_code_record(&path).await?;
                             let Some((winner, _)) = self
                                 .read_record::<StoredSlackPairingActorChallenge>(actor_path)
                                 .await
@@ -1452,7 +1452,7 @@ where
                             continue;
                         }
                         Err(error) => {
-                            self.cleanup_pairing_code_record(&path).await;
+                            self.cleanup_pairing_code_record(&path).await?;
                             return Err(map_pairing_fs_error(error));
                         }
                     }
@@ -1510,9 +1510,13 @@ where
         Ok(None)
     }
 
-    async fn cleanup_pairing_code_record(&self, path: &ScopedPath) {
-        if self.delete_record(path).await.is_err() {
-            tracing::warn!("failed to delete Slack pairing code record");
+    async fn cleanup_pairing_code_record(
+        &self,
+        path: &ScopedPath,
+    ) -> Result<(), SlackPersonalBindingPairingError> {
+        match self.delete_record(path).await {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(map_pairing_fs_error(error)),
         }
     }
 
@@ -2609,6 +2613,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filesystem_slack_host_state_issue_fails_closed_when_fresh_code_cleanup_fails_after_actor_conflict()
+     {
+        let root = Arc::new(RouteLockTestBackend::normal());
+        let state = state_with_backend(root.clone());
+
+        root.fail_next_pairing_actor_writes(1);
+        root.fail_next_pairing_code_deletes(1);
+        let error = state
+            .issue_challenge(challenge())
+            .await
+            .expect_err("orphaned fresh code cleanup failure must stop issuance");
+
+        assert!(matches!(
+            error,
+            SlackPersonalBindingPairingError::Backend(_)
+        ));
+    }
+
+    #[tokio::test]
     async fn filesystem_slack_host_state_concurrent_reissue_keeps_single_active_code() {
         let state = Arc::new(state());
         state
@@ -3329,6 +3352,7 @@ mod tests {
         route_write_delay: Option<Duration>,
         personal_dm_write_barrier: Option<Arc<tokio::sync::Barrier>>,
         route_write_failures: AtomicUsize,
+        pairing_actor_write_conflicts: AtomicUsize,
         pairing_code_delete_failures: AtomicUsize,
         lock_puts: AtomicUsize,
     }
@@ -3341,6 +3365,7 @@ mod tests {
                 route_write_delay: None,
                 personal_dm_write_barrier: None,
                 route_write_failures: AtomicUsize::new(0),
+                pairing_actor_write_conflicts: AtomicUsize::new(0),
                 pairing_code_delete_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
@@ -3353,6 +3378,7 @@ mod tests {
                 route_write_delay: Some(delay),
                 personal_dm_write_barrier: None,
                 route_write_failures: AtomicUsize::new(0),
+                pairing_actor_write_conflicts: AtomicUsize::new(0),
                 pairing_code_delete_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
@@ -3365,6 +3391,7 @@ mod tests {
                 route_write_delay: Some(delay),
                 personal_dm_write_barrier: None,
                 route_write_failures: AtomicUsize::new(0),
+                pairing_actor_write_conflicts: AtomicUsize::new(0),
                 pairing_code_delete_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
@@ -3377,6 +3404,7 @@ mod tests {
                 route_write_delay: None,
                 personal_dm_write_barrier: Some(Arc::new(tokio::sync::Barrier::new(2))),
                 route_write_failures: AtomicUsize::new(0),
+                pairing_actor_write_conflicts: AtomicUsize::new(0),
                 pairing_code_delete_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
@@ -3384,6 +3412,11 @@ mod tests {
 
         fn fail_next_route_writes(&self, count: usize) {
             self.route_write_failures.store(count, Ordering::SeqCst);
+        }
+
+        fn fail_next_pairing_actor_writes(&self, count: usize) {
+            self.pairing_actor_write_conflicts
+                .store(count, Ordering::SeqCst);
         }
 
         fn fail_next_pairing_code_deletes(&self, count: usize) {
@@ -3425,6 +3458,17 @@ mod tests {
                 && let Some(barrier) = &self.personal_dm_write_barrier
             {
                 barrier.wait().await;
+            }
+            if is_pairing_actor_record_path(path)
+                && self.pairing_actor_write_conflicts.load(Ordering::SeqCst) > 0
+            {
+                self.pairing_actor_write_conflicts
+                    .fetch_sub(1, Ordering::SeqCst);
+                return Err(FilesystemError::VersionMismatch {
+                    path: path.clone(),
+                    expected: Some(RecordVersion::from_backend(0)),
+                    found: Some(RecordVersion::from_backend(1)),
+                });
             }
             if is_channel_route_record_path(path)
                 && self.route_write_failures.load(Ordering::SeqCst) > 0
@@ -3495,6 +3539,12 @@ mod tests {
     fn is_pairing_code_record_path(path: &VirtualPath) -> bool {
         path.as_str()
             .contains("/slack-personal-binding/pairing/codes/")
+            && path.as_str().ends_with(".json")
+    }
+
+    fn is_pairing_actor_record_path(path: &VirtualPath) -> bool {
+        path.as_str()
+            .contains("/slack-personal-binding/pairing/actors/")
             && path.as_str().ends_with(".json")
     }
 

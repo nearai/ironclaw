@@ -17,7 +17,7 @@ use ironclaw_product_workflow::{
     ChannelConnectionRequirement, LifecycleExtensionSummary, LifecycleExtensionSurfaceKind,
     LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
     LifecycleProductPayload, LifecycleProductResponse, LifecycleSearchExtensionSummary,
-    ProductWorkflowError,
+    ProductWorkflowError, RebornChannelConnectStrategy,
 };
 use tokio::sync::Mutex;
 
@@ -1209,7 +1209,7 @@ pub(crate) fn channel_connection_requirement(
     if channel_id == "slack" {
         ChannelConnectionRequirement {
             channel: "slack".to_string(),
-            strategy: "inbound_proof_code".to_string(),
+            strategy: RebornChannelConnectStrategy::InboundProofCode,
             instructions: "Message the IronClaw Reborn app in Slack to get a pairing code, then paste it here. Codes expire in 10 minutes. If a code is invalid or expired, run /pair in Slack for a fresh one.".to_string(),
             input_placeholder: "Enter Slack pairing code...".to_string(),
             submit_label: "Connect".to_string(),
@@ -1218,7 +1218,7 @@ pub(crate) fn channel_connection_requirement(
     } else {
         ChannelConnectionRequirement {
             channel: channel_id.to_string(),
-            strategy: "inbound_proof_code".to_string(),
+            strategy: RebornChannelConnectStrategy::InboundProofCode,
             instructions: format!(
                 "Open {}'s app or bot, get the pairing code, and paste it here.",
                 display_name
@@ -1637,7 +1637,10 @@ mod tests {
             .as_ref()
             .expect("slack channel activation must carry a structured connection requirement");
         assert_eq!(requirement.channel, "slack");
-        assert_eq!(requirement.strategy, "inbound_proof_code");
+        assert_eq!(
+            requirement.strategy,
+            RebornChannelConnectStrategy::InboundProofCode
+        );
         assert_eq!(requirement.input_placeholder, "Enter Slack pairing code...");
         assert!(
             requirement.error_message.contains("/pair"),
@@ -1699,7 +1702,10 @@ mod tests {
             .as_ref()
             .expect("external channel activation must carry a structured connection requirement");
         assert_eq!(requirement.channel, "telegram");
-        assert_eq!(requirement.strategy, "inbound_proof_code");
+        assert_eq!(
+            requirement.strategy,
+            RebornChannelConnectStrategy::InboundProofCode
+        );
         assert!(
             requirement.instructions.contains("Telegram"),
             "generic channel copy should name the channel: {}",

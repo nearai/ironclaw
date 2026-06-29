@@ -243,7 +243,7 @@ pub trait ChannelConnectionFacade: Send + Sync {
         _caller: WebUiAuthenticatedCaller,
         _channel: &str,
     ) -> Result<(), RebornServicesError> {
-        Ok(())
+        Err(RebornServicesError::service_unavailable(false))
     }
 }
 

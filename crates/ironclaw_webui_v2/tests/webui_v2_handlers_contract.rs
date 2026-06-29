@@ -2613,6 +2613,10 @@ async fn list_connectable_channels_dispatches_through_facade() {
         "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes."
     );
     assert_eq!(
+        body["channels"][0]["action"]["error_message"],
+        "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
+    );
+    assert_eq!(
         *services
             .list_connectable_channels_calls
             .lock()

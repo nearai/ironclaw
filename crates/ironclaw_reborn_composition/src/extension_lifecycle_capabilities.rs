@@ -341,7 +341,9 @@ mod tests {
 
     use super::*;
     use crate::{RebornBuildInput, RebornServices, build_reborn_services};
-    use ironclaw_product_workflow::{ChannelConnectionRequirement, LifecyclePhase};
+    use ironclaw_product_workflow::{
+        ChannelConnectionRequirement, LifecyclePhase, RebornChannelConnectStrategy,
+    };
 
     #[test]
     fn model_visible_output_omits_connect_chrome_but_preview_keeps_it() {
@@ -350,7 +352,7 @@ mod tests {
         // the model-visible tool output.
         let requirement = ChannelConnectionRequirement {
             channel: "slack".to_string(),
-            strategy: "inbound_proof_code".to_string(),
+            strategy: RebornChannelConnectStrategy::InboundProofCode,
             instructions: "msg".to_string(),
             input_placeholder: "Enter Slack pairing code".to_string(),
             submit_label: "Connect".to_string(),
@@ -398,7 +400,7 @@ mod tests {
         // or a broken match arm would otherwise be invisible to Rust tests.
         let requirement = ChannelConnectionRequirement {
             channel: "slack".to_string(),
-            strategy: "inbound_proof_code".to_string(),
+            strategy: RebornChannelConnectStrategy::InboundProofCode,
             instructions: "Message the IronClaw Reborn app in Slack to get a pairing code."
                 .to_string(),
             input_placeholder: "Enter Slack pairing code".to_string(),

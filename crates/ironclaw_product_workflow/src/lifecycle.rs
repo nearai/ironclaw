@@ -12,7 +12,7 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 
-use crate::{ProductCommandContext, ProductWorkflowError};
+use crate::{ProductCommandContext, ProductWorkflowError, RebornChannelConnectStrategy};
 
 pub(crate) const LIFECYCLE_ID_MAX_BYTES: usize = 256;
 const LIFECYCLE_REF_MAX_BYTES: usize = 512;
@@ -301,7 +301,7 @@ impl LifecycleProductAction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelConnectionRequirement {
     pub channel: String,
-    pub strategy: String,
+    pub strategy: RebornChannelConnectStrategy,
     pub instructions: String,
     pub input_placeholder: String,
     pub submit_label: String,
