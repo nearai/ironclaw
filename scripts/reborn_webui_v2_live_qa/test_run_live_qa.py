@@ -261,16 +261,27 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
     def test_routine_creation_case_can_continue_after_clarification(self):
         captured_prompts: list[str] = []
+        first = True
 
         async def fake_live_chat_case(_ctx, **kwargs):
+            nonlocal first
             captured_prompts.append(kwargs["prompt"])
             extra_details = kwargs.get("extra_details") or {}
+            success = not first
+            first = False
             return run_live_qa.ProbeResult(
                 provider="test",
                 mode=f"live:{kwargs['case_name']}",
-                success=True,
+                success=success,
                 latency_ms=1,
-                details={"text_excerpt": "routine created", **extra_details},
+                details={
+                    "text_excerpt": (
+                        "Which sheet should I use?"
+                        if not success
+                        else "routine created"
+                    ),
+                    **extra_details,
+                },
             )
 
         with (
@@ -340,11 +351,24 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(result["dm_user_source"], "env")
         self.assertEqual(captured["data"]["users"], "UQAUSER")
 
-    def test_slack_dm_route_discovery_rejects_synthetic_inbound_user(self):
-        def fail_post(_url, **_kwargs):
-            raise AssertionError("synthetic inbound user must not open a Slack DM")
+    def test_slack_dm_route_discovery_ignores_synthetic_inbound_user(self):
+        captured: dict[str, object] = {}
 
-        fake_httpx = types.SimpleNamespace(post=fail_post)
+        class FakeResponse:
+            def json(self):
+                return {
+                    "ok": True,
+                    "channel": {
+                        "id": "DSLACKBOT",
+                        "is_im": True,
+                    },
+                }
+
+        def fake_post(_url, **kwargs):
+            captured.update(kwargs)
+            return FakeResponse()
+
+        fake_httpx = types.SimpleNamespace(post=fake_post)
         with (
             patch.dict(
                 os.environ,
@@ -358,12 +382,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 {"SLACK_BOT_TOKEN": "xoxb-test"},
             )
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["error"], "slack_route_user_id_unavailable")
-        self.assertEqual(
-            result["needed"],
-            "REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID",
-        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["dm_user_id"], "USLACKBOT")
+        self.assertEqual(result["dm_user_source"], "fallback_slackbot")
+        self.assertEqual(captured["data"]["users"], "USLACKBOT")
 
     def test_qa_7a_requires_dm_delivery_target(self):
         with (

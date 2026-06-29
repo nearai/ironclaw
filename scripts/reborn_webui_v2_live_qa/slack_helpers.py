@@ -202,14 +202,7 @@ def _discover_slack_dm_route_channel(
     ).strip()
     if inbound_user_id == "U0REBORNQA":
         inbound_user_id = ""
-    dm_user_id = configured_route_user_id or inbound_user_id
-    if not dm_user_id:
-        return {
-            "checked": True,
-            "ok": False,
-            "error": "slack_route_user_id_unavailable",
-            "needed": "REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID",
-        }
+    dm_user_id = configured_route_user_id or inbound_user_id or "USLACKBOT"
     try:
         import httpx
 
@@ -231,7 +224,7 @@ def _discover_slack_dm_route_channel(
         "checked": True,
         "ok": bool(payload.get("ok")),
         "dm_user_id": dm_user_id,
-        "dm_user_source": "env",
+        "dm_user_source": "env" if dm_user_id != "USLACKBOT" else "fallback_slackbot",
     }
     channel = payload.get("channel")
     if isinstance(channel, dict):

@@ -2448,6 +2448,13 @@ async def case_qa_6d_gmail_to_sheet_routine(ctx: LiveQaContext) -> ProbeResult:
         marker=None,
         required_text=["routine", "Gmail"],
         prompt=_qa_sheet_prompt("qa_6d_gmail_to_sheet_routine"),
+        clarification_reply=(
+            "For the routine I just requested: use an existing Google Sheet named "
+            "ABC or create one named ABC if needed. Add columns for sender, "
+            "subject, received date, and body preview. Skip duplicate emails that "
+            "were already added, use UTC, and create the routine now to check "
+            "every 30 minutes for new emails from near.ai addresses."
+        ),
     )
 
 
@@ -2586,7 +2593,7 @@ async def _routine_creation_case(
     )
     after_count = _trigger_record_count(ctx.reborn_home, count_name)
     result.details["trigger_records_after"] = after_count
-    if result.success and after_count <= before_count and clarification_reply:
+    if after_count <= before_count and clarification_reply:
         follow_up = await _live_chat_case(
             ctx,
             case_name=case_name,
