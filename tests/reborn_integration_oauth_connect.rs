@@ -135,6 +135,15 @@ async fn oauth_connect_flow_persists_credential_account() {
         1,
         "exactly one token-exchange HTTP call must be captured by the scripted egress"
     );
+
+    // Step 6 — verify the connect exchange used the authorization_code grant
+    // (not the refresh grant) — proves the right OAuth flow crossed the egress.
+    let bodies = bundle.egress.captured_bodies();
+    let body = String::from_utf8_lossy(&bodies[0]);
+    assert!(
+        body.contains("authorization_code"),
+        "connect-flow token exchange must use the authorization_code grant; body: {body}"
+    );
 }
 
 /// Guard test: attempting an OAuth callback for a non-existent flow must fail

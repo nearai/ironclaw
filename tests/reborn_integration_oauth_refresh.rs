@@ -175,6 +175,15 @@ async fn credential_refresh_sweep_refreshes_idle_google_account() {
          (total egress count: initial exchange + refresh)"
     );
 
+    // The sweep's exchange must use the refresh_token grant (not a second
+    // authorization-code exchange) — proves the refresh path, not a re-connect.
+    let refresh_bodies = bundle.egress.captured_bodies();
+    let refresh_body = String::from_utf8_lossy(&refresh_bodies[1]);
+    assert!(
+        refresh_body.contains("refresh_token"),
+        "sweep token exchange must use the refresh_token grant; body: {refresh_body}"
+    );
+
     // Step 5 — re-read the account through the durable account service and prove
     // the refresh COMMITTED the rotated credential (guards the "HTTP fired but
     // the account write was dropped" failure mode).  This reads the REAL

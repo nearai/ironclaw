@@ -256,6 +256,21 @@ impl ScriptedOAuthTokenEgress {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
     }
+
+    /// Request body bytes of every captured token-exchange call, in order.
+    ///
+    /// Exposes only the body (not the full `RuntimeHttpEgressRequest`, whose
+    /// url/headers are `ZeroizeOnDrop` because they carry injected credentials)
+    /// so a test can assert the OAuth `grant_type` — distinguishing the
+    /// authorization-code connect exchange from the refresh exchange.
+    pub fn captured_bodies(&self) -> Vec<Vec<u8>> {
+        self.captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|request| request.body.clone())
+            .collect()
+    }
 }
 
 impl std::fmt::Debug for ScriptedOAuthTokenEgress {
