@@ -746,17 +746,36 @@ fn find_local_tool_source_in(
     None
 }
 
+#[derive(serde::Deserialize)]
+struct CargoTomlPackageName {
+    package: Option<CargoTomlPackage>,
+}
+
+#[derive(serde::Deserialize)]
+struct CargoTomlPackage {
+    name: Option<String>,
+}
+
 /// Read `[package].name` from the `Cargo.toml` at `source_dir`. Returns
-/// `None` if the file is missing, unparseable, or lacks a package name —
-/// callers fall back to the extension name in that case.
-fn read_crate_name_from_cargo_toml(source_dir: &std::path::Path) -> Option<String> {
-    let contents = std::fs::read_to_string(source_dir.join("Cargo.toml")).ok()?;
-    let value: toml::Value = contents.parse().ok()?;
-    value
-        .get("package")?
-        .get("name")?
-        .as_str()
-        .map(|s| s.to_string())
+/// `Ok(None)` if the manifest is valid but lacks a package name, allowing
+/// callers to fall back to the extension name in that case.
+fn read_crate_name_from_cargo_toml(
+    source_dir: &std::path::Path,
+) -> Result<Option<String>, ExtensionError> {
+    let manifest_path = source_dir.join("Cargo.toml");
+    let contents = std::fs::read_to_string(&manifest_path).map_err(|error| {
+        ExtensionError::InstallFailed(format!(
+            "failed to read Cargo.toml at {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    let manifest: CargoTomlPackageName = toml::from_str(&contents).map_err(|error| {
+        ExtensionError::InstallFailed(format!(
+            "failed to parse Cargo.toml at {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    Ok(manifest.package.and_then(|package| package.name))
 }
 
 impl ExtensionManager {
@@ -4042,7 +4061,7 @@ impl ExtensionManager {
         // matching `tools-src/portfolio/` whose crate is `portfolio`). The
         // compiled artifact is `<crate_name>.wasm`, so we must pass the real
         // crate name to the artifact lookup.
-        let crate_name = read_crate_name_from_cargo_toml(source_dir);
+        let crate_name = read_crate_name_from_cargo_toml(source_dir)?;
         let mut result = self
             .install_wasm_from_buildable(
                 name,
@@ -14752,15 +14771,61 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            read_crate_name_from_cargo_toml(dir.path()),
+            read_crate_name_from_cargo_toml(dir.path()).unwrap(),
             Some("my_crate".to_string())
         );
     }
 
     #[test]
-    fn read_crate_name_from_cargo_toml_returns_none_on_missing_file() {
+    fn read_crate_name_from_cargo_toml_fails_on_malformed_manifest() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(read_crate_name_from_cargo_toml(dir.path()), None);
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package\nname = \"broken\"\n",
+        )
+        .unwrap();
+
+        let err = read_crate_name_from_cargo_toml(dir.path()).expect_err("malformed manifest");
+
+        match err {
+            ExtensionError::InstallFailed(msg) => {
+                assert!(
+                    msg.contains("failed to parse Cargo.toml"),
+                    "error should explain manifest parse failure: {msg}"
+                );
+            }
+            other => panic!("expected InstallFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn install_from_local_source_rejects_malformed_cargo_toml() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        let source_dir = stage_buildable_source(dir.path(), "portfolio");
+        std::fs::write(
+            source_dir.join("Cargo.toml"),
+            "[package\nname = \"broken\"\n",
+        )
+        .expect("write malformed Cargo.toml");
+
+        let manager = make_test_manager_with_dirs(None, tools_dir, channels_dir, None);
+
+        let err = manager
+            .install_from_local_source("portfolio", &source_dir, None)
+            .await
+            .expect_err("malformed Cargo.toml must not fall back to extension name");
+
+        match err {
+            ExtensionError::InstallFailed(msg) => {
+                assert!(
+                    msg.contains("failed to parse Cargo.toml"),
+                    "error should explain manifest parse failure: {msg}"
+                );
+            }
+            other => panic!("expected InstallFailed, got {other:?}"),
+        }
     }
 
     #[test]
