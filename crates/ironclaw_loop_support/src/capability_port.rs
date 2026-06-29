@@ -2587,6 +2587,17 @@ fn runtime_terminal_milestone(
             })
         }
         RuntimeCapabilityOutcome::Failed(failure) => {
+            let safe_summary = failure
+                .message
+                .as_deref()
+                .map(LoopSafeSummary::new)
+                .transpose()
+                .map_err(|reason| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::Invalid,
+                        format!("capability failure summary rejected: {reason}"),
+                    )
+                })?;
             Some(LoopHostMilestoneKind::CapabilityFailed {
                 activity_id,
                 capability_id: failure.capability_id.clone(),
@@ -2596,7 +2607,7 @@ fn runtime_terminal_milestone(
                 // Sanitized, host-authored message (e.g. "invalid JSON: ...")
                 // so the live per-tool UI card shows the real reason, not just
                 // the bare error kind.
-                safe_summary: failure.message.clone(),
+                safe_summary,
             })
         }
         RuntimeCapabilityOutcome::Unknown(unknown) => {

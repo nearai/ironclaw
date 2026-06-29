@@ -13,7 +13,7 @@ use ironclaw_event_streams::{
     InMemoryProjectionUpdateSource, ProductProjectionEnvelope, ThreadLiveProjectionItem,
     ThreadLiveProjectionUpdate, ThreadLiveWorkSummaryPhase,
 };
-use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
+use ironclaw_events::{EventCursor, EventStreamKey, ReadScope, sanitize_error_summary};
 use ironclaw_first_party_extension_ports::{SkillActivationObservedEvent, SkillActivationObserver};
 use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind, UserId};
 use ironclaw_product_adapters::{
@@ -469,7 +469,9 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
                         runtime: *runtime,
                         output_bytes: None,
                         error_kind: Some(reason_kind.as_str().to_string()),
-                        error_detail: sanitized_capability_error_detail(safe_summary.as_deref()),
+                        error_detail: sanitized_capability_error_detail(
+                            safe_summary.as_ref().map(LoopSafeSummary::as_str),
+                        ),
                     },
                 );
             }
@@ -488,8 +490,7 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
 /// control chars.
 fn sanitized_capability_error_detail(safe_summary: Option<&str>) -> Option<String> {
     let summary = safe_summary?;
-    let body = sanitize_model_visible_text(summary).trim().to_string();
-    (!body.is_empty()).then_some(body)
+    sanitize_error_summary(summary)
 }
 
 #[derive(Default)]

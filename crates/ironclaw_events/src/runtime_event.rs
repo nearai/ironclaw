@@ -169,7 +169,10 @@ impl Serialize for RuntimeEvent {
             process_id: self.process_id,
             output_bytes: self.output_bytes,
             error_kind: self.error_kind.clone().map(sanitize_error_kind),
-            error_summary: self.error_summary.clone().and_then(sanitize_error_summary),
+            error_summary: self
+                .error_summary
+                .as_deref()
+                .and_then(sanitize_error_summary_str),
             hook_id: self.hook_id.clone().map(sanitize_hook_id),
             hook_point: self.hook_point.clone().map(sanitize_hook_label),
             hook_trust_class: self.hook_trust_class.clone().map(sanitize_hook_label),
@@ -253,6 +256,10 @@ impl From<TrustedRuntimeKindWire> for RuntimeKind {
 
 impl RuntimeEventWire {
     fn into_event(self) -> RuntimeEvent {
+        let error_summary = self
+            .error_summary
+            .as_deref()
+            .and_then(sanitize_error_summary_str);
         RuntimeEvent {
             event_id: self.event_id,
             timestamp: self.timestamp,
@@ -265,7 +272,7 @@ impl RuntimeEventWire {
             process_id: self.process_id,
             output_bytes: self.output_bytes,
             error_kind: self.error_kind.map(sanitize_error_kind),
-            error_summary: self.error_summary.and_then(sanitize_error_summary),
+            error_summary,
             hook_id: self.hook_id.map(sanitize_hook_id),
             hook_point: self.hook_point.map(sanitize_hook_label),
             hook_trust_class: self.hook_trust_class.map(sanitize_hook_label),
@@ -278,6 +285,10 @@ impl RuntimeEventWire {
 
 impl TrustedRuntimeEventWire {
     fn into_event(self) -> RuntimeEvent {
+        let error_summary = self
+            .error_summary
+            .as_deref()
+            .and_then(sanitize_error_summary_str);
         RuntimeEvent {
             event_id: self.event_id,
             timestamp: self.timestamp,
@@ -290,7 +301,7 @@ impl TrustedRuntimeEventWire {
             process_id: self.process_id,
             output_bytes: self.output_bytes,
             error_kind: self.error_kind.map(sanitize_error_kind),
-            error_summary: self.error_summary.and_then(sanitize_error_summary),
+            error_summary,
             hook_id: self.hook_id.map(sanitize_hook_id),
             hook_point: self.hook_point.map(sanitize_hook_label),
             hook_trust_class: self.hook_trust_class.map(sanitize_hook_label),
@@ -666,7 +677,7 @@ impl RuntimeEvent {
         }
     }
 
-    pub fn with_error_summary(mut self, summary: impl Into<String>) -> Self {
+    pub fn with_error_summary(mut self, summary: impl AsRef<str>) -> Self {
         self.error_summary = sanitize_error_summary(summary);
         self
     }
@@ -785,6 +796,7 @@ pub const UNCLASSIFIED_ERROR_KIND: &str = "Unclassified";
 const MAX_ERROR_KIND_LEN: usize = 64;
 const MAX_ERROR_KIND_SEGMENT_LEN: usize = 24;
 const MAX_ERROR_SUMMARY_BYTES: usize = 512;
+const REDACTED_ERROR_SUMMARY: &str = "the tool failure details were redacted";
 const WORKSPACE_FILE_ERROR_SUMMARY: &str = "can't access your workspace file";
 
 /// Collapse any error_kind value that does not match the stable classification
@@ -812,30 +824,33 @@ pub fn sanitize_error_kind(error_kind: impl Into<String>) -> String {
     }
 }
 
-pub fn sanitize_error_summary(summary: impl Into<String>) -> Option<String> {
-    let value = summary.into();
+pub fn sanitize_error_summary(summary: impl AsRef<str>) -> Option<String> {
+    sanitize_error_summary_str(summary.as_ref())
+}
+
+fn sanitize_error_summary_str(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
     }
-    if is_workspace_file_error_summary(trimmed) {
+    let lower = trimmed.to_ascii_lowercase();
+    if is_workspace_file_error_summary(trimmed, &lower) {
         return Some(WORKSPACE_FILE_ERROR_SUMMARY.to_string());
     }
-    if !is_safe_error_summary(trimmed) {
-        return None;
+    if !is_safe_error_summary(trimmed, &lower) {
+        return Some(REDACTED_ERROR_SUMMARY.to_string());
     }
     Some(truncate_error_summary(trimmed))
 }
 
-fn is_workspace_file_error_summary(value: &str) -> bool {
+fn is_workspace_file_error_summary(value: &str, lower: &str) -> bool {
     if value == WORKSPACE_FILE_ERROR_SUMMARY {
         return false;
     }
-    let lower = value.to_ascii_lowercase();
-    if contains_internal_workspace_filename(&lower) {
+    if contains_internal_workspace_filename(lower) {
         return true;
     }
-    if contains_filename_like_token(&lower) {
+    if contains_filename_like_token(lower) {
         return true;
     }
     let mentions_workspace_file = lower.contains("workspace file")
@@ -928,22 +943,18 @@ fn is_common_filename_extension(extension: &str) -> bool {
     )
 }
 
-fn is_safe_error_summary(value: &str) -> bool {
-    if value
-        .chars()
-        .any(|character| character == '\0' || character.is_control())
-    {
-        return false;
-    }
+fn is_safe_error_summary(value: &str, lower: &str) -> bool {
     if value.chars().any(|character| {
-        matches!(
-            character,
-            '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
-        )
+        character == '\0'
+            || character.is_control()
+            || !character.is_ascii()
+            || matches!(
+                character,
+                '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
+            )
     }) {
         return false;
     }
-    let lower = value.to_ascii_lowercase();
     for forbidden in [
         "access token",
         "api key",
@@ -1096,7 +1107,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_event_error_summary_round_trips_only_when_safe() {
+    fn runtime_event_error_summary_round_trips_with_redaction() {
         let event = RuntimeEvent::capability_activity_failed(
             scope(),
             capability(),
@@ -1170,7 +1181,10 @@ mod tests {
         .with_error_summary("provider error: bearer token leaked");
         let wire = serde_json::to_string(&unsafe_event).expect("serialize runtime event");
         let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
-        assert_eq!(decoded.error_summary, None);
+        assert_eq!(
+            decoded.error_summary.as_deref(),
+            Some(REDACTED_ERROR_SUMMARY)
+        );
     }
 
     #[test]

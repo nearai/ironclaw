@@ -386,6 +386,7 @@ mod tests {
         CapabilityActivityId, TurnId, TurnScope,
         run_profile::{
             CapabilityFailureKind, HookDecisionSummary, LoopDriverId, LoopHostMilestone,
+            LoopSafeSummary,
         },
     };
 
@@ -538,8 +539,10 @@ mod tests {
                 runtime: Some(RuntimeKind::Script),
                 reason_kind: CapabilityFailureKind::OperationFailed,
                 safe_summary: Some(
-                    "read_file failed for path workspace ironclaw_issues.json: file not found"
-                        .to_string(),
+                    LoopSafeSummary::new(
+                        "read_file failed for path workspace ironclaw_issues.json: file not found",
+                    )
+                    .expect("safe summary"),
                 ),
             });
 

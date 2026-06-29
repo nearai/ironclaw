@@ -31,8 +31,8 @@
 //! invocation fingerprints, lease IDs, or lease contents. Runtime
 //! `error_kind` strings are constrained to short classification tokens; any
 //! unsafe value is collapsed to `Unclassified`. Optional `error_summary`
-//! strings are host-authored, bounded, and dropped when they fail the
-//! display-summary sanitizer.
+//! strings are host-authored and bounded; unsafe non-empty summaries are
+//! collapsed to a fixed safe display marker.
 #![warn(unreachable_pub)]
 
 mod cursor;
