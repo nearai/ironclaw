@@ -718,7 +718,7 @@ async fn build_storage_composite(
             )
             .await?;
             // The canonical filename is the production constant — one source of truth.
-            Some(dir.join(ironclaw_reborn_composition::LOCAL_DEV_DB_FILENAME))
+            Some(dir.join(ironclaw_reborn_composition::test_support::LOCAL_DEV_DB_FILENAME))
         }
     };
     Ok((Arc::new(composite), db_path))

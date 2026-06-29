@@ -2241,7 +2241,7 @@ async fn build_local_dev_root_filesystem(
 /// Filename of the local-dev libSQL database within the per-user root directory.
 /// One owner for the string — production factory, integration-test framework, and
 /// any on-disk path assertion all derive from this constant.
-pub const LOCAL_DEV_DB_FILENAME: &str = "reborn-local-dev.db";
+pub(crate) const LOCAL_DEV_DB_FILENAME: &str = "reborn-local-dev.db";
 
 // `pub(crate)` so the `test_support` accessor
 // (`build_default_local_dev_database_roots_for_test`) can call this

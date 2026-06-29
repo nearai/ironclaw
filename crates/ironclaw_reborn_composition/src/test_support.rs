@@ -23,6 +23,12 @@ use ironclaw_turns::{
     run_profile::{LoopCapabilityPort, LoopModelUsage},
 };
 
+/// Filename of the local-dev libSQL database within the per-user root
+/// directory. Value is derived from the production factory constant so
+/// there is one owner of the string; tests access it through this
+/// test-support surface.
+pub const LOCAL_DEV_DB_FILENAME: &str = crate::factory::LOCAL_DEV_DB_FILENAME;
+
 use crate::runtime::{AssistantReply, ConversationId};
 
 /// Build a terminal/no-text assistant reply for CLI and product-surface tests.
